@@ -20,7 +20,6 @@ from nexus.retry import (
     _vector_with_retry,
 )
 
-
 class _FakeClock:
     """Self-advancing fake clock: sleep() immediately advances `now` and
     returns — no real time.sleep, deterministic (nexus-cy9u7)."""
@@ -328,7 +327,11 @@ def test_index_code_file_retries_on_connect_error(tmp_path) -> None:
     mock_voyage = MagicMock()
     mock_voyage.embed.return_value = MagicMock(embeddings=[[0.1, 0.2]])
     result = _index_code_file(file=src, repo=tmp_path, collection_name="code__myrepo",
-                              target_model="voyage-code-3", col=mock_col, db=MagicMock(),
+                              # Neutral model token on purpose (RDR-109 mode lint):
+                              # target_model is opaque to _index_code_file/index_code_file --
+                              # threaded through to staleness comparison and chunk metadata
+                              # only, never a dispatch predicate. voyage_client is mocked.
+                              target_model="model-code", col=mock_col, db=MagicMock(),
                               voyage_client=mock_voyage, git_meta={},
                               now_iso="2026-01-01T00:00:00+00:00", score=1.0)
     assert result >= 0 and mock_col.get.call_count == 2

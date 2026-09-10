@@ -234,7 +234,7 @@ class TestRenameCLI:
         ("old", "new", "force", "expect_reject"),
         [
             # Same-prefix conformant names: always accepted.
-            ("code__nexus-1-1__voyage-code-3__v1", "code__other-1-1__voyage-code-3__v1", False, False),
+            ("code__nexus-1-1__model-code__v1", "code__other-1-1__model-code__v1", False, False),
             # Same-prefix legacy 2-segment names: accepted.
             ("code__myrepo-abc12345", "code__myrepo-def67890", False, False),
             # Cross-prefix without --force-prefix-change: rejected.
@@ -266,6 +266,12 @@ class TestRenameCLI:
         ``collection_content_type(old)`` / ``collection_content_type(new)``.
         Same accept/reject decision for the same inputs, across
         conformant, legacy-bare, quarantine-prefixed, and garbage names.
+
+        Neutral model tokens on purpose (RDR-109 mode lint): the two
+        conformant cases' model segments are irrelevant to the gate,
+        which dispatches purely on the first "__" segment;
+        rename_collection_data_plane is stubbed out below, so no
+        embedder or credential path is exercised.
 
         Isolated to the GATE decision: ``rename_collection_data_plane`` (the
         real atomic service-side cascade, tested end-to-end elsewhere -- see

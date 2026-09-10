@@ -72,8 +72,12 @@ def test_cross_collection_hit_is_REFUSED(patched):
 
     A source_uri is globally unique, so a hit from a DIFFERENT collection is
     possible; accepting it would be worse than the warning it replaces.
+
+    Neutral model token on purpose (RDR-109 mode lint): the fake catalog
+    reader below never embeds; "model-ctx" is opaque data proving the
+    refusal, not a claim about which embedder ran.
     """
-    cat = patched(_Cat(_Entry(REL, "docs__1-1__voyage-context-3__v1")))
+    cat = patched(_Cat(_Entry(REL, "docs__1-1__model-ctx__v1")))
 
     assert _canonicalize_source_path(COLLECTION, ABS) == ABS
 

@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static org.assertj.core.api.Assertions.*;
 import static org.assertj.core.data.Offset.offset;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -39,7 +40,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  *   <li>links: upsertTopicLink GREATEST on conflict / getTopicLinkPairs</li>
  *   <li>ICF: countDistinctSourceCollections / computeIcfRows</li>
  *   <li>analytics: topTopicsForCollection / chunkGroundedIn / getProjectionCountsByCollection</li>
- *   <li>ETL import: importTopic preserves id + GREATEST doc_count + EXCLUDED review_status</li>
+ *   <li>ETL import: importTopic preserves id + RECOUNTS doc_count from real
+ *       topic_assignments rather than trusting the caller (nexus-c0g6e root
+ *       cause fix, GH #1529) + EXCLUDED review_status</li>
  *   <li>ETL import: importTopic idempotent re-run does not double-insert</li>
  *   <li>ETL import: importAssignment / importTopicLink / importTaxonomyMeta fidelity</li>
  *   <li>RLS isolation: tenant A cannot see tenant B rows</li>
@@ -648,30 +651,68 @@ class TaxonomyRepositoryTest {
     @Test @Order(21)
     void importTopic_preservesId_docCountNotEtlMerged() {
         // RDR-154 P0 (nexus-i7ivk): doc_count is trigger-maintained and is no
-        // longer an ETL ON CONFLICT merge participant. The INSERT branch seeds
-        // the column; re-imports MUST NOT touch it (neither GREATEST nor verbatim).
+        // longer an ETL ON CONFLICT merge participant. The INSERT branch
+        // RECOUNTS from real nexus.topic_assignments rows instead of seeding
+        // the caller's value (nexus-c0g6e root cause fix, GH #1529 review —
+        // the caller's value used to be trusted verbatim here, which is
+        // exactly how the reported 94-topic doc_count drift was produced by
+        // a 6.18.1-era fidelity import); re-imports MUST NOT touch it either
+        // (neither GREATEST nor verbatim).
         long srcId = repo.importTopic(TENANT_A, 9900001L, "imported-topic", null, COL_A,
                                       "centroid-hash-1", 10, PAST_TS, "pending", null);
         assertThat(srcId).isEqualTo(9900001L);
         Optional<Map<String, Object>> row = repo.getTopicById(TENANT_A, 9900001L);
         assertThat(row).isPresent();
         assertThat(row.get().get("label")).isEqualTo("imported-topic");
-        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(10); // seed
+        // The caller claimed 10; there are zero real topic_assignments rows for
+        // this topic anywhere in this test — the import ignores the caller's
+        // claim and recounts to the REAL value, 0.
+        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(0);
 
-        // Re-import with LOWER doc_count — ETL no longer writes doc_count; seed preserved.
+        // Re-import with a DIFFERENT caller-claimed doc_count — ETL no longer
+        // writes doc_count on conflict at all; the recounted seed is preserved.
         repo.importTopic(TENANT_A, 9900001L, "imported-topic", null, COL_A,
                          "centroid-hash-1", 5, PAST_TS, "accepted", null);
         row = repo.getTopicById(TENANT_A, 9900001L);
-        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(10);
+        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(0);
 
-        // Re-import with HIGHER doc_count — still NOT written by the ETL upsert.
+        // Re-import with a THIRD caller-claimed doc_count — still NOT written.
         repo.importTopic(TENANT_A, 9900001L, "imported-topic", null, COL_A,
                          "centroid-hash-1", 99, PAST_TS, "pending", null);
         row = repo.getTopicById(TENANT_A, 9900001L);
-        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(10);
+        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(0);
 
         // review_status STILL uses EXCLUDED (verbatim): last import wins.
         assertThat(row.get().get("review_status")).isEqualTo("pending");
+    }
+
+    @Test @Order(22)
+    void importTopic_docCount999_landsWithTheRealAssignmentCount_notTheCallersClaim() {
+        // nexus-c0g6e fix round (GH #1529 review, item 3): the exact repro
+        // named in the review — a fidelity import carrying doc_count=999 for
+        // a brand-new topic id must land with the REAL topic_assignments
+        // count, never the caller's number. The topic_assignments_chunk_fk
+        // (RDR-194 P3d) and the topics FK together make it IMPOSSIBLE for any
+        // assignment row to exist for an id before that id's own topics row
+        // exists, so the real count for a genuinely fresh id is always 0 —
+        // proving 999 was discarded, not "coincidentally correct".
+        long srcId = repo.importTopic(TENANT_A, 9920001L, "c0g6e-999-topic", null, COL_A,
+                                      null, 999, PAST_TS, "pending", null);
+        assertThat(srcId).isEqualTo(9920001L);
+        Optional<Map<String, Object>> row = repo.getTopicById(TENANT_A, 9920001L);
+        assertThat(row).isPresent();
+        assertThat(((Number) row.get().get("doc_count")).intValue())
+            .as("doc_count=999 from the caller must be discarded; the real count is 0")
+            .isEqualTo(0);
+
+        // The live trigger picks up from here exactly as it would for any
+        // other topic: a real assignment via the normal write path advances
+        // doc_count correctly, proving the import's recount did not somehow
+        // wedge the trigger-maintained contract for this row.
+        seedChunk(TENANT_A, COL_A, hexChash("c0g6e-999-doc"));
+        repo.assignTopic(TENANT_A, hexChash("c0g6e-999-doc"), srcId, "hdbscan", null, COL_A, null);
+        row = repo.getTopicById(TENANT_A, 9920001L);
+        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(1);
     }
 
     @Test @Order(215)
@@ -1204,10 +1245,17 @@ class TaxonomyRepositoryTest {
         // TaxonomySchemaLiquibaseTest.docCountTrigger_functionsTriggersAndComment.
         final long bTopicId = 9900500L;
         final String col = "knowledge__dctrg_xtenant";
+        // nexus-c0g6e root cause fix (GH #1529 review): importTopic no longer
+        // seeds doc_count from the caller's claimed value (7 here) — it
+        // recounts from real topic_assignments rows, which is 0 since none
+        // exist yet for this topic. The claimed 7 is deliberately wrong, the
+        // same way this test already deliberately claims a "wrong" seed
+        // elsewhere in this file (see docCountTrigger_discoveryAssignmentInsertOverridesSeed's
+        // 999), to prove the caller's number never survives.
         repo.importTopic(TENANT_B, bTopicId, "b-topic", null, col,
                          null, 7, PAST_TS, "pending", null);
         assertThat(((Number) repo.getTopicById(TENANT_B, bTopicId).get().get("doc_count")).intValue())
-            .isEqualTo(7);
+            .isEqualTo(0);
 
         // Tenant A attempts an assignment pointing at tenant B's topic id.
         // topic_assignments_chunk_fk is keyed on the ASSIGNMENT's own tenant_id
@@ -1226,7 +1274,7 @@ class TaxonomyRepositoryTest {
         // inserted), but still worth pinning: a regression that silently widened
         // the FK back to tenant-blind would show up here as a mutated doc_count.
         assertThat(((Number) repo.getTopicById(TENANT_B, bTopicId).get().get("doc_count")).intValue())
-            .isEqualTo(7);
+            .isEqualTo(0);
         // And tenant A owns no such topic id.
         assertThat(repo.getTopicById(TENANT_A, bTopicId)).isEmpty();
     }
@@ -1311,6 +1359,10 @@ class TaxonomyRepositoryTest {
     void importBatch_topic_multiRow_insertsAll_andExcludedMergeOnReimport() {
         long id0 = 9900200L;
         long id1 = 9900201L;
+        // nexus-c0g6e fix round (GH #1529 review): the batch import ignores
+        // these caller-claimed doc_count seeds (5, 9) exactly like the
+        // single-row importTopic fix — no real topic_assignments rows exist
+        // for either id, so both land at 0, the real count.
         int n = repo.importBatch(TENANT_A, "topic", List.of(
             m("id", id0, "label", "batch-t0", "collection", "knowledge__batch_topic",
               "centroid_hash", "ch0", "doc_count", 5, "created_at", PAST_TS,
@@ -1321,18 +1373,67 @@ class TaxonomyRepositoryTest {
         assertThat(n).isEqualTo(2);
         assertThat(repo.getTopicById(TENANT_A, id0)).isPresent();
         assertThat(repo.getTopicById(TENANT_A, id1)).isPresent();
-        assertThat(((Number) repo.getTopicById(TENANT_A, id0).get().get("doc_count")).intValue()).isEqualTo(5);
+        assertThat(((Number) repo.getTopicById(TENANT_A, id0).get().get("doc_count")).intValue()).isEqualTo(0);
 
         // Re-import (one-row batch) with different review_status/centroid_hash/terms —
         // EXCLUDED merge applies exactly as the single-row importTopic path. doc_count
-        // is trigger-maintained and NOT an ETL merge participant — seed of 5 survives.
+        // is trigger-maintained and NOT an ETL merge participant — the recounted 0 survives.
         repo.importBatch(TENANT_A, "topic", List.of(
             m("id", id0, "label", "batch-t0", "collection", "knowledge__batch_topic",
               "centroid_hash", "ch0-v2", "doc_count", 999, "created_at", PAST_TS,
               "review_status", "accepted", "terms", "[\"a\",\"z\"]")));
         var row = repo.getTopicById(TENANT_A, id0).get();
         assertThat(row.get("review_status")).isEqualTo("accepted");
-        assertThat(((Number) row.get("doc_count")).intValue()).isEqualTo(5);
+        assertThat(((Number) row.get("doc_count")).intValue()).isEqualTo(0);
+    }
+
+    @Test @Order(465)
+    void importBatch_topic_docCount999_landsWithRealCountAfterAssignmentsBatchImports() {
+        // nexus-c0g6e fix round (GH #1529 review): the exact repro named in
+        // the review, at batch scale. Two topics imported with doc_count=999
+        // (discarded), then their real assignments imported via the SEPARATE
+        // "assignment" batch kind (the FK-forced order: a topic_assignments
+        // row cannot reference a topic id that does not yet exist, so this
+        // ordering is not a test convenience -- it is the only order any
+        // caller could ever use). By the END of the whole batch (topics
+        // batch, then assignments batch), both topics carry their REAL
+        // counts, not the discarded 999 and not a stale 0 -- the
+        // assignments batch's own multi-row INSERT fires the same
+        // statement-level topic_assignments trigger a live write does.
+        long t0 = 9900465L;
+        long t1 = 9900466L;
+        final String col = "knowledge__batch_dup"; // pre-registered in @BeforeAll
+
+        int nTopics = repo.importBatch(TENANT_A, "topic", List.of(
+            m("id", t0, "label", "batch-999-t0", "collection", col,
+              "centroid_hash", null, "doc_count", 999, "created_at", PAST_TS,
+              "review_status", "pending", "terms", null),
+            m("id", t1, "label", "batch-999-t1", "collection", col,
+              "centroid_hash", null, "doc_count", 999, "created_at", PAST_TS,
+              "review_status", "pending", "terms", null)));
+        assertThat(nTopics).isEqualTo(2);
+        assertThat(((Number) repo.getTopicById(TENANT_A, t0).get().get("doc_count")).intValue())
+            .as("999 discarded at topic-import time -- no assignments exist yet").isEqualTo(0);
+        assertThat(((Number) repo.getTopicById(TENANT_A, t1).get().get("doc_count")).intValue()).isEqualTo(0);
+
+        seedChunk(TENANT_A, col, hexChash("batch-999-doc-t0-a"));
+        seedChunk(TENANT_A, col, hexChash("batch-999-doc-t0-b"));
+        seedChunk(TENANT_A, col, hexChash("batch-999-doc-t1-a"));
+        int nAssignments = repo.importBatch(TENANT_A, "assignment", List.of(
+            m("doc_id", hexChash("batch-999-doc-t0-a"), "topic_id", t0, "assigned_by", "hdbscan",
+              "similarity", null, "assigned_at", PAST_TS, "source_collection", col),
+            m("doc_id", hexChash("batch-999-doc-t0-b"), "topic_id", t0, "assigned_by", "hdbscan",
+              "similarity", null, "assigned_at", PAST_TS, "source_collection", col),
+            m("doc_id", hexChash("batch-999-doc-t1-a"), "topic_id", t1, "assigned_by", "hdbscan",
+              "similarity", null, "assigned_at", PAST_TS, "source_collection", col)));
+        assertThat(nAssignments).isEqualTo(3);
+
+        assertThat(((Number) repo.getTopicById(TENANT_A, t0).get().get("doc_count")).intValue())
+            .as("t0's real count (2 assignments) lands by the end of the batch, never 999")
+            .isEqualTo(2);
+        assertThat(((Number) repo.getTopicById(TENANT_A, t1).get().get("doc_count")).intValue())
+            .as("t1's real count (1 assignment) lands by the end of the batch, never 999")
+            .isEqualTo(1);
     }
 
     @Test @Order(47)
@@ -1427,7 +1528,9 @@ class TaxonomyRepositoryTest {
         var row = repo.getTopicById(TENANT_A, id);
         assertThat(row).isPresent();
         assertThat(row.get().get("label")).isEqualTo("dup-b");
-        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(2);
+        // nexus-c0g6e fix round (GH #1529 review): both claimed doc_counts (1, 2)
+        // are discarded — no real assignments exist for this id, so it lands at 0.
+        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(0);
     }
 
     @Test @Order(51)
@@ -1700,6 +1803,99 @@ class TaxonomyRepositoryTest {
         assertThat(stubRowExists)
             .as("the rejected write must not have created a catalog_collections stub row either")
             .isFalse();
+    }
+
+    // ── nexus-c0g6e fix round (GH #1529): doc_count drift routes ────────────────
+
+    @Test @Order(320)
+    void getDocCountDrift_namesOnlyTopicsWhoseDocCountDisagrees() {
+        long cleanId = repo.insertTopic(TENANT_A, "c0g6e-drift-clean", null, COL_A, 0, null, null);
+        seedChunk(TENANT_A, COL_A, hexChash("c0g6e-drift-clean-doc"));
+        repo.assignTopic(TENANT_A, hexChash("c0g6e-drift-clean-doc"), cleanId, "hdbscan", null, COL_A, null);
+
+        long driftedId = repo.insertTopic(TENANT_A, "c0g6e-drift-over", null, COL_A, 0, null, null);
+        seedChunk(TENANT_A, COL_A, hexChash("c0g6e-drift-over-doc"));
+        repo.assignTopic(TENANT_A, hexChash("c0g6e-drift-over-doc"), driftedId, "hdbscan", null, COL_A, null);
+        // Real count is now 1 (trigger-maintained) — force it to disagree via a
+        // plain UPDATE, which does NOT fire the topic_assignments-side trigger:
+        // exactly the shape a fidelity import writing both tables from a stale
+        // snapshot produces.
+        forceDocCount(driftedId, 9);
+
+        List<Map<String, Object>> drift = repo.getDocCountDrift(TENANT_A);
+        assertThat(drift)
+            .as("the clean topic must not appear")
+            .noneSatisfy(row -> assertThat(((Number) row.get("topic_id")).longValue()).isEqualTo(cleanId));
+        assertThat(drift)
+            .filteredOn(row -> ((Number) row.get("topic_id")).longValue() == driftedId)
+            .hasSize(1)
+            .allSatisfy(row -> {
+                assertThat(((Number) row.get("doc_count")).intValue()).isEqualTo(9);
+                assertThat(((Number) row.get("actual_count")).longValue()).isEqualTo(1);
+                assertThat(row.get("label")).isEqualTo("c0g6e-drift-over");
+                assertThat(row.get("collection")).isEqualTo(COL_A);
+            });
+    }
+
+    @Test @Order(321)
+    void recountDocCount_dryRun_previewsWithoutWriting() {
+        long id = repo.insertTopic(TENANT_A, "c0g6e-drift-dryrun", null, COL_A, 0, null, null);
+        forceDocCount(id, 42); // zero real assignments — real count is 0
+
+        Map<String, Object> preview = repo.recountDocCount(TENANT_A, true);
+        assertThat(preview.get("dry_run")).isEqualTo(true);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> topics = (List<Map<String, Object>>) preview.get("topics");
+        assertThat(topics)
+            .filteredOn(row -> ((Number) row.get("topic_id")).longValue() == id)
+            .hasSize(1)
+            .allSatisfy(row -> assertThat(((Number) row.get("actual_count")).longValue()).isEqualTo(0));
+
+        assertThat(((Number) repo.getTopicById(TENANT_A, id).get().get("doc_count")).intValue())
+            .as("dry_run must leave doc_count exactly as it was")
+            .isEqualTo(42);
+    }
+
+    @Test @Order(322)
+    void recountDocCount_applies_correctsAndIsRepeatable() {
+        long id = repo.insertTopic(TENANT_A, "c0g6e-drift-apply", null, COL_A, 0, null, null);
+        forceDocCount(id, 7);
+
+        Map<String, Object> applied = repo.recountDocCount(TENANT_A, false);
+        assertThat(applied.get("dry_run")).isEqualTo(false);
+        assertThat(((Number) repo.getTopicById(TENANT_A, id).get().get("doc_count")).intValue())
+            .isEqualTo(0);
+
+        // Repeatable: a second call finds THIS topic already correct — assert
+        // via getDocCountDrift rather than the aggregate "corrected" count,
+        // which reflects every topic in the tenant, not just this one.
+        Map<String, Object> second = repo.recountDocCount(TENANT_A, false);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> stillDrifted = (List<Map<String, Object>>) second.get("topics");
+        assertThat(stillDrifted)
+            .noneSatisfy(row -> assertThat(((Number) row.get("topic_id")).longValue()).isEqualTo(id));
+    }
+
+    /** Force nexus.topics.doc_count directly via a plain UPDATE (superuser,
+     *  bypasses RLS AND does not fire the topic_assignments-side trigger —
+     *  the ONLY thing that can produce a genuinely drifted row for these
+     *  tests, since every normal write path here is trigger-maintained). */
+    private void forceDocCount(long topicId, int docCount) {
+        // Typed jOOQ DSL (nexus-zrcj7: no raw SQL strings in Java, including
+        // test sources) -- a plain UPDATE against the superuser connection,
+        // bypassing RLS and the topic_assignments-side trigger entirely
+        // (exactly the shape a fidelity import writing both tables from a
+        // stale snapshot would produce).
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES)
+               .update(TOPICS)
+               .set(TOPICS.DOC_COUNT, docCount)
+               .where(TOPICS.ID.eq(topicId))
+               .execute();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

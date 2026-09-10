@@ -192,10 +192,38 @@ def _mock_db_for_info(mock_db, name, count, metadatas):
     mock_db.get_or_create_collection.return_value = mock_col
 
 
-@pytest.mark.parametrize("col_name,expected_model", [
-    ("code__nexus", "voyage-code-3"),
-    ("knowledge__research", "voyage-context-3"),
-])
+@pytest.mark.parametrize(
+    "col_name,expected_model",
+    [
+        # Conformant 4-segment names: embedding_model_for_collection_name
+        # parses the model segment directly, whatever it is -- neutral
+        # tokens on purpose (RDR-109 mode lint), since this part of the
+        # test's point is "info displays the collection's own model
+        # token" and any string proves it equally well.
+        ("code__nexus__model-code__v1", "model-code"),
+        ("knowledge__research__model-ctx__v1", "model-ctx"),
+        # Legacy 2-segment name: embedding_model_for_collection_name
+        # returns None for this shape, so embedding_model_for_collection
+        # falls through to voyage_model_for_collection -- a fixed,
+        # mode-INDEPENDENT prefix->model dispatch table (never consults
+        # is_local_mode()) that unconditionally returns the real
+        # "voyage-code-3"/"voyage-context-3" strings. Not swappable to a
+        # neutral token without asserting something false about what
+        # `nx collection info` actually prints for a legacy name; reason
+        # class "string-literal-as-name" (mirrors test_h1zu0_dim_routing.py
+        # -- see the exclusion in tests/conftest.py). This is the only
+        # place in the suite that exercises the fallback THROUGH the
+        # `info` command itself; test_corpus.py / test_local_mode.py /
+        # test_local_daemon_client_embed.py cover
+        # embedding_model_for_collection / voyage_model_for_collection
+        # directly, not this command's display path (a prior commit
+        # message incorrectly cited
+        # test_list_shows_the_row_values_when_the_name_disagrees above as
+        # covering this branch -- that test uses a conformant 4-segment
+        # name and never reaches the legacy fallback at all).
+        ("code__nexus", "voyage-code-3"),
+    ],
+)
 def test_info_shows_embedding_model(runner, env_creds, mock_db, col_name, expected_model) -> None:
     _mock_db_for_info(mock_db, col_name, 42, [{}])
     result = _invoke(runner, mock_db, ["info", col_name])
@@ -923,6 +951,11 @@ def test_collections_from_registry_info_filters_excluded() -> None:
     """``taxonomy.local_exclude_collections`` patterns hide registry
     collections from the post-processing chain. Empty registry
     info returns ``[]``.
+
+    Neutral model tokens on purpose (RDR-109 mode lint): the exclusion
+    filter dispatches on the ``code__*`` PREFIX glob, never on the
+    model segment; `_discover_taxonomy`/`make_t3` are fully mocked, no
+    embedder runs.
     """
     from nexus.commands.index import _collections_from_registry_info
 
@@ -932,15 +965,15 @@ def test_collections_from_registry_info_filters_excluded() -> None:
     # A typical post-RDR-103 registry entry returns its
     # collection + docs_collection pair.
     info = {
-        "collection": "code__myrepo__voyage-code-3__v1",
-        "docs_collection": "docs__myrepo__voyage-context-3__v1",
+        "collection": "code__myrepo__model-code__v1",
+        "docs_collection": "docs__myrepo__model-ctx__v1",
     }
     out = _collections_from_registry_info(info)
     # Local-mode default config excludes ``code__*`` from the taxonomy
     # post-processing chain (taxonomy.local_exclude_collections =
     # ["code__*"]); the docs__ collection always surfaces. Cloud-mode
     # CI runs would see both, but unit tests run in local mode.
-    assert "docs__myrepo__voyage-context-3__v1" in out
+    assert "docs__myrepo__model-ctx__v1" in out
 
 
 def test_collections_from_registry_info_prefers_conformant_code_collection() -> None:
@@ -948,14 +981,17 @@ def test_collections_from_registry_info_prefers_conformant_code_collection() -> 
     ``collection`` alias even after the conformant ``code_collection``
     is set. The post-pass must enumerate the conformant name only —
     enumerating the alias triggers ``collection_not_found`` every run.
+
+    Neutral model tokens on purpose (RDR-109 mode lint): same reason as
+    the sibling test above.
     """
     from nexus.commands.index import _collections_from_registry_info
 
     info = {
         "collection": "code__nexus-571b8edd",  # legacy alias, no T3 collection
-        "code_collection": "code__1-2188__voyage-code-3__v1",
-        "docs_collection": "docs__1-2188__voyage-context-3__v1",
-        "rdr_collection": "rdr__1-2188__voyage-context-3__v1",
+        "code_collection": "code__1-2188__model-code__v1",
+        "docs_collection": "docs__1-2188__model-ctx__v1",
+        "rdr_collection": "rdr__1-2188__model-ctx__v1",
     }
     out = _collections_from_registry_info(info)
     assert "code__nexus-571b8edd" not in out, (
@@ -963,20 +999,23 @@ def test_collections_from_registry_info_prefers_conformant_code_collection() -> 
         "conformant code_collection is present"
     )
     # Cloud-mode passthrough: rdr/docs always; code__ filtered in local mode only.
-    assert "docs__1-2188__voyage-context-3__v1" in out
-    assert "rdr__1-2188__voyage-context-3__v1" in out
+    assert "docs__1-2188__model-ctx__v1" in out
+    assert "rdr__1-2188__model-ctx__v1" in out
 
 
 def test_collections_from_registry_info_dedupes() -> None:
     """nexus-cxg9: when the legacy ``collection`` field happens to equal
     ``code_collection`` (post-RDR-103 fresh registrations), the result
     must not contain duplicates.
+
+    Neutral model tokens on purpose (RDR-109 mode lint): same reason as
+    the sibling tests above.
     """
     from nexus.commands.index import _collections_from_registry_info
 
-    name = "code__myrepo__voyage-code-3__v1"
+    name = "code__myrepo__model-code__v1"
     info = {"collection": name, "code_collection": name,
-            "docs_collection": "docs__myrepo__voyage-context-3__v1"}
+            "docs_collection": "docs__myrepo__model-ctx__v1"}
     out = _collections_from_registry_info(info)
     assert len(out) == len(set(out))
 
@@ -986,7 +1025,11 @@ def test_run_collection_postprocessing_does_not_pass_alias_through(monkeypatch):
     must never reach ``_discover_taxonomy`` (which is where the
     ``collection_not_found`` warning would fire). Patches
     ``_discover_taxonomy`` to capture call args; asserts the legacy
-    non-conformant name never shows up."""
+    non-conformant name never shows up.
+
+    Neutral model tokens on purpose (RDR-109 mode lint): same reason as
+    the sibling tests above; make_t3 is fully mocked here too.
+    """
     from unittest.mock import MagicMock
     import nexus.commands.index as index_mod
 
@@ -1015,8 +1058,8 @@ def test_run_collection_postprocessing_does_not_pass_alias_through(monkeypatch):
 
     info = {
         "collection": "code__nexus-571b8edd",  # legacy non-conformant alias
-        "code_collection": "code__1-2188__voyage-code-3__v1",
-        "docs_collection": "docs__1-2188__voyage-context-3__v1",
+        "code_collection": "code__1-2188__model-code__v1",
+        "docs_collection": "docs__1-2188__model-ctx__v1",
     }
     collections = index_mod._collections_from_registry_info(info)
     index_mod.run_collection_postprocessing(collections, repo_path=None, quiet=True)

@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    hygiene-007 — recount every nexus.topics.doc_count from nexus.topic_
+    assignments (bead nexus-c0g6e, GH #1529). Boot-time walk, same shape as
+    hygiene-006-sequence-catchup.xml.
+
+    THE DEFECT (reporter, confirmed still present on 7.38.0 / engine
+    v0.1.112). 94 topics created 2026-04-22..05-01 on a store that went
+    through the conexus 6.18.1 guided upgrade carry doc_count above their
+    real topic_assignments count: 12,379 recorded vs 9,625 rows, every one
+    of the 94 over-counted. taxonomy-013's / taxonomy-015's recompute
+    triggers (topics_doc_count_recount_ins/_del) are correct for every
+    assignment written since they landed — this is imported drift that
+    predates them, not a live miscount. The store's own import path (a
+    6.18.1-era fidelity import, the same shape hygiene-006-1's header
+    documents for the sequence-lag defect) wrote topics rows with an
+    explicit doc_count that never matched the assignment rows actually
+    carried across.
+
+    ROOT CAUSE, closed separately (fix round, GH #1529 review). The import
+    path itself — TaxonomyRepository#importTopic's fresh-INSERT branch — no
+    longer seeds doc_count from the caller's value; it recounts from
+    nexus.topic_assignments in the same INSERT statement (see
+    taxonomy-006-assign-from-chashes.xml's sibling changesets and
+    TaxonomyRepository.java's importTopic javadoc). This changeset remains
+    the remedy for STORES THAT ALREADY IMPORTED under the old, unguarded
+    path — it does not need to re-run once the root cause is fixed, but it
+    still must run once on every such store.
+
+    THE FIX. One boot walk over every nexus.topics row, now sharing its SQL
+    with the live HTTP routes (fix round, GH #1529 review — "share SQL with
+    the changeset by making the changeset call a nexus.* function the route
+    also calls"): this changeset's DO block calls
+    nexus.topics_recount_doc_count(NULL, false)
+    (taxonomy-016-doc-count-drift-functions.xml), the SAME function GET
+    /topics/doc_count_drift's read and POST /topics/recount_doc_count's
+    apply/dry-run both call — recompute doc_count from a single batched
+    GROUP BY over nexus.topic_assignments (not a per-row correlated
+    subquery), and UPDATE only the rows where the stored value disagrees.
+    The zero case is covered by construction: a topic with no assignment
+    rows at all gets the LEFT JOIN's COALESCE(..., 0), not skipped. RAISE
+    NOTICE per topic corrected and one summary line (both emitted from
+    inside the shared function) — same idiom as hygiene-006-1.
+
+    LOCK ORDER. The shared function's UPDATE writes only nexus.topics, one
+    row at a time, each write scoped to its own (tenant_id, id) primary
+    key. This takes Postgres's default FOR NO KEY UPDATE lock mode (an
+    ordinary UPDATE of a non-key column) — the lock mode
+    taxonomy-015-doc-count-lock-mode.xml moved topics_doc_count_recount_ins/
+    _del TO, after taxonomy-013's original FOR UPDATE shape was measured to
+    still deadlock in production against the live trigger's own FK-driven
+    FOR KEY SHARE (nexus-6n51g, 2026-09-02). taxonomy-015, not taxonomy-013,
+    is the citation this UPDATE's lock behavior actually matches. The walk
+    runs once at boot, outside of any concurrent assign_from_chashes_<dim>
+    traffic's steady state, so there is no adversarial concurrent writer to
+    serialize against here the way taxonomy-013/015 had to for the live
+    trigger path.
+
+    RLS. Both walked tables carry FORCE ROW LEVEL SECURITY (taxonomy-001,
+    taxonomy-014's own header confirms both still do), under which even the
+    owner sees no rows and the recount would read empty. This changeset's
+    DO block (running as the Liquibase migration role, nexus_admin, the
+    table OWNER) still does its own toggle-wrapped NO FORCE / FORCE around
+    the whole pass, exactly as before FORCE governs the owner only — the
+    shared function itself carries NO toggle (see
+    taxonomy-016-doc-count-drift-functions.xml's own header: the live HTTP
+    routes run as nexus_svc, a non-owner, which is always subject to the
+    ordinary per-tenant RLS policy with or without FORCE, so they need no
+    toggle at all; a toggle INSIDE the function would in fact be a
+    permission error for that role). SECURITY INVOKER means the function
+    runs as whichever role calls it, so this changeset's toggle — issued
+    before the function call, restored after — governs the function's own
+    UPDATE exactly as it governed the inlined UPDATE this changeset used to
+    run directly.
+
+    NEVER WEDGES (2026-08-16 directive, same as hygiene-006-1): no RAISE
+    EXCEPTION path; a store with no drift (every fresh install, and any
+    store whose topics predate the 6.18.1-era import path or postdate the
+    importTopic root-cause fix) runs this as a read-only pass that corrects
+    nothing.
+
+    IDEMPOTENCE: a second run finds every topic's doc_count already equal
+    to its topic_assignments count and corrects nothing; independent of
+    Liquibase's own once-only guarantee.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+
+    <changeSet id="hygiene-007-1" author="nexus-c0g6e">
+        <comment>
+            nexus-c0g6e (GH #1529): recount every nexus.topics.doc_count from
+            nexus.topic_assignments via the shared
+            nexus.topics_recount_doc_count function (also called by the live
+            GET /topics/doc_count_drift / POST /topics/recount_doc_count
+            routes — a 6.18.1-era fidelity import wrote topics.doc_count that
+            never matched the assignment rows carried across, predating
+            taxonomy-013's/taxonomy-015's recompute triggers). Read-only
+            except the function's own corrective UPDATE; toggle-wrapped NO
+            FORCE / FORCE per table around the call; NOTICE per topic
+            corrected (emitted inside the function).
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+DECLARE
+    v_forced_t  boolean;
+    v_forced_a  boolean;
+    v_corrected integer;
+BEGIN
+    SELECT relforcerowsecurity INTO v_forced_t
+      FROM pg_class WHERE oid = 'nexus.topics'::regclass;
+    SELECT relforcerowsecurity INTO v_forced_a
+      FROM pg_class WHERE oid = 'nexus.topic_assignments'::regclass;
+
+    IF v_forced_t THEN
+        ALTER TABLE nexus.topics NO FORCE ROW LEVEL SECURITY;
+    END IF;
+    IF v_forced_a THEN
+        ALTER TABLE nexus.topic_assignments NO FORCE ROW LEVEL SECURITY;
+    END IF;
+
+    SELECT count(*) INTO v_corrected
+      FROM nexus.topics_recount_doc_count(NULL, false);
+
+    IF v_forced_a THEN
+        ALTER TABLE nexus.topic_assignments FORCE ROW LEVEL SECURITY;
+    END IF;
+    IF v_forced_t THEN
+        ALTER TABLE nexus.topics FORCE ROW LEVEL SECURITY;
+    END IF;
+
+    RAISE NOTICE 'hygiene-007-1: % topic(s) corrected via nexus.topics_recount_doc_count', v_corrected;
+END $$;
+        </sql>
+        <rollback>
+            <!-- Nothing to undo: a corrected doc_count is the true count: a
+                 rolled-back correction would re-introduce the drift this
+                 changeset removes, and any live INSERT/DELETE since would
+                 make the ORIGINAL (wrong) value strictly less accurate,
+                 never more. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

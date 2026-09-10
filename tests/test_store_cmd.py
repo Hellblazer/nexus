@@ -231,6 +231,35 @@ def test_store_put_oversized_content_shows_clean_error(runner, mock_store, tmp_p
     mock_store.put.assert_not_called()
 
 
+@pytest.mark.parametrize("exc_cls_name", ["EmbeddingProfileMismatchError", "LocalVoyageCredentialMissingError"])
+def test_store_put_profile_refusal_is_a_clean_click_error(runner, mock_store, tmp_path, exc_cls_name, monkeypatch):
+    """7.38.0 shakeout (2026-09-09): the registration seam's refusals (a
+    Voyage intent against a bge profile; a Voyage intent with no key) name
+    the service restart in their message and must reach the operator as a
+    clean ClickException, not a raw traceback."""
+    import nexus.corpus as corpus_mod  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+
+    # Keep the catalog hook out of it (no service endpoint under CliRunner);
+    # same alias patch as test_store_put_oversized_content_never_mints_catalog_row.
+    monkeypatch.setattr("nexus.commands.store._catalog_store_hook_tracked", lambda *a, **k: ("", False))
+
+    exc_cls = getattr(corpus_mod, exc_cls_name)
+    message = "content_type='knowledge': this install's configured intent is 'voyage-context-3', but the engine's embedding_profile still says 'bge-base-en-v15-768'. A restart is required: `nx daemon service stop && nx daemon service start`."
+    mock_store.put.side_effect = exc_cls(message)
+
+    src = tmp_path / "note.md"
+    src.write_text("a note under a mismatched embedding intent")
+    result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src), "--title", "note"])
+
+    assert result.exit_code != 0
+    # A ClickException exits through SystemExit; the raw class escaping is
+    # exactly the traceback this pins against.
+    assert result.exc_info is not None and result.exc_info[0] is SystemExit, result.exc_info
+    assert "Traceback" not in result.output, result.output
+    assert result.output.rstrip().splitlines()[-1].startswith("Error: ")
+    assert "nx daemon service stop && nx daemon service start" in result.output
+
+
 def test_store_put_oversized_content_never_mints_catalog_row(runner, mock_store, tmp_path, monkeypatch):
     """The refusal must fire BEFORE catalog_store_hook_tracked -- no
     wasted mint + rollback round trip for an oversized attempt."""

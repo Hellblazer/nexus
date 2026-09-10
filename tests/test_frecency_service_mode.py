@@ -292,8 +292,12 @@ class TestFrecencyRdrCollection:
     def test_rdr_collection_included_in_frecency_update(self, tmp_path: Path) -> None:
         """nexus-e0w01 regression: --frecency-only must touch the rdr__
         collection too — it was a total omission (RDR chunks' frecency_score
-        only ever refreshed by a full index pass)."""
-        rdr_col = "rdr__repo__voyage-context-3__v1"
+        only ever refreshed by a full index pass).
+
+        Neutral model token on purpose (RDR-109 mode lint): a mocked
+        HttpVectorClient stands in for the service; no embedder runs.
+        """
+        rdr_col = "rdr__repo__model-ctx__v1"
         svc = _make_svc_client(collection_exists=True, chunk_ids=[], chunk_metas=[])
         reg = _make_registry()
         reg.get.return_value["rdr_collection"] = rdr_col

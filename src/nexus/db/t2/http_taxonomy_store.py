@@ -330,6 +330,49 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             params["collection"] = collection
         return self._get("/topics/unreviewed", params)
 
+    def count_assignments(self, topic_id: int) -> int:
+        """Pure read: the REAL topic_assignments row count for a SINGLE topic,
+        from the engine's ``TaxonomyRepository.countAssignments`` (already-
+        shipped route, ``GET /topics/count_assignments``) — never ``topics.
+        doc_count`` itself, which is trigger-maintained (taxonomy-013/015)
+        and can drift on an import that wrote both tables from a snapshot
+        whose counts never agreed (bead nexus-c0g6e, GH #1529; hygiene-007-1
+        is the engine-side boot-time repair).
+
+        NOT used by the doctor drift check (fix round, GH #1529 review) —
+        that check now calls :meth:`get_doc_count_drift` once, in one
+        batched round trip, rather than looping this method once per topic
+        (the exact N+1-per-item anti-pattern the review flagged). This
+        method remains for any caller that genuinely needs a single topic's
+        real count without pulling the whole drift set.
+        """
+        result = self._get("/topics/count_assignments", {"topic_id": topic_id})
+        return int(result.get("count") or 0)
+
+    def get_doc_count_drift(self) -> list[dict[str, Any]]:
+        """Every topic (this tenant) whose cached ``doc_count`` disagrees
+        with its real ``topic_assignments`` count, in ONE batched round trip
+        — ``GET /topics/doc_count_drift`` (bead nexus-c0g6e fix round, GH
+        #1529 review). Each row: ``{topic_id, label, collection, doc_count,
+        actual_count}``. Backs the `nx doctor` drift row and `nx taxonomy
+        audit --fix-doc-count`'s dry-run preview.
+        """
+        return self._get("/topics/doc_count_drift")
+
+    def recount_doc_count(self, *, dry_run: bool = True) -> dict[str, Any]:
+        """Apply (or, ``dry_run``, preview) the correction
+        :meth:`get_doc_count_drift` names — ``POST /topics/recount_doc_count``
+        (bead nexus-c0g6e fix round, GH #1529 review). Repeatable: a tenant
+        with no drift returns ``{"corrected": 0, "topics": []}`` either way.
+        ``dry_run`` defaults to True — the safer default for a method that
+        can write; callers that mean to apply must say so explicitly.
+
+        Returns ``{"dry_run": bool, "corrected": int, "topics": [...]}`` —
+        the same row shape as :meth:`get_doc_count_drift`, either previewed
+        (dry_run) or already applied.
+        """
+        return self._post("/topics/recount_doc_count", {"dry_run": dry_run}, mutates=not dry_run)
+
     def update_topic_label(self, topic_id: int, new_label: str) -> None:
         """Update topic label without changing review_status."""
         self._post("/topics/update_label", {"topic_id": topic_id, "label": new_label})

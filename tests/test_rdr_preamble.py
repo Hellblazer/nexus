@@ -20,6 +20,7 @@ Invocation convention mirrors test_rdr_lint.py:
 """
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -29,6 +30,31 @@ from click.testing import CliRunner
 
 from nexus.commands.rdr import rdr
 from nexus.db.t2 import T2Database
+from nexus.plans.audit_rounds import BLOCKS_PLANNING, DISCOVER_AT_IMPLEMENTATION
+
+_PLUGIN_DIR = Path(__file__).parent.parent / "conexus"
+
+#: nexus-yjf5l.10: the class-to-disposition clause (which disposition a
+#: BLOCKS-PLANNING or unclassified residual needs) is stated identically in
+#: rdr-accept/SKILL.md step 1b, conexus/commands/rdr-accept.md Step 2b, and
+#: the printed ``preamble_rdr_accept`` brief. One regex extracts the sentence
+#: from whichever surface carries it so the comparison is a single equality
+#: across all three, not three independent substring checks that could each
+#: drift on their own (the fix-check parenthetical is exactly what drifted:
+#: the printed brief dropped it entirely).
+_ACCEPT_DISPOSITION_CLAUSE_RE = re.compile(
+    r"A residual classed `BLOCKS-PLANNING`, or an unclassified residual \(every line "
+    r"written before the class field existed\), needs an explicit author disposition "
+    r"— a sha \(with its fix check\) or a bead — and the choice is recorded, never "
+    r"defaulted",
+)
+
+
+def _disposition_clause(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text)
+    match = _ACCEPT_DISPOSITION_CLAUSE_RE.search(normalized)
+    assert match, f"disposition clause not found in: {text[:200]!r}..."
+    return match.group(0).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +411,77 @@ class TestRdrAccept:
         assert result.exit_code == 0, result.output
         assert "`residuals:`" in result.output
         assert "blocks accept" in result.output
+
+    def test_rdr_accept_names_the_fix_check_a_sha_disposition_carries(self, rdr_env):
+        """A residual dispositioned by a change to the RDR file gets a fix check
+        on that change; a residual dispositioned by a bead id does not."""
+        _write_rdr(
+            rdr_env["rdr_dir"], "rdr-204-example.md",
+            {"title": "Example", "status": "draft", "type": "Architecture", "priority": "medium"},
+            body="## Problem\n\nText.\n",
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-accept", "--", "204"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert "204-fix-check-<sha>" in out, "the T2 title the disposition's check goes under"
+        assert "docs/rdr/rdr-204-example.md" in out, "the range names the RDR file"
+        assert "tip" in out, "the sha is the RDR file's tip after the disposition"
+        assert "bead id" in out and "needs none" in out, "the bead-disposition exemption"
+
+    def test_rdr_accept_names_the_class_to_disposition_rule(self, rdr_env):
+        """nexus-yjf5l.8: classification determines which disposition a
+        residual needs. A DISCOVER-AT-IMPLEMENTATION residual is
+        dispositioned by a bead naming its Implementation Plan phase; a
+        BLOCKS-PLANNING or unclassified residual (every line written before
+        the class field existed) needs an explicit author disposition,
+        never a default."""
+        _write_rdr(
+            rdr_env["rdr_dir"], "rdr-204-example.md",
+            {"title": "Example", "status": "draft", "type": "Architecture", "priority": "medium"},
+            body="## Problem\n\nText.\n",
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-accept", "--", "204"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert DISCOVER_AT_IMPLEMENTATION in out
+        assert "bead id" in out
+        assert "Implementation Plan phase" in out
+        assert BLOCKS_PLANNING in out
+        assert "unclassified" in out
+        assert "never defaulted" in out
+        # nexus-yjf5l.10: the disposition clause is the SAME sentence in the
+        # skill, the command mirror, and this printed brief — one equality
+        # across all three rather than three separate substring checks that
+        # could each drift independently (the printed brief once dropped the
+        # "(with its fix check)" parenthetical the other two carried).
+        skill = (_PLUGIN_DIR / "skills" / "rdr-accept" / "SKILL.md").read_text()
+        cmd = (_PLUGIN_DIR / "commands" / "rdr-accept.md").read_text()
+        assert _disposition_clause(skill) == _disposition_clause(cmd) == _disposition_clause(out)
+
+    def test_rdr_accept_preamble_opens_no_t2_client(self, rdr_env, monkeypatch) -> None:
+        """nexus-yjf5l.8 / .18: preamble_rdr_accept prints instructions
+        only; it never opens a T2 client itself, directly OR through a
+        helper it calls. Runtime pin (nexus-yjf5l.18, Phase 3 review F2):
+        a static ``inspect.getsource`` scan of the callback's own body only
+        catches a direct ``_t2_client_factory`` reference and would miss a
+        future helper that opens one and is merely called from here —
+        monkeypatching the factory to raise catches both, at every calling
+        frame, which is why this is the runtime form rather than the
+        source-scan one."""
+        import nexus.commands.rdr as rdr_mod
+
+        def _boom() -> None:
+            raise AssertionError("preamble_rdr_accept must never open a T2 client")
+
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", _boom)
+        _write_rdr(
+            rdr_env["rdr_dir"], "rdr-204-example.md",
+            {"title": "Example", "status": "draft", "type": "Architecture", "priority": "medium"},
+            body="## Problem\n\nText.\n",
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-accept", "--", "204"])
+        assert result.exit_code == 0, result.output
+        assert "Planning Handoff" in result.output
 
     def test_rdr_accept_with_draft_rdr_prints_planning_handoff(self, rdr_env):
         """Draft RDR with plan section: prints Planning Handoff block."""
@@ -1050,6 +1147,34 @@ class TestPhaseReviewGate:
         assert "File fallback" in result.output
         assert "Item3" in result.output
 
+    def test_phase_review_gate_refuses_a_subset_when_an_item_start_fails_to_parse(self, rdr_env):
+        """GH #1443: a `5a.` item used to be absorbed into item 5 and the gate
+        enumerated 2 of 3 items; now it refuses with the offending line."""
+        body = (
+            "## Problem Statement\n\nProblem.\n\n"
+            "### Approach\n\n"
+            "1. **T2 read**: Read from T2 database.\n"
+            "1a. **T2 lease**: added after drafting.\n"
+            "2. **File fallback**: Fall back to .md files.\n\n"
+            "## Tradeoffs\n\nSome tradeoffs."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-130-command-preambles.md",
+            {"title": "Command Preambles", "status": "accepted", "type": "decision", "priority": "P0"},
+            body=body,
+        )
+        result = _runner().invoke(
+            rdr,
+            ["preamble", "phase-review-gate", "--", "130", "--phase", "1", "--evidence", "Item1=nexus-aaaa,Item2=nexus-bbbb"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "ERROR" in result.output
+        assert "GH #1443" in result.output
+        assert "1a. **T2 lease**" in result.output
+        assert "CROSS-WALK PASSED" not in result.output
+        assert "| # | Label | Evidence needed |" not in result.output
+
     def test_phase_review_gate_pass2_all_covered_passes(self, rdr_env):
         """Pass 2 with all items covered: APPROACH CROSS-WALK PASSED printed."""
         body = (
@@ -1367,6 +1492,166 @@ class TestApproachSectionExtractor:
         assert _prg_extract_approach_section(text) == ""
 
 
+class TestPrgUnparsedItemStarts:
+    """GH #1443: the three §Approach shapes the item regex misses must be
+    reported, never absorbed into the previous item."""
+
+    def test_clean_numbered_list_has_no_unparsed_lines(self):
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "1. **T2 read**: read from T2.\n"
+            "   continuation prose of item one\n"
+            "2. **File fallback**: fall back to files.\n"
+            "- a sub bullet\n"
+        )
+        assert _prg_find_unparsed_item_starts(text) == []
+
+    def test_non_integer_item_number_is_reported(self):
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts, _prg_parse_approach_items  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "5. **Daemon**: stand it up.\n"
+            "5a. **Daemon lease**: added after drafting.\n"
+            "6. **Routes**: wire reads.\n"
+        )
+        assert [n for n, _, _ in _prg_parse_approach_items(text)] == [5, 6]
+        assert _prg_find_unparsed_item_starts(text) == ["5a. **Daemon lease**: added after drafting."]
+
+    def test_wrapped_bold_label_is_reported(self):
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "1. **Short**: fine.\n"
+            "2. **A label long enough that the author wrapped it\n"
+            "   onto the next line**: description.\n"
+        )
+        assert _prg_find_unparsed_item_starts(text) == [
+            "2. **A label long enough that the author wrapped it",
+        ]
+
+    def test_label_on_the_following_line_is_reported(self):
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = "1. **First**: fine.\n2.\n**Second**: label below its number.\n"
+        assert _prg_find_unparsed_item_starts(text) == ["2."]
+
+    def test_decimal_and_paren_numbering_are_reported(self):
+        """Critique of ad158133b: `5.1.` and `2)` reproduce the GH #1443 symptom
+        (absorbed into the previous item) and the first detector missed both."""
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "5. **Daemon**: stand it up.\n"
+            "5.1. **Lease**: a decimal sub-item.\n"
+            "6) **Routes**: paren numbering.\n"
+            "7. plain numbered item with no bold label\n"
+        )
+        assert _prg_find_unparsed_item_starts(text) == [
+            "5.1. **Lease**: a decimal sub-item.",
+            "6) **Routes**: paren numbering.",
+            "7. plain numbered item with no bold label",
+        ]
+
+    def test_phase_block_structure_is_guarded_too(self, rdr_env):
+        """Critique of ad158133b: the guard used to run only when numbered
+        items parsed, so a phase-block §Approach with a stray column-0
+        numbered line fell through to the fallback unguarded."""
+        body = (
+            "## Problem Statement\n\nProblem.\n\n"
+            "### Approach\n\n"
+            "**Phase 1: Core**\n\n"
+            "- **Daemon**: stand it up\n"
+            "2. a numbered line the fallback would drop\n\n"
+            "## Tradeoffs\n\nSome tradeoffs."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-120-storage-substrate-split.md",
+            {"title": "Storage substrate split", "status": "accepted", "type": "decision", "priority": "P1"},
+            body=body,
+        )
+        result = _runner().invoke(
+            rdr, ["preamble", "phase-review-gate", "--", "120", "--phase", "1"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "GH #1443" in result.output
+        assert "| # | Label | Evidence needed |" not in result.output
+
+    def test_a_numbered_aside_under_a_later_subheading_is_out_of_scope(self):
+        """Critique fix check: the extracted section can run through several
+        `###` subsections (rdr-195: two real items, then a numbered
+        consequences aside under Technical Design). Only the item list's own
+        block is scanned."""
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "1. **Engine**: cap the batch.\n"
+            "2. **Client**: size the byte budget.\n"
+            "\n"
+            "Two consequences follow.\n"
+            "1. Skewed users can still hit the ceiling.\n"
+            "2. The budget must be sized with headroom.\n"
+            "\n"
+            "### Technical Design\n"
+            "1. an aside under a later heading\n"
+        )
+        assert _prg_find_unparsed_item_starts(text) == []
+
+    def test_a_dropped_item_before_the_first_parsed_one_is_reported(self):
+        """rdr-089's wrapped label is item 1 and the first PARSED item is 2:
+        the scan must begin at the block's heading, not at the first parse."""
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "### Approach\n"
+            "1. **A label that wraps onto\n"
+            "   the next line**: description.\n"
+            "2. **Second**: fine.\n"
+        )
+        assert _prg_find_unparsed_item_starts(text) == ["1. **A label that wraps onto"]
+
+    def test_a_plain_line_inside_the_item_block_is_still_reported(self):
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "1. **Engine**: cap the batch.\n"
+            "2. plain step between two items\n"
+            "3. **Client**: size the byte budget.\n"
+            "\n"
+            "### Technical Design\n"
+            "1. an aside that is out of scope\n"
+        )
+        assert _prg_find_unparsed_item_starts(text) == ["2. plain step between two items"]
+
+    def test_phase_block_headers_are_not_item_starts(self):
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = "**Phase 0: Scaffolding**\n- bullet\n**Phase 1: Core**\n- bullet\n"
+        assert _prg_find_unparsed_item_starts(text) == []
+
+    def test_indented_numbered_lines_and_fenced_code_are_not_item_starts(self):
+        """Review of ad158133b: rdr-037 (a numbered shell recipe inside a code
+        fence) and rdr-063 (nested numbered checklists) were refused by the
+        first version. Column 0 is the item grammar; nothing indented or
+        fenced is an item."""
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "1. **Consolidate**: one database.\n"
+            "   1. nested step one\n"
+            "   2. nested step two\n"
+            "```bash\n"
+            "1. not an item, a recipe line\n"
+            "2a. also not an item\n"
+            "```\n"
+            "2. **Cut over**: flip.\n"
+        )
+        assert _prg_find_unparsed_item_starts(text) == []
+
+    def test_wrapped_bold_prose_is_not_an_item_start(self):
+        """Review of ad158133b: rdr-146 carries bold emphasis that wraps
+        across two lines inside an item's prose; it is prose, not a label."""
+        from nexus.commands.rdr import _prg_find_unparsed_item_starts  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "1. **Daemon**: stand it up.\n"
+            "   **This matters because the store is behind the\n"
+            "   daemon** and nothing else reaches it.\n"
+            "2. **Routes**: wire reads.\n"
+        )
+        assert _prg_find_unparsed_item_starts(text) == []
+
+
 class TestPhaseBlockParser:
     """Unit tests for _prg_parse_phase_block_items (nexus-4u6mt)."""
 
@@ -1392,6 +1677,21 @@ class TestPhaseBlockParser:
         items = _prg_parse_phase_block_items(self._APPROACH, phase="0")
         assert len(items) == 2
         assert all("Phase 0" in lbl for _, lbl, _ in items)
+
+    def test_a_bullet_continuation_line_is_kept(self):
+        """GH #1443 critique residual: a non-bulleted line inside a phase
+        block after a bullet used to be dropped on the floor; it is that
+        bullet's continuation."""
+        from nexus.commands.rdr import _prg_parse_phase_block_items  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "**Phase 1: Core**\n"
+            "- **Daemon**: stand it up\n"
+            "  and keep it up across restarts\n"
+            "- route reads\n"
+        )
+        items = _prg_parse_phase_block_items(text, phase="1")
+        assert [n for n, _, _ in items] == [1, 2]
+        assert items[0][2] == "stand it up and keep it up across restarts"
 
     def test_no_phase_enumerates_all_blocks(self):
         from nexus.commands.rdr import _prg_parse_phase_block_items
@@ -1736,6 +2036,228 @@ class TestRdrGateRegateBlock:
         assert "T2 unreachable" in result.output and "engine down" in result.output
         assert "Section Structure" in result.output, "the rest of the preamble still prints"
 
+    def test_recorded_residual_is_exempt_from_the_survivor_sweep(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.3: a finding recorded on the prior round's `residuals:`
+        lines was dispositioned at accept, not left open — it is not a
+        survivor to re-sweep. It prints under its own heading, is excluded
+        from the "Prior findings" sweep list, and Layer 0's instruction
+        names the exemption."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                "outcome: \"PASSED\"\ndate: \"2026-09-09\"\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09z\n"
+                "residuals:\n  - unused variable in the fallback branch\n"
+            ),
+            "204-gate-critique-2026-09-09z": (
+                "## Critical Issues\n\n### Issue: query timeout doubles under load\n"
+                "- **Location**: L100\n\n"
+                "## Significant Issues\n\n### Issue: unused variable in the fallback branch\n"
+                "- **Location**: L200\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert "Recorded residuals (dispositioned at accept; not survivors" in out, out
+        rec_idx = out.index("Recorded residuals")
+        pf_idx = out.index("Prior findings (each must be closed EVERYWHERE")
+        res_finding_idx = out.index("unused variable in the fallback branch")
+        blocker_finding_idx = out.index("query timeout doubles under load")
+        assert rec_idx < res_finding_idx < pf_idx, (
+            "the recorded residual is listed under its own heading, before Prior findings"
+        )
+        assert pf_idx < blocker_finding_idx, "the unmatched finding stays under Prior findings"
+        prior_section = out[pf_idx:out.index("Layer 0")]
+        assert "unused variable in the fallback branch" not in prior_section, (
+            "a recorded residual must not also appear in the survivor sweep list"
+        )
+        assert "that is not a recorded residual" in out, "Layer 0 states the exemption"
+
+    def test_finding_title_key_strips_a_classed_residual_tag(self) -> None:
+        """nexus-yjf5l.7: from this bead a `residuals:` line carries a class
+        tag (`[DISCOVER-AT-IMPLEMENTATION] <title>`), never present on a
+        `_critique_findings` title (`Issue: <title>`). One normalisation
+        must still equate them, or Phase 1's exemption and split
+        (nexus-yjf5l.2/.3) silently stop matching classed residuals."""
+        from nexus.commands.rdr import _finding_title_key
+
+        assert (
+            _finding_title_key("[DISCOVER-AT-IMPLEMENTATION] Some Title")
+            == _finding_title_key("Issue: Some Title")
+        )
+        assert (
+            _finding_title_key("[BLOCKS-PLANNING] Some Title")
+            == _finding_title_key("Some Title")
+        )
+
+    def test_finding_title_key_does_not_strip_a_non_class_bracket_tag(self) -> None:
+        """nexus-yjf5l.18 (Phase 3 review F1): the class-strip regex is
+        built from BLOCKS_PLANNING/DISCOVER_AT_IMPLEMENTATION
+        (VALID_CLASSIFICATIONS), not a generic ``[A-Z][A-Z-]*`` bracket
+        shape — a title genuinely beginning ``[SQL]`` is not a class tag
+        and must keep its bracket, or it silently collides with the
+        differently-titled finding whose bracket was wrongly stripped."""
+        from nexus.commands.rdr import _finding_title_key
+
+        assert _finding_title_key("[SQL] query builder allows injection") != _finding_title_key(
+            "query builder allows injection"
+        )
+        assert _finding_title_key("[SQL] query builder allows injection") == _finding_title_key(
+            "[SQL] query builder allows injection"
+        )
+        # The two real classes are still stripped (regression, same as
+        # test_finding_title_key_strips_a_classed_residual_tag above).
+        assert _finding_title_key("[BLOCKS-PLANNING] Some Title") == _finding_title_key("Some Title")
+
+    def test_classed_residual_is_exempt_from_the_survivor_sweep(self, rdr_env, monkeypatch):
+        """The same exemption as test_recorded_residual_is_exempt_from_the_
+        survivor_sweep, but the prior round's `residuals:` line now carries
+        the classed shape this bead writes."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                "outcome: \"PASSED\"\ndate: \"2026-09-09\"\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09z\n"
+                "residuals:\n  - [DISCOVER-AT-IMPLEMENTATION] unused variable in the fallback branch\n"
+            ),
+            "204-gate-critique-2026-09-09z": (
+                "## Critical Issues\n\n### Issue: query timeout doubles under load\n"
+                "- **Location**: L100\n\n"
+                "## Significant Issues\n\n### Issue: unused variable in the fallback branch\n"
+                "- **Location**: L200\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert "Recorded residuals (dispositioned at accept; not survivors" in out, out
+        rec_idx = out.index("Recorded residuals")
+        pf_idx = out.index("Prior findings (each must be closed EVERYWHERE")
+        res_finding_idx = out.index("unused variable in the fallback branch")
+        assert rec_idx < res_finding_idx < pf_idx, (
+            "the classed residual is still recognised and listed under its own heading"
+        )
+
+    def test_recorded_residual_is_exempt_from_the_survivor_sweep_for_free_form_critique(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.15 (Phase 1 review F2): the same exemption as
+        test_recorded_residual_is_exempt_from_the_survivor_sweep, but the
+        prior critique is the free-form 'CRITICAL — <title>' shape. Before
+        the fix, _critique_findings returned [] for this shape and the
+        exemption never ran."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                "outcome: \"PASSED\"\ndate: \"2026-09-09\"\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09zz\n"
+                "residuals:\n  - unused variable in the fallback branch\n"
+            ),
+            "204-gate-critique-2026-09-09zz": (
+                "CRITICAL — query timeout doubles under load\nShip-blocker: yes\n\n"
+                "SIGNIFICANT — unused variable in the fallback branch\nShip-blocker: no\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert "Recorded residuals (dispositioned at accept; not survivors" in out, out
+        rec_idx = out.index("Recorded residuals")
+        pf_idx = out.index("Prior findings (each must be closed EVERYWHERE")
+        res_finding_idx = out.index("unused variable in the fallback branch")
+        assert rec_idx < res_finding_idx < pf_idx, (
+            "the free-form residual is now recognised and listed under its own heading"
+        )
+
+    def test_unmatched_residual_is_named_not_dropped(self, rdr_env, monkeypatch):
+        """A residual recorded on the prior round that matches no finding in
+        the critique is named under its own line, never silently dropped."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                "outcome: \"PASSED\"\ndate: \"2026-09-09\"\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09y\n"
+                "residuals:\n  - a residual the critique no longer states\n"
+            ),
+            "204-gate-critique-2026-09-09y": (
+                "## Significant Issues\n\n### Issue: unrelated finding\n- **Location**: L1\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"]).output
+        assert (
+            "Recorded residual, no matching finding in the critique: "
+            "a residual the critique no longer states" in out
+        ), out
+
+    def test_unmatched_residual_names_the_nearest_finding_by_loose_key(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.14: a recorded residual that matches no current
+        finding, even under the digit-stripped loose key, still names the
+        survivor sharing the most loose-key tokens as a hint for a human —
+        never a silent guess, which is why
+        test_unmatched_residual_is_named_not_dropped's zero-overlap case
+        must keep printing bare."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                "outcome: \"PASSED\"\ndate: \"2026-09-09\"\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09x\n"
+                "residuals:\n  - gate timeout retries 3 times before it eventually times out\n"
+            ),
+            "204-gate-critique-2026-09-09x": (
+                "## Significant Issues\n\n### Issue: gate timeout retries 5 times before it always times out\n"
+                "- **Location**: L1\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"]).output
+        assert (
+            "Recorded residual, no matching finding in the critique "
+            "(nearest by title: Issue: gate timeout retries 5 times before it always times out): "
+            "gate timeout retries 3 times before it eventually times out" in out
+        ), out
+
+    def test_no_residuals_regate_output_is_unchanged(self, rdr_env, monkeypatch):
+        """Regression pin (round-1/round-2 path, nexus-yjf5l.3): a gate
+        record with no `residuals:` field prints the same Prior-findings and
+        Layer 0 text as before this bead. Scoped to those two sections only
+        — not the Fix check wording, which nexus-yjf5l.1 already changed."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                "outcome: \"BLOCKED\"\ndate: \"2026-09-07\"\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-07c\n"
+            ),
+            "204-gate-critique-2026-09-07c": (
+                "## Critical Issues\n\n### Issue: ghost sweep omits topic_assignments\n"
+                "- **Location**: L1\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"]).output
+        assert "Prior findings (each must be closed EVERYWHERE in the file, not at the quoted line):" in out
+        assert (
+            "**Layer 0 (survivor sweep, before Layer 3):** for every prior finding, sweep every "
+            in out
+        ), out
+        assert "Recorded residuals" not in out
+        assert "no matching finding in the critique" not in out
+        assert "that is not a recorded residual" not in out
+
 
 class TestRdrGateRoundAndFixCheck:
     """nexus-g7zgw.1 / .2: the re-gate block carries the gate round number,
@@ -1847,6 +2369,18 @@ class TestRdrGateRoundAndFixCheck:
         assert "only a ship-blocker blocks" in result.output
         early = self._gate(rdr_env, monkeypatch, outcome="BLOCKED", commit=sha, prior=None)
         assert "only a ship-blocker blocks" not in early.output
+        # nexus-yjf5l.2: the fix preamble reads the same gate record through
+        # the same _gate_round_lines call as the gate preamble, so its own
+        # copy of the round-3+ rule must be the identical text, not a second
+        # copy that can drift from this one.
+        import nexus.commands.rdr as rdr_mod
+
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": f"outcome: \"BLOCKED\"\ncommit: {sha}\nprior: [1] (BLOCKED 1C)\n",
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        fix_out = _runner().invoke(rdr, ["preamble", "rdr-fix", "--", "204"]).output
+        assert "Gate round 3" in fix_out and "only a ship-blocker blocks" in fix_out
 
     def test_fix_check_names_the_diff_range_when_the_file_changed(self, rdr_env, monkeypatch):
         gated = self._commit(rdr_env, self._BODY, "gated")
@@ -1859,9 +2393,15 @@ class TestRdrGateRoundAndFixCheck:
         assert f"204-fix-check-{fixed}" in out, "the T2 title carries the tip sha"
         assert "enumeration" in out and "universal" in out
         assert "Do not enter Layer 1 or Layer 3" in out
+        # nexus-yjf5l.5 (R2): the brief goes identifier-level — every
+        # changed identifier's other occurrences in the file, enumerated.
+        assert "owning phase" in out and "every other occurrence" in out, out
+        assert "under any other name" in out, out
 
-    def test_fix_check_not_applicable_past_the_gate(self, rdr_env, monkeypatch):
-        """An accepted RDR's post-accept edits are not gate fixes."""
+    def test_no_regate_fix_check_past_the_gate(self, rdr_env, monkeypatch):
+        """Past the gate there is no re-gate to gate, and the branch says so —
+        but a residual dispositioned by a change to the RDR file still carries a
+        fix check on that change, and this surface names it."""
         gated = self._commit(rdr_env, self._BODY, "gated")
         path = _write_rdr(
             rdr_env["rdr_dir"], "rdr-204-example.md",
@@ -1872,8 +2412,11 @@ class TestRdrGateRoundAndFixCheck:
         subprocess.run(["git", "-C", root, "add", str(path)], check=True, capture_output=True)
         subprocess.run(["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "accept"], check=True, capture_output=True)
         out = self._gate(rdr_env, monkeypatch, outcome="PASSED", commit=gated, prior=None).output
-        assert "Fix check: not applicable (RDR status is `accepted`" in out, out
-        assert "### Fix check (required" not in out
+        assert "past the gate" in out and "`accepted`" in out, out
+        assert "### Fix check (required" not in out, "no re-gate fix check past the gate"
+        assert "204-fix-check-<sha>" in out, "the disposition's own fix check is named"
+        assert f"git diff {gated}..HEAD -- docs/rdr/rdr-204-example.md" in out, out
+        assert "bead id" in out and "needs none" in out, "the bead-disposition exemption"
 
     def test_fix_check_not_required_when_nothing_changed(self, rdr_env, monkeypatch):
         gated = self._commit(rdr_env, self._BODY, "gated")
@@ -2006,6 +2549,10 @@ class TestRdrFixPreamble:
         assert "nothing else" in out and "inferred, not read" in out and "census" in out
         assert f"204-fix-check-{fixed}" in out
         assert "no fix-check record yet" in out.lower()
+        # nexus-yjf5l.5 (R2): the serial precondition — fix, check, then
+        # Layer 1 and Layer 3, never a parallel dispatch against one commit
+        # — is printed among the fix rules on the fix side.
+        assert "dispatched against the same commit in parallel" in out, out
 
     def test_existing_fix_check_record_is_reported(self, rdr_env, monkeypatch):
         import nexus.commands.rdr as rdr_mod
@@ -2037,6 +2584,8 @@ class TestRdrFixPreamble:
         out = _runner().invoke(rdr, ["preamble", "rdr-fix", "--", "204"]).output
         assert "past the gate" in out and "accepted" in out
         assert "#### Before the edit" not in out, "past the gate, the instructions do not print"
+        assert "204-fix-check-<sha>" in out, "the pointer at rdr-accept names the check it carries"
+        assert "bead id" in out and "needs none" in out, "the bead-disposition exemption"
 
     def test_unreachable_t2_is_named(self, rdr_env, monkeypatch):
         import nexus.commands.rdr as rdr_mod
@@ -2054,6 +2603,77 @@ class TestRdrFixPreamble:
         result = _runner().invoke(rdr, ["preamble", "rdr-fix", "--", "204"])
         assert result.exit_code == 0
         assert "T2 unreachable" in result.output and "engine down" in result.output
+
+    def test_round_three_splits_ship_blockers_from_residuals(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.2: from round 3 the fix preamble separates the
+        findings that block (marked `Ship-blocker: yes`) from the residuals
+        the round already recorded in `residuals:` — two lists, not one."""
+        import nexus.commands.rdr as rdr_mod
+
+        gated = self._commit(rdr_env, self._BODY, "gated")
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                f"outcome: \"BLOCKED\"\ndate: \"2026-09-09\"\ncommit: {gated}\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09z\n"
+                "prior: [1] (BLOCKED 1C), [2] (BLOCKED 1C)\n"
+                "residuals:\n  - unused variable in the fallback branch\n"
+            ),
+            "204-gate-critique-2026-09-09z": (
+                "## Critical Issues\n\n### Issue: query timeout doubles under load\n"
+                "- **Location**: L100\n- **Ship-blocker**: yes\n\n"
+                "## Significant Issues\n\n### Issue: unused variable in the fallback branch\n"
+                "- **Location**: L200\n- **Ship-blocker**: no\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-fix", "--", "204"]).output
+        assert "Gate round 4" in out, out
+        assert "Ship-blockers (fix these)" in out, out
+        assert "Residuals (record; do not fix in this change)" in out, out
+        assert "query timeout doubles under load" in out
+        assert "unused variable in the fallback branch" in out
+        ship_idx = out.index("Ship-blockers (fix these)")
+        res_idx = out.index("Residuals (record; do not fix in this change)")
+        assert ship_idx < out.index("query timeout doubles under load") < res_idx, (
+            "the ship-blocker finding is listed under the fix-these heading"
+        )
+        assert res_idx < out.index("unused variable in the fallback branch"), (
+            "the residual finding is listed under the record-only heading"
+        )
+
+    def test_round_three_splits_ship_blockers_from_residuals_for_free_form_critique(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.15 (Phase 1 review F2): the free-form
+        'CRITICAL — <title>' shape must drive the same round-3+ split as
+        the canonical shape. Before the fix, _critique_findings returned
+        [] for this shape and the split was silently inert."""
+        import nexus.commands.rdr as rdr_mod
+
+        gated = self._commit(rdr_env, self._BODY, "gated")
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                f"outcome: \"BLOCKED\"\ndate: \"2026-09-09\"\ncommit: {gated}\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09zz\n"
+                "prior: [1] (BLOCKED 1C), [2] (BLOCKED 1C)\n"
+                "residuals:\n  - unused variable in the fallback branch\n"
+            ),
+            "204-gate-critique-2026-09-09zz": (
+                "CRITICAL — query timeout doubles under load\nShip-blocker: yes\n\n"
+                "SIGNIFICANT — unused variable in the fallback branch\nShip-blocker: no\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-fix", "--", "204"]).output
+        assert "Gate round 4" in out, out
+        assert "Ship-blockers (fix these)" in out, out
+        assert "Residuals (record; do not fix in this change)" in out, out
+        ship_idx = out.index("Ship-blockers (fix these)")
+        res_idx = out.index("Residuals (record; do not fix in this change)")
+        assert ship_idx < out.index("query timeout doubles under load") < res_idx, (
+            "the ship-blocker finding is listed under the fix-these heading"
+        )
+        assert res_idx < out.index("unused variable in the fallback branch"), (
+            "the residual finding is listed under the record-only heading"
+        )
 
 
 class TestRdrAuditGateLoopHealth:
@@ -2292,6 +2912,185 @@ class TestRdrVerdictPreamble:
         out = self._run(rdr_env, monkeypatch, {}, "204-gate-critique-nope").output
         assert "no such T2 record" in out
 
+    def test_residual_line_carries_its_class(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.7 (R3): at round 4, alpha's `Ship-blocker: yes` makes
+        it the ship-blocker (not a residual); beta is a residual and its
+        `Class: DISCOVER-AT-IMPLEMENTATION` line survives onto the printed
+        `residuals:` line, exactly as `  - [<class>] <title>`."""
+        self._commit(rdr_env)
+        crit = (
+            "## Critical Issues\n\n### Issue: alpha\n- **Location**: L1\n"
+            "- **Class**: BLOCKS-PLANNING\n- **Ship-blocker**: yes\n\n"
+            "## Significant Issues\n\n### Issue: beta\n- **Location**: L2\n"
+            "- **Class**: DISCOVER-AT-IMPLEMENTATION\n- **Ship-blocker**: no\n\n"
+            "## Verdict\n\n- **outcome**: not-justified\n- **critical_count**: 1\n"
+            "- **significant_count**: 1\n- **ship_blockers**: 1\n"
+        )
+        store = {"c": crit, "204-gate-latest": "outcome: \"PASSED\"\nprior: [1] (1C), [2] (1C)\n"}
+        out = self._run(rdr_env, monkeypatch, store, "c").output
+        assert "Gate round 4" in out, out
+        assert "outcome: \"BLOCKED\"" in out, out
+        assert "residuals:\n  - [DISCOVER-AT-IMPLEMENTATION] beta" in out, out
+        assert "[DISCOVER-AT-IMPLEMENTATION] alpha" not in out, "alpha is the ship-blocker, not a residual"
+
+    def test_ship_blocker_and_discover_at_implementation_contradiction_refuses(self, rdr_env, monkeypatch):
+        """Decision 2: `Ship-blocker: yes` plus `Class: DISCOVER-AT-IMPLEMENTATION`
+        on the SAME finding disagree — a ship-blocker is BLOCKS-PLANNING by
+        definition — and the verdict refuses to compute an outcome at all."""
+        self._commit(rdr_env)
+        crit = (
+            "## Critical Issues\n\n### Issue: gamma\n- **Location**: L1\n"
+            "- **Class**: DISCOVER-AT-IMPLEMENTATION\n- **Ship-blocker**: yes\n\n"
+            "## Significant Issues\nNone.\n\n"
+            "## Verdict\n\n- **outcome**: not-justified\n- **critical_count**: 1\n"
+            "- **significant_count**: 0\n- **ship_blockers**: 1\n"
+        )
+        out = self._run(rdr_env, monkeypatch, {"c": crit}, "c").output
+        assert "Contradiction" in out, out
+        assert "gamma" in out
+        assert "Ship-blocker: yes" in out and "DISCOVER-AT-IMPLEMENTATION" in out
+        assert "outcome: \"BLOCKED\"" not in out and "outcome: \"PASSED\"" not in out
+        assert "**Outcome:" not in out
+
+    def test_class_carrying_critique_with_no_ship_blocker_line_computes_normally(self, rdr_env, monkeypatch):
+        """A critique that carries Class lines but no per-finding
+        Ship-blocker line at all is not a contradiction — it falls through
+        to the ordinary ship_blockers computation untouched."""
+        self._commit(rdr_env)
+        crit = (
+            "## Critical Issues\n\n### Issue: delta\n- **Location**: L1\n"
+            "- **Class**: BLOCKS-PLANNING\n\n"
+            "## Significant Issues\nNone.\n\n"
+            "## Verdict\n\n- **outcome**: not-justified\n- **critical_count**: 1\n"
+            "- **significant_count**: 0\n- **ship_blockers**: 0\n"
+        )
+        out = self._run(rdr_env, monkeypatch, {"c": crit}, "c").output
+        assert "Contradiction" not in out, out
+        assert "outcome: \"BLOCKED\"" in out, "critical_count > 0 blocks at round 1 regardless of Class"
+
+    def test_unclassified_residual_does_not_change_what_blocks(self, rdr_env, monkeypatch):
+        """gamma carries no `Class:` line at all. It still prints as a
+        residual under the conservative BLOCKS-PLANNING default (needs a
+        human disposition, never auto-beaded) but the outcome stays driven
+        by alpha's ship-blocker, exactly as it would with no classes at
+        all — an unclassified finding never changes what blocks."""
+        self._commit(rdr_env)
+        crit = (
+            "## Critical Issues\n\n### Issue: alpha\n- **Location**: L1\n"
+            "- **Class**: BLOCKS-PLANNING\n- **Ship-blocker**: yes\n\n"
+            "## Significant Issues\n\n### Issue: gamma\n- **Location**: L2\n"
+            "- **Ship-blocker**: no\n\n"
+            "## Verdict\n\n- **outcome**: not-justified\n- **critical_count**: 1\n"
+            "- **significant_count**: 1\n- **ship_blockers**: 1\n"
+        )
+        store = {"c": crit, "204-gate-latest": "outcome: \"PASSED\"\nprior: [1] (1C), [2] (1C)\n"}
+        out = self._run(rdr_env, monkeypatch, store, "c").output
+        assert "Gate round 4" in out, out
+        assert "outcome: \"BLOCKED\"" in out, out
+        assert "residuals:\n  - [BLOCKS-PLANNING] gamma" in out, out
+
+    def test_ship_blocker_with_no_class_line_is_unclassified_and_not_a_residual(self, rdr_env, monkeypatch):
+        """Boundary value (critique nexus-yjf5l.9 finding, item (a)): a
+        finding carrying `Ship-blocker: yes` and NO `Class:` line at all.
+        This is a pin, not a red-before-green test — no code change makes
+        it pass, because the behaviour already holds: the contradiction
+        check (`tally.classifications.get(title) ==
+        DISCOVER_AT_IMPLEMENTATION`) only fires when a Class line is
+        present and says DISCOVER-AT-IMPLEMENTATION; an absent Class line
+        makes `.get()` return `None`, `None == DISCOVER_AT_IMPLEMENTATION`
+        is `False`, so no contradiction fires and alpha proceeds as an
+        ordinary, unclassified ship-blocker. And because `residuals` is
+        built as `criticals + significants` MINUS `ship_blocker_titles`,
+        alpha — being a ship-blocker — can never reach the `residuals:`
+        printed list at all, classified or not; there is no
+        BLOCKS-PLANNING default line to observe for it. beta pins the
+        sibling boundary: unclassified AND excluded from
+        `ship_blocker_titles`, so it IS a residual, and its printed line
+        carries the conservative BLOCKS-PLANNING default — exactly as
+        `test_unclassified_residual_does_not_change_what_blocks` already
+        shows for a differently-named finding."""
+        self._commit(rdr_env)
+        crit = (
+            "## Critical Issues\n\n### Issue: alpha\n- **Location**: L1\n"
+            "- **Ship-blocker**: yes\n\n"
+            "## Significant Issues\n\n### Issue: beta\n- **Location**: L2\n"
+            "- **Ship-blocker**: no\n\n"
+            "## Verdict\n\n- **outcome**: not-justified\n- **critical_count**: 1\n"
+            "- **significant_count**: 1\n- **ship_blockers**: 1\n"
+        )
+        store = {"c": crit, "204-gate-latest": "outcome: \"PASSED\"\nprior: [1] (1C), [2] (1C)\n"}
+        out = self._run(rdr_env, monkeypatch, store, "c").output
+        assert "Gate round 4" in out, out
+        assert "Contradiction" not in out, out
+        assert "outcome: \"BLOCKED\"" in out, out
+        assert "ship_blockers: 1" in out, out
+        assert "residuals:\n  - [BLOCKS-PLANNING] beta" in out, out
+        assert "[BLOCKS-PLANNING] alpha" not in out, "alpha is the ship-blocker, not a residual"
+
+    def test_residual_absent_from_the_critique_is_carried_forward(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.14 F1: with Layer 0 telling critics not to re-raise a
+        recorded residual, round N's residual (gamma, recorded at round 3)
+        is absent from round 4's own critique. It must still appear in
+        round 4's `residuals:` field, carrying its class and a marker
+        naming the round it was carried from — otherwise it vanishes from
+        the chain before accept can ever disposition it."""
+        self._commit(rdr_env)
+        crit = (
+            "## Critical Issues\n\n### Issue: alpha\n- **Location**: L1\n"
+            "- **Ship-blocker**: yes\n\n"
+            "## Significant Issues\nNone.\n\n"
+            "## Verdict\n\n- **outcome**: not-justified\n- **critical_count**: 1\n"
+            "- **significant_count**: 0\n- **ship_blockers**: 1\n"
+        )
+        store = {
+            "c": crit,
+            "204-gate-latest": (
+                "outcome: \"BLOCKED\"\ndate: \"2026-09-07\"\nround: 3\n"
+                "prior: [1] (1C), [2] (1C)\n"
+                "residuals:\n  - [DISCOVER-AT-IMPLEMENTATION] gamma\n"
+            ),
+        }
+        out = self._run(rdr_env, monkeypatch, store, "c").output
+        assert "Gate round 4" in out, out
+        assert "outcome: \"BLOCKED\"" in out, out
+        assert (
+            "residuals:\n  - [DISCOVER-AT-IMPLEMENTATION] gamma (carried from round 3)" in out
+        ), out
+
+    def test_drifted_residual_title_matches_and_is_not_duplicated(self, rdr_env, monkeypatch):
+        """nexus-yjf5l.14 F1/critique 1: a residual's title carries a
+        self-referential count that drifts between rounds (the RDR-204
+        live repro's exact shape). The strict key misses on the digit
+        alone, but the looser key must still recognise it as the same
+        finding and never carry a duplicate copy forward. ``epsilon`` is
+        untouched by this round's critique and anchors that carry-forward
+        actually ran (with no carry logic at all, ``epsilon`` would be
+        silently lost, and the dedup assertion below would pass
+        vacuously)."""
+        self._commit(rdr_env)
+        crit = (
+            "## Critical Issues\nNone.\n\n"
+            "## Significant Issues\n\n### Issue: Finalization Gate critique count is stale by 3\n"
+            "- **Location**: L1\n- **Ship-blocker**: no\n\n"
+            "## Verdict\n\n- **outcome**: not-justified\n- **critical_count**: 0\n"
+            "- **significant_count**: 1\n- **ship_blockers**: 0\n"
+        )
+        store = {
+            "c": crit,
+            "204-gate-latest": (
+                "outcome: \"PASSED\"\ndate: \"2026-09-08\"\nround: 5\n"
+                "prior: [1] (1C), [2] (1C), [3] (1C), [4] (1C)\n"
+                "residuals:\n  - [BLOCKS-PLANNING] Finalization Gate critique count is stale by 2\n"
+                "  - [BLOCKS-PLANNING] epsilon untouched\n"
+            ),
+        }
+        out = self._run(rdr_env, monkeypatch, store, "c").output
+        assert "Gate round 6" in out, out
+        assert "epsilon untouched (carried from round 5)" in out, "carry-forward must still run for the untouched residual"
+        assert out.count("stale by") == 2, out  # once in the "Residuals (N)" line, once in `residuals:`
+        assert "stale by 3" in out
+        assert "stale by 2" not in out, "the drifted-count duplicate must not be carried forward"
+
 
 class TestCritiqueFindings:
     """nexus-7vdf9 (critique [24815] Critical 2): the extractor must read the
@@ -2346,3 +3145,107 @@ class TestCritiqueFindings:
         from nexus.commands.rdr import _critique_findings
 
         assert _critique_findings("") == []
+
+    def test_class_line_survives_the_allowlist(self) -> None:
+        """nexus-yjf5l.7: unlike Ship-blocker (handled solely by
+        _critique_tally, never reaching this extractor's output), Class
+        must reach the author through the re-gate and fix preambles, or it
+        vanishes silently — add it to _critique_findings' detail allowlist."""
+        from nexus.commands.rdr import _critique_findings
+
+        text = (
+            "## Critical Issues\n\n### Issue: title\n- **Location**: L1\n"
+            "- **Class**: BLOCKS-PLANNING\n- **Ship-blocker**: yes\n\n"
+            "## Significant Issues\nNone.\n"
+        )
+        f = _critique_findings(text)
+        assert any("Class: BLOCKS-PLANNING" in x for x in f), f
+        assert not any("Ship-blocker" in x for x in f), "Ship-blocker stays out, as before"
+
+    def test_absent_class_line_is_not_an_error(self) -> None:
+        """Backward compatibility: a historical critique that predates the
+        Class field (204-gate-critique-2026-09-07i.md) parses exactly as it
+        did before — its findings are recognised, and no Class detail is
+        invented for them."""
+        from nexus.commands.rdr import _critique_findings
+
+        text = (FIXTURES / "204-gate-critique-2026-09-07i.md").read_text()
+        f = _critique_findings(text)
+        assert f, "the historical critique's findings must still parse"
+        assert not any("Class:" in x for x in f)
+
+    def test_free_form_em_dash_shape_matches_the_tally(self) -> None:
+        """nexus-yjf5l.15 (Phase 1 review F2): the free-form
+        'CRITICAL — <title>' / 'SIGNIFICANT — <title>' shape
+        _critique_tally already counted (RDR-204's seventh gate) must
+        yield findings too, or the round-3+ split (nexus-yjf5l.2) and the
+        Layer 0 exemption (nexus-yjf5l.3) are silently inert for it — as
+        they were before this fix, when this shape parsed to []."""
+        from nexus.commands.rdr import _critique_findings, _critique_tally
+
+        text = (
+            "CRITICAL — a false claim introduced by this fix commit.\n"
+            "Ship-blocker: yes\n\n"
+            "SIGNIFICANT — redundant clause left stale at a second site.\n"
+            "Ship-blocker: no\n"
+        )
+        findings = _critique_findings(text)
+        tally = _critique_tally(text)
+        assert findings, "the free-form em-dash shape must yield findings, not []"
+        assert not any("Ship-blocker" in f for f in findings), "Ship-blocker stays out, as before"
+        for title in tally.criticals + tally.significants:
+            assert any(title in f for f in findings), (title, findings)
+
+    def test_real_free_form_fixture_yields_findings_matching_the_tally(self) -> None:
+        """The actual RDR-204 seventh-gate critique
+        (204-gate-critique-2026-09-07f.md): _critique_tally counts 1
+        Critical + 2 Significants; _critique_findings must now match it,
+        not return [] (nexus-yjf5l.15, Phase 1 review F2 repro)."""
+        from nexus.commands.rdr import _critique_findings, _critique_tally
+
+        text = (FIXTURES / "204-gate-critique-2026-09-07f.md").read_text()
+        tally = _critique_tally(text)
+        findings = _critique_findings(text)
+        assert (len(tally.criticals), len(tally.significants)) == (1, 2)
+        assert len(findings) == 3, findings
+        for title in tally.criticals + tally.significants:
+            assert any(title in f for f in findings), (title, findings)
+
+
+class TestResidualBatchReviewPins:
+    """Pins from the residual-batch review of nexus-yjf5l (T2
+    nexus/review-nexus-yjf5l-residual-batch-2026-09-10 F1 F2, and
+    nexus/critique-nexus-yjf5l-residual-batch-2026-09-10 findings 1 and 2)."""
+
+    def test_residual_class_tag_is_scoped_to_the_two_classes(self) -> None:
+        from nexus.commands.rdr import _residual_class_and_title
+        from nexus.plans.audit_rounds import BLOCKS_PLANNING, DISCOVER_AT_IMPLEMENTATION
+
+        assert _residual_class_and_title("[SQL] query builder allows injection") == (
+            BLOCKS_PLANNING, "[SQL] query builder allows injection",
+        )
+        assert _residual_class_and_title(f"[{DISCOVER_AT_IMPLEMENTATION}] a title") == (
+            DISCOVER_AT_IMPLEMENTATION, "a title",
+        )
+
+    def test_loose_key_keeps_the_file_path_and_drops_only_the_line(self) -> None:
+        from nexus.commands.rdr import _finding_title_key_loose
+
+        a = _finding_title_key_loose("Off-by-one in the sweep at foo.py:120")
+        b = _finding_title_key_loose("Off-by-one in the sweep at bar.py:340")
+        c = _finding_title_key_loose("Off-by-one in the sweep at foo.py:121")
+        assert a != b, "two findings differing only in file must not share a loose key"
+        assert a == c, "a drifted line number in the same file is the same finding"
+
+    def test_loose_match_is_refused_when_ambiguous(self) -> None:
+        from nexus.commands.rdr import _loose_unique_index
+
+        idx = _loose_unique_index([
+            "the round 3 residuals count is off by 1",
+            "the round 5 residuals count is off by 1",
+            "an unrelated title",
+        ])
+        assert "an unrelated title" in idx.values()
+        assert not any("off by" in v for v in idx.values()), (
+            "two titles sharing every non-digit word must not resolve to either"
+        )

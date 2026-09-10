@@ -863,8 +863,28 @@ def _delete_docs_for_paths(repo: Path, deleted_relpaths: list[str]) -> None:
 
     The delta path's replacement for housekeeping's miss-count sweep: git
     already told us these worktree-relative paths are gone (rename detection
-    applied), so their docs are deleted immediately — the manifest FK CASCADE
-    then exposes their chunks to ``_prune_deleted_files``'s orphan sweep.
+    applied), so their docs are tombstoned immediately rather than waiting on
+    the two-run sweep. CORRECTION (nexus-d6qmz round 3, review
+    nexus/critique-nexus-d6qmz-7710a262b-2026-09-09): this used to claim "the
+    manifest FK CASCADE then exposes their chunks to _prune_deleted_files's
+    orphan sweep" — false. ``writer.delete_document`` is a plain soft-
+    tombstone UPDATE (sets ``deleted_at``) that deliberately does NOT cascade
+    (nexus-mqd6t tripwire; store_hook.py's nexus-3ck2g docstring says the
+    same). The underlying T3 chunk stays referenced by the tombstoned
+    manifest until ``nx catalog purge-trash`` reclaims it past its age
+    window (one day by default) — same latency as a git deletion always
+    had here.
+
+    ``reader.by_file_path`` filters ``deleted_at IS NULL`` server-side
+    (``documentsByFilePath``, ``service/.../CatalogRepository.java``), so an
+    already-tombstoned path is a safe no-op HERE by construction — not
+    merely because the ``entry is None`` check happens to catch it. A
+    caller (e.g. ``_stored_paths_among`` below, which reads through
+    ``by_owner`` — the identical ``deleted_at IS NULL`` filter,
+    ``documentsByOwner``) never needs its own tombstone check before
+    feeding a path in here; an already-reclaimed path never re-enters this
+    function's caller's ``delta_deleted`` in the first place.
+
     Best-effort per path; a failed lookup/delete is logged and skipped (the
     next FULL run's housekeeping recovers it).
     """
@@ -896,6 +916,56 @@ def _delete_docs_for_paths(repo: Path, deleted_relpaths: list[str]) -> None:
                 )
     except Exception:  # noqa: BLE001 — catalog unavailable: nothing to delete from
         _log.debug("since_head_delete_docs_unavailable", exc_info=True)
+
+
+def _stored_paths_among(repo: Path, candidate_relpaths: set[str]) -> set[str]:
+    """Filter *candidate_relpaths* down to the ones with a LIVE catalog document
+    (nexus-d6qmz round 2, review nexus/review-nexus-d6qmz-7710a262b-since-head-
+    regression-2026-09-09).
+
+    ``rdr_excluded_present`` (the RDR-basename-exclusion feed into
+    ``delta_deleted``, below) finds the SAME permanent basenames present on
+    disk every single run — a repo's own ``docs/rdr/README.md`` and
+    ``AGENTS.md`` never go away. Feeding an already-reclaimed (or never-
+    stored) path into ``delta_deleted`` unconditionally would make
+    ``delta_deleted`` permanently non-empty, defeating the ``--since-head:
+    no deletions in delta`` skip gate at the prune-deleted phase and paying
+    the full per-collection orphan sweep on every incremental run forever
+    — in steady state there is nothing left to reclaim after the first run.
+
+    ONE batched ``by_owner`` read (mirrors ``_run_housekeeping``'s own
+    pattern), never one lookup per candidate path — the candidate set is
+    at most a handful of basenames, but the cost that matters is per-RUN,
+    not per-path. ``by_owner`` is backed by the IDENTICAL ``deleted_at IS
+    NULL`` filter as ``by_file_path`` (``documentsByOwner`` /
+    ``documentsByFilePath``, ``service/.../CatalogRepository.java`` — see
+    ``_delete_docs_for_paths``'s docstring), so an already-tombstoned path
+    drops out of ``owned_paths`` on its own the run right after it was
+    reclaimed — this function never needs its own tombstone check, and an
+    already-reclaimed README can never re-enter ``delta_deleted``.
+    Catalog-absent, owner-absent, or any lookup failure is a safe empty
+    result (best-effort; the caller then feeds nothing new into
+    ``delta_deleted`` and defers to the next full run's housekeeping
+    sweep, exactly as before this filter existed).
+    """
+    if not candidate_relpaths:
+        return set()
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+        reader = make_catalog_reader()
+        if reader is None:
+            return set()
+        _, repo_hash = _repo_identity(repo)
+        owner = reader.owner_for_repo(repo_hash)
+        if owner is None:
+            return set()
+        owned_paths = {e.file_path for e in reader.by_owner(owner)}
+    except Exception:  # noqa: BLE001 — best-effort filter; empty result defers to full-run housekeeping
+        _log.debug("rdr_excluded_present_filter_unavailable", exc_info=True)
+        return set()
+    return candidate_relpaths & owned_paths
 
 
 def _catalog_progress(
@@ -4305,6 +4375,29 @@ def _run_index(
     # its own.
     skipped_unchunkable: list[tuple[Path, str]] = []
 
+    # nexus-d6qmz (GH #1524 residual): a document already stored for a
+    # path this pass's own filter now excludes (see
+    # RDR_DIR_NON_RDR_BASENAMES below) survives on disk untouched — the
+    # exclusion only stops it being RE-discovered here, it never reaches
+    # the stored catalog row. Left alone, the only reclaim path is
+    # ``_run_housekeeping``'s two-run miss-count sweep (the file is simply
+    # absent from every run's ``indexed_set``). Collected here (every
+    # excluded basename present on disk, whether or not it still has a
+    # stored document — that filtering happens once, batched, below via
+    # ``_stored_paths_among``) and fed into ``delta_deleted`` so a path
+    # that DOES still have a stored document rides the SAME same-run
+    # tombstone (``_delete_docs_for_paths``) the --since-head path already
+    # uses for a real git deletion — tombstoned THIS run, not the second
+    # one (the underlying T3 chunk still follows only at
+    # ``nx catalog purge-trash``'s window, same as a git deletion — see
+    # the comment above ``_delete_docs_for_paths(repo, delta_deleted)``
+    # below). A repo's own permanent docs/rdr/README.md is present on disk
+    # every run, so this SET is non-empty every run; ``_stored_paths_among``
+    # is what keeps ``delta_deleted`` (and the expensive orphan sweep it
+    # triggers) empty in steady state, once there is nothing left to
+    # reclaim.
+    rdr_excluded_present: set[str] = set()
+
     rdr_md_paths: list[tuple[float, Path]] = []
     for rdr_rel in dict.fromkeys(rdr_paths):  # de-dupe while preserving order
         rdr_dir = repo / rdr_rel
@@ -4316,6 +4409,7 @@ def _run_index(
                         # README (and the agent guidance files beside it) are
                         # not RDRs; indexed as one, the byte-identical README
                         # outranked every real RDR in five collections at once.
+                        rdr_excluded_present.add(str(md_file.relative_to(repo)))
                         continue
                     if (delta_changed is not None
                             and str(md_file.relative_to(repo)) not in delta_changed):
@@ -4341,6 +4435,16 @@ def _run_index(
                     rdr_md_paths.append((frecency_map.get(md_file, 0.0), md_file))
     rdr_md_paths.sort(key=lambda x: x[0], reverse=True)
     have_rdr_files = bool(rdr_md_paths)
+
+    if rdr_excluded_present:
+        # nexus-d6qmz round 2: filter to paths that actually still HAVE a
+        # stored document before merging into delta_deleted — see
+        # _stored_paths_among's docstring for why the unfiltered set made
+        # delta_deleted permanently non-empty on --since-head runs.
+        _stored = _stored_paths_among(repo, rdr_excluded_present)
+        if _stored:
+            _already = set(delta_deleted)
+            delta_deleted.extend(sorted(_stored - _already))
 
     # Walk repo and classify files into code, prose, and PDF lists
     code_files: list[tuple[float, Path]] = []
@@ -4692,6 +4796,95 @@ def _run_index(
         if rdr_col_name is not None else None
     )
     _log.debug("collections ready")
+
+    # nexus-bd44g: register each freshly-minted T3 collection with the
+    # engine BEFORE anything reads it. RDR-204 Phase 1 retired the
+    # engine's auto-register-on-first-write behaviour for T3 chunk
+    # writes (write_with_registration_retry / ensure_collection_
+    # registered, called from HttpVectorClient.upsert_chunks at the
+    # per-file write further down this run) — but the staleness-cache
+    # build below (build_staleness_cache -> col.get_all_metadata /
+    # the paginated get fallback) is a READ that runs before any file
+    # has been written, so on a genuinely first-time collection it hit
+    # the engine's ``collection ... is not registered for tenant``
+    # 422 unconditionally, logging a fast-path-failed traceback
+    # followed by a paginated-get-failed traceback before falling
+    # through to the (correct) empty-cache result every downstream
+    # write path already tolerates. Registering here — same name,
+    # same per-process cache ensure_collection_registered's write path
+    # already relies on, so the later write is a cache hit, not a
+    # second round trip — closes the read-before-registration window
+    # entirely rather than papering over its symptom.
+    #
+    # Known debris window (fix-round finding, not closed by this loop):
+    # write_with_registration_retry's own docstring (corpus.py) treats
+    # registration and the write that follows as ADJACENT within one
+    # call -- this loop breaks that adjacency by registering all three
+    # collections here, up front, while the per-file write loop that
+    # follows can run for minutes. A run that registers a collection and
+    # then writes ZERO chunks to it (every file of that content type
+    # fails to chunk, or the process dies before any successful write)
+    # leaves a registered-but-chunkless row with no write ever attempted
+    # to self-heal it. Not data loss and not new in KIND -- the engine's
+    # boot ghost sweep (a durable, at-most-once-per-tenant marker, not a
+    # recurring per-boot pass; nexus-snm4y/nexus-n060e semantics) and
+    # `nx catalog collection-gc` both already reclaim exactly this row
+    # shape, and a repo re-run self-heals it -- but this loop makes the
+    # window more reachable than the write-time-only registration it
+    # replaces. Direct prior instance of the same failure CLASS, a
+    # different call site: nexus-syfes (engine-service-v0.1.111
+    # shakeout, Phase E) -- see this file's
+    # test_prune_collection_serverside_never_registers_the_quarantine_
+    # sibling, which documents that incident and asserts the client
+    # never eagerly pre-registers the quarantine sibling for exactly
+    # this reason. No code change here; tracked in bead notes.
+    #
+    # nexus-bd44g fix check (full-suite finding, /tmp/wt-int2): a bare
+    # ensure_collection_registered(_name) call (kwargs=None) derives
+    # embedding_model via collection_registration_kwargs ->
+    # effective_embedding_model_for_writes(content_type) -- an
+    # INDEPENDENT, env-sensitive computation (local vs. service-vector
+    # mode, fastembed tier availability) that can genuinely disagree
+    # with the model token this run's OWN collection name already
+    # carries (observed live: a name minted while
+    # NX_STORAGE_BACKEND_VECTORS read one way, registered moments later
+    # after a test/run flipped it to another -- code__tiny-repo-
+    # 721d1ff1__bge-base-en-v15-768__v1 registered with embedding_model
+    # 'minilm-l6-v2-384'). The engine 422s on ANY kwargs/profile
+    # disagreement regardless of which side is "right", so re-deriving
+    # independently is itself the hazard. code_collection/docs_collection/
+    # rdr_col_name are ALREADY confirmed conformant by this point (Phase-4
+    # migration + the is_conformant_collection_name re-checks above), so
+    # index_model_for_collection(_name) -- the SAME name-token read
+    # index_model_for_collection above already uses for the service-mode
+    # embed-fn selection -- makes the registration kwargs agree with the
+    # name BY CONSTRUCTION, never a second independent guess.
+    #
+    # Release-battery finding (7.39.0 local-service gate, 35 reds): this
+    # loop runs only when the vector backend is the engine. The write path
+    # it fronts registers from INSIDE HttpVectorClient, so with
+    # NX_STORAGE_BACKEND_VECTORS opted out (a client-embedding T3 double
+    # injected by tests, the only non-service topology left) no write ever
+    # registered anything, and there is no engine-side collection to
+    # register: the name carries the double's own model token
+    # (minilm-l6-v2-384) and the engine 422s it against the tenant's real
+    # profile. Gated on the same is_vector_service_mode() that chose `db`
+    # above, so the loop and the client it registers for agree by
+    # construction.
+    from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+        collection_registration_kwargs,
+        ensure_collection_registered,
+    )
+    from nexus.db.http_vector_client import is_vector_service_mode as _reg_service_mode  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
+
+    if _reg_service_mode():
+        for _name in (code_collection if have_code_files else None,
+                      docs_collection if have_docs_files else None,
+                      rdr_col_name):
+            if _name is not None:
+                _reg_kwargs = collection_registration_kwargs(_name)
+                _reg_kwargs["embedding_model"] = index_model_for_collection(_name)
+                ensure_collection_registered(_name, kwargs=_reg_kwargs)
 
     # ── Pre-index catalog registration (RDR-101 Phase 3 PR δ Stage B) ───────
     # Register catalog entries BEFORE per-file indexing so the prose
@@ -5855,11 +6048,31 @@ def _run_index(
             _phase("  skipped (--since-head: no deletions in delta)")
         else:
             if delta_deleted:
-                # nexus-fltb4: git said these paths are GONE (rename detection
-                # already applied) — delete their catalog docs NOW so the
-                # manifest CASCADE exposes their chunks to the orphan sweep
-                # below. The full-walk path never reaches here with
-                # delta_deleted set.
+                # nexus-fltb4: git said these paths are GONE (rename
+                # detection already applied) — tombstone their catalog
+                # docs NOW. CORRECTION (nexus-d6qmz round 3, review
+                # nexus/critique-nexus-d6qmz-7710a262b-2026-09-09): this
+                # used to claim "the manifest CASCADE exposes their
+                # chunks to the orphan sweep below" — that is false.
+                # deleteDocument (service CatalogRepository.java) is a
+                # plain soft-tombstone UPDATE (sets deleted_at) that
+                # deliberately does NOT cascade (nexus-mqd6t tripwire;
+                # store_hook.py's nexus-3ck2g docstring says the same).
+                # The document drops out of every live-only lookup
+                # (by_file_path, by_owner, ...) THIS run; its T3 chunk
+                # stays referenced by the tombstoned manifest until
+                # `nx catalog purge-trash` reclaims it past its age
+                # window (one day by default) — same latency as a real
+                # git deletion, not a same-run chunk sweep.
+                # nexus-d6qmz: a FULL walk can also populate delta_deleted
+                # — not only real git deletions ride this list. Paths
+                # this run's RDR-basename exclusion found present-but-
+                # no-longer-discovered (rdr_excluded_present, filtered to
+                # still-live documents by _stored_paths_among, above) are
+                # appended to delta_deleted too, so a stored document at
+                # an excluded path is tombstoned THIS run exactly like a
+                # git deletion, instead of waiting on housekeeping's
+                # two-run miss-count sweep.
                 _delete_docs_for_paths(repo, delta_deleted)
             _prune_deleted_files(
                 code_collection, docs_collection, db, catalog=_cat,

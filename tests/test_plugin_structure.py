@@ -1342,6 +1342,99 @@ def test_changelog_has_a_section_for_pyprojects_version() -> None:
     )
 
 
+#: nexus-yjf5l.5 (R2): the identifier-level fix-check clause, stated
+#: identically in rdr-gate/SKILL.md, conexus/commands/rdr-gate.md and the
+#: printed ``_fix_check_lines`` brief. One regex extracts the sentence from
+#: whichever surface carries it so the comparison is a single equality
+#: across all three, not three independent substring checks that could
+#: each drift on their own.
+#:
+#: nexus-yjf5l.17: the clause is authored in SEVEN raw occurrences across
+#: five files (rdr.py, rdr-gate/SKILL.md, commands/rdr-gate.md, three
+#: places in rdr-fix/SKILL.md, and commands/rdr-fix.md); the equality
+#: pin below covered only the first three. ``_all_identifier_clauses``
+#: (``findall``, not ``search``) lets a caller pin every occurrence in a
+#: file that carries the sentence more than once.
+#: No trailing period in the pattern: the clause is the LAST item in its
+#: enumeration on some surfaces (rdr.py, rdr-gate/SKILL.md — period) and
+#: a mid-list item on others (the rdr-fix/SKILL.md Relay Template, once
+#: check (6) follows it — semicolon). The terminator is list-position
+#: punctuation, not part of the clause's identity; comparing the
+#: substance without it is what "identical" means here.
+_IDENTIFIER_CLAUSE_RE = re.compile(
+    r"For every identifier whose meaning, bound, or owning phase this change "
+    r"alters.*?list every other occurrence in the file, and every check, bound "
+    r"or rule stated over the value it names under any other name, and say "
+    r"whether each still holds",
+    re.DOTALL,
+)
+
+
+def _identifier_clause(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text)
+    match = _IDENTIFIER_CLAUSE_RE.search(normalized)
+    assert match, f"identifier clause not found in: {text[:200]!r}..."
+    return match.group(0).strip()
+
+
+def _all_identifier_clauses(text: str) -> list[str]:
+    normalized = re.sub(r"\s+", " ", text)
+    return [m.strip() for m in _IDENTIFIER_CLAUSE_RE.findall(normalized)]
+
+
+#: nexus-yjf5l.17 (R2 residual, Finding 5 / critique Issue "T3-lead
+#: paraphrase"): the T3-lead clause, one sentence, pinned by equality
+#: the same way as the identifier clause above. It appears in four raw
+#: occurrences (rdr.py, rdr-gate/SKILL.md, commands/rdr-gate.md, and the
+#: rdr-fix/SKILL.md Relay Template) — commands/rdr-gate.md carried a
+#: paraphrase until this bead.
+#: No trailing period, for the same list-position reason as
+#: _IDENTIFIER_CLAUSE_RE above: the Relay Template's item (4) is
+#: followed by item (5), so it ends in a semicolon there, not a period.
+_T3_LEAD_CLAUSE_RE = re.compile(
+    r"A `file:line` taken from a T3 search or query hit is a lead, not a "
+    r"citation:.*?the clause passes only when the line was re-read from "
+    r"the working tree",
+    re.DOTALL,
+)
+
+
+def _t3_lead_clause(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text)
+    match = _T3_LEAD_CLAUSE_RE.search(normalized)
+    assert match, f"T3-lead clause not found in: {text[:200]!r}..."
+    return match.group(0).strip()
+
+
+#: nexus-yjf5l.17 (residual 1: the identifier clause needs no shared
+#: name only when the file happens to gloss one identifier in terms of
+#: the other). The crosswalk clause is the diff-scoped, vocabulary-
+#: independent check the critique asked for: it travels everywhere the
+#: identifier clause travels (same seven raw occurrences), one step
+#: further in the numbered brief.
+_CROSSWALK_CLAUSE_RE = re.compile(
+    r"For every check, bound or rule this change adds, name the "
+    r"parameter, column or setting it constrains, and for every "
+    r"parameter, column or setting this change adds or alters, name "
+    r"every check, bound or rule that constrains it, whether or not "
+    r"they share a name, and a pair the previous check already named is "
+    r"not named again\.",
+    re.DOTALL,
+)
+
+
+def _crosswalk_clause(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text)
+    match = _CROSSWALK_CLAUSE_RE.search(normalized)
+    assert match, f"crosswalk clause not found in: {text[:200]!r}..."
+    return match.group(0).strip()
+
+
+def _all_crosswalk_clauses(text: str) -> list[str]:
+    normalized = re.sub(r"\s+", " ", text)
+    return [m.strip() for m in _CROSSWALK_CLAUSE_RE.findall(normalized)]
+
+
 class TestRdrGateLoopRemedies:
     """nexus-g7zgw: the five process remedies for the RDR gate/fix loop
     (T2 nexus/deep-analysis-rdr-gate-fix-loop-2026-09-07) are stated in the
@@ -1352,6 +1445,9 @@ class TestRdrGateLoopRemedies:
     GATE_CMD = PLUGIN_DIR / "commands" / "rdr-gate.md"
     RESEARCH_SKILL = SKILLS_DIR / "rdr-research" / "SKILL.md"
     ACCEPT_SKILL = SKILLS_DIR / "rdr-accept" / "SKILL.md"
+    ACCEPT_CMD = PLUGIN_DIR / "commands" / "rdr-accept.md"
+    FIX_SKILL = SKILLS_DIR / "rdr-fix" / "SKILL.md"
+    FIX_CMD = PLUGIN_DIR / "commands" / "rdr-fix.md"
 
     def test_fix_check_layer_in_gate_skill_and_command(self) -> None:
         """Remedy 1: a diff-scoped fix check stands between a fix and Layer 3."""
@@ -1361,10 +1457,32 @@ class TestRdrGateLoopRemedies:
             assert "with ONLY th" in text and "diff" in text, f"{path}: the fix check reads only the diff"
             assert "fix-check-" in text, f"{path}: names the T2 title shape"
             assert "fix_check:" in text, f"{path}: the gate record carries the pointer"
+            # nexus-yjf5l.5 (R2): the fix-check brief goes identifier-level —
+            # every changed identifier's other occurrences are enumerated,
+            # not just the clause carrying it.
+            assert "owning phase" in text and "every other occurrence" in text, (
+                f"{path}: the identifier clause is missing"
+            )
+            # The clause reaches a check stated over the same value under a
+            # different name: the round-3 collision was a caller parameter
+            # against a boot check that never used the parameter's token.
+            assert "under any other name" in text, f"{path}: the clause stops at the same token"
+            # nexus-yjf5l.17: the crosswalk clause needs no bridging gloss —
+            # it walks the diff's own ADDED checks and ADDED parameters
+            # directly, whether or not they share a name.
+            assert "whether or not they share a name" in text, (
+                f"{path}: the crosswalk clause is missing"
+            )
         skill = self.GATE_SKILL.read_text()
         for phrase in ("contradicted by any other line", "enumeration", "universal", "research entry"):
             assert phrase in skill, f"rdr-gate/SKILL.md: fix-check brief lacks '{phrase}'"
         assert "never counts toward the round" in skill
+        # nexus-yjf5l.5 (R2): the serial precondition — fix, check, then
+        # Layer 1 and Layer 3, never a parallel dispatch against one commit.
+        for path in (self.GATE_SKILL, self.GATE_CMD):
+            assert "dispatched against the same commit in parallel" in path.read_text(), (
+                f"{path}: the serial precondition is missing"
+            )
 
     def test_termination_rule_and_ship_blockers_in_gate_skill(self) -> None:
         """Remedy 2: rounds 1-2 block on any Critical; from round 3 only a
@@ -1394,6 +1512,11 @@ class TestRdrGateLoopRemedies:
         assert "Sites:" in cmd
         critic = (PLUGIN_DIR / "agents" / "substantive-critic.md").read_text()
         assert "- **Sites**:" in critic, "the canonical Issue format carries the Sites line"
+        # nexus-yjf5l.3: a finding recorded on the prior round's residuals:
+        # lines is dispositioned at accept, not a survivor — Layer 0's sweep
+        # instruction states the exemption in both surfaces.
+        assert "recorded residual" in skill, "Layer 0 must exempt recorded residuals from the sweep"
+        assert "recorded residual" in cmd, "Layer 0 must exempt recorded residuals from the sweep"
 
     def test_command_and_skill_agree_on_fix_check_scope(self) -> None:
         cmd = self.GATE_CMD.read_text()
@@ -1405,6 +1528,65 @@ class TestRdrGateLoopRemedies:
         assert "fix_check:" in accept and "not the record's `commit:`" in accept
         assert "no `fix_check:`" in accept, "a skipped fix check blocks accept"
         assert "mandatory on every re-gate" in skill and "mandatory on every re-gate" in self.GATE_CMD.read_text()
+        # nexus-yjf5l.5 (R2): the identifier clause must be the SAME sentence
+        # in the skill, the command mirror, and the printed fix-check brief —
+        # one equality across all three rather than three separate substring
+        # checks that could each drift independently.
+        from nexus.commands.rdr import _fix_check_lines
+
+        printed = "\n".join(_fix_check_lines(
+            repo_root=str(REPO_ROOT), t2_key="0", rel="README.md",
+            gated_commit="HEAD", changed=True,
+        ))
+        canonical = _identifier_clause(printed)
+        assert _identifier_clause(skill) == canonical
+        assert _identifier_clause(cmd) == canonical
+        # nexus-yjf5l.17 (R2 residual Finding 4 / critique Issue 2): the
+        # equality pin above covered only three of the clause's seven raw
+        # occurrences. The other four live in rdr-fix/SKILL.md (Behavior
+        # step 5, Rules, and the Relay Template — three occurrences) and
+        # commands/rdr-fix.md (one). Pin every one of them, individually,
+        # to the same canonical sentence.
+        fix_skill_text = self.FIX_SKILL.read_text()
+        fix_skill_clauses = _all_identifier_clauses(fix_skill_text)
+        assert len(fix_skill_clauses) == 3, (
+            f"rdr-fix/SKILL.md should carry the identifier clause 3 times "
+            f"(Behavior step 5, Rules, Relay Template); found {len(fix_skill_clauses)}"
+        )
+        assert all(c == canonical for c in fix_skill_clauses), (
+            "rdr-fix/SKILL.md: not every occurrence of the identifier clause matches the canonical sentence"
+        )
+        fix_cmd_text = self.FIX_CMD.read_text()
+        fix_cmd_clauses = _all_identifier_clauses(fix_cmd_text)
+        assert len(fix_cmd_clauses) == 1, (
+            f"commands/rdr-fix.md should carry the identifier clause once; found {len(fix_cmd_clauses)}"
+        )
+        assert fix_cmd_clauses[0] == canonical
+
+        # nexus-yjf5l.17 (R2 residual Finding 5 / critique Issue "T3-lead
+        # paraphrase"): the T3-lead clause pinned the same way, across its
+        # four raw occurrences (rdr.py, rdr-gate/SKILL.md,
+        # commands/rdr-gate.md, and the rdr-fix/SKILL.md Relay Template).
+        t3_canonical = _t3_lead_clause(printed)
+        assert _t3_lead_clause(skill) == t3_canonical
+        assert _t3_lead_clause(cmd) == t3_canonical
+        assert _t3_lead_clause(fix_skill_text) == t3_canonical
+
+        # nexus-yjf5l.17 (residual 1: the cross-identifier reach needs a
+        # bridging gloss the RDR might not supply). The crosswalk clause
+        # is diff-scoped and vocabulary-independent; it travels wherever
+        # the identifier clause does, one number further in the brief.
+        crosswalk_canonical = _crosswalk_clause(printed)
+        assert _crosswalk_clause(skill) == crosswalk_canonical
+        assert _crosswalk_clause(cmd) == crosswalk_canonical
+        fix_skill_crosswalks = _all_crosswalk_clauses(fix_skill_text)
+        assert len(fix_skill_crosswalks) == 3, (
+            f"rdr-fix/SKILL.md should carry the crosswalk clause 3 times; found {len(fix_skill_crosswalks)}"
+        )
+        assert all(c == crosswalk_canonical for c in fix_skill_crosswalks)
+        fix_cmd_crosswalks = _all_crosswalk_clauses(fix_cmd_text)
+        assert len(fix_cmd_crosswalks) == 1
+        assert fix_cmd_crosswalks[0] == crosswalk_canonical
 
     def test_fix_commit_rule_in_research_and_gate_skills(self) -> None:
         """Remedy 5: a fix changes the fact named and nothing else; glosses and
@@ -1415,6 +1597,13 @@ class TestRdrGateLoopRemedies:
             assert "before the edit" in text.lower(), f"{path}: research entry precedes the edit"
             assert "inferred, not read" in text, f"{path}: unquoted clauses are marked"
             assert "census" in text, f"{path}: universals need a census"
+        # nexus-yjf5l.2: the round-3 rule (from round 3 the fix closes only
+        # ship-blockers) is rdr-gate/SKILL.md's own copy, in "Fixing
+        # findings" — not the research skill's territory, so it is pinned
+        # here on GATE_SKILL alone rather than added to the loop above.
+        assert "Ship-blocker: yes" in self.GATE_SKILL.read_text(), (
+            "rdr-gate/SKILL.md: round-3 fix rule missing from Fixing findings"
+        )
 
     def test_remedy_skills_carry_no_incident_narrative(self) -> None:
         """Skills are instructions; the why lives in the RDR and T2
@@ -1451,8 +1640,22 @@ class TestRdrGateLoopRemedies:
         assert fix_skill.exists() and fix_cmd.exists()
         assert "nx rdr preamble rdr-fix" in fix_cmd.read_text()
         skill = fix_skill.read_text()
-        for phrase in ("nothing else", "inferred, not read", "census", "before the edit", "fix-check-"):
+        for phrase in (
+            "nothing else", "inferred, not read", "census", "before the edit",
+            "fix-check-", "Ship-blocker: yes", "every other occurrence",
+        ):
             assert phrase in skill, f"rdr-fix/SKILL.md lacks '{phrase}'"
+        # The Relay Template is the brief a fix check dispatched through
+        # /conexus:rdr-fix actually receives, so it carries every numbered
+        # check the printed brief carries, in the same order: (1) to (6),
+        # the T3-lead clause and the crosswalk clause included.
+        deliverable = next(l for l in skill.splitlines() if l.startswith("One row per ADDED"))
+        numbers = re.findall(r"\((\d)\)", deliverable)
+        assert numbers == ["1", "2", "3", "4", "5", "6"], f"Relay Template checks are {numbers}, not (1) to (6)"
+        assert "lead, not a citation" in deliverable, "Relay Template lacks the T3-lead clause"
+        assert "(4) A `file:line`" in deliverable, "the T3-lead clause is check (4), capitalised as printed"
+        assert "(5) For every identifier" in deliverable, "the identifier clause is check (5), capitalised as printed"
+        assert "(6) For every check, bound or rule" in deliverable, "the crosswalk clause is check (6), capitalised as printed"
         assert "/conexus:rdr-fix" in self.GATE_SKILL.read_text()
         lifecycle = (SKILLS_DIR / "using-nx-skills" / "SKILL.md").read_text()
         assert "/conexus:rdr-fix" in lifecycle
@@ -1460,10 +1663,102 @@ class TestRdrGateLoopRemedies:
         assert "rdr-fix:" in registry and "commands/rdr-fix.md" in registry
 
     def test_accept_dispositions_residuals(self) -> None:
-        text = self.ACCEPT_SKILL.read_text()
-        assert "residuals:" in text
-        assert "disposition" in text
-        assert "bead" in text and "commit" in text
+        """The disposition rule, and the fix check a sha disposition carries,
+        in the accept skill and its command mirror."""
+        for path in (self.ACCEPT_SKILL, self.ACCEPT_CMD):
+            text = path.read_text()
+            assert "residuals:" in text, path
+            assert "disposition" in text, path
+            assert "bead" in text and "commit" in text, path
+            assert "fix-check-" in text, f"{path}: the T2 title a sha disposition's check goes under"
+            assert "bead id" in text and "needs none" in text, f"{path}: the bead-disposition exemption"
+            # nexus-yjf5l.8: classification determines which disposition
+            # applies — DISCOVER-AT-IMPLEMENTATION takes a bead naming its
+            # Implementation Plan phase; BLOCKS-PLANNING or an unclassified
+            # residual needs an explicit author disposition, never a default.
+            assert "DISCOVER-AT-IMPLEMENTATION" in text, f"{path}: missing the class name"
+            assert "Implementation Plan phase" in text, f"{path}: missing the bead-names-the-phase rule"
+            assert "BLOCKS-PLANNING" in text, f"{path}: missing the class name"
+            assert "unclassified" in text, f"{path}: missing the unclassified-residual case"
+            assert "never defaulted" in text, f"{path}: the disposition must never be defaulted"
+
+    def test_finding_classification_imported_and_scoped(self) -> None:
+        """R3 (nexus-yjf5l.7): every gate finding carries a Class alongside
+        Ship-blocker (BLOCKS-PLANNING / DISCOVER-AT-IMPLEMENTATION,
+        imported from nexus.plans.audit_rounds), classification governs
+        disposition rather than blocking, and the critic's bullet scopes
+        the requirement to an RDR gate critique so the other consumers of
+        this agent inherit no unstated obligation."""
+        critic = (PLUGIN_DIR / "agents" / "substantive-critic.md").read_text()
+        normalized = re.sub(r"\s+", " ", critic)
+        assert "- **Class**:" in critic
+        assert "BLOCKS-PLANNING" in critic and "DISCOVER-AT-IMPLEMENTATION" in critic
+        assert "required for an RDR gate critique" in normalized, (
+            "the Class bullet must scope itself to an RDR gate critique"
+        )
+        assert "optional for every other consumer of this agent" in normalized, (
+            "the Class bullet must read as optional for every consumer other than an RDR gate critique"
+        )
+        assert "`Ship-blocker: yes` implies `Class: BLOCKS-PLANNING`" in normalized
+        for path in (self.GATE_SKILL, self.GATE_CMD):
+            text = path.read_text()
+            text_normalized = re.sub(r"\s+", " ", text)
+            assert "BLOCKS-PLANNING" in text and "DISCOVER-AT-IMPLEMENTATION" in text, (
+                f"{path}: rdr-gate must name both class strings"
+            )
+            assert "Classification governs disposition, not blocking" in text_normalized, path
+            assert "ship_blockers` stays the sole blocking field" in text_normalized, path
+
+    #: nexus-yjf5l.10 (fix for a nexus-yjf5l.9 critique finding): the
+    #: Class bullet's "optional for every other consumer" parenthetical
+    #: once named plan-audit and phase-review-gate, neither of which ever
+    #: dispatches this agent (plan-audit calls the nx_plan_audit MCP tool
+    #: with "no agent spawn"; phase-review-gate is a pure evidence-table
+    #: gate). Each entry below maps a named consumer to the file(s) whose
+    #: text is the grep-verifiable proof it actually dispatches
+    #: substantive-critic, so the bullet's claim is pinned against the
+    #: same evidence that must keep it true.
+    _REAL_CRITIC_CONSUMERS: dict[str, tuple[Path, ...]] = {
+        "code review": (
+            SKILLS_DIR / "orchestration" / "SKILL.md",
+            SKILLS_DIR / "development" / "SKILL.md",
+        ),
+        "rdr-fix": (SKILLS_DIR / "rdr-fix" / "SKILL.md",),
+        "rdr-accept": (SKILLS_DIR / "rdr-accept" / "SKILL.md",),
+        "rdr-close": (SKILLS_DIR / "rdr-close" / "SKILL.md",),
+        "the substantive-critique skill": (SKILLS_DIR / "substantive-critique" / "SKILL.md",),
+    }
+
+    def test_critic_consumer_list_names_only_real_dispatchers(self) -> None:
+        """nexus-yjf5l.10: every consumer named in the Class bullet's
+        "optional for every other consumer" parenthetical actually
+        dispatches substantive-critic somewhere in its own skill file
+        (mentioning the agent's name is not enough — plan-audit.md and
+        phase-review-gate's files both DO mention "substantive-critic" in
+        passing without ever dispatching it, which is exactly how the
+        stale claim went unnoticed). plan-audit and phase-review-gate are
+        pinned as the negative case so the false claim cannot silently
+        return."""
+        critic = (PLUGIN_DIR / "agents" / "substantive-critic.md").read_text()
+        normalized = re.sub(r"\s+", " ", critic)
+        match = re.search(r"optional for every other consumer of this agent \(([^)]+)\)", normalized)
+        assert match, "the Class bullet's consumer parenthetical was not found"
+        named = [n.strip().removeprefix("and ") for n in match.group(1).split(",")]
+        assert set(named) == set(self._REAL_CRITIC_CONSUMERS), (
+            f"the bullet names {named!r}; the test's mapping covers "
+            f"{list(self._REAL_CRITIC_CONSUMERS)!r} — update both together"
+        )
+        for name, paths in self._REAL_CRITIC_CONSUMERS.items():
+            assert any("substantive-critic" in p.read_text() for p in paths), (
+                f"{name}: none of {paths} references substantive-critic at all"
+            )
+        # The two names the bullet used to carry are confirmed NOT real
+        # dispatchers — this is the defect nexus-yjf5l.10 fixes.
+        plan_audit_cmd = (PLUGIN_DIR / "commands" / "plan-audit.md").read_text()
+        plan_auditor_agent = (PLUGIN_DIR / "agents" / "plan-auditor.md").read_text()
+        assert "no agent spawn" in plan_audit_cmd or "no agent spawn" in plan_auditor_agent
+        phase_gate_skill = (SKILLS_DIR / "phase-review-gate" / "SKILL.md").read_text()
+        assert "substantive-critic" not in phase_gate_skill
 
 
 class TestReviewRoundContracts:

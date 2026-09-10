@@ -104,12 +104,17 @@ def test_format_engine_activity_line_cloud_mode_no_activity_at_all():
 
 def test_format_engine_activity_line_cloud_mode_falls_back_to_embedder_activity():
     """Pass 3 (T2 [24547]): the majority-posture fix -- cloud mode reports
-    real activity via embedder_activity when local_embed_activity is null."""
+    real activity via embedder_activity when local_embed_activity is null.
+
+    Neutral model token on purpose (RDR-109 mode lint): "model-code" is
+    a LABEL in the status dict this pure formatter renders; no real
+    embedder call is made.
+    """
     status = {
         "embedding_mode": "voyage",
         "local_embed_activity": None,
         "embedder_activity": {
-            "voyage-code-3": {
+            "model-code": {
                 "active": True, "chunks_done_total": 64, "sub_batches_total": 4,
                 "last_chunks_per_sec": 3.2, "last_activity_age_ms": 150,
                 "queue_depth": -1, "thread_width": -1,
@@ -118,7 +123,7 @@ def test_format_engine_activity_line_cloud_mode_falls_back_to_embedder_activity(
     }
     line = format_engine_activity_line(status)
     assert "mode=voyage" in line
-    assert "embedder=voyage-code-3" in line
+    assert "embedder=model-code" in line
     assert "active" in line
     assert "chunks_done=64" in line
     assert "rate=3.2/s" in line
@@ -129,16 +134,18 @@ def test_format_engine_activity_line_cloud_mode_falls_back_to_embedder_activity(
 
 
 def test_format_engine_activity_line_picks_the_busiest_embedder_and_names_the_rest():
+    """Neutral model tokens on purpose (RDR-109 mode lint): same reason
+    as the sibling test above -- pure display LABELS, no embedder call."""
     status = {
         "embedding_mode": "voyage",
         "local_embed_activity": None,
         "embedder_activity": {
-            "voyage-code-3": {
+            "model-code": {
                 "active": False, "chunks_done_total": 10, "sub_batches_total": 1,
                 "last_chunks_per_sec": 1.0, "last_activity_age_ms": 9000,
                 "queue_depth": -1, "thread_width": -1,
             },
-            "voyage-context-3": {
+            "model-ctx": {
                 "active": True, "chunks_done_total": 90, "sub_batches_total": 9,
                 "last_chunks_per_sec": 9.0, "last_activity_age_ms": 50,
                 "queue_depth": -1, "thread_width": -1,
@@ -147,7 +154,7 @@ def test_format_engine_activity_line_picks_the_busiest_embedder_and_names_the_re
     }
     line = format_engine_activity_line(status)
     # The fresher (50ms ago) entry wins over the stale (9000ms ago) one.
-    assert "embedder=voyage-context-3" in line
+    assert "embedder=model-ctx" in line
     assert "chunks_done=90" in line
     assert "(+1 other embedder(s) tracked)" in line
 

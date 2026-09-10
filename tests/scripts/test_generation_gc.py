@@ -200,6 +200,82 @@ def test_a_held_generation_outside_keep_last_n_is_still_retained(env) -> None:
     )
 
 
+def test_a_held_generation_is_reported_as_kept_with_its_holders(env) -> None:
+    """nexus-xn84f: a reap that only reports what it deleted let a box grow one
+    generation per upgrade with nothing on the terminal saying why. A held tree
+    outside the keep window is named, with the pids holding it, in both the wet
+    and the dry pass."""
+    tools, stub_bin = env
+    gens = [_gen(tools, f"{i:02d}") for i in range(4)]
+    _point(tools, "current", gens[3])
+    _stub_ps(stub_bin, [
+        "  999 /usr/bin/vim unrelated.txt",
+        f" 4242 {gens[0]}/bin/python -m nexus.mcp",
+    ])
+
+    dry = _sh("nx_gc_generations --keep 1 --dry-run", tools, stub_bin).stdout
+    wet = _sh("nx_gc_generations --keep 1", tools, stub_bin).stdout
+
+    for out in (dry, wet):
+        kept = [line for line in out.splitlines() if line.startswith("kept ")]
+        assert kept == [f"kept {gens[0]}: held by 4242"], out
+    assert gens[0].is_dir(), "the held generation was reaped"
+    assert not gens[1].is_dir(), "the free generation outside the window survived (the test proved nothing)"
+
+
+def test_a_receipt_less_tree_being_built_right_now_is_not_wreckage(env) -> None:
+    """Review of nexus-xn84f: with the reap on every session's SessionStart
+    hook, another session's `nx self install` is mid-build (receipt written
+    last, `uv venv <dir>` argv unmatched by the holder census) exactly when a
+    sibling session starts. A receipt-less tree written to inside the grace
+    window is kept and named; one older than the window is still wreckage."""
+    tools, stub_bin = env
+    gens = [_gen(tools, f"{i:02d}") for i in range(2)]
+    _point(tools, "current", gens[1])
+    building = tools / "gen-03"
+    (building / "lib").mkdir(parents=True)
+    (building / "lib" / "half.py").write_text("in progress")
+    stale = tools / "gen-00-old"
+    (stale / "lib").mkdir(parents=True)
+    old = 1_700_000_000
+    for path in (stale / "lib", stale):
+        os.utime(path, (old, old))
+
+    out = _sh("nx_gc_generations --keep 1", tools, stub_bin).stdout
+
+    assert building.is_dir(), "a build in progress was reaped"
+    assert f"kept {building}: build in progress" in out, out
+    assert not stale.exists(), "receipt-less wreckage older than the grace window survived (the test proved nothing)"
+
+
+def test_a_claimed_tree_survives_a_long_quiet_download_phase(env) -> None:
+    """Fix check on nexus-xn84f: resolve/download writes into uv's cache, not
+    the tree, so a slow install can leave the tree untouched for over the
+    write grace. The builder's claim marker keeps it for the claim window;
+    a marker older than that window is a crashed build and goes."""
+    tools, stub_bin = env
+    gens = [_gen(tools, f"{i:02d}") for i in range(2)]
+    _point(tools, "current", gens[1])
+    quiet = tools / "gen-03"
+    quiet.mkdir()
+    (quiet / ".nx-building").write_text("")
+    two_hours_ago = int(__import__("time").time()) - 2 * 3600
+    os.utime(quiet, (two_hours_ago, two_hours_ago))
+    os.utime(quiet / ".nx-building", (two_hours_ago, two_hours_ago))
+    crashed = tools / "gen-00-old"
+    crashed.mkdir()
+    (crashed / ".nx-building").write_text("")
+    old = 1_700_000_000
+    os.utime(crashed / ".nx-building", (old, old))
+    os.utime(crashed, (old, old))
+
+    out = _sh("nx_gc_generations --keep 1", tools, stub_bin).stdout
+
+    assert quiet.is_dir(), "a claimed build two hours into a quiet download was reaped"
+    assert f"kept {quiet}: build in progress" in out, out
+    assert not crashed.exists(), "a crashed build past the claim window survived (the test proved nothing)"
+
+
 def test_gc_is_a_no_op_on_a_fresh_single_generation_install(env) -> None:
     tools, stub_bin = env
     only = _gen(tools, "00")
@@ -267,6 +343,12 @@ def test_a_receipt_less_directory_is_not_treated_as_a_generation(env) -> None:
     _point(tools, "current", gens[2])
     wreckage = tools / "gen-99-crashed"
     (wreckage / "bin").mkdir(parents=True)  # no nexus-install.json
+    # Past the build-in-progress grace (nexus-xn84f): a crashed build is
+    # wreckage once nothing has written to it for an hour; a fresh one is
+    # another session's build and is kept (its own test above).
+    old = 1_700_000_000
+    for path in (wreckage / "bin", wreckage):
+        os.utime(path, (old, old))
 
     _sh("nx_gc_generations --keep 2", tools, stub_bin)
 

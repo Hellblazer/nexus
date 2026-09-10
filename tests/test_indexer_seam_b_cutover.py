@@ -75,6 +75,16 @@ def _service_mode_patches(db, *, extra=None):
         "nexus.indexer._migrate_legacy_collections": {"return_value": {}},
         "nexus.catalog.factory.make_catalog_reader": {"return_value": None},
         "nexus.catalog.factory.make_catalog_writer": {"return_value": None},
+        # nexus-bd44g fix check: _run_index's pre-staleness-sweep
+        # registration loop now calls ensure_collection_registered before
+        # any per-file write. That seam reads the engine's embedding
+        # profile via make_catalog_reader() (stubbed to None above for
+        # this journey), so left unpatched it raises
+        # CatalogReaderUnavailableError on every test in this file --
+        # a boundary these tests never previously reached (make_t3
+        # already stubs every write wholesale). No-op stub, same
+        # fidelity as make_catalog_reader/make_catalog_writer above.
+        "nexus.corpus.ensure_collection_registered": {},
     }
     if extra:
         patches.update(extra)
@@ -123,7 +133,14 @@ def test_run_index_service_mode_skips_voyageai_client(tmp_path, monkeypatch):
 def _flush_ctx(doc_id: str = "1.1", chash: str = "a" * 64) -> list:
     """One nexus-wxjr6 combined-write-shaped file_contexts entry — the
     (path, context) pair _batch_flush needs to build full_docs (a
-    catalog_doc_id and metadatas carrying chunk_text_hash/position 0)."""
+    catalog_doc_id and metadatas carrying chunk_text_hash/position 0).
+
+    Neutral model tokens on purpose (RDR-109 mode lint), used by the
+    four ``captured["flush"](...)`` calls below: the collection-NAME
+    fixture passed to the mocked flush closure; the tests assert the
+    force_re_embed kwarg / retry / shared-chash behavior of the flush
+    call, not any cloud-mode embedder behavior.
+    """
     return [(
         "hello.py",
         {
@@ -212,7 +229,7 @@ def test_run_index_batch_flush_forwards_force_re_embed(tmp_path, monkeypatch):
         # exits), or the deferred import resolves to the REAL
         # get_catalog_writer and attempts a real HTTP call.
         captured["flush"](
-            "code__repo__voyage-code-3__v1", ["a" * 64], ["doc1"], [{"m": 1}],
+            "code__repo__model-code__v1", ["a" * 64], ["doc1"], [{"m": 1}],
             _flush_ctx(),
         )
     assert catalog_writer.write_manifest_many.call_count == 1
@@ -277,7 +294,7 @@ def test_run_index_batch_flush_force_false_omits_force_re_embed(tmp_path, monkey
         # nexus-wxjr6: flush() must be invoked INSIDE this patch context —
         # see the sibling test's comment.
         captured["flush"](
-            "code__repo__voyage-code-3__v1", ["a" * 64], ["doc1"], [{"m": 1}],
+            "code__repo__model-code__v1", ["a" * 64], ["doc1"], [{"m": 1}],
             _flush_ctx(),
         )
     assert catalog_writer.write_manifest_many.call_count == 1
@@ -362,7 +379,7 @@ def test_run_index_batch_flush_retries_transient_failure_then_succeeds(tmp_path,
         # Must not raise — the transient error is swallowed by the retry
         # wrapper and the second attempt succeeds.
         captured["flush"](
-            "code__repo__voyage-code-3__v1", ["a" * 64], ["doc1"], [{"m": 1}],
+            "code__repo__model-code__v1", ["a" * 64], ["doc1"], [{"m": 1}],
             _flush_ctx(),
         )
 
@@ -470,7 +487,7 @@ def test_run_index_batch_flush_shared_chash_orphan_copy_survives_identity_doc_fa
         # Flatten fctx into the (ids, docs, metas) shape a real
         # ChunkBatcher flush would carry — one entry per claiming file.
         captured["flush"](
-            "code__repo__voyage-code-3__v1",
+            "code__repo__model-code__v1",
             [shared_chash, shared_chash],
             ["shared", "shared"],
             [
@@ -715,7 +732,13 @@ def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monke
     nexus-sghyo (2026-08-06): the legacy non-service embed path
     (``_embed_with_fallback``) is deleted outright — there is nothing
     left to mock/assert-not-called; a successful run through the
-    service-mode branch IS the proof."""
+    service-mode branch IS the proof.
+
+    Neutral model tokens on purpose (RDR-109 mode lint): the prepared
+    chunk metadata's embedding_model and the collection name are
+    unasserted pass-through data; embed_fn=None below is the actual
+    proof.
+    """
     from nexus.doc_indexer import _index_pdf_incremental
 
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
@@ -725,8 +748,8 @@ def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monke
     col.get.return_value = {"ids": [], "metadatas": []}
 
     prepared = [
-        ("id1", "chunk text 1", {"embedding_model": "voyage-context-3"}),
-        ("id2", "chunk text 2", {"embedding_model": "voyage-context-3"}),
+        ("id1", "chunk text 1", {"embedding_model": "model-ctx"}),
+        ("id2", "chunk text 2", {"embedding_model": "model-ctx"}),
     ]
 
     mock_hooks = MagicMock()
@@ -749,7 +772,7 @@ def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monke
             corpus="test-corpus",
             prepared=prepared,
             content_hash="abc123",
-            collection_name="docs__test__voyage-context-3__v1",
+            collection_name="docs__test__model-ctx__v1",
             t3=db,
             embed_fn=None,
             hooks=mock_hooks,

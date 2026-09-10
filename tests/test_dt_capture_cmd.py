@@ -9,7 +9,6 @@ from __future__ import annotations
 import pytest
 from click.testing import CliRunner
 
-
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
@@ -45,13 +44,16 @@ def test_dt_absent_exits_nonzero_with_required_message(runner, monkeypatch) -> N
 
 
 def test_webarchive_capture_routes_through_dt_content(runner, monkeypatch) -> None:
+    # Neutral model token on purpose (RDR-109 mode lint): a collection-NAME
+    # CLI flag value -- _patch_index below stubs out the actual indexing
+    # call, so no embedder or credential path is exercised.
     from nexus.cli import main
     monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **k: True)
     monkeypatch.setattr("nexus.mcp_client.devonthink.dt_capture_web_page",
                         lambda url, **kw: "NEW-UUID")
     dt_calls, file_calls = _patch_index(monkeypatch)
     result = runner.invoke(main, ["dt", "capture", "https://example.com",
-                                  "--collection", "docs__t__voyage-context-3__v1"])
+                                  "--collection", "docs__t__model-ctx__v1"])
     assert result.exit_code == 0, result.output
     assert "Captured https://example.com -> DEVONthink record NEW-UUID" in result.output
     assert dt_calls == ["NEW-UUID"]   # non-file-backed -> Layer D path

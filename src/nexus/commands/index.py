@@ -1011,6 +1011,10 @@ def index_repo_cmd(
     ``--corpus knowledge``), RDR documents are auto-discovered and indexed
     into rdr__.
     """
+    from nexus.corpus import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+        EmbeddingProfileMismatchError,
+        LocalVoyageCredentialMissingError,
+    )
     from nexus.indexer import index_repository  # noqa: PLC0415 — deliberate function-local import (heavy indexer dep deferred; startup-cost)
     from nexus.retry import VectorUpsertTimeoutError  # noqa: PLC0415 -- deliberate function-local import (per-run retry accumulator reset convention)
 
@@ -1439,6 +1443,18 @@ def index_repo_cmd(
             # exception's own str(e) already names GET /v1/status; a re-run
             # of `nx index repo` picks up any file this run did not reach.
             raise click.ClickException(str(e)) from e
+        except (EmbeddingProfileMismatchError, LocalVoyageCredentialMissingError) as exc:
+            # nexus-bd44g fix round: the registration seam's two refusals (a
+            # Voyage intent against a bge profile; a Voyage intent with no
+            # key) name the service restart in their message and reached the
+            # operator as a raw traceback here -- index_md_cmd/index_pdf_cmd
+            # already got this treatment in the 7.38.0 shakeout (1bd05acec);
+            # this command had no such clause. Surfacing moved EARLIER within
+            # this same run by the nexus-bd44g fix itself (the new
+            # pre-staleness-sweep registration call can now raise this
+            # before any file is touched, not only at the first chunk
+            # write), so the gap is more reachable than before, not new.
+            raise click.ClickException(str(exc)) from exc
         finally:
             eta_ticker.stop()
             phase_heartbeat.disarm()
@@ -2968,7 +2984,12 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 )
 def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, monitor: bool, source_uri: str | None) -> None:
     """Extract and index a Markdown file into T3 docs__CORPUS (or --collection)."""
-    from nexus.corpus import split_candidate_collection_name, t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+    from nexus.corpus import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+        EmbeddingProfileMismatchError,
+        LocalVoyageCredentialMissingError,
+        split_candidate_collection_name,
+        t3_collection_name,
+    )
     from nexus.doc_indexer import index_markdown  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         ChunkLandingUnverifiedError,
@@ -3045,6 +3066,13 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
     except CredentialsMissingError as exc:
         # GH #336: surface the silent failure visibly. Click maps
         # ClickException to stderr + non-zero exit.
+        raise click.ClickException(str(exc)) from exc
+    except (EmbeddingProfileMismatchError, LocalVoyageCredentialMissingError) as exc:
+        # 7.38.0 shakeout (2026-09-09): the registration seam's two refusals
+        # (a Voyage intent against a bge profile; a Voyage intent with no key)
+        # name the service restart in their message and reached the operator
+        # as a raw traceback here. index_pdf_cmd already renders them through
+        # its outer RuntimeError clause; this command had no such clause.
         raise click.ClickException(str(exc)) from exc
     except (SourceUriNotFoundError, SourceUriCollectionMismatchError, EphemeralPathRefusedError) as exc:
         # nexus-y8qtj / nexus-3o4lt: fail-loud identity errors surface the same way.

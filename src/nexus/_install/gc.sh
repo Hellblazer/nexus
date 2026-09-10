@@ -62,6 +62,16 @@ _nx_gc_protected() {
 #   --self <dir>    the generation running this installer (rule d)
 #   --dry-run       report exactly what would go, delete nothing
 #   $1 optional trailing tools root
+#: Minutes a receipt-less gen-* tree is presumed to be a build in progress.
+#: A generation build takes minutes; an hour is well past any of them.
+NX_GC_BUILD_GRACE_MINUTES="${NX_GC_BUILD_GRACE_MINUTES:-60}"
+#: Minutes a receipt-less tree carrying the builder's claim marker
+#: ($NX_BUILDING_MARKER_NAME, written the instant the directory exists) is
+#: presumed to be a build in progress even if nothing under it was written
+#: since: a slow resolve/download phase lands packages in uv's cache, not the
+#: tree. Six hours is past any build; a crashed one is reaped after that.
+NX_GC_BUILD_CLAIM_MINUTES="${NX_GC_BUILD_CLAIM_MINUTES:-360}"
+
 nx_gc_generations() {
     _nx_gc_keep=3
     _nx_gc_self=""
@@ -126,6 +136,20 @@ $_nx_gc_self"
             if [ $((_nx_gc_total - _nx_gc_index)) -lt "$_nx_gc_keep" ]; then
                 continue
             fi
+        elif [ ! -L "$_nx_gc_dir" ] && {
+                [ -n "$(find "$_nx_gc_dir" -mmin "-$NX_GC_BUILD_GRACE_MINUTES" -print -quit 2>/dev/null)" ] ||
+                [ -n "$(find "$_nx_gc_dir/$NX_BUILDING_MARKER_NAME" -maxdepth 0 -mmin "-$NX_GC_BUILD_CLAIM_MINUTES" -print 2>/dev/null)" ]
+            }; then
+            # A receipt-less tree that something wrote to within the grace
+            # window is a BUILD IN PROGRESS, not wreckage (review of
+            # nexus-xn84f): install_generation.sh writes the receipt last,
+            # and its `uv venv`/pip argv names the bare directory, which the
+            # holder census does not match. With the reap on every
+            # session's SessionStart hook, another session's install is the
+            # normal case, not the edge. Wreckage is what is still
+            # receipt-less after the window.
+            printf 'kept %s: build in progress (receipt-less; written within %s min or claimed within %s min)\n' "$_nx_gc_dir" "$NX_GC_BUILD_GRACE_MINUTES" "$NX_GC_BUILD_CLAIM_MINUTES"
+            continue
         fi
         # A receipt-less directory falls through here deliberately: reapable,
         # and never counted toward the keep window.
@@ -141,8 +165,13 @@ $_nx_gc_self"
         done
         [ "$_nx_gc_is_protected" -eq 1 ] && continue
 
-        # Rule (c).
-        if [ -n "$(nx_generation_holder_pids "$_nx_gc_dir" "$_nx_gc_snapshot")" ]; then
+        # Rule (c). Say so on stdout (nexus-xn84f): a held tree outside the
+        # keep window is 1.7 GB the operator cannot see go, and a reap that
+        # only reports what it deleted let a box grow one generation per
+        # upgrade for as long as its sessions lived.
+        _nx_gc_holders="$(nx_generation_holder_pids "$_nx_gc_dir" "$_nx_gc_snapshot")"
+        if [ -n "$_nx_gc_holders" ]; then
+            printf 'kept %s: held by %s\n' "$_nx_gc_dir" "$(printf '%s' "$_nx_gc_holders" | tr '\n' ' ' | sed 's/ *$//')"
             continue
         fi
 

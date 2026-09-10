@@ -332,6 +332,35 @@ def test_index_repo_upsert_timeout_exits_nonzero_with_clean_message(runner, repo
     assert "Upsert timed out" in result.output
 
 
+def test_index_repo_profile_refusal_exits_nonzero_without_traceback(runner, repo_dir, mock_reg):
+    """nexus-bd44g fix round: unlike index_md_cmd/index_pdf_cmd (7.38.0
+    shakeout, 1bd05acec), `nx index repo`'s except chain had no
+    translation for the registration seam's two refusals
+    (EmbeddingProfileMismatchError, LocalVoyageCredentialMissingError) --
+    a real risk now that the nexus-bd44g fix moved this error's earliest
+    possible surfacing point INTO index_repository itself (the new
+    pre-staleness-sweep registration call), not only its first chunk
+    write. Must render as a clean ClickException naming the restart, not
+    a raw traceback."""
+    from nexus.corpus import EmbeddingProfileMismatchError
+
+    def _raise(*args, **kwargs):
+        raise EmbeddingProfileMismatchError(
+            "content_type='code': this install's configured intent is "
+            "'voyage-code-3', but the engine's embedding_profile still says "
+            "'bge-base-en-v15-768'. A restart is required for the engine to "
+            "adopt this: `nx daemon service stop && nx daemon service start`."
+        )
+
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg, index_side_effect=_raise,
+    )
+    assert result.exit_code != 0, result.output
+    assert result.exc_info is not None and result.exc_info[0] is SystemExit, result.exc_info
+    assert "Traceback (most recent call last)" not in result.output, result.output
+    assert "nx daemon service stop && nx daemon service start" in result.output
+
+
 def test_index_repo_durable_write_failure_surfaces_a_loud_warning(runner, repo_dir, mock_reg):
     """nexus-nukn3 fold-in (critic Significant finding): a durable-WRITE
     failure (nothing recorded in nexus.index_failures for this run's
@@ -464,6 +493,39 @@ def test_index_credentials_missing_exits_nonzero_with_message(
     # Click's ClickException prints the message to stdout in CliRunner.
     assert "voyage_api_key" in result.output
     assert "Set via" in result.output or "config set" in result.output
+
+
+@pytest.mark.parametrize("subcmd,fixture", [
+    ("pdf", "fake_pdf"),
+    ("md", "fake_md"),
+])
+def test_index_profile_refusal_exits_nonzero_without_traceback(
+    runner, request, subcmd, fixture, monkeypatch,
+):
+    """7.38.0 shakeout (2026-09-09): the registration seam's refusals
+    (EmbeddingProfileMismatchError, LocalVoyageCredentialMissingError) name
+    the service restart and must render as a clean ClickException on both
+    single-file index commands, not as a raw traceback."""
+    from nexus.corpus import EmbeddingProfileMismatchError  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+
+    fixture_path = request.getfixturevalue(fixture)
+    fn_name = "index_pdf" if subcmd == "pdf" else "index_markdown"
+
+    def _raise(*args, **kwargs):
+        raise EmbeddingProfileMismatchError(
+            "content_type='docs': this install's configured intent is "
+            "'voyage-context-3', but the engine's embedding_profile still says "
+            "'bge-base-en-v15-768'. A restart is required for the engine to "
+            "adopt this: `nx daemon service stop && nx daemon service start`."
+        )
+
+    with patch(f"nexus.doc_indexer.{fn_name}", side_effect=_raise):
+        result = runner.invoke(main, ["index", subcmd, str(fixture_path)])
+
+    assert result.exit_code != 0, result.output
+    assert result.exc_info is not None and result.exc_info[0] is SystemExit, result.exc_info
+    assert "Traceback (most recent call last)" not in result.output, result.output
+    assert "nx daemon service stop && nx daemon service start" in result.output
 
 
 def test_index_md_command_empty_file_exits_nonzero_without_registering(

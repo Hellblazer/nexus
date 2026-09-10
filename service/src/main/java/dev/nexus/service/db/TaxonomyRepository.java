@@ -357,6 +357,69 @@ public final class TaxonomyRepository {
     }
 
     /**
+     * Every topic whose cached {@code doc_count} disagrees with its real
+     * {@code topic_assignments} row count, in ONE batched query (bead
+     * nexus-c0g6e fix round, GH #1529 review — replaces the doctor's former
+     * per-topic {@link #countAssignments} loop). Calls the shared
+     * {@code nexus.topics_doc_count_drift} function
+     * (taxonomy-016-doc-count-drift-functions.xml) — the SAME relation
+     * {@code hygiene-007-1}'s boot walk and {@link #recountDocCount} both
+     * read, so the drift definition can never diverge between the three
+     * callers. Pure read; no RLS toggle needed (nexus_svc is a non-owner,
+     * always subject to the ordinary per-tenant RLS policy — see that
+     * changelog's own header).
+     */
+    public List<Map<String, Object>> getDocCountDrift(String tenant) {
+        return tenantScope.withTenant(tenant, ctx ->
+            mapDriftRows(ctx.selectFrom(TOPICS_DOC_COUNT_DRIFT.call(tenant)).fetch()));
+    }
+
+    /**
+     * Apply (or, {@code dryRun}, preview) the correction {@link
+     * #getDocCountDrift} names, via the shared {@code
+     * nexus.topics_recount_doc_count} function — the same one hygiene-007-1's
+     * boot walk calls. {@code dryRun=true} returns the identical row shape
+     * with no side effect (every drifted topic's {@code doc_count} left
+     * exactly as it was); {@code dryRun=false} additionally UPDATEs each row
+     * and RAISE NOTICEs the correction (visible in the engine log either
+     * way it is called: this route, or the boot walk).
+     */
+    public Map<String, Object> recountDocCount(String tenant, boolean dryRun) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            List<Map<String, Object>> rows = mapDriftRows(
+                ctx.selectFrom(TOPICS_RECOUNT_DOC_COUNT.call(tenant, dryRun)).fetch());
+            var out = new LinkedHashMap<String, Object>();
+            out.put("dry_run", dryRun);
+            out.put("corrected", rows.size());
+            out.put("topics", rows);
+            return out;
+        });
+    }
+
+    /** Row shape shared by {@code nexus.topics_doc_count_drift} and {@code
+     *  nexus.topics_recount_doc_count} — both RETURNS TABLE(tenant_id text,
+     *  topic_id bigint, label text, collection text, doc_count integer,
+     *  actual_count bigint), so one mapper serves both call sites (generic
+     *  string+type Record access, the same idiom PgVectorRepository#
+     *  runCombinedQuery uses for its own combined-query table functions —
+     *  the two generated jOOQ Table classes carry distinct Field identities
+     *  despite the identical column names, so a single typed-Field helper
+     *  cannot serve both without relying on jOOQ's by-name fallback). */
+    private static List<Map<String, Object>> mapDriftRows(org.jooq.Result<? extends org.jooq.Record> result) {
+        List<Map<String, Object>> rows = new ArrayList<>(result.size());
+        for (org.jooq.Record rec : result) {
+            var m = new LinkedHashMap<String, Object>();
+            m.put("topic_id",     rec.get("topic_id", Long.class));
+            m.put("label",        rec.get("label", String.class));
+            m.put("collection",   rec.get("collection", String.class));
+            m.put("doc_count",    rec.get("doc_count", Integer.class));
+            m.put("actual_count", rec.get("actual_count", Long.class));
+            rows.add(Collections.unmodifiableMap(m));
+        }
+        return rows;
+    }
+
+    /**
      * Delete a topic and its assignments (cascade via FK).
      * Returns the collection name so the caller can clean the chroma centroid.
      */
@@ -1332,18 +1395,43 @@ public final class TaxonomyRepository {
             // DIFFERENT id must be refused before the write, not left to raise a
             // raw 23505 on idx_topics_root_tenant_collection_label.
             guardTopicIdentity(ctx, tenant, srcId, parentId, collection, label);
+            // nexus-c0g6e ROOT CAUSE fix (fix round, GH #1529 review): the INSERT
+            // branch used to seed doc_count from the CALLER's value verbatim —
+            // exactly the mechanism that produced the reported 94-topic drift (a
+            // 6.18.1-era fidelity import whose doc_count never matched the
+            // assignment rows carried across in the same snapshot). doc_count is
+            // trigger-maintained (RDR-154 P0, comment below) and this import path
+            // is the one write site that bypassed that contract entirely — so it
+            // now RECOUNTS from the real nexus.topic_assignments rows for this
+            // topic id, in the same statement, instead of trusting the caller.
+            // A brand-new topic imported before its assignments (the common ETL
+            // order) recounts to 0, exactly as the live INSERT trigger would seed
+            // it; a topic whose assignments already landed first (an out-of-order
+            // or resumed import) recounts to their real count, not 0 and not
+            // whatever the caller happened to send.
+            Field<Integer> realDocCount = field(
+                select(count()).from(TOPIC_ASSIGNMENTS)
+                    .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(tenant)
+                           .and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(srcId))));
             ctx.insertInto(TOPICS,
                     TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.PARENT_ID,
                     TOPICS.COLLECTION, TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT,
                     TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.TERMS)
-               .values(srcId, tenant, label, parentId, collection, centroidHash,
-                       docCount, createdAtTs, reviewStatus, terms)
+               // jOOQ's typed values(...) overload requires either ALL-raw or
+               // ALL-Field arguments per InsertValuesStepN — realDocCount is a
+               // Field<Integer> (a scalar subquery, not a bindable literal), so
+               // every sibling argument is wrapped with val(...) to hit the
+               // all-Field overload.
+               .values(val(srcId), val(tenant), val(label), val(parentId),
+                       val(collection), val(centroidHash), realDocCount,
+                       val(createdAtTs), val(reviewStatus), val(terms))
                .onConflict(TOPICS.ID)
                .doUpdate()
                // RDR-154 P0 (nexus-i7ivk): doc_count is trigger-maintained and
-               // is NOT an ETL merge participant. The INSERT branch seeds it for
-               // a brand-new topic; on conflict the live (trigger-computed) value
-               // is left untouched so a lossy snapshot can never clobber it.
+               // is NOT an ETL merge participant. The INSERT branch (above) now
+               // recounts it for a brand-new topic; on conflict the live
+               // (trigger-computed) value is left untouched so a lossy snapshot
+               // can never clobber it.
                .set(TOPICS.REVIEW_STATUS, field("EXCLUDED.review_status", String.class))
                .set(TOPICS.CENTROID_HASH, field("EXCLUDED.centroid_hash", String.class))
                .set(TOPICS.TERMS,         field("EXCLUDED.terms",         String.class))
@@ -1540,8 +1628,29 @@ public final class TaxonomyRepository {
                 // omits.
                 guardTopicIdentity(ctx, tenant, reqL(r, "id"), optL(r, "parent_id"),
                                     optS(r, "collection"), optS(r, "label"));
+                // nexus-c0g6e fix round (GH #1529 review, item on importBatch):
+                // the caller's doc_count is discarded here too, same as the
+                // single-row importTopic fix -- this row's ON CONFLICT branch
+                // below never touches doc_count either (RDR-154 P0), so this
+                // path only ever runs for a GENUINELY NEW id, and
+                // topic_assignments_topic_id_fkey / fk_topic_assignments_
+                // topic_tenant make it IMPOSSIBLE for any assignment to exist
+                // for an id before its own topics row exists -- the real count
+                // at THIS instant is always 0. A batch import's own topic
+                // rows are always applied (this method) before that batch's
+                // assignment rows (importAssignmentsBatch, a SEPARATE kind --
+                // the FK forces this ordering, it is not merely convention),
+                // and importAssignmentsBatch's multi-row INSERT fires the
+                // SAME statement-level topic_assignments trigger a live
+                // write does, recomputing doc_count from the real rows for
+                // every affected topic by the end of that call -- so a
+                // literal 0 here lands with the real count at the end of the
+                // batch, with no per-row correlated-subquery cost against
+                // topic_assignments (this method's own comment above calls
+                // topic_assignments the 190k-row dogfood offender it exists
+                // to keep cheap).
                 insert = insert.values(reqL(r, "id"), tenant, optS(r, "label"), optL(r, "parent_id"),
-                        optS(r, "collection"), optS(r, "centroid_hash"), optI(r, "doc_count", 0),
+                        optS(r, "collection"), optS(r, "centroid_hash"), 0,
                         parseTsStrict(reqS(r, "created_at")), optS(r, "review_status"),
                         optS(r, "terms"));
             }

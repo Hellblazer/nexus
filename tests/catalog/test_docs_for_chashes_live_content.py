@@ -187,13 +187,15 @@ class TestBuildStalenessCacheLiveContent:
     def test_nonzero_docs_after_index_like_write(
         self, http_client: HttpCatalogClient,
     ) -> None:
+        """Neutral model token on purpose (RDR-109 mode lint): opaque
+        chunk-metadata data, never an embedder call."""
         col = MagicMock(spec=["get", "name"])
         col.get.return_value = {
             "ids": ["chunk-0"],
             "metadatas": [{
                 "chunk_text_hash": _FULL_CHASH,
                 "content_hash": "content-hash-a",
-                "embedding_model": "voyage-code-3",
+                "embedding_model": "model-code",
             }],
         }
 
@@ -203,4 +205,4 @@ class TestBuildStalenessCacheLiveContent:
 
         # Exact assertion, not an inequality: the "0 docs" bug returns
         # ``{}`` here; content is real (non-toy) proof this round-trips.
-        assert cache.by_doc_id == {_TUMBLER: ("content-hash-a", "voyage-code-3")}
+        assert cache.by_doc_id == {_TUMBLER: ("content-hash-a", "model-code")}

@@ -199,13 +199,16 @@ class TestLayerDFallback:
             idx.assert_not_called()  # never reached the chunking pipeline
 
     def test_file_backed_chunk_has_no_extraction_source(self):
+        # Neutral model token on purpose (RDR-109 mode lint): opaque
+        # embedding_model label passed straight through to metadata by
+        # make_chunk_metadata; no embedder is constructed.
         from nexus.metadata_schema import make_chunk_metadata
         meta = make_chunk_metadata(
             content_type="markdown",
             chunk_text_hash="a" * 64,
             content_hash="b" * 64,
             indexed_at="2026-05-30T00:00:00Z",
-            embedding_model="voyage-context-3",
+            embedding_model="model-ctx",
         )
         assert "extraction_source" not in meta  # absent == file
 

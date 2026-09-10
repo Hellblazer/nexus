@@ -334,8 +334,18 @@ class TestWorktreeDetection:
         assert is_linked_worktree(worktree / "src" / "pkg")
 
     def test_this_repo_primary_is_not_a_worktree(self) -> None:
-        """Non-vacuity: the detector says 'primary' for the checkout the suite runs in."""
-        assert not is_linked_worktree(REPO_ROOT)
+        """Non-vacuity: the detector says 'primary' for this repository's
+        primary checkout. Resolved through git's common dir so the assertion
+        holds when the suite itself runs inside a linked worktree (every
+        worktree suite run used to carry this one red, 2026-09-09)."""
+        common = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        primary = Path(common).parent
+        assert not is_linked_worktree(primary)
+        if is_linked_worktree(REPO_ROOT):
+            assert primary != REPO_ROOT.resolve()
 
     def test_empty_and_missing_cwd_are_not_worktrees(self, tmp_path: Path) -> None:
         assert not is_linked_worktree("")

@@ -49,6 +49,11 @@ NX_LEGACY_GENERATION_NAME="legacy-uv-tool"
 # The nexus-owned receipt: the replacement for uv-receipt.toml and the only
 # home extras have. Losing extras re-opens the 768->384 embedder downgrade.
 NX_RECEIPT_NAME="nexus-install.json"
+#: Written by install_generation.sh the instant a gen-* directory exists and
+#: left in place; gc.sh reads its mtime as "a builder claimed this tree" and
+#: keeps a receipt-less tree whose marker is younger than NX_GC_BUILD_CLAIM_MINUTES
+#: (nexus-xn84f review: a slow resolve/download writes nothing into the tree).
+NX_BUILDING_MARKER_NAME=".nx-building"
 NX_RECEIPT_SCHEMA=1
 NX_INSTALLER_SCHEMA=1
 

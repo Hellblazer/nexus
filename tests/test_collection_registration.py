@@ -647,19 +647,25 @@ class TestEnsureCollectionRegisteredExplicitKwargsOverride:
     def test_explicit_kwargs_bypasses_name_derivation(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Neutral model token on purpose (RDR-109 mode lint): `kwargs=`
+        bypasses `collection_registration_kwargs` entirely for this call,
+        so this override dict's embedding_model reaches the writer
+        verbatim without ever touching local_embed_model_is_voyage() or
+        any other real derivation; no embedder or credential path is
+        exercised."""
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
         monkeypatch.setattr(
             "nexus.db.http_vector_client.is_vector_service_mode", lambda: True,
         )
         writer = _fake_writer()
         # A name whose OWN shape would derive completely different kwargs
-        # (content_type="quarantine-code", owner_id="myrepo__voyage-
-        # code-3__v1") if collection_registration_kwargs(name) ran --
+        # (content_type="quarantine-code", owner_id="myrepo__model-
+        # code__v1") if collection_registration_kwargs(name) ran --
         # proving the override, not the name, drove the register call.
-        name = "quarantine-code__myrepo__voyage-code-3__v1"
+        name = "quarantine-code__myrepo__model-code__v1"
         override = {
             "content_type": "code", "owner_id": "myrepo",
-            "embedding_model": "voyage-code-3", "model_version": "v1",
+            "embedding_model": "model-code", "model_version": "v1",
         }
 
         ensure_collection_registered(name, registrar=lambda: writer, kwargs=override)
@@ -671,18 +677,25 @@ class TestEnsureCollectionRegisteredExplicitKwargsOverride:
     ) -> None:
         """An explicit override does not bypass Technical Design 1a's
         mismatch guard -- only the generic name-parsing step that used
-        to feed it."""
+        to feed it.
+
+        Neutral model token on purpose (RDR-109 mode lint): the profile
+        check is a pure string-inequality comparison between the
+        override's embedding_model and the stubbed profile row below;
+        local_embed_model_choice is patched but never consulted for this
+        kwargs= call path (same reason as the sibling test above).
+        """
         from nexus.corpus import EmbeddingProfileMismatchError
 
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-code-3")
+        monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "model-code")
         monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
         _stub_profile_reader(monkeypatch, {"code": "bge-base-en-v15-768"})
         writer = _fake_writer()
-        name = "quarantine-code__myrepo__voyage-code-3__v1"
+        name = "quarantine-code__myrepo__model-code__v1"
         override = {
             "content_type": "code", "owner_id": "myrepo",
-            "embedding_model": "voyage-code-3", "model_version": "v1",
+            "embedding_model": "model-code", "model_version": "v1",
         }
 
         with pytest.raises(EmbeddingProfileMismatchError, match="restart"):

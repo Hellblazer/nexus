@@ -2301,11 +2301,16 @@ class TestCheckChashConformanceReport:
     def test_fully_routable_collections_still_render_plain_clean(self, monkeypatch) -> None:
         """Regression guard: a tenant whose collections ALL route to a known
         dim must still get the plain clean pass — the new probe must not
-        false-positive on ordinary, fully-covered content."""
+        false-positive on ordinary, fully-covered content.
+
+        Neutral model token on purpose (RDR-109 mode lint): routability is
+        keyed on dim_for_model_token's fixed 5-entry table, not on mode --
+        minilm-l6-v2-384 is as routable as any voyage token and carries no
+        cloud-mode claim."""
         cat = self._cat()
         t3 = self._t3(collection_names=[
             "knowledge__x__bge-base-en-v15-768__v1",
-            "code__y__voyage-code-3__v1",
+            "code__y__minilm-l6-v2-384__v1",
         ])
         r = self._run(monkeypatch, cat, t3=t3)
         assert r.ok is True
@@ -3971,3 +3976,177 @@ class TestDoctorFenceNonRepoOwners:
         assert r.ok is False
         assert "non-repo owner" not in r.detail
         assert not r.fix_suggestions[0].startswith("nx catalog reconcile-fences")
+
+
+class TestCheckTopicsDocCountDrift:
+    """Topics whose cached doc_count disagrees with the real topic_assignments
+    count (bead nexus-c0g6e, GH #1529).
+
+    The engine self-heals this silently on its next restart (hygiene-007-1,
+    the boot-time recount walk), and repeatably on demand via `nx taxonomy
+    audit --fix-doc-count`; this check exists so the blast radius is
+    reportable rather than guessed, mirroring TestCheckNextSeqDrift's own
+    framing for the sibling sequence-lag defect (hygiene-006-1).
+
+    SCALE NOTE (fix round, GH #1529 review — replaces a prior version of this
+    check that looped one HTTP GET per topic, the exact N+1-per-item
+    anti-pattern TestCheckNextSeqDrift's own docstring documents as a past
+    incident): the fake store below returns the ALREADY-BATCHED drift rows
+    from a single ``get_doc_count_drift()`` call, mirroring the real
+    ``GET /topics/doc_count_drift`` engine route — a store with thousands of
+    topics costs this check the exact same ONE round trip a store with none
+    does. ``test_get_doc_count_drift_called_exactly_once`` pins the call
+    count so the O(topics) loop can never silently regress back in.
+    """
+
+    def _store(
+        self, drift_rows: list[dict], *, get_exc: Exception | None = None,
+    ):
+        calls = {"get_doc_count_drift": 0}
+
+        class _Store:
+            closed = False
+
+            def get_doc_count_drift(self) -> list[dict]:
+                calls["get_doc_count_drift"] += 1
+                if get_exc is not None:
+                    raise get_exc
+                return list(drift_rows)
+
+            def close(self) -> None:
+                self.closed = True
+
+        store = _Store()
+        store.calls = calls  # type: ignore[attr-defined]
+        return store
+
+    def _run(self, monkeypatch, store) -> "object":
+        import nexus.health as h
+        monkeypatch.setattr(
+            "nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore",
+            lambda *a, **k: store, raising=False,
+        )
+        return h._check_topics_doc_count_drift()[0]
+
+    def test_drifted_topic_is_named(self, monkeypatch) -> None:
+        store = self._store(
+            [{"topic_id": 500, "label": "over-counted", "collection": "knowledge__a",
+              "doc_count": 5, "actual_count": 2}],
+        )
+        r = self._run(monkeypatch, store)
+        assert r.ok is False and r.warn is True
+        assert "500" in r.detail and "over-counted" in r.detail
+        assert "doc_count=5" in r.detail and "actual=2" in r.detail
+        assert store.closed is True
+
+    def test_zero_case_topic_with_no_assignments_is_flagged(self, monkeypatch) -> None:
+        """A topic whose real assignment count is 0 must still be flagged as
+        drift, not skipped as 'no rows found' — the same zero-case the
+        engine-side hygiene-007-1 changeset (and its shared
+        topics_doc_count_drift function) covers via its LEFT JOIN."""
+        store = self._store(
+            [{"topic_id": 502, "label": "zeroed", "collection": "knowledge__a",
+              "doc_count": 7, "actual_count": 0}],
+        )
+        r = self._run(monkeypatch, store)
+        assert r.ok is False and r.warn is True
+        assert "doc_count=7" in r.detail and "actual=0" in r.detail
+
+    def test_healthy_topics_are_clean(self, monkeypatch) -> None:
+        # A clean store's drift route returns an empty list — there is
+        # nothing to disagree, so the engine never emits these topics at all.
+        store = self._store([])
+        r = self._run(monkeypatch, store)
+        assert r.ok is True
+        assert r.detail == "none"
+
+    def test_no_topics_skips(self, monkeypatch) -> None:
+        store = self._store([])
+        r = self._run(monkeypatch, store)
+        assert r.ok is True and r.detail == "none"
+
+    def test_connect_failure_skips(self, monkeypatch) -> None:
+        import nexus.health as h
+
+        def _raise(*a, **k):
+            raise RuntimeError("no service registered")
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore", _raise, raising=False,
+        )
+        r = h._check_topics_doc_count_drift()[0]
+        assert r.ok is True
+        assert "skipped" in r.detail and "no engine reachable" in r.detail
+
+    def test_get_drift_failure_skips(self, monkeypatch) -> None:
+        store = self._store([], get_exc=RuntimeError("transport failure"))
+        r = self._run(monkeypatch, store)
+        assert r.ok is True
+        assert "skipped" in r.detail and "taxonomy store unavailable" in r.detail
+
+    def test_route_missing_404_reads_as_unread_not_clean(self, monkeypatch) -> None:
+        """NON-VACUITY: a pre-route engine must report UNREAD, not a false
+        all-clear — mirrors TestCheckNextSeqDrift.
+        test_engine_without_next_seq_reads_as_skipped_not_clean."""
+        request = httpx.Request("GET", "https://engine.example/v1/taxonomy/topics/doc_count_drift")
+        response = httpx.Response(404, request=request)
+        store = self._store([], get_exc=httpx.HTTPStatusError("404 error", request=request, response=response))
+        r = self._run(monkeypatch, store)
+        assert r.ok is True
+        assert "skipped" in r.detail and "doc_count_drift" in r.detail
+        assert r.detail != "none"
+
+    def test_multiple_drifted_topics_all_named_up_to_ten(self, monkeypatch) -> None:
+        rows = [
+            {"topic_id": i, "label": f"drifted-{i}", "collection": "knowledge__a",
+             "doc_count": i, "actual_count": 0}
+            for i in range(1, 13)
+        ]
+        store = self._store(rows)
+        r = self._run(monkeypatch, store)
+        assert r.ok is False and r.warn is True
+        assert "12 topic(s)" in r.detail
+        assert "… 2 more" in r.detail
+
+    def test_unlabelled_topic_falls_back_to_id(self, monkeypatch) -> None:
+        store = self._store(
+            [{"topic_id": 500, "label": None, "collection": "knowledge__a",
+              "doc_count": 5, "actual_count": 2}],
+        )
+        r = self._run(monkeypatch, store)
+        assert "unlabelled id=500" in r.detail
+
+    def test_store_closed_even_when_drift_found(self, monkeypatch) -> None:
+        store = self._store(
+            [{"topic_id": 500, "label": "t", "collection": "knowledge__a",
+              "doc_count": 5, "actual_count": 2}],
+        )
+        self._run(monkeypatch, store)
+        assert store.closed is True
+
+    def test_get_doc_count_drift_called_exactly_once(self, monkeypatch) -> None:
+        """The O(1)-round-trip pin: however many drifted rows the engine
+        returns, this check must call get_doc_count_drift() exactly once —
+        never once per topic (TestCheckNextSeqDrift's own
+        test_corpus_walked_once_regardless_of_owner_count is the sibling
+        pin for the analogous next_seq-drift check)."""
+        rows = [
+            {"topic_id": i, "label": f"t{i}", "collection": "knowledge__a",
+             "doc_count": i, "actual_count": 0}
+            for i in range(1, 51)
+        ]
+        store = self._store(rows)
+        self._run(monkeypatch, store)
+        assert store.calls["get_doc_count_drift"] == 1, (
+            f"get_doc_count_drift called {store.calls['get_doc_count_drift']}x for "
+            f"{len(rows)} drifted topics — the O(topics) per-item loop is back"
+        )
+
+    def test_remedy_names_the_repeatable_cli_fix(self, monkeypatch) -> None:
+        store = self._store(
+            [{"topic_id": 500, "label": "t", "collection": "knowledge__a",
+              "doc_count": 5, "actual_count": 2}],
+        )
+        r = self._run(monkeypatch, store)
+        assert "nx taxonomy audit" in r.detail and "--fix-doc-count" in r.detail
+        assert any("--fix-doc-count" in s for s in r.fix_suggestions)

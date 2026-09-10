@@ -21,6 +21,11 @@ from pathlib import Path
 import click
 import yaml
 
+from nexus.plans.audit_rounds import (
+    BLOCKS_PLANNING,
+    DISCOVER_AT_IMPLEMENTATION,
+    VALID_CLASSIFICATIONS,
+)
 from nexus.tables.load import Table, TableLoadError, load_packaged_table
 from nexus.tables.resolve import resolve
 from nexus.tables.review_rounds import blocking_rounds, rule_for
@@ -1704,7 +1709,7 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
 
 _CRITIQUE_SECTION_RE = re.compile(r"^\s*#{1,3}\s*(critical|significant)\b", re.IGNORECASE)
 _CRITIQUE_ISSUE_RE = re.compile(r"^\s*#{1,6}\s*issue:\s*(.+)$", re.IGNORECASE)
-_CRITIQUE_DETAIL_RE = re.compile(r"^\s*[-*]\s*\*{0,2}(location|problem|recommendation|issue|sites)\*{0,2}\s*:\s*(.+)$", re.IGNORECASE)
+_CRITIQUE_DETAIL_RE = re.compile(r"^\s*[-*]\s*\*{0,2}(location|problem|recommendation|issue|sites|class)\*{0,2}\s*:\s*(.+)$", re.IGNORECASE)
 # A free-form finding opens with the severity and then a number, a colon, a
 # bold close or the word "issue"; "Critical mass of the aspect queue" and
 # "Significant prior art exists" are prose (deep critique [24873] S1).
@@ -1713,18 +1718,55 @@ _CRITIQUE_INLINE_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: The RDR-204 seventh-gate free-form shape: a paragraph opening
+#: ``CRITICAL — <title>`` / ``SIGNIFICANT — <title>`` (an em-dash or a run
+#: of hyphens, exact-case severity word). Shared module-level constant so
+#: ``_critique_tally`` (which already counted this shape) and
+#: ``_critique_findings`` (which did not — nexus-yjf5l.15, Phase 1 review
+#: F2) recognise it identically; a second, independently maintained copy
+#: of this regex is exactly how the round-3+ ship-blocker/residual split
+#: (nexus-yjf5l.2) and the Layer 0 survivor exemption (nexus-yjf5l.3) went
+#: silently inert for it.
+_FREEFORM_ISSUE_RE = re.compile(r"^\s*(CRITICAL|SIGNIFICANT)\s*[—-]+\s*(.+)$")
+
+#: A bare ALL-CAPS free-form heading (``OBSERVATIONS``, ``GAP-CLOSURE
+#: CROSS-WALK``, ...) — never a Critical/Significant title, which always
+#: carries an em-dash per :data:`_FREEFORM_ISSUE_RE`. Shared with
+#: ``_critique_tally`` via :func:`_freeform_heading_toggle`.
+_FREEFORM_HEADING_RE = re.compile(r"^[A-Z][A-Z0-9 ,()'/-]+$")
+
+
+def _freeform_heading_toggle(stripped: str) -> bool | None:
+    """``None`` when *stripped* is not a bare ALL-CAPS free-form heading;
+    otherwise the new off-state for free-form Critical/Significant
+    recognition — an OBSERVATIONS/VERIFICATION heading turns it off until
+    the next heading turns it back on, so a free-form ``CRITICAL —``
+    aside quoted inside an Observations block is never counted as a live
+    finding. Shared by ``_critique_tally`` and ``_critique_findings``."""
+    if not _FREEFORM_HEADING_RE.match(stripped):
+        return None
+    return stripped.startswith("OBSERVATION") or stripped.startswith("VERIFICATION")
+
 
 def _critique_findings(text: str) -> list[str]:
     """Extract the Critical and Significant findings from a critique body.
 
-    Two formats are read. The substantive-critic's canonical output
-    (``## Critical Issues`` / ``## Significant Issues`` sections holding
-    ``### Issue: <title>`` blocks with ``- **Location**:`` and
-    ``- **Recommendation**:`` details) yields one line per issue title plus
-    its location and recommendation. Free-form critiques yield any line
-    that opens with Critical, Significant, NEW CRITICAL, or ``Issue:``.
-    Observations and other sections are never findings. Empty input, or a
-    critique with none of either, yields ``[]``.
+    Three shapes are read — every shape ``_critique_tally`` counts, plus
+    one legacy shape it does not (nexus-yjf5l.15). The substantive-critic's
+    canonical output (``## Critical Issues`` / ``## Significant Issues``
+    sections holding ``### Issue: <title>`` blocks with ``- **Location**:``
+    and ``- **Recommendation**:`` details) yields one line per issue title
+    plus its location and recommendation. The RDR-204 seventh-gate
+    free-form shape (``CRITICAL — <title>`` / ``SIGNIFICANT — <title>``,
+    never inside an ALL-CAPS OBSERVATIONS/VERIFICATION block) yields
+    ``Issue: <title>`` per paragraph, the same rendering canonical findings
+    use, so a residual's stored bare title matches either shape through
+    the one ``_finding_title_key`` normalisation. A legacy free-form line
+    that opens with Critical, Significant, NEW CRITICAL, or ``Issue:`` (a
+    shape ``_critique_tally`` itself does not recognise) is read verbatim,
+    for backward compatibility only. Observations and other sections are
+    never findings. Empty input, or a critique with none of the above,
+    yields ``[]``.
     """
     out: list[str] = []
     in_finding_section = False
@@ -1748,19 +1790,129 @@ def _critique_findings(text: str) -> list[str]:
                 out.append(f"Issue: {m.group(1).strip()}")
                 continue
             d = _CRITIQUE_DETAIL_RE.match(line)
-            if d and d.group(1).lower() in ("location", "recommendation", "issue", "sites"):
+            if d and d.group(1).lower() in ("location", "recommendation", "issue", "sites", "class"):
                 out.append(f"  {d.group(1).capitalize()}: {d.group(2).strip()}")
                 continue
     if saw_sections:
         return out
-    # Free-form fallback.
+    # Free-form fallback. Two shapes, checked in this order per line: the
+    # RDR-204 seventh-gate ``CRITICAL — <title>`` paragraph (recognised via
+    # the SAME regex and heading-toggle _critique_tally counts by —
+    # nexus-yjf5l.15, so this is one parser, not two independently
+    # maintained recognitions of what a free-form finding looks like), then
+    # the legacy bold/colon shape (``**Critical 1**: ...``, ``NEW CRITICAL``,
+    # ``Issue: ...``) _CRITIQUE_INLINE_RE has always matched.
+    freeform_off = False
     for raw in text.splitlines():
         stripped = raw.strip()
         if not stripped:
             continue
+        # The heading toggle updates state but never `continue`s here (unlike
+        # _critique_tally): a legacy free-form marker like "NEW CRITICAL" is
+        # itself an ALL-CAPS line and must still reach the legacy check below.
+        off = _freeform_heading_toggle(stripped)
+        if off is not None:
+            freeform_off = off
+        if freeform_off:
+            continue
+        m = _FREEFORM_ISSUE_RE.match(stripped)
+        if m:
+            out.append(f"Issue: {m.group(2).strip()}")
+            continue
         if _CRITIQUE_INLINE_RE.match(stripped) or re.match(r"^(?:\*\*)?issue:", stripped, re.IGNORECASE):
             out.append(stripped.lstrip("-*# ").strip())
     return out
+
+
+#: A leading classed-residual tag on a FINDING/residual title — built from
+#: the same VALID_CLASSIFICATIONS import ``_CLASS_LINE_RE`` uses (nexus-
+#: yjf5l.18, Phase 3 review F1), never a bare ``[A-Z][A-Z-]*`` bracket
+#: shape: a title genuinely beginning ``[SQL]`` is not a class tag and
+#: must keep its bracket, not collide with a differently-titled finding
+#: whose bracket was stripped.
+_FINDING_CLASS_TAG_RE = re.compile(
+    r"^\[(?:" + "|".join(re.escape(c) for c in VALID_CLASSIFICATIONS) + r")\]\s*"
+)
+
+
+def _finding_title_key(text: str) -> str:
+    """Normalise a finding or residual title for cross-surface matching.
+
+    ``_critique_findings`` prefixes a canonical title with ``Issue: ``; a
+    gate record's ``residuals:`` bullet carries the bare title with
+    neither that prefix nor list decoration, but from nexus-yjf5l.7 it is
+    prefixed with the residual's class instead (``[DISCOVER-AT-IMPLEMENTATION]
+    <title>``). One normalisation — strip a leading classed-residual tag
+    (only :data:`BLOCKS_PLANNING`/:data:`DISCOVER_AT_IMPLEMENTATION`, per
+    :data:`_FINDING_CLASS_TAG_RE` — nexus-yjf5l.18), strip the ``Issue:``
+    prefix, strip leading/trailing list and markdown decoration, collapse
+    whitespace, casefold — so a residual's stored title and a finding's
+    title match the same way everywhere a surface needs to tell them
+    apart: the fix preamble's ship-blocker/residual split (nexus-yjf5l.2)
+    and the Layer 0 survivor sweep's residual exemption (nexus-yjf5l.3)
+    both call this one function, not their own copy.
+    """
+    t = text.strip()
+    t = _FINDING_CLASS_TAG_RE.sub("", t)
+    t = re.sub(r"^(?:issue\s*:\s*)", "", t, flags=re.IGNORECASE)
+    t = t.lstrip("-*# ").rstrip("*").strip()
+    t = re.sub(r"\s+", " ", t)
+    return t.casefold()
+
+
+#: A file:line style pointer inside an otherwise-matching title (nexus-yjf5l.14).
+_FINDING_TITLE_LOC_RE = re.compile(r"\b[\w./-]+:\d+\b")
+
+
+def _finding_title_key_loose(text: str) -> str:
+    """A second, looser normalisation of :func:`_finding_title_key`, used
+    only when the strict key finds no match (nexus-yjf5l.14). Digits are
+    replaced by a placeholder and a file:line pointer keeps its path and
+    loses only its line number in the strict key's output,
+    tolerating a residual title that drifted by nothing but a
+    self-referential count or a dated pointer between gate rounds — the
+    shape that recurs most in this project's own gate history (the live
+    RDR-204 repro this bead fixes). Never the first attempt at a match: two
+    genuinely different findings that happen to share every non-digit word
+    would otherwise collide. Callers needing "is this the same finding"
+    try the strict key first and fall back to this one only on a miss.
+    """
+    key = _finding_title_key(text)
+    key = _FINDING_TITLE_LOC_RE.sub(lambda m: m.group(0).rsplit(":", 1)[0] + ":n", key)
+    key = re.sub(r"\d+", "n", key)
+    return re.sub(r"\s+", " ", key).strip()
+
+
+def _loose_unique_index(titles: list[str]) -> dict[str, str]:
+    """Loose key to title, for the keys that name exactly ONE title in
+    *titles*. A loose match is accepted only when it is unambiguous on both
+    sides: two distinct findings that share every non-digit word ("round 3
+    ... off by 1" and "round 5 ... off by 1") share a loose key, and a
+    fallback that picked one of them would merge two defects into one
+    residual line. Ambiguity is a miss, never a guess."""
+    by_key: dict[str, list[str]] = {}
+    for t in titles:
+        by_key.setdefault(_finding_title_key_loose(t), []).append(t)
+    return {k: v[0] for k, v in by_key.items() if len(v) == 1}
+
+
+def _nearest_finding_title(residual_title: str, candidate_titles: list[str]) -> str | None:
+    """Best-effort nearest finding for a residual that matches nothing by
+    strict or loose key (nexus-yjf5l.14): the candidate sharing the most
+    loose-key tokens with *residual_title*. Returns ``None`` when no
+    candidate shares a single token — a genuinely unrelated residual must
+    still print bare rather than naming a false guess."""
+    residual_tokens = set(_finding_title_key_loose(residual_title).split())
+    if not residual_tokens or not candidate_titles:
+        return None
+    best_title: str | None = None
+    best_overlap = 0
+    for title in candidate_titles:
+        overlap = len(residual_tokens & set(_finding_title_key_loose(title).split()))
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_title = title
+    return best_title
 
 
 def _preamble_regate_block(
@@ -1853,21 +2005,77 @@ def _preamble_regate_block(
     ))
 
     findings = _critique_findings(str(critique.get("content", ""))) if isinstance(critique, dict) else []
+    # nexus-yjf5l.3: a finding recorded on the prior round's residuals: lines
+    # was dispositioned at accept, not left open — it is not a survivor to
+    # re-sweep. Match it out of the sweep list by the same normalisation
+    # nexus-yjf5l.2's fix-preamble split uses, so the two never carry
+    # separate copies of the comparison.
+    residual_titles = _residual_titles(content)
+    residual_keys = {_finding_title_key(t) for t in residual_titles}
+    # nexus-yjf5l.14: a residual's title can drift by a self-referential
+    # count or pointer between rounds — the loose key catches that drift
+    # as a second pass, never the first, so two genuinely different
+    # findings sharing every non-digit word cannot collide on it.
+    residual_loose_unique = _loose_unique_index(residual_titles)
+    finding_loose_unique = _loose_unique_index([f for f in findings if not f.startswith("  ")])
     if findings:
+        survivors: list[str] = []
+        recorded: list[str] = []
+        matched_keys: set[str] = set()
+        matched_loose_keys: set[str] = set()
+        is_residual = False
+        for f in findings:
+            if not f.startswith("  "):
+                fkey = _finding_title_key(f)
+                is_residual = fkey in residual_keys
+                if is_residual:
+                    matched_keys.add(fkey)
+                else:
+                    floose = _finding_title_key_loose(f)
+                    is_residual = floose in residual_loose_unique and floose in finding_loose_unique
+                    if is_residual:
+                        matched_loose_keys.add(floose)
+            (recorded if is_residual else survivors).append(f)
+
+        if recorded:
+            lines.append("Recorded residuals (dispositioned at accept; not survivors — do not re-open):")
+            lines.extend(f"- {f}" for f in recorded)
+            lines.append("")
+        unmatched = [
+            t for t in residual_titles
+            if _finding_title_key(t) not in matched_keys
+            and _finding_title_key_loose(t) not in matched_loose_keys
+        ]
+        survivor_titles = [f for f in survivors if not f.startswith("  ")]
+        for t in unmatched:
+            nearest = _nearest_finding_title(t, survivor_titles)
+            if nearest:
+                lines.append(
+                    f"- Recorded residual, no matching finding in the critique "
+                    f"(nearest by title: {nearest}): {t}"
+                )
+            else:
+                lines.append(f"- Recorded residual, no matching finding in the critique: {t}")
+        if unmatched:
+            lines.append("")
+
         lines.append("Prior findings (each must be closed EVERYWHERE in the file, not at the quoted line):")
         # Cap on FINDINGS, not lines: a canonical issue is four lines (Issue,
         # Location, Recommendation, Sites) and a line cap dropped the Sites
         # lists Layer 0 sweeps (deep critique [24873] S2).
         shown = 0
-        cut = len(findings)
-        for i, f in enumerate(findings):
+        cut = len(survivors)
+        for i, f in enumerate(survivors):
             if not f.startswith("  "):
                 shown += 1
                 if shown > _REGATE_MAX_FINDINGS:
                     cut = i
                     break
-        lines.extend(f"- {f}" for f in findings[:cut])
-        hidden = sum(1 for f in findings[cut:] if not f.startswith("  "))
+        if survivors:
+            lines.extend(f"- {f}" for f in survivors[:cut])
+        else:
+            lines.append("(none — every finding this round matched the gate record's `residuals:` field)")
+        hidden = sum(1 for f in survivors[cut:] if not f.startswith("  "))
         if hidden:
             lines.append(f"- ... and {hidden} more findings in the critique")
     elif fetch_failed:
@@ -1909,10 +2117,18 @@ def _preamble_regate_block(
                 lines.append("")
                 if stat and status.strip().lower() not in ("", "draft", "open"):
                     # Post-accept edits (the status flip itself, residual
-                    # dispositions) are not gate fixes (deep critique [24873]).
+                    # dispositions) are not gate fixes (deep critique [24873]),
+                    # so there is no re-gate to gate. The disposition still
+                    # carries its own fix check (nexus-yjf5l.1) — saying only
+                    # "not applicable" here contradicted rdr-accept.
                     lines.append(
-                        f"Fix check: not applicable (RDR status is `{status.strip()}`; the "
-                        "fix check gates re-gates of a draft, and this RDR is past the gate)."
+                        f"Fix check: no re-gate fix check (RDR status is `{status.strip()}`; "
+                        "that check gates a re-gate of a draft, and this RDR is past the "
+                        "gate). A residual dispositioned by a change to the RDR file still "
+                        f"carries a fix check on that change: `git diff {gated_commit}..HEAD "
+                        f"-- {rel}`, verdict stored as `{t2_key}-fix-check-<sha>`, `<sha>` "
+                        "the RDR file's tip after the disposition. A residual dispositioned "
+                        "by a bead id changed nothing in the file and needs none."
                     )
                 else:
                     lines.extend(_fix_check_lines(
@@ -1923,8 +2139,17 @@ def _preamble_regate_block(
             lines.append(f"Changed since the gated commit `{gated_commit}`: (git diff failed: {exc})")
         lines.append("")
 
+    # The exemption clause names itself only when this round actually
+    # recorded a residual — an unconditional clause would print on every
+    # first-gate and every round-1/round-2 record too, and the no-residuals
+    # regression pin (nexus-yjf5l.3) is byte-for-byte on that path.
+    exempt_clause = (
+        " that is not a recorded residual (dispositioned at accept, not swept as a survivor here)"
+        if residual_keys else ""
+    )
     lines.extend([
-        "**Layer 0 (survivor sweep, before Layer 3):** for every prior finding, sweep every "
+        "**Layer 0 (survivor sweep, before Layer 3):** for every prior finding"
+        f"{exempt_clause}, sweep every "
         "site in its `Sites:` list; where a finding has none, grep the RDR for the refuted "
         "phrasing AND the corrected one; every occurrence must agree. A "
         "fact lives in Problem Statement, Research Findings, Technical Design and the "
@@ -2121,10 +2346,24 @@ def _fix_check_lines(
         "enumeration or the artifact's own text, quoted; two sites that agree are not a "
         "source. The same enumeration requirement applies to the research entry the fix cites.",
         "3. Does its cited source (changeset, file:line, RDR, T2 entry) contain the claim as stated?",
+        "4. A `file:line` taken from a T3 search or query hit is a lead, not a citation: the "
+        "store carries the line as of index time, and the clause passes only when the line "
+        "was re-read from the working tree.",
+        "5. For every identifier whose meaning, bound, or owning phase this change alters (a "
+        "column, a caller-supplied parameter, a typed error, a setting, a phase or step "
+        "number), list every other occurrence in the file, and every check, bound or rule "
+        "stated over the value it names under any other name, and say whether each still "
+        "holds.",
+        "6. For every check, bound or rule this change adds, name the parameter, column or "
+        "setting it constrains, and for every parameter, column or setting this change adds "
+        "or alters, name every check, bound or rule that constrains it, whether or not they "
+        "share a name, and a pair the previous check already named is not named again.",
         "",
         f"Verdict goes to T2 `{t2_key}-fix-check-{tip_sha}` (project `<repo>_rdr`); the gate "
         f"record's `fix_check:` must name `{tip_sha}`, equal to its `commit:`. Any FAIL: fix, "
-        "re-run the fix check on the new diff. Do not enter Layer 1 or Layer 3 with a FAIL open.",
+        "re-run the fix check on the new diff. Do not enter Layer 1 or Layer 3 with a FAIL open. "
+        "The fix check and the gate critique are never dispatched against the same commit in "
+        "parallel: fix, then check, then Layer 1 and Layer 3.",
     ])
     return lines
 
@@ -2228,6 +2467,22 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
         "   Every `residuals:` line in that record needs a disposition (the commit sha "
         "that fixed it, or the bead id that carries it) recorded in Revision History "
         "before the T2 write; a residual with no disposition blocks accept (nexus-g7zgw.2)."
+    )
+    print(
+        "   A residual dispositioned by a change to the RDR file carries a fix check on "
+        f"that change: read `git diff <the record's commit:>..HEAD -- "
+        f"{os.path.relpath(str(rdr_file), repo_root)}` and store the verdict as "
+        f"`{t2_key}-fix-check-<sha>` (project `{repo_name}_rdr`), `<sha>` the RDR file's "
+        "tip after the disposition. A residual dispositioned by a bead id changed nothing "
+        "in the file and needs none (nexus-yjf5l.1)."
+    )
+    print(
+        f"   Classification determines which disposition applies: a residual classed "
+        f"`{DISCOVER_AT_IMPLEMENTATION}` is dispositioned by a bead id, and the bead names "
+        "the Implementation Plan phase whose steps would hit it. A residual classed "
+        f"`{BLOCKS_PLANNING}`, or an unclassified residual (every line written before the "
+        "class field existed), needs an explicit author disposition — a sha (with its "
+        "fix check) or a bead — and the choice is recorded, never defaulted (nexus-yjf5l.8)."
     )
     print()
     print(f"**RDR file path:** `{rdr_file}`")
@@ -2770,7 +3025,12 @@ _FIX_RULES: tuple[str, ...] = (
     "needs a census of the whole surface, captured in the research entry as an enumeration.",
     "Sweep every site in the finding's Sites: list; a fact lives in Problem Statement, "
     "Research Findings, Technical Design and the Implementation Plan at once.",
+    "From round 3, the fix closes only findings marked `Ship-blocker: yes`; every other "
+    "Critical and Significant is a residual, recorded and dispositioned at accept — never "
+    "re-gated for this change.",
     "A Criterion 6 readability WARN is never closed inside a fix commit.",
+    "The fix check and the gate critique are never dispatched against the same commit in "
+    "parallel: fix, then check, then Layer 1 and Layer 3.",
 )
 
 
@@ -2815,8 +3075,12 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
     if status.lower() not in ("", "draft", "open"):
         print(
             f"> RDR-{t2_key} is past the gate (status `{status}`). Post-accept edits are "
-            "not gate fixes; residual dispositions go through rdr-accept, and a design "
-            "change reopens the RDR. Nothing to fix here."
+            "not gate fixes and there is no gate fix to make here; residual dispositions "
+            "go through rdr-accept, and a design change reopens the RDR. A residual "
+            "dispositioned by a change to the RDR file carries a fix check on that change, "
+            f"stored as `{t2_key}-fix-check-<sha>` with `<sha>` the RDR file's tip after "
+            "the disposition; a residual dispositioned by a bead id changed nothing in the "
+            "file and needs none."
         )
         return
 
@@ -2856,9 +3120,40 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
         print(line)
 
     findings = _critique_findings(str(critique.get("content", ""))) if isinstance(critique, dict) else []
+    own_round = _gate_round_number(content, critique_count) - 1
     print("#### Findings to fix (each at every site named)")
     print()
-    if findings:
+    if findings and own_round > GATE_MAX_ANY_CRITICAL_ROUNDS:
+        residual_keys = {_finding_title_key(t) for t in _residual_titles(content)}
+        ship_blockers: list[str] = []
+        residuals_out: list[str] = []
+        is_residual = False
+        for f in findings:
+            if not f.startswith("  "):
+                is_residual = _finding_title_key(f) in residual_keys
+            (residuals_out if is_residual else ship_blockers).append(f)
+        print(
+            f"From round {GATE_MAX_ANY_CRITICAL_ROUNDS + 1}, fix only the ship-blockers below; "
+            "every other Critical and Significant is a residual — record it, do not fix it in "
+            "this change; it is dispositioned at accept, never re-gated."
+        )
+        print()
+        print("**Ship-blockers (fix these):**")
+        print()
+        if ship_blockers:
+            for f in ship_blockers:
+                print(f"- {f}")
+        else:
+            print("(none — every finding this round matched the gate record's `residuals:` field)")
+        print()
+        print("**Residuals (record; do not fix in this change):**")
+        print()
+        if residuals_out:
+            for f in residuals_out:
+                print(f"- {f}")
+        else:
+            print("(none)")
+    elif findings:
         for f in findings:
             print(f"- {f}")
     elif critique_title:
@@ -2908,27 +3203,87 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
     print()
 
 
-def _residual_count(content: str) -> int:
-    """Residuals in a gate record: bullets under ``residuals:`` (the live
-    shape), or one per ``residuals:`` key line carrying inline text. Never a
-    split on punctuation inside a residual's own prose (code review [24883]
-    finding 1)."""
-    count = 0
+def _residual_bullets(content: str) -> list[str]:
+    """One walk over a gate record's ``residuals:`` block, yielding the
+    RAW text of each residual entry in document order: the inline text on
+    the ``residuals:`` line itself (only when non-empty), then each
+    ``- <title>`` bullet beneath it (unconditionally — an empty bullet
+    still counts as an entry). Never a split on punctuation inside a
+    residual's own prose (code review [24883] finding 1).
+
+    ``_residual_count`` and ``_residual_titles`` both derive from this one
+    walk (nexus-yjf5l.15, Phase 1 review F3) instead of each
+    re-implementing the same active-flag scan, which is exactly how the
+    two could silently drift apart on the next edit to either."""
+    out: list[str] = []
     active = False
-    inline = 0
     for line in content.splitlines():
         stripped = line.strip()
         if stripped.startswith("residuals:"):
             active = True
-            if stripped.split(":", 1)[1].strip():
-                inline += 1
+            inline = stripped.split(":", 1)[1].strip()
+            if inline:
+                out.append(inline)
             continue
         if active and re.match(r"^[A-Za-z_][A-Za-z0-9_]*:", stripped):
             active = False
             continue
         if active and stripped.startswith("-"):
-            count += 1
-    return count + inline
+            out.append(stripped.lstrip("-").strip())
+    return out
+
+
+def _residual_count(content: str) -> int:
+    """Residuals in a gate record: bullets under ``residuals:`` (the live
+    shape), or one per ``residuals:`` key line carrying inline text. See
+    :func:`_residual_bullets` for the shared walk."""
+    return len(_residual_bullets(content))
+
+
+#: A trailing "(carried from round N)" annotation (nexus-yjf5l.14): presentation
+#: metadata written by ``preamble_rdr_verdict``'s carry-forward, never part of
+#: the finding's own title, so every reader of ``_residual_titles`` strips it
+#: before matching.
+_CARRIED_FROM_RE = re.compile(r"\s*\(carried from round \d+\)\s*$", re.IGNORECASE)
+
+#: A leading classed-residual tag (``[DISCOVER-AT-IMPLEMENTATION] <title>``,
+#: nexus-yjf5l.7). ``_finding_title_key`` strips this too, for matching; this
+#: copy exists so ``_residual_class_and_title`` can recover the class instead
+#: of discarding it.
+_RESIDUAL_CLASS_TAG_RE = re.compile(
+    r"^\[(" + "|".join(re.escape(c) for c in VALID_CLASSIFICATIONS) + r")\]\s*"
+)
+
+
+def _residual_titles(content: str) -> list[str]:
+    """The titles recorded in a gate record's ``residuals:`` block: one
+    per ``- <title>`` bullet, or the inline text on the ``residuals:``
+    line itself, with any trailing ``(carried from round N)`` annotation
+    stripped (nexus-yjf5l.14 — that marker is presentation, not part of
+    the title being matched). Derives from :func:`_residual_bullets`'s
+    shared walk and returns the text for matching against a finding's
+    title via ``_finding_title_key`` (the fix preamble's round-3+
+    ship-blocker/residual split, nexus-yjf5l.2; reused by the Layer 0
+    survivor sweep's residual exemption, nexus-yjf5l.3, and by
+    ``preamble_rdr_verdict``'s own cross-round carry-forward,
+    nexus-yjf5l.14)."""
+    return [_CARRIED_FROM_RE.sub("", b).strip() for b in _residual_bullets(content)]
+
+
+def _residual_class_and_title(raw: str) -> tuple[str, str]:
+    """Split a stored residual bullet's leading class tag from its bare
+    title (nexus-yjf5l.14). Defaults to :data:`BLOCKS_PLANNING` when no
+    tag is present — the same conservative default
+    ``preamble_rdr_verdict`` already prints for an unclassified finding —
+    so carrying a residual forward across rounds keeps the class it was
+    recorded with instead of discarding it. Expects *raw* already through
+    ``_residual_titles`` (the carried-from marker, if any, already
+    stripped)."""
+    text = raw.strip()
+    m = _RESIDUAL_CLASS_TAG_RE.match(text)
+    if m:
+        return m.group(1), text[m.end():].strip()
+    return BLOCKS_PLANNING, text
 
 
 #: The day the round cap shipped (nexus-g7zgw.2). Gate records dated before
@@ -3024,6 +3379,14 @@ def _gate_loop_health_lines(rows: list[dict]) -> list[str]:
 _VERDICT_FIELD_RE = re.compile(r"^\s*-\s*\*\*(outcome|critical_count|significant_count|ship_blockers)\*\*\s*:\s*(\S+)", re.IGNORECASE | re.MULTILINE)
 _VERDICT_INLINE_RE = re.compile(r"\b(critical_count|significant_count|ship_blockers)\s*=\s*(\d+)", re.IGNORECASE)
 _SHIP_BLOCKER_RE = re.compile(r"^\s*(?:-\s*)?\*{0,2}Ship-blocker\*{0,2}\s*:\s*\*{0,2}(yes|no)\b", re.IGNORECASE | re.MULTILINE)
+# nexus-yjf5l.7: a per-finding Class line, imported from nexus.plans.audit_rounds
+# rather than spelled out here — see VALID_CLASSIFICATIONS above.
+_CLASS_LINE_RE = re.compile(
+    r"^\s*(?:-\s*)?\*{0,2}Class\*{0,2}\s*:\s*\*{0,2}("
+    + "|".join(re.escape(c) for c in VALID_CLASSIFICATIONS)
+    + r")\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -3036,6 +3399,12 @@ class CritiqueTally:
     reported_critical: int | None
     reported_significant: int | None
     reported_ship_blockers: int | None
+    #: nexus-yjf5l.7: each Critical/Significant title that carried an
+    #: explicit ``Class:`` line, mapped to its normalised classification
+    #: (one of VALID_CLASSIFICATIONS). A title absent from this dict is
+    #: unclassified — see ``_classification_of``'s conservative default,
+    #: which rdr-gate applies for disposition only, never for blocking.
+    classifications: dict[str, str]
 
 
 def _critique_tally(text: str) -> CritiqueTally:
@@ -3051,6 +3420,7 @@ def _critique_tally(text: str) -> CritiqueTally:
     criticals: list[str] = []
     significants: list[str] = []
     blockers: list[str] = []
+    classes: dict[str, str] = {}
     section: str | None = None
     current: str | None = None
     current_kind: str | None = None
@@ -3060,6 +3430,12 @@ def _critique_tally(text: str) -> CritiqueTally:
         # block must not count twice (code review [24900] finding 2).
         if yes and title is not None and kind in ("critical", "significant") and title not in blockers:
             blockers.append(title)
+
+    def _mark_class(kind: str | None, title: str | None, classification: str) -> None:
+        # First Class line per issue wins, same one-mark-per-issue rule as
+        # _mark above.
+        if title is not None and kind in ("critical", "significant") and title not in classes:
+            classes[title] = classification.strip().upper()
 
     # Canonical critiques carry section headings; free-form ones do not.
     # A ``CRITICAL —`` paragraph counts only in a free-form critique and
@@ -3084,13 +3460,17 @@ def _critique_tally(text: str) -> CritiqueTally:
             current_kind = section
             (criticals if section == "critical" else significants).append(current)
             continue
-        if not canonical and re.match(r"^[A-Z][A-Z0-9 ,()'/-]+$", stripped):
+        if not canonical:
             # An all-caps free-form heading: OBSERVATIONS (and anything after
-            # it until the next heading) is not a findings block.
-            freeform_off = stripped.startswith("OBSERVATION") or stripped.startswith("VERIFICATION")
-            current = None
-            continue
-        free = re.match(r"^\s*(CRITICAL|SIGNIFICANT)\s*[—-]+\s*(.+)$", stripped)
+            # it until the next heading) is not a findings block. Shared
+            # toggle with _critique_findings (nexus-yjf5l.15) via
+            # _freeform_heading_toggle, not a second copy of this check.
+            off = _freeform_heading_toggle(stripped)
+            if off is not None:
+                freeform_off = off
+                current = None
+                continue
+        free = _FREEFORM_ISSUE_RE.match(stripped)
         if free and not canonical and not freeform_off:
             current = free.group(2).strip()
             current_kind = free.group(1).lower()
@@ -3099,6 +3479,10 @@ def _critique_tally(text: str) -> CritiqueTally:
         sb = _SHIP_BLOCKER_RE.match(line)
         if sb:
             _mark(current_kind, current, sb.group(1).lower() == "yes")
+            continue
+        cl = _CLASS_LINE_RE.match(line)
+        if cl:
+            _mark_class(current_kind, current, cl.group(1))
     # The Verdict is read from the LAST ``## Verdict`` section (or the last
     # ``VERDICT:`` line), with fenced code stripped first, so a quoted or
     # example verdict earlier in the text cannot poison the counts (code
@@ -3127,6 +3511,7 @@ def _critique_tally(text: str) -> CritiqueTally:
         reported_critical=_int("critical_count"),
         reported_significant=_int("significant_count"),
         reported_ship_blockers=_int("ship_blockers"),
+        classifications=classes,
     )
 
 
@@ -3197,6 +3582,27 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
             "(conexus/agents/substantive-critic.md § Output Format) and run this again."
         )
         return
+    # nexus-yjf5l.7 decision 2: a finding cannot carry both an explicit
+    # `Ship-blocker: yes` and an explicit `Class: DISCOVER-AT-IMPLEMENTATION`
+    # — those two fields disagree about the same finding, and no outcome
+    # is computed until the critique is fixed. This is a per-finding,
+    # both-lines-present test only: a Class-carrying critique with no
+    # per-finding Ship-blocker line, or a Ship-blocker line with no Class
+    # line, is not a contradiction and falls through untouched below.
+    contradictions = [
+        title for title in tally.ship_blocker_titles
+        if tally.classifications.get(title) == DISCOVER_AT_IMPLEMENTATION
+    ]
+    if contradictions:
+        print(f"> Contradiction in `{critique_title}`; no outcome is computed:")
+        for title in contradictions:
+            print(
+                f"> - \"{title}\" is marked `Ship-blocker: yes` and `Class: "
+                f"{DISCOVER_AT_IMPLEMENTATION}`; these disagree — a ship-blocker "
+                f"is {BLOCKS_PLANNING} by definition. Fix the critique (drop one "
+                "line or the other) and run this again."
+            )
+        return
     round_no = _gate_round_number(latest_content, critique_count)
     rule = rule_for("rdr-gate", round_no)
     already_gated = (
@@ -3238,9 +3644,39 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
     else:
         blocked = False
     outcome = "BLOCKED" if blocked else "PASSED"
+    # nexus-yjf5l.14: a residual recorded at round N that Layer 0 tells the
+    # critic not to re-raise vanishes from round N+1's OWN critique — so this
+    # round's residuals: is the union of this round's own new non-ship-blocker
+    # findings AND the prior gate-latest record's still-open residuals, never
+    # this round's tally alone. A prior residual duplicated by a fresh finding
+    # (matched strict-then-loose, nexus-yjf5l.14) is not carried a second time;
+    # one still unmatched is carried forward, marked, keeping its own class.
     residuals: list[str] = []
+    residual_classes: dict[str, str] = {}
+    carried_titles: set[str] = set()
+    carried_round_label = ""
     if rule.blocks_on == "ship-blocker":
         residuals = [t for t in tally.criticals + tally.significants if t not in tally.ship_blocker_titles]
+        new_strict_keys = {_finding_title_key(t) for t in residuals}
+        new_loose_unique = _loose_unique_index(residuals)
+        prior_raw = _residual_titles(latest_content)
+        prior_loose_unique = _loose_unique_index([_residual_class_and_title(r)[1] for r in prior_raw])
+        carried_round_label = (_preamble_parse_t2_field(latest_content, "round") or "").strip()
+        for raw in prior_raw:
+            cls, bare_title = _residual_class_and_title(raw)
+            if _finding_title_key(bare_title) in new_strict_keys:
+                continue
+            loose = _finding_title_key_loose(bare_title)
+            if loose in new_loose_unique and loose in prior_loose_unique:
+                continue
+            residuals.append(bare_title)
+            residual_classes[bare_title] = cls
+            carried_titles.add(bare_title)
+
+    def _residual_line(title: str) -> str:
+        cls = tally.classifications.get(title, residual_classes.get(title, BLOCKS_PLANNING))
+        suffix = f" (carried from round {carried_round_label})" if title in carried_titles and carried_round_label else ""
+        return f"[{cls}] {title}{suffix}"
 
     commit = (_git_out(repo_root, "log", "-1", "--format=%h", "--", rel) or "").strip()
     prev_outcome = (_preamble_parse_t2_field(latest_content, "outcome") or "").strip().upper()
@@ -3269,10 +3705,15 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
         print(f"- {n}")
     print()
     print(f"**Outcome: {outcome}**")
+    # nexus-yjf5l.7: every residual carries its class — BLOCKS_PLANNING is
+    # the conservative default for a finding with no explicit Class line
+    # (same default _classification_of applies in plan-audit), and here it
+    # means "needs an explicit human disposition", never auto-beaded; it
+    # never changes what blocks (ship_blockers, computed above, is unaffected).
     if residuals:
         print(f"Residuals ({len(residuals)}), recorded for accept to disposition:")
         for r in residuals:
-            print(f"- {r}")
+            print(f"- {_residual_line(r)}")
     print()
     print("Gate record to write (memory_put project=\"" + project + f"\", title=\"{t2_key}-gate-latest\", ttl=\"permanent\", tags=\"rdr,gate\"):")
     print()
@@ -3290,7 +3731,7 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
     if residuals:
         print("residuals:")
         for r in residuals:
-            print(f"  - {r}")
+            print(f"  - {_residual_line(r)}")
     if prior_parts:
         print("prior: " + ", ".join(prior_parts))
     print("```")
@@ -3746,6 +4187,9 @@ def _prg_extract_approach_section(text: str) -> str:
     return ""
 
 
+_PRG_ITEM_RE = re.compile(r"^(\d+)\.\s+\*\*([^*]+)\*\*[:\s]*(.*)")
+
+
 def _prg_parse_approach_items(
     approach_text: str,
 ) -> list[tuple[int, str, str]]:
@@ -3760,7 +4204,7 @@ def _prg_parse_approach_items(
     current_lines: list[str] = []
 
     for line in lines:
-        m = re.match(r"^(\d+)\.\s+\*\*([^*]+)\*\*[:\s]*(.*)", line)
+        m = _PRG_ITEM_RE.match(line)
         if m:
             if current_num is not None:
                 items.append(
@@ -3779,6 +4223,79 @@ def _prg_parse_approach_items(
             (current_num, current_label, " ".join(current_lines).strip())
         )
     return items
+
+
+# Column 0, like _PRG_ITEM_RE: an INDENTED numbered line is a nested list or
+# a recipe inside a code fence, never a missed top-level item (review of
+# ad158133b: rdr-037 and rdr-063 both carry them and were refused).
+_PRG_ITEM_START_RE = re.compile(r"^(\d+(?:\.\d+)*[a-z]?)[.)](\s|$)")
+_PRG_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+
+
+def _prg_find_unparsed_item_starts(approach_text: str) -> list[str]:
+    """Lines of §Approach that look like the start of an item but that
+    :func:`_prg_parse_approach_items` would silently absorb as continuation
+    text of the previous item (GH #1443).
+
+    The shapes measured to go invisible (8 of 10 items enumerated on a
+    downstream RDR, gate reported PASSED) all start at column 0 with a
+    number the item regex then rejects: a sub-number (``5a.``, ``5.1.``), a
+    paren number (``2)``), a bare number whose label sits on the next line,
+    a bold label that wraps before it closes, or a plain ``N. text`` item
+    with no bold label at all. Column 0 is the whole test: an indented
+    numbered line is a nested list or a recipe, and a line inside a fenced
+    code block is code; the first version of this also flagged unclosed
+    bold, which is how this repo writes wrapped emphasis, and refused 11 of
+    the repo's own RDRs.
+
+    SCOPE. When the section parses numbered items, only the item list's
+    own block is scanned: heading to heading around the parsed items, and
+    within it up to the first numbered line that restarts at ``1.`` after
+    an item (a second list, such as rdr-195's two-point consequences aside
+    under the same heading). The extracted section can span several
+    ``###`` subsections, and a numbered aside under a later one is not a
+    lost item. A section with no parsed items (phase-block structure) is
+    scanned whole. A list where one incidental bold phrase makes one step
+    parse and the rest are plain steps (rdr-063, rdr-102) IS refused: the
+    gate cannot tell which of those steps are items, and enumerating the
+    one would be the silent subset this exists to stop.
+
+    The one shape left invisible is a bold label whose number was dropped
+    entirely (``**Label**: ...`` at column 0): in this corpus that line is
+    a bold aside inside an item far more often than a lost item, so it is
+    not flagged. Returned lines are stripped; the caller refuses to
+    enumerate rather than pass on a subset, for both §Approach structures.
+    """
+    lines = approach_text.splitlines()
+    item_idx = [k for k, line in enumerate(lines) if _PRG_ITEM_RE.match(line)]
+    start, end = 0, len(lines)
+    if item_idx:
+        start = next(
+            (k + 1 for k in range(item_idx[0] - 1, -1, -1) if lines[k].startswith("#")), 0,
+        )
+        end = next(
+            (k for k in range(item_idx[-1] + 1, len(lines)) if lines[k].startswith("#")),
+            len(lines),
+        )
+    unparsed: list[str] = []
+    in_fence = False
+    seen_item = False
+    for line in lines[start:end]:
+        if _PRG_FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if _PRG_ITEM_RE.match(line):
+            seen_item = True
+            continue
+        m = _PRG_ITEM_START_RE.match(line)
+        if not m:
+            continue
+        if seen_item and m.group(1) == "1":
+            break  # a second list restarting at 1. after the items: not a lost item
+        unparsed.append(line.strip())
+    return unparsed
 
 
 def _prg_parse_phase_block_items(
@@ -3831,6 +4348,11 @@ def _prg_parse_phase_block_items(
             bm = bullet_re.match(line)
             if bm and bm.group(1).strip():
                 cur[2].append(bm.group(1).strip())
+            elif cur[2] and line.strip():
+                # A non-bulleted line inside a block after a bullet is that
+                # bullet's continuation (a wrapped label or summary), not
+                # something to drop on the floor (GH #1443 critique residual).
+                cur[2][-1] = cur[2][-1] + " " + line.strip()
     if cur is not None:
         blocks.append(cur)
 
@@ -3959,6 +4481,29 @@ def preamble_phase_review_gate(args: tuple[str, ...]) -> None:
         return
 
     items = _prg_parse_approach_items(approach_text)
+    # Guard BOTH structures (critique of ad158133b): the phase-block fallback
+    # below absorbs a stray column-0 numbered line just as silently.
+    unparsed = _prg_find_unparsed_item_starts(approach_text)
+    if unparsed:
+        # GH #1443: a line that looks like an item start but fails the item
+        # regex used to be absorbed as continuation text, so the gate
+        # enumerated a SUBSET of §Approach and could report PASSED on it.
+        # Refuse to enumerate: a partial cross-walk is the silent scope
+        # reduction this gate exists to catch.
+        print(
+            f"> **ERROR**: §Approach has {len(unparsed)} line(s) that look like "
+            "an item start but do not parse as `N. **Label**: description` "
+            "(GH #1443). The gate does not cross-walk a subset."
+        )
+        for raw in unparsed:
+            print(f">   - `{raw[:120]}`")
+        print(
+            "> Fix the RDR: integer item numbers only (no `5a.`, `5.1.` or "
+            "`2)`; renumber or nest as an indented bullet), the bold label "
+            "opened and closed on the item's own line, and every label "
+            "carrying its number."
+        )
+        return
     if not items:
         # nexus-4u6mt: fall back to phase-block sub-bullet enumeration
         # (RDR-120-style §Approach). Filters to the requested --phase

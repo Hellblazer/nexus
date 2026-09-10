@@ -2830,7 +2830,28 @@ def hubs_cmd(
     "--top-n", "-n", default=5, type=int, show_default=True,
     help="Number of receiving hub topics to display.",
 )
-def audit_cmd(collection: str, threshold: float | None, top_n: int) -> None:
+@click.option(
+    "--fix-doc-count", is_flag=True, default=False,
+    help=(
+        "Correct topics.doc_count drift instead of the projection-quality "
+        "report (bead nexus-c0g6e, GH #1529) — the repeatable, on-demand "
+        "twin of the engine's own boot-time recount (hygiene-007-1), and "
+        "the remedy `nx doctor`'s 'topics.doc_count drift' row names. "
+        "Dry-run by default (previews what would change); pass --yes to "
+        "apply. The underlying engine route recounts EVERY topic for this "
+        "tenant, not just this collection's — --collection here scopes "
+        "what is DISPLAYED, matching this command's usual per-collection "
+        "framing, while an apply (--yes) always corrects the whole tenant."
+    ),
+)
+@click.option(
+    "--yes", is_flag=True, default=False,
+    help="With --fix-doc-count, apply the correction instead of previewing it.",
+)
+def audit_cmd(
+    collection: str, threshold: float | None, top_n: int,
+    fix_doc_count: bool, yes: bool,
+) -> None:
     """Report projection-quality diagnostics for one source collection.
 
     Output:
@@ -2842,7 +2863,14 @@ def audit_cmd(collection: str, threshold: float | None, top_n: int) -> None:
         stopword tokens (`assert`, `class`, `exception`, ...).
 
     See docs/exploration/taxonomy-projection-tuning.md for interpretation guidance.
+
+    ``--fix-doc-count`` replaces the report above entirely with the
+    doc_count-drift repair (bead nexus-c0g6e, GH #1529) — see that option's
+    own help text.
     """
+    if fix_doc_count:
+        _run_fix_doc_count(collection, apply=yes)
+        return
     db = _T2Database(_default_db_path(), client=_command_shared_t2_client())
     try:
         report = db.taxonomy.audit_collection(
@@ -2887,6 +2915,75 @@ def audit_cmd(collection: str, threshold: float | None, top_n: int) -> None:
                     f"  [{h.topic_id}] {h.label} — matched: "
                     + ",".join(h.matched_stopwords)
                 )
+    finally:
+        db.close()
+
+
+def _run_fix_doc_count(collection: str, *, apply: bool) -> None:
+    """``nx taxonomy audit --fix-doc-count`` (bead nexus-c0g6e, GH #1529) —
+    the repeatable, on-demand twin of the engine's hygiene-007-1 boot walk.
+
+    Calls the SAME engine-side recount (``POST /topics/recount_doc_count``)
+    :func:`nexus.health._check_topics_doc_count_drift` names as the doctor
+    row's remedy. Dry-run by default (``apply=False``): previews every
+    drifted topic tenant-wide with no write. ``apply=True`` (``--yes``)
+    performs the correction tenant-wide and reports what changed.
+
+    ``collection`` scopes DISPLAY only — the underlying route has no
+    per-collection filter (it recounts every topic for the tenant in one
+    batched pass, the same relation the doctor check and the boot walk
+    both read); an apply always corrects the whole tenant regardless of
+    which collection's rows are shown here. Documented in the option's own
+    help text so this is never a silent surprise.
+
+    A pre-route engine (404 on ``/topics/recount_doc_count``) is reported
+    with one line naming the route and exits non-zero without a
+    traceback — the same distinction :func:`nexus.health.
+    _check_topics_doc_count_drift` already makes for its own 404 case
+    (fix round, GH #1529 review addendum: this verb previously let the
+    raw ``httpx.HTTPStatusError`` propagate uncaught, contradicting the
+    wire-ledger entry's claim that both the doctor row and this flag
+    read 404 the same way). Any OTHER HTTP error still propagates, as a
+    :class:`click.ClickException` rather than a raw traceback.
+    """
+    import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    db = _T2Database(_default_db_path(), client=_command_shared_t2_client())
+    try:
+        try:
+            result = db.taxonomy.recount_doc_count(dry_run=not apply)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                click.echo(
+                    "doc_count-drift fix cannot run: the deployed engine has no "
+                    "/topics/recount_doc_count route (bead nexus-c0g6e, GH #1529 — "
+                    "needs the engine tag carrying "
+                    "taxonomy-016-doc-count-drift-functions.xml; see "
+                    "docs/wire-contract-pending.md). Deploy an engine carrying it "
+                    "and re-run.",
+                    err=True,
+                )
+                raise click.exceptions.Exit(2) from None
+            raise click.ClickException(str(exc)) from exc
+        rows = [r for r in (result.get("topics") or []) if r.get("collection") == collection]
+        verb = "Would correct" if not apply else "Corrected"
+        if not rows:
+            scope_note = (
+                "" if not (result.get("topics") or [])
+                else f" ({len(result.get('topics') or [])} elsewhere in this tenant)"
+            )
+            click.echo(f"No doc_count drift for collection {collection!r}{scope_note}.")
+            return
+        click.echo(f"{verb} {len(rows)} topic(s) in collection {collection!r}:")
+        for r in rows:
+            label = r.get("label") or f"(unlabelled id={r.get('topic_id')})"
+            click.echo(
+                f"  [{r.get('topic_id')}] {label}  "
+                f"doc_count={r.get('doc_count')} -> {r.get('actual_count')}"
+            )
+        if not apply:
+            click.echo("")
+            click.echo("Dry run — nothing was written. Re-run with --yes to apply.")
     finally:
         db.close()
 

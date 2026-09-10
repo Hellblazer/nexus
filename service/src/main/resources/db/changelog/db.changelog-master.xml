@@ -972,6 +972,19 @@
          hygiene-001's own <include> comments for the identical reasoning). -->
     <include file="db/changelog/taxonomy-015-doc-count-lock-mode.xml"/>
 
+    <!-- nexus-c0g6e fix round (GH #1529): nexus.topics_doc_count_drift /
+         nexus.topics_recount_doc_count — additive, reusable SQL shared by
+         hygiene-007-1's boot walk (rewritten to call
+         topics_recount_doc_count(NULL, false) instead of inlining its own
+         copy) and the new GET /topics/doc_count_drift / POST
+         /topics/recount_doc_count HTTP routes. Placed after
+         taxonomy-015-doc-count-lock-mode.xml (current tail) and before the
+         grants-nexus-svc.xml runAlways block, matching the established
+         late-append convention (D0.1) — and before hygiene-007's own
+         late-append include further down, since hygiene-007-1's DO block
+         now depends on these functions existing. -->
+    <include file="db/changelog/taxonomy-016-doc-count-drift-functions.xml"/>
+
     <!-- nexus-ndoke — nx_answer_steps gains cache_read_input_tokens and
          cache_creation_input_tokens. The Anthropic usage envelope reports
          CACHED input separately, so a cached prompt records input_tokens=2
@@ -1238,6 +1251,17 @@
         Late-append convention, before the grants tail.
     -->
     <include file="db/changelog/hygiene-006-sequence-catchup.xml"/>
+
+    <!--
+        nexus-c0g6e (GH #1529): a 6.18.1-era fidelity import left
+        nexus.topics.doc_count above the real nexus.topic_assignments count
+        on 94 topics (12,379 recorded vs 9,625 rows, all over-counted) —
+        drift predating taxonomy-013's recompute triggers. hygiene-007-1
+        recounts every topic's doc_count from topic_assignments and
+        corrects the rows that disagree; read-only otherwise. Late-append
+        convention, before the grants tail.
+    -->
+    <include file="db/changelog/hygiene-007-doc-count-recount.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

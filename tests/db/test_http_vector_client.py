@@ -397,6 +397,10 @@ class TestUpdateChunks:
     """RDR-152 nexus-enehl: update_chunks routes to /v1/vectors/update-metadata."""
 
     def test_posts_to_update_metadata_endpoint_empty_and_tenant(self, monkeypatch):
+        """Neutral model token on purpose (RDR-109 mode lint): a
+        realistic collection-NAME fixture for the update-chunks HTTP
+        request body; the test asserts the POST target, not any
+        cloud-mode embedder behavior."""
         client = HttpVectorClient()
         calls = []
         def fake_post(path, body, **kw):
@@ -404,14 +408,14 @@ class TestUpdateChunks:
             return {"updated": 2}
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         client.update_chunks(
-            "code__repo__voyage-code-3__v1",
+            "code__repo__model-code__v1",
             ["id1", "id2"],
             [{"frecency_score": 0.5}, {"frecency_score": 0.8}],
         )
         assert len(calls) == 1
         path, body = calls[0]
         assert path == "/v1/vectors/update-metadata"
-        assert body["collection"] == "code__repo__voyage-code-3__v1"
+        assert body["collection"] == "code__repo__model-code__v1"
         assert body["ids"] == ["id1", "id2"]
         assert body["metadatas"] == [{"frecency_score": 0.5}, {"frecency_score": 0.8}]
 
@@ -1135,6 +1139,237 @@ class TestGetT3Routing:
         assert isinstance(t3, HttpVectorClient)
 
 
+# ── Row resolution scoped to the writing client's own tenant (nexus-fryrd) ───
+#
+# Since the RDR-204 Phase 3 repoint, the write path's own catalog-row lookup
+# (per_collection_chunk_cap / _upsert_byte_budget, via _is_cce_collection)
+# read unconditionally through nexus.mcp_infra's process-wide T3 singleton --
+# whose tenant is always "default" (get_http_vector_client()'s own
+# construction). A client built for a DIFFERENT tenant therefore resolved
+# rows for the WRONG catalog (and, under a mint-locked credential, could
+# 403 minting for a tenant it was never configured for). HttpVectorClient
+# now resolves its own row through _resolve_collection_row: an injected
+# resolver first, else mcp_infra for the literal "default" tenant (byte-
+# identical to the old behaviour), else THIS client's own list_collections().
+
+class TestResolveCollectionRowTenantScoping:
+    # Neutral model tokens on purpose (RDR-109 mode lint): none of these tests
+    # touch an embedder, so a voyage-* name would be a cloud-mode claim they do not make.
+    def setup_method(self):
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        mcp_infra.reset_singletons()
+        reset_http_vector_client_for_tests()
+
+    def teardown_method(self):
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        mcp_infra.reset_singletons()
+        reset_http_vector_client_for_tests()
+
+    def test_default_tenant_client_reads_through_mcp_infra(self):
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        from nexus.db.t3 import T3Database  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+
+        fake_t3 = MagicMock(spec=T3Database)
+        fake_t3.list_collections.return_value = [
+            {"name": "docs__x__model-ctx__v1", "count": 1, "content_type": "docs"},
+        ]
+        mcp_infra.inject_t3(fake_t3)
+
+        client = HttpVectorClient()  # tenant="default"
+        row = client._resolve_collection_row("docs__x__model-ctx__v1")
+        # mcp_infra.get_collection_row's own contract: only the catalog-
+        # attribute subset, never "name"/"count" (see
+        # _collections_cache_tuple_from_rows) -- still enough for the
+        # field reads (content_type/embedding_model) the write path needs.
+        assert row == {"content_type": "docs"}
+        fake_t3.list_collections.assert_called_once()
+
+    def test_explicit_tenant_client_never_touches_mcp_infra_and_reads_its_own(self, monkeypatch):
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        from nexus.db.t3 import T3Database  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+
+        # If the write path fell through to mcp_infra's singleton (the
+        # nexus-fryrd defect), THIS would answer instead of the tenant-
+        # scoped HTTP call below -- assert it is never even touched.
+        fake_default_t3 = MagicMock(spec=T3Database)
+        fake_default_t3.list_collections.side_effect = AssertionError(
+            "mcp_infra's default-tenant singleton must not be read by an "
+            "explicit-tenant client's row resolver"
+        )
+        mcp_infra.inject_t3(fake_default_t3)
+
+        get_calls = []
+
+        def fake_get(path, *, tenant="default"):
+            get_calls.append((path, tenant))
+            return [
+                {"name": "knowledge__x__model-ctx__v1", "count": 2, "content_type": "knowledge"},
+            ]
+
+        monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
+
+        client = HttpVectorClient(tenant="tenant-a")
+        row = client._resolve_collection_row("knowledge__x__model-ctx__v1")
+        assert row == {"name": "knowledge__x__model-ctx__v1", "count": 2, "content_type": "knowledge"}
+        assert get_calls == [("/v1/vectors/stats", "tenant-a")]
+
+    def test_two_clients_of_different_tenants_resolve_through_their_own_tenant(self, monkeypatch):
+        """The concrete defect this closes: two live clients, two tenants,
+        one catalog each -- neither may answer for the other."""
+        rows_by_tenant = {
+            "tenant-a": [{"name": "code__proj__model-code__v1", "count": 1, "content_type": "code"}],
+            "tenant-b": [{"name": "code__proj__model-code__v1", "count": 1, "content_type": "docs"}],
+        }
+
+        def fake_get(path, *, tenant="default"):
+            return rows_by_tenant[tenant]
+
+        monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
+
+        client_a = HttpVectorClient(tenant="tenant-a")
+        client_b = HttpVectorClient(tenant="tenant-b")
+
+        row_a = client_a._resolve_collection_row("code__proj__model-code__v1")
+        row_b = client_b._resolve_collection_row("code__proj__model-code__v1")
+        assert row_a is not None and row_a["content_type"] == "code"
+        assert row_b is not None and row_b["content_type"] == "docs"
+
+    def test_injected_row_resolver_overrides_both_defaults(self):
+        seen = []
+
+        def fake_resolver(name):
+            seen.append(name)
+            return {"content_type": "knowledge"}
+
+        client = HttpVectorClient(tenant="tenant-c", _row_resolver=fake_resolver)
+        assert client._resolve_collection_row("anything") == {"content_type": "knowledge"}
+        assert seen == ["anything"]
+
+    def test_write_path_wires_the_resolver_through_upsert_chunks(self, monkeypatch):
+        """End-to-end (still HTTP-mocked): upsert_chunks's own cap and
+        byte-budget lookups go through THIS client's tenant -- once per
+        collection, memoized within the call -- and never mcp_infra's."""
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        from nexus.db.t3 import T3Database  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+
+        fake_default_t3 = MagicMock(spec=T3Database)
+        fake_default_t3.list_collections.side_effect = AssertionError(
+            "mcp_infra's default-tenant singleton must not be read for a "
+            "non-default-tenant client's write"
+        )
+        mcp_infra.inject_t3(fake_default_t3)
+
+        get_calls = []
+
+        def fake_get(path, *, tenant="default"):
+            get_calls.append((path, tenant))
+            return [{"name": "code__proj__model-code__v1", "count": 1, "content_type": "code"}]
+
+        monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda path, body, **kw: {"upserted": len(body.get("ids", []))},
+        )
+
+        client = HttpVectorClient(tenant="tenant-a")
+        client.upsert_chunks("code__proj__model-code__v1", ["id1"], ["text1"])
+
+        assert get_calls == [("/v1/vectors/stats", "tenant-a")]
+
+    def test_process_default_tenant_helper_drives_both_the_singleton_and_the_identity_check(
+        self, monkeypatch,
+    ):
+        """Fix round (Important #1): the case-2/case-3 split must be an
+        IDENTITY check against the SAME source get_http_vector_client()
+        itself reads (_process_default_tenant), never a bare
+        `== "default"` literal -- pinned by constructing the process
+        singleton under a non-"default" configured tenant and asserting
+        it still takes the mcp_infra (case 2) path, while a genuinely
+        different tenant still takes case 3."""
+        import nexus.db.http_vector_client as hvc  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        from nexus.db.t3 import T3Database  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+
+        monkeypatch.setattr(hvc, "_process_default_tenant", lambda: "acme-tenant")
+        hvc.reset_http_vector_client_for_tests()
+
+        singleton = hvc.get_http_vector_client()
+        assert singleton._tenant == "acme-tenant"  # noqa: SLF001 — the identity this test pins
+
+        fake_t3 = MagicMock(spec=T3Database)
+        fake_t3.list_collections.return_value = [
+            {"name": "docs__x__model-ctx__v1", "count": 1, "content_type": "docs"},
+        ]
+        mcp_infra.inject_t3(fake_t3)
+
+        row = singleton._resolve_collection_row("docs__x__model-ctx__v1")
+        assert row == {"content_type": "docs"}
+        fake_t3.list_collections.assert_called_once()
+
+        # A genuinely different tenant, even under the same patched
+        # process default, must still take the non-default (case 3) path.
+        other = hvc.HttpVectorClient(tenant="some-other-tenant")
+        get_calls = []
+
+        def fake_get(path, *, tenant="default"):
+            get_calls.append(tenant)
+            return [{"name": "docs__x__model-ctx__v1", "count": 1, "content_type": "docs"}]
+
+        monkeypatch.setattr(hvc, "_get", fake_get)
+        other._resolve_collection_row("docs__x__model-ctx__v1")
+        assert get_calls == ["some-other-tenant"]
+
+    def test_resolver_failure_is_memoized_not_retried(self, monkeypatch):
+        """Fix round (Important #2): a raising row resolver must be tried
+        ONCE per upsert_chunks() call -- not once per row-consuming caller
+        (cap, then byte budget)."""
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda path, body, **kw: {"upserted": len(body.get("ids", []))},
+        )
+        client = HttpVectorClient(tenant="tenant-a")
+        calls = []
+
+        def raising_resolver(name):
+            calls.append(name)
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(client, "_resolve_collection_row", raising_resolver)
+
+        client.upsert_chunks("code__proj__model-code__v1", ["id1"], ["text1"])
+
+        assert len(calls) == 1
+
+    def test_list_collections_primes_mcp_infra_only_for_the_process_default_tenant(
+        self, monkeypatch,
+    ):
+        """Critical fix (composed with nexus-7l3zo's list_collections
+        priming, e27665dbb): a non-default-tenant client's OWN
+        list_collections() must never write into mcp_infra's name-keyed,
+        tenant-blind cache -- only the process's own client's listing may
+        prime it."""
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+
+        def fake_get(path, *, tenant="default"):
+            return [{"name": "code__proj__model-code__v1", "count": 1, "content_type": "code"}]
+
+        monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
+
+        # A non-default client's own listing leaves the shared cache
+        # untouched -- the composed-defect case this fix closes.
+        other = HttpVectorClient(tenant="tenant-a")
+        other.list_collections()
+        assert mcp_infra._collections_cache[2] == {}  # noqa: SLF001 — the cache tuple's row-dict slot, the invariant this test pins
+
+        # The process-default client's listing DOES still prime it
+        # (unchanged nexus-7l3zo behaviour for the case it was built for).
+        default_client = HttpVectorClient()  # tenant="default"
+        default_client.list_collections()
+        assert mcp_infra._collections_cache[2] == {  # noqa: SLF001
+            "code__proj__model-code__v1": {"content_type": "code"},
+        }
+
+
 # ── Service-mode split-brain / dead-seam regression tests (RDR-152 .20 fixes) ─
 #
 # BEFORE the fix: doc_indexer.py called make_t3() directly when t3=None, always
@@ -1147,12 +1382,12 @@ class TestServiceModeIndexerRouting:
     """Verify doc_indexer.py routes through get_t3() in service mode (no split-brain)."""
 
     def setup_method(self):
-        from nexus import mcp_infra
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
         mcp_infra.reset_singletons()
         reset_http_vector_client_for_tests()
 
     def teardown_method(self):
-        from nexus import mcp_infra
+        from nexus import mcp_infra  # noqa: PLC0415 — deferred, matches the file's other in-test imports
         mcp_infra.reset_singletons()
         reset_http_vector_client_for_tests()
 
@@ -2647,96 +2882,111 @@ def _wire_fake_opener(monkeypatch: pytest.MonkeyPatch, body, headers: dict[str, 
 
 class TestSkippedCollectionsHeaderLogging:
     def test_search_logs_a_warning_when_the_header_is_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Neutral model tokens on purpose (RDR-109 mode lint): opaque
+        data for the thread-local header-capture logging path (a fake
+        HTTP response header); no embedder runs, no credential is read."""
         from structlog.testing import capture_logs
 
         _wire_fake_opener(
             monkeypatch, [],
-            headers={"X-Nexus-Skipped-Collections": "docs__ghost__voyage-context-3__v1,code__gone__voyage-code-3__v1"},
+            headers={"X-Nexus-Skipped-Collections": "docs__ghost__model-ctx__v1,code__gone__model-code__v1"},
         )
         client = HttpVectorClient()
         with capture_logs() as logs:
-            client.search("q", ["docs__ghost__voyage-context-3__v1", "code__gone__voyage-code-3__v1", "docs__live__voyage-context-3__v1"])
+            client.search("q", ["docs__ghost__model-ctx__v1", "code__gone__model-code__v1", "docs__live__model-ctx__v1"])
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert len(events) == 1
         assert events[0]["route"] == "search"
-        assert events[0]["skipped"] == ["docs__ghost__voyage-context-3__v1", "code__gone__voyage-code-3__v1"]
+        assert events[0]["skipped"] == ["docs__ghost__model-ctx__v1", "code__gone__model-code__v1"]
         assert events[0]["requested"] == [
-            "docs__ghost__voyage-context-3__v1", "code__gone__voyage-code-3__v1", "docs__live__voyage-context-3__v1",
+            "docs__ghost__model-ctx__v1", "code__gone__model-code__v1", "docs__live__model-ctx__v1",
         ]
 
     def test_search_logs_nothing_when_the_header_is_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Neutral model token on purpose (RDR-109 mode lint): same
+        reason as the sibling test above."""
         from structlog.testing import capture_logs
 
         _wire_fake_opener(monkeypatch, [])
         client = HttpVectorClient()
         with capture_logs() as logs:
-            client.search("q", ["docs__live__voyage-context-3__v1"])
+            client.search("q", ["docs__live__model-ctx__v1"])
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert events == []
 
     def test_search_metadata_scoped_logs_a_warning_when_the_header_is_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Neutral model token on purpose (RDR-109 mode lint): same
+        reason as the sibling test above."""
         from structlog.testing import capture_logs
 
         _wire_fake_opener(
             monkeypatch, [],
-            headers={"X-Nexus-Skipped-Collections": "docs__ghost__voyage-context-3__v1"},
+            headers={"X-Nexus-Skipped-Collections": "docs__ghost__model-ctx__v1"},
         )
         client = HttpVectorClient()
         with capture_logs() as logs:
-            client.search_metadata_scoped("q", ["docs__ghost__voyage-context-3__v1", "docs__live__voyage-context-3__v1"])
+            client.search_metadata_scoped("q", ["docs__ghost__model-ctx__v1", "docs__live__model-ctx__v1"])
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert len(events) == 1
         assert events[0]["route"] == "search_metadata_scoped"
-        assert events[0]["skipped"] == ["docs__ghost__voyage-context-3__v1"]
+        assert events[0]["skipped"] == ["docs__ghost__model-ctx__v1"]
 
     def test_search_graph_hop_logs_a_warning_when_the_header_is_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Neutral model token on purpose (RDR-109 mode lint): same
+        reason as the sibling test above."""
         from structlog.testing import capture_logs
 
         _wire_fake_opener(
             monkeypatch, [],
-            headers={"X-Nexus-Skipped-Collections": "docs__ghost__voyage-context-3__v1"},
+            headers={"X-Nexus-Skipped-Collections": "docs__ghost__model-ctx__v1"},
         )
         client = HttpVectorClient()
         with capture_logs() as logs:
-            client.search_graph_hop("q", ["1.1"], ["docs__ghost__voyage-context-3__v1", "docs__live__voyage-context-3__v1"])
+            client.search_graph_hop("q", ["1.1"], ["docs__ghost__model-ctx__v1", "docs__live__model-ctx__v1"])
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert len(events) == 1
         assert events[0]["route"] == "search_graph_hop"
-        assert events[0]["skipped"] == ["docs__ghost__voyage-context-3__v1"]
+        assert events[0]["skipped"] == ["docs__ghost__model-ctx__v1"]
 
     def test_search_aspect_scoped_logs_a_warning_when_the_header_is_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Neutral model token on purpose (RDR-109 mode lint): same
+        reason as the sibling test above."""
         from structlog.testing import capture_logs
 
         _wire_fake_opener(
             monkeypatch, [],
-            headers={"X-Nexus-Skipped-Collections": "docs__ghost__voyage-context-3__v1"},
+            headers={"X-Nexus-Skipped-Collections": "docs__ghost__model-ctx__v1"},
         )
         client = HttpVectorClient()
         with capture_logs() as logs:
-            client.search_aspect_scoped("q", ["docs__ghost__voyage-context-3__v1", "docs__live__voyage-context-3__v1"])
+            client.search_aspect_scoped("q", ["docs__ghost__model-ctx__v1", "docs__live__model-ctx__v1"])
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert len(events) == 1
         assert events[0]["route"] == "search_aspect_scoped"
-        assert events[0]["skipped"] == ["docs__ghost__voyage-context-3__v1"]
+        assert events[0]["skipped"] == ["docs__ghost__model-ctx__v1"]
 
     def test_a_later_unrelated_call_does_not_see_a_stale_header(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Pop-not-peek: the thread-local clears itself after each read, so
         a second call issued with no header present must not replay the
-        FIRST call's skip."""
+        FIRST call's skip.
+
+        Neutral model tokens on purpose (RDR-109 mode lint): same reason
+        as the sibling tests above.
+        """
         from structlog.testing import capture_logs
         import nexus.db.http_vector_client as hv
 
         monkeypatch.setattr(hv, "_resolve_endpoint", lambda: ("http://svc", "static-tok"))
         stub = _StubDataTokenManager(None)
         monkeypatch.setattr("nexus.db.data_token.get_data_token_manager", lambda: stub)
-        opener = _FakeOpener([], {"X-Nexus-Skipped-Collections": "docs__ghost__voyage-context-3__v1"})
+        opener = _FakeOpener([], {"X-Nexus-Skipped-Collections": "docs__ghost__model-ctx__v1"})
         monkeypatch.setattr(hv, "_keepalive_opener", lambda: opener)
         client = HttpVectorClient()
-        client.search("q", ["docs__ghost__voyage-context-3__v1"])  # primes the thread-local
+        client.search("q", ["docs__ghost__model-ctx__v1"])  # primes the thread-local
 
         opener._headers = None  # second call's real response carries no header
         with capture_logs() as logs:
-            client.search("q", ["docs__live__voyage-context-3__v1"])
+            client.search("q", ["docs__live__model-ctx__v1"])
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert events == []
 
@@ -2753,13 +3003,16 @@ class TestSingleCollectionUnregistered422IsActionable:
     accompanies it."""
 
     def test_single_collection_422_renders_the_engine_detail(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Neutral model token on purpose (RDR-109 mode lint): the
+        engine's error body is a canned string this test constructs
+        itself; no embedder or credential path is exercised."""
         import urllib.error
         import io
         import json as _json
         import nexus.db.http_vector_client as hv
 
         body = _json.dumps({
-            "error": "collection 'docs__ghost__voyage-context-3__v1' is not registered",
+            "error": "collection 'docs__ghost__model-ctx__v1' is not registered",
             "detail": "register it first via POST /v1/catalog/collections/upsert",
         }).encode()
 
@@ -2772,9 +3025,9 @@ class TestSingleCollectionUnregistered422IsActionable:
 
         client = HttpVectorClient()
         with pytest.raises(VectorServiceError) as excinfo:
-            client.search("q", ["docs__ghost__voyage-context-3__v1"])
+            client.search("q", ["docs__ghost__model-ctx__v1"])
         msg = str(excinfo.value)
-        assert "docs__ghost__voyage-context-3__v1" in msg
+        assert "docs__ghost__model-ctx__v1" in msg
         assert "is not registered" in msg
         assert "register it first" in msg
         assert excinfo.value.code == 422

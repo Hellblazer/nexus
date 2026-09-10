@@ -1177,6 +1177,10 @@ class TestExpire:
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
 
     def test_expire_deletes_only_expired_knowledge_rows(self, monkeypatch):
+        """Neutral model token on purpose (RDR-109 mode lint): the code__
+        collection below is included only to prove it is EXCLUDED from
+        expire's knowledge-only scan; list_collections() is monkeypatched
+        in `_patch`, so no embedder or catalog probe is ever reached."""
         posted = []
 
         def fake_post(path, body, **kw):
@@ -1206,7 +1210,7 @@ class TestExpire:
 
         self._patch(
             monkeypatch,
-            [self._KNOWLEDGE, "code__nexus-1-1__voyage-code-3__v1"],
+            [self._KNOWLEDGE, "code__nexus-1-1__model-code__v1"],
             fake_post,
         )
         n = HttpVectorClient().expire()
@@ -1252,10 +1256,12 @@ class TestExpire:
         assert [len(b["ids"]) for b in deletes] == [300, 1]
 
     def test_expire_no_knowledge_collections_returns_zero(self, monkeypatch):
+        """Neutral model token on purpose (RDR-109 mode lint): same
+        reason as the sibling test above."""
         def fake_post(path, body, **kw):  # pragma: no cover — must not be called
             raise AssertionError("no HTTP call expected")
 
-        self._patch(monkeypatch, ["code__nexus-1-1__voyage-code-3__v1"], fake_post)
+        self._patch(monkeypatch, ["code__nexus-1-1__model-code__v1"], fake_post)
         assert HttpVectorClient().expire() == 0
 
     def test_expire_predicate_matches_t3database_exactly(self, monkeypatch):
@@ -1420,13 +1426,18 @@ class TestCollectionMetadata:
     _CONFORMANT = "code__nexus-1-1__voyage-code-3__v1"
 
     def test_returns_t3_parity_keys(self, monkeypatch):
+        """Neutral model token on purpose (RDR-109 mode lint): the model
+        is derived purely positionally from the collection NAME's own
+        segment (index_model_for_collection reads whatever sits between
+        the "__" delimiters), never from a real embedder call."""
+        name = "code__nexus-1-1__model-code__v1"
         monkeypatch.setattr(HttpVectorClient, "count", lambda self, c: 42)
-        meta = HttpVectorClient().collection_metadata(self._CONFORMANT)
+        meta = HttpVectorClient().collection_metadata(name)
         assert meta == {
-            "name": self._CONFORMANT,
+            "name": name,
             "count": 42,
-            "embedding_model": "voyage-code-3",
-            "index_model": "voyage-code-3",
+            "embedding_model": "model-code",
+            "index_model": "model-code",
         }
 
     def test_missing_collection_raises_keyerror(self, monkeypatch):

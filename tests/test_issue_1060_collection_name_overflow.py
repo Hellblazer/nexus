@@ -97,5 +97,9 @@ def test_conformant_collection_name_passes() -> None:
 
 
 def test_short_known_voyage_name_passes() -> None:
-    """Standard voyage-named collection passes validation unchanged."""
-    validate_collection_name("code__nexus-abc123__voyage-code-3__v1")
+    """Standard cloud-embedder-named collection passes validation unchanged.
+
+    Neutral model token on purpose (RDR-109 mode lint): pure length/
+    charset validation, no embedder call either way.
+    """
+    validate_collection_name("code__nexus-abc123__model-code__v1")

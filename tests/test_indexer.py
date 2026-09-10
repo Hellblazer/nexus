@@ -158,6 +158,19 @@ def _patches(db, *, cfg=None, extra=None):
         # explicit fixture, not a weaker patch.
         "nexus.catalog.factory.make_catalog_reader": {"return_value": None},
         "nexus.indexer._catalog_hook": {"return_value": {}},
+        # nexus-bd44g: the indexer now registers each freshly-minted T3
+        # collection (ensure_collection_registered) BEFORE the staleness
+        # sweep. That seam reads the engine's embedding profile via the
+        # SAME make_catalog_reader() this module stubs to None above, so
+        # left unpatched it raises CatalogReaderUnavailableError on every
+        # journey below — a boundary these tests never previously
+        # reached, since `db` (nexus.db.make_t3`'s return) already stubs
+        # every write wholesale (upsert_chunks_with_embeddings et al.),
+        # bypassing the REAL write path's own ensure_collection_registered
+        # call inside HttpVectorClient. Stubbed here at the same fidelity
+        # as _catalog_hook/make_catalog_reader above; a test asserting
+        # registration behaviour overrides this via `extra`.
+        "nexus.corpus.ensure_collection_registered": {},
     }
     if extra: patches.update(extra)
     mocks, stack = {}, []
@@ -644,6 +657,150 @@ def test_run_index_skips_process_documents_in_the_rdr_directory(tmp_path):
         stats = _run_index(repo, _reg())
     assert seen == ["001.md"], seen
     assert stats["rdr_indexed"] == 1
+
+
+def test_run_index_prunes_stored_doc_for_now_excluded_rdr_basename(tmp_path, monkeypatch):
+    """nexus-d6qmz (GH #1524 residual): a document already stored for
+    docs/rdr/README.md under the pre-#1524 rule survives on disk untouched
+    by the new basename exclusion above — it is never RE-discovered, but
+    the stored catalog row is never told either. Without the fix, the only
+    reclaim path is ``_run_housekeeping``'s two-run miss-count sweep (this
+    run's ``indexed_set`` simply omits the path); THIS run must also feed
+    it into the same ``delta_deleted`` -> ``_delete_docs_for_paths`` prune
+    the --since-head path uses for a real git deletion, so a FULL run
+    reclaims it immediately, exactly like a git deletion would.
+
+    ``_stored_paths_among`` (round 2: the batched "is it still stored"
+    confirmation gate) has its own dedicated unit test
+    (``test_stored_paths_among_filters_to_live_documents_only``); here it
+    is short-circuited to "yes, everything present is still stored" so
+    THIS test stays focused on the wiring one layer up — a path
+    confirmed stored rides ``delta_deleted`` into a same-run
+    ``_delete_docs_for_paths`` call."""
+    from nexus.indexer import _run_index
+    repo = tmp_path / "repo"; repo.mkdir()
+    rdr = repo / "docs" / "rdr"; rdr.mkdir(parents=True)
+    (rdr / "001.md").write_text("# D\n")
+    (rdr / "README.md").write_text("# Recommendation Decisioning Records\n")
+    (rdr / "AGENTS.md").write_text("# guidance\n")
+    db, _, _ = _tracking_db()
+    deleted_calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "nexus.indexer._stored_paths_among",
+        lambda _repo, candidates: set(candidates),
+    )
+
+    with _patches(db, extra={
+        "nexus.indexer._index_prose_file": {"return_value": 1},
+        "nexus.indexer._delete_docs_for_paths": {
+            "side_effect": lambda _repo, paths: deleted_calls.append(list(paths)),
+        },
+    }):
+        _run_index(repo, _reg())
+
+    assert deleted_calls, (
+        "an excluded-but-present RDR basename confirmed still stored must "
+        "trigger a same-run _delete_docs_for_paths call, not wait on the "
+        "two-run housekeeping miss-count sweep"
+    )
+    got = set(deleted_calls[0])
+    assert str(Path("docs/rdr/README.md")) in got
+    assert str(Path("docs/rdr/AGENTS.md")) in got
+    # The real RDR file must never be swept alongside the excluded ones.
+    assert str(Path("docs/rdr/001.md")) not in got
+
+
+def test_stored_paths_among_filters_to_live_documents_only(tmp_path):
+    """nexus-d6qmz round 2 (review nexus/review-nexus-d6qmz-7710a262b-since-
+    head-regression-2026-09-09): ONE batched ``by_owner`` read narrows the
+    excluded-basename candidate set down to paths that still have a LIVE
+    catalog document — never a lookup per candidate path. ``by_owner`` is
+    backed by the same ``deleted_at IS NULL`` filter as ``by_file_path``
+    server-side, so an already-tombstoned or never-stored path drops out
+    on its own and can never re-enter ``delta_deleted``."""
+    from nexus.indexer import _stored_paths_among
+
+    class _Entry:
+        def __init__(self, file_path):
+            self.file_path = file_path
+
+    class _Reader:
+        def __init__(self, entries):
+            self._entries = entries
+
+        def owner_for_repo(self, _repo_hash):
+            return "1.1"
+
+        def by_owner(self, _owner):
+            return self._entries
+
+    candidates = {str(Path("docs/rdr/README.md")), str(Path("docs/rdr/AGENTS.md"))}
+
+    with patch(
+        "nexus.catalog.factory.make_catalog_reader",
+        return_value=_Reader([_Entry(str(Path("docs/rdr/README.md"))), _Entry("other.py")]),
+    ):
+        got = _stored_paths_among(tmp_path, candidates)
+    assert got == {str(Path("docs/rdr/README.md"))}
+
+    # Steady state: nothing left to reclaim (never stored, or the
+    # deleted_at IS NULL filter already dropped an earlier tombstone).
+    with patch(
+        "nexus.catalog.factory.make_catalog_reader",
+        return_value=_Reader([_Entry("other.py")]),
+    ):
+        got = _stored_paths_among(tmp_path, candidates)
+    assert got == set()
+
+    # Catalog absent: safe empty result, never an exception.
+    with patch("nexus.catalog.factory.make_catalog_reader", return_value=None):
+        got = _stored_paths_among(tmp_path, candidates)
+    assert got == set()
+
+    # Empty candidate set: not even a catalog call.
+    with patch("nexus.catalog.factory.make_catalog_reader") as mk:
+        got = _stored_paths_among(tmp_path, set())
+    assert got == set()
+    mk.assert_not_called()
+
+
+def test_since_head_run_with_nothing_stored_at_excluded_paths_skips_the_sweep(tmp_path, monkeypatch):
+    """nexus-d6qmz round 2 (review nexus/review-nexus-d6qmz-7710a262b-since-
+    head-regression-2026-09-09): docs/rdr/README.md and AGENTS.md are
+    PERMANENT — present on disk every run. Once there is nothing left to
+    reclaim at those paths (never stored, or already reclaimed by a prior
+    run — the steady state), a --since-head run with no git deletions must
+    NOT call ``_delete_docs_for_paths`` and must hit the "no deletions in
+    delta" skip phase, not silently pay the full per-collection orphan
+    sweep on every incremental run forever."""
+    from nexus import indexer as idx
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    rdr = repo / "docs" / "rdr"; rdr.mkdir(parents=True)
+    (rdr / "README.md").write_text("# process doc\n")
+    (rdr / "AGENTS.md").write_text("# guidance\n")
+
+    monkeypatch.setattr(idx, "_get_owner_head_hash", lambda _repo: "a" * 40)
+    monkeypatch.setattr(idx, "_git_changed_since", lambda _repo, _base: (["some_file.py"], []))
+    # Steady state: the batched confirmation gate reports nothing to reclaim.
+    monkeypatch.setattr(idx, "_stored_paths_among", lambda _repo, _candidates: set())
+
+    deleted_calls: list[list[str]] = []
+    phases: list[str] = []
+    db, _, _ = _tracking_db()
+    with _patches(db, extra={
+        "nexus.indexer._index_prose_file": {"return_value": 1},
+        "nexus.indexer._delete_docs_for_paths": {
+            "side_effect": lambda _repo, paths: deleted_calls.append(list(paths)),
+        },
+    }):
+        idx._run_index(repo, _reg(), since_head=True, on_phase=phases.append)
+
+    assert deleted_calls == [], (
+        "nothing confirmed stored at the excluded paths — delta_deleted "
+        "must stay empty and _delete_docs_for_paths must not fire"
+    )
+    assert any("no deletions in delta" in p for p in phases), phases
 
 
 @pytest.mark.parametrize("rdr_indexed,expect", [(1, True), (0, False)])
@@ -2500,6 +2657,317 @@ def test_run_index_creates_both_for_mixed_repo(tmp_path):
     assert docs_created, (
         "mixed repo must create docs__ collection; "
         "lazy-creation gate is over-eager"
+    )
+
+
+def test_run_index_registers_collection_before_staleness_sweep(tmp_path, caplog):
+    """nexus-bd44g: a first-time ``nx index repo`` run must register the
+    freshly-minted T3 collection with the engine BEFORE the staleness-
+    cache read that follows it (``build_staleness_cache`` ->
+    ``col.get_all_metadata``).
+
+    ``db.get_or_create_collection`` returns a bare client-side handle with
+    NO registration side effect — RDR-204 Phase 1 retired the engine's
+    auto-register-on-first-write behaviour, so registration now happens
+    lazily at the first per-file chunk WRITE, further down this same run
+    (``write_with_registration_retry`` -> ``ensure_collection_registered``).
+    Pre-fix, the staleness sweep ran unconditionally BEFORE that first
+    write, so on a genuinely first-time collection it hit the engine's
+    "not registered" 422 on every single run — logging a
+    ``build_staleness_cache_fast_path_failed_falling_back`` warning (with
+    a full traceback) though the run itself still completed correctly
+    with an empty (all-new) cache.
+
+    A fake ``ensure_collection_registered`` flips a shared flag; the mock
+    collection's ``get_all_metadata`` raises the engine's exact "not
+    registered" 422 shape until that flag is set. This is a code-only
+    repo (one collection minted, so no cross-collection ambiguity), and
+    the flag is keyed on "any registration happened yet" rather than on
+    the collection's own conformant name — ``_migrate_legacy_collections``
+    promotes the legacy 2-segment name ``_reg()`` supplies to a real
+    RDR-103 4-segment name at run time, so the exact string is not
+    knowable up front. Removing the fix's pre-sweep registration call
+    makes this test fail: the flag is never set before the sweep, so the
+    raise fires and the warning is logged.
+    """
+    import logging
+
+    import structlog
+
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")
+
+    state = {"registered": False}
+
+    def _fake_ensure_registered(name, *, registrar=None, kwargs=None):
+        state["registered"] = True
+
+    col = MagicMock()
+    col.get.return_value = {"metadatas": [], "ids": []}
+
+    def _get_all_metadata(where=None):
+        if not state["registered"]:
+            raise RuntimeError(
+                "POST /v1/vectors/get-all-metadata -> HTTP 422: "
+                f"collection {col.name!r} is not registered for tenant 'default'"
+            )
+        return {"ids": [], "metadatas": []}
+    col.get_all_metadata.side_effect = _get_all_metadata
+
+    db = MagicMock()
+    db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
+
+    v = _voyage(1)
+    structlog.configure(
+        processors=[structlog.stdlib.render_to_log_kwargs],
+        wrapper_class=structlog.stdlib.BoundLogger,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+    )
+    with caplog.at_level(logging.WARNING, logger="nexus.indexer_utils"):
+        with _patches(db, extra={
+            "nexus.chunker.chunk_file": {"return_value": [_chunk()]},
+            "voyageai.Client": {"return_value": v},
+            "nexus.corpus.ensure_collection_registered": {
+                "side_effect": _fake_ensure_registered,
+            },
+        }):
+            _run_index(repo, _reg())
+
+    assert state["registered"], (
+        "ensure_collection_registered was never called for the "
+        "freshly-minted collection"
+    )
+    fast_path_failures = [
+        r for r in caplog.records
+        if r.msg == "build_staleness_cache_fast_path_failed_falling_back"
+    ]
+    assert not fast_path_failures, (
+        "staleness-cache read reached the engine before registration: "
+        f"{[getattr(r, 'collection', None) for r in fast_path_failures]}"
+    )
+
+
+def test_run_index_registration_loop_skips_deferred_collections(tmp_path):
+    """nexus-bd44g fix round (code review coverage gap): the registration
+    loop's have_code_files / have_docs_files / rdr_col_name guards must
+    exactly mirror the collection-CREATION guards a few lines above it in
+    ``_run_index``. A code-only repo (no docs, no docs/rdr) must register
+    ONLY the code__ collection -- never call ensure_collection_registered
+    for a deferred (None) docs__/rdr__ handle. A regression that dropped
+    these guards (always registering all three names unconditionally)
+    would pass every OTHER existing test silently, since nothing else
+    asserts non-call in the no-files case.
+    """
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")  # code only: no docs, no docs/rdr
+
+    registered_names: list[str] = []
+
+    def _fake_ensure_registered(name, *, registrar=None, kwargs=None):
+        registered_names.append(name)
+
+    db, col = _mock_db()
+    v = _voyage(1)
+    with _patches(db, extra={
+        "nexus.chunker.chunk_file": {"return_value": [_chunk()]},
+        "voyageai.Client": {"return_value": v},
+        "nexus.corpus.ensure_collection_registered": {
+            "side_effect": _fake_ensure_registered,
+        },
+    }):
+        _run_index(repo, _reg())
+
+    assert registered_names, "expected at least the code collection to register"
+    assert all(n.startswith("code__") for n in registered_names), (
+        "a deferred (docs/rdr) collection was registered when no such "
+        f"files exist: {registered_names!r}"
+    )
+
+
+def test_run_index_registration_loop_skips_when_vectors_opt_out_of_service(tmp_path, monkeypatch):
+    """7.39.0 release-battery finding (local-service gate, 35 reds): with
+    NX_STORAGE_BACKEND_VECTORS opted out of service mode the indexer writes
+    to a client-embedding T3 double, whose collection names carry the
+    double's own model token; registering those against the engine 422s on
+    the tenant's real embedding profile. The write path registers only from
+    inside HttpVectorClient, so the pre-sweep loop must not register either.
+    """
+    from nexus.indexer import _run_index  # noqa: PLC0415 — deferred import, same idiom as the sibling bd44g tests
+
+    # Local mode (the only branch that survives a vector opt-out: the
+    # non-local, non-service branch raises CredentialsMissingError) plus the
+    # opt-out itself, exactly the posture tests/test_indexer_e2e.py pins.
+    monkeypatch.setenv("NX_LOCAL", "1")
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)  # overrides this module's cloud_mode pin
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "local")
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")
+
+    registered_names: list[str] = []
+
+    def _fake_ensure_registered(name, *, registrar=None, kwargs=None):
+        registered_names.append(name)
+
+    db, col = _mock_db()
+    v = _voyage(1)
+    with _patches(db, extra={
+        "nexus.chunker.chunk_file": {"return_value": [_chunk()]},
+        "voyageai.Client": {"return_value": v},
+        "nexus.corpus.ensure_collection_registered": {
+            "side_effect": _fake_ensure_registered,
+        },
+        "nexus.indexer.check_local_path_writable": {},
+    }):
+        _run_index(repo, _reg())
+
+    assert registered_names == [], (
+        "the pre-sweep loop registered against the engine while the vector "
+        f"backend was opted out of service mode: {registered_names!r}"
+    )
+
+
+def test_run_index_registers_rdr_collection_when_rdr_files_exist(tmp_path):
+    """nexus-bd44g fix round (code review coverage gap): the registration
+    loop's third slot (rdr_col_name) must actually fire when RDR files
+    exist -- the original fix's own regression test was code-only, "no
+    cross-collection ambiguity", and never exercised this branch.
+    """
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "README.md").write_text("# README\n\nProject description here.\n")
+    rdr = repo / "docs" / "rdr"; rdr.mkdir(parents=True)
+    (rdr / "ADR-001.md").write_text("# ADR-001\n\nArchitecture decision.\n")
+
+    registered_names: list[str] = []
+
+    def _fake_ensure_registered(name, *, registrar=None, kwargs=None):
+        registered_names.append(name)
+
+    db, ups, _ = _tracking_db()
+    with _patches(db, extra={
+        "nexus.corpus.ensure_collection_registered": {
+            "side_effect": _fake_ensure_registered,
+        },
+    }):
+        _run_index(repo, _reg())
+
+    rdr_registered = [n for n in registered_names if n.startswith("rdr__")]
+    assert rdr_registered, (
+        "rdr collection was never registered even though RDR files "
+        f"exist; registered: {registered_names!r}"
+    )
+
+
+def test_run_index_propagates_embedding_profile_mismatch_from_registration_loop(
+    tmp_path,
+):
+    """nexus-bd44g fix round (code review coverage gap): a genuine
+    EmbeddingProfileMismatchError raised by ensure_collection_registered
+    must propagate UNCAUGHT out of _run_index from the NEW, earlier call
+    site -- the commit's own prose asserted this ("A genuine profile
+    mismatch still propagates uncaught, same as it always would have at
+    write time") without a regression test integrated through _run_index
+    itself, only via ensure_collection_registered's own isolated unit
+    tests. This only moves WHEN the failure surfaces; it must never mask
+    it.
+    """
+    from nexus.corpus import EmbeddingProfileMismatchError
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")
+
+    def _raise_mismatch(name, *, registrar=None, kwargs=None):
+        raise EmbeddingProfileMismatchError(
+            "content_type='code': this install's configured intent is "
+            "'voyage-code-3', but the engine's embedding_profile still says "
+            "'bge-base-en-v15-768'. A restart is required for the engine to "
+            "adopt this: `nx daemon service stop && nx daemon service start`."
+        )
+
+    db, col = _mock_db()
+    with _patches(db, extra={
+        "nexus.corpus.ensure_collection_registered": {
+            "side_effect": _raise_mismatch,
+        },
+    }):
+        with pytest.raises(EmbeddingProfileMismatchError):
+            _run_index(repo, _reg())
+
+
+def test_run_index_registration_loop_derives_model_from_name_not_independent_guess(
+    tmp_path,
+):
+    """nexus-bd44g fix check (full-suite finding, /tmp/wt-int2): a bare
+    ``ensure_collection_registered(_name)`` call (kwargs=None) derives
+    ``embedding_model`` via ``collection_registration_kwargs`` ->
+    ``effective_embedding_model_for_writes(content_type)`` -- an
+    INDEPENDENT, env-sensitive computation that can genuinely disagree
+    with the model token already embedded in this run's OWN conformant
+    collection name. Live failure: ``code__tiny-repo-721d1ff1__bge-
+    base-en-v15-768__v1`` (a real name minted under one
+    NX_STORAGE_BACKEND_VECTORS state) registered with embedding_model
+    'minilm-l6-v2-384' (effective_embedding_model_for_writes evaluated
+    moments later, after the run flipped that env var) -- the engine
+    422s on ANY kwargs/profile disagreement regardless of which side is
+    "right".
+
+    Reproduces the split directly: the registry supplies an ALREADY
+    CONFORMANT ``code_collection`` name naming 'bge-base-en-v15-768' (so
+    _run_index's Phase-4 migration is a pass-through, not a re-mint),
+    while ``effective_embedding_model_for_writes`` is patched to return
+    a DIFFERENT model ('minilm-l6-v2-384') -- simulating exactly the
+    env-ordering split observed live. The registration call's kwargs
+    must still carry the NAME's own model, never the independent guess.
+    """
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")
+
+    conformant_code_collection = "code__repo__bge-base-en-v15-768__v1"
+    registered_kwargs: list[dict] = []
+
+    def _fake_ensure_registered(name, *, registrar=None, kwargs=None):
+        registered_kwargs.append({"name": name, "kwargs": kwargs})
+
+    db, col = _mock_db()
+    v = _voyage(1)
+    with _patches(db, extra={
+        "nexus.chunker.chunk_file": {"return_value": [_chunk()]},
+        "voyageai.Client": {"return_value": v},
+        "nexus.corpus.effective_embedding_model_for_writes": {
+            "return_value": "minilm-l6-v2-384",
+        },
+        "nexus.corpus.ensure_collection_registered": {
+            "side_effect": _fake_ensure_registered,
+        },
+    }):
+        _run_index(
+            repo,
+            _reg({
+                "collection": conformant_code_collection,
+                "code_collection": conformant_code_collection,
+                "docs_collection": "docs__repo",
+            }),
+        )
+
+    code_calls = [c for c in registered_kwargs if c["name"] == conformant_code_collection]
+    assert code_calls, (
+        f"expected a registration call for {conformant_code_collection!r}; "
+        f"got {registered_kwargs!r}"
+    )
+    assert code_calls[0]["kwargs"]["embedding_model"] == "bge-base-en-v15-768", (
+        "registration kwargs must derive embedding_model from the "
+        "collection's OWN name segment, not the independent "
+        "effective_embedding_model_for_writes() guess (patched here to "
+        f"'minilm-l6-v2-384'); got {code_calls[0]['kwargs']!r}"
     )
 
 

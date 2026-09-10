@@ -86,7 +86,7 @@ class FakeNewEndpointHandler(BaseHTTPRequestHandler):
         elif op == "/collections/list":
             self._send_json({
                 "collections": [
-                    {"name": "code__owner1__voyage-code-3__v1", "owner_id": "owner1",
+                    {"name": "code__owner1__model-code__v1", "owner_id": "owner1",
                      "content_type": "code"},
                     {"name": "knowledge__owner2__voyage-context-3__v1",
                      "owner_id": "owner2", "content_type": "knowledge"},
@@ -223,9 +223,13 @@ class TestHttpCatalogClientNewMethods:
         assert result == {}
 
     def test_collections_by_owner(self, http_client):
+        """Neutral model token on purpose (RDR-109 mode lint): a
+        realistic collection-NAME fixture the fake server always
+        returns; the test asserts the catalog public-API method, not
+        any cloud-mode embedder behavior."""
         result = http_client.collections_by_owner("owner1")
         assert len(result) == 1
-        assert result[0]["name"] == "code__owner1__voyage-code-3__v1"
+        assert result[0]["name"] == "code__owner1__model-code__v1"
 
     def test_stats_via_http(self, http_client):
         s = http_client.stats()

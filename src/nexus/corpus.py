@@ -307,8 +307,11 @@ class EmbeddingProfileMismatchError(RuntimeError):
     the engine's own register-time 422 on a mismatch (which remains the
     correctness guard for every OTHER registration call site this seam
     does not yet cover — those still get the engine's late refusal, not
-    this early one, until nexus-ft04v.27 consolidates them through this
-    same funnel).
+    this early one, until nexus-aotql consolidates them through this
+    same funnel — see :func:`ensure_collection_registered`'s own
+    docstring for the current site list; the prior tracker,
+    nexus-ft04v.27, CLOSED on 164fc06b2 with a census that predates one
+    of those sites).
     """
 
 
@@ -874,6 +877,16 @@ def collection_content_type(name: str) -> str:
     exactly the two-sources-of-truth bug (GH #667) RDR-204 exists to
     close. Callers deriving a CANDIDATE name to mint (not yet a real
     collection) must not call this -- see :func:`split_candidate_collection_name`.
+
+    Tenant-blind by construction (nexus-fryrd fix round, Significant 2):
+    ``get_collection_row`` always reads ``nexus.mcp_infra``'s process-wide
+    cache, which is that singleton's own tenant only -- this function (and
+    :func:`collection_owner` / :func:`collection_model` below, same
+    contract) has no client instance to ask "whose tenant", unlike
+    :meth:`nexus.db.http_vector_client.HttpVectorClient._resolve_collection_row`,
+    which does. Fine for every current caller (all read the ambient
+    process-default catalog); a caller resolving a DIFFERENT tenant's
+    collection identity would need the HttpVectorClient-side seam instead.
     """
     from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
     row = get_collection_row(name)
@@ -925,6 +938,7 @@ def collection_model(name: str) -> str:
 
 def resolve_row_preferred(
     name: str, field: str, name_fallback: "Callable[[str], str | None]",
+    *, row_resolver: "Callable[[str], dict | None] | None" = None,
 ) -> "str | None":
     """Row-preferred, candidate-string-fallback resolution of catalog
     *field* for collection *name*.
@@ -955,10 +969,22 @@ def resolve_row_preferred(
     falling through to *name_fallback*, matching every one of the four
     sites' original behaviour (a row that exists, even an incomplete
     one, is still authoritative and wins outright).
+
+    *row_resolver* (nexus-fryrd): the row lookup a caller uses instead of
+    the module-wide :func:`nexus.mcp_infra.get_collection_row` default --
+    e.g. an ``HttpVectorClient`` instance's own row resolver, scoped to
+    ITS tenant/endpoint rather than the ``mcp_infra`` singleton's
+    (``get_t3()``'s, always ``tenant="default"``). ``None`` (every
+    existing caller) preserves the prior behaviour exactly: the
+    ``mcp_infra`` cache, unconditionally.
     """
-    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+    if row_resolver is not None:
+        get_row = row_resolver
+    else:
+        from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+        get_row = get_collection_row
     try:
-        row = get_collection_row(name)
+        row = get_row(name)
     except Exception:  # noqa: BLE001 — class-(d) diagnostics run over drifted, offline or catalog-only state; a row fetch that cannot complete is reported and the site's own name derivation answers, exactly as it did before the row was preferred
         _log.warning(
             "resolve_row_preferred_row_fetch_failed",
@@ -1658,8 +1684,18 @@ def ensure_collection_registered(
     ``reindex_cmd``, ``commands/catalog_cmds/collections.py``'s
     backfill/rename, ``db/t3.py``'s row synthesis — all call
     :func:`collection_registration_kwargs` directly and register
-    without going through this function) until nexus-ft04v.27
-    consolidates them through one funnel.
+    without going through this function) until nexus-aotql
+    consolidates them through one funnel. ``nexus-ft04v.27`` (the prior
+    tracker for this consolidation) CLOSED on 164fc06b2 with a census
+    predating the site below, so it never carried a live count for it;
+    nexus-aotql is the current tracker. ``indexer.py``'s
+    ``index_repository`` pre-staleness-sweep registration loop
+    (nexus-bd44g) is a FIFTH related site, added after that census —
+    unlike the four above it already calls THIS function (no bypass,
+    same profile check), but it is a fifth place that independently
+    decides WHEN to register a name, so it is tracked alongside the
+    other four under nexus-aotql for the same eventual single-authority
+    design.
     """
     if name in _REGISTERED_COLLECTIONS:
         return

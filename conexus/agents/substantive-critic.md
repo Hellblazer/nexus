@@ -284,6 +284,24 @@ The canonical structure (in emission order):
 - **Ship-blocker**: yes | no — "yes" only if shipping AS-IS violates the relay's
   stated acceptance bar, loses data, wedges an install, or breaks a published
   contract. Everything else is "no" and becomes a bead, not a reason to hold.
+- **Class**: BLOCKS-PLANNING | DISCOVER-AT-IMPLEMENTATION — required for an RDR
+  gate critique (dispatched via `/conexus:rdr-gate` or the rdr-gate skill);
+  optional for every other consumer of this agent (code review, rdr-fix,
+  rdr-accept, rdr-close, and the substantive-critique skill), none of
+  which states a rule for this field. `Ship-blocker: yes` implies
+  `Class: BLOCKS-PLANNING`.
+
+      BLOCKS-PLANNING
+          The plan as written would cause someone to build the wrong thing,
+          or it cannot be executed in the order given. A bead is missing,
+          mis-sequenced, or specifies behaviour that contradicts the design
+          of record.
+
+      DISCOVER-AT-IMPLEMENTATION
+          Real, but the first test run, the first CI run, or the first hour
+          at the keyboard surfaces it. Missing fetches, unresolvable refs,
+          wrong flags, environment specifics, and anything a failing test
+          would name.
 
 ## Significant Issues
 [Issues that should be addressed. If none: write `None.`]

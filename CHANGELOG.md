@@ -6,6 +6,88 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.39.0] - 2026-09-10
+
+Paired engine: engine-service-v0.1.113 (tagged on e222a8fb6; deployed and
+live before this client tag, additive on the wire). `REQUIRED_ENGINE_VERSION`
+is (0, 1, 113).
+
+### Generations stop accumulating (nexus-xn84f)
+
+- `nx self gc [--keep N] [--dry-run] [--prune-uv-cache]` reaps old
+  generations without an install; the plugin's SessionStart hook runs it,
+  so a generation a long-lived session held at install time goes once that
+  session ends instead of at the next upgrade (1.7 GB per upgrade on a
+  box with day-long sessions). The reap prints every held tree it keeps
+  (`kept <gen>: held by <pids>`); a receipt-less tree written to within an
+  hour, or claimed by the builder's `.nx-building` marker within six, is a
+  build in progress, never wreckage. `nx doctor`'s Holders row names each
+  held generation's size on disk and the remedy. `nx self install` runs
+  `uv cache prune` after a successful flip.
+
+### Taxonomy doc_count drift (GH #1529, nexus-c0g6e)
+
+- Engine (v0.1.113): boot changeset hygiene-007-1 recounts every
+  `topics.doc_count` from `topic_assignments` through
+  `nexus.topics_recount_doc_count` (taxonomy-016); two additive routes,
+  `GET /v1/taxonomy/topics/doc_count_drift` and
+  `POST /v1/taxonomy/topics/recount_doc_count`; `importTopic` and the
+  batch topic import no longer seed `doc_count` from the caller.
+- Client: `nx doctor` reports doc_count drift in one call and names the
+  repair; `nx taxonomy audit --fix-doc-count` (dry run by default, `--yes`
+  to apply) runs the recount on demand; a pre-route engine reads as unread,
+  never as clean.
+
+### Indexing and catalog
+
+- A first `nx index repo` registers its collections before the staleness
+  sweep, with the model taken from the collection's own name, so a virgin
+  collection's read no longer logs two tracebacks (nexus-bd44g);
+  `nx index repo` renders the embedding-profile refusals as clean errors,
+  as `index md` and `index pdf` do.
+- A document already stored at an RDR-directory path the RDR pass now
+  excludes (README.md, AGENTS.md, CLAUDE.md) is tombstoned in the same run,
+  gated on a batched live-storage lookup so an incremental run keeps its
+  skip gate; the chunk follows at purge-trash's window (GH #1524 residual,
+  nexus-d6qmz).
+- `HttpVectorClient` resolves its write-path collection row through its
+  own tenant (an injectable resolver; the process's own client keeps the
+  cached path), memoizes a failed lookup per write, and only the process's
+  own client primes the shared row cache; `list_collections` primes that
+  cache at the listing seam so every CLI verb pays one stats round trip
+  (nexus-fryrd, nexus-7l3zo).
+
+### RDR tooling
+
+- The phase-review gate refuses to cross-walk a subset of §Approach: a
+  column-0 numbered line that fails the item grammar (`5a.`, `5.1.`,
+  `2)`, a bare number, a wrapped bold label, a plain step) inside the item
+  list's block is reported and the gate stops, for both §Approach
+  structures; fenced code and wrapped bold prose are not items (GH #1443,
+  nexus-010w5). The phase-block parser keeps a bullet's continuation line.
+- rdr-gate, rdr-fix and rdr-accept: findings carry a class
+  (BLOCKS-PLANNING or DISCOVER-AT-IMPLEMENTATION) that governs their
+  disposition; from round 3 the fix closes only ship-blockers and every
+  other finding is a residual dispositioned at accept; a residual
+  dispositioned by an RDR edit carries a fix check; residuals carry
+  forward across rounds; the fix check names every other occurrence of a
+  changed identifier and what constrains what (nexus-yjf5l series).
+- RDR-204 Phase 4 (opaque collection names) is rejected, recorded in the
+  RDR with its reopen trigger.
+
+### Other
+
+- `scripts/check_engine_release_floor.py`: `--no-record-deploy REASON`
+  wins over an exported `NX_GATE_REPORT_DIR`.
+- `nx store put` and `nx index md` render `EmbeddingProfileMismatchError`
+  and `LocalVoyageCredentialMissingError` as clean errors, not tracebacks.
+- Test harness: the mode-declaration lint's nodeid exclusions fall from 82
+  to 17 (every remaining entry with a reason; file-level entries 60 to 44,
+  continued as a bead); the "primary is not a worktree" pin resolves the
+  primary through git's common dir so a worktree suite run no longer
+  carries that red; the four collection-registration call sites are
+  tracked for consolidation (nexus-aotql).
+
 ## [7.38.0] - 2026-09-09
 
 Paired engine: engine-service-v0.1.112 (tagged on 9f0a5397c; deployed and

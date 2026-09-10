@@ -1605,6 +1605,8 @@ nx taxonomy project code__nexus --use-icf --persist  # suppress hub topics (RDR-
 nx taxonomy project --backfill --persist        # project all collections
 nx taxonomy hubs --min-collections 5 --max-icf 1.2 --explain  # hub detector (RDR-077)
 nx taxonomy audit --collection code__nexus                    # projection quality audit (RDR-077)
+nx taxonomy audit --collection code__nexus --fix-doc-count    # preview doc_count drift (bead nexus-c0g6e, GH #1529)
+nx taxonomy audit --collection code__nexus --fix-doc-count --yes  # apply the correction (tenant-wide; --collection scopes only the display)
 nx taxonomy validate-refs docs/**/*.md                        # stale-reference validator (RDR-081)
 nx taxonomy backfill-source-collection                        # RETIRED: refuses with guidance
 nx taxonomy backfill-source-collection --apply                # RETIRED: refuses with guidance
@@ -3254,6 +3256,48 @@ uninstall conexus` remains the way to reap a legacy uv tree once nothing is
 running from it.
 
 ---
+
+
+## nx self gc
+
+```
+nx self gc [--keep N] [--dry-run] [--prune-uv-cache]
+```
+
+Reap old generations without installing one (7.39.0, nexus-xn84f). It is the
+same reap `nx self install` runs last, with the same keep window (default 3)
+and the same four never-delete rules, and it is what turns a held generation
+back into free disk: a generation held by a long-lived `nx-mcp` at install
+time was never reclaimed until the next install, and on a box whose sessions
+live for days every generation since those sessions started was held at every
+install, so the tree grew by one 1.7 GB generation per upgrade for as long as
+the sessions lived. The plugin's SessionStart hook runs this, so a tree goes
+the moment its holders are gone. Every held tree the reap keeps is printed
+(`kept <gen>: held by <pids>`), from both this verb and `nx self install`,
+where the reap used to say nothing about them. `nx doctor`'s Holders row names
+each held generation's size on disk and the remedy: end those sessions, then
+`nx self gc`.
+
+| Flag | Description |
+|------|-------------|
+| `--keep N` | Generations to retain (default 3); the four rules still apply on top. |
+| `--dry-run` | Report what would go; delete nothing. |
+| `--prune-uv-cache` | Also run `uv cache prune`. Every generation build unpacks its wheels into uv's archive cache and nothing else ever removes them (82 GB measured on a box that had upgraded for months); `nx self install` runs the prune after every successful flip. |
+
+`--keep N` bounds the unheld generations, not the total: a held generation
+is retained outside the window by rule, so a box with many long-lived
+staggered sessions retains one generation per distinct holder set until those
+sessions end, and the Holders row is where that count shows. A receipt-less
+`gen-*` tree written to within the last hour (`NX_GC_BUILD_GRACE_MINUTES`), or
+carrying the builder's `.nx-building` claim marker younger than six hours
+(`NX_GC_BUILD_CLAIM_MINUTES`, since a slow resolve or download writes into
+uv's cache, not the tree), is another session's build in progress and is kept
+and named, never reaped as wreckage; the receipt is written last, so wreckage
+is what is still receipt-less after both windows. `uv cache prune` is best-effort: uv holds its
+own lock on the cache, so a prune that lands beside another uv process either
+waits or fails, and the one line printed says which.
+
+Silent and exit 0 on a box with no generation layout.
 
 ## nx upgrade
 

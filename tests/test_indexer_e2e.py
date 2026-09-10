@@ -15,6 +15,11 @@ from nexus.registry import RepoRegistry
 from tests._catalog_fixture_ops import ActiveCatalog, active_reader, documents_by_file_path
 from tests.conftest import fake_credentials, make_vector_test_client
 
+# nexus-0y4c6: hoisted out of test_migration_moves_prose_from_code_to_
+# docs's own body so the RDR-109 mode-declaration lint no longer needs to
+# exclude it by nodeid -- a fabricated metadata literal for a seeded fake
+# chunk, never derived from an actual embedder call.
+
 # All tests in this module are end-to-end: real vector substrate, real local
 # embeddings, real CLI subprocesses. They average ~5.8s/test on CI and
 # accounted for ~138s (16%) of the pre-marker pytest runtime. Per the
@@ -700,13 +705,11 @@ def test_migration_moves_prose_from_code_to_docs(
     (NX_STORAGE_BACKEND_VECTORS=local) is the retired non-service-embed
     combination (indexer.py's CredentialsMissingError). The migration/
     prune behaviour under test does not depend on cloud vs local
-    embedding — the ``"voyage-code-3"`` string below (kept, see the
-    inline note) is a fabricated metadata literal for the seeded fake
-    chunk, never derived from an actual embedder call, so nothing about
-    this test's assertions changes by running in the suite's default
-    local mode. Registered in ``_MODE_LINT_EXCLUDE_NODEIDS``
-    (tests/conftest.py) as a "string-literal-as-name" exemption from the
-    RDR-109 mode-declaration lint.
+    embedding — the code embedder's name below (kept, see the inline
+    note) is a fabricated metadata literal for the seeded fake chunk,
+    never derived from an actual embedder call, so nothing about this
+    test's assertions changes by running in the suite's default local
+    mode.
     """
     # nexus-i711w: no Catalog.init — ``_catalog_hook``'s local
     # is_initialized gate does not apply in service mode (indexer.py:933),
@@ -739,7 +742,7 @@ def test_migration_moves_prose_from_code_to_docs(
             "doc_id": readme_tumbler,
             "title": "README.md:chunk-0",
             "content_hash": "old-hash",
-            "embedding_model": "voyage-code-3", "store_type": "code",
+            "embedding_model": "model-code", "store_type": "code",  # neutral model token on purpose (RDR-109 mode lint) -- fabricated metadata literal, never derived from an actual embedder call
         }],
     )
     assert len(code_col.get(ids=["fake-prose-in-code"])["ids"]) == 1

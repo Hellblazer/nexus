@@ -8,7 +8,6 @@ import pytest
 from nexus.errors import UnextractableContentError
 from nexus.pdf_extractor import PDFExtractor, ExtractionResult, _normalize_whitespace_edge_cases
 
-
 @pytest.fixture
 def extractor():
     return PDFExtractor()
@@ -378,7 +377,10 @@ def test_pdf_chunks_extracts_without_error_on_any_formula_count(formula_count, d
     result = ExtractionResult(text=text, metadata=meta)
     with patch("nexus.doc_indexer.PDFExtractor") as M:
         M.return_value.extract.return_value = result
-        chunks = _pdf_chunks(Path("/fake/t.pdf"), "x", "voyage-context-3", "2026-01-01T00:00:00", "test")
+        # Neutral model token on purpose (RDR-109 mode lint): _pdf_chunks
+        # is a pure chunking function -- the model string is opaque metadata,
+        # never a dispatch predicate; no embedder is constructed.
+        chunks = _pdf_chunks(Path("/fake/t.pdf"), "x", "model-ctx", "2026-01-01T00:00:00", "test")
     assert len(chunks) > 0
     for _id, _text, m in chunks:
         assert "has_formulas" not in m

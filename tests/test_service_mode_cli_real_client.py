@@ -347,7 +347,7 @@ def test_collection_reembed_cross_model_rejected_service_mode(
     monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
 
     with patch("nexus.commands.collection._t3", return_value=real_client):
-        # _KNOWLEDGE encodes voyage-context-3; ask for voyage-code-3.
+        # _KNOWLEDGE encodes the docs/knowledge embedder; ask for the code one.
         result = runner.invoke(
             main, ["collection", "re-embed", _KNOWLEDGE,
                    "--to", "voyage-code-3", "--no-dry-run", "--yes"],
@@ -376,7 +376,7 @@ def test_collection_reembed_same_model_requests_server_side_re_embed(
     recompute (``force_re_embed``), not that it silently no-ops via the
     existence-partition skip.
     """
-    coll = _CODE  # encodes voyage-code-3
+    coll = _CODE  # encodes the code embedder
     upserts = []
 
     def fake_post(path, body, **kw):

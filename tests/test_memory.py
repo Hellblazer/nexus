@@ -10,7 +10,6 @@ from nexus.cli import main
 from nexus.db.t2 import T2Database
 from tests._t2_fixture_ops import backdate_memory, memory_row
 
-
 # ── T2 database layer ───────────────────────────────────────────────────────
 
 
@@ -317,7 +316,16 @@ def test_promote_entry_not_found(runner: CliRunner, mem_home: Path, db: T2Databa
     assert "not found" in result.output.lower() or "9999" in result.output
 
 
-def test_promote_calls_t3_put(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+def test_promote_calls_t3_put(
+    runner: CliRunner, mem_home: Path, db: T2Database, cloud_mode: None,
+) -> None:
+    """Genuinely cloud-mode (RDR-109 mode lint): ``_promote``'s own
+    ``patch("nexus.config.is_local_mode", return_value=False)`` already
+    drives this, but the ``cloud_mode`` fixture declares that intent
+    explicitly -- ``t3_collection_name(for_write=True)`` resolves the
+    auto-promoted model segment via ``effective_embedding_model_for_writes``,
+    which is genuinely mode-dependent (local mode would promote to the
+    local embed model instead of voyage-context-3)."""
     row_id = db.put(project="proj", title="doc.md", content="the content", ttl=7, tags="ai")
     result, mt3 = _promote(runner, db, row_id)
     assert result.exit_code == 0, result.output

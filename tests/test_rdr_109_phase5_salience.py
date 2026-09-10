@@ -199,7 +199,13 @@ def test_salience_boost_conformant_and_lookalike_prefixes(monkeypatch) -> None:
     ``collection_content_type(...) in ("knowledge", "docs")``. Pin both a
     conformant 4-segment name (still targeted) and a near-miss prefix that
     must stay excluded (``knowledgebase__`` starts with "knowledge" but its
-    first '__'-delimited segment is "knowledgebase", not "knowledge")."""
+    first '__'-delimited segment is "knowledgebase", not "knowledge").
+
+    Neutral model token on purpose (RDR-109 mode lint): a collection-NAME
+    fixture in a fully-faked HttpDocumentAspectsStore seam; no embedder
+    (this file's autouse fixture also stubs
+    nexus.mcp_infra.get_collection_row).
+    """
     fake = _FakeAspectsStore({
         "D": ["hybrid retrieval cross-encoder reranking"],
         "E": ["hybrid retrieval cross-encoder reranking"],
@@ -208,7 +214,7 @@ def test_salience_boost_conformant_and_lookalike_prefixes(monkeypatch) -> None:
 
     from nexus.search_engine import _apply_salience_boost
     results = [
-        _make_result("d", "docs__nexus__voyage-context-3__v1", "D", score=0.50),
+        _make_result("d", "docs__nexus__model-ctx__v1", "D", score=0.50),
         _make_result("e", "knowledgebase__foo", "E", score=0.60),
     ]
     out = _apply_salience_boost(results, query="hybrid retrieval cross-encoder", weight=0.5)

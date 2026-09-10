@@ -51,7 +51,7 @@ def _fire_service_path_failure(monkeypatch, captured: list) -> None:
 
     monkeypatch.setattr(mcp_infra, "t2_index_write", _capture_write)
     mcp_infra.taxonomy_assign_batch_hook(
-        ["doc1", "doc2"], "knowledge__tw__voyage-context-3__v1",
+        ["doc1", "doc2"], "knowledge__tw__model-ctx__v1",
         ["c1", "c2"], [[0.1], [0.2]], None,
     )
 
@@ -68,7 +68,7 @@ def test_service_path_failure_records_hook_failures_row(monkeypatch):
     )
     call = recording[-1].telemetry.record_hook_failure.call_args
     assert call.kwargs["hook_name"] == "taxonomy_assign_batch_hook"
-    assert call.kwargs["collection"] == "knowledge__tw__voyage-context-3__v1"
+    assert call.kwargs["collection"] == "knowledge__tw__model-ctx__v1"
     assert call.kwargs["doc_id"] == "doc1"
     assert "RuntimeError" in call.kwargs["error"]
 
@@ -84,7 +84,7 @@ def test_tripwire_persist_failure_never_propagates(monkeypatch):
     monkeypatch.setattr(mcp_infra, "t2_index_write", _t2_down)
     # Must not raise despite BOTH the hook body and the tripwire persist failing.
     mcp_infra.taxonomy_assign_batch_hook(
-        ["doc1"], "knowledge__tw__voyage-context-3__v1", ["c1"], [[0.1]], None,
+        ["doc1"], "knowledge__tw__model-ctx__v1", ["c1"], [[0.1]], None,
     )
 
 

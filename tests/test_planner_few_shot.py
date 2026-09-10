@@ -322,9 +322,14 @@ def test_sample_collection_names_by_prefix_families_pinned() -> None:
     (``n.split("__", 1)[0]``) became a funnel-helper branch. Pin: a
     dunder-free name is its own family (not an empty-string bucket), and
     an unrecognized/quarantine-prefixed name families under its raw first
-    segment, unfiltered."""
+    segment, unfiltered.
+
+    Neutral model token on purpose (RDR-109 mode lint): one
+    collection-NAME fixture in a plain string list fed to the
+    family-key derivation; no embedder.
+    """
     from nexus.mcp.core import _sample_collection_names_by_prefix
 
-    names = ["rgcache", "quarantine-docs__x", "code__myrepo__voyage-code-3__v1"]
+    names = ["rgcache", "quarantine-docs__x", "code__myrepo__model-code__v1"]
     shown = _sample_collection_names_by_prefix(names, limit=10)
     assert set(shown) == set(names)  # all three distinct families, nothing dropped

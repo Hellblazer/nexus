@@ -558,7 +558,10 @@ def _check_generation_holders(
         except Exception:  # noqa: BLE001 — a census failure is not a layout fault
             continue
         if pids:
-            held.append(f"{gen.name}: {len(pids)} ({', '.join(str(p) for p in pids[:4])})")
+            held.append(
+                f"{gen.name}: {len(pids)} ({', '.join(str(p) for p in pids[:4])}), "
+                f"{_format_held_size(gen)} on disk"
+            )
     # The legacy uv tree is an "older generation" too -- the oldest one there
     # is -- and it is receipt-less, so it is never in *generations*. Ask the
     # census for it by structure (nexus-k52g0: 9 processes on the 7.19.0 uv
@@ -582,9 +585,55 @@ def _check_generation_holders(
         label="Holders", ok=True,
         detail=(
             "still bound to an older generation, converging at their next "
-            f"spawn — {'; '.join(held)}"
+            f"spawn — {'; '.join(held)}. A held tree is never reaped while "
+            "those processes live (nexus-xn84f): end those sessions, then "
+            "`nx self gc` (or the next `nx self install`) reclaims it."
         ),
     )]
+
+
+#: Files the Holders row will stat per held generation before it stops and
+#: reports a lower bound. A generation is ~50k files; the cap keeps a box
+#: with many stranded trees (the case nexus-xn84f fixes) from turning doctor
+#: into a disk walk.
+_TREE_BYTES_MAX_FILES: int = 200_000
+
+
+def _tree_bytes(root: Path) -> tuple[int, bool]:
+    """``(bytes under root, complete)``, following no symlinks; ``(0, True)``
+    when unreadable. ``complete`` is False when the file cap stopped the walk,
+    so the caller renders a lower bound."""
+    total = 0
+    seen = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
+            for name in filenames:
+                seen += 1
+                if seen > _TREE_BYTES_MAX_FILES:
+                    return total, False
+                fp = os.path.join(dirpath, name)
+                try:
+                    if not os.path.islink(fp):
+                        total += os.stat(fp).st_size
+                except OSError:
+                    continue
+    except OSError:
+        return 0, True
+    return total, True
+
+
+def _format_held_size(gen: Path) -> str:
+    size, complete = _tree_bytes(gen)
+    return _format_bytes(size) if complete else f"at least {_format_bytes(size)}"
+
+
+def _format_bytes(n: int) -> str:
+    if n >= 1 << 30:
+        return f"{n / (1 << 30):.1f} GB"
+    if n >= 1 << 20:
+        return f"{n / (1 << 20):.0f} MB"
+    return f"{n} B"
 
 
 def _check_process_skew() -> list[HealthResult]:
@@ -6507,6 +6556,118 @@ def _highest_child_seqs(cat: Any) -> dict[str, int]:
     return best
 
 
+def _check_topics_doc_count_drift() -> list[HealthResult]:
+    """Name topics whose cached ``doc_count`` disagrees with the real
+    ``topic_assignments`` row count (bead nexus-c0g6e, GH #1529).
+
+    THE DEFECT. 94 topics created 2026-04-22..05-01 on a store that went
+    through the conexus 6.18.1 guided upgrade carry ``doc_count`` above their
+    real assignment count (12,379 recorded vs 9,625 rows, every one
+    over-counted) — drift from the fidelity import, predating taxonomy-013's/
+    taxonomy-015's recompute triggers. ``doc_count`` is trigger-maintained on
+    every live INSERT/DELETE against ``topic_assignments`` (RDR-154 P0,
+    nexus-i7ivk) so it never drifts again once a store is past this one
+    import boundary; this check exists for the stores that already crossed
+    it, and importTopic's own root cause (fix round, GH #1529 review) is
+    closed separately on the engine so a fresh import cannot reproduce it.
+
+    THE FIX lives on the engine: ``hygiene-007-1``
+    (``hygiene-007-doc-count-recount.xml``) is a boot-time walk, the same
+    shape as ``hygiene-006-1``'s sequence-catchup — it recounts every topic
+    from ``topic_assignments`` and self-heals on the engine's next restart.
+    This check exists because that healing is SILENT until the operator
+    restarts: it names the blast radius so it is known rather than guessed,
+    the same framing as :func:`_check_next_seq_drift`. The remedy this check
+    names is repeatable and does not require a restart: `nx taxonomy audit
+    --fix-doc-count` calls the SAME engine-side recount on demand (`--yes`
+    to apply, dry-run by default) — useful when drift reappears from a fresh
+    import between restarts, a case a one-shot boot-time changeset cannot
+    self-heal a second time.
+
+    ONE ROUND TRIP, REGARDLESS OF TOPIC COUNT (fix round, GH #1529 review —
+    Critical/Important finding on the prior version of this check, which
+    looped one HTTP GET per topic via ``count_assignments`` against an
+    unbounded ``get_all_topics()``: the exact N+1-per-item anti-pattern
+    :func:`_check_next_seq_drift`'s own header documents as a past incident,
+    "65 owners x ~22k documents ... measured at 218s of a 224s doctor",
+    nexus-ohxzu). This check now calls
+    :meth:`HttpTaxonomyStore.get_doc_count_drift` exactly ONCE — the engine
+    computes the whole batched GROUP BY / LEFT JOIN server-side
+    (``nexus.topics_doc_count_drift``, the same relation hygiene-007-1's
+    boot walk and the recount route both call) and returns only the
+    disagreeing rows. A store with hundreds or thousands of topics costs
+    this check the SAME one HTTP call a store with none does.
+
+    Read-only, per the RDR-185 rung shape. Degrades to a skip on any
+    connectivity failure, an empty drift set, or a pre-route engine (the
+    ``/topics/doc_count_drift`` route the check depends on) — a pre-route
+    engine must report the row as UNREAD, never clean (mirrors
+    :func:`_check_next_seq_drift`'s own next_seq-absent skip). A doctor check
+    must never crash the command it is diagnosing.
+    """
+    import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    label = "topics.doc_count drift"
+    try:
+        from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — deferred: CLI startup cost
+
+        store = HttpTaxonomyStore()  # self-resolves the endpoint, as t2/__init__ does
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_topics_doc_count_check_failed", stage="connect", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (no engine reachable)")]
+
+    try:
+        try:
+            drifted = store.get_doc_count_drift()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                # The route is newer than the deployed engine — distinct
+                # from "no drift found": unread, not clean.
+                return [HealthResult(
+                    label=label, ok=True,
+                    detail="skipped (engine does not report /topics/doc_count_drift — "
+                           "needs a newer engine)",
+                )]
+            _log.debug("doctor_topics_doc_count_check_failed", stage="get_drift", error=str(exc))
+            return [HealthResult(label=label, ok=True, detail="skipped (taxonomy store unavailable)")]
+        except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+            _log.debug("doctor_topics_doc_count_check_failed", stage="get_drift", error=str(exc))
+            return [HealthResult(label=label, ok=True, detail="skipped (taxonomy store unavailable)")]
+
+        if not drifted:
+            return [HealthResult(label=label, ok=True, detail="none")]
+
+        def _pretty(row: dict) -> str:
+            tid = row.get("topic_id")
+            label_ = row.get("label") or f"(unlabelled id={tid})"
+            return f"{tid} {label_!r} (doc_count={row.get('doc_count')}, actual={row.get('actual_count')})"
+
+        names = "; ".join(_pretty(row) for row in drifted[:10])
+        if len(drifted) > 10:
+            names += f"; … {len(drifted) - 10} more"
+        return [HealthResult(
+            label=label,
+            ok=False,
+            warn=True,
+            detail=(
+                f"{len(drifted)} topic(s) whose doc_count disagrees with the real "
+                f"topic_assignments count: {names}. Run `nx taxonomy audit "
+                "--fix-doc-count --yes` to correct now (dry-run by default), or "
+                "restart the service to run the engine's own boot-time recount "
+                "(hygiene-007-1) — the CLI fix is repeatable and also covers drift "
+                "reappearing between restarts."
+            ),
+            fix_suggestions=[
+                "nx taxonomy audit --collection <collection> --fix-doc-count --yes",
+            ],
+        )]
+    finally:
+        try:
+            store.close()
+        except Exception:  # noqa: BLE001 — best-effort close, never masks the check's own result
+            pass
+
+
 def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -6575,6 +6736,11 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     # their own children. Self-healing is silent, so the blast radius must
     # be reportable rather than guessed.
     results.extend(_check_next_seq_drift())
+    # nexus-c0g6e (GH #1529): topics whose cached doc_count disagrees with
+    # the real topic_assignments count (6.18.1-era import drift, predating
+    # taxonomy-013's recompute triggers). Self-heals on the engine's next
+    # restart (hygiene-007-1); silent until then, so reportable here.
+    results.extend(_check_topics_doc_count_drift())
 
     results.extend(_check_tools())
     results.extend(_check_mcp_entry_points())

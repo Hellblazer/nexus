@@ -55,7 +55,6 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 from nexus.db.t3 import T3Database
 from nexus.registry import RepoRegistry
 
-
 # ── shared fixtures ──────────────────────────────────────────────────────────
 
 
@@ -585,8 +584,11 @@ def test_pdf_indexer_handles_duplicate_chunks_within_document(
     # Pin the destination collection name so the test does not have to
     # discover it via ``list_collections`` (the EphemeralClient shares
     # process state across fixtures, so ``list_collections`` returns
-    # collections from earlier tests in the same session).
-    pinned_collection = "docs__dupdocs__voyage-context-3__v1"
+    # collections from earlier tests in the same session). Neutral model
+    # token on purpose (RDR-109 mode lint): embed_fn=_local_embed below
+    # supplies the real model string; this is just a conformant-shaped
+    # NAME, no embedder or credential path is exercised.
+    pinned_collection = "docs__dupdocs__model-ctx__v1"
 
     # nexus-dbzxb (RDR-191 Phase 5 Python collateral): local_t3 is a fake
     # in-memory T3 client (see the comment on the RUNFENCE stub above),

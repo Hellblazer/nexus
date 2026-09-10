@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-
 # ── DT helpers: no-content filtering + key handling ─────────────────────────
 
 def test_extract_highlights_returns_markdown() -> None:
@@ -110,7 +109,10 @@ def test_ingest_highlights_record_writes_store(tmp_path, monkeypatch) -> None:
     real HTTP round-trip is pinned in tests/db/test_http_aspects_stores.py."""
     from nexus.commands import dt as dt_mod
 
-    _coll = "knowledge__dt__voyage-context-3__v1"
+    # Neutral model token on purpose (RDR-109 mode lint): collection-NAME
+    # fixture fed to a stateful fake highlights store; no embedder or
+    # credential path is exercised.
+    _coll = "knowledge__dt__model-ctx__v1"
     _patch_catalog(monkeypatch, tmp_path, tumbler="1.7", collection=_coll)
     monkeypatch.setattr("nexus.mcp_client.devonthink.dt_extract_highlights",
                         lambda u: "## Highlights\n- x")

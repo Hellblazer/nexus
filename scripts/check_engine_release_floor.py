@@ -1227,9 +1227,14 @@ def main(argv: list[str] | None = None) -> int:
             "modes never record"
         )
     # The env default applies to the bare verify only -- a globally-set
-    # NX_GATE_REPORT_DIR must not turn a pre-deploy mode into a recorder.
+    # NX_GATE_REPORT_DIR must not turn a pre-deploy mode into a recorder, and
+    # it must not override an explicit --no-record-deploy REASON either: the
+    # opt-out is the operator saying "verify only, write nothing" on THIS
+    # invocation, and a globally exported directory (a box that also runs the
+    # recording form) turned it into a tracker write on 2026-09-09 -- refused
+    # by the production-write guard, but only because that guard was there.
     report_dir: str | None = args.record_deploy_from_gate_report
-    if report_dir is None and not non_bare:
+    if report_dir is None and not non_bare and args.no_record_deploy is None:
         report_dir = os.environ.get(deploy_tracker.GATE_REPORT_DIR_ENV, "").strip() or None
     if args.ledger_only:
         if args.paired_deploy is not None or args.paired_deploy_auto or args.url is not None:

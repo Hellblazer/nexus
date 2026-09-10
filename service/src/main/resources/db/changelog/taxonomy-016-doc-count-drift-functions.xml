@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-c0g6e fix round (GH #1529), on review of 4ebe29931/8eb64f78a: two
+    ADDITIVE nexus.* functions exposing the doc_count-vs-topic_assignments
+    drift check and its correction on demand, so hygiene-007-1's boot-time
+    walk and the live HTTP routes (TaxonomyHandler's GET
+    /topics/doc_count_drift, POST /topics/recount_doc_count) run the EXACT
+    SAME SQL rather than parallel, independently-driftable copies.
+
+    nexus.topics_doc_count_drift(p_tenant_id text) — pure read, LANGUAGE sql,
+    the same batched GROUP BY / LEFT JOIN hygiene-007-1 always ran, now a
+    named, reusable relation. p_tenant_id NULL means "every tenant" (the
+    migration walk's own scope); a real tenant string scopes to one (the
+    live route's scope, called under tenantScope with the session's RLS GUC
+    already narrowing nexus.topics/nexus.topic_assignments to that tenant —
+    the explicit filter is redundant-but-correct belt, not the only guard).
+
+    nexus.topics_recount_doc_count(p_tenant_id text, p_dry_run boolean) —
+    LANGUAGE plpgsql, wraps the drift function: returns the identical row
+    shape, and when NOT p_dry_run additionally UPDATEs each drifted topic's
+    doc_count to its real count, RAISE NOTICE per topic corrected plus one
+    summary line. dry_run leaves every row untouched and answers "what would
+    this change" with no side effect — the same shape recount_doc_count's
+    HTTP response returns either way (nexus-c0g6e's `dry_run` flag).
+
+    NEITHER function toggles FORCE ROW LEVEL SECURITY. FORCE governs the
+    TABLE OWNER only (nexus_admin, the Liquibase migration role); the live
+    engine's runtime role (nexus_svc) is a non-owner and is ALWAYS subject to
+    the ordinary per-tenant RLS policy, with or without FORCE — so the live
+    routes need no toggle at all. The migration caller (hygiene-007-1's DO
+    block, rewritten by this fix round to call
+    nexus.topics_recount_doc_count(NULL, false) instead of inlining the walk)
+    keeps its OWN toggle-wrapped NO FORCE / FORCE around the call, exactly as
+    before — SECURITY INVOKER means the function runs as the toggling
+    caller's own role, so the already-lowered FORCE state applies inside the
+    function's UPDATE too, with no toggle duplicated inside the function
+    itself (which would be a permission error for nexus_svc, a non-owner
+    that cannot ALTER TABLE at all).
+
+    LOCK ORDER (fix round item 4): the single-row UPDATE inside
+    topics_recount_doc_count, keyed on the primary key (tenant_id, id), takes
+    Postgres's default FOR NO KEY UPDATE lock mode for an ordinary UPDATE of
+    a non-key column — the SAME lock mode taxonomy-015-doc-count-lock-mode.xml
+    moved topics_doc_count_recount_ins/_del to after the taxonomy-013
+    FOR UPDATE shape was measured to still deadlock in production (nexus-
+    6n51g, 2026-09-02). It is taxonomy-015, not taxonomy-013, that documents
+    the lock mode this UPDATE's default behavior is actually consistent with.
+
+    Rollback drops both functions — no data to reconcile, additive only.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="taxonomy-016-1" author="nexus-c0g6e">
+        <comment>nexus.topics_doc_count_drift: topics whose doc_count disagrees with the real topic_assignments count, one batched query</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.topics_doc_count_drift(
+    p_tenant_id text
+) RETURNS TABLE(tenant_id text, topic_id bigint, label text, collection text, doc_count integer, actual_count bigint)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT t.tenant_id, t.id, t.label, t.collection, t.doc_count, COALESCE(a.cnt, 0)::bigint
+      FROM nexus.topics t
+      LEFT JOIN (
+          SELECT tenant_id, topic_id, COUNT(*) AS cnt
+            FROM nexus.topic_assignments
+           GROUP BY tenant_id, topic_id
+      ) a ON a.tenant_id = t.tenant_id AND a.topic_id = t.id
+     WHERE (p_tenant_id IS NULL OR t.tenant_id = p_tenant_id)
+       AND t.doc_count IS DISTINCT FROM COALESCE(a.cnt, 0)
+     ORDER BY t.tenant_id, t.id
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.topics_doc_count_drift(text)</rollback>
+    </changeSet>
+
+    <changeSet id="taxonomy-016-2" author="nexus-c0g6e">
+        <comment>nexus.topics_recount_doc_count: applies (or, dry_run, previews) the correction topics_doc_count_drift names</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.topics_recount_doc_count(
+    p_tenant_id text,
+    p_dry_run   boolean DEFAULT false
+) RETURNS TABLE(tenant_id text, topic_id bigint, label text, collection text, doc_count integer, actual_count bigint)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $fn$
+DECLARE
+    r           record;
+    v_corrected integer := 0;
+BEGIN
+    FOR r IN SELECT * FROM nexus.topics_doc_count_drift(p_tenant_id)
+    LOOP
+        IF NOT p_dry_run THEN
+            UPDATE nexus.topics t
+               SET doc_count = r.actual_count
+             WHERE t.tenant_id = r.tenant_id AND t.id = r.topic_id;
+            v_corrected := v_corrected + 1;
+            RAISE NOTICE 'topics_recount_doc_count: topic %.% doc_count corrected % -> %',
+                r.tenant_id, r.topic_id, r.doc_count, r.actual_count;
+        END IF;
+        tenant_id     := r.tenant_id;
+        topic_id      := r.topic_id;
+        label         := r.label;
+        collection    := r.collection;
+        doc_count     := r.doc_count;
+        actual_count  := r.actual_count;
+        RETURN NEXT;
+    END LOOP;
+    IF NOT p_dry_run THEN
+        RAISE NOTICE 'topics_recount_doc_count: % topic(s) corrected (tenant_id=%)',
+            v_corrected, COALESCE(p_tenant_id, 'ALL');
+    END IF;
+END;
+$fn$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.topics_recount_doc_count(text, boolean)</rollback>
+    </changeSet>
+
+</databaseChangeLog>

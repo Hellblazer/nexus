@@ -69,11 +69,14 @@ def test_rename_rejects_tombstoned_old_with_actionable_message(
     _patch_get(monkeypatch, stats_names=set(), raw_names={"knowledge__delos"})
     t3_db = HttpVectorClient()
 
+    # Neutral model token on purpose (RDR-109 mode lint): the rename
+    # TARGET name below never reaches an embedder -- HttpVectorClient's
+    # network boundary is patched by `_patch_get` above.
     with patch("nexus.db.make_t3", return_value=t3_db):
         result = runner.invoke(
             main,
             ["catalog", "rename-collection",
-             "knowledge__delos", "knowledge__1-1__voyage-context-3__v1"],
+             "knowledge__delos", "knowledge__1-1__model-ctx__v1"],
         )
     assert result.exit_code != 0
     message = result.output.lower()
@@ -88,7 +91,9 @@ def test_rename_rejects_tombstoned_new_as_not_free_to_claim(
     """The collision bug this bead exists to fix: a tombstoned target used to
     read as "doesn't exist in T3" (free), inviting a rename onto dead rows."""
     catalog.register_collection("knowledge__delos")
-    target = "knowledge__1-1__voyage-context-3__v1"
+    # Neutral model token on purpose (RDR-109 mode lint): opaque data,
+    # same reason as the sibling test above.
+    target = "knowledge__1-1__model-ctx__v1"
     # old is live; new has physical rows but zero live chunks (tombstoned).
     _patch_get(
         monkeypatch,

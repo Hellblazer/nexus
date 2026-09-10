@@ -41,6 +41,10 @@ import java.util.Optional;
  *   POST  /v1/taxonomy/topics/rename       rename + mark accepted
  *   POST  /v1/taxonomy/topics/mark_reviewed update review_status
  *   GET   /v1/taxonomy/topics/count_assignments count assignments for topic_id=
+ *   GET   /v1/taxonomy/topics/doc_count_drift topics whose doc_count disagrees
+ *         with their real topic_assignments count (nexus-c0g6e, GH #1529)
+ *   POST  /v1/taxonomy/topics/recount_doc_count apply/preview (dry_run) that
+ *         correction (nexus-c0g6e, GH #1529)
  *   POST  /v1/taxonomy/topics/delete       delete topic (returns collection)
  *   POST  /v1/taxonomy/topics/merge        merge source→target
  *   POST  /v1/taxonomy/assignments/assign  upsert assignment
@@ -134,6 +138,8 @@ public final class TaxonomyHandler implements HttpHandler {
                 case "/topics/rename"             -> handleRenameTopic(exchange, tenant, method);
                 case "/topics/mark_reviewed"      -> handleMarkReviewed(exchange, tenant, method);
                 case "/topics/count_assignments"  -> handleCountAssignments(exchange, tenant, method);
+                case "/topics/doc_count_drift"     -> handleGetDocCountDrift(exchange, tenant, method);
+                case "/topics/recount_doc_count"   -> handleRecountDocCount(exchange, tenant, method);
                 case "/topics/delete"             -> handleDeleteTopic(exchange, tenant, method);
                 case "/topics/merge"              -> handleMergeTopics(exchange, tenant, method);
                 // Assignments
@@ -375,13 +381,44 @@ public final class TaxonomyHandler implements HttpHandler {
 
     // RDR-154 P0 (nexus-i7ivk): handleUpdateDocCount / POST /topics/update_doc_count
     // removed. topics.doc_count is maintained solely by the statement-level
-    // topic_assignments triggers; there is no app-side write path to expose.
+    // topic_assignments triggers for ROUTINE writes; there is no general-purpose
+    // app-side write path for it. handleRecountDocCount below is NOT that write
+    // path reborn — it is a targeted REPAIR route (nexus-c0g6e, GH #1529) for
+    // drift a trigger-maintained column cannot self-heal: rows an import wrote
+    // directly, bypassing the trigger entirely. It always recomputes from
+    // nexus.topic_assignments; it never accepts a caller-supplied value.
 
     private void handleCountAssignments(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "GET");
         long topicId = requireLongParam(ex, "topic_id");
         int count = repo.countAssignments(tenant, topicId);
         HttpUtil.send(ex, 200, json(Map.of("count", count)));
+    }
+
+    /**
+     * GET /topics/doc_count_drift: every topic whose cached doc_count
+     * disagrees with its real topic_assignments count, in ONE query
+     * (nexus-c0g6e fix round, GH #1529 review — replaces a per-topic
+     * count_assignments loop the doctor used to run).
+     */
+    private void handleGetDocCountDrift(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        HttpUtil.send(ex, 200, json(repo.getDocCountDrift(tenant)));
+    }
+
+    /**
+     * POST /topics/recount_doc_count: apply (or, {@code dry_run}, preview)
+     * the correction {@link #handleGetDocCountDrift} names. Body:
+     * {@code {"dry_run"?: bool}} — absent/non-Boolean means {@code false}
+     * (applies), mirroring this handler's own {@code cross_collection}
+     * parsing idiom elsewhere in this file. Repeatable: a store with no
+     * drift returns {@code corrected: 0} either way.
+     */
+    private void handleRecountDocCount(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        boolean dryRun = body.get("dry_run") instanceof Boolean b && b;
+        HttpUtil.send(ex, 200, json(repo.recountDocCount(tenant, dryRun)));
     }
 
     private void handleDeleteTopic(HttpExchange ex, String tenant, String method) throws IOException {

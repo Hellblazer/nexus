@@ -128,6 +128,10 @@ for _suffix in "" a b c d e f g h; do
     _candidate="$(nx_generation_dir "${STAMP}${_suffix}" "$TOOLS_DIR")" || exit $?
     if mkdir "$_candidate" 2>/dev/null; then
         GEN="$_candidate"
+        # Claim the tree for gc.sh (nexus-xn84f): a receipt-less gen-* with a
+        # young marker is a build in progress even while resolve/download
+        # writes nothing under it. The receipt, written last, supersedes it.
+        : > "$GEN/$NX_BUILDING_MARKER_NAME"
         break
     fi
 done
@@ -146,7 +150,14 @@ trap _cleanup_incomplete EXIT
 # inside the env and would need UV_TOOL_BIN_DIR redirected too, or it clobbers
 # the shared bin entries — and those must be nexus-owned regular files (.4),
 # never uv-owned symlinks.
-uv venv --python "$PYTHON_VERSION" "$GEN" >&2
+# --allow-existing: the tree is already claimed above (mkdir + the build
+# marker), and uv 0.9+ refuses to create a venv in a non-empty directory
+# without it ("A directory already exists at: ..."; measured on the 7.39.0
+# release PR's CI smoke, uv 0.8 on the dev box tolerated it). The flag
+# preserves the marker; never --clear, which would delete the claim.
+uv venv --allow-existing --python "$PYTHON_VERSION" "$GEN" >&2
+# Refresh the claim (nexus-xn84f): each phase gets the full claim window.
+touch "$GEN/$NX_BUILDING_MARKER_NAME"
 # nexus-heykz: pyproject's [tool.uv] override-dependencies (the `av`
 # exclusion) is read by uv from the invoking project, never from the wheel,
 # so every user install got av and its colliding ffmpeg dylibs. The same
@@ -172,6 +183,7 @@ else
     uv pip install --python "$GEN/bin/python" ${TORCH_ARGS[@]+"${TORCH_ARGS[@]}"} --overrides "$OVERRIDES" "$SPEC" >&2
 fi
 
+# The install phases above are done; the receipt below supersedes the claim.
 # ── Receipt ──────────────────────────────────────────────────────────────────
 # base_interpreter holds pyvenv.cfg's `home` value verbatim. That field is what
 # CPython itself consults and what uv pruning removes, so it is the thing .11's

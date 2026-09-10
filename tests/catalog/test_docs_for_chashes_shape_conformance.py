@@ -105,6 +105,9 @@ class TestBuildStalenessCacheConsumesRealHttpClient:
         log) and ``by_doc_id`` came back empty; this test asserts the
         resolved doc_id lands in the cache, which only happens when the
         shape is correct end to end.
+
+        Neutral model token on purpose (RDR-109 mode lint): opaque
+        chunk-metadata data, never an embedder call.
         """
         col = MagicMock(spec=["get", "name"])
         col.get.return_value = {
@@ -112,7 +115,7 @@ class TestBuildStalenessCacheConsumesRealHttpClient:
             "metadatas": [{
                 "chunk_text_hash": CHUNK_SHA_A,  # full 64-char form — the wire width since RDR-180
                 "content_hash": "hash-a",
-                "embedding_model": "voyage-code-3",
+                "embedding_model": "model-code",
             }],
         }
 
@@ -120,4 +123,4 @@ class TestBuildStalenessCacheConsumesRealHttpClient:
         with patch.object(_factory_mod, "make_catalog_reader", return_value=http_client):
             cache = build_staleness_cache(col)
 
-        assert cache.by_doc_id == {"1.1.1": ("hash-a", "voyage-code-3")}
+        assert cache.by_doc_id == {"1.1.1": ("hash-a", "model-code")}
