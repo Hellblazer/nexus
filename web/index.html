@@ -67,6 +67,8 @@ pre .c{color:var(--code-cmt)}
 .copy:hover{background:rgba(255,255,255,.14)}
 .copy:focus-visible{outline:2px solid var(--brass)}
 .note{font-size:14px;color:var(--ink-2);margin-top:8px}
+.ph{color:var(--brass);font-style:italic}
+pre .ph{color:#E0B24C}
 .expect{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;margin:18px 0}
 .expect div{background:var(--paper);padding:12px 14px}
 .expect b{display:block;font-family:"Source Serif 4",Georgia,serif;font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}
@@ -230,6 +232,46 @@ nx doctor</pre><button class="copy">Copy</button></div>
 nx upgrade        <span class="c"># update the service, the data, and the plugins</span></pre><button class="copy">Copy</button></div>
 <div class="callout"><p><strong>Do not</strong> update with <code>uv tool install conexus</code> or with <code>--force</code>. That command removes the local search model, and search then returns nothing. If this happened, <code>nx self install</code> repairs it.</p></div>
 <p class="note">If you update the plugin with <code>/plugin update</code> in Claude Code, the next session runs both commands for you.</p>
+
+<h2>Remove Nexus completely</h2>
+<p>Four steps, in this order. The first one is optional. Nothing here touches a managed cloud tenant. It removes only what is on this computer.</p>
+<ol class="steps">
+<li><div class="step">
+  <h3>Optional: keep a copy of your knowledge</h3>
+  <p>The knowledge store can be exported to a file and imported into a later install. Memory and scratch cannot be exported.</p>
+  <div class="cmd"><pre>nx store export --all -o <span class="ph">&lt;A-DIRECTORY-TO-KEEP&gt;</span>   <span class="c"># one .nxexp file per collection</span></pre><button class="copy" type="button">Copy</button></div>
+  <p class="note">Later, <code>nx store import <span class="ph">&lt;FILE&gt;</span>.nxexp</code> restores a collection into a new install.</p>
+</div></li>
+<li><div class="step">
+  <h3>Remove the Claude integration</h3>
+  <p data-for="code cli">In Claude Code:</p>
+  <div class="cmd" data-for="code cli"><pre>/plugin uninstall conexus@nexus-plugins</pre><button class="copy" type="button">Copy</button></div>
+  <p data-for="desktop">In Claude Desktop: Settings → Connectors → Desktop → Conexus → Uninstall. This removes the extension only. The service and the data stay. Steps 3 and 4 remove them.</p>
+  <p class="note">If you use both Claude Code and Claude Desktop, do both.</p>
+</div></li>
+<li><div class="step">
+  <h3>Stop the service and delete the data</h3>
+  <p>The first command only shows what would be removed. The second command does it.</p>
+  <div class="cmd"><pre>nx uninstall                          <span class="c"># preview, changes nothing</span>
+nx uninstall --yes --remove-data      <span class="c"># stop the service, remove autostart, delete notes, plans, catalog and the database</span></pre><button class="copy" type="button">Copy</button></div>
+  <p class="note">Without <code>--remove-data</code>, the service stops and autostart is removed, but your data stays in <code>~/.config/nexus</code>. Use that form if you plan to install again later.</p>
+</div></li>
+<li><div class="step">
+  <h3>Remove the program</h3>
+  <p><code>nx uninstall</code> does not remove <code>nx</code> itself, the downloaded search model, or older versions kept side by side. Remove them by hand:</p>
+  <div class="cmd"><pre>uv tool uninstall conexus 2&gt;/dev/null      <span class="c"># the uv install, if one exists</span>
+rm -rf ~/.local/share/nexus                <span class="c"># program versions, search model cache</span>
+rm -f ~/.local/bin/nx ~/.local/bin/nx-mcp ~/.local/bin/nx-mcp-catalog ~/.local/bin/nx-session-end-launcher</pre><button class="copy" type="button">Copy</button></div>
+</div></li>
+</ol>
+<h3>Check</h3>
+<div class="cmd" data-os-block="mac"><pre>which nx                        <span class="c"># must print nothing</span>
+launchctl list | grep -i nexus  <span class="c"># must print nothing</span>
+ls ~/.config/nexus              <span class="c"># must not exist</span></pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd hidden" data-os-block="linux"><pre>which nx                                          <span class="c"># must print nothing</span>
+systemctl --user list-unit-files | grep -i nexus  <span class="c"># must print nothing</span>
+ls ~/.config/nexus                                <span class="c"># must not exist</span></pre><button class="copy" type="button">Copy</button></div>
+<p class="note">Old installs from before mid-2026 may also have a directory <code>~/.local/share/nexus/chroma</code> or a <code>com.nexus.t2</code> unit. The commands above remove both.</p>
 
 <h2>Problems</h2>
 <details><summary>nx: command not found</summary><p>Add <code>~/.local/bin</code> to your PATH. Then open a new terminal. If PATH is already correct, run <code>nx self install</code>. If <code>nx</code> was never installed, run <code>uv tool install conexus</code>.</p></details>
