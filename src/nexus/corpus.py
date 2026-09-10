@@ -307,8 +307,11 @@ class EmbeddingProfileMismatchError(RuntimeError):
     the engine's own register-time 422 on a mismatch (which remains the
     correctness guard for every OTHER registration call site this seam
     does not yet cover — those still get the engine's late refusal, not
-    this early one, until nexus-ft04v.27 consolidates them through this
-    same funnel).
+    this early one, until nexus-aotql consolidates them through this
+    same funnel — see :func:`ensure_collection_registered`'s own
+    docstring for the current site list; the prior tracker,
+    nexus-ft04v.27, CLOSED on 164fc06b2 with a census that predates one
+    of those sites).
     """
 
 
@@ -1681,8 +1684,18 @@ def ensure_collection_registered(
     ``reindex_cmd``, ``commands/catalog_cmds/collections.py``'s
     backfill/rename, ``db/t3.py``'s row synthesis — all call
     :func:`collection_registration_kwargs` directly and register
-    without going through this function) until nexus-ft04v.27
-    consolidates them through one funnel.
+    without going through this function) until nexus-aotql
+    consolidates them through one funnel. ``nexus-ft04v.27`` (the prior
+    tracker for this consolidation) CLOSED on 164fc06b2 with a census
+    predating the site below, so it never carried a live count for it;
+    nexus-aotql is the current tracker. ``indexer.py``'s
+    ``index_repository`` pre-staleness-sweep registration loop
+    (nexus-bd44g) is a FIFTH related site, added after that census —
+    unlike the four above it already calls THIS function (no bypass,
+    same profile check), but it is a fifth place that independently
+    decides WHEN to register a name, so it is tracked alongside the
+    other four under nexus-aotql for the same eventual single-authority
+    design.
     """
     if name in _REGISTERED_COLLECTIONS:
         return

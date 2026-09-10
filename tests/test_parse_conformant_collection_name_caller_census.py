@@ -87,7 +87,7 @@ _TARGET = "parse_conformant_collection_name"
 #: conformant via is_conformant_collection_name, a pure regex check with
 #: no row lookup).
 ALLOWED_CALLERS: dict[tuple[str, int], str] = {
-    ("src/nexus/corpus.py", 1542): (  # line shifted again (nexus-fryrd: resolve_row_preferred's row_resolver injection param/docstring plus collection_content_type's tenant-blindness note added lines above it)
+    ("src/nexus/corpus.py", 1522): (  # line shifted again (nexus-bd44g fix check: the ensure_collection_registered docstring's nexus-ft04v.27 -> nexus-aotql repoint added three lines above it)
         "collection_registration_kwargs: the write-time registration "
         "derivation used by HttpCatalogClient.register_collection's OWN "
         "bare-call fallback and by ensure_collection_registered (T3 chunk "
