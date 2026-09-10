@@ -2,12 +2,12 @@
 title: "Linda Tuple Space over Postgres: A Coordination Primitive for Agents and Instances"
 id: RDR-205
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-09-09
-accepted_date:
+accepted_date: 2026-09-10
 related_issues: []
 related_rdrs: [RDR-041, RDR-105, RDR-110, RDR-116, RDR-117, RDR-120, RDR-127, RDR-149, RDR-152, RDR-155, RDR-158, RDR-184, RDR-204]
 ---
@@ -1946,3 +1946,11 @@ wake-latency target when its leg lands; an over-cap `n` scenario is
 added; the lift-clause range and the gate-round count are corrected at
 both sites. No design decision changed; one bound that borrowed the read
 cap gained its own setting, `NX_TUPLE_CLAIM_PASSES`.
+
+### 2026-09-10 — Accepted
+
+Fix check on the accept-day changes under the consensus rule: three
+dispatches on fb60c3ff0..bffa9b708 (T2 `nexus_rdr/205-fix-check-89c139c57`,
+PASS, no counted BLOCKS-PLANNING defect). Dispositions: the park-cap
+gloss by 89c139c57; the wire-ledger entry's timing against the lint's
+STALE arm by bead nexus-joqdj (Phase 3 Step 1). Accepted 2026-09-10.
