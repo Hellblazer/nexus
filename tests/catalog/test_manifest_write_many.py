@@ -29,6 +29,13 @@ from nexus.retry import _is_connectivity_error
 # now requires an explicit collection. A single shared constant keeps the
 # many call sites below from inventing their own plausible-looking values.
 _COLLECTION = "knowledge__manifest-write-many-test__voyage-context-3__v1"
+# nexus-0y4c6: the chunk-carrying-branch collection for the six
+# combined-write tests below, hoisted so their own bodies no longer
+# carry the literal -- a conformant RDR-103 name needed to reach the
+# chunk-carrying branch of write_manifest_many (it raises ValueError
+# without a `collection`); every one of the six monkeypatches `_post`,
+# so the name never leaves the request body and no embedder runs.
+_CODE_COLLECTION = "code__nexus-1-1__voyage-code-3__v1"
 
 
 def _client() -> HttpCatalogClient:
@@ -179,12 +186,12 @@ class TestWriteManifestManyCombined:
             [("1.9.12", [{"chash": "a" * 64, "position": 0}])],
             sweep=True,
             chunks=chunks,
-            collection="code__nexus-1-1__voyage-code-3__v1",
+            collection=_CODE_COLLECTION,
             force_re_embed=True,
         )
         assert len(posts) == 1
         body = posts[0]
-        assert body["collection"] == "code__nexus-1-1__voyage-code-3__v1"
+        assert body["collection"] == _CODE_COLLECTION
         assert body["chunks"] == chunks
         assert body["sweep"] is True
         assert body["force_re_embed"] is True
@@ -206,7 +213,7 @@ class TestWriteManifestManyCombined:
             c.write_manifest_many(
                 [("1.9.13", [{"chash": "a" * 64, "position": 0}])],
                 chunks=[{"chash": "a" * 64, "text": "hi", "metadata": {}}],
-                collection="code__nexus-1-1__voyage-code-3__v1",
+                collection=_CODE_COLLECTION,
             )
 
     def test_no_chunks_sent_never_checks_ack(self, monkeypatch) -> None:
@@ -277,7 +284,7 @@ class TestWriteManifestManyCombinedTimeout:
         c.write_manifest_many(
             [("1.9.16", [{"chash": "a" * 64, "position": 0}])],
             chunks=[{"chash": "a" * 64, "text": "hi", "metadata": {}}],
-            collection="code__nexus-1-1__voyage-code-3__v1",
+            collection=_CODE_COLLECTION,
         )
 
         assert len(calls) == 1
@@ -351,7 +358,7 @@ class TestCombinedWriteReadTimeoutNotRetried:
             c.write_manifest_many(
                 [("1.9.21", [{"chash": "a" * 64, "position": 0}])],
                 chunks=[{"chash": "a" * 64, "text": "hi", "metadata": {}}],
-                collection="code__nexus-1-1__voyage-code-3__v1",
+                collection=_CODE_COLLECTION,
             )
 
         # Exactly one POST at this boundary — write_manifest_many itself
@@ -381,7 +388,7 @@ class TestCombinedWriteReadTimeoutNotRetried:
             c.write_manifest_many(
                 [("1.9.22", [{"chash": "a" * 64, "position": 0}])],
                 chunks=[{"chash": "a" * 64, "text": "hi", "metadata": {}}],
-                collection="code__nexus-1-1__voyage-code-3__v1",
+                collection=_CODE_COLLECTION,
             )
         except CombinedWriteEmbedTimeoutError as exc:
             assert _is_connectivity_error(exc) is False
@@ -409,7 +416,7 @@ class TestCombinedWriteReadTimeoutNotRetried:
             c.write_manifest_many(
                 [("1.9.23", [{"chash": "a" * 64, "position": 0}])],
                 chunks=[{"chash": "a" * 64, "text": "hi", "metadata": {}}],
-                collection="code__nexus-1-1__voyage-code-3__v1",
+                collection=_CODE_COLLECTION,
             )
 
         assert len(calls) == 1

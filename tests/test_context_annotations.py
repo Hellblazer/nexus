@@ -7,6 +7,11 @@ from datetime import UTC, datetime
 from nexus.context_annotations import READER_INSTRUCTION, annotate, annotation_line
 
 NOW = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
+# nexus-0y4c6: hoisted out of test_source_note_names_document_collection_
+# and_dates's own body so the RDR-109 mode-declaration lint no longer
+# needs to exclude it by nodeid -- a collection-NAME string passed
+# straight through to source_note's string-formatting logic; no embedder.
+_COLLECTION = "knowledge__vector-search__voyage-context-3__v1"
 
 
 def test_indexed_age_and_published_year():
@@ -66,10 +71,10 @@ def test_source_note_names_document_collection_and_dates():
 
     note = source_note(
         {"title": "ctxnote", "indexed_at": "2026-08-27T17:49:07+00:00", "bib_year": 2026},
-        collection="knowledge__vector-search__voyage-context-3__v1", now=NOW,
+        collection=_COLLECTION, now=NOW,
     )
     assert note == (
-        "ctxnote · knowledge__vector-search__voyage-context-3__v1 · "
+        f"ctxnote · {_COLLECTION} · "
         "indexed 2026-08-27 (11d ago) · published 2026"
     )
 

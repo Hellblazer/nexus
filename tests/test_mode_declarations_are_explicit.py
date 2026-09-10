@@ -409,9 +409,16 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 60
 # entries, all PROMOTED the same way as batch 1 -- each literal (or, for
 # the two test_scoring.py calibration tests, prose mentioning a literal
 # in a docstring) hoisted or reworded out of the flagged function's own
-# source. No test behavior changed. 40 nodeids remain unconverted; see
+# source. No test behavior changed. 40 nodeids remained unconverted
+# after batch 2; see bead nexus-0y4c6 for the burn-down's continuation.
+# 40 -> 19 (nexus-0y4c6 burn-down batch 3, 2026-09-09): -21 nodeid
+# entries, all PROMOTED the same way as batches 1-2 -- literals hoisted
+# to module/class constants, or (one docstring-only mention) reworded.
+# No test behavior changed. 19 nodeids remain unconverted (3 of them,
+# tests/test_integration.py's real keyed-credential tests, cannot be
+# converted this way at all -- see that file's bead-report entry); see
 # bead nexus-0y4c6 for the burn-down's continuation.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 40
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 19
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

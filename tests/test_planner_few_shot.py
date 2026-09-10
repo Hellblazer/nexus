@@ -10,6 +10,12 @@ from dataclasses import dataclass
 
 import pytest
 
+# nexus-0y4c6: hoisted out of test_sample_collection_names_by_prefix_
+# families_pinned's own body so the RDR-109 mode-declaration lint no
+# longer needs to exclude it by nodeid -- one collection-NAME fixture in
+# a plain string list fed to the family-key derivation; no embedder.
+_CODE_MYREPO_COLLECTION = "code__myrepo__voyage-code-3__v1"
+
 
 @dataclass
 class _FakeMatch:
@@ -325,6 +331,6 @@ def test_sample_collection_names_by_prefix_families_pinned() -> None:
     segment, unfiltered."""
     from nexus.mcp.core import _sample_collection_names_by_prefix
 
-    names = ["rgcache", "quarantine-docs__x", "code__myrepo__voyage-code-3__v1"]
+    names = ["rgcache", "quarantine-docs__x", _CODE_MYREPO_COLLECTION]
     shown = _sample_collection_names_by_prefix(names, limit=10)
     assert set(shown) == set(names)  # all three distinct families, nothing dropped

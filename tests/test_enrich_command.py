@@ -672,8 +672,9 @@ def test_enrich_bare_subject_resolves_to_conformant_collection(
 
     result = CliRunner().invoke(enrich, ["bib", "knowledge__vector-search", "--source", "s2"])
     assert result.exit_code == 0, result.output
-    # The model token is install-dependent (bge under the test config,
-    # voyage-context-3 on a cloud box); the shape is what the engine checks.
+    # The model token is install-dependent (bge under the test config, the
+    # docs/knowledge cloud embedder on a cloud box); the shape is what the
+    # engine checks.
     resolved = mock_db.get_or_create_collection.call_args.args[0]
     assert resolved.startswith("knowledge__vector-search__"), resolved
     assert resolved.endswith("__v1") and resolved.count("__") == 3, resolved

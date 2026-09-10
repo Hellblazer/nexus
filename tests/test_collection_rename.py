@@ -179,6 +179,37 @@ class TestCatalogRename:
 # ── CLI `nx collection rename` ──────────────────────────────────────────────
 
 
+# nexus-0y4c6: hoisted out of test_rename_prefix_validity_table's own
+# decorator so the RDR-109 mode-declaration lint no longer needs to
+# exclude it by nodeid -- voyage tokens appear only as parametrize-data
+# source/target collection-name pairs; no embedder or credential path is
+# exercised (rename_collection_data_plane is stubbed out in the test).
+_RENAME_PREFIX_VALIDITY_CASES = [
+    # Same-prefix conformant names: always accepted.
+    ("code__nexus-1-1__voyage-code-3__v1", "code__other-1-1__voyage-code-3__v1", False, False),
+    # Same-prefix legacy 2-segment names: accepted.
+    ("code__myrepo-abc12345", "code__myrepo-def67890", False, False),
+    # Cross-prefix without --force-prefix-change: rejected.
+    ("code__foo", "docs__foo", False, True),
+    # Same cross-prefix pair WITH --force-prefix-change: accepted.
+    ("code__foo", "docs__foo", True, False),
+    # Quarantine-prefixed: the raw first segment includes the
+    # "quarantine-" text verbatim (collection_shape.py's own
+    # quarantine STRIPPING is a different code path -- this gate
+    # never strips it), so two DIFFERENT quarantined base types
+    # still mismatch.
+    ("quarantine-code__foo", "quarantine-docs__foo", False, True),
+    # Same quarantined base type: match, accepted.
+    ("quarantine-code__foo", "quarantine-code__bar", False, False),
+    # Both legacy-bare (no "__" at all): both have "" as their
+    # prefix under the pre-funnel ternary's "" default -- equal,
+    # accepted, same as before the funnel.
+    ("bare-name-one", "bare-name-two", False, False),
+    # Bare (no "__") vs a real prefix: "" != "docs", rejected.
+    ("bare-name", "docs__foo", False, True),
+]
+
+
 class TestRenameCLI:
     def _fake_t3(self, *, old_exists: bool = True, new_exists: bool = False) -> MagicMock:
         fake = MagicMock()
@@ -232,30 +263,7 @@ class TestRenameCLI:
 
     @pytest.mark.parametrize(
         ("old", "new", "force", "expect_reject"),
-        [
-            # Same-prefix conformant names: always accepted.
-            ("code__nexus-1-1__voyage-code-3__v1", "code__other-1-1__voyage-code-3__v1", False, False),
-            # Same-prefix legacy 2-segment names: accepted.
-            ("code__myrepo-abc12345", "code__myrepo-def67890", False, False),
-            # Cross-prefix without --force-prefix-change: rejected.
-            ("code__foo", "docs__foo", False, True),
-            # Same cross-prefix pair WITH --force-prefix-change: accepted.
-            ("code__foo", "docs__foo", True, False),
-            # Quarantine-prefixed: the raw first segment includes the
-            # "quarantine-" text verbatim (collection_shape.py's own
-            # quarantine STRIPPING is a different code path -- this gate
-            # never strips it), so two DIFFERENT quarantined base types
-            # still mismatch.
-            ("quarantine-code__foo", "quarantine-docs__foo", False, True),
-            # Same quarantined base type: match, accepted.
-            ("quarantine-code__foo", "quarantine-code__bar", False, False),
-            # Both legacy-bare (no "__" at all): both have "" as their
-            # prefix under the pre-funnel ternary's "" default -- equal,
-            # accepted, same as before the funnel.
-            ("bare-name-one", "bare-name-two", False, False),
-            # Bare (no "__") vs a real prefix: "" != "docs", rejected.
-            ("bare-name", "docs__foo", False, True),
-        ],
+        _RENAME_PREFIX_VALIDITY_CASES,
     )
     def test_rename_prefix_validity_table(
         self, old: str, new: str, force: bool, expect_reject: bool, env_creds,

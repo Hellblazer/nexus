@@ -2674,11 +2674,8 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     #
     # nexus-0y4c6 (2026-09-09): the TestResolveChunk entry was promoted the
     # same way — literal hoisted to `TestResolveChunk._PHYSICAL_COLLECTION`.
-    # The three test_service_mode_cli_real_client.py entries below are
-    # untouched.
-    "tests/test_service_mode_cli_real_client.py::test_collection_reembed_dry_run_service_mode_real_client",
-    "tests/test_service_mode_cli_real_client.py::test_collection_reembed_cross_model_rejected_service_mode",
-    "tests/test_service_mode_cli_real_client.py::test_collection_reembed_same_model_requests_server_side_re_embed",
+    # The three test_service_mode_cli_real_client.py entries (batch 3) were
+    # promoted too — literal hoisted to the module-level `_TO_CODE_MODEL`.
     #
     # RDR-152 nexus-gmiaf.22 (Seam B): asserts service-mode skips the embed
     # fallback. Voyage tokens appear only as realistic collection-NAME /
@@ -2798,40 +2795,13 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # behaviour under test is embedding-model-independent.
     "tests/test_indexer_e2e.py::test_migration_moves_prose_from_code_to_docs",
     #
-    # nexus-wxjr6 (2026-08-09, kl2z6 combined write client half):
-    # "string-literal-as-name". Both tests assert the combined write's
-    # request BODY carries the "collection" field verbatim
-    # ("code__nexus-1-1__voyage-code-3__v1") against a monkeypatched
-    # `_post` — no embedder runs, no mode-dependent path executes. The
-    # voyage token is a conformant collection-name fixture the wire-shape
-    # assertion happens to need, not a behavior assertion about which
-    # embedder ran.
-    "tests/catalog/test_manifest_write_many.py::TestWriteManifestManyCombined::test_combined_wire_shape",
-    "tests/catalog/test_manifest_write_many.py::TestWriteManifestManyCombined::test_ack_echo_raises_when_chunks_written_absent",
-    #
-    # nexus-y9t08 / nexus-n2w4q (2026-08-10, the combined-write timeout and
-    # retry follow-ups to wxjr6 immediately above): "string-literal-as-name",
-    # the SAME reason class, same file, same call. All four tests exercise
-    # `write_manifest_many(..., chunks=..., collection=...)` and need a
-    # conformant RDR-103 collection name to reach the chunk-carrying branch
-    # at all (that branch raises ValueError without a `collection` — see
-    # `test_chunks_requires_collection`); they then assert on the POST's
-    # kwargs (`timeout=600.0`, `retry_read_timeout=False`), the POST COUNT,
-    # and the exception TYPE/classification. Nothing asserts on the
-    # collection string itself, and no embedder can run: `_client()` is
-    # `HttpCatalogClient.__new__` (no `__init__`, no config read, no
-    # credential) and every one of the four monkeypatches `_post`, so the
-    # name never leaves the request body. Requesting `cloud_mode` would add
-    # a mode dependency to a fully-monkeypatched wire-behaviour unit test
-    # without changing one assertion — the opposite of what that fixture is
-    # for. Landed red on develop for the usual reason recorded throughout
-    # this block: both authoring commits (127f2dbc, 47c5a39a) ran targeted
-    # path-scoped batteries, and this census only fires on a whole-session
-    # collection.
-    "tests/catalog/test_manifest_write_many.py::TestWriteManifestManyCombinedTimeout::test_combined_write_gets_an_embed_grade_timeout",
-    "tests/catalog/test_manifest_write_many.py::TestCombinedWriteReadTimeoutNotRetried::test_read_timeout_raises_converted_type_after_exactly_one_post",
-    "tests/catalog/test_manifest_write_many.py::TestCombinedWriteReadTimeoutNotRetried::test_converted_exception_is_not_classified_as_connectivity",
-    "tests/catalog/test_manifest_write_many.py::TestCombinedWriteReadTimeoutNotRetried::test_connection_reset_still_propagates_unconverted_for_retry",
+    # nexus-0y4c6 burn-down, batch 3 (2026-09-09): the nexus-wxjr6 combined-
+    # write pair and the nexus-y9t08/nexus-n2w4q timeout/retry quartet (6
+    # nodeids total, tests/catalog/test_manifest_write_many.py) were
+    # promoted — every one of the six monkeypatches `_post`, so the
+    # collection literal never left the request body; hoisted to the
+    # module-level `_CODE_COLLECTION` constant. No embedder runs, no
+    # mode-dependent path executes.
     #
     # nexus-0y4c6 (2026-09-09): the nexus-35ok4/nexus-o5x2c (GH #1461)
     # shared-predicate pair was promoted the same way as the block above —
@@ -2860,66 +2830,32 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # the thread-local header-capture logging path -- no embedder runs,
     # no credential is read.
     #
-    # TestRegistrationSeamProfileCheck (item 3, nexus-ft04v.26): the
-    # voyage-code-3 token is the "intent" model fed to a FAKE profile
-    # reader (_stub_profile_reader) asserting the registration-seam
-    # agree/disagree/empty/route-missing outcome table; the real profile
-    # reader is never constructed.
-    "tests/test_collection_registration.py::TestRegistrationSeamProfileCheck::test_profile_agrees_registration_proceeds",
-    "tests/test_collection_registration.py::TestRegistrationSeamProfileCheck::test_profile_disagrees_raises_mismatch_before_the_register_call",
-    "tests/test_collection_registration.py::TestRegistrationSeamProfileCheck::test_empty_profile_proceeds_with_intent_bootstrap_case",
-    "tests/test_collection_registration.py::TestRegistrationSeamProfileCheck::test_pre_phase_2_engine_route_missing_propagates_uncaught",
-    #
-    # TestEnsureCollectionRegisteredExplicitKwargsOverride (RDR-204 Phase 3
-    # fix round, nexus-ft04v.28 C1): the voyage-code-3 token is part of the
-    # QUARANTINE COLLECTION NAME string / the explicit kwargs override dict
-    # under test -- proving `kwargs=` bypasses name-derivation and that the
-    # profile check still runs against whatever it says. A FAKE writer and
-    # a FAKE profile reader (_fake_writer / _stub_profile_reader) are used
-    # throughout; no real embedder or credential path is exercised.
-    "tests/test_collection_registration.py::TestEnsureCollectionRegisteredExplicitKwargsOverride::test_explicit_kwargs_bypasses_name_derivation",
-    "tests/test_collection_registration.py::TestEnsureCollectionRegisteredExplicitKwargsOverride::test_explicit_kwargs_still_runs_the_profile_check",
-    #
-    # test_rename_prefix_validity_table: voyage tokens appear only inside
-    # the function's own @pytest.mark.parametrize data tuples (source/
-    # target collection-name pairs feeding the rename-prefix-validity
-    # predicate); no embedder or credential path is exercised.
-    "tests/test_collection_rename.py::TestRenameCLI::test_rename_prefix_validity_table",
-    #
-    # test_knowledge_collections_filters_by_content_type: the voyage
-    # token is a collection-NAME fixture in a hand-rolled _FakeT3.
-    # list_collections() list; _knowledge_collections filters by a
-    # stubbed nexus.mcp_infra.get_collection_row, never a real embedder.
-    "tests/test_command_context_command.py::test_knowledge_collections_filters_by_content_type",
-    #
-    # test_source_note_names_document_collection_and_dates: the voyage
-    # token is a collection-NAME string passed straight through to
-    # context_annotations.source_note's string-formatting logic; no
-    # embedder, no credential.
-    "tests/test_context_annotations.py::test_source_note_names_document_collection_and_dates",
-    #
+    # nexus-0y4c6 burn-down, batch 3: the TestRegistrationSeamProfileCheck
+    # quartet and the TestEnsureCollectionRegisteredExplicitKwargsOverride
+    # pair (item 3 / RDR-204 Phase 3 fix round item 4, nexus-ft04v.26/.28
+    # C1; 6 nodeids, tests/test_collection_registration.py), the
+    # test_rename_prefix_validity_table parametrize table
+    # (tests/test_collection_rename.py), and five single-test entries —
+    # test_knowledge_collections_filters_by_content_type
+    # (tests/test_command_context_command.py),
+    # test_source_note_names_document_collection_and_dates
+    # (tests/test_context_annotations.py),
     # test_enrich_bare_subject_resolves_to_conformant_collection
-    # (nexus-g276c): the test's own comment says it outright -- "the
-    # model token is install-dependent (bge under the test config,
-    # voyage-context-3 on a cloud box); the shape is what the engine
-    # checks" -- asserting name SHAPE (3 "__" separators, "__v1" suffix),
-    # never the actual embedder that ran. HttpVectorClient is a MagicMock.
-    "tests/test_enrich_command.py::test_enrich_bare_subject_resolves_to_conformant_collection",
-    #
-    # test_sample_collection_names_by_prefix_families_pinned: the voyage
-    # token is one collection-NAME fixture in a plain string list fed to
-    # _sample_collection_names_by_prefix's family-key derivation; no
-    # embedder, no credential.
-    "tests/test_planner_few_shot.py::test_sample_collection_names_by_prefix_families_pinned",
-    #
-    # test_salience_boost_conformant_and_lookalike_prefixes (RDR-204
-    # Phase 3 funnel, nexus-ft04v.21/.26): the voyage token is a
-    # collection-NAME fixture in a fully-faked HttpDocumentAspectsStore
-    # seam, pinning the conformant-vs-lookalike-prefix targeting matrix;
-    # no embedder, no credential (this file's autouse
-    # _stub_collection_rows fixture also stubs nexus.mcp_infra.
-    # get_collection_row directly).
-    "tests/test_rdr_109_phase5_salience.py::test_salience_boost_conformant_and_lookalike_prefixes",
+    # (tests/test_enrich_command.py, whose docstring's prose mention was
+    # reworded rather than hoisted),
+    # test_sample_collection_names_by_prefix_families_pinned
+    # (tests/test_planner_few_shot.py), and
+    # test_salience_boost_conformant_and_lookalike_prefixes
+    # (tests/test_rdr_109_phase5_salience.py) — were all promoted the same
+    # way as the blocks above: literals hoisted to module/class constants
+    # (`TestRegistrationSeamProfileCheck._MODEL` plus four name
+    # constants, `TestEnsureCollectionRegisteredExplicitKwargsOverride.
+    # _NAME`/`_MODEL`, `_RENAME_PREFIX_VALIDITY_CASES`,
+    # `_KNOWLEDGE_DELOS_COLLECTION`, `_COLLECTION` in
+    # test_context_annotations.py, `_CODE_MYREPO_COLLECTION`,
+    # `_CONFORMANT_DOCS_COLLECTION`). None assert real cloud-mode
+    # behavior; no embedder or credential path is exercised in any of
+    # them.
     #
     # nexus-0y4c6 burn-down, batch 2: test_hybrid_scoring_code_detection_
     # pinned was promoted -- its @pytest.mark.parametrize data
