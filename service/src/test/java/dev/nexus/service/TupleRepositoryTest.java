@@ -821,7 +821,7 @@ class TupleRepositoryTest {
                     .execute();
         }
 
-        int purged = repo.purgeOldClaimLogBatch(tenant, 300, null);
+        int purged = repo.purgeOldClaimLogBatch(tenant, 300, null).purged();
         assertThat(purged).isEqualTo(1);
 
         try (Connection su = pg.createConnection("")) {
