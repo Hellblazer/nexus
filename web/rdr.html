@@ -132,7 +132,7 @@ ol.plain li,ul.plain li{margin:3px 0}
     <li><a href="#l3">3. Research, in cycles</a></li>
     <li><a href="#l4">4. Read it, react, repeat</a></li>
     <li><a href="#l5">5. The gate</a></li>
-    <li><a href="#l6">6. Accept, then break it into work</a></li>
+    <li><a href="#l6">6. Accept, and the plan follows</a></li>
     <li><a href="#l7">7. Build it, across many sessions</a></li>
     <li><a href="#l8">8. Close it, and what remains</a></li>
   </ol>
@@ -312,20 +312,22 @@ ol.plain li,ul.plain li{margin:3px 0}
 
 <!-- ============ 6 ============ -->
 <section class="lesson" id="l6">
-<div class="lhead"><span class="lnum">6</span><h2>Accept, then break it into work</h2><span class="ltime">15 min</span></div>
-<p class="why">Accepting is a decision, and it is yours. After it, the RDR stops being a draft and becomes the reference that the code is built against. Then Claude turns the Implementation Plan into tracked tasks, in phases, so the build can happen across many sessions without losing the thread.</p>
+<div class="lhead"><span class="lnum">6</span><h2>Accept, and the plan follows</h2><span class="ltime">15 min</span></div>
+<p class="why">Accepting is a decision, and it is yours. After it, the RDR stops being a draft and becomes the reference that the code is built against. Acceptance also starts the planning: Claude turns the Implementation Plan into tracked tasks, in phases, audits the plan, and enriches the tasks, in one chain, so the build can happen across many sessions without losing the thread.</p>
 
-<h3>Accept</h3>
+<h3>Accept, and the plan follows</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Accept RDR <span class="ph">&lt;NUMBER&gt;</span>.</pre><button class="copy" type="button">Copy</button></div>
-<p>Claude runs <code>/conexus:rdr-accept</code>. The status becomes <code>accepted</code>. Memory records the acceptance. From now on the RDR is not edited to match what gets built. If the build proves it wrong, lesson 7 says what happens.</p>
-
-<h3>Decompose</h3>
-<div class="see">You might say</div>
-<div class="cmd"><pre>Break RDR <span class="ph">&lt;NUMBER&gt;</span> into tasks by phase. Audit the plan once before I look at it.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
-<p>Claude uses the planning skill (<code>/conexus:create-plan</code>) to turn each phase of the Implementation Plan into tasks in the <code>bd</code> task tracker, with dependencies between them, under one epic that names the RDR. Then it runs the plan audit (<code>/conexus:plan-audit</code>), which checks the tasks against the code as it is: do the files exist, is the order possible, is anything assumed that the code contradicts. It shows you the task tree.</p>
-<p class="note">The plan audit has the same budget rule as the gate. One round, two at most. Past that, the first task's first test run tells you more than a third audit would.</p>
+<p>Claude runs <code>/conexus:rdr-accept</code>. The status becomes <code>accepted</code>, and memory records it. Then, because the RDR has an Implementation Plan, Claude asks one question: build the execution tasks now? The default is yes. Say yes, and the rest happens without further prompting from you, in this order:</p>
+<ol class="plain">
+<li>The planner agent turns each phase of the Implementation Plan into tasks in the <code>bd</code> task tracker, with dependencies between them, under one epic that names the RDR.</li>
+<li>The plan audit checks those tasks against the code as it is: do the files exist, is the order possible, is anything assumed that the code contradicts.</li>
+<li>Task enrichment adds to each task the context a builder needs: the files to touch, the tests to run, the constraints from the RDR, and any finding from the audit that applies.</li>
+</ol>
+<p>Then Claude shows you the task tree. You do not invoke the planner, the audit, or the enrichment yourself. They are the second half of accepting.</p>
+<p class="note">Say no to the question when the RDR has no build, for example a decision that only changes a rule, or when you want to plan later. You can run the planning chain on its own afterwards with <code>/conexus:create-plan</code>.</p>
+<p class="note">The plan audit has the same budget rule as the gate. One round, two at most. A plan audited many times is a plan nobody has tried to build.</p>
 
 <h3>Read the tree, not the tasks</h3>
 <p>Look at the phases and the dependencies. Is the first phase the one that proves the design works, or the one that is easiest? It should be the first. Is there a phase that ships nothing visible? Ask why. Then say go, or move things.</p>
@@ -388,7 +390,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 
 <h3>What remains</h3>
 <p>The RDR is now part of the corpus. The next time you or Claude research a similar question, in this project or another that shares the store, the search finds it, and the research agent reads it before it reads the web. This is the point of the whole cycle. One RDR is a decision. Two hundred are a memory of how the project thinks.</p>
-<div class="callout rule"><p><strong>The cycle again, in one line.</strong> A conversation becomes a draft. Research grows it in cycles. You read and react, sometimes with a critic. A gate checks it, within a budget. You accept. Claude breaks it into phases. Sessions build it, each ending with a continuation, each phase ending with a review. You close it. It becomes something the next RDR can find.</p></div>
+<div class="callout rule"><p><strong>The cycle again, in one line.</strong> A conversation becomes a draft. Research grows it in cycles. You read and react, sometimes with a critic. A gate checks it, within a budget. You accept, and the plan follows. Sessions build it, each ending with a continuation, each phase ending with a review. You close it. It becomes something the next RDR can find.</p></div>
 
 <div class="further"><h4>Investigate further</h4><ul>
 <li>After a close, ask Claude to research something adjacent to the RDR's subject. Watch it find the RDR.</li>
