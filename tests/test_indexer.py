@@ -2750,6 +2750,115 @@ def test_run_index_registers_collection_before_staleness_sweep(tmp_path, caplog)
     )
 
 
+def test_run_index_registration_loop_skips_deferred_collections(tmp_path):
+    """nexus-bd44g fix round (code review coverage gap): the registration
+    loop's have_code_files / have_docs_files / rdr_col_name guards must
+    exactly mirror the collection-CREATION guards a few lines above it in
+    ``_run_index``. A code-only repo (no docs, no docs/rdr) must register
+    ONLY the code__ collection -- never call ensure_collection_registered
+    for a deferred (None) docs__/rdr__ handle. A regression that dropped
+    these guards (always registering all three names unconditionally)
+    would pass every OTHER existing test silently, since nothing else
+    asserts non-call in the no-files case.
+    """
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")  # code only: no docs, no docs/rdr
+
+    registered_names: list[str] = []
+
+    def _fake_ensure_registered(name, *, registrar=None, kwargs=None):
+        registered_names.append(name)
+
+    db, col = _mock_db()
+    v = _voyage(1)
+    with _patches(db, extra={
+        "nexus.chunker.chunk_file": {"return_value": [_chunk()]},
+        "voyageai.Client": {"return_value": v},
+        "nexus.corpus.ensure_collection_registered": {
+            "side_effect": _fake_ensure_registered,
+        },
+    }):
+        _run_index(repo, _reg())
+
+    assert registered_names, "expected at least the code collection to register"
+    assert all(n.startswith("code__") for n in registered_names), (
+        "a deferred (docs/rdr) collection was registered when no such "
+        f"files exist: {registered_names!r}"
+    )
+
+
+def test_run_index_registers_rdr_collection_when_rdr_files_exist(tmp_path):
+    """nexus-bd44g fix round (code review coverage gap): the registration
+    loop's third slot (rdr_col_name) must actually fire when RDR files
+    exist -- the original fix's own regression test was code-only, "no
+    cross-collection ambiguity", and never exercised this branch.
+    """
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "README.md").write_text("# README\n\nProject description here.\n")
+    rdr = repo / "docs" / "rdr"; rdr.mkdir(parents=True)
+    (rdr / "ADR-001.md").write_text("# ADR-001\n\nArchitecture decision.\n")
+
+    registered_names: list[str] = []
+
+    def _fake_ensure_registered(name, *, registrar=None, kwargs=None):
+        registered_names.append(name)
+
+    db, ups, _ = _tracking_db()
+    with _patches(db, extra={
+        "nexus.corpus.ensure_collection_registered": {
+            "side_effect": _fake_ensure_registered,
+        },
+    }):
+        _run_index(repo, _reg())
+
+    rdr_registered = [n for n in registered_names if n.startswith("rdr__")]
+    assert rdr_registered, (
+        "rdr collection was never registered even though RDR files "
+        f"exist; registered: {registered_names!r}"
+    )
+
+
+def test_run_index_propagates_embedding_profile_mismatch_from_registration_loop(
+    tmp_path,
+):
+    """nexus-bd44g fix round (code review coverage gap): a genuine
+    EmbeddingProfileMismatchError raised by ensure_collection_registered
+    must propagate UNCAUGHT out of _run_index from the NEW, earlier call
+    site -- the commit's own prose asserted this ("A genuine profile
+    mismatch still propagates uncaught, same as it always would have at
+    write time") without a regression test integrated through _run_index
+    itself, only via ensure_collection_registered's own isolated unit
+    tests. This only moves WHEN the failure surfaces; it must never mask
+    it.
+    """
+    from nexus.corpus import EmbeddingProfileMismatchError
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")
+
+    def _raise_mismatch(name, *, registrar=None, kwargs=None):
+        raise EmbeddingProfileMismatchError(
+            "content_type='code': this install's configured intent is "
+            "'voyage-code-3', but the engine's embedding_profile still says "
+            "'bge-base-en-v15-768'. A restart is required for the engine to "
+            "adopt this: `nx daemon service stop && nx daemon service start`."
+        )
+
+    db, col = _mock_db()
+    with _patches(db, extra={
+        "nexus.corpus.ensure_collection_registered": {
+            "side_effect": _raise_mismatch,
+        },
+    }):
+        with pytest.raises(EmbeddingProfileMismatchError):
+            _run_index(repo, _reg())
+
+
 # nexus-sghyo (2026-08-06): the ``_legacy_vector_backend`` autouse
 # fixture that force-pinned this whole module to
 # NX_STORAGE_BACKEND_VECTORS=chroma (the legacy chroma/local embed

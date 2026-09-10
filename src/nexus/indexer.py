@@ -4815,6 +4815,29 @@ def _run_index(
     # already relies on, so the later write is a cache hit, not a
     # second round trip — closes the read-before-registration window
     # entirely rather than papering over its symptom.
+    #
+    # Known debris window (fix-round finding, not closed by this loop):
+    # write_with_registration_retry's own docstring (corpus.py) treats
+    # registration and the write that follows as ADJACENT within one
+    # call -- this loop breaks that adjacency by registering all three
+    # collections here, up front, while the per-file write loop that
+    # follows can run for minutes. A run that registers a collection and
+    # then writes ZERO chunks to it (every file of that content type
+    # fails to chunk, or the process dies before any successful write)
+    # leaves a registered-but-chunkless row with no write ever attempted
+    # to self-heal it. Not data loss and not new in KIND -- the engine's
+    # boot ghost sweep (a durable, at-most-once-per-tenant marker, not a
+    # recurring per-boot pass; nexus-snm4y/nexus-n060e semantics) and
+    # `nx catalog collection-gc` both already reclaim exactly this row
+    # shape, and a repo re-run self-heals it -- but this loop makes the
+    # window more reachable than the write-time-only registration it
+    # replaces. Direct prior instance of the same failure CLASS, a
+    # different call site: nexus-syfes (engine-service-v0.1.111
+    # shakeout, Phase E) -- see this file's
+    # test_prune_collection_serverside_never_registers_the_quarantine_
+    # sibling, which documents that incident and asserts the client
+    # never eagerly pre-registers the quarantine sibling for exactly
+    # this reason. No code change here; tracked in bead notes.
     from nexus.corpus import ensure_collection_registered  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
 
     for _name in (code_collection if have_code_files else None,
