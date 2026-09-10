@@ -4305,6 +4305,19 @@ def _run_index(
     # its own.
     skipped_unchunkable: list[tuple[Path, str]] = []
 
+    # nexus-d6qmz (GH #1524 residual): a document already stored for a
+    # path this pass's own filter now excludes (see
+    # RDR_DIR_NON_RDR_BASENAMES below) survives on disk untouched — the
+    # exclusion only stops it being RE-discovered here, it never reaches
+    # the stored catalog row. Left alone, the only reclaim path is
+    # ``_run_housekeeping``'s two-run miss-count sweep (the file is simply
+    # absent from every run's ``indexed_set``). Collected here and fed
+    # into ``delta_deleted`` below so it rides the SAME same-run prune
+    # (``_delete_docs_for_paths`` -> ``_prune_deleted_files``'s orphan
+    # sweep) the --since-head path already uses for a real git deletion —
+    # reclaimed THIS run, not the second one.
+    rdr_excluded_present: set[str] = set()
+
     rdr_md_paths: list[tuple[float, Path]] = []
     for rdr_rel in dict.fromkeys(rdr_paths):  # de-dupe while preserving order
         rdr_dir = repo / rdr_rel
@@ -4316,6 +4329,7 @@ def _run_index(
                         # README (and the agent guidance files beside it) are
                         # not RDRs; indexed as one, the byte-identical README
                         # outranked every real RDR in five collections at once.
+                        rdr_excluded_present.add(str(md_file.relative_to(repo)))
                         continue
                     if (delta_changed is not None
                             and str(md_file.relative_to(repo)) not in delta_changed):
@@ -4341,6 +4355,10 @@ def _run_index(
                     rdr_md_paths.append((frecency_map.get(md_file, 0.0), md_file))
     rdr_md_paths.sort(key=lambda x: x[0], reverse=True)
     have_rdr_files = bool(rdr_md_paths)
+
+    if rdr_excluded_present:
+        _already = set(delta_deleted)
+        delta_deleted.extend(sorted(rdr_excluded_present - _already))
 
     # Walk repo and classify files into code, prose, and PDF lists
     code_files: list[tuple[float, Path]] = []
@@ -5858,8 +5876,15 @@ def _run_index(
                 # nexus-fltb4: git said these paths are GONE (rename detection
                 # already applied) — delete their catalog docs NOW so the
                 # manifest CASCADE exposes their chunks to the orphan sweep
-                # below. The full-walk path never reaches here with
-                # delta_deleted set.
+                # below.
+                # nexus-d6qmz: a FULL walk can also populate delta_deleted —
+                # not only real git deletions ride this list. Paths this
+                # run's RDR-basename exclusion found present-but-no-longer-
+                # discovered (rdr_excluded_present, above) are appended to
+                # delta_deleted too, so a stored document at an excluded
+                # path is reclaimed THIS run exactly like a git deletion,
+                # instead of waiting on housekeeping's two-run miss-count
+                # sweep.
                 _delete_docs_for_paths(repo, delta_deleted)
             _prune_deleted_files(
                 code_collection, docs_collection, db, catalog=_cat,

@@ -646,6 +646,45 @@ def test_run_index_skips_process_documents_in_the_rdr_directory(tmp_path):
     assert stats["rdr_indexed"] == 1
 
 
+def test_run_index_prunes_stored_doc_for_now_excluded_rdr_basename(tmp_path):
+    """nexus-d6qmz (GH #1524 residual): a document already stored for
+    docs/rdr/README.md under the pre-#1524 rule survives on disk untouched
+    by the new basename exclusion above — it is never RE-discovered, but
+    the stored catalog row is never told either. Without the fix, the only
+    reclaim path is ``_run_housekeeping``'s two-run miss-count sweep (this
+    run's ``indexed_set`` simply omits the path); THIS run must also feed
+    it into the same ``delta_deleted`` -> ``_delete_docs_for_paths`` prune
+    the --since-head path uses for a real git deletion, so a FULL run
+    reclaims it immediately, exactly like a git deletion would."""
+    from nexus.indexer import _run_index
+    repo = tmp_path / "repo"; repo.mkdir()
+    rdr = repo / "docs" / "rdr"; rdr.mkdir(parents=True)
+    (rdr / "001.md").write_text("# D\n")
+    (rdr / "README.md").write_text("# Recommendation Decisioning Records\n")
+    (rdr / "AGENTS.md").write_text("# guidance\n")
+    db, _, _ = _tracking_db()
+    deleted_calls: list[list[str]] = []
+
+    with _patches(db, extra={
+        "nexus.indexer._index_prose_file": {"return_value": 1},
+        "nexus.indexer._delete_docs_for_paths": {
+            "side_effect": lambda _repo, paths: deleted_calls.append(list(paths)),
+        },
+    }):
+        _run_index(repo, _reg())
+
+    assert deleted_calls, (
+        "an excluded-but-present RDR basename must trigger a same-run "
+        "_delete_docs_for_paths call, not wait on the two-run housekeeping "
+        "miss-count sweep"
+    )
+    got = set(deleted_calls[0])
+    assert str(Path("docs/rdr/README.md")) in got
+    assert str(Path("docs/rdr/AGENTS.md")) in got
+    # The real RDR file must never be swept alongside the excluded ones.
+    assert str(Path("docs/rdr/001.md")) not in got
+
+
 @pytest.mark.parametrize("rdr_indexed,expect", [(1, True), (0, False)])
 def test_index_repo_cmd_rdr_summary(tmp_path, rdr_indexed, expect):
     from click.testing import CliRunner; from nexus.cli import main
