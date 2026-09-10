@@ -298,6 +298,32 @@ def test_lease_for_a_different_host_is_ignored(tmp_path: Path, mock_engine) -> N
     assert engine.requests == []
 
 
+def test_two_leases_for_one_host_picks_the_resolved_tenant(tmp_path: Path, mock_engine) -> None:
+    """nexus-em75s.12 review fix: lease selection filters on the resolved
+    tenant ("default", matching HttpTupleStore's DEFAULT_TENANT), not
+    only on host-digest self-consistency. A fresher, longer-lived lease
+    for a DIFFERENT tenant on the same host must never win -- before the
+    fix it would, because the digest is recomputed from the same file's
+    own tenant field and so always self-matches."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    # Fresher and longer-lived, but the wrong tenant -- must be ignored.
+    _write_data_token_lease(
+        config_dir, base_url=engine.base_url, token="wrong-tenant-token",
+        tenant="other-tenant", ttl_seconds=7200.0, remaining_s=7200.0,
+    )
+    # Shorter remaining TTL, but the resolved ("default") tenant -- must win.
+    _write_data_token_lease(
+        config_dir, base_url=engine.base_url, token="right-tenant-token",
+        tenant="default", ttl_seconds=3600.0, remaining_s=3600.0,
+    )
+
+    proc = _run("start", tmp_path=tmp_path, env_overrides={"NX_SERVICE_URL": engine.base_url})
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+    assert engine.auth_headers[0] == "Bearer right-tenant-token"
+
+
 def test_resolves_host_port_from_storage_service_lease(tmp_path: Path, mock_engine) -> None:
     """No NX_SERVICE_* env at all -- host/port come from the storage
     lease, exactly like every other T2/T3 client's local-supervisor leg."""
@@ -390,6 +416,41 @@ def test_never_mints_never_imports_nexus_package() -> None:
     assert module._ROUTE == "/v1/tuples/out"
 
 
-def test_script_uses_curl_binary_for_the_post() -> None:
+def test_script_never_spawns_a_subprocess_for_the_post() -> None:
+    """nexus-em75s.12 review fix: the bearer must never appear in a
+    subprocess argv (readable by any co-resident user via ps/proc for the
+    life of the call). The POST goes over stdlib ``urllib.request``, not
+    ``curl`` or any other shellout."""
     src = SCRIPT.read_text()
-    assert '"curl"' in src
+    assert '"curl"' not in src
+    assert "import subprocess" not in src
+    assert "urllib.request" in src
+
+
+def test_bearer_never_appears_in_a_spawned_subprocess(tmp_path: Path, mock_engine, monkeypatch) -> None:
+    """Behavioral proof, not just a source grep: patch subprocess.run to
+    fail loudly if the script's own process ever calls it, then run the
+    real POST path end to end and confirm the token still reaches the
+    engine -- via the Authorization header, never via any argv."""
+    import importlib.util
+    import subprocess as real_subprocess
+
+    engine = mock_engine(status=200)
+
+    spec = importlib.util.spec_from_file_location("tuple_ledger_project_probe", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def _forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("tuple_ledger_project.py must never spawn a subprocess to POST")
+
+    monkeypatch.setattr(real_subprocess, "run", _forbidden)
+    monkeypatch.setattr(real_subprocess, "Popen", _forbidden)
+
+    module._post_via_urllib(
+        engine.base_url, "never-in-argv",
+        {"subspace": "ledger/x", "keys": {"agent_id": "a", "kind": "start"}, "dims": {}},
+    )
+
+    assert len(engine.requests) == 1
+    assert engine.auth_headers[0] == "Bearer never-in-argv"

@@ -53,8 +53,16 @@ mechanize, it matters enough to ship.
 - `conexus/hooks/scripts/tuple_ledger_project.py` (new): the async
   projection body. Reads the client's cached storage-service and
   data-token lease files under `~/.config/nexus/`, POSTs the ledger
-  start/report tuple to `/v1/tuples/out` with `curl`, never mints, and on
-  a missing or near-expiry data-token lease skips and appends the reason
-  to `<session_id>.tuple-projection.log` beside the session's
-  `.expectations` ledger.
+  start/report tuple to `/v1/tuples/out` with stdlib `urllib.request`
+  (bearer in a header, never a subprocess argv), never mints, and on a
+  missing or near-expiry data-token lease scoped to the resolved tenant
+  skips and appends the reason to `<session_id>.tuple-projection.log`
+  beside the session's `.expectations` ledger.
   bead: nexus-em75s.11
+- `conexus/hooks/scripts/auto-approve-nx-mcp.sh`: RDR-205 Phase 2 review
+  fix — the eight tuple-space MCP tools (`tuple_out`, `tuple_rd`,
+  `tuple_in`, `tuple_ack`, `tuple_nack`, `tuple_registry`, `tuple_list`,
+  `tuple_stats`) were registered by `nexus.mcp.core` without a matching
+  allow-list entry, so every call prompted for permission instead of
+  auto-approving.
+  bead: nexus-em75s.12

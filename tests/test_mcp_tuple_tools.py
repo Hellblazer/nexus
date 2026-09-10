@@ -31,17 +31,22 @@ def _uniq(label: str) -> str:
 class TestTupleOutRd:
     def test_out_then_rd_round_trips(self, t2_service_env) -> None:
         addr = _uniq("addr")
-        msg = tuple_out(
+        tuple_id = tuple_out(
             f"mailbox/{addr}", {"to": addr}, {"from": "sender-a"}, "hello",
             nonce=_uniq("nonce"),
         )
-        assert "Wrote tuple" in msg
-        assert f"mailbox/{addr}" in msg
+        # nexus-em75s.12 review fix: the docstring promises "the tuple id,
+        # lowercase hex" -- the return value IS the id, not a sentence.
+        assert isinstance(tuple_id, str)
+        assert "Wrote" not in tuple_id
+        assert tuple_id == tuple_id.lower()
+        assert all(c in "0123456789abcdef" for c in tuple_id)
 
         rows = tuple_rd(f"mailbox/{addr}", {"to": addr})
         assert isinstance(rows, list) and len(rows) == 1
         row = rows[0]
         assert isinstance(row, dict)
+        assert row["id"] == tuple_id
         assert row["subspace"] == f"mailbox/{addr}"
         assert row["keys"] == {"to": addr}
         assert row["body"] == "hello"

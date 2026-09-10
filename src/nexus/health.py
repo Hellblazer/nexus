@@ -4787,12 +4787,27 @@ def _check_stranded_install() -> list[HealthResult]:
 # The anchor is FROZEN at today's ``REQUIRED_ENGINE_VERSION`` (audit round
 # 2 residual, nexus-em75s.10 bead notes) rather than computed some other
 # way, because there is no known future tag yet to anchor on — Phase 3
-# has not cut one. KNOWN LIMITATION carried forward from the identical
-# precedent: an unrelated engine-floor bump between now and the Phase 3
-# cut would flip these rows to WARN before the tuple route actually
-# ships. Whoever cuts the Phase 3 engine tag MUST update this constant to
-# that tag's own version (the same discipline AGENTS.md's paired-release
-# choreography already requires for REQUIRED_ENGINE_VERSION itself).
+# has not cut one.
+#
+# THE REAL HAZARD (nexus-em75s.12 review fix — the prior wording here
+# claimed this constant marks "the pin at the time this route was
+# added", which reads as though the route already shipped on a released
+# engine; it has not): this constant is truthful ONLY as long as NO
+# released engine-service tag actually carries ``/v1/tuples``, and it
+# MUST be updated, the moment one does, to equal that tag's own version
+# — not left frozen at whatever ``REQUIRED_ENGINE_VERSION`` happened to
+# be when this comment was written. Today's floor, (0, 1, 113), does NOT
+# carry the route (Phase 3 has not cut a tag yet) — the equality with
+# ``REQUIRED_ENGINE_VERSION`` below is coincidental to when this was
+# written, not a claim that the route ships at that version. Whoever cuts
+# the Phase 3 engine tag MUST bump this constant to that tag's own
+# version (the same discipline AGENTS.md's paired-release choreography
+# already requires for ``REQUIRED_ENGINE_VERSION`` itself) — see bead
+# nexus-em75s.14, which carries this as a downstream reference to bump at
+# the cut. ``tests/test_health_tuple_doctor_rows.py``'s
+# ``test_tuple_route_first_engine_version_pin`` fails loudly if this ever
+# drifts below ``REQUIRED_ENGINE_VERSION`` or above the newest published
+# ``engine-service-v*`` tag this repo knows about.
 _TUPLE_ROUTE_FIRST_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 113)
 
 #: Doctor heuristic, not derived from any per-template TTL: an unclaimed
@@ -4845,6 +4860,39 @@ def _fmt_age(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
+def _template_take_enabled(templates: list[dict], subspace: str) -> bool:
+    """Resolve *subspace* against the ``registry()`` wire's ``templates``
+    list and return the matching template's ``take.enabled`` (nexus-em75s.12
+    review fix). Mirrors ``TemplateRegistry.resolve()``'s literal-before-
+    pattern rule (``service/src/main/java/dev/nexus/service/tuples/
+    TemplateRegistry.java``): a literal template name is checked before
+    any parameterised one, and a ``<param>`` segment matches anything in
+    the corresponding position. Defaults to ``True`` (assume claimable,
+    keep checking) when nothing resolves or a template carries no ``take``
+    block -- an unmatched subspace must never be silently skipped.
+    """
+    segments = subspace.split("/")
+
+    def _matches(name: str) -> bool:
+        t_segments = name.split("/")
+        if len(t_segments) != len(segments):
+            return False
+        return all(
+            (ts.startswith("<") and ts.endswith(">")) or ts == ss
+            for ts, ss in zip(t_segments, segments)
+        )
+
+    literal = [t for t in templates if "<" not in t.get("name", "")]
+    patterned = [t for t in templates if "<" in t.get("name", "")]
+    for t in literal:
+        if t.get("name", "") == subspace:
+            return bool(t.get("take", {}).get("enabled", True))
+    for t in patterned:
+        if _matches(t.get("name", "")):
+            return bool(t.get("take", {}).get("enabled", True))
+    return True
+
+
 _TUPLE_UNCLAIMED_LABEL = "tuples.oldest_unclaimed"
 
 
@@ -4863,6 +4911,14 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
     whose oldest unclaimed tuple falls outside the first page is a known,
     documented limitation of a census check, not a silent miss (nothing
     here claims exhaustive coverage past one page).
+
+    Two review fixes (nexus-em75s.12): a subspace whose resolved template
+    has ``take.enabled: false`` (e.g. ``ledger/<session_id>`` — read-only
+    by design, rows are never claimed) is skipped outright, since
+    "oldest unclaimed" carries no signal there; and a subspace whose
+    census ``oldest_created_at`` (spans ALL rows, not just unclaimed) is
+    already younger than the staleness threshold skips the per-subspace
+    ``rd(n=300)`` fetch, since nothing in it could possibly be stale.
     """
     label = _TUPLE_UNCLAIMED_LABEL
     route_predates_floor = _tuple_route_predates_floor()
@@ -4919,11 +4975,34 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
     if not subspaces:
         return [HealthResult(label=label, ok=True, detail="no subspaces")]
 
+    try:
+        templates = store.registry().get("templates") or []
+    except Exception as exc:  # noqa: BLE001 — best-effort: a registry fetch failure must not sink this row; fall back to checking every subspace
+        _log.debug("doctor_tuple_unclaimed_age_registry_failed", error=str(exc))
+        templates = []
+
     stale: list[str] = []
     reported: list[str] = []
     for census in subspaces:
         if census.available <= 0:
             continue
+        if not _template_take_enabled(templates, census.subspace):
+            # Read-only template (take.enabled: false, e.g. ledger/<session_id>):
+            # rows are never claimed by design, so "oldest unclaimed" carries
+            # no signal here (nexus-em75s.12 review fix).
+            continue
+        census_oldest_dt = _parse_tuple_timestamp(census.oldest_created_at)
+        if census_oldest_dt is not None:
+            census_age_s = (datetime.now(UTC) - census_oldest_dt).total_seconds()
+            if census_age_s < _TUPLE_STALE_UNCLAIMED_AGE_S:
+                # oldest_created_at spans ALL rows in the subspace (live,
+                # claimed, dead, consumed) -- if even that overall oldest
+                # row is younger than the staleness threshold, no row here,
+                # unclaimed included, can possibly be older. Skip the
+                # per-subspace rd(n=300) fetch entirely (nexus-em75s.12
+                # review fix).
+                reported.append(f"{census.subspace}={_fmt_age(census_age_s)}")
+                continue
         try:
             rows = store.rd(census.subspace, None, n=300)
         except Exception as exc:  # noqa: BLE001 — best-effort per-subspace; one bad subspace must not sink the whole row

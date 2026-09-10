@@ -42,7 +42,7 @@ the tuple id is derived from ``(agent_id, kind)`` alone, so a retried
 construction, no de-dup needed here.
 
 Every failure path -- unresolvable endpoint, no fresh data-token lease,
-``curl`` transport failure, a non-2xx response -- appends one line to a
+transport failure, a non-2xx response -- appends one line to a
 log file beside the session's expectations ledger
 (``<state_dir>/<session_id>.tuple-projection.log``) and exits 0. This
 script's stdout, stderr and exit code are never read by anyone (the
@@ -56,7 +56,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import subprocess
 import sys
 import time
 import urllib.parse
@@ -89,13 +88,24 @@ _DATA_TOKEN_LEASE_FORMAT_VERSION = 1
 #: retry and no reader of the response.
 _NEAR_EXPIRY_THRESHOLD = 0.20
 
-#: Bound on the whole curl round trip -- research 5 measured ~10ms for a
+#: Bound on the whole POST round trip -- research 5 measured ~10ms for a
 #: healthy engine; this is a ceiling for a degraded/rate-limiting one, not
 #: a target. The wrapper has already detached, so this bound only keeps a
-#: hung engine from leaving an orphaned curl process running forever.
-_CURL_TIMEOUT_S = 5
+#: hung engine from leaving an orphaned connection open forever.
+_POST_TIMEOUT_S = 5
 
 _ROUTE = "/v1/tuples/out"
+
+#: The tenant this script's writes are scoped to. Matches
+#: ``nexus.db.t2.http_tuple_store``'s (and every sibling ``Http*Store``'s)
+#: ``DEFAULT_TENANT`` -- ``HttpTupleStore`` is never constructed with a
+#: non-default tenant anywhere this hook's writes correspond to, so a
+#: data-token lease minted for any OTHER tenant must never be presented
+#: here even when it is the freshest lease on disk for the same host
+#: (nexus-em75s.12 review fix: the lease-selection loop used to pick
+#: purely on host-digest + freshest-expiry, so a second tenant's lease
+#: for the same host could win and be sent as this write's bearer).
+_RESOLVED_TENANT = "default"
 
 _SESSION_ID_RE_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
@@ -214,11 +224,22 @@ def _resolve_base_url(config_dir: Path) -> str:
     )
 
 
-def _read_data_token_lease(config_dir: Path, base_url: str) -> str:
-    """The freshest data-token lease whose digest matches *base_url*'s
-    host, with remaining TTL ABOVE the near-expiry threshold -- or raise
-    :class:`_Skip` naming why. Never mints. Never falls back to a static
-    token: the caller has nothing else to try.
+def _read_data_token_lease(
+    config_dir: Path, base_url: str, tenant: str = _RESOLVED_TENANT,
+) -> str:
+    """The freshest data-token lease for *tenant* whose digest matches
+    *base_url*'s host, with remaining TTL ABOVE the near-expiry threshold
+    -- or raise :class:`_Skip` naming why. Never mints. Never falls back
+    to a static token: the caller has nothing else to try.
+
+    Filters on *tenant* explicitly (nexus-em75s.12 review fix), not only
+    on digest self-consistency: the digest is recomputed from the SAME
+    lease file's own ``tenant`` field, so a lease for a different tenant
+    on the same host still reproduces a matching digest and would
+    otherwise be indistinguishable from a same-tenant lease by that check
+    alone. Two leases for one host (different tenants) must resolve to
+    the one actually scoped to *tenant*, never to whichever has the
+    furthest expiry.
     """
     host = urllib.parse.urlsplit(base_url).netloc or base_url
     now = time.time()
@@ -232,8 +253,10 @@ def _read_data_token_lease(config_dir: Path, base_url: str) -> str:
             data = json.loads(path.read_text())
             if data.get("format_version") != _DATA_TOKEN_LEASE_FORMAT_VERSION:
                 continue
-            tenant = str(data["tenant"])
-            digest = hashlib.sha256(f"{host}\x00{tenant}".encode("utf-8")).hexdigest()
+            lease_tenant = str(data["tenant"])
+            if lease_tenant != tenant:
+                continue
+            digest = hashlib.sha256(f"{host}\x00{lease_tenant}".encode("utf-8")).hexdigest()
             if data.get("base_url_digest") != digest:
                 continue
             token = str(data["token"])
@@ -250,7 +273,7 @@ def _read_data_token_lease(config_dir: Path, base_url: str) -> str:
             best_token, best_expiry = token, expires_at
     if not best_token:
         raise _Skip(
-            f"no fresh data-token lease for {host} under "
+            f"no fresh data-token lease for {host} tenant={tenant!r} under "
             f"{config_dir}/{_DATA_TOKEN_LEASE_PREFIX}* (missing, wrong "
             f"host/tenant digest, or within {int(_NEAR_EXPIRY_THRESHOLD * 100)}% "
             f"of expiry)"
@@ -258,7 +281,7 @@ def _read_data_token_lease(config_dir: Path, base_url: str) -> str:
     return best_token
 
 
-# ── Payload + curl POST ─────────────────────────────────────────────────
+# ── Payload + POST ───────────────────────────────────────────────────────
 
 
 def _extract_fields(raw_payload: str) -> tuple[str, str, str]:
@@ -274,37 +297,39 @@ def _extract_fields(raw_payload: str) -> tuple[str, str, str]:
     return session_id, agent_id, agent_type
 
 
-def _post_via_curl(base_url: str, token: str, body: dict[str, Any]) -> None:
-    """POST *body* to ``{base_url}/v1/tuples/out`` via the ``curl``
-    binary (RDR-205 CA 4: measured ~10ms vs 0.8-0.9s of CPU for a
-    ``uv run nx`` shellout). Raises :class:`_Skip` naming the failure;
-    never raises anything else.
+def _post_via_urllib(base_url: str, token: str, body: dict[str, Any]) -> None:
+    """POST *body* to ``{base_url}/v1/tuples/out`` via stdlib
+    ``urllib.request`` -- never via a subprocess argv (nexus-em75s.12
+    review fix: the prior ``curl -H "Authorization: Bearer <token>"``
+    invocation put the bearer in that process's argv, readable by any
+    co-resident user via ``ps``/``/proc`` for the life of the call).
+    Same repo precedent as ``routing/_lib.py``'s routing-event POST and
+    ``t2_prefix_scan.py``'s ``_http_get_json``. Raises :class:`_Skip`
+    naming the failure; never raises anything else.
     """
-    payload = json.dumps(body, separators=(",", ":"))
+    import urllib.error  # noqa: PLC0415 — stdlib, only needed on this path
+    import urllib.request  # noqa: PLC0415 — stdlib, only needed on this path
+
+    payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
     url = f"{base_url}{_ROUTE}"
-    argv = [
-        "curl", "-sS", "-m", str(_CURL_TIMEOUT_S),
-        "-o", "/dev/null", "-w", "%{http_code}",
-        "-X", "POST", url,
-        "-H", f"Authorization: Bearer {token}",
-        "-H", "Content-Type: application/json",
-        "--data-binary", "@-",
-    ]
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
     try:
-        proc = subprocess.run(
-            argv, input=payload, capture_output=True, text=True,
-            timeout=_CURL_TIMEOUT_S + 2,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise _Skip(f"curl transport failure posting to {url}: {exc}") from exc
-    if proc.returncode != 0:
-        raise _Skip(
-            f"curl exited {proc.returncode} posting to {url}: "
-            f"{proc.stderr.strip()[:200]}"
-        )
-    status = proc.stdout.strip()
-    if not status.startswith("2"):
-        raise _Skip(f"engine returned HTTP {status or '?'} posting to {url}")
+        with urllib.request.urlopen(req, timeout=_POST_TIMEOUT_S) as resp:  # noqa: S310 — fixed internal engine URL, not user input
+            status = resp.status
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise _Skip(f"transport failure posting to {url}: {exc}") from exc
+    if not (200 <= status < 300):
+        raise _Skip(f"engine returned HTTP {status} posting to {url}")
 
 
 def main(argv: list[str]) -> int:
@@ -328,7 +353,7 @@ def main(argv: list[str]) -> int:
             "keys": {"agent_id": agent_id, "kind": kind},
             "dims": {"agent_type": agent_type},
         }
-        _post_via_curl(base_url, token, body)
+        _post_via_urllib(base_url, token, body)
     except _Skip as exc:
         _log_skip(session_id, f"SKIP kind={kind} agent_id={agent_id} {exc}")
         return 0

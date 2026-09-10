@@ -32,9 +32,10 @@ import nexus.health as h
 
 
 class _FakeSubspace:
-    def __init__(self, subspace: str, available: int) -> None:
+    def __init__(self, subspace: str, available: int, oldest_created_at: str | None = None) -> None:
         self.subspace = subspace
         self.available = available
+        self.oldest_created_at = oldest_created_at
 
 
 class _FakeTupleRow:
@@ -44,20 +45,34 @@ class _FakeTupleRow:
         self.claim_state = claim_state
 
 
+def _fake_template(name: str, *, take_enabled: bool = True) -> dict:
+    return {"name": name, "take": {"enabled": take_enabled}}
+
+
 class _FakeTupleStore:
     closed = False
 
-    def __init__(self, subspaces=None, rd_by_subspace=None, list_exc=None) -> None:
+    def __init__(
+        self, subspaces=None, rd_by_subspace=None, list_exc=None,
+        templates=None, rd_calls: list[str] | None = None,
+    ) -> None:
         self._subspaces = subspaces or []
         self._rd_by_subspace = rd_by_subspace or {}
         self._list_exc = list_exc
+        self._templates = templates if templates is not None else []
+        self._rd_calls = rd_calls
 
     def subspace_list(self, prefix=None):
         if self._list_exc is not None:
             raise self._list_exc
         return self._subspaces
 
+    def registry(self):
+        return {"templates": self._templates}
+
     def rd(self, subspace, keys_pattern, n=1, since=None, timeout_s=0):
+        if self._rd_calls is not None:
+            self._rd_calls.append(subspace)
         return self._rd_by_subspace.get(subspace, [])
 
 
@@ -164,6 +179,82 @@ class TestCheckTupleUnclaimedAgeBehavior:
         r = _run_unclaimed(monkeypatch, store)
         assert r.ok is True
         assert r.detail == "none"
+
+    def test_take_disabled_ledger_subspace_with_day_old_rows_is_ok(self, monkeypatch) -> None:
+        """nexus-em75s.12 review fix: a take.enabled=false template (e.g.
+        ledger/<session_id>) is read-only by design -- rows are never
+        claimed, so a day-old row must not trip the staleness finding.
+        rd() must never even be called for this subspace."""
+        import datetime as _dt
+        old = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(days=1)).isoformat().replace("+00:00", "Z")
+        rd_calls: list[str] = []
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("ledger/sess1", available=1, oldest_created_at=old)],
+            rd_by_subspace={"ledger/sess1": [_FakeTupleRow("id1", old, None)]},
+            templates=[_fake_template("ledger/<session_id>", take_enabled=False)],
+            rd_calls=rd_calls,
+        )
+        r = _run_unclaimed(monkeypatch, store)
+        assert r.ok is True
+        assert r.warn is not True
+        assert "ledger/sess1" not in r.detail
+        assert rd_calls == []
+
+    def test_mailbox_subspace_with_hour_old_available_row_yields_existing_severity(self, monkeypatch) -> None:
+        """The take-enabled path (mailbox/<address>) and the new census
+        pre-filter must not change behavior for a row old enough to
+        matter -- rd() is still called and the outcome matches the
+        pre-fix severity (a hard finding, same as
+        test_stale_unclaimed_tuple_is_a_hard_finding)."""
+        import datetime as _dt
+        hour_old = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(hours=1, seconds=5)).isoformat().replace("+00:00", "Z")
+        rd_calls: list[str] = []
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("mailbox/a", available=1, oldest_created_at=hour_old)],
+            rd_by_subspace={"mailbox/a": [_FakeTupleRow("id1", hour_old, None)]},
+            templates=[_fake_template("mailbox/<address>", take_enabled=True)],
+            rd_calls=rd_calls,
+        )
+        r = _run_unclaimed(monkeypatch, store)
+        assert rd_calls == ["mailbox/a"]
+        assert r.ok is False and r.warn is not True
+        assert "mailbox/a" in r.detail
+
+    def test_fresh_census_oldest_created_at_skips_the_rd_fetch(self, monkeypatch) -> None:
+        """nexus-em75s.12 review fix: when the census's own oldest_created_at
+        (spans ALL rows) is already younger than the staleness threshold,
+        nothing in the subspace -- unclaimed included -- can possibly be
+        stale, so the per-subspace rd(n=300) fetch is skipped entirely."""
+        import datetime as _dt
+        fresh = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(seconds=10)).isoformat().replace("+00:00", "Z")
+        rd_calls: list[str] = []
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("mailbox/a", available=1, oldest_created_at=fresh)],
+            rd_by_subspace={"mailbox/a": [_FakeTupleRow("id1", fresh, None)]},
+            templates=[_fake_template("mailbox/<address>", take_enabled=True)],
+            rd_calls=rd_calls,
+        )
+        r = _run_unclaimed(monkeypatch, store)
+        assert rd_calls == []
+        assert r.ok is True
+        assert "mailbox/a=" in r.detail
+
+    def test_unmatched_subspace_defaults_to_checked(self, monkeypatch) -> None:
+        """A subspace with no resolving template (registry unavailable or
+        genuinely unmatched) must default to claimable/checked -- never
+        silently skipped, matching TemplateRegistry.resolve()'s own
+        "return null when nothing matches" being a caller-decides case,
+        not an implicit take.enabled=false."""
+        import datetime as _dt
+        old = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("mailbox/a", available=1, oldest_created_at=old)],
+            rd_by_subspace={"mailbox/a": [_FakeTupleRow("deadbeef" * 8, old, None)]},
+            templates=[],  # registry has no matching template
+        )
+        r = _run_unclaimed(monkeypatch, store)
+        assert r.ok is False and r.warn is not True
+        assert "mailbox/a" in r.detail
 
 
 # ── rows 2 and 3: psql-backed ────────────────────────────────────────────────
@@ -403,3 +494,38 @@ def test_all_three_rows_are_registered_in_run_health_checks() -> None:
         "_check_tuple_unclaimed_age", "_check_tuple_table_bloat", "_check_tuple_sweep_freshness",
     ):
         assert f"{fn_name}()" in source, f"nx doctor must invoke {fn_name}()"
+
+
+# ── floor-constant pin (nexus-em75s.12 review fix) ───────────────────────────
+
+
+def test_tuple_route_first_engine_version_pin() -> None:
+    """``_TUPLE_ROUTE_FIRST_ENGINE_VERSION`` must never sit BELOW
+    ``REQUIRED_ENGINE_VERSION`` (that would claim the tuple route ships
+    in an engine no local install can even reach any more) and must
+    never sit ABOVE the newest published ``engine-service-v*`` tag this
+    repo's git history knows about (that would name a tag that does not
+    exist yet). Both directions drift the moment either side moves
+    without the other -- this is the mechanical half of the comment
+    above the constant's definition in ``src/nexus/health.py``.
+    """
+    assert h._TUPLE_ROUTE_FIRST_ENGINE_VERSION >= ev.REQUIRED_ENGINE_VERSION, (
+        f"_TUPLE_ROUTE_FIRST_ENGINE_VERSION {h._TUPLE_ROUTE_FIRST_ENGINE_VERSION} is BELOW "
+        f"REQUIRED_ENGINE_VERSION {ev.REQUIRED_ENGINE_VERSION} -- the tuple route cannot "
+        "predate a floor no local install can even reach any more; fix the constant in "
+        "src/nexus/health.py."
+    )
+
+    import check_engine_release_floor as gate
+
+    newest = gate.newest_published_engine()
+    if newest is gate._TAGS_UNAVAILABLE:
+        pytest.skip("git tags unavailable in this checkout (shallow clone with no tags fetched)")
+    if newest is None:
+        pytest.skip("no engine-service-v* tags found in this checkout's git history")
+    assert h._TUPLE_ROUTE_FIRST_ENGINE_VERSION <= newest, (
+        f"_TUPLE_ROUTE_FIRST_ENGINE_VERSION {h._TUPLE_ROUTE_FIRST_ENGINE_VERSION} names a "
+        f"tag NEWER than any published engine-service-v* tag this repo knows about "
+        f"({newest}) -- update it only once that tag actually exists and actually carries "
+        "/v1/tuples."
+    )

@@ -5748,12 +5748,22 @@ def plan_delete(plan_id: int) -> str:
 
 # ── Tuple space tools (RDR-205 Phase 2 Step 2, bead nexus-em75s.10) ──────────
 # Eight MCP tools over nexus.db.t2.http_tuple_store.HttpTupleStore
-# (nexus-em75s.9). ``structured_output=False`` is set ONLY where the return
-# annotation is a union or a list (the nexus-6jlki/nexus-r90ao rule: a bare
-# unparameterized ``dict`` return is never auto-wrapped by FastMCP) — see
-# the ``search`` tool's docstring above for the full rule. ``rd``/``in_``
-# cover their own non-blocking probe case via ``timeout_s=0`` (the
-# default): there are no separate ``tuple_rdp``/``tuple_inp`` tools.
+# (nexus-em75s.9). ``structured_output=False`` is declared explicitly on
+# EVERY one of the eight tools below, regardless of return-annotation
+# shape (nexus-em75s.12 review fix — this comment previously claimed it
+# was set only where the annotation is a union or a list, which the code
+# never did: ``tuple_out``/``tuple_ack``/``tuple_nack`` return a bare
+# ``str`` and ``tuple_registry``/``tuple_stats`` a bare ``dict``, and both
+# carry the same explicit ``structured_output=False``). The real rule is
+# the nexus-r90ao registration census (``tests/test_mcp_wire_shapes.py``):
+# every ``@mcp.tool()`` must declare ``structured_output=`` explicitly, so
+# a future signature edit to a union/list return can never silently
+# reintroduce FastMCP's auto-wrap with no test noticing — see
+# ``tuple_registry``'s and ``tuple_stats``'s own inline comments below,
+# and the ``search`` tool's docstring above, for the full nexus-6jlki/
+# nexus-r90ao auto-wrap rule this declares against. ``rd``/``in_`` cover
+# their own non-blocking probe case via ``timeout_s=0`` (the default):
+# there are no separate ``tuple_rdp``/``tuple_inp`` tools.
 
 
 def _tuple_row_to_dict(row: Any) -> dict[str, Any]:
@@ -5826,7 +5836,7 @@ def tuple_out(
             ),
             op="tuple_out",
         )
-        return f"Wrote tuple {tuple_id} to subspace {subspace!r}"
+        return tuple_id
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("tuple_out", e)
 
