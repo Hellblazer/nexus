@@ -112,3 +112,7 @@ mechanize, it matters enough to ship.
   gate record, marked `(carried from round <N>)`, rather than dropped.
 - `conexus/commands/rdr-gate.md`: nexus-yjf5l.14 — mirrors the same
   cross-round carry-forward statement.
+- `conexus/skills/rdr-gate/SKILL.md`, `conexus/skills/rdr-fix/SKILL.md`,
+  `conexus/commands/rdr-gate.md`, `conexus/commands/rdr-fix.md`:
+  nexus-yjf5l.17 review — the cross-walk check names a pair once: a pair
+  the identifier check already named is not named again.

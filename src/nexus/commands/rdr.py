@@ -1866,8 +1866,9 @@ _FINDING_TITLE_LOC_RE = re.compile(r"\b[\w./-]+:\d+\b")
 
 def _finding_title_key_loose(text: str) -> str:
     """A second, looser normalisation of :func:`_finding_title_key`, used
-    only when the strict key finds no match (nexus-yjf5l.14). Digits and
-    file:line pointer tokens are stripped from the strict key's output,
+    only when the strict key finds no match (nexus-yjf5l.14). Digits are
+    replaced by a placeholder and a file:line pointer keeps its path and
+    loses only its line number in the strict key's output,
     tolerating a residual title that drifted by nothing but a
     self-referential count or a dated pointer between gate rounds — the
     shape that recurs most in this project's own gate history (the live
@@ -1877,9 +1878,22 @@ def _finding_title_key_loose(text: str) -> str:
     try the strict key first and fall back to this one only on a miss.
     """
     key = _finding_title_key(text)
-    key = _FINDING_TITLE_LOC_RE.sub("", key)
-    key = re.sub(r"\d+", "", key)
+    key = _FINDING_TITLE_LOC_RE.sub(lambda m: m.group(0).rsplit(":", 1)[0] + ":n", key)
+    key = re.sub(r"\d+", "n", key)
     return re.sub(r"\s+", " ", key).strip()
+
+
+def _loose_unique_index(titles: list[str]) -> dict[str, str]:
+    """Loose key to title, for the keys that name exactly ONE title in
+    *titles*. A loose match is accepted only when it is unambiguous on both
+    sides: two distinct findings that share every non-digit word ("round 3
+    ... off by 1" and "round 5 ... off by 1") share a loose key, and a
+    fallback that picked one of them would merge two defects into one
+    residual line. Ambiguity is a miss, never a guess."""
+    by_key: dict[str, list[str]] = {}
+    for t in titles:
+        by_key.setdefault(_finding_title_key_loose(t), []).append(t)
+    return {k: v[0] for k, v in by_key.items() if len(v) == 1}
 
 
 def _nearest_finding_title(residual_title: str, candidate_titles: list[str]) -> str | None:
@@ -2002,7 +2016,8 @@ def _preamble_regate_block(
     # count or pointer between rounds — the loose key catches that drift
     # as a second pass, never the first, so two genuinely different
     # findings sharing every non-digit word cannot collide on it.
-    residual_loose_keys = {_finding_title_key_loose(t) for t in residual_titles}
+    residual_loose_unique = _loose_unique_index(residual_titles)
+    finding_loose_unique = _loose_unique_index([f for f in findings if not f.startswith("  ")])
     if findings:
         survivors: list[str] = []
         recorded: list[str] = []
@@ -2017,7 +2032,7 @@ def _preamble_regate_block(
                     matched_keys.add(fkey)
                 else:
                     floose = _finding_title_key_loose(f)
-                    is_residual = floose in residual_loose_keys
+                    is_residual = floose in residual_loose_unique and floose in finding_loose_unique
                     if is_residual:
                         matched_loose_keys.add(floose)
             (recorded if is_residual else survivors).append(f)
@@ -2342,7 +2357,7 @@ def _fix_check_lines(
         "6. For every check, bound or rule this change adds, name the parameter, column or "
         "setting it constrains, and for every parameter, column or setting this change adds "
         "or alters, name every check, bound or rule that constrains it, whether or not they "
-        "share a name.",
+        "share a name, and a pair the previous check already named is not named again.",
         "",
         f"Verdict goes to T2 `{t2_key}-fix-check-{tip_sha}` (project `<repo>_rdr`); the gate "
         f"record's `fix_check:` must name `{tip_sha}`, equal to its `commit:`. Any FAIL: fix, "
@@ -3235,7 +3250,9 @@ _CARRIED_FROM_RE = re.compile(r"\s*\(carried from round \d+\)\s*$", re.IGNORECAS
 #: nexus-yjf5l.7). ``_finding_title_key`` strips this too, for matching; this
 #: copy exists so ``_residual_class_and_title`` can recover the class instead
 #: of discarding it.
-_RESIDUAL_CLASS_TAG_RE = re.compile(r"^\[([A-Z][A-Z-]*)\]\s*")
+_RESIDUAL_CLASS_TAG_RE = re.compile(
+    r"^\[(" + "|".join(re.escape(c) for c in VALID_CLASSIFICATIONS) + r")\]\s*"
+)
 
 
 def _residual_titles(content: str) -> list[str]:
@@ -3641,13 +3658,16 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
     if rule.blocks_on == "ship-blocker":
         residuals = [t for t in tally.criticals + tally.significants if t not in tally.ship_blocker_titles]
         new_strict_keys = {_finding_title_key(t) for t in residuals}
-        new_loose_keys = {_finding_title_key_loose(t) for t in residuals}
+        new_loose_unique = _loose_unique_index(residuals)
+        prior_raw = _residual_titles(latest_content)
+        prior_loose_unique = _loose_unique_index([_residual_class_and_title(r)[1] for r in prior_raw])
         carried_round_label = (_preamble_parse_t2_field(latest_content, "round") or "").strip()
-        for raw in _residual_titles(latest_content):
+        for raw in prior_raw:
             cls, bare_title = _residual_class_and_title(raw)
             if _finding_title_key(bare_title) in new_strict_keys:
                 continue
-            if _finding_title_key_loose(bare_title) in new_loose_keys:
+            loose = _finding_title_key_loose(bare_title)
+            if loose in new_loose_unique and loose in prior_loose_unique:
                 continue
             residuals.append(bare_title)
             residual_classes[bare_title] = cls

@@ -1417,7 +1417,8 @@ _CROSSWALK_CLAUSE_RE = re.compile(
     r"parameter, column or setting it constrains, and for every "
     r"parameter, column or setting this change adds or alters, name "
     r"every check, bound or rule that constrains it, whether or not "
-    r"they share a name\.",
+    r"they share a name, and a pair the previous check already named is "
+    r"not named again\.",
     re.DOTALL,
 )
 

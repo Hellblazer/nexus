@@ -79,7 +79,7 @@ fix commits, and the T2 title for the verdict. Then:
    6. For every check, bound or rule this change adds, name the parameter,
       column or setting it constrains, and for every parameter, column or
       setting this change adds or alters, name every check, bound or rule
-      that constrains it, whether or not they share a name.
+      that constrains it, whether or not they share a name, and a pair the previous check already named is not named again.
 2. Deliverable: one row per clause, PASS or FAIL with line numbers, plus the
    standard Verdict block.
 3. Store the verdict in T2: mcp__plugin_conexus_nexus__memory_put(project="{repo}_rdr", title="{id}-fix-check-<sha>", ttl="permanent", tags="rdr,gate,fix-check"), where `<sha>` is the RDR file's tip commit as printed by the preamble.

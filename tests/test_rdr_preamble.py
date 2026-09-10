@@ -3210,3 +3210,42 @@ class TestCritiqueFindings:
         assert len(findings) == 3, findings
         for title in tally.criticals + tally.significants:
             assert any(title in f for f in findings), (title, findings)
+
+
+class TestResidualBatchReviewPins:
+    """Pins from the residual-batch review of nexus-yjf5l (T2
+    nexus/review-nexus-yjf5l-residual-batch-2026-09-10 F1 F2, and
+    nexus/critique-nexus-yjf5l-residual-batch-2026-09-10 findings 1 and 2)."""
+
+    def test_residual_class_tag_is_scoped_to_the_two_classes(self) -> None:
+        from nexus.commands.rdr import _residual_class_and_title
+        from nexus.plans.audit_rounds import BLOCKS_PLANNING, DISCOVER_AT_IMPLEMENTATION
+
+        assert _residual_class_and_title("[SQL] query builder allows injection") == (
+            BLOCKS_PLANNING, "[SQL] query builder allows injection",
+        )
+        assert _residual_class_and_title(f"[{DISCOVER_AT_IMPLEMENTATION}] a title") == (
+            DISCOVER_AT_IMPLEMENTATION, "a title",
+        )
+
+    def test_loose_key_keeps_the_file_path_and_drops_only_the_line(self) -> None:
+        from nexus.commands.rdr import _finding_title_key_loose
+
+        a = _finding_title_key_loose("Off-by-one in the sweep at foo.py:120")
+        b = _finding_title_key_loose("Off-by-one in the sweep at bar.py:340")
+        c = _finding_title_key_loose("Off-by-one in the sweep at foo.py:121")
+        assert a != b, "two findings differing only in file must not share a loose key"
+        assert a == c, "a drifted line number in the same file is the same finding"
+
+    def test_loose_match_is_refused_when_ambiguous(self) -> None:
+        from nexus.commands.rdr import _loose_unique_index
+
+        idx = _loose_unique_index([
+            "the round 3 residuals count is off by 1",
+            "the round 5 residuals count is off by 1",
+            "an unrelated title",
+        ])
+        assert "an unrelated title" in idx.values()
+        assert not any("off by" in v for v in idx.values()), (
+            "two titles sharing every non-digit word must not resolve to either"
+        )
