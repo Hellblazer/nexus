@@ -1378,8 +1378,18 @@ def test_cli_taxonomy_list(tmp_path: Path) -> None:
 
     db_path = tmp_path / "memory.db"
     with T2Database(db_path) as db:
-        _seed_topic(db.taxonomy, "Search Methods", collection="proj", doc_count=5)
-        _seed_topic(db.taxonomy, "Database Queries", collection="proj", doc_count=3)
+        t1 = _seed_topic(db.taxonomy, "Search Methods", collection="proj")
+        t2 = _seed_topic(db.taxonomy, "Database Queries", collection="proj")
+        # doc_count is trigger-maintained (RDR-154 P0) and, since nexus-c0g6e's
+        # root-cause fix (GH #1529), the import path itself recounts from
+        # real topic_assignments rows rather than trusting a caller-supplied
+        # seed — this test's whole point is that the CLI displays doc counts
+        # correctly, so the "5 docs"/"3 docs" it checks for come from REAL
+        # assignment rows, not a doc_count argument to _seed_topic.
+        for i in range(5):
+            _seed_assignment(db.taxonomy, canonical_chunk_id(f"search-doc-{i}"), t1)
+        for i in range(3):
+            _seed_assignment(db.taxonomy, canonical_chunk_id(f"db-doc-{i}"), t2)
 
     runner = CliRunner()
     with patch(
@@ -1990,12 +2000,17 @@ class TestReviewMethods:
 
     def test_get_topic_by_id(self, db: T2Database) -> None:
         """get_topic_by_id returns a single topic dict or None."""
-        topic_id = _seed_topic(db.taxonomy, "my-topic", collection="proj", doc_count=7)
+        # doc_count is trigger-maintained (RDR-154 P0) and, since nexus-c0g6e's
+        # root-cause fix (GH #1529), the import path itself recounts from real
+        # topic_assignments rows rather than trusting a caller-supplied seed —
+        # no assignments are seeded here (this test's point is the lookup
+        # mechanics, not a doc_count value), so the real count is 0.
+        topic_id = _seed_topic(db.taxonomy, "my-topic", collection="proj")
 
         result = db.taxonomy.get_topic_by_id(topic_id)
         assert result is not None
         assert result["label"] == "my-topic"
-        assert result["doc_count"] == 7
+        assert result["doc_count"] == 0
 
         assert db.taxonomy.get_topic_by_id(99999) is None
 
