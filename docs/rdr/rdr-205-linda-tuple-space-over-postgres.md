@@ -588,9 +588,10 @@ nexus.tuple_tenants               tenant_id PK, first_seen, last_seen, last_swep
                                   (a plain select, no lock) and issues the upsert only when the
                                   row is missing or last_seen is older than a minute, so an
                                   ordinary out takes no row lock here; the sweep's enumeration
-                                  source, visited least-recently-swept first (last_swept_at ascending,
-                                  tenant_id as the tie-break) and stamped when a tenant's sweep
-                                  finishes, so resumption after a budget stop or a restart needs no
+                                  source, visited least-recently-swept first (last_swept_at ascending
+                                  with nulls first, tenant_id as the tie-break) and stamped only when
+                                  a tenant's sweep finishes cleanly (a tenant cut short keeps its old
+                                  stamp), so resumption after a budget stop or a restart needs no
                                   cursor; never purged by the sweep; exposed by no client operation
 
 nexus.tuple_claim_log             append-only: claim | ack | nack | expire | dead
@@ -600,7 +601,8 @@ nexus.tuple_claim_log             append-only: claim | ack | nack | expire | dea
   claim_id, claimant, transition, at
   expires_at                  the log's own TTL, an engine setting (NX_TUPLE_CLAIM_LOG_TTL_DAYS,
                               default 180) the loader reads at boot and refuses to start unless it
-                              exceeds every template's retention_seconds by one sweep interval
+                              exceeds every template's retention_seconds by strictly more than
+                              one sweep interval (the boot check in the prose below)
 ```
 
 No v1 template embeds. A later semantic column lands as an additive
@@ -636,7 +638,8 @@ names every field its id covers.
 authority):**
 
 ```text
-// in one tenant-scoped transaction, nothing else in it
+// in one tenant-scoped transaction: the claim, plus at most NX_TUPLE_CLAIM_PASSES
+// dead-letter transitions from the re-run below, nothing else
 row = select(...).from(TUPLES)
         .where(TENANT.eq(t), SUBSPACE.eq(s), KEYS.eq(pattern),
                CONSUMED_AT.isNull(), EXPIRES_AT.gt(now()),
@@ -655,8 +658,11 @@ insert claim_log(tuple_id, claim_id, c, 'claim', now)
 weaker lock lets the log's foreign key coexist; it has no call site in
 the engine today and `forUpdate()` is the fallback. `SKIP LOCKED`
 because a contended row is skipped, not waited on. The transaction holds
-the claim and nothing else, so the taxonomy-015 class (a lock upgrade
-inside one transaction) has nothing to upgrade.
+the claim and, from the dead-letter re-run below, at most
+`NX_TUPLE_CLAIM_PASSES` dead-letter transitions (each an update, an
+`expire` row and a `dead` row on a candidate it locked); every lock it
+takes is `FOR NO KEY UPDATE` from the start, so the taxonomy-015 class
+(a lock upgrade inside one transaction) has nothing to upgrade.
 
 Two rules from the May implementation travel with the statement. The
 availability predicate is `consumed_at IS NULL AND expires_at > now()
@@ -671,10 +677,13 @@ row whose previous lease has lapsed, the same transaction writes the
 brings `attempts` to the template's `max_attempts` the row is
 dead-lettered there and then (`claim_state = 'dead'`, a `dead` row) and
 the claim re-runs its select, otherwise the row is claimed. That re-run
-is bounded: each pass either claims or dead-letters one row, and the
-call gives up after `NX_TUPLE_READ_MAX` passes and returns the probe
-result. The `dead` log row is the per-claim record; the sweep's
-`dead_lettered` count covers only the rows the sweep itself
+is bounded by its own setting: each pass either claims or dead-letters
+one row, and the call gives up after `NX_TUPLE_CLAIM_PASSES` passes (a
+new engine setting this RDR adds, default 8, unrelated to the read cap
+`NX_TUPLE_READ_MAX`) and returns the probe result, leaving the rest of
+the run to the sweep's release arm, which does the same work under its
+budget. The `dead` log row is the per-claim record; the sweep's
+`dead-lettered` count covers only the rows the sweep itself
 dead-letters. So
 a consumer that crashes on a message counts against `max_attempts`
 exactly as a `nack` does. The sweep's release arm does the same for
@@ -725,9 +734,9 @@ see what a claimant is holding and what has failed. The cap on `n` is
 the paging convention the client already carries as
 `MAX_QUERY_RESULTS` in `limits.py` (300; the engine has no constant of
 that name today and cites the client's), enforced engine-side by a new
-setting this RDR adds, `NX_TUPLE_READ_MAX`, default 300 (Phase 1 Step
-4 owns it; an `n` above the cap is clamped, as paging is elsewhere, not
-refused). Results are ordered by `(created_at, id)`, resuming strictly
+setting this RDR adds, `NX_TUPLE_READ_MAX`, default 300 (named in
+Phase 1 Step 4 beside the typed errors; an `n` above the cap is clamped,
+as paging is elsewhere, not refused). Results are ordered by `(created_at, id)`, resuming strictly
 after `since`, a `(created_at, id)` cursor the caller keeps, so rows
 sharing a timestamp are neither skipped nor repeated. Acked rows are
 never returned; no v1 consumer reads them (the ledger is never claimed
@@ -1137,7 +1146,7 @@ the record; the RDR-184 failures are exactly what this produced.
       spikes; CA 5 to CA 7 recorded from conexus's measurements of
       2026-09-09.
 - [x] The RDR-120 lift statement in §Relationship to Prior RDRs stands
-      unchallenged at the gate (verified verbatim in four gate rounds).
+      unchallenged at the gate (verified verbatim in five gate rounds).
 
 CA 3's confirmation through the cloud client-path gate is a Phase 3
 deliverable, after the engine that carries the tuple route is deployed,
@@ -1188,14 +1197,21 @@ include line in the master changelog before the grant includes.
 YAML templates in engine resources plus the optional
 `NX_TUPLE_TEMPLATE_DIR`; loader and validator at boot, including the
 check that the claim log's TTL setting exceeds every template's
-retention by a sweep interval; the two v1 templates named in §Technical
-Design and no third.
+retention by strictly more than one sweep interval (the boot check in
+§Technical Design); the two v1 templates named in §Technical Design and
+no third.
 
 #### Step 4: Repository and handler
 
 `TupleRepository` (claim, out, read, ack, nack, stats, sweep) in jOOQ;
 `TupleHandler` under `/v1/tuples`; the waiter set and the one-second
-re-run timer; typed errors.
+re-run timer; typed errors; and the engine settings this step
+introduces: `NX_TUPLE_READ_MAX` (default 300, an over-cap `n` is
+clamped), `NX_TUPLE_CLAIM_PASSES` (default 8, the claim re-run's pass
+cap), the `timeout_s` cap (25 s, CA 3) and the two park caps
+(`ParkCapExceeded`, four per claimant and sixteen per engine). The
+wire-ledger entry for `/v1/tuples` is written in Phase 3 Step 1, where
+the engine tag it must name exists.
 
 #### Step 5: Sweep
 
@@ -1262,25 +1278,47 @@ the dev jar and close on their own scenario tests and MVV run 1; the
 only work that waits for a deployed engine is Step 2 (the edge
 confirmation of the 25 s cap) and the edge-latency leg of Step 3, which
 complete whenever the next engine cut ships (Sam's decision, on the
-engine's own cadence). The RDR closes after both.
+engine's own cadence). One consequence is stated here rather than
+left implied: the Phase 4 close sets targets for the five engine-side
+MVV metrics from Step 3's engine-direct legs, and the sixth target,
+wake latency through the public edge, is set when that leg lands. The
+RDR closes after both.
 
 #### Step 1: Engine cut and deploy
 
 The engine-release skill's battery on the tagged commit: the full
 engine suite and the migration-rehearsal shakeout. Sam cuts the
-`engine-service-vX.Y.Z` tag. Because `tuples-001-baseline.xml` is a
-changeset, the deploy relay to conexus asks for their pre-deploy
+`engine-service-vX.Y.Z` tag. The order after the tag follows the
+engine-release skill's own numbering: §5, the post-publish `--acquire`
+gate against the published bytes; §5b, the migration-release steps,
+which this tag triggers because `tuples-001-baseline.xml` is a
+changeset (the representative-scale rehearsal, the rollback decision,
+the freeze-window derivation, the post-deploy data-integrity check);
+then §6, the deploy relay to conexus, whose pre-deploy step is their
 Liquibase walk rehearsal against a point-in-time fork of production (a
 conexus-owned gate, AGENTS.md § Engine-service release), then the
-deploy, then the post-publish `--acquire` gate against the published
-bytes. The deploy is paired with the client release that bumps
-`REQUIRED_ENGINE_VERSION` to that tag so local installs receive the same
-engine (the paired-release choreography in AGENTS.md). The wire change
-is additive (a new route family, no existing contract touched): Phase 1
-Step 4 writes the `[additive]` `## Unshipped` entry for `/v1/tuples` in
-`docs/wire-contract-pending.md`, which is what the release gates and the
-lint read, and that entry is why the engine deploys before the client
-tag.
+deploy. The deploy is paired with the client release that bumps
+`REQUIRED_ENGINE_VERSION` to that tag so local installs receive the
+same engine (the paired-release choreography in AGENTS.md).
+
+This step also writes the wire-ledger entry, once the tag exists to
+name: one line under `## Unshipped` in `docs/wire-contract-pending.md`
+in the form the parser reads (`- \`<sha>\` -- bead <id> -- engine tag
+\`engine-service-vX.Y.Z\` -- [additive] ...`), where `<sha>` is the
+Phase 1 commit that added the `/v1/tuples` routes, the note leads with
+`[additive]` and carries direction-safety prose naming both directions
+(old client with new engine: the routes are unreachable dead surface;
+new client with old engine: `HttpTupleStore` fails loud on 404). The
+same step moves that line to `## Shipped` when the paired client
+release publishes, because the lint's STALE arm fails any `## Unshipped`
+entry whose commit is an ancestor of the newest published `v*` tag,
+whether or not the commit was ever flagged. The wire change is additive
+(a new route family, no existing contract touched). The engine may
+deploy before the client tag when the whole `## Unshipped` section is
+all-`[additive]` with the pairing named, which
+`check_client_release_precondition.py` accepts (AGENTS.md, the
+nexus-1emxn refinement); the section's state at that moment is read
+from the file, not assumed here.
 
 #### Step 2: CA 3 through the public edge
 
@@ -1377,6 +1415,10 @@ None. Postgres, pgvector, jOOQ and Liquibase are in place.
   `max_attempts` — **Verify**: the row is dead-lettered in that
   transaction with a `dead` log row, and the claim re-runs its select
   and returns the next candidate or the probe result.
+- **Scenario**: a subspace holding more rows at `max_attempts - 1` with
+  lapsed leases than `NX_TUPLE_CLAIM_PASSES` — **Verify**: one `in`
+  dead-letters exactly `NX_TUPLE_CLAIM_PASSES` rows, returns the probe
+  result, and the next sweep run dead-letters the rest.
 - **Scenario**: a `ttl_seconds` above the template's retention, and a
   `lease_s` above `max_lease_seconds` — **Verify**: `TtlTooLong` and
   `LeaseTooLong`, no row or claim written; a `lease_s` within the cap on
@@ -1440,6 +1482,8 @@ None. Postgres, pgvector, jOOQ and Liquibase are in place.
 - **Scenario**: an unknown subspace, a `timeout_s` above the cap, a
   `ttl_seconds` or `lease_s` at or below zero, a negative `timeout_s` —
   **Verify**: the named typed error, no row written.
+- **Scenario**: `rd` with `n` above `NX_TUPLE_READ_MAX` — **Verify**:
+  `NX_TUPLE_READ_MAX` rows returned, no error.
 - **Scenario**: a template file with a breach — **Verify**: the engine
   refuses to boot naming the file and field.
 - **Scenario**: the engine stops with parked readers — **Verify**: every
@@ -1472,8 +1516,9 @@ None. Postgres, pgvector, jOOQ and Liquibase are in place.
 ### Performance Expectations
 
 None claimed beyond the measured load in §Key Discoveries. The six MVV
-metrics are recorded, not targeted, on MVV run 2 (Phase 3 Step 3);
-targets are set from that record at the Phase 4 close.
+metrics are recorded, not targeted, on MVV run 2 (Phase 3 Step 3); the
+five engine-side targets are set from that record at the Phase 4 close,
+and the edge wake-latency target when its leg lands after the deploy.
 
 ## Finalization Gate
 
@@ -1490,7 +1535,8 @@ or the code; each is listed with its resolution.
   purge order: `TtlTooLong` caps a row's TTL at retention, a refire never
   extends past `created_at` plus retention, the lease is clamped to the
   row's expiry, and the loader refuses a log TTL that does not exceed
-  every retention by a sweep interval; so log rows outlive their tuples
+  every retention by strictly more than one sweep interval (the boot
+  check in §Technical Design); so log rows outlive their tuples
   for every row, which is what §Cross-Cutting Recovery relies on.
 - Dead-lettering as a claim state against the availability predicate:
   the predicate excludes `claim_state = 'dead'` in prose and in the
@@ -1502,7 +1548,7 @@ or the code; each is listed with its resolution.
   sweeps, and the RDR says which property each has.
 - The two RDR-120 §Scope Boundaries bullets this RDR revives (tuple-space
   primitives, subspace registry with digest) against the lift clause at
-  rdr-120:249-251: both licensed by "a follow-on RDR if any consumer is
+  rdr-120:248-249: both licensed by "a follow-on RDR if any consumer is
   wanted", with the consumers named in §Approach.
 - `NX_TUPLE_TEMPLATE_DIR` against "templates change with an engine
   release": the directory is a test-only path, logged at boot, listed by
@@ -1538,8 +1584,10 @@ rest on the conexus session's measurements of 2026-09-09, recorded in
 MVV run 1 is Phase 4's closing deliverable and MVV run 2 is Phase 3
 Step 3, its engine-side legs on a developer engine before any cut and
 its edge-latency leg against the deployed engine Phase 3 Step 1
-delivers; neither is deferred, and neither gates Phases 4 to 6. The Test Plan and Performance Expectations set run
-2's targets at the Phase 4 close from the record Step 3 produces. Of
+delivers; neither is deferred, and neither gates Phases 4 to 6. The
+Test Plan and Performance Expectations set run 2's five engine-side
+targets at the Phase 4 close from the record Step 3's engine-direct
+legs produce, and the edge wake-latency target when that leg lands. Of
 RDR-120 §Scope Boundaries' blocked bullets this RDR revives two, the
 tuple-space primitives and the subspace registry with its digest, both
 under the same lift clause.
@@ -1584,7 +1632,7 @@ each with its trigger: a semantic destructive read (a consumer plus a
 fuzz gate on the engine's embedding), `LISTEN/NOTIFY` (a second engine
 JVM), partitioning (millions of rows), a batch claim (a consumer that
 drains many tuples at once), and any wrapping of scratch, memory or
-plans (its own RDR). The document's length is the record of four gate
+plans (its own RDR). The document's length is the record of five gate
 rounds, kept in Revision History; the design sections themselves are
 sized to the change.
 
@@ -1836,14 +1884,16 @@ Critique: T2 `nexus_rdr/205-gate-critique-2026-09-09e`; gate record
 `nexus_rdr/205-gate-latest`. The eight residuals are dispositioned as
 fixes in this entry's commit, with no further gate round (Sam,
 2026-09-09): the boot check is strictly greater and the prose says so;
-Phase 1 Step 4 owns the `[additive]` wire-ledger entry and the
-`NX_TUPLE_READ_MAX` setting, and an over-cap `n` is clamped;
+the `[additive]` wire-ledger entry and the `NX_TUPLE_READ_MAX` setting
+are pointed at Phase 1 Step 4 (named in the step itself only by the
+accept-day entry below), and an over-cap `n` is clamped;
 `last_swept_at` orders nulls first and an unfinished tenant keeps its
 stamp; the claim's dead-letter branch re-runs its select under a
 bounded number of passes, the sketch carries the branch, and the `dead`
 log row is the per-claim record; CA 4's remaining work is Phase 2 Step
-3; the point-in-time fork rehearsal is conexus's pre-deploy gate with
-the post-publish `--acquire` gate after it; the budget scenario uses
+3; the point-in-time fork rehearsal is conexus's pre-deploy gate (its
+order against `--acquire` corrected in the accept-day entry below); the
+budget scenario uses
 the `last_swept_at` vocabulary; the RDR-120 reference names lines 201,
 206 and 248-249.
 Two clauses from the fix check on the gated commit (T2
@@ -1868,3 +1918,31 @@ Fix-checked under the post-gate rule; the first check failed three rows
 (a settled premise the record calls an assumption, a crash window the
 record never analysed, and candidate text carrying binding rules), all
 closed in the second commit.
+
+### 2026-09-10 — Accept: residual dispositions and the fix check on them
+
+Dispositions of the eight round-5 residuals in `nexus_rdr/205-gate-latest`
+(unclassified lines, so each is an explicit author disposition, Sam's
+ruling of 2026-09-09 that they are fixed in place): C1, S2, S3, S4, S5,
+S6, S7 by commit 90667f3ba, with b928fa3c2 and 0e72698e5 following;
+S1 by 90667f3ba with the step's own text in this entry's commit. Fix
+check on fdc633f91..0e72698e5: T2 `nexus_rdr/205-fix-check-0e72698e5`,
+FAIL on nine of eighteen clauses (S5, S7 and the two folded clauses
+closed at every site; C1, S1, S2, S3, S4, S6 survived at a sibling
+site). This entry's commit closes them: the boot-check paraphrases in
+the table sketch, Phase 1 Step 3 and the Contradiction Check cite the
+rule; the table sketch carries nulls-first and the clean-finish stamp;
+the claim re-run has its own cap, `NX_TUPLE_CLAIM_PASSES` (default 8),
+the sketch header and the taxonomy-015 sentence say what the
+transaction may hold, and a Test Plan scenario asserts the count; Phase
+1 Step 4 names its settings; `--acquire` runs after the
+tag and before the relay, with §5b between them, as the engine-release
+skill orders it; the wire-ledger entry moves to Phase 3 Step 1, where
+its engine tag exists, in the parser's line form, with its move to
+Shipped owned by the same step; the deploy-before-tag ordering rests on
+an all-`[additive]` Unshipped section, not on the entry existing; the
+Phase 4 close sets the five engine-side targets and the edge
+wake-latency target when its leg lands; an over-cap `n` scenario is
+added; the lift-clause range and the gate-round count are corrected at
+both sites. No design decision changed; one bound that borrowed the read
+cap gained its own setting, `NX_TUPLE_CLAIM_PASSES`.

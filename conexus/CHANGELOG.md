@@ -4,6 +4,26 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.40.0] - 2026-09-10
+
+Plugin version aligned with conexus 7.40.0. Live at this pin, from
+`PENDING_RELEASE.md`:
+
+- `skills/rdr-gate/SKILL.md`, `commands/rdr-gate.md`, `skills/rdr-fix/SKILL.md`,
+  `commands/rdr-fix.md`, `skills/rdr-accept/SKILL.md`, `commands/rdr-accept.md`
+  (nexus-dxksa): the fix check is three independent dispatches of one
+  brief; a defect counts only when at least two raise it at the same
+  site, with the majority class; every row carries a Class and only a
+  counted BLOCKS-PLANNING defect fails; a failed check is fixed once and
+  checked once more, then its counted defects are residuals for accept.
+  Replaces "any FAIL: fix, re-run" in every placement.
+- `skills/rdr-gate/SKILL.md`, `commands/rdr-gate.md`, `skills/rdr-accept/SKILL.md`,
+  `commands/rdr-accept.md` (nexus-yjf5l.11, .12, .13 and their follow-on
+  review): Layer 0 sweeps only the last two rounds' findings and retires
+  one absent from both; a gate round appends one Revision History line;
+  the `prior:` field names each round's own critique record id; accept
+  records one disposition line naming each residual's sha or bead.
+
 ## [7.39.0] - 2026-09-10
 
 Plugin version aligned with conexus 7.39.0. Live at this pin, from

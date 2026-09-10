@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Final
 
 import click
 import yaml
@@ -220,6 +221,34 @@ def _preamble_parse_t2_field(content: str, field: str) -> str | None:
             val = stripped.split(":", 1)[1].strip().strip('"').strip("'")
             return val
     return None
+
+
+def _prior_round_identity(client: Any, project: str, latest_content: str) -> str:
+    """The stable identity for the gate round *latest_content* represents,
+    to name in the ``prior:`` chain's newest entry — that round's own
+    critique record id, resolved from its ``critique:`` field. ``'?'``
+    when it cannot be resolved.
+
+    Never the upserted ``{id}-gate-latest`` row's own id (nexus-yjf5l.13).
+    That row is stored under ONE fixed title, re-written every round
+    (``memory_put`` upserts by ``(project, title)``), so its id is
+    constant across every round; a chain built from it points every
+    entry at whichever round happens to be current when read — the real
+    ``205-gate-latest`` record's four ``prior:`` entries all read
+    ``[25098]``, its own id, for exactly this reason. A critique record,
+    by contrast, is stored under a fresh, date-suffixed title each round
+    and is never overwritten, so its id is a genuine per-round identity.
+    """
+    field = (_preamble_parse_t2_field(latest_content, "critique") or "").strip()
+    title = field.rsplit("/", 1)[-1].strip() if field else ""
+    if not title:
+        return "?"
+    try:
+        record = client.get(project=project, title=title)
+    except Exception:  # noqa: BLE001 — best-effort identity; '?' is the safe fallback
+        return "?"
+    rid = record.get("id") if isinstance(record, dict) else None
+    return str(rid) if rid is not None else "?"
 
 
 def _preamble_get_rdrs_from_t2(repo_name: str, rdr_dir: str) -> list[dict]:
@@ -1915,6 +1944,35 @@ def _nearest_finding_title(residual_title: str, candidate_titles: list[str]) -> 
     return best_title
 
 
+def _finding_blocks(findings: list[str]) -> list[list[str]]:
+    """Group :func:`_critique_findings` output into per-finding blocks: a
+    non-indented title line followed by its indented detail lines (nexus-
+    yjf5l.11, needed to union two critiques' findings without splitting a
+    finding from its own ``Location``/``Sites`` lines)."""
+    blocks: list[list[str]] = []
+    for f in findings:
+        if not f.startswith("  "):
+            blocks.append([f])
+        elif blocks:
+            blocks[-1].append(f)
+    return blocks
+
+
+def _merge_finding_blocks(primary: list[str], secondary: list[str]) -> list[str]:
+    """Union of two :func:`_critique_findings` outputs: *primary*'s blocks
+    first, then any *secondary* block whose title key is not already in
+    *primary* (nexus-yjf5l.11) — sweeping the last two rounds' critiques as
+    one list without duplicating a finding both rounds happened to carry."""
+    primary_blocks = _finding_blocks(primary)
+    secondary_blocks = _finding_blocks(secondary)
+    primary_keys = {_finding_title_key(b[0]) for b in primary_blocks}
+    merged = list(primary)
+    for b in secondary_blocks:
+        if _finding_title_key(b[0]) not in primary_keys:
+            merged.extend(b)
+    return merged
+
+
 def _preamble_regate_block(
     *, repo_root: str, repo_name: str, t2_key: str, rdr_file: Path, status: str = "",
 ) -> list[str]:
@@ -1941,6 +1999,22 @@ def _preamble_regate_block(
     (nexus-g7zgw.1). A T2 read failure returns a single named note rather
     than nothing, so an unreachable T2 is visible and never mistaken for
     "no prior round".
+
+    nexus-yjf5l.11: the survivor sweep covers the last TWO rounds'
+    critiques, not one — "two consecutive clean confirmations" retires a
+    finding without a new gate-record field, because ``get_all`` already
+    returns full column data for every ``{id}-gate-critique-*`` row
+    (``HttpMemoryStore.get_all``'s own docstring), so every critique OLDER
+    than the two most recent is free to read, no extra fetch. A finding
+    present in the latest critique, or in the one before it, is swept
+    (printed under "Prior findings"); a finding present only in an older
+    critique, and not re-raised in either of the last two, is printed
+    under one "Retired from the sweep" line instead, as a count with its
+    titles. A record whose critique history implies a second critique
+    exists but it cannot be placed or loaded is a visible note, never a
+    silently narrower sweep. A recorded residual (nexus-yjf5l.3) is exempt
+    from both the sweep and the retired bucket regardless of age, unaffected
+    by this.
     """
     project = f"{repo_name}_rdr"
     try:
@@ -1964,14 +2038,20 @@ def _preamble_regate_block(
                 fix_check_exists = client.get(project=project, title=f"{t2_key}-fix-check-{fc.group(1)}") is not None
             # Every gate round writes a critique record; their count is the
             # round count nobody retypes (deep critique [24873] Critical 1).
-            critique_count = 0
+            # nexus-yjf5l.11: get_all already returns full column data (the
+            # HttpMemoryStore.get_all docstring), so every critique's
+            # content rides this ONE call for free — sorted by title, which
+            # is chronological by construction (``{id}-gate-critique-
+            # {date}``, same-day re-gates append a letter).
+            critique_rows: list[tuple[str, str]] = []
             get_all = getattr(client, "get_all", None)
             if callable(get_all):
                 prefix = f"{t2_key}-gate-critique-"
-                critique_count = sum(
-                    1 for row in (get_all(project=project) or [])
-                    if isinstance(row, dict) and str(row.get("title", "")).startswith(prefix)
-                )
+                for row in (get_all(project=project) or []):
+                    if isinstance(row, dict) and str(row.get("title", "")).startswith(prefix):
+                        critique_rows.append((str(row.get("title", "")), str(row.get("content", ""))))
+                critique_rows.sort(key=lambda tc: tc[0])
+            critique_count = len(critique_rows)
             critique = None
             fetch_failed = False
             if critique_title:
@@ -1984,6 +2064,45 @@ def _preamble_regate_block(
                 else:
                     critique = client.get(project=project, title=critique_title)
                 fetch_failed = critique is None
+            # nexus-yjf5l.11: "the one before" the latest critique — load
+            # up to two critiques instead of one. A record whose critique
+            # count implies a second exists, but critique_title cannot be
+            # placed among the enumerated critiques (or the placed title
+            # fails to load), is a visible note rather than a silently
+            # narrower sweep.
+            second_critique_title = ""
+            second_critique_content: str | None = None
+            second_missing = False
+            older_critique_rows: list[tuple[str, str]] = []
+            if critique_title and not fetch_failed:
+                titles_sorted = [t for t, _ in critique_rows]
+                idx = titles_sorted.index(critique_title) if critique_title in titles_sorted else -1
+                if idx >= 1:
+                    second_critique_title = titles_sorted[idx - 1]
+                    resolve = getattr(client, "resolve_title", None)
+                    if callable(resolve):
+                        second_critique, _cand2 = resolve(project=project, title=second_critique_title)
+                    else:
+                        second_critique = client.get(project=project, title=second_critique_title)
+                    if second_critique is None:
+                        second_missing = True
+                    else:
+                        second_critique_content = (
+                            str(second_critique.get("content", "")) if isinstance(second_critique, dict) else ""
+                        )
+                    if idx >= 2:
+                        older_critique_rows = critique_rows[:idx - 1]
+                elif critique_count >= 1:
+                    # Follow-on review F2: critique_rows/critique_count is
+                    # built from get_all's enumeration, which EXCLUDES the
+                    # current title when it is hidden from that scan (the
+                    # nexus-zu1q0 race — idx == -1 here means exactly that).
+                    # So critique_count already counts only the OTHER,
+                    # older rounds; at round 2 that count is 1, not 2. The
+                    # old ">= 2" threshold silently skipped the round-2
+                    # boundary — no note, no second-round load, the sweep
+                    # quietly narrowed to the latest round alone.
+                    second_missing = True
     except Exception as exc:  # noqa: BLE001 — T2 unreachable must be a visible note, never a silent "no prior round"
         return [
             f"> Re-gate check: T2 unreachable ({type(exc).__name__}: {exc}); the prior "
@@ -2003,8 +2122,25 @@ def _preamble_regate_block(
         fix_check_field, gated_commit,
         is_regate=bool(_t2_field_block(content, "prior")), record_exists=fix_check_exists,
     ))
+    if second_missing:
+        lines.append(
+            "**Second critique missing:** the record's critique history shows at least 2 "
+            "prior critiques, so the sweep should also cover the one before "
+            f"`{critique_title}`"
+            + (f" (`{second_critique_title}`)" if second_critique_title else " (could not place it among the "
+               "enumerated critiques)")
+            + ", but it could not be loaded. The sweep below covers only the latest round "
+            "until the second one is found by hand and re-checked."
+        )
+        lines.append("")
 
     findings = _critique_findings(str(critique.get("content", ""))) if isinstance(critique, dict) else []
+    # nexus-yjf5l.11: sweep the last two rounds' critiques as one list — a
+    # finding from the round before the latest still gets one more chance to
+    # be reconfirmed, on the theory that the freshest pass might simply not
+    # have looked at it rather than having verified it closed.
+    second_findings = _critique_findings(second_critique_content) if second_critique_content else []
+    findings = _merge_finding_blocks(findings, second_findings)
     # nexus-yjf5l.3: a finding recorded on the prior round's residuals: lines
     # was dispositioned at accept, not left open — it is not a survivor to
     # re-sweep. Match it out of the sweep list by the same normalisation
@@ -2012,13 +2148,56 @@ def _preamble_regate_block(
     # separate copies of the comparison.
     residual_titles = _residual_titles(content)
     residual_keys = {_finding_title_key(t) for t in residual_titles}
+    # nexus-yjf5l.11: findings raised only in a critique OLDER than the last
+    # two, and not re-raised in either of them, are two consecutive clean
+    # confirmations — retire them from the sweep rather than re-listing them
+    # every round. Every older critique's content rode the same get_all call
+    # above, so this costs no extra fetch. A recorded residual is exempt
+    # from this bucket too; it already prints under its own heading.
+    older_titles: list[str] = []
+    _seen_older_keys: set[str] = set()
+    for _older_title, _older_content in older_critique_rows:
+        for f in _critique_findings(_older_content):
+            if f.startswith("  "):
+                continue
+            k = _finding_title_key(f)
+            if k in _seen_older_keys:
+                continue
+            _seen_older_keys.add(k)
+            older_titles.append(f)
+    sweep_keys = {_finding_title_key(f) for f in findings if not f.startswith("  ")}
     # nexus-yjf5l.14: a residual's title can drift by a self-referential
     # count or pointer between rounds — the loose key catches that drift
     # as a second pass, never the first, so two genuinely different
     # findings sharing every non-digit word cannot collide on it.
     residual_loose_unique = _loose_unique_index(residual_titles)
     finding_loose_unique = _loose_unique_index([f for f in findings if not f.startswith("  ")])
-    if findings:
+    # Follow-on review F1: retirement must use the same strict-then-loose
+    # rule the survivors/recorded split below applies, not strict-only —
+    # otherwise a title that drifted since the older round it was last
+    # raised in is neither recognised as the same finding still open (it
+    # can then print BOTH "Retired" and "Prior findings" at once) nor as
+    # the same recorded residual (it loses the residual exemption the
+    # docstring promises regardless of age). Unambiguous on both sides,
+    # per `_loose_unique_index`'s own contract — `older_loose_unique`
+    # covers the retirement-candidate side.
+    older_loose_unique = _loose_unique_index(older_titles)
+
+    def _retirement_survives(title: str, strict_keys: set[str], loose_index: dict[str, str]) -> bool:
+        """True when *title* (an older-round finding) still matches
+        something in *strict_keys*/*loose_index* — i.e. it is NOT eligible
+        for retirement against that keyspace."""
+        if _finding_title_key(title) in strict_keys:
+            return True
+        loose = _finding_title_key_loose(title)
+        return loose in loose_index and loose in older_loose_unique
+
+    retired_titles = [
+        t for t in older_titles
+        if not _retirement_survives(t, sweep_keys, finding_loose_unique)
+        and not _retirement_survives(t, residual_keys, residual_loose_unique)
+    ]
+    if findings or retired_titles:
         survivors: list[str] = []
         recorded: list[str] = []
         matched_keys: set[str] = set()
@@ -2040,6 +2219,12 @@ def _preamble_regate_block(
         if recorded:
             lines.append("Recorded residuals (dispositioned at accept; not survivors — do not re-open):")
             lines.extend(f"- {f}" for f in recorded)
+            lines.append("")
+        if retired_titles:
+            lines.append(
+                f"Retired from the sweep (confirmed closed in the last two rounds): {len(retired_titles)}"
+            )
+            lines.extend(f"- {t}" for t in retired_titles)
             lines.append("")
         unmatched = [
             t for t in residual_titles
@@ -2073,8 +2258,10 @@ def _preamble_regate_block(
                     break
         if survivors:
             lines.extend(f"- {f}" for f in survivors[:cut])
-        else:
+        elif findings:
             lines.append("(none — every finding this round matched the gate record's `residuals:` field)")
+        else:
+            lines.append("(none — the last two rounds' critiques raised nothing)")
         hidden = sum(1 for f in survivors[cut:] if not f.startswith("  "))
         if hidden:
             lines.append(f"- ... and {hidden} more findings in the critique")
@@ -2292,6 +2479,24 @@ def _fix_check_pointer_lines(
     return []
 
 
+#: The per-row classification the fix-check brief demands (nexus-dxksa). One
+#: sentence, carried verbatim by every placement of the brief (the gate and
+#: fix skills, their command mirrors, the accept skill and command);
+#: tests/test_plugin_structure.py pins each placement to this string.
+FIX_CHECK_CLASS_CLAUSE: Final = (
+    "Every row carries a `Class:` of exactly one of `BLOCKS-PLANNING` (an implementer executing the plan as written would build the wrong thing, or a step cannot run in the order given), `DISCOVER-AT-IMPLEMENTATION` (real, and the first test run or first hour at the keyboard surfaces it), or `OBSERVATION` (a wording, count, paraphrase or citation-form defect that changes no decision and no step; a documentation-accuracy defect is never BLOCKS-PLANNING, and an OBSERVATION is never counted and never a residual). Each dispatch reads no sibling scratch and writes no T1 or T2, and ends with the line `FIX CHECK: PASS` or `FIX CHECK: FAIL — <n> BLOCKS-PLANNING rows`."
+)
+
+#: The consensus rule (nexus-dxksa): four runs of one brief on one commit
+#: raised eleven findings, five of them by exactly one run and one by all
+#: four, so a single run's FAIL list is partly sampling noise and "any
+#: FAIL: re-run" resamples forever. Same
+#: placement and pinning contract as FIX_CHECK_CLASS_CLAUSE.
+FIX_CHECK_CONSENSUS_CLAUSE: Final = (
+    "The fix check is three independent dispatches of the fix-check brief on the same range, never one; the caller computes the consensus and stores one verdict naming all three; a defect counts only when at least two of the three raise it, whichever lines each cites, its Class is the one at least two of the three assign, and a three-way class split reads as BLOCKS-PLANNING; a defect one critic alone raises is recorded as an observation and never fails the check; the check fails only on a counted BLOCKS-PLANNING defect; a failed check is fixed once and checked once more, and a second failure ends the loop: its counted defects are written as `residuals:` lines of the gate record (`[<class>] <title> (fix check <sha>)`) for accept to disposition, the check is then closed, and nothing runs a third time."
+)
+
+
 def _fix_check_lines(
     *, repo_root: str, t2_key: str, rel: str, gated_commit: str, changed: bool,
 ) -> list[str]:
@@ -2359,9 +2564,12 @@ def _fix_check_lines(
         "or alters, name every check, bound or rule that constrains it, whether or not they "
         "share a name, and a pair the previous check already named is not named again.",
         "",
-        f"Verdict goes to T2 `{t2_key}-fix-check-{tip_sha}` (project `<repo>_rdr`); the gate "
-        f"record's `fix_check:` must name `{tip_sha}`, equal to its `commit:`. Any FAIL: fix, "
-        "re-run the fix check on the new diff. Do not enter Layer 1 or Layer 3 with a FAIL open. "
+        FIX_CHECK_CLASS_CLAUSE,
+        "",
+        FIX_CHECK_CONSENSUS_CLAUSE,
+        f"The consensus verdict goes to T2 `{t2_key}-fix-check-{tip_sha}` (project `<repo>_rdr`), "
+        f"naming all three dispatches; the gate record's `fix_check:` must name `{tip_sha}`, equal "
+        "to its `commit:`. Do not enter Layer 1 or Layer 3 with a first failure open. "
         "The fix check and the gate critique are never dispatched against the same commit in "
         "parallel: fix, then check, then Layer 1 and Layer 3.",
     ])
@@ -2465,7 +2673,8 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
     )
     print(
         "   Every `residuals:` line in that record needs a disposition (the commit sha "
-        "that fixed it, or the bead id that carries it) recorded in Revision History "
+        "that fixed it, or the bead id that carries it) recorded in Revision History as "
+        "one line naming each residual's disposition — never the finding text itself — "
         "before the T2 write; a residual with no disposition blocks accept (nexus-g7zgw.2)."
     )
     print(
@@ -2476,6 +2685,7 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
         "tip after the disposition. A residual dispositioned by a bead id changed nothing "
         "in the file and needs none (nexus-yjf5l.1)."
     )
+    print(f"   {FIX_CHECK_CONSENSUS_CLAUSE}")
     print(
         f"   Classification determines which disposition applies: a residual classed "
         f"`{DISCOVER_AT_IMPLEMENTATION}` is dispositioned by a bead id, and the bead names "
@@ -3031,6 +3241,7 @@ _FIX_RULES: tuple[str, ...] = (
     "A Criterion 6 readability WARN is never closed inside a fix commit.",
     "The fix check and the gate critique are never dispatched against the same commit in "
     "parallel: fix, then check, then Layer 1 and Layer 3.",
+    FIX_CHECK_CONSENSUS_CLAUSE,
 )
 
 
@@ -3556,7 +3767,10 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
                 return
             latest = client.get(project=project, title=f"{t2_key}-gate-latest")
             latest_content = latest.get("content", "") if isinstance(latest, dict) else ""
-            latest_id = latest.get("id") if isinstance(latest, dict) else None
+            # nexus-yjf5l.13: the chain's newest entry names the round
+            # `latest_content` represents by ITS critique record's id,
+            # never `latest`'s own id — see `_prior_round_identity`.
+            prev_round_id = _prior_round_identity(client, project, latest_content)
             rows = client.get_all(project=project) or [] if callable(getattr(client, "get_all", None)) else []
             prefix = f"{t2_key}-gate-critique-"
             critique_count = sum(
@@ -3685,7 +3899,7 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
     prev_chain = _t2_field_block(latest_content, "prior")
     prior_parts: list[str] = []
     if latest_content:
-        prior_parts.append(f"[{latest_id if latest_id is not None else '?'}] ({prev_outcome or '?'} {prev_c}C {prev_s}S)")
+        prior_parts.append(f"[{prev_round_id}] ({prev_outcome or '?'} {prev_c}C {prev_s}S)")
     if prev_chain:
         prior_parts.append(prev_chain)
 
@@ -3737,6 +3951,27 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
     print("```")
     print()
     print("Write these fields as printed; the outcome is not recomputed by hand.")
+    print()
+    print(
+        "Revision History line to append (this is the ENTIRE entry; the findings, "
+        "residual lists and fix narrative live only in the two T2 records above, "
+        "never repeated here):"
+    )
+    print()
+    print(
+        # Follow-on review finding 1: the gate record's own title
+        # (`{t2_key}-gate-latest`) is upserted under ONE fixed name every
+        # round (memory_put's upsert-by-title contract) — naming it here
+        # made every round's line carry the identical pointer, which
+        # resolves to a DIFFERENT round's content once a later round
+        # overwrites it. The critique title is round-specific (date-
+        # suffixed, never overwritten) and durable on its own; drop the
+        # stale gate-record pointer rather than reintroduce it.
+        f"- {datetime.now(timezone.utc).date().isoformat()}: Gate round {round_no} — {outcome} "
+        f"({critical_count} Critical, {significant_count} Significant, {ship_blockers} "
+        f"ship-blocker(s)); commit `{commit or '?'}`; "
+        f"critique `{project}/{critique_title}`."
+    )
 
 
 # ---------------------------------------------------------------------------

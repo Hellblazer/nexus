@@ -1435,6 +1435,30 @@ def _all_crosswalk_clauses(text: str) -> list[str]:
     return [m.strip() for m in _CROSSWALK_CLAUSE_RE.findall(normalized)]
 
 
+
+#: nexus-dxksa: the fix-check consensus clause and the per-row Class clause,
+#: one sentence each, pinned by equality across every placement of the
+#: brief (the printed brief in rdr.py, the gate and fix skills, their
+#: command mirrors, the accept skill and command).
+_CONSENSUS_CLAUSE_RE = re.compile(
+    r"The fix check is three independent dispatches of the fix-check brief on the "
+    r"same range, never one;.*?nothing runs a third time\.",
+    re.DOTALL,
+)
+_CLASS_CLAUSE_RE = re.compile(
+    r"Every row carries a `Class:` of exactly one of `BLOCKS-PLANNING`.*?"
+    r"BLOCKS-PLANNING rows`\.",
+    re.DOTALL,
+)
+
+
+def _all_consensus_clauses(text: str) -> list[str]:
+    return [m.strip() for m in _CONSENSUS_CLAUSE_RE.findall(re.sub(r"\s+", " ", text))]
+
+
+def _all_class_clauses(text: str) -> list[str]:
+    return [m.strip() for m in _CLASS_CLAUSE_RE.findall(re.sub(r"\s+", " ", text))]
+
 class TestRdrGateLoopRemedies:
     """nexus-g7zgw: the five process remedies for the RDR gate/fix loop
     (T2 nexus/deep-analysis-rdr-gate-fix-loop-2026-09-07) are stated in the
@@ -1484,6 +1508,43 @@ class TestRdrGateLoopRemedies:
                 f"{path}: the serial precondition is missing"
             )
 
+    def test_fix_check_consensus_rule_in_every_placement(self) -> None:
+        """nexus-dxksa: a fix check is three dispatches; a defect counts at
+        two of three; only a counted BLOCKS-PLANNING defect fails; one fix
+        round, then residuals. The same sentence everywhere, by equality,
+        and the old single-run re-run rule is gone from every placement."""
+        from nexus.commands.rdr import (
+            FIX_CHECK_CLASS_CLAUSE, FIX_CHECK_CONSENSUS_CLAUSE, _FIX_RULES, _fix_check_lines,
+        )
+
+        printed = "\n".join(_fix_check_lines(
+            repo_root=str(REPO_ROOT), t2_key="0", rel="README.md",
+            gated_commit="HEAD", changed=True,
+        ))
+        assert _all_consensus_clauses(printed) == [FIX_CHECK_CONSENSUS_CLAUSE]
+        assert _all_class_clauses(printed) == [FIX_CHECK_CLASS_CLAUSE]
+        assert FIX_CHECK_CONSENSUS_CLAUSE in _FIX_RULES
+        expected_consensus = {
+            self.GATE_SKILL: 1, self.GATE_CMD: 1, self.FIX_SKILL: 2, self.FIX_CMD: 1,
+            self.ACCEPT_SKILL: 1, self.ACCEPT_CMD: 1,
+        }
+        for path, count in expected_consensus.items():
+            clauses = _all_consensus_clauses(path.read_text())
+            assert clauses == [FIX_CHECK_CONSENSUS_CLAUSE] * count, (
+                f"{path}: expected {count} verbatim consensus clause(s), found {clauses}"
+            )
+        for path in (self.GATE_SKILL, self.GATE_CMD, self.FIX_SKILL):
+            assert _all_class_clauses(path.read_text()) == [FIX_CHECK_CLASS_CLAUSE], path
+        banned = (
+            "any fail", "fails closed", "re-run the fix check on the new diff",
+            "re-run the check on the new diff", "re-run on the new diff",
+            "re-checked before layer 1", "with a failed check open",
+        )
+        for path in list(expected_consensus) + ["printed"]:
+            text = (printed if path == "printed" else path.read_text()).lower()
+            for phrase in banned:
+                assert phrase not in text, f"{path}: the single-run re-run rule survives: {phrase!r}"
+
     def test_termination_rule_and_ship_blockers_in_gate_skill(self) -> None:
         """Remedy 2: rounds 1-2 block on any Critical; from round 3 only a
         ship-blocker blocks; Criterion 6 never becomes a finding."""
@@ -1517,6 +1578,60 @@ class TestRdrGateLoopRemedies:
         # instruction states the exemption in both surfaces.
         assert "recorded residual" in skill, "Layer 0 must exempt recorded residuals from the sweep"
         assert "recorded residual" in cmd, "Layer 0 must exempt recorded residuals from the sweep"
+
+    def test_gate_round_appends_one_revision_history_line(self) -> None:
+        """nexus-yjf5l.12: a gate round appends ONE Revision History line —
+        the findings, residual lists and fix narrative live only in the two
+        T2 records (the gate record and the critique), never repeated in
+        the RDR file. Before this change the skill instructed the author to
+        append the findings themselves ("Append gate findings to the RDR's
+        Revision History section", "appends \"Gate N residuals\" to Revision
+        History", "gate findings appended to Revision History"); after, it
+        instructs appending only the one line `nx rdr preamble rdr-verdict`
+        prints."""
+        skill = self.GATE_SKILL.read_text()
+        cmd = self.GATE_CMD.read_text()
+        assert "Revision History line" in skill, "the one-line form is named"
+        assert "Revision History line" in cmd, "the command mirror names the one-line form"
+        # Old wording promised the findings themselves in the RDR file.
+        assert "Append gate findings to the RDR's Revision History section" not in skill
+        assert 'appends "Gate N residuals"\n  to Revision History' not in skill
+        assert "gate findings appended to Revision History" not in skill
+        assert "Revision History for accept to disposition" not in cmd, (
+            "accept dispositions residuals from the gate record's residuals:, not Revision History"
+        )
+
+    def test_layer_zero_retirement_rule_stated_identically(self) -> None:
+        """R5 follow-on (nexus-yjf5l.11): the sweep covers only the last two
+        rounds' critiques — a finding absent from both retires (printed
+        under its own line, not under "Prior findings"). One clause, the
+        same in the skill and the command mirror. Whitespace-normalised
+        (same convention as ``_all_crosswalk_clauses`` above) so the skill's
+        own line wrap cannot desync this pin from the source text."""
+        clause = (
+            'for every prior finding printed under "prior findings" (the last two '
+            "rounds' critiques; a finding absent from both, printed under \"retired "
+            'from the sweep" instead, needs no re-check) that is not a recorded '
+            "residual"
+        )
+        skill = re.sub(r"\s+", " ", self.GATE_SKILL.read_text()).lower()
+        assert clause in skill, "rdr-gate/SKILL.md: the retirement clause is missing or drifted"
+        cmd = re.sub(r"\s+", " ", self.GATE_CMD.read_text()).lower()
+        assert clause in cmd, "rdr-gate.md: the retirement clause is missing or drifted"
+
+    def test_prior_chain_names_the_previous_rounds_own_critique_id(self) -> None:
+        """Follow-on review finding 3 (nexus-yjf5l.13 had no crosswalk pin,
+        unlike R5/.11 and R6/.12 in the same batch — a gap against the
+        epic's own four-surface rule). One clause, the same in the skill
+        and the command mirror: the `prior:` field names the previous
+        round's own critique record id, never the upserted
+        `{id}-gate-latest` row's own id. Whitespace-normalised, same
+        convention as ``test_layer_zero_retirement_rule_stated_identically``."""
+        clause = "the previous round's own critique record id, never the latest record's id"
+        skill = re.sub(r"\s+", " ", self.GATE_SKILL.read_text()).lower()
+        assert clause in skill, "rdr-gate/SKILL.md: the prior-chain clause is missing or drifted"
+        cmd = re.sub(r"\s+", " ", self.GATE_CMD.read_text()).lower()
+        assert clause in cmd, "rdr-gate.md: the prior-chain clause is missing or drifted"
 
     def test_command_and_skill_agree_on_fix_check_scope(self) -> None:
         cmd = self.GATE_CMD.read_text()

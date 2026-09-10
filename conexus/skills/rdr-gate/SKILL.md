@@ -34,14 +34,16 @@ gate round number (derived from the record's `prior:` chain), the critique's
 Critical and Significant lines verbatim, the diff of the RDR file since the
 gated commit, and the Fix check section. Do this before anything else:
 
-1. For every prior finding that is not a recorded residual (dispositioned at
-   accept, never a survivor to re-sweep), sweep every site in its `Sites:`
-   list (the critic emits one per finding; see the Layer 3 brief). Where a
-   prior critique has no `Sites:` list, grep the RDR file for the refuted
-   phrasing AND the corrected one. Every occurrence must agree. A fact lives
-   in the Problem Statement, Research Findings, Technical Design and the
-   Implementation Plan at once; the last two paraphrase the design and are
-   where survivors hide. Fix every site.
+1. For every prior finding printed under "Prior findings" (the last two rounds'
+   critiques; a finding absent from both, printed under "Retired from the
+   sweep" instead, needs no re-check) that is not a recorded residual
+   (dispositioned at accept, never a survivor to re-sweep), sweep every site
+   in its `Sites:` list (the critic emits one per finding; see the Layer 3
+   brief). Where a prior critique has no `Sites:` list, grep the RDR file for
+   the refuted phrasing AND the corrected one. Every occurrence must agree. A
+   fact lives in the Problem Statement, Research Findings, Technical Design
+   and the Implementation Plan at once; the last two paraphrase the design and
+   are where survivors hide. Fix every site.
 2. If a finding changed a design decision, read Implementation Plan, Test Plan,
    Day 2 Operations, Trade-offs and Proportionality in full.
 3. Brief the Layer 3 critic with the prior findings and ask it to verify each is
@@ -81,12 +83,12 @@ fix commits, and the T2 title for the verdict. Then:
       setting this change adds or alters, name every check, bound or rule
       that constrains it, whether or not they share a name, and a pair the previous check already named is not named again.
 2. Deliverable: one row per clause, PASS or FAIL with line numbers, plus the
-   standard Verdict block.
+   standard Verdict block. Every row carries a `Class:` of exactly one of `BLOCKS-PLANNING` (an implementer executing the plan as written would build the wrong thing, or a step cannot run in the order given), `DISCOVER-AT-IMPLEMENTATION` (real, and the first test run or first hour at the keyboard surfaces it), or `OBSERVATION` (a wording, count, paraphrase or citation-form defect that changes no decision and no step; a documentation-accuracy defect is never BLOCKS-PLANNING, and an OBSERVATION is never counted and never a residual). Each dispatch reads no sibling scratch and writes no T1 or T2, and ends with the line `FIX CHECK: PASS` or `FIX CHECK: FAIL — <n> BLOCKS-PLANNING rows`.
 3. Store the verdict in T2: mcp__plugin_conexus_nexus__memory_put(project="{repo}_rdr", title="{id}-fix-check-<sha>", ttl="permanent", tags="rdr,gate,fix-check"), where `<sha>` is the RDR file's tip commit as printed by the preamble.
-4. Any FAIL: fix it, re-run the fix check on the new diff. Do not enter Layer 1
-   or Layer 3 with a FAIL open. Zero FAIL: proceed. The fix check and the gate
-   critique are never dispatched against the same commit in parallel: fix,
-   then check, then Layer 1 and Layer 3.
+4. The fix check is three independent dispatches of the fix-check brief on the same range, never one; the caller computes the consensus and stores one verdict naming all three; a defect counts only when at least two of the three raise it, whichever lines each cites, its Class is the one at least two of the three assign, and a three-way class split reads as BLOCKS-PLANNING; a defect one critic alone raises is recorded as an observation and never fails the check; the check fails only on a counted BLOCKS-PLANNING defect; a failed check is fixed once and checked once more, and a second failure ends the loop: its counted defects are written as `residuals:` lines of the gate record (`[<class>] <title> (fix check <sha>)`) for accept to disposition, the check is then closed, and nothing runs a third time. Do not enter Layer 1 or Layer 3 with a first failure
+   open. The fix check and the gate critique are never
+   dispatched against the same commit in parallel: fix, then check, then
+   Layer 1 and Layer 3.
 
 Every re-gated record (one with a `prior:` chain) carries `fix_check:`: either
 `{repo}_rdr/{id}-fix-check-<sha>` with the sha equal to the record's `commit:`, or
@@ -222,9 +224,11 @@ by hand. The rules it applies (`review-rounds.toml`, contract `rdr-gate`):
 - Rounds 1 and 2: BLOCKED iff `critical_count > 0`. Significants never block.
 - Round 3 onward: BLOCKED iff `ship_blockers > 0`. Every other Critical and
   Significant is a residual: the gate writes `outcome: PASSED` with one
-  `residuals:` line per finding in the gate record, appends "Gate N residuals"
-  to Revision History, and accept dispositions each one (rdr-accept skill).
-  `residuals:` is a union across rounds, not just this round's own critique:
+  `residuals:` line per finding in the gate record, appends the one printed
+  Revision History line (date, round, outcome, counts, ship-blockers, the
+  commit and the critique's T2 record title — nothing else) to Revision History,
+  and accept dispositions each residual from the gate record (rdr-accept
+  skill). `residuals:` is a union across rounds, not just this round's own critique:
   a residual absent from a later round's critique (Layer 0 tells the critic
   not to re-raise it) is carried forward from the prior gate record into
   this one rather than dropped, marked `(carried from round <N>)` and keeping
@@ -248,8 +252,10 @@ by hand. The rules it applies (`review-rounds.toml`, contract `rdr-gate`):
 ### On Pass
 
 1. Store the critique in T2 FIRST: mcp__plugin_conexus_nexus__memory_put(content="{critique}", project="{repo}_rdr", title="{id}-gate-critique-{date}", ttl="permanent", tags="rdr,gate,critique"). Same-day re-gates append a letter (`{date}b`, `{date}c`). T2 is where the preamble reads; a T3 copy (collection="<subject>", title="gate-rdr-NNN-{date}") is optional and never the only copy.
-2. Write gate result to T2: mcp__plugin_conexus_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nship_blockers: 0\nsummary: One-sentence summary\ncritique: {repo}_rdr/{id}-gate-critique-{date}\ncommit: <git log -1 --format=%h -- <rdr file>>\nfix_check: <{repo}_rdr/{id}-fix-check-<sha>, sha equal to commit:, or 'none (no change since <sha>)'; mandatory on every re-gate>\nresiduals: <one line per residual finding, round 3+, each `  - [<class>] <title>`, or `  - [<class>] <title> (carried from round <N>)` when it is carried forward from the prior record>\nprior: [<previous record id>] (<OUTCOME> <nC> <nS>), <the previous record's own prior chain>", project="{repo}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate"). `critique:`, `commit:` and `prior:` are what the re-gate block reads; `fix_check:` must equal `commit:`.
-3. Append gate findings to the RDR's Revision History section
+2. Write gate result to T2: mcp__plugin_conexus_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nship_blockers: 0\nsummary: One-sentence summary\ncritique: {repo}_rdr/{id}-gate-critique-{date}\ncommit: <git log -1 --format=%h -- <rdr file>>\nfix_check: <{repo}_rdr/{id}-fix-check-<sha>, sha equal to commit:, or 'none (no change since <sha>)'; mandatory on every re-gate>\nresiduals: <one line per residual finding, round 3+, each `  - [<class>] <title>`, or `  - [<class>] <title> (carried from round <N>)` when it is carried forward from the prior record>\nprior: [<the previous round's own critique record id, never the latest record's id>] (<OUTCOME> <nC> <nS>), <the previous record's own prior chain>", project="{repo}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate"). `critique:`, `commit:` and `prior:` are what the re-gate block reads; `fix_check:` must equal `commit:`. `nx rdr preamble rdr-verdict` computes and prints this whole block, `prior:` included — copy it verbatim rather than retyping the chain by hand.
+3. Append the one printed Revision History line to the RDR's Revision History
+   section — never the findings themselves; those live only in the two T2
+   records written in steps 1 and 2.
 4. Print: `> Run '/conexus:rdr-accept <id>' to accept this RDR.`
 
 Status remains **Draft** until the author explicitly accepts via `/conexus:rdr-accept`.
@@ -306,7 +312,7 @@ For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/REL
 - [ ] Fix check run on the diff since the gated commit, verdict stored as `{id}-fix-check-<sha>`, before Layer 1
 - [ ] Gate outcome computed by `nx rdr preamble rdr-verdict -- <id> <critique-title>`, never by hand
 - [ ] Gate result written to T2 as `{id}-gate-latest` (both pass and fail), with `prior:` chain, `fix_check:` and `residuals:`
-- [ ] On pass: gate findings appended to Revision History, accept prompt displayed
+- [ ] On pass: the one printed Revision History line appended to Revision History, accept prompt displayed
 - [ ] On fail: specific sections to address displayed to user
 
 ## Agent-Specific PRODUCE
