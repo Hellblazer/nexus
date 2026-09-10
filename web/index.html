@@ -101,7 +101,7 @@ details p{margin:8px 0 4px;font-size:15px}
 <div class="wrap">
 <div class="eyebrow">Nexus · conexus 7.x</div>
 <h1>Installing Nexus</h1>
-<p class="lede">Persistent memory and semantic search for Claude, running entirely on your machine. No API keys, no accounts, no Postgres to install. About ten minutes from nothing to your first search.</p>
+<p class="lede">Persistent memory and semantic search for Claude, running locally. No API keys, no accounts, no separate Postgres install. About ten minutes to a working search.</p>
 
 <p class="choose-label">How do you use Claude?</p>
 <div class="choose" role="group" aria-label="Surface">
@@ -131,7 +131,7 @@ details p{margin:8px 0 4px;font-size:15px}
 <tr><td>~600 MB download, a few minutes</td><td>First run downloads a signed service binary, a Postgres bundle and the embedding model.</td><td>—</td></tr>
 </table></div>
 
-<p>Missing uv or Node? Install them first:</p>
+<p>If uv or Node.js is missing:</p>
 <div class="cmd" data-os-block="mac"><pre><span class="c"># macOS</span>
 brew install uv<span data-for="code">
 brew install node</span></pre><button class="copy">Copy</button></div>
@@ -160,12 +160,12 @@ nx self install</pre><button class="copy">Copy</button></div>
 </div></li>
 <li><div class="step">
   <h3>Provision the storage service</h3>
-  <p>Downloads the signed engine and Postgres bundle, sets up pgvector and the bge-768 embedder, starts the service, and asks to register autostart at login. Say yes.</p>
+  <p>Downloads the signed engine and Postgres bundle, sets up pgvector and the bge-768 embedder, starts the service, and prompts to register autostart at login (accept).</p>
   <div class="cmd"><pre>nx init</pre><button class="copy">Copy</button></div>
   <div class="expect">
     <div><b>~600 MB</b><span>downloaded, first run only</span></div>
     <div><b>2–5 min</b><span>on a normal connection</span></div>
-    <div><b>0</b><span>things you have to configure</span></div>
+    <div><b>0</b><span>configuration steps</span></div>
   </div>
   <p class="note">Non-interactive: <code>nx init --yes</code>. To skip autostart: <code>nx init --no-autostart</code>.</p>
 </div></li>
@@ -191,7 +191,7 @@ nx search "how does retry work"</pre><button class="copy">Copy</button></div>
 </div></li>
 </ol>
 
-<div class="callout ok"><p><strong>Done.</strong> Search runs fully local. Topics are discovered automatically after indexing; <code>nx taxonomy status</code> shows them.</p><p>Next: <a href="getting-started.html"><strong>Your First Hour with Nexus</strong></a>, eight short lessons from this first search to your first RDR.</p></div>
+<div class="callout ok"><p><strong>Install complete.</strong> Search runs locally. Topics are discovered automatically after indexing; <code>nx taxonomy status</code> shows them.</p><p>Next: <a href="getting-started.html"><strong>Getting started</strong></a>, eight lessons from indexing through the RDR lifecycle.</p></div>
 </section>
 
 <!-- ===== Desktop path ===== -->
@@ -218,7 +218,7 @@ nx doctor</pre><button class="copy">Copy</button></div>
   <p>Download <code>conexus.mcpb</code> from the <a href="https://github.com/Hellblazer/nexus/releases/latest">latest release</a> and double-click it. Claude Desktop registers it under Settings → Connectors as "Conexus". First launch resolves dependencies, about 20 seconds.</p>
 </div></li>
 </ol>
-<div class="callout"><p>Next: <a href="getting-started.html"><strong>Your First Hour with Nexus</strong></a>. Already have the conexus plugin in Claude Code? Skip the extension. Desktop chat already sees the plugin's tools, and installing both gives you two copies under different names.</p></div>
+<div class="callout"><p>Next: <a href="getting-started.html"><strong>Getting started</strong></a>. Already have the conexus plugin in Claude Code? Skip the extension. Desktop chat already sees the plugin's tools, and installing both gives you two copies under different names.</p></div>
 </section>
 
 <h2>Keeping it current</h2>
