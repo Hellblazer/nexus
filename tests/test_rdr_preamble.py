@@ -2425,6 +2425,127 @@ class TestRdrGateRegateBlock:
         assert "could not be loaded" in out
         assert "finding C" in out, "the latest critique's own findings still sweep"
 
+    def test_missing_second_critique_is_a_visible_note_at_round_2(self, rdr_env, monkeypatch):
+        """Follow-on review F2: the round-2 boundary of the idx==-1
+        (hidden-current-title, nexus-zu1q0 race) path. ``critique_count``
+        excludes the hidden current title by construction, so at round 2
+        (exactly one OTHER, older critique row visible via get_all) that
+        count is 1, not 2 — the old ``critique_count >= 2`` threshold never
+        fired here, silently narrowing the sweep to the latest round alone
+        with no note. The note must fire starting at round 2, not only from
+        round 3 onward."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient(
+            entries={
+                "204-gate-latest": (
+                    "outcome: \"BLOCKED\"\ndate: \"2026-09-08\"\n"
+                    "critique: nexus_rdr/204-gate-critique-2026-09-08b\n"
+                ),
+                "204-gate-critique-2026-09-07": (
+                    "## Critical Issues\n\n### Issue: finding A\n- **Location**: L1\n"
+                ),
+                "204-gate-critique-2026-09-08b": (
+                    "## Significant Issues\n\n### Issue: finding B\n- **Location**: L2\n"
+                ),
+            },
+            # nexus-zu1q0 race shape at round 2: only round 1's critique (A)
+            # is enumerable via get_all; the record's own (round 2) critique
+            # is hidden from it, so it cannot be placed among its peers even
+            # though exactly one older critique demonstrably exists.
+            hidden_from_get_all=frozenset({"204-gate-critique-2026-09-08b"}),
+        )
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert "**Second critique missing:**" in out, out
+        assert "could not be loaded" in out
+        assert "finding B" in out, "the latest critique's own findings still sweep"
+
+    def test_a_drifted_title_is_not_both_retired_and_swept(self, rdr_env, monkeypatch):
+        """Follow-on review F1: retirement must use the same strict-then-loose
+        rule the survivors/recorded split already applies (nexus-yjf5l.14's
+        ``_finding_title_key_loose`` / ``_loose_unique_index``), not
+        strict-only. A round-1 finding reworded by nothing but a digit when
+        re-raised in round 3 shares a loose key with its own current-round
+        title — it must never print under "Retired from the sweep" (which
+        asserts "confirmed closed") while the SAME issue, under its current
+        wording, also prints under the active "Prior findings" sweep."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                "outcome: \"BLOCKED\"\ndate: \"2026-09-09\"\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09\n"
+            ),
+            "204-gate-critique-2026-09-07": (
+                "## Critical Issues\n\n### Issue: fewer than 5 callers checked\n"
+                "- **Location**: L1\n"
+            ),
+            "204-gate-critique-2026-09-08": (
+                "## Significant Issues\n\n### Issue: unrelated stale item\n"
+                "- **Location**: L2\n"
+            ),
+            "204-gate-critique-2026-09-09": (
+                "## Critical Issues\n\n### Issue: fewer than 8 callers checked\n"
+                "- **Location**: L1\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert "Retired from the sweep" not in out, (
+            "the round-1 title differs from the current round's own re-raised "
+            "title by nothing but a digit; it must not print as retired"
+        )
+        pf_idx = out.index("Prior findings (each must be closed EVERYWHERE")
+        prior_section = out[pf_idx:out.index("Layer 0")]
+        assert "fewer than 8 callers checked" in prior_section
+
+    def test_a_drifted_recorded_residual_is_never_retired(self, rdr_env, monkeypatch):
+        """Follow-on review F1, second consequence: a recorded residual is
+        "exempt from both the sweep and the retired bucket regardless of
+        age" (this function's own docstring) — but that exemption used only
+        strict title matching against ``residual_keys``, so a residual whose
+        stored title drifted (a digit changed) since the older round it was
+        first raised in was NOT recognised as the same finding and printed
+        under "Retired from the sweep" instead of staying fully exempt."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                "outcome: \"BLOCKED\"\ndate: \"2026-09-09\"\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09\n"
+                "residuals:\n"
+                "  - [DISCOVER-AT-IMPLEMENTATION] fewer than 8 callers checked\n"
+            ),
+            "204-gate-critique-2026-09-07": (
+                "## Critical Issues\n\n### Issue: fewer than 5 callers checked\n"
+                "- **Location**: L1\n"
+            ),
+            "204-gate-critique-2026-09-08": (
+                "## Significant Issues\n\n### Issue: unrelated stale item\n"
+                "- **Location**: L2\n"
+            ),
+            "204-gate-critique-2026-09-09": (
+                "## Significant Issues\n\n### Issue: new census gap\n"
+                "- **Location**: L3\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert result.exit_code == 0, result.output
+        out = result.output
+        assert "Retired from the sweep" not in out, (
+            "a recorded residual (even with a digit-drifted title) is exempt "
+            "from the retired bucket, not merely from the active sweep"
+        )
+
 
 class TestRdrGateRoundAndFixCheck:
     """nexus-g7zgw.1 / .2: the re-gate block carries the gate round number,
@@ -3358,11 +3479,16 @@ class TestRdrVerdictPreamble:
         assert "stale by 2" not in out, "the drifted-count duplicate must not be carried forward"
 
     def test_prints_one_line_revision_history_form(self, rdr_env, monkeypatch):
-        """nexus-yjf5l.12: a gate round appends ONE Revision History line —
-        date, round, outcome, critical and significant counts, ship-blockers,
-        the gated commit, the T2 gate record title and the critique record
-        title — and nothing else. The finding titles (alpha, beta) live only
-        in the T2 gate record and critique above; they must not appear in the
+        """nexus-yjf5l.12 (as amended by the follow-on review finding 1): a
+        gate round appends ONE Revision History line — date, round, outcome,
+        critical and significant counts, ship-blockers, the gated commit and
+        the critique's T2 record title — and nothing else. The gate-latest
+        record's own title is deliberately NOT named here: it is upserted
+        under one fixed title every round, so a pointer to it in an OLDER
+        round's line would resolve to a LATER round's content once that
+        record is overwritten — the critique title is round-specific and
+        durable on its own. The finding titles (alpha, beta) live only in
+        the T2 gate record and critique above; they must not appear in the
         printed Revision History block."""
         sha = self._commit(rdr_env)
         repo_name = rdr_env["repo_root"].name
@@ -3382,13 +3508,18 @@ class TestRdrVerdictPreamble:
         today = datetime.now(timezone.utc).date().isoformat()
         expected = (
             f"- {today}: Gate round 4 — BLOCKED (1 Critical, 1 Significant, "
-            f"1 ship-blocker(s)); commit `{sha}`; gate record `{project}/204-gate-latest`; "
+            f"1 ship-blocker(s)); commit `{sha}`; "
             f"critique `{project}/c`."
         )
         assert expected in out, out
         after = out.split("Revision History line to append", 1)[1]
         assert "alpha" not in after, after
         assert "beta" not in after, after
+        assert "gate record" not in after, (
+            "the gate-latest record's own upserted title must not appear in the "
+            "printed line — it is stale for every round but the latest, the same "
+            "defect class already fixed for the `prior:` chain"
+        )
 
 
 class TestCritiqueFindings:

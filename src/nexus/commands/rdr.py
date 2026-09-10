@@ -2092,7 +2092,16 @@ def _preamble_regate_block(
                         )
                     if idx >= 2:
                         older_critique_rows = critique_rows[:idx - 1]
-                elif critique_count >= 2:
+                elif critique_count >= 1:
+                    # Follow-on review F2: critique_rows/critique_count is
+                    # built from get_all's enumeration, which EXCLUDES the
+                    # current title when it is hidden from that scan (the
+                    # nexus-zu1q0 race — idx == -1 here means exactly that).
+                    # So critique_count already counts only the OTHER,
+                    # older rounds; at round 2 that count is 1, not 2. The
+                    # old ">= 2" threshold silently skipped the round-2
+                    # boundary — no note, no second-round load, the sweep
+                    # quietly narrowed to the latest round alone.
                     second_missing = True
     except Exception as exc:  # noqa: BLE001 — T2 unreachable must be a visible note, never a silent "no prior round"
         return [
@@ -2157,16 +2166,37 @@ def _preamble_regate_block(
             _seen_older_keys.add(k)
             older_titles.append(f)
     sweep_keys = {_finding_title_key(f) for f in findings if not f.startswith("  ")}
-    retired_titles = [
-        t for t in older_titles
-        if _finding_title_key(t) not in sweep_keys and _finding_title_key(t) not in residual_keys
-    ]
     # nexus-yjf5l.14: a residual's title can drift by a self-referential
     # count or pointer between rounds — the loose key catches that drift
     # as a second pass, never the first, so two genuinely different
     # findings sharing every non-digit word cannot collide on it.
     residual_loose_unique = _loose_unique_index(residual_titles)
     finding_loose_unique = _loose_unique_index([f for f in findings if not f.startswith("  ")])
+    # Follow-on review F1: retirement must use the same strict-then-loose
+    # rule the survivors/recorded split below applies, not strict-only —
+    # otherwise a title that drifted since the older round it was last
+    # raised in is neither recognised as the same finding still open (it
+    # can then print BOTH "Retired" and "Prior findings" at once) nor as
+    # the same recorded residual (it loses the residual exemption the
+    # docstring promises regardless of age). Unambiguous on both sides,
+    # per `_loose_unique_index`'s own contract — `older_loose_unique`
+    # covers the retirement-candidate side.
+    older_loose_unique = _loose_unique_index(older_titles)
+
+    def _retirement_survives(title: str, strict_keys: set[str], loose_index: dict[str, str]) -> bool:
+        """True when *title* (an older-round finding) still matches
+        something in *strict_keys*/*loose_index* — i.e. it is NOT eligible
+        for retirement against that keyspace."""
+        if _finding_title_key(title) in strict_keys:
+            return True
+        loose = _finding_title_key_loose(title)
+        return loose in loose_index and loose in older_loose_unique
+
+    retired_titles = [
+        t for t in older_titles
+        if not _retirement_survives(t, sweep_keys, finding_loose_unique)
+        and not _retirement_survives(t, residual_keys, residual_loose_unique)
+    ]
     if findings or retired_titles:
         survivors: list[str] = []
         recorded: list[str] = []
@@ -2622,7 +2652,8 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
     )
     print(
         "   Every `residuals:` line in that record needs a disposition (the commit sha "
-        "that fixed it, or the bead id that carries it) recorded in Revision History "
+        "that fixed it, or the bead id that carries it) recorded in Revision History as "
+        "one line naming each residual's disposition — never the finding text itself — "
         "before the T2 write; a residual with no disposition blocks accept (nexus-g7zgw.2)."
     )
     print(
@@ -3905,9 +3936,17 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
     )
     print()
     print(
+        # Follow-on review finding 1: the gate record's own title
+        # (`{t2_key}-gate-latest`) is upserted under ONE fixed name every
+        # round (memory_put's upsert-by-title contract) — naming it here
+        # made every round's line carry the identical pointer, which
+        # resolves to a DIFFERENT round's content once a later round
+        # overwrites it. The critique title is round-specific (date-
+        # suffixed, never overwritten) and durable on its own; drop the
+        # stale gate-record pointer rather than reintroduce it.
         f"- {datetime.now(timezone.utc).date().isoformat()}: Gate round {round_no} — {outcome} "
         f"({critical_count} Critical, {significant_count} Significant, {ship_blockers} "
-        f"ship-blocker(s)); commit `{commit or '?'}`; gate record `{project}/{t2_key}-gate-latest`; "
+        f"ship-blocker(s)); commit `{commit or '?'}`; "
         f"critique `{project}/{critique_title}`."
     )
 

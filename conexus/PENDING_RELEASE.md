@@ -140,3 +140,18 @@ mechanize, it matters enough to ship.
   "Retired from the sweep" instead, needs no re-check.
 - `conexus/commands/rdr-gate.md`: nexus-yjf5l.11 — the Layer 0 bullet
   mirrors the same last-two-rounds scoping.
+- `conexus/skills/rdr-gate/SKILL.md`: follow-on review of nexus-yjf5l.11/
+  .12/.13 — the `prior:` field template's register (bare clause, no
+  narrative or bead pointer) and the Revision History line's composition
+  (the commit and the critique's own T2 record title only, not the
+  gate-latest record's upserted title) both corrected; Gate Aggregation,
+  On Pass step 2 and step 3 all updated in lock-step.
+- `conexus/commands/rdr-gate.md`: same follow-on review — the `prior:`
+  field template and the gate-outcome bullet's Revision History wording
+  mirror the skill's corrections.
+- `conexus/skills/rdr-accept/SKILL.md`: same follow-on review — step 1b's
+  "Record the dispositions in Revision History" instruction now states
+  its own bound explicitly: one line, naming each residual's disposition
+  (sha or bead id), never the finding text.
+- `conexus/commands/rdr-accept.md`: same follow-on review — Step 2b
+  mirrors the skill's disposition-recording bound.

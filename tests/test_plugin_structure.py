@@ -1558,6 +1558,20 @@ class TestRdrGateLoopRemedies:
         cmd = re.sub(r"\s+", " ", self.GATE_CMD.read_text()).lower()
         assert clause in cmd, "rdr-gate.md: the retirement clause is missing or drifted"
 
+    def test_prior_chain_names_the_previous_rounds_own_critique_id(self) -> None:
+        """Follow-on review finding 3 (nexus-yjf5l.13 had no crosswalk pin,
+        unlike R5/.11 and R6/.12 in the same batch — a gap against the
+        epic's own four-surface rule). One clause, the same in the skill
+        and the command mirror: the `prior:` field names the previous
+        round's own critique record id, never the upserted
+        `{id}-gate-latest` row's own id. Whitespace-normalised, same
+        convention as ``test_layer_zero_retirement_rule_stated_identically``."""
+        clause = "the previous round's own critique record id, never the latest record's id"
+        skill = re.sub(r"\s+", " ", self.GATE_SKILL.read_text()).lower()
+        assert clause in skill, "rdr-gate/SKILL.md: the prior-chain clause is missing or drifted"
+        cmd = re.sub(r"\s+", " ", self.GATE_CMD.read_text()).lower()
+        assert clause in cmd, "rdr-gate.md: the prior-chain clause is missing or drifted"
+
     def test_command_and_skill_agree_on_fix_check_scope(self) -> None:
         cmd = self.GATE_CMD.read_text()
         assert "research entry" in cmd, "the enumeration rule covers the cited research entry"
