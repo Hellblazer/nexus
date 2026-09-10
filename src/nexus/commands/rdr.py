@@ -2199,13 +2199,17 @@ def _fix_check_lines(
         "source. The same enumeration requirement applies to the research entry the fix cites.",
         "3. Does its cited source (changeset, file:line, RDR, T2 entry) contain the claim as stated?",
         "4. A `file:line` taken from a T3 search or query hit is a lead, not a citation: the "
-        "store carries the line as of index time. The clause passes only when the line was "
-        "re-read from the working tree.",
+        "store carries the line as of index time, and the clause passes only when the line "
+        "was re-read from the working tree.",
         "5. For every identifier whose meaning, bound, or owning phase this change alters (a "
         "column, a caller-supplied parameter, a typed error, a setting, a phase or step "
         "number), list every other occurrence in the file, and every check, bound or rule "
         "stated over the value it names under any other name, and say whether each still "
         "holds.",
+        "6. For every check, bound or rule this change adds, name the parameter, column or "
+        "setting it constrains, and for every parameter, column or setting this change adds "
+        "or alters, name every check, bound or rule that constrains it, whether or not they "
+        "share a name.",
         "",
         f"Verdict goes to T2 `{t2_key}-fix-check-{tip_sha}` (project `<repo>_rdr`); the gate "
         f"record's `fix_check:` must name `{tip_sha}`, equal to its `commit:`. Any FAIL: fix, "

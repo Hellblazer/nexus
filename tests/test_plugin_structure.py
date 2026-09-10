@@ -1348,11 +1348,24 @@ def test_changelog_has_a_section_for_pyprojects_version() -> None:
 #: whichever surface carries it so the comparison is a single equality
 #: across all three, not three independent substring checks that could
 #: each drift on their own.
+#:
+#: nexus-yjf5l.17: the clause is authored in SEVEN raw occurrences across
+#: five files (rdr.py, rdr-gate/SKILL.md, commands/rdr-gate.md, three
+#: places in rdr-fix/SKILL.md, and commands/rdr-fix.md); the equality
+#: pin below covered only the first three. ``_all_identifier_clauses``
+#: (``findall``, not ``search``) lets a caller pin every occurrence in a
+#: file that carries the sentence more than once.
+#: No trailing period in the pattern: the clause is the LAST item in its
+#: enumeration on some surfaces (rdr.py, rdr-gate/SKILL.md — period) and
+#: a mid-list item on others (the rdr-fix/SKILL.md Relay Template, once
+#: check (6) follows it — semicolon). The terminator is list-position
+#: punctuation, not part of the clause's identity; comparing the
+#: substance without it is what "identical" means here.
 _IDENTIFIER_CLAUSE_RE = re.compile(
     r"For every identifier whose meaning, bound, or owning phase this change "
     r"alters.*?list every other occurrence in the file, and every check, bound "
     r"or rule stated over the value it names under any other name, and say "
-    r"whether each still holds\.",
+    r"whether each still holds",
     re.DOTALL,
 )
 
@@ -1362,6 +1375,63 @@ def _identifier_clause(text: str) -> str:
     match = _IDENTIFIER_CLAUSE_RE.search(normalized)
     assert match, f"identifier clause not found in: {text[:200]!r}..."
     return match.group(0).strip()
+
+
+def _all_identifier_clauses(text: str) -> list[str]:
+    normalized = re.sub(r"\s+", " ", text)
+    return [m.strip() for m in _IDENTIFIER_CLAUSE_RE.findall(normalized)]
+
+
+#: nexus-yjf5l.17 (R2 residual, Finding 5 / critique Issue "T3-lead
+#: paraphrase"): the T3-lead clause, one sentence, pinned by equality
+#: the same way as the identifier clause above. It appears in four raw
+#: occurrences (rdr.py, rdr-gate/SKILL.md, commands/rdr-gate.md, and the
+#: rdr-fix/SKILL.md Relay Template) — commands/rdr-gate.md carried a
+#: paraphrase until this bead.
+#: No trailing period, for the same list-position reason as
+#: _IDENTIFIER_CLAUSE_RE above: the Relay Template's item (4) is
+#: followed by item (5), so it ends in a semicolon there, not a period.
+_T3_LEAD_CLAUSE_RE = re.compile(
+    r"A `file:line` taken from a T3 search or query hit is a lead, not a "
+    r"citation:.*?the clause passes only when the line was re-read from "
+    r"the working tree",
+    re.DOTALL,
+)
+
+
+def _t3_lead_clause(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text)
+    match = _T3_LEAD_CLAUSE_RE.search(normalized)
+    assert match, f"T3-lead clause not found in: {text[:200]!r}..."
+    return match.group(0).strip()
+
+
+#: nexus-yjf5l.17 (residual 1: the identifier clause needs no shared
+#: name only when the file happens to gloss one identifier in terms of
+#: the other). The crosswalk clause is the diff-scoped, vocabulary-
+#: independent check the critique asked for: it travels everywhere the
+#: identifier clause travels (same seven raw occurrences), one step
+#: further in the numbered brief.
+_CROSSWALK_CLAUSE_RE = re.compile(
+    r"For every check, bound or rule this change adds, name the "
+    r"parameter, column or setting it constrains, and for every "
+    r"parameter, column or setting this change adds or alters, name "
+    r"every check, bound or rule that constrains it, whether or not "
+    r"they share a name\.",
+    re.DOTALL,
+)
+
+
+def _crosswalk_clause(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text)
+    match = _CROSSWALK_CLAUSE_RE.search(normalized)
+    assert match, f"crosswalk clause not found in: {text[:200]!r}..."
+    return match.group(0).strip()
+
+
+def _all_crosswalk_clauses(text: str) -> list[str]:
+    normalized = re.sub(r"\s+", " ", text)
+    return [m.strip() for m in _CROSSWALK_CLAUSE_RE.findall(normalized)]
 
 
 class TestRdrGateLoopRemedies:
@@ -1375,6 +1445,8 @@ class TestRdrGateLoopRemedies:
     RESEARCH_SKILL = SKILLS_DIR / "rdr-research" / "SKILL.md"
     ACCEPT_SKILL = SKILLS_DIR / "rdr-accept" / "SKILL.md"
     ACCEPT_CMD = PLUGIN_DIR / "commands" / "rdr-accept.md"
+    FIX_SKILL = SKILLS_DIR / "rdr-fix" / "SKILL.md"
+    FIX_CMD = PLUGIN_DIR / "commands" / "rdr-fix.md"
 
     def test_fix_check_layer_in_gate_skill_and_command(self) -> None:
         """Remedy 1: a diff-scoped fix check stands between a fix and Layer 3."""
@@ -1394,6 +1466,12 @@ class TestRdrGateLoopRemedies:
             # different name: the round-3 collision was a caller parameter
             # against a boot check that never used the parameter's token.
             assert "under any other name" in text, f"{path}: the clause stops at the same token"
+            # nexus-yjf5l.17: the crosswalk clause needs no bridging gloss —
+            # it walks the diff's own ADDED checks and ADDED parameters
+            # directly, whether or not they share a name.
+            assert "whether or not they share a name" in text, (
+                f"{path}: the crosswalk clause is missing"
+            )
         skill = self.GATE_SKILL.read_text()
         for phrase in ("contradicted by any other line", "enumeration", "universal", "research entry"):
             assert phrase in skill, f"rdr-gate/SKILL.md: fix-check brief lacks '{phrase}'"
@@ -1459,7 +1537,55 @@ class TestRdrGateLoopRemedies:
             repo_root=str(REPO_ROOT), t2_key="0", rel="README.md",
             gated_commit="HEAD", changed=True,
         ))
-        assert _identifier_clause(skill) == _identifier_clause(cmd) == _identifier_clause(printed)
+        canonical = _identifier_clause(printed)
+        assert _identifier_clause(skill) == canonical
+        assert _identifier_clause(cmd) == canonical
+        # nexus-yjf5l.17 (R2 residual Finding 4 / critique Issue 2): the
+        # equality pin above covered only three of the clause's seven raw
+        # occurrences. The other four live in rdr-fix/SKILL.md (Behavior
+        # step 5, Rules, and the Relay Template — three occurrences) and
+        # commands/rdr-fix.md (one). Pin every one of them, individually,
+        # to the same canonical sentence.
+        fix_skill_text = self.FIX_SKILL.read_text()
+        fix_skill_clauses = _all_identifier_clauses(fix_skill_text)
+        assert len(fix_skill_clauses) == 3, (
+            f"rdr-fix/SKILL.md should carry the identifier clause 3 times "
+            f"(Behavior step 5, Rules, Relay Template); found {len(fix_skill_clauses)}"
+        )
+        assert all(c == canonical for c in fix_skill_clauses), (
+            "rdr-fix/SKILL.md: not every occurrence of the identifier clause matches the canonical sentence"
+        )
+        fix_cmd_text = self.FIX_CMD.read_text()
+        fix_cmd_clauses = _all_identifier_clauses(fix_cmd_text)
+        assert len(fix_cmd_clauses) == 1, (
+            f"commands/rdr-fix.md should carry the identifier clause once; found {len(fix_cmd_clauses)}"
+        )
+        assert fix_cmd_clauses[0] == canonical
+
+        # nexus-yjf5l.17 (R2 residual Finding 5 / critique Issue "T3-lead
+        # paraphrase"): the T3-lead clause pinned the same way, across its
+        # four raw occurrences (rdr.py, rdr-gate/SKILL.md,
+        # commands/rdr-gate.md, and the rdr-fix/SKILL.md Relay Template).
+        t3_canonical = _t3_lead_clause(printed)
+        assert _t3_lead_clause(skill) == t3_canonical
+        assert _t3_lead_clause(cmd) == t3_canonical
+        assert _t3_lead_clause(fix_skill_text) == t3_canonical
+
+        # nexus-yjf5l.17 (residual 1: the cross-identifier reach needs a
+        # bridging gloss the RDR might not supply). The crosswalk clause
+        # is diff-scoped and vocabulary-independent; it travels wherever
+        # the identifier clause does, one number further in the brief.
+        crosswalk_canonical = _crosswalk_clause(printed)
+        assert _crosswalk_clause(skill) == crosswalk_canonical
+        assert _crosswalk_clause(cmd) == crosswalk_canonical
+        fix_skill_crosswalks = _all_crosswalk_clauses(fix_skill_text)
+        assert len(fix_skill_crosswalks) == 3, (
+            f"rdr-fix/SKILL.md should carry the crosswalk clause 3 times; found {len(fix_skill_crosswalks)}"
+        )
+        assert all(c == crosswalk_canonical for c in fix_skill_crosswalks)
+        fix_cmd_crosswalks = _all_crosswalk_clauses(fix_cmd_text)
+        assert len(fix_cmd_crosswalks) == 1
+        assert fix_cmd_crosswalks[0] == crosswalk_canonical
 
     def test_fix_commit_rule_in_research_and_gate_skills(self) -> None:
         """Remedy 5: a fix changes the fact named and nothing else; glosses and
@@ -1520,13 +1646,15 @@ class TestRdrGateLoopRemedies:
             assert phrase in skill, f"rdr-fix/SKILL.md lacks '{phrase}'"
         # The Relay Template is the brief a fix check dispatched through
         # /conexus:rdr-fix actually receives, so it carries every numbered
-        # check the printed brief carries, in the same order: (1) to (5),
-        # the T3-lead clause included.
+        # check the printed brief carries, in the same order: (1) to (6),
+        # the T3-lead clause and the crosswalk clause included.
         deliverable = next(l for l in skill.splitlines() if l.startswith("One row per ADDED"))
         numbers = re.findall(r"\((\d)\)", deliverable)
-        assert numbers == ["1", "2", "3", "4", "5"], f"Relay Template checks are {numbers}, not (1) to (5)"
+        assert numbers == ["1", "2", "3", "4", "5", "6"], f"Relay Template checks are {numbers}, not (1) to (6)"
         assert "lead, not a citation" in deliverable, "Relay Template lacks the T3-lead clause"
+        assert "(4) A `file:line`" in deliverable, "the T3-lead clause is check (4), capitalised as printed"
         assert "(5) For every identifier" in deliverable, "the identifier clause is check (5), capitalised as printed"
+        assert "(6) For every check, bound or rule" in deliverable, "the crosswalk clause is check (6), capitalised as printed"
         assert "/conexus:rdr-fix" in self.GATE_SKILL.read_text()
         lifecycle = (SKILLS_DIR / "using-nx-skills" / "SKILL.md").read_text()
         assert "/conexus:rdr-fix" in lifecycle

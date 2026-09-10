@@ -93,3 +93,16 @@ mechanize, it matters enough to ship.
   disposition, never a default.
 - `conexus/commands/rdr-accept.md`: nexus-yjf5l.8 — Step 2b mirrors the
   same class-to-disposition rule.
+- `conexus/skills/rdr-gate/SKILL.md`: nexus-yjf5l.17 — the T3-lead clause
+  becomes one sentence (matching the Relay Template's join) instead of
+  two, and the Fix check list gains a sixth check: for every added check
+  and every added or altered parameter, column or setting, name what
+  constrains what, regardless of shared vocabulary.
+- `conexus/commands/rdr-gate.md`: nexus-yjf5l.17 — the T3-lead clause
+  stops being a paraphrase and becomes the identical sentence carried by
+  the other gate-side surfaces; the same sixth check is added.
+- `conexus/skills/rdr-fix/SKILL.md`: nexus-yjf5l.17 — the sixth check
+  added in Behavior step 5, Rules, and the Relay Template's Deliverable
+  line (as check (6), the T3-lead clause's (4) capitalised to match).
+- `conexus/commands/rdr-fix.md`: nexus-yjf5l.17 — the sixth check added
+  as its own bullet, mirroring the skill.

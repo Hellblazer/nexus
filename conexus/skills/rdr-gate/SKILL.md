@@ -69,13 +69,17 @@ fix commits, and the T2 title for the verdict. Then:
    3. Does its cited source (changeset, file:line, RDR, T2 entry) contain the
       claim as stated?
    4. A `file:line` taken from a T3 search or query hit is a lead, not a
-      citation: the store carries the line as of index time. The clause passes
-      only when the line was re-read from the working tree.
+      citation: the store carries the line as of index time, and the clause
+      passes only when the line was re-read from the working tree.
    5. For every identifier whose meaning, bound, or owning phase this change
       alters (a column, a caller-supplied parameter, a typed error, a
       setting, a phase or step number), list every other occurrence in the
       file, and every check, bound or rule stated over the value it
       names under any other name, and say whether each still holds.
+   6. For every check, bound or rule this change adds, name the parameter,
+      column or setting it constrains, and for every parameter, column or
+      setting this change adds or alters, name every check, bound or rule
+      that constrains it, whether or not they share a name.
 2. Deliverable: one row per clause, PASS or FAIL with line numbers, plus the
    standard Verdict block.
 3. Store the verdict in T2: mcp__plugin_conexus_nexus__memory_put(project="{repo}_rdr", title="{id}-fix-check-<sha>", ttl="permanent", tags="rdr,gate,fix-check"), where `<sha>` is the RDR file's tip commit as printed by the preamble.
