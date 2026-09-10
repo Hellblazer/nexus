@@ -428,6 +428,11 @@ class TestRdrAccept:
         assert "docs/rdr/rdr-204-example.md" in out, "the range names the RDR file"
         assert "tip" in out, "the sha is the RDR file's tip after the disposition"
         assert "bead id" in out and "needs none" in out, "the bead-disposition exemption"
+        # nexus-dxksa: the consensus rule is printed verbatim by the accept
+        # preamble, not only by the gate preamble's fix-check section.
+        from nexus.commands.rdr import FIX_CHECK_CONSENSUS_CLAUSE
+
+        assert FIX_CHECK_CONSENSUS_CLAUSE in out
 
     def test_rdr_accept_names_the_class_to_disposition_rule(self, rdr_env):
         """nexus-yjf5l.8: classification determines which disposition a

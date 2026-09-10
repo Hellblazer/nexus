@@ -2484,15 +2484,16 @@ def _fix_check_pointer_lines(
 #: fix skills, their command mirrors, the accept skill and command);
 #: tests/test_plugin_structure.py pins each placement to this string.
 FIX_CHECK_CLASS_CLAUSE: Final = (
-    "Every row carries a `Class:` of exactly one of `BLOCKS-PLANNING` (an implementer executing the plan as written would build the wrong thing, or a step cannot run in the order given), `DISCOVER-AT-IMPLEMENTATION` (real, and the first test run or first hour at the keyboard surfaces it), or `OBSERVATION` (a wording, count, paraphrase or citation-form defect that changes no decision and no step; a documentation-accuracy defect is never BLOCKS-PLANNING)."
+    "Every row carries a `Class:` of exactly one of `BLOCKS-PLANNING` (an implementer executing the plan as written would build the wrong thing, or a step cannot run in the order given), `DISCOVER-AT-IMPLEMENTATION` (real, and the first test run or first hour at the keyboard surfaces it), or `OBSERVATION` (a wording, count, paraphrase or citation-form defect that changes no decision and no step; a documentation-accuracy defect is never BLOCKS-PLANNING, and an OBSERVATION is never counted and never a residual). Each dispatch reads no sibling scratch and writes no T1 or T2, and ends with the line `FIX CHECK: PASS` or `FIX CHECK: FAIL — <n> BLOCKS-PLANNING rows`."
 )
 
 #: The consensus rule (nexus-dxksa): four runs of one brief on one commit
-#: disagreed on five of eleven findings, so a single run's FAIL list is
-#: about half noise and "any FAIL: re-run" resamples forever. Same
+#: raised eleven findings, five of them by exactly one run and one by all
+#: four, so a single run's FAIL list is partly sampling noise and "any
+#: FAIL: re-run" resamples forever. Same
 #: placement and pinning contract as FIX_CHECK_CLASS_CLAUSE.
 FIX_CHECK_CONSENSUS_CLAUSE: Final = (
-    "The fix check is three independent dispatches of this brief on the same range, never one; a defect counts only when at least two of the three raise it at the same site, its Class is the one at least two of the three assign, and a defect one critic alone raises is recorded as an observation and never fails the check; the check fails only on a counted BLOCKS-PLANNING defect; a failed check is fixed once and checked once more, and a second failure ends the loop with its counted defects recorded as residuals for accept, never a third run."
+    "The fix check is three independent dispatches of the fix-check brief on the same range, never one; the caller computes the consensus and stores one verdict naming all three; a defect counts only when at least two of the three raise it, whichever lines each cites, its Class is the one at least two of the three assign, and a three-way class split reads as BLOCKS-PLANNING; a defect one critic alone raises is recorded as an observation and never fails the check; the check fails only on a counted BLOCKS-PLANNING defect; a failed check is fixed once and checked once more, and a second failure ends the loop: its counted defects are written as `residuals:` lines of the gate record (`[<class>] <title> (fix check <sha>)`) for accept to disposition, the check is then closed, and nothing runs a third time."
 )
 
 
@@ -2562,12 +2563,13 @@ def _fix_check_lines(
         "setting it constrains, and for every parameter, column or setting this change adds "
         "or alters, name every check, bound or rule that constrains it, whether or not they "
         "share a name, and a pair the previous check already named is not named again.",
+        "",
         FIX_CHECK_CLASS_CLAUSE,
         "",
         FIX_CHECK_CONSENSUS_CLAUSE,
         f"The consensus verdict goes to T2 `{t2_key}-fix-check-{tip_sha}` (project `<repo>_rdr`), "
         f"naming all three dispatches; the gate record's `fix_check:` must name `{tip_sha}`, equal "
-        "to its `commit:`. Do not enter Layer 1 or Layer 3 with a failed check open. "
+        "to its `commit:`. Do not enter Layer 1 or Layer 3 with a first failure open. "
         "The fix check and the gate critique are never dispatched against the same commit in "
         "parallel: fix, then check, then Layer 1 and Layer 3.",
     ])

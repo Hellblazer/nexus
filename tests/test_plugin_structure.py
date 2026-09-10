@@ -1441,13 +1441,13 @@ def _all_crosswalk_clauses(text: str) -> list[str]:
 #: brief (the printed brief in rdr.py, the gate and fix skills, their
 #: command mirrors, the accept skill and command).
 _CONSENSUS_CLAUSE_RE = re.compile(
-    r"The fix check is three independent dispatches of this brief on the same "
-    r"range, never one;.*?never a third run\.",
+    r"The fix check is three independent dispatches of the fix-check brief on the "
+    r"same range, never one;.*?nothing runs a third time\.",
     re.DOTALL,
 )
 _CLASS_CLAUSE_RE = re.compile(
     r"Every row carries a `Class:` of exactly one of `BLOCKS-PLANNING`.*?"
-    r"is never BLOCKS-PLANNING\)\.",
+    r"BLOCKS-PLANNING rows`\.",
     re.DOTALL,
 )
 
@@ -1535,13 +1535,15 @@ class TestRdrGateLoopRemedies:
             )
         for path in (self.GATE_SKILL, self.GATE_CMD, self.FIX_SKILL):
             assert _all_class_clauses(path.read_text()) == [FIX_CHECK_CLASS_CLAUSE], path
-        for path in expected_consensus:
-            text = path.read_text()
-            assert "Any FAIL" not in text, f"{path}: the single-run re-run rule survives"
-            assert "re-run the fix check on the new diff" not in text, path
-            assert "re-run the check on the new diff" not in text, path
-            assert "re-run on the new diff" not in text, path
-        assert "Any FAIL" not in printed
+        banned = (
+            "any fail", "fails closed", "re-run the fix check on the new diff",
+            "re-run the check on the new diff", "re-run on the new diff",
+            "re-checked before layer 1", "with a failed check open",
+        )
+        for path in list(expected_consensus) + ["printed"]:
+            text = (printed if path == "printed" else path.read_text()).lower()
+            for phrase in banned:
+                assert phrase not in text, f"{path}: the single-run re-run rule survives: {phrase!r}"
 
     def test_termination_rule_and_ship_blockers_in_gate_skill(self) -> None:
         """Remedy 2: rounds 1-2 block on any Critical; from round 3 only a
