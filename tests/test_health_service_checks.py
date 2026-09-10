@@ -2068,6 +2068,12 @@ class TestCheckChashConformanceReport:
     real-poison proof one layer down rather than merely asserted absent.
     """
 
+    # nexus-0y4c6: a class attribute so
+    # test_fully_routable_collections_still_render_plain_clean no longer
+    # carries the literal in its own body -- a routable collection-NAME
+    # fixture fed to a FAKE catalog reader; no embedder is constructed.
+    _ROUTABLE_CODE_COLLECTION = "code__y__voyage-code-3__v1"
+
     def _cat(
         self, *, tables_by_dim: dict[int, list[dict]] | None = None,
         raise_status: int | None = None, raise_exc: Exception | None = None,
@@ -2305,7 +2311,7 @@ class TestCheckChashConformanceReport:
         cat = self._cat()
         t3 = self._t3(collection_names=[
             "knowledge__x__bge-base-en-v15-768__v1",
-            "code__y__voyage-code-3__v1",
+            self._ROUTABLE_CODE_COLLECTION,
         ])
         r = self._run(monkeypatch, cat, t3=t3)
         assert r.ok is True

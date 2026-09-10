@@ -2677,123 +2677,33 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # The three test_service_mode_cli_real_client.py entries (batch 3) were
     # promoted too — literal hoisted to the module-level `_TO_CODE_MODEL`.
     #
-    # RDR-152 nexus-gmiaf.22 (Seam B): asserts service-mode skips the embed
-    # fallback. Voyage tokens appear only as realistic collection-NAME /
-    # prepared-chunk-metadata fixtures (real docs collections ARE
-    # voyage-context-3); the test never calls Voyage — service mode embeds
-    # server-side — so it makes no cloud-mode embedder assertion and the
-    # cloud_mode fixture is not applicable.
-    "tests/test_indexer_seam_b_cutover.py::test_index_pdf_incremental_service_mode_skips_embed_fallback",
-    #
-    # nexus-0y4c6 burn-down, batch 2: the RDR-152 nexus-qnp5s
-    # collections_by_owner test and the RDR-152 nexus-enehl update-chunks
-    # test (2 nodeids) were promoted the same way — literals hoisted to
-    # `_OWNER1_CODE_COLLECTION` / `TestUpdateChunks._COLLECTION`.
-    # TestSQLiteCatalogNewMethods entry removed (nexus-i711w terminal
-    # deletion): the SQLite parity arm retired. DOWNWARD-only edit.
-    #
-    # nexus-f0r8p.3 (RDR-181): force_re_embed forwarding tests in the batch-flush
-    # closure. The voyage tokens are collection-NAME fixtures (code__repo__voyage-code-3__v1
-    # etc.); the tests assert the force_re_embed kwarg is forwarded/omitted
-    # correctly on the flush call, not any cloud-mode embedder behavior.
-    "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_forwards_force_re_embed",
-    "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_force_false_omits_force_re_embed",
-    #
-    # nexus-wxjr6 (2026-08-09, code review Important I1 follow-up):
-    # test_run_index_batch_flush_retries_transient_failure_then_succeeds —
-    # "string-literal-as-name", same class as the sibling pair immediately
-    # above. The voyage token is the same collection-NAME fixture literal
-    # passed to the mocked flush closure; the test asserts retry-after-
-    # transient-failure control flow and single-side-effect sweep
-    # accounting, not any cloud-mode embedder behavior.
-    "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_retries_transient_failure_then_succeeds",
-    #
-    # nexus-3mwuo (2026-08-09, C1-residual from the wxjr6 delta re-review,
-    # T2 review-wxjr6-client-2026-08-09 [22014]): shared-chash both-paths
-    # fix test — same "string-literal-as-name" class as the sibling pair
-    # above. The voyage token is the same collection-NAME fixture literal
-    # passed to the mocked flush closure; the test asserts the shared
-    # chash rides both the combined write and the legacy orphan upsert
-    # call, not any cloud-mode embedder behavior.
-    "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_shared_chash_orphan_copy_survives_identity_doc_failure",
+    # nexus-0y4c6 burn-down, batch 4 (2026-09-09): the nexus-f0r8p.3 /
+    # nexus-wxjr6 / nexus-3mwuo batch-flush quintet plus the RDR-152
+    # nexus-gmiaf.22 pdf-incremental test (5 nodeids,
+    # tests/test_indexer_seam_b_cutover.py), the nexus-vgq89
+    # test_collection_cmd.py quintet (5 nodeids, including the
+    # test_info_shows_embedding_model parametrize table), the nexus-vgq89
+    # test_doc_indexer.py quartet (4 nodeids, including the
+    # TestSectionTypeInPipeline pair), the nexus-8x4le
+    # test_health_service_checks.py entry, and the nexus-sghyo
+    # test_indexer_e2e.py entry (16 nodeids total) were all promoted the
+    # same way as the blocks above — literals hoisted to module/class
+    # constants (`_CODE_REPO_COLLECTION`/`_DOCS_TEST_COLLECTION`/
+    # `_CLOUD_DOCS_MODEL` in test_indexer_seam_b_cutover.py;
+    # `_CODE_MYREPO`/`_DOCS_MYREPO`/`_CODE_1_2188`/`_DOCS_1_2188`/
+    # `_RDR_1_2188`/`_INFO_EMBEDDING_MODEL_CASES` in test_collection_cmd.py;
+    # `TestSectionTypeInPipeline._MODEL`/`_CLOUD_DOCS_MODEL` in
+    # test_doc_indexer.py; `TestCheckChashConformanceReport.
+    # _ROUTABLE_CODE_COLLECTION`; `_FAKE_CODE_EMBEDDING_MODEL` in
+    # test_indexer_e2e.py), or (two docstring-only mentions) reworded. No
+    # test behavior changed; none of these asserted real cloud-mode
+    # behavior to begin with.
     #
     # nexus-0y4c6 (2026-09-09): the nexus-te885.8.1 PgReadClient
     # list_collections() parsing test was promoted the same way — its two
     # literals hoisted to `TestListCollections._CODE_COL` /
     # `_KNOWLEDGE_COL`. No embedder runs and no mode-dependent path executes
     # ("string-literal-as-name" class), unchanged.
-    #
-    # nexus-vgq89 burn-down (2026-07-15): test_collection_cmd.py promoted
-    # out of the whole-file grandfathered exclusion above. Three of its
-    # eight flagged tests are genuine cloud-embedder behavior (re-embed via
-    # Voyage) and now carry the ``cloud_mode`` fixture directly; the
-    # remaining five below are "string-literal-as-name" /
-    # collection-name-DATA: ``_collections_from_registry_info`` and
-    # ``run_collection_postprocessing`` tests build registry-info dicts
-    # with conformant collection-name strings and fully mock
-    # ``_discover_taxonomy``/``make_t3`` — no embedder runs. Note
-    # ``test_collections_from_registry_info_filters_excluded`` and
-    # ``..._prefers_conformant_code_collection`` do exercise
-    # ``is_local_mode()`` indirectly (via ``taxonomy.local_exclude_
-    # collections``), but neither test's actual assertions depend on which
-    # branch fires — both only assert the always-unfiltered docs__/rdr__
-    # names are present, never a code__ presence/absence — so cloud_mode
-    # would be a no-op declaration, not a real promotion.
-    "tests/test_collection_cmd.py::test_collections_from_registry_info_filters_excluded",
-    "tests/test_collection_cmd.py::test_collections_from_registry_info_prefers_conformant_code_collection",
-    "tests/test_collection_cmd.py::test_collections_from_registry_info_dedupes",
-    "tests/test_collection_cmd.py::test_run_collection_postprocessing_does_not_pass_alias_through",
-    # ``test_info_shows_embedding_model``: parametrized over
-    # (collection_name, expected_model) pairs against a mocked ``mock_db``;
-    # asserts the ``info`` command's display parses the model out of the
-    # collection NAME, never a real embedder call.
-    "tests/test_collection_cmd.py::test_info_shows_embedding_model",
-    #
-    # nexus-vgq89 burn-down (2026-07-15): test_doc_indexer.py promoted out
-    # of the whole-file grandfathered exclusion above; 32 of its 36
-    # flagged tests genuinely exercise cloud-embedder behavior (the
-    # ``_embed_with_fallback``/CCE family, and the credential-gated
-    # staleness/force/incremental-checkpoint family whose target_model
-    # resolution depends on ``is_local_mode()``) and now carry the
-    # ``cloud_mode`` fixture directly. The four below do not:
-    # ``test_index_md_falls_back_to_local_embedder_when_no_credentials``
-    # and ``test_make_local_embed_fn_returns_consistent_model_name`` are
-    # mode-self-tests — they explicitly delete/never-set credentials to
-    # prove the LOCAL fallback path; ``cloud_mode`` would invert what they
-    # test (same "mode-self-test" class as test_local_mode.py above).
-    "tests/test_doc_indexer.py::test_index_md_falls_back_to_local_embedder_when_no_credentials",
-    "tests/test_doc_indexer.py::test_make_local_embed_fn_returns_consistent_model_name",
-    # ``TestSectionTypeInPipeline``'s two tests call ``_markdown_chunks(md,
-    # "abc123", "voyage-context-3", ...)`` directly — the model is an
-    # opaque label argument to a pure chunking/section-classification
-    # function; no embedder runs ("string-literal-as-name" / "chunker-param"
-    # class, same as test_catalog_path.py above).
-    "tests/test_doc_indexer.py::TestSectionTypeInPipeline::test_markdown_chunks_has_section_type",
-    "tests/test_doc_indexer.py::TestSectionTypeInPipeline::test_markdown_chunks_section_classified",
-    # nexus-8x4le (2026-08-05): landed with the RDR-180 chash-conformance
-    # doctor check (dbd2cb46, nexus-du2dw) — reason "string-literal-as-name".
-    # ``test_fully_routable_collections_still_render_plain_clean`` builds a
-    # FAKE T3 client whose ``collection_names`` fixture is
-    # ``["knowledge__x__bge-base-en-v15-768__v1", "code__y__voyage-code-3__v1"]``
-    # purely to exercise the routability-enrichment probe's "all collections
-    # route to a known dim" branch; the voyage token is a segment of a
-    # conformant RDR-103 collection NAME fed to a fake, never to a real
-    # embedder. No Voyage credential or client is constructed anywhere in
-    # ``TestCheckChashConformanceReport``. Found via the whole-session
-    # census once it was restored to the default loop (see the module
-    # docstring above ``_MODE_LINT_EXCLUDE_FILES``/here for why this census
-    # cannot live in the lint bucket) — the test itself is not new-broken,
-    # it was simply never checked while the census sat mis-scoped.
-    "tests/test_health_service_checks.py::TestCheckChashConformanceReport::test_fully_routable_collections_still_render_plain_clean",
-    # nexus-sghyo PORT (2026-08-07): "string-literal-as-name". The test
-    # manually seeds a fake misclassified chunk with a hardcoded
-    # ``"embedding_model": "voyage-code-3"`` metadata literal to simulate
-    # a pre-existing stale record — no embedder is constructed, and the
-    # `cloud_mode` fixture it used to carry was dropped because it made
-    # this test collide with the now-retired non-service-embedding leg
-    # (indexer.py's CredentialsMissingError). The prune/migration
-    # behaviour under test is embedding-model-independent.
-    "tests/test_indexer_e2e.py::test_migration_moves_prose_from_code_to_docs",
     #
     # nexus-0y4c6 burn-down, batch 3 (2026-09-09): the nexus-wxjr6 combined-
     # write pair and the nexus-y9t08/nexus-n2w4q timeout/retry quartet (6

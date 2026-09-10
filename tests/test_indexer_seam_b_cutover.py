@@ -21,6 +21,14 @@ import pytest
 # ── Fixtures and helpers ─────────────────────────────────────────────────────
 
 
+# nexus-0y4c6: hoisted out of the five tests below' own bodies so the
+# RDR-109 mode-declaration lint no longer needs to exclude them by
+# nodeid -- collection-NAME fixtures passed to a mocked flush closure /
+# monkeypatched embed fallback; no embedder or cloud call is ever made.
+_CODE_REPO_COLLECTION = "code__repo__voyage-code-3__v1"
+_DOCS_TEST_COLLECTION = "docs__test__voyage-context-3__v1"
+_CLOUD_DOCS_MODEL = "voyage-context-3"
+
 _DEFAULT_CONFIG = {
     "server": {"ignorePatterns": []},
     "indexing": {
@@ -222,7 +230,7 @@ def test_run_index_batch_flush_forwards_force_re_embed(tmp_path, monkeypatch):
         # exits), or the deferred import resolves to the REAL
         # get_catalog_writer and attempts a real HTTP call.
         captured["flush"](
-            "code__repo__voyage-code-3__v1", ["a" * 64], ["doc1"], [{"m": 1}],
+            _CODE_REPO_COLLECTION, ["a" * 64], ["doc1"], [{"m": 1}],
             _flush_ctx(),
         )
     assert catalog_writer.write_manifest_many.call_count == 1
@@ -287,7 +295,7 @@ def test_run_index_batch_flush_force_false_omits_force_re_embed(tmp_path, monkey
         # nexus-wxjr6: flush() must be invoked INSIDE this patch context —
         # see the sibling test's comment.
         captured["flush"](
-            "code__repo__voyage-code-3__v1", ["a" * 64], ["doc1"], [{"m": 1}],
+            _CODE_REPO_COLLECTION, ["a" * 64], ["doc1"], [{"m": 1}],
             _flush_ctx(),
         )
     assert catalog_writer.write_manifest_many.call_count == 1
@@ -372,7 +380,7 @@ def test_run_index_batch_flush_retries_transient_failure_then_succeeds(tmp_path,
         # Must not raise — the transient error is swallowed by the retry
         # wrapper and the second attempt succeeds.
         captured["flush"](
-            "code__repo__voyage-code-3__v1", ["a" * 64], ["doc1"], [{"m": 1}],
+            _CODE_REPO_COLLECTION, ["a" * 64], ["doc1"], [{"m": 1}],
             _flush_ctx(),
         )
 
@@ -480,7 +488,7 @@ def test_run_index_batch_flush_shared_chash_orphan_copy_survives_identity_doc_fa
         # Flatten fctx into the (ids, docs, metas) shape a real
         # ChunkBatcher flush would carry — one entry per claiming file.
         captured["flush"](
-            "code__repo__voyage-code-3__v1",
+            _CODE_REPO_COLLECTION,
             [shared_chash, shared_chash],
             ["shared", "shared"],
             [
@@ -735,8 +743,8 @@ def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monke
     col.get.return_value = {"ids": [], "metadatas": []}
 
     prepared = [
-        ("id1", "chunk text 1", {"embedding_model": "voyage-context-3"}),
-        ("id2", "chunk text 2", {"embedding_model": "voyage-context-3"}),
+        ("id1", "chunk text 1", {"embedding_model": _CLOUD_DOCS_MODEL}),
+        ("id2", "chunk text 2", {"embedding_model": _CLOUD_DOCS_MODEL}),
     ]
 
     mock_hooks = MagicMock()
@@ -759,7 +767,7 @@ def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monke
             corpus="test-corpus",
             prepared=prepared,
             content_hash="abc123",
-            collection_name="docs__test__voyage-context-3__v1",
+            collection_name=_DOCS_TEST_COLLECTION,
             t3=db,
             embed_fn=None,
             hooks=mock_hooks,

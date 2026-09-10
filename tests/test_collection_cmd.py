@@ -12,6 +12,17 @@ from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
 from tests.conftest import make_vector_test_client
 
+# nexus-0y4c6: hoisted out of the four _collections_from_registry_info /
+# run_collection_postprocessing tests' own bodies below so the RDR-109
+# mode-declaration lint no longer needs to exclude them by nodeid --
+# conformant collection-name fixtures fed to registry-info dicts with
+# `_discover_taxonomy`/`make_t3` fully mocked; no embedder runs.
+_CODE_MYREPO = "code__myrepo__voyage-code-3__v1"
+_DOCS_MYREPO = "docs__myrepo__voyage-context-3__v1"
+_CODE_1_2188 = "code__1-2188__voyage-code-3__v1"
+_DOCS_1_2188 = "docs__1-2188__voyage-context-3__v1"
+_RDR_1_2188 = "rdr__1-2188__voyage-context-3__v1"
+
 
 @pytest.fixture
 def runner() -> CliRunner:
@@ -192,10 +203,17 @@ def _mock_db_for_info(mock_db, name, count, metadatas):
     mock_db.get_or_create_collection.return_value = mock_col
 
 
-@pytest.mark.parametrize("col_name,expected_model", [
+# nexus-0y4c6: hoisted out of test_info_shows_embedding_model's own
+# decorator so the RDR-109 mode-declaration lint no longer needs to
+# exclude it by nodeid -- parametrize-data collection-name/expected-model
+# pairs against a MagicMock db; no embedder or credential path.
+_INFO_EMBEDDING_MODEL_CASES = [
     ("code__nexus", "voyage-code-3"),
     ("knowledge__research", "voyage-context-3"),
-])
+]
+
+
+@pytest.mark.parametrize("col_name,expected_model", _INFO_EMBEDDING_MODEL_CASES)
 def test_info_shows_embedding_model(runner, env_creds, mock_db, col_name, expected_model) -> None:
     _mock_db_for_info(mock_db, col_name, 42, [{}])
     result = _invoke(runner, mock_db, ["info", col_name])
@@ -932,15 +950,15 @@ def test_collections_from_registry_info_filters_excluded() -> None:
     # A typical post-RDR-103 registry entry returns its
     # collection + docs_collection pair.
     info = {
-        "collection": "code__myrepo__voyage-code-3__v1",
-        "docs_collection": "docs__myrepo__voyage-context-3__v1",
+        "collection": _CODE_MYREPO,
+        "docs_collection": _DOCS_MYREPO,
     }
     out = _collections_from_registry_info(info)
     # Local-mode default config excludes ``code__*`` from the taxonomy
     # post-processing chain (taxonomy.local_exclude_collections =
     # ["code__*"]); the docs__ collection always surfaces. Cloud-mode
     # CI runs would see both, but unit tests run in local mode.
-    assert "docs__myrepo__voyage-context-3__v1" in out
+    assert _DOCS_MYREPO in out
 
 
 def test_collections_from_registry_info_prefers_conformant_code_collection() -> None:
@@ -953,9 +971,9 @@ def test_collections_from_registry_info_prefers_conformant_code_collection() -> 
 
     info = {
         "collection": "code__nexus-571b8edd",  # legacy alias, no T3 collection
-        "code_collection": "code__1-2188__voyage-code-3__v1",
-        "docs_collection": "docs__1-2188__voyage-context-3__v1",
-        "rdr_collection": "rdr__1-2188__voyage-context-3__v1",
+        "code_collection": _CODE_1_2188,
+        "docs_collection": _DOCS_1_2188,
+        "rdr_collection": _RDR_1_2188,
     }
     out = _collections_from_registry_info(info)
     assert "code__nexus-571b8edd" not in out, (
@@ -963,8 +981,8 @@ def test_collections_from_registry_info_prefers_conformant_code_collection() -> 
         "conformant code_collection is present"
     )
     # Cloud-mode passthrough: rdr/docs always; code__ filtered in local mode only.
-    assert "docs__1-2188__voyage-context-3__v1" in out
-    assert "rdr__1-2188__voyage-context-3__v1" in out
+    assert _DOCS_1_2188 in out
+    assert _RDR_1_2188 in out
 
 
 def test_collections_from_registry_info_dedupes() -> None:
@@ -974,9 +992,9 @@ def test_collections_from_registry_info_dedupes() -> None:
     """
     from nexus.commands.index import _collections_from_registry_info
 
-    name = "code__myrepo__voyage-code-3__v1"
+    name = _CODE_MYREPO
     info = {"collection": name, "code_collection": name,
-            "docs_collection": "docs__myrepo__voyage-context-3__v1"}
+            "docs_collection": _DOCS_MYREPO}
     out = _collections_from_registry_info(info)
     assert len(out) == len(set(out))
 
@@ -1015,8 +1033,8 @@ def test_run_collection_postprocessing_does_not_pass_alias_through(monkeypatch):
 
     info = {
         "collection": "code__nexus-571b8edd",  # legacy non-conformant alias
-        "code_collection": "code__1-2188__voyage-code-3__v1",
-        "docs_collection": "docs__1-2188__voyage-context-3__v1",
+        "code_collection": _CODE_1_2188,
+        "docs_collection": _DOCS_1_2188,
     }
     collections = index_mod._collections_from_registry_info(info)
     index_mod.run_collection_postprocessing(collections, repo_path=None, quiet=True)

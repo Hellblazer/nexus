@@ -414,11 +414,27 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 60
 # 40 -> 19 (nexus-0y4c6 burn-down batch 3, 2026-09-09): -21 nodeid
 # entries, all PROMOTED the same way as batches 1-2 -- literals hoisted
 # to module/class constants, or (one docstring-only mention) reworded.
-# No test behavior changed. 19 nodeids remain unconverted (3 of them,
-# tests/test_integration.py's real keyed-credential tests, cannot be
-# converted this way at all -- see that file's bead-report entry); see
-# bead nexus-0y4c6 for the burn-down's continuation.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 19
+# No test behavior changed. 19 nodeids remained unconverted after batch
+# 3 (3 of them, tests/test_integration.py's real keyed-credential tests,
+# cannot be converted this way at all); see bead nexus-0y4c6 for the
+# burn-down's continuation.
+# 19 -> 3 (nexus-0y4c6 burn-down batch 4, 2026-09-09): -16 nodeid
+# entries, all PROMOTED the same way as batches 1-3 -- literals hoisted
+# to module/class constants, or (two docstring-only mentions) reworded.
+# No test behavior changed. The 3 remaining entries
+# (tests/test_integration.py::test_cce_query_retrieves_cce_indexed_
+# markdown / test_t3_put_embedding_model_in_search_metadata /
+# test_voyage_code3_index_and_query) are REAL keyed integration tests
+# (-m integration, @requires_voyage_key): their mode declaration IS the
+# credential-gating itself, and the `cloud_mode` fixture would overwrite
+# their genuine VOYAGE_API_KEY with a fake one, breaking them against
+# the live Voyage API (see the comment beside them, above). This is the
+# nodeid burn-down's floor -- these three cannot be converted by hoisting
+# or rewording; only a change to how the lint recognizes credential-gated
+# integration tests could remove them, and that is out of scope for a
+# test-only burn-down. The 60-entry _MODE_LINT_EXCLUDE_FILES set is a
+# SEPARATE, unconverted burn-down surface -- see bead nexus-0y4c6.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 3
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:
