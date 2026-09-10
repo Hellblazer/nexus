@@ -86,4 +86,60 @@ class TupleWaitRegistryTest {
                 .as("a signal for a different group must not close this waiter's timer early")
                 .isGreaterThanOrEqualTo(900);
     }
+
+    // ── group eviction (RDR-205 §Memory management, bead nexus-em75s.37) ───────
+
+    /**
+     * {@code groups} must not grow forever: a group with no live waiter and no
+     * signal for {@link TupleWaitRegistry#IDLE_EVICT_NANOS} is reclaimed. Uses an
+     * injected {@link java.util.concurrent.atomic.AtomicLong}-backed clock rather
+     * than a real sleep, per the bead's own test description ("with a fixed clock
+     * or an injected time source") -- deterministic and instant.
+     */
+    @Test
+    void register_manySubspaces_parkedNothing_idleGroupsAreEvictedAfterTheIdlePeriod() {
+        java.util.concurrent.atomic.AtomicLong clock = new java.util.concurrent.atomic.AtomicLong(0L);
+        TupleWaitRegistry registry = new TupleWaitRegistry(4, 16, clock::get);
+
+        int subspaceCount = 50;
+        for (int i = 0; i < subspaceCount; i++) {
+            TupleWaitRegistry.Waiter waiter = registry.register(TENANT, SUBSPACE + "-" + i);
+            waiter.release(); // parks nothing: registers, then immediately stops waiting
+        }
+        assertThat(registry.groupCount()).isEqualTo(subspaceCount);
+
+        // Advance the injected clock well past the idle threshold, then register one
+        // more (unrelated) group -- register() runs the opportunistic sweep.
+        clock.addAndGet(TupleWaitRegistry.IDLE_EVICT_NANOS * 2);
+        TupleWaitRegistry.Waiter trigger = registry.register(TENANT, "trigger-subspace");
+        trigger.release();
+
+        assertThat(registry.groupCount())
+                .as("every idle, waiter-less group from before the clock jump must be reclaimed")
+                .isEqualTo(1); // only the just-registered trigger group survives
+    }
+
+    /**
+     * The counterpart to the eviction test above: a group with a LIVE waiter (never
+     * released) must never be evicted, even once the clock says it is idle --
+     * {@code waiters} is a genuine occupancy count, not a last-register timestamp.
+     */
+    @Test
+    void register_liveWaiterNeverReleased_groupSurvivesPastTheIdlePeriod() {
+        java.util.concurrent.atomic.AtomicLong clock = new java.util.concurrent.atomic.AtomicLong(0L);
+        TupleWaitRegistry registry = new TupleWaitRegistry(4, 16, clock::get);
+
+        TupleWaitRegistry.Waiter stillWaiting = registry.register(TENANT, "still-parked-subspace");
+        registry.register(TENANT, "idle-subspace").release();
+        assertThat(registry.groupCount()).isEqualTo(2);
+
+        clock.addAndGet(TupleWaitRegistry.IDLE_EVICT_NANOS * 2);
+        registry.register(TENANT, "trigger-subspace").release();
+
+        assertThat(registry.groupCount())
+                .as("a group with a live (never-released) waiter must survive the sweep")
+                .isEqualTo(2); // still-parked-subspace + trigger-subspace; idle-subspace is gone
+
+        stillWaiting.release(); // avoid leaking state past the test, though nothing reads it after
+    }
 }

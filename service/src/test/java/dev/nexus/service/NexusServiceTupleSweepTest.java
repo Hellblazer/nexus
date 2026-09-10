@@ -132,14 +132,20 @@ class NexusServiceTupleSweepTest {
     }
 
     /** {@code tupleId} may be null (a log-retention probe with no backing tuple);
-     *  when non-null it MUST already exist in {@code nexus.tuples} (the FK). */
+     *  when non-null it MUST already exist in {@code nexus.tuples} (the FK).
+     *  {@code expires_at} mirrors {@code TupleRepository#insertClaimLog}'s own
+     *  formula ({@code at + claimLogTtlSeconds()}, RDR-205 P1 follow-on
+     *  nexus-em75s.37) rather than an arbitrary fixed offset -- the purge arm now
+     *  reads this column directly, so a fixture using a different formula would
+     *  misrepresent which seeded rows are actually past their retention. */
     private void insertClaimLogRow(String tenant, String subspace, byte[] tupleId, String transition,
                                     OffsetDateTime at) {
         su.insertInto(TUPLE_CLAIM_LOG,
                         TUPLE_CLAIM_LOG.TENANT_ID, TUPLE_CLAIM_LOG.SUBSPACE, TUPLE_CLAIM_LOG.TEMPLATE,
                         TUPLE_CLAIM_LOG.TUPLE_ID, TUPLE_CLAIM_LOG.TRANSITION, TUPLE_CLAIM_LOG.AT,
                         TUPLE_CLAIM_LOG.EXPIRES_AT)
-                .values(tenant, subspace, MAILBOX_TEMPLATE, tupleId, transition, at, at.plusDays(1))
+                .values(tenant, subspace, MAILBOX_TEMPLATE, tupleId, transition, at,
+                        at.plusSeconds(registry.claimLogTtlSeconds()))
                 .execute();
     }
 

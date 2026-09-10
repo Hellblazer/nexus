@@ -440,6 +440,7 @@ public final class TupleRepository {
             }
         } finally {
             waitRegistry.releaseParkSlot(null);
+            waiter.release();
         }
     }
 
@@ -518,6 +519,7 @@ public final class TupleRepository {
             }
         } finally {
             waitRegistry.releaseParkSlot(claimant);
+            waiter.release();
         }
     }
 
@@ -594,7 +596,7 @@ public final class TupleRepository {
                     // only be a LAPSED lease (dead is excluded, claimed-and-live would fail
                     // the lease_until<now() arm) — release the previous claim first.
                     insertClaimLog(ctx, tenant, subspace, t.name(), row.getId(),
-                            row.getClaimId(), row.getClaimant(), TRANSITION_EXPIRE, now, row.getExpiresAt());
+                            row.getClaimId(), row.getClaimant(), TRANSITION_EXPIRE, now);
                     attempts = attempts + 1;
                     if (attempts >= maxAttempts) {
                         ctx.update(TUPLES)
@@ -606,7 +608,7 @@ public final class TupleRepository {
                                 .where(TUPLES.ID.eq(row.getId()))
                                 .execute();
                         insertClaimLog(ctx, tenant, subspace, t.name(), row.getId(),
-                                null, null, TRANSITION_DEAD, now, row.getExpiresAt());
+                                null, null, TRANSITION_DEAD, now);
                         continue; // bounded re-run: NX_TUPLE_CLAIM_PASSES
                     }
                     // otherwise: claim THIS row now, below, with the incremented attempts
@@ -626,7 +628,7 @@ public final class TupleRepository {
                         .where(TUPLES.ID.eq(row.getId()))
                         .execute();
                 insertClaimLog(ctx, tenant, subspace, t.name(), row.getId(),
-                        newClaimId, claimant, TRANSITION_CLAIM, now, row.getExpiresAt());
+                        newClaimId, claimant, TRANSITION_CLAIM, now);
 
                 TupleRow claimed = new TupleRow(row.getId(), subspace, t.name(),
                         fromJsonb(row.getKeys()), fromJsonb(row.getDims()), row.getBody(),
@@ -666,7 +668,7 @@ public final class TupleRepository {
                     .where(TUPLES.ID.eq(row.getId()))
                     .execute();
             insertClaimLog(ctx, tenant, row.getSubspace(), row.getTemplate(), row.getId(),
-                    claimId, claimant, TRANSITION_ACK, now, row.getExpiresAt());
+                    claimId, claimant, TRANSITION_ACK, now);
             return null;
         });
     }
@@ -687,7 +689,7 @@ public final class TupleRepository {
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
             releaseOrDeadLetter(ctx, tenant, row.getSubspace(), row.getTemplate(), row.getId(),
-                    claimId, claimant, TRANSITION_NACK, now, row.getExpiresAt(), attempts, maxAttempts);
+                    claimId, claimant, TRANSITION_NACK, now, attempts, maxAttempts);
             return null;
         });
     }
@@ -706,11 +708,11 @@ public final class TupleRepository {
      *
      * @return true iff this row was dead-lettered (attempts reached max_attempts)
      */
-    private static boolean releaseOrDeadLetter(DSLContext ctx, String tenant, String subspace, String template,
-                                                 byte[] tupleId, String claimId, String claimant,
-                                                 String releaseTransition, OffsetDateTime now,
-                                                 OffsetDateTime expiresAt, int attempts, long maxAttempts) {
-        insertClaimLog(ctx, tenant, subspace, template, tupleId, claimId, claimant, releaseTransition, now, expiresAt);
+    private boolean releaseOrDeadLetter(DSLContext ctx, String tenant, String subspace, String template,
+                                          byte[] tupleId, String claimId, String claimant,
+                                          String releaseTransition, OffsetDateTime now,
+                                          int attempts, long maxAttempts) {
+        insertClaimLog(ctx, tenant, subspace, template, tupleId, claimId, claimant, releaseTransition, now);
         if (attempts >= maxAttempts) {
             ctx.update(TUPLES)
                     .set(TUPLES.CLAIM_STATE, CLAIM_STATE_DEAD)
@@ -720,7 +722,7 @@ public final class TupleRepository {
                     .set(TUPLES.ATTEMPTS, attempts)
                     .where(TUPLES.ID.eq(tupleId))
                     .execute();
-            insertClaimLog(ctx, tenant, subspace, template, tupleId, null, null, TRANSITION_DEAD, now, expiresAt);
+            insertClaimLog(ctx, tenant, subspace, template, tupleId, null, null, TRANSITION_DEAD, now);
             return true;
         }
         ctx.update(TUPLES)
@@ -782,7 +784,7 @@ public final class TupleRepository {
                         ? Long.MAX_VALUE : t.take().maxAttempts();
                 int attempts = row.getAttempts() + 1;
                 boolean dead = releaseOrDeadLetter(ctx, tenant, row.getSubspace(), row.getTemplate(), row.getId(),
-                        row.getClaimId(), row.getClaimant(), TRANSITION_EXPIRE, now, row.getExpiresAt(),
+                        row.getClaimId(), row.getClaimant(), TRANSITION_EXPIRE, now,
                         attempts, maxAttempts);
                 if (dead) {
                     deadLettered++;
@@ -831,26 +833,27 @@ public final class TupleRepository {
 
     /**
      * One BATCH, one transaction, of the scheduled sweep's log-retention arm:
-     * deletes up to {@code batchSize} {@code nexus.tuple_claim_log} rows older than
-     * {@link TemplateRegistry#claimLogTtlSeconds()} — the SAME value the registry's
-     * own boot check validated against every template's {@code retention_seconds}
-     * (never a second, independently-parsed copy of {@code
-     * NX_TUPLE_CLAIM_LOG_TTL_DAYS}). The cutoff is evaluated server-side via {@code
-     * DSL.currentOffsetDateTime().sub(...)}, the same now/interval split {@link #out}
-     * uses (see the class javadoc's now/interval convention).
+     * deletes up to {@code batchSize} {@code nexus.tuple_claim_log} rows whose OWN
+     * {@code expires_at} has passed. {@link #insertClaimLog} stamps that column at
+     * write time as {@code at + }{@link TemplateRegistry#claimLogTtlSeconds()} — the
+     * SAME value the registry's own boot check validated against every template's
+     * {@code retention_seconds} (never a second, independently-parsed copy of {@code
+     * NX_TUPLE_CLAIM_LOG_TTL_DAYS}) — so this arm reads the stored column directly
+     * rather than recomputing the cutoff from {@code at} a second time (RDR-205 P1
+     * follow-on, nexus-em75s.37, review M6 / critique S2): the two computations can
+     * only drift if this arm keeps its own copy of the TTL math.
      *
      * @return {@code examined} is the candidate SELECT's own row count (RDR-205
      *         Phase 1 follow-on, bead nexus-em75s.38), independent of {@code
      *         purged}, the delete's affected-row count
      */
     public PurgeBatchResult purgeOldClaimLogBatch(String tenant, int batchSize, Duration statementTimeout) {
-        DayToSecond ttlInterval = interval(registry.claimLogTtlSeconds());
         return tenantScope.withTenant(tenant, ctx -> {
             SweepBounds.applyStatementTimeout(ctx, statementTimeout);
-            Field<OffsetDateTime> cutoff = DSL.currentOffsetDateTime().sub(ttlInterval);
             List<Long> ids = ctx.select(TUPLE_CLAIM_LOG.LOG_ID)
                     .from(TUPLE_CLAIM_LOG)
-                    .where(TUPLE_CLAIM_LOG.TENANT_ID.eq(tenant).and(TUPLE_CLAIM_LOG.AT.lt(cutoff)))
+                    .where(TUPLE_CLAIM_LOG.TENANT_ID.eq(tenant)
+                            .and(TUPLE_CLAIM_LOG.EXPIRES_AT.lt(DSL.currentOffsetDateTime())))
                     .orderBy(TUPLE_CLAIM_LOG.LOG_ID.asc())
                     .limit(batchSize)
                     .forUpdate()
@@ -882,14 +885,25 @@ public final class TupleRepository {
                 .fetchOne();
     }
 
-    private static void insertClaimLog(DSLContext ctx, String tenant, String subspace, String template,
-                                        byte[] tupleId, String claimId, String claimant,
-                                        String transition, OffsetDateTime at, OffsetDateTime expiresAt) {
+    /**
+     * RDR-205 P1 follow-on (nexus-em75s.37, review M6 / critique S2): {@code
+     * tuple_claim_log.expires_at} is the LOG ROW's own retention deadline (RDR
+     * §Technical Design line ~602: {@code at + NX_TUPLE_CLAIM_LOG_TTL_DAYS}), not the
+     * tuple's expiry — a claim log row for a short-lived tuple must still survive the
+     * full audit retention window. Computed here, once, from {@link
+     * TemplateRegistry#claimLogTtlSeconds()} rather than accepted as a caller-supplied
+     * parameter, so no call site can (again) pass the tuple's own {@code expires_at}
+     * by mistake.
+     */
+    private void insertClaimLog(DSLContext ctx, String tenant, String subspace, String template,
+                                 byte[] tupleId, String claimId, String claimant,
+                                 String transition, OffsetDateTime at) {
+        OffsetDateTime logExpiresAt = at.plusSeconds(registry.claimLogTtlSeconds());
         ctx.insertInto(TUPLE_CLAIM_LOG,
                         TUPLE_CLAIM_LOG.TENANT_ID, TUPLE_CLAIM_LOG.SUBSPACE, TUPLE_CLAIM_LOG.TEMPLATE,
                         TUPLE_CLAIM_LOG.TUPLE_ID, TUPLE_CLAIM_LOG.CLAIM_ID, TUPLE_CLAIM_LOG.CLAIMANT,
                         TUPLE_CLAIM_LOG.TRANSITION, TUPLE_CLAIM_LOG.AT, TUPLE_CLAIM_LOG.EXPIRES_AT)
-                .values(tenant, subspace, template, tupleId, claimId, claimant, transition, at, expiresAt)
+                .values(tenant, subspace, template, tupleId, claimId, claimant, transition, at, logExpiresAt)
                 .execute();
     }
 

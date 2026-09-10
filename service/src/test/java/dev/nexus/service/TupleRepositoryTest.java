@@ -779,4 +779,116 @@ class TupleRepositoryTest {
             assertThat(recentSurvives).isTrue();
         }
     }
+
+    /**
+     * RDR-205 P1 follow-on (nexus-em75s.37, review M6): the purge arm must filter on
+     * the log row's OWN {@code expires_at} column, not recompute a cutoff from {@code
+     * at}. This row is built to disagree between the two: {@code at} is recent (a
+     * naive {@code at}-based cutoff of "now minus the TTL" would keep it), but {@code
+     * expires_at} has already passed -- exactly what a row written by the pre-fix
+     * {@code insertClaimLog} (the tuple's own, much shorter, expiry) would look like.
+     * A sibling row with a matching recent {@code at} but a still-future {@code
+     * expires_at} must survive, proving this isn't simply "purge everything."
+     */
+    @Test
+    void purgeOldClaimLogBatch_readsExpiresAtColumn_notRecomputedFromAt() throws Exception {
+        String tenant = "tuple-tenant-log-batch-expires-" + UUID.randomUUID();
+        OffsetDateTime now = OffsetDateTime.now(java.time.ZoneOffset.UTC);
+        try (Connection su = pg.createConnection("")) {
+            var dsl = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            // Recent AT (an at-based cutoff of "now - TTL" would never touch this row),
+            // but EXPIRES_AT already in the past -- must be purged under the new rule.
+            dsl.insertInto(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TENANT_ID,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.SUBSPACE,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TEMPLATE,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TRANSITION,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.AT,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.EXPIRES_AT)
+                    .values(tenant, "mailbox/log-batch-expired-despite-recent-at", "mailbox", "claim",
+                            now.minusHours(1), now.minusMinutes(1))
+                    .execute();
+            // Same recent AT, but EXPIRES_AT still in the future -- must survive.
+            dsl.insertInto(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TENANT_ID,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.SUBSPACE,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TEMPLATE,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TRANSITION,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.AT,
+                            dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.EXPIRES_AT)
+                    .values(tenant, "mailbox/log-batch-not-yet-expired", "mailbox", "claim",
+                            now.minusHours(1), now.plusDays(180))
+                    .execute();
+        }
+
+        int purged = repo.purgeOldClaimLogBatch(tenant, 300, null);
+        assertThat(purged).isEqualTo(1);
+
+        try (Connection su = pg.createConnection("")) {
+            var dsl = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            boolean expiredGone = !dsl.fetchExists(dsl.selectFrom(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TENANT_ID.eq(tenant)
+                            .and(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.SUBSPACE.eq(
+                                    "mailbox/log-batch-expired-despite-recent-at"))));
+            boolean notYetExpiredSurvives = dsl.fetchExists(
+                    dsl.selectFrom(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG)
+                            .where(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TENANT_ID.eq(tenant)
+                                    .and(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.SUBSPACE.eq(
+                                            "mailbox/log-batch-not-yet-expired"))));
+            assertThat(expiredGone)
+                    .as("a row past its OWN expires_at must be purged even with a recent `at`")
+                    .isTrue();
+            assertThat(notYetExpiredSurvives)
+                    .as("a row not yet past its OWN expires_at must survive")
+                    .isTrue();
+        }
+    }
+
+    /**
+     * RDR-205 P1 follow-on (nexus-em75s.37, review M6 / critique S2, RDR §Technical
+     * Design line ~602): {@code tuple_claim_log.expires_at} is the LOG's own TTL
+     * ({@code at + claimLogTtlSeconds()}), not the tuple's expiry. The fixture's
+     * mailbox template retains tuples for 7 days ({@code retention_seconds:
+     * 604800}); the registry's default claim-log TTL is 180 days -- two very
+     * different numbers, so a log row landing near either one is an unambiguous
+     * signal of which expiry actually got written.
+     */
+    @Test
+    void ack_writesClaimLogExpiresAt_asAtPlusClaimLogTtl_notTheTuplesOwnExpiry() throws Exception {
+        String to = "agent-log-expiry-" + UUID.randomUUID();
+        OffsetDateTime beforeOut = OffsetDateTime.now(java.time.ZoneOffset.UTC);
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+                Map.of("from", "sender-log-expiry"), "body", "nonce-log-expiry-1", null);
+
+        var claimed = repo.inp(TENANT_A, "mailbox/" + to, Map.of("to", to), "claimant-log-expiry", 300);
+        assertThat(claimed).isPresent();
+        OffsetDateTime tuplesOwnExpiry = claimed.get().tuple().expiresAt();
+
+        repo.ack(TENANT_A, claimed.get().claimId(), "claimant-log-expiry");
+
+        OffsetDateTime logAt;
+        OffsetDateTime logExpiresAt;
+        try (Connection su = pg.createConnection("")) {
+            var dsl = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            var row = dsl.selectFrom(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TENANT_ID.eq(TENANT_A)
+                            .and(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.SUBSPACE.eq("mailbox/" + to))
+                            .and(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.TRANSITION.eq("ack")))
+                    .fetchOne();
+            assertThat(row).isNotNull();
+            logAt = row.get(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.AT);
+            logExpiresAt = row.get(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.EXPIRES_AT);
+        }
+
+        assertThat(logAt).isAfterOrEqualTo(beforeOut);
+
+        OffsetDateTime expectedLogExpiresAt = logAt.plusSeconds(registry.claimLogTtlSeconds());
+        assertThat(java.time.Duration.between(expectedLogExpiresAt, logExpiresAt).abs())
+                .as("expires_at must equal at + claimLogTtlSeconds(), the log's own TTL")
+                .isLessThan(java.time.Duration.ofSeconds(5));
+
+        assertThat(java.time.Duration.between(logExpiresAt, tuplesOwnExpiry).abs())
+                .as("the log's expires_at must NOT be the tuple's own (7-day mailbox retention) expiry")
+                .isGreaterThan(java.time.Duration.ofDays(1));
+    }
 }

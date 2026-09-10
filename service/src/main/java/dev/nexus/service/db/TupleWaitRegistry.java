@@ -8,6 +8,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
+import java.util.function.LongSupplier;
 
 /**
  * RDR-205 §Technical Design "Wake": one {@link Condition} per {@code
@@ -43,6 +44,25 @@ import java.util.function.BiConsumer;
  * happened since the last observation, so the waiter returns immediately
  * instead of parking for the full one-second timer.
  *
+ * <p><b>Group eviction (RDR-205 §Memory management, bead nexus-em75s.37,
+ * critique S5).</b> {@link #groups} would otherwise grow one {@link Group}
+ * per {@code (tenant, subspace)} ever seen, forever — nothing previously
+ * removed an entry once created. {@link #register} now also runs a cheap,
+ * non-blocking sweep ({@link #evictIdleGroups}) that removes any OTHER
+ * group with no live waiter ({@link Group#waiters} == 0) and no activity
+ * ({@link Group#lastActivityNanos}, bumped by {@link #register}, {@link
+ * Waiter#release}, and {@link #signalAll}) for {@link #IDLE_EVICT_NANOS}.
+ * Eviction and registration race safely because both touch a group's state
+ * only under that group's own {@link Group#lock}: whichever acquires the
+ * lock first wins — a concurrent {@link #register} that increments {@code
+ * waiters} first makes the group ineligible; an eviction that removes the
+ * mapping first is detected by {@link #register} re-checking identity
+ * under the lock and retrying against a fresh group. {@code waiters} is a
+ * genuine occupancy count, not a last-register timestamp: a caller parked
+ * in a long {@code rd}/{@code in} poll loop keeps its group alive for the
+ * whole loop (via {@link Waiter#release} only decrementing at the very
+ * end), so a real in-flight waiter is never evicted out from under it.
+ *
  * <p><b>Shutdown.</b> {@link #shutdown} signals every waiter and flips
  * {@link #isShuttingDown()} so a parked call's next wake runs one final
  * query and returns instead of re-parking, riding out its budget past
@@ -64,8 +84,17 @@ final class TupleWaitRegistry {
      */
     static volatile BiConsumer<String, String> TEST_ONLY_SIGNAL_HOOK = (tenant, subspace) -> { };
 
+    /**
+     * A group with no live waiter and no signal for at least this long is eligible
+     * for eviction by {@link #evictIdleGroups} (bead nexus-em75s.37). Package-private
+     * so {@code TupleWaitRegistryTest} can reason about it directly; a real deploy
+     * never needs a value other than this one, so there is no env/config knob.
+     */
+    static final long IDLE_EVICT_NANOS = TimeUnit.MINUTES.toNanos(1);
+
     private final int maxPerClaimant;
     private final int maxGlobal;
+    private final LongSupplier nanoTimeSource;
 
     private final ConcurrentHashMap<WaitKey, Group> groups = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicInteger> perClaimantParked = new ConcurrentHashMap<>();
@@ -73,8 +102,16 @@ final class TupleWaitRegistry {
     private volatile boolean shuttingDown = false;
 
     TupleWaitRegistry(int maxPerClaimant, int maxGlobal) {
+        this(maxPerClaimant, maxGlobal, System::nanoTime);
+    }
+
+    /** Test-injectable clock (bead nexus-em75s.37): a fixed/advanceable {@link
+     *  LongSupplier} lets {@code TupleWaitRegistryTest} exercise {@link
+     *  #evictIdleGroups} deterministically without a real one-minute sleep. */
+    TupleWaitRegistry(int maxPerClaimant, int maxGlobal, LongSupplier nanoTimeSource) {
         this.maxPerClaimant = maxPerClaimant;
         this.maxGlobal = maxGlobal;
+        this.nanoTimeSource = nanoTimeSource;
     }
 
     private record WaitKey(String tenant, String subspace) {
@@ -88,10 +125,22 @@ final class TupleWaitRegistry {
          *  own last-observed value against this to detect a signal it never parked
          *  for. */
         long generation;
+        /** Live {@link Waiter} count for this group, guarded by {@link #lock}:
+         *  incremented by {@link #register}, decremented by {@link Waiter#release}.
+         *  Zero is the eviction precondition (nexus-em75s.37) -- a group with a
+         *  genuinely parked caller is never evicted mid-wait. */
+        int waiters;
+        /** Nanotime of the last registration, release, or signal on this group,
+         *  guarded by {@link #lock}. The other eviction precondition. */
+        long lastActivityNanos;
+
+        Group(long nowNanos) {
+            this.lastActivityNanos = nowNanos;
+        }
     }
 
-    private Group group(String tenant, String subspace) {
-        return groups.computeIfAbsent(new WaitKey(tenant, subspace), k -> new Group());
+    private long now() {
+        return nanoTimeSource.getAsLong();
     }
 
     /** Signals every waiter parked on {@code (tenant, subspace)}. Call ONLY after commit. */
@@ -103,6 +152,7 @@ final class TupleWaitRegistry {
         g.lock.lock();
         try {
             g.generation++;
+            g.lastActivityNanos = now();
             g.condition.signalAll();
         } finally {
             g.lock.unlock();
@@ -110,23 +160,78 @@ final class TupleWaitRegistry {
         TEST_ONLY_SIGNAL_HOOK.accept(tenant, subspace);
     }
 
-    /** Registers interest in {@code (tenant, subspace)} BEFORE the caller's first query. */
+    /**
+     * Registers interest in {@code (tenant, subspace)} BEFORE the caller's first
+     * query. Retries against a freshly-created {@link Group} if the one {@link
+     * ConcurrentHashMap#computeIfAbsent} handed back was concurrently evicted by
+     * {@link #evictIdleGroups} between that call and this method acquiring its lock
+     * (nexus-em75s.37) -- so a registration can never silently attach to a group that
+     * future {@link #signalAll} calls will no longer find in {@link #groups}.
+     */
     Waiter register(String tenant, String subspace) {
-        Group g = group(tenant, subspace);
-        long seenGeneration;
-        g.lock.lock();
-        try {
-            seenGeneration = g.generation;
-        } finally {
-            g.lock.unlock();
+        WaitKey key = new WaitKey(tenant, subspace);
+        while (true) {
+            Group g = groups.computeIfAbsent(key, k -> new Group(now()));
+            long seenGeneration;
+            g.lock.lock();
+            try {
+                if (groups.get(key) != g) {
+                    // Evicted between computeIfAbsent and this lock acquisition --
+                    // g is orphaned; retry against whatever's there now (or create
+                    // a fresh one).
+                    continue;
+                }
+                g.waiters++;
+                g.lastActivityNanos = now();
+                seenGeneration = g.generation;
+            } finally {
+                g.lock.unlock();
+            }
+            evictIdleGroups(key);
+            return new Waiter(g, seenGeneration);
         }
-        return new Waiter(g, seenGeneration);
+    }
+
+    /**
+     * Removes every group other than {@code exempt} that has no live waiter and no
+     * activity for {@link #IDLE_EVICT_NANOS} (nexus-em75s.37). Non-blocking: a group
+     * currently locked by a concurrent {@link #register}/{@link Waiter#release}/
+     * {@link #signalAll} is simply skipped this pass rather than waited on -- it will
+     * be reconsidered on the next {@link #register} call, and an idle group is in no
+     * hurry to be reclaimed by exactly one minute versus a few minutes later.
+     */
+    private void evictIdleGroups(WaitKey exempt) {
+        long nowNanos = now();
+        for (var entry : groups.entrySet()) {
+            WaitKey key = entry.getKey();
+            if (key.equals(exempt)) {
+                continue;
+            }
+            Group g = entry.getValue();
+            if (!g.lock.tryLock()) {
+                continue;
+            }
+            try {
+                if (g.waiters == 0 && (nowNanos - g.lastActivityNanos) >= IDLE_EVICT_NANOS) {
+                    groups.remove(key, g);
+                }
+            } finally {
+                g.lock.unlock();
+            }
+        }
+    }
+
+    /** Current group count -- test-only visibility into {@link #groups}' size
+     *  (nexus-em75s.37), so a test can assert eviction actually shrank the map. */
+    int groupCount() {
+        return groups.size();
     }
 
     /** A registered interest; parks the calling thread until signalled or one second elapses. */
     final class Waiter {
         private final Group g;
         private long seenGeneration;
+        private boolean released;
 
         private Waiter(Group g, long seenGeneration) {
             this.g = g;
@@ -150,6 +255,27 @@ final class TupleWaitRegistry {
                 }
                 g.condition.await(1, TimeUnit.SECONDS);
                 seenGeneration = g.generation;
+            } finally {
+                g.lock.unlock();
+            }
+        }
+
+        /**
+         * Marks this waiter done (nexus-em75s.37): decrements the group's live-waiter
+         * count and refreshes its activity clock, so the idle-eviction window starts
+         * from the moment the last waiter actually stopped waiting, not from {@link
+         * #register} time. Idempotent; call exactly once, from the same {@code
+         * finally} block that calls {@link #releaseParkSlot}.
+         */
+        void release() {
+            g.lock.lock();
+            try {
+                if (released) {
+                    return;
+                }
+                released = true;
+                g.waiters--;
+                g.lastActivityNanos = now();
             } finally {
                 g.lock.unlock();
             }
