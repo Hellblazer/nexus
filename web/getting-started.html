@@ -265,7 +265,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <p class="why">The memory store holds facts and decisions about a project. Claude writes to it by itself while it works: a decision it made, a finding from an investigation, the state of the work at the end of a session. When a new session starts, Claude receives these entries first. Memory is not a to-do list or a place for your own notes. Claude fills it, and Claude reads it. You do not manage this store. You work, and it fills.</p>
 
 <h3>How it fills</h3>
-<p>Nothing to do here except work. Spend a session with Claude on a real task: fix a bug, add a feature, investigate a question. As it works, Claude records what it decided and what it found. At the end, if you close the session with <code>/conexus:continuation</code>, the state of the work is recorded too. Helper agents that Claude starts write their results to the same store.</p>
+<p>Nothing to do here except work. Spend a session with Claude on a real task: fix a bug, add a feature, investigate a question. As it works, Claude records what it decided and what it found. At the end, if you close the session with <code>/conexus:continuation</code> (lesson 8), the state of the work is recorded too. Helper agents that Claude starts write their results to the same store.</p>
 <p>Each entry has a project name and a title. An entry lives 30 days by default. Each time Claude reads it, it lives longer. So facts that stay useful stay, and facts that nobody reads expire.</p>
 
 <h3>How you notice it</h3>
@@ -415,7 +415,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 
 <!-- ============ 8 ============ -->
 <section class="lesson" id="l8">
-<div class="lhead"><span class="lnum">8</span><h2>Questions that need many documents</h2><span class="ltime">10 min</span></div>
+<div class="lhead"><span class="lnum">8</span><h2>Questions that need many documents</h2><span class="ltime">15 min</span></div>
 <p class="why">A normal question makes one or two searches. Some questions need more: compare what the documentation says with what the code does, or collect a pattern from many files. For these, the plugin has a skill that plans several steps and combines the results.</p>
 
 <div class="see">You might say</div>
@@ -432,10 +432,32 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <tr><td>Plan a feature before you write code</td><td><code>/conexus:brainstorming-gate</code>, then <code>/conexus:create-plan</code></td></tr>
 <tr><td>Review code before you commit it</td><td><code>/conexus:review-code</code></td></tr>
 <tr><td>Debug a problem after two failed tries</td><td><code>/conexus:debug</code></td></tr>
-<tr><td>Prepare the next session</td><td><code>/conexus:continuation</code></td></tr>
+<tr><td>Hand the work to the next session</td><td><code>/conexus:continuation</code>, explained below</td></tr>
 <tr><td>Not sure which one</td><td>Ask Claude: <em>"Read the using-nx-skills skill and tell me which skill fits my task."</em></td></tr>
 </table></div>
-<div class="callout"><p><strong>At the end of a session</strong>, run <code>/conexus:continuation</code>. It writes a short text with the branch, the open work, and the active memory. Paste this text as the first message of the next session. The next session then continues where this one stopped.</p></div>
+<h3>End a session, start the next one</h3>
+<p>A Claude Code session has a limited memory of the conversation. When it gets long, Claude Code compresses it, and detail is lost. When you close the session or type <code>/clear</code>, the conversation is gone. Memory (lesson 3) keeps the facts and decisions. It does not keep "where was I": which branch, what was half done, what to do first tomorrow. That is what <code>/conexus:continuation</code> is for.</p>
+
+<div class="see">You might say, when you are about to stop</div>
+<div class="cmd"><pre>/conexus:continuation</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>Claude writes one file under <code>/tmp</code> with the state of the work. The file has a fixed set of sections:</p>
+<ul class="plain">
+<li>What was finished in this session: commits, closed tasks, memory entries written.</li>
+<li>Where the state lives: the branch, the files, the memory entries, the task IDs.</li>
+<li>The first actions for the next session, as commands that can be run as they are.</li>
+<li>Open work, and what blocks it.</li>
+<li>Decisions from this session that the next session must keep.</li>
+<li>Things the next session must not do.</li>
+<li>What went wrong in this session, so the next one avoids it.</li>
+</ul>
+<p>Then Claude answers with three lines only. The third line is a command of the form <code>cat /tmp/…</code>. Copy that line.</p>
+
+<div class="see">In the next session</div>
+<p>Type <code>/clear</code>, or start a new session. Paste the copied line as the first message. Claude reads the file, runs the first actions, and continues where the last session stopped. It also receives the memory block from lesson 1, so it has both the facts and the position.</p>
+
+<div class="callout rule"><p><strong>Two stores, two jobs.</strong> Memory holds what is true about the project, for weeks. The continuation file holds where the work stands, for the next session only. Use <code>/conexus:continuation</code> at the end of every work session, and also before a long session gets compressed. It costs a few seconds. Without it, the next session spends its first minutes finding out what this one already knew.</p></div>
+<p class="note">You can give a topic: <code>/conexus:continuation <span class="ph">&lt;TOPIC&gt;</span></code>. The file is then named after the topic, which helps when you work on several things in parallel. The files live in <code>/tmp</code> and disappear at the next reboot. They are a handoff, not a record. The record is memory.</p>
 
 <div class="further"><h4>Investigate further</h4><ul>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md">Querying guide</a>: the four ways to search, and when to use each.</li>
