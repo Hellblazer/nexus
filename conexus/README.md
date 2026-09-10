@@ -2,9 +2,11 @@
 
 13 agents (10 active + 3 stubs pointing at MCP tools), 43 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
 
+New to Nexus? The [install guide](https://hellblazer.github.io/nexus/) covers setup end to end, and [Getting started](https://hellblazer.github.io/nexus/getting-started.html) walks the first search, memory, scratch, and knowledge lessons; [Working with RDRs](https://hellblazer.github.io/nexus/rdr.html) covers the RDR lifecycle. This file is reference — what the plugin ships, not how to use it.
+
 ## Installation
 
-**Marketplace** (recommended):
+**Marketplace** (recommended). Full walkthrough, prerequisites, and troubleshooting: [install guide](https://hellblazer.github.io/nexus/).
 
 ```bash
 /plugin marketplace add Hellblazer/nexus
@@ -23,7 +25,7 @@ The `nx` CLI and plugin work independently, but the plugin's full agent and skil
 
 | Dependency | Required for | Install |
 |-----------|-------------|---------|
-| **`nx` CLI** | Hook scripts, indexing, and CLI-only operations (agents use MCP tools) | See [Getting Started](../docs/getting-started.md) |
+| **`nx` CLI** | Hook scripts, indexing, and CLI-only operations (agents use MCP tools) | [Install guide](https://hellblazer.github.io/nexus/) |
 | **`bd` (Beads)** | Task tracking in all agents | [github.com/BeadsProject/beads](https://github.com/BeadsProject/beads) |
 
 Run `/conexus:nx-preflight` after installing to verify all dependencies are present.
@@ -55,6 +57,8 @@ story.
 - **Two bundled MCP servers** — `nexus` (36 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, 10 LLM-backed operators, and 4 orchestration tools including `nx_answer` for plan-centric retrieval) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking` fetched via npx
 
 ### Pick your entry point
+
+New to Nexus? Follow [Getting started](https://hellblazer.github.io/nexus/getting-started.html) instead — it walks these in order, with what you'll see at each step. This table is a lookup once you already know your way around.
 
 | Goal | Start here |
 |------|-----------|

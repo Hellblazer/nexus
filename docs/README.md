@@ -1,6 +1,10 @@
 # Nexus Documentation
 
-Start with [Getting Started](getting-started.md) for installation. Then find your section below by what you're trying to do.
+Start on the site, then find your section below by what you're trying to do.
+
+- [Install guide](https://hellblazer.github.io/nexus/) — setup for Claude Code, the `nx` CLI alone, or Claude Desktop, with copyable commands
+- [Getting started](https://hellblazer.github.io/nexus/getting-started.html) — eleven lessons inside Claude Code: your first search, memory, scratch, knowledge, and RDRs
+- [Working with RDRs](https://hellblazer.github.io/nexus/rdr.html) — the RDR lifecycle as it's practised, in eight lessons
 
 `docs/*.md` is living reference documentation — kept current with the codebase and safe to trust as-is. `docs/rdr/*.md` is a different thing entirely: an append-only historical decision log (196+ RDR files, plus per-RDR post-mortems) capturing the reasoning behind past design choices, some since superseded. If you're looking for a how-to or a current design reference, stay in `docs/`; only dig into `docs/rdr/` when you need the "why" behind a decision.
 
