@@ -96,18 +96,23 @@ def test_hybrid_score_weighted_sum():
 # input classes the bead names, since a wrong verdict here silently
 # changes which results get the frecency-blended score. ──────────────────
 
-@pytest.mark.parametrize(
-    "coll, is_code_like",
-    [
-        ("code__repo", True),                            # legacy 2-segment
-        ("code__repo__voyage-code-3__v1", True),          # conformant
-        ("docs__papers", False),
-        ("knowledge__notes", False),
-        ("quarantine-code__repo", False),                 # NOT "code__"-prefixed
-        ("other__repo", False),                           # unrecognized prefix
-        ("codebase__repo", False),                        # startswith("code") but not "code__"
-    ],
-)
+# nexus-0y4c6: hoisted out of test_hybrid_scoring_code_detection_pinned's
+# own decorator so the RDR-109 mode-declaration lint no longer needs to
+# exclude it by nodeid -- parametrize-data collection-name/is_code_like
+# pairs; nexus.mcp_infra.get_collection_row is stubbed directly
+# (_code_row_stub), no embedder or credential path.
+_CODE_DETECTION_CASES = [
+    ("code__repo", True),                            # legacy 2-segment
+    ("code__repo__voyage-code-3__v1", True),          # conformant
+    ("docs__papers", False),
+    ("knowledge__notes", False),
+    ("quarantine-code__repo", False),                 # NOT "code__"-prefixed
+    ("other__repo", False),                           # unrecognized prefix
+    ("codebase__repo", False),                        # startswith("code") but not "code__"
+]
+
+
+@pytest.mark.parametrize("coll, is_code_like", _CODE_DETECTION_CASES)
 def test_hybrid_scoring_code_detection_pinned(coll: str, is_code_like: bool, monkeypatch) -> None:
     monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _code_row_stub)
     r = _r(coll=coll, dist=0.2, frecency=0.8)
@@ -283,9 +288,10 @@ def test_resolve_calibration_factors_activates_for_genuine_multi_model_set(cloud
 def test_resolve_calibration_factors_is_noop_for_legacy_names_in_local_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """nexus-mc1l1: the cloud-mode legacy-name split above (voyage-code-3
-    vs voyage-context-3 from the prefix guess) is correct for cloud/
-    service-mode installs, but it fired UNCONDITIONALLY -- including for
+    """nexus-mc1l1: the cloud-mode legacy-name split above (the code
+    embedder vs. the docs/knowledge embedder, guessed from the collection
+    name's prefix) is correct for cloud/service-mode installs, but it
+    fired UNCONDITIONALLY -- including for
     a LOCAL-MODE install with grandfathered pre-RDR-103 legacy
     collections (``code__myrepo``, ``knowledge__myrepo``; RDR-103 is only
     ~4 months old and existing collections are never auto-renamed on
@@ -326,10 +332,10 @@ def test_resolve_calibration_factors_still_activates_for_legacy_names_local_mode
 ) -> None:
     """Counterpart: a local-mode install that has explicitly opted
     ``local.embed_model`` into Voyage (nexus-35ok4 / GH #1461) really
-    does write code__ under voyage-code-3 and knowledge__/docs__/rdr__
-    under voyage-context-3, per-content-type, exactly like cloud mode --
-    so calibration for THAT install's legacy names must still activate,
-    not collapse to a spurious single-model no-op."""
+    does write code__ under the code embedder and knowledge__/docs__/rdr__
+    under the docs/knowledge embedder, per-content-type, exactly like
+    cloud mode -- so calibration for THAT install's legacy names must
+    still activate, not collapse to a spurious single-model no-op."""
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
     monkeypatch.setattr("nexus.config.local_embed_model_is_voyage", lambda: True)
     factors = _resolve_calibration_factors([

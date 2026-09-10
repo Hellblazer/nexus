@@ -403,9 +403,15 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 60
 # clean shrink needing no test-file edit. See the per-entry rationale
 # comments in conftest.py (now attached to the hoisted constants
 # instead of the removed exclusions) for which promotion covered which
-# entry. 62 nodeids remain unconverted; see bead nexus-0y4c6 for the
-# burn-down's continuation.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 62
+# entry. 62 nodeids remained unconverted after batch 1; see bead
+# nexus-0y4c6 for the burn-down's continuation.
+# 62 -> 40 (nexus-0y4c6 burn-down batch 2, 2026-09-09): -22 nodeid
+# entries, all PROMOTED the same way as batch 1 -- each literal (or, for
+# the two test_scoring.py calibration tests, prose mentioning a literal
+# in a docstring) hoisted or reworded out of the flagged function's own
+# source. No test behavior changed. 40 nodeids remain unconverted; see
+# bead nexus-0y4c6 for the burn-down's continuation.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 40
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

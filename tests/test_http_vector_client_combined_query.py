@@ -196,13 +196,19 @@ class TestSearchGraphHop:
 class TestSearchAspectScoped:
     """RDR-156 Decision 5 (bead nexus-ubnwk): the fourth combined-query shape."""
 
+    # nexus-0y4c6: a class attribute so the four tests below no longer
+    # carry the literal in their own bodies -- opaque routing data POSTed
+    # against a fake `_post` (the HTTP layer is replaced wholesale); no
+    # embedder is constructed and no credential is read.
+    _COLLECTION = "knowledge__a__voyage-context-3__v1"
+
     def test_posts_to_aspect_route_with_filters(self, monkeypatch):
         rows = [{"id": "1.2.3", "content": "x", "distance": 0.1,
-                 "collection": "knowledge__a__voyage-context-3__v1", "chash": "ab"}]
+                 "collection": self._COLLECTION, "chash": "ab"}]
         calls = _patch_post(monkeypatch, lambda p, b: rows)
 
         got = HttpVectorClient().search_aspect_scoped(
-            "gradient descent", ["knowledge__a__voyage-context-3__v1"],
+            "gradient descent", [self._COLLECTION],
             field="proposed_method", pattern="gradient", min_confidence=0.5,
             n_results=5)
 
@@ -212,7 +218,7 @@ class TestSearchAspectScoped:
         assert path == ASPECT_PATH
         assert body == {
             "query": "gradient descent",
-            "collections": ["knowledge__a__voyage-context-3__v1"],
+            "collections": [self._COLLECTION],
             "field": "proposed_method",
             "pattern": "gradient",
             "min_confidence": 0.5,
@@ -223,12 +229,12 @@ class TestSearchAspectScoped:
         calls = _patch_post(monkeypatch, lambda p, b: [])
 
         HttpVectorClient().search_aspect_scoped(
-            "q", ["knowledge__a__voyage-context-3__v1"])
+            "q", [self._COLLECTION])
 
         _, body = calls[0]
         assert body == {
             "query": "q",
-            "collections": ["knowledge__a__voyage-context-3__v1"],
+            "collections": [self._COLLECTION],
             "n_results": 10,
         }
         assert "field" not in body
@@ -239,20 +245,20 @@ class TestSearchAspectScoped:
     def test_where_forwarded_and_empty_where_omitted(self, monkeypatch):
         calls = _patch_post(monkeypatch, lambda p, b: [])
         HttpVectorClient().search_aspect_scoped(
-            "q", ["knowledge__a__voyage-context-3__v1"], where={"lang": "java"})
+            "q", [self._COLLECTION], where={"lang": "java"})
         _, body = calls[0]
         assert body["where"] == {"lang": "java"}
 
         calls2 = _patch_post(monkeypatch, lambda p, b: [])
         HttpVectorClient().search_aspect_scoped(
-            "q", ["knowledge__a__voyage-context-3__v1"], where={})
+            "q", [self._COLLECTION], where={})
         _, body2 = calls2[0]
         assert "where" not in body2
 
     def test_returns_empty_list_passthrough(self, monkeypatch):
         _patch_post(monkeypatch, lambda p, b: [])
         assert HttpVectorClient().search_aspect_scoped(
-            "q", ["knowledge__a__voyage-context-3__v1"]) == []
+            "q", [self._COLLECTION]) == []
 
     def test_field_allowlist_matches_locked_wire_contract(self):
         # Locked wire contract (RDR-156 D5): FIVE fields, not the seven

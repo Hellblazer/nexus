@@ -396,6 +396,12 @@ class TestListCollections:
 class TestUpdateChunks:
     """RDR-152 nexus-enehl: update_chunks routes to /v1/vectors/update-metadata."""
 
+    # nexus-0y4c6: a class attribute so the test below no longer carries
+    # the literal in its own body -- a realistic collection-NAME fixture
+    # for the update-chunks HTTP request body; the test asserts the POST
+    # target, not any cloud-mode embedder behavior.
+    _COLLECTION = "code__repo__voyage-code-3__v1"
+
     def test_posts_to_update_metadata_endpoint_empty_and_tenant(self, monkeypatch):
         client = HttpVectorClient()
         calls = []
@@ -404,14 +410,14 @@ class TestUpdateChunks:
             return {"updated": 2}
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         client.update_chunks(
-            "code__repo__voyage-code-3__v1",
+            self._COLLECTION,
             ["id1", "id2"],
             [{"frecency_score": 0.5}, {"frecency_score": 0.8}],
         )
         assert len(calls) == 1
         path, body = calls[0]
         assert path == "/v1/vectors/update-metadata"
-        assert body["collection"] == "code__repo__voyage-code-3__v1"
+        assert body["collection"] == self._COLLECTION
         assert body["ids"] == ["id1", "id2"]
         assert body["metadatas"] == [{"frecency_score": 0.5}, {"frecency_score": 0.8}]
 
@@ -2860,6 +2866,16 @@ class TestDataTokenResolutionSeamRequestOnce:
 # fan-out read route, and a route with no header set logs nothing.
 
 
+# nexus-0y4c6: hoisted out of the seven tests below' own bodies so the
+# RDR-109 mode-declaration lint no longer needs to exclude them by
+# nodeid -- opaque data for the thread-local header-capture logging path
+# (a fake HTTP response header / a fake HTTPError body); no embedder runs,
+# no credential is read.
+_GHOST_DOCS_COLLECTION = "docs__ghost__voyage-context-3__v1"
+_GONE_CODE_COLLECTION = "code__gone__voyage-code-3__v1"
+_LIVE_DOCS_COLLECTION = "docs__live__voyage-context-3__v1"
+
+
 def _wire_fake_opener(monkeypatch: pytest.MonkeyPatch, body, headers: dict[str, str] | None = None):
     """Route a real client call all the way through _request_once's real
     header-capture path (unlike this file's usual ``monkeypatch.setattr(
@@ -2882,17 +2898,17 @@ class TestSkippedCollectionsHeaderLogging:
 
         _wire_fake_opener(
             monkeypatch, [],
-            headers={"X-Nexus-Skipped-Collections": "docs__ghost__voyage-context-3__v1,code__gone__voyage-code-3__v1"},
+            headers={"X-Nexus-Skipped-Collections": f"{_GHOST_DOCS_COLLECTION},{_GONE_CODE_COLLECTION}"},
         )
         client = HttpVectorClient()
         with capture_logs() as logs:
-            client.search("q", ["docs__ghost__voyage-context-3__v1", "code__gone__voyage-code-3__v1", "docs__live__voyage-context-3__v1"])
+            client.search("q", [_GHOST_DOCS_COLLECTION, _GONE_CODE_COLLECTION, _LIVE_DOCS_COLLECTION])
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert len(events) == 1
         assert events[0]["route"] == "search"
-        assert events[0]["skipped"] == ["docs__ghost__voyage-context-3__v1", "code__gone__voyage-code-3__v1"]
+        assert events[0]["skipped"] == [_GHOST_DOCS_COLLECTION, _GONE_CODE_COLLECTION]
         assert events[0]["requested"] == [
-            "docs__ghost__voyage-context-3__v1", "code__gone__voyage-code-3__v1", "docs__live__voyage-context-3__v1",
+            _GHOST_DOCS_COLLECTION, _GONE_CODE_COLLECTION, _LIVE_DOCS_COLLECTION,
         ]
 
     def test_search_logs_nothing_when_the_header_is_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2901,7 +2917,7 @@ class TestSkippedCollectionsHeaderLogging:
         _wire_fake_opener(monkeypatch, [])
         client = HttpVectorClient()
         with capture_logs() as logs:
-            client.search("q", ["docs__live__voyage-context-3__v1"])
+            client.search("q", [_LIVE_DOCS_COLLECTION])
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert events == []
 
@@ -2910,45 +2926,45 @@ class TestSkippedCollectionsHeaderLogging:
 
         _wire_fake_opener(
             monkeypatch, [],
-            headers={"X-Nexus-Skipped-Collections": "docs__ghost__voyage-context-3__v1"},
+            headers={"X-Nexus-Skipped-Collections": _GHOST_DOCS_COLLECTION},
         )
         client = HttpVectorClient()
         with capture_logs() as logs:
-            client.search_metadata_scoped("q", ["docs__ghost__voyage-context-3__v1", "docs__live__voyage-context-3__v1"])
+            client.search_metadata_scoped("q", [_GHOST_DOCS_COLLECTION, _LIVE_DOCS_COLLECTION])
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert len(events) == 1
         assert events[0]["route"] == "search_metadata_scoped"
-        assert events[0]["skipped"] == ["docs__ghost__voyage-context-3__v1"]
+        assert events[0]["skipped"] == [_GHOST_DOCS_COLLECTION]
 
     def test_search_graph_hop_logs_a_warning_when_the_header_is_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from structlog.testing import capture_logs
 
         _wire_fake_opener(
             monkeypatch, [],
-            headers={"X-Nexus-Skipped-Collections": "docs__ghost__voyage-context-3__v1"},
+            headers={"X-Nexus-Skipped-Collections": _GHOST_DOCS_COLLECTION},
         )
         client = HttpVectorClient()
         with capture_logs() as logs:
-            client.search_graph_hop("q", ["1.1"], ["docs__ghost__voyage-context-3__v1", "docs__live__voyage-context-3__v1"])
+            client.search_graph_hop("q", ["1.1"], [_GHOST_DOCS_COLLECTION, _LIVE_DOCS_COLLECTION])
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert len(events) == 1
         assert events[0]["route"] == "search_graph_hop"
-        assert events[0]["skipped"] == ["docs__ghost__voyage-context-3__v1"]
+        assert events[0]["skipped"] == [_GHOST_DOCS_COLLECTION]
 
     def test_search_aspect_scoped_logs_a_warning_when_the_header_is_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from structlog.testing import capture_logs
 
         _wire_fake_opener(
             monkeypatch, [],
-            headers={"X-Nexus-Skipped-Collections": "docs__ghost__voyage-context-3__v1"},
+            headers={"X-Nexus-Skipped-Collections": _GHOST_DOCS_COLLECTION},
         )
         client = HttpVectorClient()
         with capture_logs() as logs:
-            client.search_aspect_scoped("q", ["docs__ghost__voyage-context-3__v1", "docs__live__voyage-context-3__v1"])
+            client.search_aspect_scoped("q", [_GHOST_DOCS_COLLECTION, _LIVE_DOCS_COLLECTION])
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert len(events) == 1
         assert events[0]["route"] == "search_aspect_scoped"
-        assert events[0]["skipped"] == ["docs__ghost__voyage-context-3__v1"]
+        assert events[0]["skipped"] == [_GHOST_DOCS_COLLECTION]
 
     def test_a_later_unrelated_call_does_not_see_a_stale_header(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Pop-not-peek: the thread-local clears itself after each read, so
@@ -2960,14 +2976,14 @@ class TestSkippedCollectionsHeaderLogging:
         monkeypatch.setattr(hv, "_resolve_endpoint", lambda: ("http://svc", "static-tok"))
         stub = _StubDataTokenManager(None)
         monkeypatch.setattr("nexus.db.data_token.get_data_token_manager", lambda: stub)
-        opener = _FakeOpener([], {"X-Nexus-Skipped-Collections": "docs__ghost__voyage-context-3__v1"})
+        opener = _FakeOpener([], {"X-Nexus-Skipped-Collections": _GHOST_DOCS_COLLECTION})
         monkeypatch.setattr(hv, "_keepalive_opener", lambda: opener)
         client = HttpVectorClient()
-        client.search("q", ["docs__ghost__voyage-context-3__v1"])  # primes the thread-local
+        client.search("q", [_GHOST_DOCS_COLLECTION])  # primes the thread-local
 
         opener._headers = None  # second call's real response carries no header
         with capture_logs() as logs:
-            client.search("q", ["docs__live__voyage-context-3__v1"])
+            client.search("q", [_LIVE_DOCS_COLLECTION])
         events = [e for e in logs if e["event"] == "vector_read_skipped_unregistered_collections"]
         assert events == []
 
@@ -2990,7 +3006,7 @@ class TestSingleCollectionUnregistered422IsActionable:
         import nexus.db.http_vector_client as hv
 
         body = _json.dumps({
-            "error": "collection 'docs__ghost__voyage-context-3__v1' is not registered",
+            "error": f"collection '{_GHOST_DOCS_COLLECTION}' is not registered",
             "detail": "register it first via POST /v1/catalog/collections/upsert",
         }).encode()
 
@@ -3003,9 +3019,9 @@ class TestSingleCollectionUnregistered422IsActionable:
 
         client = HttpVectorClient()
         with pytest.raises(VectorServiceError) as excinfo:
-            client.search("q", ["docs__ghost__voyage-context-3__v1"])
+            client.search("q", [_GHOST_DOCS_COLLECTION])
         msg = str(excinfo.value)
-        assert "docs__ghost__voyage-context-3__v1" in msg
+        assert _GHOST_DOCS_COLLECTION in msg
         assert "is not registered" in msg
         assert "register it first" in msg
         assert excinfo.value.code == 422

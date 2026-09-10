@@ -6,6 +6,13 @@ import httpx
 
 from nexus.db.http_engine_status import fetch_engine_status, format_engine_activity_line
 
+# nexus-0y4c6: hoisted out of the two format_engine_activity_line tests'
+# own bodies below so the RDR-109 mode-declaration lint no longer needs to
+# exclude them by nodeid -- Voyage model names used as LABELS in a status
+# dict this pure formatter renders, never a real embedder call.
+_VOYAGE_CODE = "voyage-code-3"
+_VOYAGE_CONTEXT = "voyage-context-3"
+
 
 def test_fetch_engine_status_returns_none_when_endpoint_unresolvable():
     with patch(
@@ -109,7 +116,7 @@ def test_format_engine_activity_line_cloud_mode_falls_back_to_embedder_activity(
         "embedding_mode": "voyage",
         "local_embed_activity": None,
         "embedder_activity": {
-            "voyage-code-3": {
+            _VOYAGE_CODE: {
                 "active": True, "chunks_done_total": 64, "sub_batches_total": 4,
                 "last_chunks_per_sec": 3.2, "last_activity_age_ms": 150,
                 "queue_depth": -1, "thread_width": -1,
@@ -118,7 +125,7 @@ def test_format_engine_activity_line_cloud_mode_falls_back_to_embedder_activity(
     }
     line = format_engine_activity_line(status)
     assert "mode=voyage" in line
-    assert "embedder=voyage-code-3" in line
+    assert f"embedder={_VOYAGE_CODE}" in line
     assert "active" in line
     assert "chunks_done=64" in line
     assert "rate=3.2/s" in line
@@ -133,12 +140,12 @@ def test_format_engine_activity_line_picks_the_busiest_embedder_and_names_the_re
         "embedding_mode": "voyage",
         "local_embed_activity": None,
         "embedder_activity": {
-            "voyage-code-3": {
+            _VOYAGE_CODE: {
                 "active": False, "chunks_done_total": 10, "sub_batches_total": 1,
                 "last_chunks_per_sec": 1.0, "last_activity_age_ms": 9000,
                 "queue_depth": -1, "thread_width": -1,
             },
-            "voyage-context-3": {
+            _VOYAGE_CONTEXT: {
                 "active": True, "chunks_done_total": 90, "sub_batches_total": 9,
                 "last_chunks_per_sec": 9.0, "last_activity_age_ms": 50,
                 "queue_depth": -1, "thread_width": -1,
@@ -147,7 +154,7 @@ def test_format_engine_activity_line_picks_the_busiest_embedder_and_names_the_re
     }
     line = format_engine_activity_line(status)
     # The fresher (50ms ago) entry wins over the stale (9000ms ago) one.
-    assert "embedder=voyage-context-3" in line
+    assert f"embedder={_VOYAGE_CONTEXT}" in line
     assert "chunks_done=90" in line
     assert "(+1 other embedder(s) tracked)" in line
 

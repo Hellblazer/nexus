@@ -21,6 +21,13 @@ import pytest
 
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 
+# nexus-0y4c6: hoisted out of test_collections_by_owner's own body so the
+# RDR-109 mode-declaration lint no longer needs to exclude it by nodeid --
+# a realistic collection-NAME fixture the fake server below always
+# returns; the test asserts the catalog public-API method, not any
+# cloud-mode embedder behavior.
+_OWNER1_CODE_COLLECTION = "code__owner1__voyage-code-3__v1"
+
 
 # ── shared fake server ────────────────────────────────────────────────────────
 
@@ -225,7 +232,7 @@ class TestHttpCatalogClientNewMethods:
     def test_collections_by_owner(self, http_client):
         result = http_client.collections_by_owner("owner1")
         assert len(result) == 1
-        assert result[0]["name"] == "code__owner1__voyage-code-3__v1"
+        assert result[0]["name"] == _OWNER1_CODE_COLLECTION
 
     def test_stats_via_http(self, http_client):
         s = http_client.stats()

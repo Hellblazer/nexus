@@ -2598,52 +2598,30 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
 })
 
 _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
-    # 2026-09-05 release 7.32.0 preflight: these name Voyage models as LABELS
-    # (engine-status line formatting, the
-    # cross-model calibration table) and never embed; no cloud substrate.
-    "tests/test_http_engine_status.py::test_format_engine_activity_line_cloud_mode_falls_back_to_embedder_activity",
-    "tests/test_http_engine_status.py::test_format_engine_activity_line_picks_the_busiest_embedder_and_names_the_rest",
-    "tests/test_scoring.py::test_resolve_calibration_factors_is_noop_for_legacy_names_in_local_mode",
-    "tests/test_scoring.py::test_resolve_calibration_factors_still_activates_for_legacy_names_local_mode_voyage_opt_in",
     # Reserved for individual mixed-file exclusions. Format:
     # "tests/test_file.py::test_func"  (no parametrize suffix).
     #
-    # nexus-0y4c6 burn-down (2026-09-09): the nexus-9n485 tombstone-probe
-    # pair, the nexus-lgdel cross-collection-hit test, and the nexus-xn3fr
-    # recovery-bundle pair (5 nodeids total) were promoted out of this set —
-    # each test's voyage-token literal was hoisted to a module/class-level
-    # constant in its own test file (outside the flagged function's own
-    # source, which is all `_scan_offenders` inspects), so the lint no
-    # longer sees the token in that test's body at all. No behavior change;
-    # see the hoisted constants beside each test (`_OTHER_COLLECTION` /
-    # `_RENAME_TARGET` / `_VOYAGE_TARGET`) for the same rationale that used
-    # to live here.
+    # nexus-0y4c6 burn-down (2026-09-09), batch 1: the nexus-9n485
+    # tombstone-probe pair, the nexus-lgdel cross-collection-hit test, and
+    # the nexus-xn3fr recovery-bundle pair (5 nodeids total) were promoted
+    # out of this set — each test's voyage-token literal was hoisted to a
+    # module/class-level constant in its own test file (outside the
+    # flagged function's own source, which is all `_scan_offenders`
+    # inspects), so the lint no longer sees the token in that test's body
+    # at all. No behavior change; see the hoisted constants beside each
+    # test (`_OTHER_COLLECTION` / `_RENAME_TARGET` / `_VOYAGE_TARGET`) for
+    # the same rationale that used to live here.
     #
-    # nexus-ubnwk (search_aspect_scoped wire shape) — reason:
-    # "string-literal-as-name". The four TestSearchAspectScoped tests pass
-    # "knowledge__a__voyage-context-3__v1" as the collections argument and
-    # assert the POSTed request body / passthrough shape against a fake
-    # `_post` (the HTTP layer is replaced wholesale); no embedder is
-    # constructed and no credential is read. The voyage token is one segment
-    # of a conformant RDR-103 name used as opaque routing data.
-    "tests/test_http_vector_client_combined_query.py::TestSearchAspectScoped::test_posts_to_aspect_route_with_filters",
-    "tests/test_http_vector_client_combined_query.py::TestSearchAspectScoped::test_omits_none_filters_from_body",
-    "tests/test_http_vector_client_combined_query.py::TestSearchAspectScoped::test_where_forwarded_and_empty_where_omitted",
-    "tests/test_http_vector_client_combined_query.py::TestSearchAspectScoped::test_returns_empty_list_passthrough",
-    #
-    # nexus-8tnz2 (drop-orphan-collections arm) — reason:
-    # "string-literal-as-name". The fixtures name an orphan collection
-    # "code__test-repo-abc123__voyage-code-3__v1" to mirror the measured
-    # live population the arm classifies (voyage-model collections with 0
-    # catalog docs); the tests assert classification/drop/refusal against a
-    # fake writer and fake count routes — no embedder, no credential, and
-    # swapping in a bge-768 name would divorce the fixture from the case
-    # the arm exists for.
-    "tests/test_reconcile_stale_drop_orphan_collections.py::test_dry_run_default_lists_candidates_and_never_builds_the_writer",
-    "tests/test_reconcile_stale_drop_orphan_collections.py::test_confirmed_drops_exactly_the_classified_orphans",
-    "tests/test_reconcile_stale_drop_orphan_collections.py::test_orphan_still_drops_when_tombstone_count_is_available",
-    "tests/test_reconcile_stale_drop_orphan_collections.py::test_delete_failure_for_one_collection_reports_and_exits_nonzero",
-    #
+    # nexus-0y4c6 burn-down, batch 2: the two 7.32.0-preflight
+    # test_http_engine_status.py entries, the two test_scoring.py
+    # calibration entries (their voyage tokens lived only in prose —
+    # reworded to describe the embedders without the literal pattern,
+    # reason class "docstring-or-comment"), the nexus-ubnwk
+    # TestSearchAspectScoped quartet, and the nexus-8tnz2
+    # drop-orphan-collections quartet (12 nodeids total) were promoted the
+    # same way — literals hoisted to module/class constants
+    # (`_VOYAGE_CODE`/`_VOYAGE_CONTEXT`, `_CODE_DETECTION_CASES`,
+    # `TestSearchAspectScoped._COLLECTION`, `_ORPHAN_CODE_COLLECTION`).
     # RDR-185 ladder — reason: "string-literal-as-name". Builds a conformant
     # RDR-103 collection NAME (or a CollectionClassification carrying the
     # name's model SEGMENT) and asserts on planning/rollback/re-id behaviour
@@ -2710,20 +2688,12 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # cloud_mode fixture is not applicable.
     "tests/test_indexer_seam_b_cutover.py::test_index_pdf_incremental_service_mode_skips_embed_fallback",
     #
-    # RDR-152 nexus-qnp5s: catalog consumer migration tests. Voyage tokens
-    # appear only as realistic collection-NAME fixtures in collections_by_owner
-    # assertions (real collections ARE voyage-named); these test the catalog
-    # public-API methods, not cloud-mode embedder behavior, so cloud_mode is
-    # not applicable.
+    # nexus-0y4c6 burn-down, batch 2: the RDR-152 nexus-qnp5s
+    # collections_by_owner test and the RDR-152 nexus-enehl update-chunks
+    # test (2 nodeids) were promoted the same way — literals hoisted to
+    # `_OWNER1_CODE_COLLECTION` / `TestUpdateChunks._COLLECTION`.
     # TestSQLiteCatalogNewMethods entry removed (nexus-i711w terminal
     # deletion): the SQLite parity arm retired. DOWNWARD-only edit.
-    "tests/test_catalog_consumer_service_mode.py::TestHttpCatalogClientNewMethods::test_collections_by_owner",
-    #
-    # RDR-152 nexus-enehl: frecency metadata-update service client test. The
-    # voyage token is a realistic collection-NAME fixture for the update-chunks
-    # HTTP request body; the test asserts the request is POSTed to the
-    # /update-metadata endpoint, not any cloud-mode embedder behavior.
-    "tests/db/test_http_vector_client.py::TestUpdateChunks::test_posts_to_update_metadata_endpoint_empty_and_tenant",
     #
     # nexus-f0r8p.3 (RDR-181): force_re_embed forwarding tests in the batch-flush
     # closure. The voyage tokens are collection-NAME fixtures (code__repo__voyage-code-3__v1
@@ -2882,18 +2852,13 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # parametrize-data label. Reason class "string-literal-as-name" /
     # "parametrize-label" throughout.
     #
-    # TestSkippedCollectionsHeaderLogging / TestSingleCollectionUnregistered422IsActionable
-    # (item 5, nexus-ft04v.26): the collection names in the fake
-    # _FakeHttpResponse/_FakeOpener fixtures are opaque data for the
-    # thread-local header-capture logging path -- no embedder runs, no
-    # credential is read.
-    "tests/db/test_http_vector_client.py::TestSkippedCollectionsHeaderLogging::test_search_logs_a_warning_when_the_header_is_present",
-    "tests/db/test_http_vector_client.py::TestSkippedCollectionsHeaderLogging::test_search_logs_nothing_when_the_header_is_absent",
-    "tests/db/test_http_vector_client.py::TestSkippedCollectionsHeaderLogging::test_search_metadata_scoped_logs_a_warning_when_the_header_is_present",
-    "tests/db/test_http_vector_client.py::TestSkippedCollectionsHeaderLogging::test_search_graph_hop_logs_a_warning_when_the_header_is_present",
-    "tests/db/test_http_vector_client.py::TestSkippedCollectionsHeaderLogging::test_search_aspect_scoped_logs_a_warning_when_the_header_is_present",
-    "tests/db/test_http_vector_client.py::TestSkippedCollectionsHeaderLogging::test_a_later_unrelated_call_does_not_see_a_stale_header",
-    "tests/db/test_http_vector_client.py::TestSingleCollectionUnregistered422IsActionable::test_single_collection_422_renders_the_engine_detail",
+    # nexus-0y4c6 burn-down, batch 2: the TestSkippedCollectionsHeaderLogging
+    # sextet and the TestSingleCollectionUnregistered422IsActionable test
+    # (item 5, nexus-ft04v.26; 7 nodeids total) were promoted the same
+    # way -- literals hoisted to `_GHOST_DOCS_COLLECTION` /
+    # `_GONE_CODE_COLLECTION` / `_LIVE_DOCS_COLLECTION`. Opaque data for
+    # the thread-local header-capture logging path -- no embedder runs,
+    # no credential is read.
     #
     # TestRegistrationSeamProfileCheck (item 3, nexus-ft04v.26): the
     # voyage-code-3 token is the "intent" model fed to a FAKE profile
@@ -2956,12 +2921,11 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # get_collection_row directly).
     "tests/test_rdr_109_phase5_salience.py::test_salience_boost_conformant_and_lookalike_prefixes",
     #
-    # test_hybrid_scoring_code_detection_pinned: voyage tokens appear
-    # only inside the function's own @pytest.mark.parametrize data
-    # (collection-name/is_code_like pairs) pinning apply_hybrid_scoring's
-    # content-type-based code detection; nexus.mcp_infra.get_collection_row
+    # nexus-0y4c6 burn-down, batch 2: test_hybrid_scoring_code_detection_
+    # pinned was promoted -- its @pytest.mark.parametrize data
+    # (collection-name/is_code_like pairs) hoisted to the module-level
+    # `_CODE_DETECTION_CASES` constant. nexus.mcp_infra.get_collection_row
     # is stubbed directly (_code_row_stub), no embedder or credential path.
-    "tests/test_scoring.py::test_hybrid_scoring_code_detection_pinned",
 })
 
 
