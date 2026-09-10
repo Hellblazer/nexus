@@ -1350,8 +1350,9 @@ def test_changelog_has_a_section_for_pyprojects_version() -> None:
 #: each drift on their own.
 _IDENTIFIER_CLAUSE_RE = re.compile(
     r"For every identifier whose meaning, bound, or owning phase this change "
-    r"alters.*?list every other occurrence in the file and say whether each "
-    r"still holds\.",
+    r"alters.*?list every other occurrence in the file, and every check, bound "
+    r"or rule stated over the value it names under any other name, and say "
+    r"whether each still holds\.",
     re.DOTALL,
 )
 
@@ -1389,6 +1390,10 @@ class TestRdrGateLoopRemedies:
             assert "owning phase" in text and "every other occurrence" in text, (
                 f"{path}: the identifier clause is missing"
             )
+            # The clause reaches a check stated over the same value under a
+            # different name: the round-3 collision was a caller parameter
+            # against a boot check that never used the parameter's token.
+            assert "under any other name" in text, f"{path}: the clause stops at the same token"
         skill = self.GATE_SKILL.read_text()
         for phrase in ("contradicted by any other line", "enumeration", "universal", "research entry"):
             assert phrase in skill, f"rdr-gate/SKILL.md: fix-check brief lacks '{phrase}'"

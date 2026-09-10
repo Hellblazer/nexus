@@ -2195,7 +2195,9 @@ def _fix_check_lines(
         "re-read from the working tree.",
         "5. For every identifier whose meaning, bound, or owning phase this change alters (a "
         "column, a caller-supplied parameter, a typed error, a setting, a phase or step "
-        "number), list every other occurrence in the file and say whether each still holds.",
+        "number), list every other occurrence in the file, and every check, bound or rule "
+        "stated over the value it names under any other name, and say whether each still "
+        "holds.",
         "",
         f"Verdict goes to T2 `{t2_key}-fix-check-{tip_sha}` (project `<repo>_rdr`); the gate "
         f"record's `fix_check:` must name `{tip_sha}`, equal to its `commit:`. Any FAIL: fix, "

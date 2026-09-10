@@ -2171,6 +2171,7 @@ class TestRdrGateRoundAndFixCheck:
         # nexus-yjf5l.5 (R2): the brief goes identifier-level — every
         # changed identifier's other occurrences in the file, enumerated.
         assert "owning phase" in out and "every other occurrence" in out, out
+        assert "under any other name" in out, out
 
     def test_no_regate_fix_check_past_the_gate(self, rdr_env, monkeypatch):
         """Past the gate there is no re-gate to gate, and the branch says so —

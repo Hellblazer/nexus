@@ -74,7 +74,8 @@ fix commits, and the T2 title for the verdict. Then:
    5. For every identifier whose meaning, bound, or owning phase this change
       alters (a column, a caller-supplied parameter, a typed error, a
       setting, a phase or step number), list every other occurrence in the
-      file and say whether each still holds.
+      file, and every check, bound or rule stated over the value it
+      names under any other name, and say whether each still holds.
 2. Deliverable: one row per clause, PASS or FAIL with line numbers, plus the
    standard Verdict block.
 3. Store the verdict in T2: mcp__plugin_conexus_nexus__memory_put(project="{repo}_rdr", title="{id}-fix-check-<sha>", ttl="permanent", tags="rdr,gate,fix-check"), where `<sha>` is the RDR file's tip commit as printed by the preamble.
