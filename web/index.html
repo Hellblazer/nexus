@@ -39,6 +39,9 @@ h2{font-size:26px;margin-top:56px;padding-top:20px;border-top:1px solid var(--li
 h3{font-size:19px;margin-top:28px}
 p{margin:12px 0;max-width:66ch}
 .lede{font-size:19px;color:var(--ink-2);max-width:60ch}
+.dome{float:right;width:min(280px,40%);height:auto;margin:4px 0 12px 24px;border-radius:var(--radius)}
+@media (max-width:560px){.dome{float:none;display:block;width:100%;max-width:320px;margin:16px auto}}
+h2{clear:both}
 .topnav{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:14px}
 .topnav .links{display:flex;gap:16px;flex-wrap:wrap}
 .topnav a{font-size:14px;font-weight:500;text-decoration:none}
@@ -111,6 +114,7 @@ details p{margin:8px 0 4px;font-size:15px}
 <div class="wrap">
 <div class="topnav"><span class="eyebrow" style="margin:0">Nexus · conexus 7.x</span><span class="links"><a href="#update">Update</a><a href="#uninstall">Uninstall</a><a href="#problems">Problems</a><a href="getting-started.html">Getting started →</a><a href="rdr.html">RDRs →</a></span></div>
 <h1>Installing Nexus</h1>
+<img class="dome" src="assets/a-stately-pleasure-dome.png" alt="A brass-ribbed crystal dome on a hilltop at dusk" width="320" height="320">
 <p class="lede">Nexus gives Claude a permanent memory and search by meaning. It runs on your computer. You need no API key, no account, and no separate database install. The install takes about ten minutes.</p>
 
 <p class="choose-label">How do you use Claude?</p>
@@ -288,7 +292,7 @@ ls ~/.config/nexus                                <span class="c"># must not exi
 
 <h2 id="what">What you installed</h2>
 <p>One service on your computer. It contains a database (Postgres 17 with pgvector) and three stores: scratch for one session, memory for project facts, and knowledge for everything you index. The search model also runs on your computer, so your data does not leave it. One time per day, Nexus sends one anonymous message with six values: install id, version, mode, operating system, CPU type, and Python version. <code>nx telemetry off</code> stops this.</p>
-<p>More: <a href="https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/">How I actually use Nexus</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md">Getting Started</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md">CLI reference</a></p>
+<p>More: <a href="getting-started.html">Getting started</a> · <a href="rdr.html">Working with RDRs</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md">CLI reference</a></p>
 
 <p class="footer">Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a> README and docs. The commands match the current conexus release. This page is <a href="https://github.com/Hellblazer/nexus/blob/main/web/index.html">web/index.html</a> in the repo. Corrections are welcome.</p>
 </div>
