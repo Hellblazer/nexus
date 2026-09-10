@@ -1628,8 +1628,29 @@ public final class TaxonomyRepository {
                 // omits.
                 guardTopicIdentity(ctx, tenant, reqL(r, "id"), optL(r, "parent_id"),
                                     optS(r, "collection"), optS(r, "label"));
+                // nexus-c0g6e fix round (GH #1529 review, item on importBatch):
+                // the caller's doc_count is discarded here too, same as the
+                // single-row importTopic fix -- this row's ON CONFLICT branch
+                // below never touches doc_count either (RDR-154 P0), so this
+                // path only ever runs for a GENUINELY NEW id, and
+                // topic_assignments_topic_id_fkey / fk_topic_assignments_
+                // topic_tenant make it IMPOSSIBLE for any assignment to exist
+                // for an id before its own topics row exists -- the real count
+                // at THIS instant is always 0. A batch import's own topic
+                // rows are always applied (this method) before that batch's
+                // assignment rows (importAssignmentsBatch, a SEPARATE kind --
+                // the FK forces this ordering, it is not merely convention),
+                // and importAssignmentsBatch's multi-row INSERT fires the
+                // SAME statement-level topic_assignments trigger a live
+                // write does, recomputing doc_count from the real rows for
+                // every affected topic by the end of that call -- so a
+                // literal 0 here lands with the real count at the end of the
+                // batch, with no per-row correlated-subquery cost against
+                // topic_assignments (this method's own comment above calls
+                // topic_assignments the 190k-row dogfood offender it exists
+                // to keep cheap).
                 insert = insert.values(reqL(r, "id"), tenant, optS(r, "label"), optL(r, "parent_id"),
-                        optS(r, "collection"), optS(r, "centroid_hash"), optI(r, "doc_count", 0),
+                        optS(r, "collection"), optS(r, "centroid_hash"), 0,
                         parseTsStrict(reqS(r, "created_at")), optS(r, "review_status"),
                         optS(r, "terms"));
             }

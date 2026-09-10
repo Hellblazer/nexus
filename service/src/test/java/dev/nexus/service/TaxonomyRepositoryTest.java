@@ -1358,6 +1358,10 @@ class TaxonomyRepositoryTest {
     void importBatch_topic_multiRow_insertsAll_andExcludedMergeOnReimport() {
         long id0 = 9900200L;
         long id1 = 9900201L;
+        // nexus-c0g6e fix round (GH #1529 review): the batch import ignores
+        // these caller-claimed doc_count seeds (5, 9) exactly like the
+        // single-row importTopic fix — no real topic_assignments rows exist
+        // for either id, so both land at 0, the real count.
         int n = repo.importBatch(TENANT_A, "topic", List.of(
             m("id", id0, "label", "batch-t0", "collection", "knowledge__batch_topic",
               "centroid_hash", "ch0", "doc_count", 5, "created_at", PAST_TS,
@@ -1368,18 +1372,67 @@ class TaxonomyRepositoryTest {
         assertThat(n).isEqualTo(2);
         assertThat(repo.getTopicById(TENANT_A, id0)).isPresent();
         assertThat(repo.getTopicById(TENANT_A, id1)).isPresent();
-        assertThat(((Number) repo.getTopicById(TENANT_A, id0).get().get("doc_count")).intValue()).isEqualTo(5);
+        assertThat(((Number) repo.getTopicById(TENANT_A, id0).get().get("doc_count")).intValue()).isEqualTo(0);
 
         // Re-import (one-row batch) with different review_status/centroid_hash/terms —
         // EXCLUDED merge applies exactly as the single-row importTopic path. doc_count
-        // is trigger-maintained and NOT an ETL merge participant — seed of 5 survives.
+        // is trigger-maintained and NOT an ETL merge participant — the recounted 0 survives.
         repo.importBatch(TENANT_A, "topic", List.of(
             m("id", id0, "label", "batch-t0", "collection", "knowledge__batch_topic",
               "centroid_hash", "ch0-v2", "doc_count", 999, "created_at", PAST_TS,
               "review_status", "accepted", "terms", "[\"a\",\"z\"]")));
         var row = repo.getTopicById(TENANT_A, id0).get();
         assertThat(row.get("review_status")).isEqualTo("accepted");
-        assertThat(((Number) row.get("doc_count")).intValue()).isEqualTo(5);
+        assertThat(((Number) row.get("doc_count")).intValue()).isEqualTo(0);
+    }
+
+    @Test @Order(465)
+    void importBatch_topic_docCount999_landsWithRealCountAfterAssignmentsBatchImports() {
+        // nexus-c0g6e fix round (GH #1529 review): the exact repro named in
+        // the review, at batch scale. Two topics imported with doc_count=999
+        // (discarded), then their real assignments imported via the SEPARATE
+        // "assignment" batch kind (the FK-forced order: a topic_assignments
+        // row cannot reference a topic id that does not yet exist, so this
+        // ordering is not a test convenience -- it is the only order any
+        // caller could ever use). By the END of the whole batch (topics
+        // batch, then assignments batch), both topics carry their REAL
+        // counts, not the discarded 999 and not a stale 0 -- the
+        // assignments batch's own multi-row INSERT fires the same
+        // statement-level topic_assignments trigger a live write does.
+        long t0 = 9900465L;
+        long t1 = 9900466L;
+        final String col = "knowledge__batch_dup"; // pre-registered in @BeforeAll
+
+        int nTopics = repo.importBatch(TENANT_A, "topic", List.of(
+            m("id", t0, "label", "batch-999-t0", "collection", col,
+              "centroid_hash", null, "doc_count", 999, "created_at", PAST_TS,
+              "review_status", "pending", "terms", null),
+            m("id", t1, "label", "batch-999-t1", "collection", col,
+              "centroid_hash", null, "doc_count", 999, "created_at", PAST_TS,
+              "review_status", "pending", "terms", null)));
+        assertThat(nTopics).isEqualTo(2);
+        assertThat(((Number) repo.getTopicById(TENANT_A, t0).get().get("doc_count")).intValue())
+            .as("999 discarded at topic-import time -- no assignments exist yet").isEqualTo(0);
+        assertThat(((Number) repo.getTopicById(TENANT_A, t1).get().get("doc_count")).intValue()).isEqualTo(0);
+
+        seedChunk(TENANT_A, col, hexChash("batch-999-doc-t0-a"));
+        seedChunk(TENANT_A, col, hexChash("batch-999-doc-t0-b"));
+        seedChunk(TENANT_A, col, hexChash("batch-999-doc-t1-a"));
+        int nAssignments = repo.importBatch(TENANT_A, "assignment", List.of(
+            m("doc_id", hexChash("batch-999-doc-t0-a"), "topic_id", t0, "assigned_by", "hdbscan",
+              "similarity", null, "assigned_at", PAST_TS, "source_collection", col),
+            m("doc_id", hexChash("batch-999-doc-t0-b"), "topic_id", t0, "assigned_by", "hdbscan",
+              "similarity", null, "assigned_at", PAST_TS, "source_collection", col),
+            m("doc_id", hexChash("batch-999-doc-t1-a"), "topic_id", t1, "assigned_by", "hdbscan",
+              "similarity", null, "assigned_at", PAST_TS, "source_collection", col)));
+        assertThat(nAssignments).isEqualTo(3);
+
+        assertThat(((Number) repo.getTopicById(TENANT_A, t0).get().get("doc_count")).intValue())
+            .as("t0's real count (2 assignments) lands by the end of the batch, never 999")
+            .isEqualTo(2);
+        assertThat(((Number) repo.getTopicById(TENANT_A, t1).get().get("doc_count")).intValue())
+            .as("t1's real count (1 assignment) lands by the end of the batch, never 999")
+            .isEqualTo(1);
     }
 
     @Test @Order(47)
@@ -1474,7 +1527,9 @@ class TaxonomyRepositoryTest {
         var row = repo.getTopicById(TENANT_A, id);
         assertThat(row).isPresent();
         assertThat(row.get().get("label")).isEqualTo("dup-b");
-        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(2);
+        // nexus-c0g6e fix round (GH #1529 review): both claimed doc_counts (1, 2)
+        // are discarded — no real assignments exist for this id, so it lands at 0.
+        assertThat(((Number) row.get().get("doc_count")).intValue()).isEqualTo(0);
     }
 
     @Test @Order(51)
