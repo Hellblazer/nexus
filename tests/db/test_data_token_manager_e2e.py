@@ -84,20 +84,16 @@ def test_data_token_manager_self_mint_round_trip_against_real_engine(
         chash = hashlib.sha256(content.encode()).hexdigest()
         embedding = [0.1] * _DIM
 
-        # RDR-204 Phase 3 (nexus-ft04v.26): the write path resolves the
-        # collection's model row-first through nexus.mcp_infra's process-wide
-        # T3 singleton, whose tenant comes from CONFIG ('default' here), not
-        # from this explicit-tenant client. Under the mint-locked credential
-        # that singleton's first use mints for 'default' and is refused (403,
-        # a data_token_mint_failed event this test asserts never happens),
-        # while the write itself still succeeds by name fallback. No
-        # production process constructs a client for a tenant other than its
-        # configured one; wire the singleton to THIS client for the window,
-        # the fixture-seam pattern every other row-reading test uses.
-        from tests.conftest import patched_mcp_infra_t3
-
+        # nexus-fryrd: the write path resolves the collection's catalog row
+        # through THIS client's own resolver (HttpVectorClient._resolve_
+        # collection_row) -- for a non-default tenant that reads through
+        # THIS client's own list_collections(), never through nexus.mcp_
+        # infra's process-wide singleton (whose tenant is always
+        # 'default'). No mcp_infra-singleton fixture wiring needed: the row
+        # lookup below mints (and authenticates) under the SAME tenant the
+        # write itself uses.
         structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
-        with patched_mcp_infra_t3(client), structlog.testing.capture_logs() as logs:
+        with structlog.testing.capture_logs() as logs:
             # Write: exercises the T3 choke point in _request_once.
             client.upsert_chunks_with_embeddings(
                 collection, ids=[chash], documents=[content], embeddings=[embedding],

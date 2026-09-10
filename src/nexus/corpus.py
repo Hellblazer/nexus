@@ -925,6 +925,7 @@ def collection_model(name: str) -> str:
 
 def resolve_row_preferred(
     name: str, field: str, name_fallback: "Callable[[str], str | None]",
+    *, row_resolver: "Callable[[str], dict | None] | None" = None,
 ) -> "str | None":
     """Row-preferred, candidate-string-fallback resolution of catalog
     *field* for collection *name*.
@@ -955,10 +956,22 @@ def resolve_row_preferred(
     falling through to *name_fallback*, matching every one of the four
     sites' original behaviour (a row that exists, even an incomplete
     one, is still authoritative and wins outright).
+
+    *row_resolver* (nexus-fryrd): the row lookup a caller uses instead of
+    the module-wide :func:`nexus.mcp_infra.get_collection_row` default --
+    e.g. an ``HttpVectorClient`` instance's own row resolver, scoped to
+    ITS tenant/endpoint rather than the ``mcp_infra`` singleton's
+    (``get_t3()``'s, always ``tenant="default"``). ``None`` (every
+    existing caller) preserves the prior behaviour exactly: the
+    ``mcp_infra`` cache, unconditionally.
     """
-    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+    if row_resolver is not None:
+        get_row = row_resolver
+    else:
+        from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+        get_row = get_collection_row
     try:
-        row = get_collection_row(name)
+        row = get_row(name)
     except Exception:  # noqa: BLE001 — class-(d) diagnostics run over drifted, offline or catalog-only state; a row fetch that cannot complete is reported and the site's own name derivation answers, exactly as it did before the row was preferred
         _log.warning(
             "resolve_row_preferred_row_fetch_failed",

@@ -1135,6 +1135,140 @@ class TestGetT3Routing:
         assert isinstance(t3, HttpVectorClient)
 
 
+# ── Row resolution scoped to the writing client's own tenant (nexus-fryrd) ───
+#
+# Since the RDR-204 Phase 3 repoint, the write path's own catalog-row lookup
+# (per_collection_chunk_cap / _upsert_byte_budget, via _is_cce_collection)
+# read unconditionally through nexus.mcp_infra's process-wide T3 singleton --
+# whose tenant is always "default" (get_http_vector_client()'s own
+# construction). A client built for a DIFFERENT tenant therefore resolved
+# rows for the WRONG catalog (and, under a mint-locked credential, could
+# 403 minting for a tenant it was never configured for). HttpVectorClient
+# now resolves its own row through _resolve_collection_row: an injected
+# resolver first, else mcp_infra for the literal "default" tenant (byte-
+# identical to the old behaviour), else THIS client's own list_collections().
+
+class TestResolveCollectionRowTenantScoping:
+    def setup_method(self):
+        from nexus import mcp_infra
+        mcp_infra.reset_singletons()
+
+    def teardown_method(self):
+        from nexus import mcp_infra
+        mcp_infra.reset_singletons()
+
+    def test_default_tenant_client_reads_through_mcp_infra(self):
+        from nexus import mcp_infra
+        from nexus.db.t3 import T3Database
+
+        fake_t3 = MagicMock(spec=T3Database)
+        fake_t3.list_collections.return_value = [
+            {"name": "docs__x__voyage-context-3__v1", "count": 1, "content_type": "docs"},
+        ]
+        mcp_infra.inject_t3(fake_t3)
+
+        client = HttpVectorClient()  # tenant="default"
+        row = client._resolve_collection_row("docs__x__voyage-context-3__v1")
+        # mcp_infra.get_collection_row's own contract: only the catalog-
+        # attribute subset, never "name"/"count" (see
+        # _collections_cache_tuple_from_rows) -- still enough for the
+        # field reads (content_type/embedding_model) the write path needs.
+        assert row == {"content_type": "docs"}
+        fake_t3.list_collections.assert_called_once()
+
+    def test_explicit_tenant_client_never_touches_mcp_infra_and_reads_its_own(self, monkeypatch):
+        from nexus import mcp_infra
+        from nexus.db.t3 import T3Database
+
+        # If the write path fell through to mcp_infra's singleton (the
+        # nexus-fryrd defect), THIS would answer instead of the tenant-
+        # scoped HTTP call below -- assert it is never even touched.
+        fake_default_t3 = MagicMock(spec=T3Database)
+        fake_default_t3.list_collections.side_effect = AssertionError(
+            "mcp_infra's default-tenant singleton must not be read by an "
+            "explicit-tenant client's row resolver"
+        )
+        mcp_infra.inject_t3(fake_default_t3)
+
+        get_calls = []
+
+        def fake_get(path, *, tenant="default"):
+            get_calls.append((path, tenant))
+            return [
+                {"name": "knowledge__x__voyage-context-3__v1", "count": 2, "content_type": "knowledge"},
+            ]
+
+        monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
+
+        client = HttpVectorClient(tenant="tenant-a")
+        row = client._resolve_collection_row("knowledge__x__voyage-context-3__v1")
+        assert row == {"name": "knowledge__x__voyage-context-3__v1", "count": 2, "content_type": "knowledge"}
+        assert get_calls == [("/v1/vectors/stats", "tenant-a")]
+
+    def test_two_clients_of_different_tenants_resolve_through_their_own_tenant(self, monkeypatch):
+        """The concrete defect this closes: two live clients, two tenants,
+        one catalog each -- neither may answer for the other."""
+        rows_by_tenant = {
+            "tenant-a": [{"name": "code__proj__voyage-code-3__v1", "count": 1, "content_type": "code"}],
+            "tenant-b": [{"name": "code__proj__voyage-code-3__v1", "count": 1, "content_type": "docs"}],
+        }
+
+        def fake_get(path, *, tenant="default"):
+            return rows_by_tenant[tenant]
+
+        monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
+
+        client_a = HttpVectorClient(tenant="tenant-a")
+        client_b = HttpVectorClient(tenant="tenant-b")
+
+        row_a = client_a._resolve_collection_row("code__proj__voyage-code-3__v1")
+        row_b = client_b._resolve_collection_row("code__proj__voyage-code-3__v1")
+        assert row_a is not None and row_a["content_type"] == "code"
+        assert row_b is not None and row_b["content_type"] == "docs"
+
+    def test_injected_row_resolver_overrides_both_defaults(self):
+        seen = []
+
+        def fake_resolver(name):
+            seen.append(name)
+            return {"content_type": "knowledge"}
+
+        client = HttpVectorClient(tenant="tenant-c", _row_resolver=fake_resolver)
+        assert client._resolve_collection_row("anything") == {"content_type": "knowledge"}
+        assert seen == ["anything"]
+
+    def test_write_path_wires_the_resolver_through_upsert_chunks(self, monkeypatch):
+        """End-to-end (still HTTP-mocked): upsert_chunks's own cap and
+        byte-budget lookups go through THIS client's tenant -- once per
+        collection, memoized within the call -- and never mcp_infra's."""
+        from nexus import mcp_infra
+        from nexus.db.t3 import T3Database
+
+        fake_default_t3 = MagicMock(spec=T3Database)
+        fake_default_t3.list_collections.side_effect = AssertionError(
+            "mcp_infra's default-tenant singleton must not be read for a "
+            "non-default-tenant client's write"
+        )
+        mcp_infra.inject_t3(fake_default_t3)
+
+        get_calls = []
+
+        def fake_get(path, *, tenant="default"):
+            get_calls.append((path, tenant))
+            return [{"name": "code__proj__voyage-code-3__v1", "count": 1, "content_type": "code"}]
+
+        monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post",
+            lambda path, body, **kw: {"upserted": len(body.get("ids", []))},
+        )
+
+        client = HttpVectorClient(tenant="tenant-a")
+        client.upsert_chunks("code__proj__voyage-code-3__v1", ["id1"], ["text1"])
+
+        assert get_calls == [("/v1/vectors/stats", "tenant-a")]
+
+
 # ── Service-mode split-brain / dead-seam regression tests (RDR-152 .20 fixes) ─
 #
 # BEFORE the fix: doc_indexer.py called make_t3() directly when t3=None, always
