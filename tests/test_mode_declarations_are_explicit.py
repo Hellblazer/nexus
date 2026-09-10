@@ -230,8 +230,9 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
 # surfaced this as a standing offender (it is vacuous on any shrunk
 # item list, including a solo run of this file). Rationale in
 # conftest.py beside the entry.
-# 60 -> 44 (nexus-0y4c6 burn-down batch 5, 2026-09-09): -16 entries. 7
-# were DEAD: test_backfill_hash.py, test_catalog_backfill_collections.py,
+# 60 -> 44 (nexus-0y4c6 burn-down batch 5, 2026-09-09, INITIAL PASS --
+# CORRECTED): -16 entries. 7 were DEAD: test_backfill_hash.py,
+# test_catalog_backfill_collections.py,
 # test_catalog_doctor_collections_drift.py,
 # test_catalog_rename_collection.py, test_doctor_integrity.py,
 # test_rdr137_followup_reader_sigs.py, and test_source_uri_home_key.py
@@ -240,19 +241,37 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
 # test_doctor_integrity.py, inside a shared helper METHOD, not a
 # `test_*` function) -- never inside any test's own source, so none of
 # their tests were ever real offenders; a clean shrink, no test-file
-# change. The other 9 were PROMOTED the same way as the nodeid batches
-# above: test_vector_retry.py, test_pdf_extractor.py,
+# change (unaffected by the correction below).
+#
+# The other 9 (test_vector_retry.py, test_pdf_extractor.py,
 # test_indexer_duplicate_content.py, test_memory.py,
 # test_dt_mcp_fallback.py, test_dt_highlights_layer_e.py,
-# test_dt_capture_cmd.py, test_store_enrich_doc_id.py, and
-# test_t3_strict_collection_naming.py each had exactly ONE voyage-*
-# occurrence, located inside exactly one test; that literal was hoisted
-# to a module- or class-level constant in the same file, so the lint no
-# longer sees it. No test behavior changed. 44 entries remain
-# unconverted; see bead nexus-0y4c6 for the burn-down's continuation
-# (the remaining entries mostly carry MANY tests per file, or a
-# scattered literal across dozens of call sites, and were left for a
-# future batch).
+# test_dt_capture_cmd.py, test_store_enrich_doc_id.py,
+# test_t3_strict_collection_naming.py) were first removed by hoisting
+# their one-per-file voyage literal to a module/class constant outside
+# the flagged test's own body. The coordinator rejected that mechanism
+# (see the matching correction on `_MODE_LINT_EXCLUDE_NODEIDS_CEILING`
+# below -- same rationale, same fix): hoisting hides the claim from the
+# scanner rather than making it honest. CORRECTED (same day): every
+# hoist reverted, literal moved back inline, then reclassified per-test
+# rather than per-file. 8 of the 9 were case (b) -- the token was an
+# inert label/argument/collection-name segment verified (by reading the
+# production dispatch code) to never drive a mode-dependent branch --
+# and swapped in place for a neutral model token (`model-code` /
+# `model-ctx`), matching the "Neutral model tokens on purpose"
+# convention in test_http_vector_client_stats.py. test_memory.py's
+# test_promote_calls_t3_put is genuinely cloud-mode (t3_collection_
+# name's auto-promotion resolves the model segment via
+# effective_embedding_model_for_writes, which really does branch on
+# is_local_mode()) and now declares the `cloud_mode` fixture directly.
+# Either way the flagged test's own source carries no voyage-* literal
+# (case b) or is legitimately exempt via the fixturenames check (the
+# cloud_mode case) -- same end state, zero exclusion needed for any of
+# the 9, reached honestly instead of by hiding the literal. 44 entries
+# remain unconverted; see bead nexus-0y4c6 for the burn-down's
+# continuation (the remaining entries mostly carry MANY tests per file,
+# or a scattered literal across dozens of call sites, and were left for
+# a future batch).
 _MODE_LINT_EXCLUDE_FILES_CEILING = 44
 # 43 -> 46 (6.10.1): +3 real keyed integration tests in test_integration.py
 # — cloud_mode's fake credentials broke them against the live Voyage API
@@ -441,23 +460,84 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 44
 # 3 (3 of them, tests/test_integration.py's real keyed-credential tests,
 # cannot be converted this way at all); see bead nexus-0y4c6 for the
 # burn-down's continuation.
-# 19 -> 3 (nexus-0y4c6 burn-down batch 4, 2026-09-09): -16 nodeid
-# entries, all PROMOTED the same way as batches 1-3 -- literals hoisted
-# to module/class constants, or (two docstring-only mentions) reworded.
-# No test behavior changed. The 3 remaining entries
-# (tests/test_integration.py::test_cce_query_retrieves_cce_indexed_
-# markdown / test_t3_put_embedding_model_in_search_metadata /
-# test_voyage_code3_index_and_query) are REAL keyed integration tests
-# (-m integration, @requires_voyage_key): their mode declaration IS the
-# credential-gating itself, and the `cloud_mode` fixture would overwrite
-# their genuine VOYAGE_API_KEY with a fake one, breaking them against
-# the live Voyage API (see the comment beside them, above). This is the
-# nodeid burn-down's floor -- these three cannot be converted by hoisting
-# or rewording; only a change to how the lint recognizes credential-gated
-# integration tests could remove them, and that is out of scope for a
-# test-only burn-down. The 60-entry _MODE_LINT_EXCLUDE_FILES set is a
-# SEPARATE, unconverted burn-down surface -- see bead nexus-0y4c6.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 3
+# 19 -> 3 (nexus-0y4c6 burn-down batch 4, 2026-09-09, INITIAL PASS --
+# CORRECTED BELOW): -16 nodeid entries, all removed by hoisting each
+# literal to a module/class constant, or (two docstring-only mentions)
+# rewording -- the same mechanism as batches 1-3.
+#
+# CORRECTION (nexus-0y4c6, same day, coordinator rejection): "hoisting a
+# voyage literal to a module or class constant so
+# inspect.getsource(test_func) no longer sees it does not make the
+# test's mode explicit; it hides the same claim from the scanner. That
+# is the exact 'move it into an uncounted helper' shape this repo's
+# census gates refuse." Every hoist across batches 1-4 (all 79 nodeids
+# promoted out of this set that way) was REVERTED -- literal moved back
+# inline into the flagged test's own body -- and reclassified into one
+# of four buckets:
+#   (a) genuinely cloud-mode behavior: the test now declares
+#       `cloud_mode` (fixture arg, or `pytest.mark.usefixtures(
+#       "cloud_mode")` at class scope); the literal stays inline and
+#       the lint's own fixturenames exemption legitimately covers it --
+#       no exclusion entry needed.
+#   (b) the voyage token is inert -- an opaque label/argument/
+#       collection-name segment verified, by reading the production
+#       dispatch code rather than assuming from a comment, to never
+#       drive a mode-dependent branch: swapped in place for a neutral
+#       model token (`model-code` / `model-ctx`), matching the "Neutral
+#       model tokens on purpose" convention in
+#       test_http_vector_client_stats.py; the voyage-* regex no longer
+#       matches, so no exclusion entry is needed either.
+#   (c) genuine "mode-self-test": the test's whole point is to pin
+#       LOCAL mode explicitly and assert real voyage-string-driven
+#       dispatch -- the same class as the pre-existing
+#       test_local_mode.py / test_o5x2c_write_chokepoint_repros.py
+#       file-level entries. `cloud_mode` would invert what the test
+#       proves. STAYS excluded below, literal reverted to inline.
+#   (d) shared pre-existing test fixture: the literal is a constant
+#       used by MANY unrelated tests in the same file (blast radius far
+#       exceeding the one flagged test) -- swapping it is out of scope
+#       for a mode-lint burn-down. STAYS excluded below, literal
+#       reverted to inline.
+# Every batch-1..batch-4 entry landed in bucket (a) or (b) except the
+# eleven below, added back to this set with their bucket noted (full
+# rationale beside each entry in conftest.py):
+#   (c) tests/daemon/test_storage_service_daemon.py::
+#       TestSpawnServiceVoyageKeyPlumbing::{test_voyage_configured_
+#       model_still_plumbs, test_shared_predicate_true_drives_both_
+#       sites_to_voyage, test_shared_predicate_false_drives_both_
+#       sites_to_local}
+#   (c) tests/test_collection_registration.py::
+#       TestRegistrationSeamProfileCheck::{test_profile_agrees_
+#       registration_proceeds, test_profile_disagrees_raises_mismatch_
+#       before_the_register_call, test_empty_profile_proceeds_with_
+#       intent_bootstrap_case, test_pre_phase_2_engine_route_missing_
+#       propagates_uncaught}
+#   (d) tests/catalog/test_http_catalog_client.py::TestResolveChunk::
+#       test_resolve_chunk_returns_full_dict -- the literal
+#       "code__test__voyage-code-3__v1" is the FakeCatalogHandler's own
+#       hardcoded response, shared by dozens of unrelated tests
+#       throughout this file.
+#   (d) tests/test_service_mode_cli_real_client.py::
+#       {test_collection_reembed_dry_run_service_mode_real_client,
+#       test_collection_reembed_cross_model_rejected_service_mode,
+#       test_collection_reembed_same_model_requests_server_side_re_
+#       embed} -- the pre-existing module-level `_KNOWLEDGE`/`_CODE`
+#       constants (predating this burn-down, used broadly throughout
+#       the file) carry FIXED model segments the `--to` flag value must
+#       match/mismatch against.
+# No test behavior changed by the correction -- only the mechanism used
+# to reach "no voyage-* literal in the flagged function's own source,
+# or a real fixture declaration" changed, from hiding to honest
+# reclassification.
+#
+# Combined with the pre-existing 3-entry floor (tests/test_integration.py
+# below -- REAL keyed integration tests, -m integration,
+# @requires_voyage_key, whose mode declaration IS the credential-gating
+# itself; unaffected by this correction), the corrected nodeid set has
+# 14 entries total. This is the nodeid burn-down's floor: the 44-entry
+# _MODE_LINT_EXCLUDE_FILES set is a SEPARATE, unconverted burn-down
+# surface -- see bead nexus-0y4c6.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 14
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:
