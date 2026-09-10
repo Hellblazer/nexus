@@ -65,3 +65,8 @@ mechanize, it matters enough to ship.
   allow-list entry, so every call prompted for permission instead of
   auto-approving.
   bead: nexus-em75s.12
+- `conexus/skills/orchestration/SKILL.md`: RDR-205 Phase 4 — one new
+  section, "Waiting for One Agent's Report", telling the orchestrator to
+  wait for a named agent's report with a parked `tuple_rd` on
+  `ledger/<session_id>` (looping at the 25 s cap) instead of polling.
+  bead: nexus-em75s.20
