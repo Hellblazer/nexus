@@ -491,3 +491,28 @@ def test_conexus_dir_other_than_changelog_is_code(tmp_path: Path) -> None:
     proc, outputs = _run_in(repo, script)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert outputs.get("code") == "true"
+
+
+def test_web_dir_is_docs_only(tmp_path: Path) -> None:
+    """nexus-ynejb: web/** is the GitHub Pages site (static HTML deployed by
+    pages.yml on its own trigger); a page edit must not run the pytest
+    matrix. Falsified by deleting the `web/*` arm in ci.yml."""
+    repo = _init_repo(tmp_path)
+    before = _commit(repo, {"seed.txt": "x"}, "seed")
+    _commit(repo, {"web/index.html": "<h1>hi</h1>"}, "site edit")
+    script = _render(_gate_script(), _values("push", before_sha=before))
+    proc, outputs = _run_in(repo, script)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert outputs.get("code") == "false"
+
+
+def test_nested_web_lookalike_is_code(tmp_path: Path) -> None:
+    """The `web/*` arm is prefix-anchored at the repo root: `src/web/x.py`
+    must still read as code (the `*/*` arm catches it)."""
+    repo = _init_repo(tmp_path)
+    before = _commit(repo, {"seed.txt": "x"}, "seed")
+    _commit(repo, {"src/web/handler.py": "x = 1"}, "nested web dir")
+    script = _render(_gate_script(), _values("push", before_sha=before))
+    proc, outputs = _run_in(repo, script)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert outputs.get("code") == "true"

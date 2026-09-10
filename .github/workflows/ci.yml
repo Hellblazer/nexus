@@ -302,13 +302,16 @@ jobs:
           # inverse-and-worse direction of the PR #1464 bug this job exists
           # to fix. The `*/*` arm below fires for ANY remaining path with a
           # directory component (once the two legitimately-nested arms,
-          # `docs/*` and the exact `conexus/CHANGELOG.md`, have already had
+          # `docs/*`, `web/*` (the GitHub Pages site, nexus-ynejb: static
+          # HTML no test imports, deployed by pages.yml on its own trigger)
+          # and the exact `conexus/CHANGELOG.md`, have already had
           # first crack) and marks it code -- so `CHANGELOG*`/`LICENSE*`
           # below it only ever see slash-free, true root-level filenames.
           docs_only=true
           while IFS= read -r f; do
             case "$f" in
               docs/*) ;;
+              web/*) ;;
               conexus/CHANGELOG.md) ;;
               */*) docs_only=false ;;
               README.md) ;;
