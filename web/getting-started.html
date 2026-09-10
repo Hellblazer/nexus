@@ -137,7 +137,7 @@ ul.plain li{margin:3px 0}
 <main>
 <div class="eyebrow">Nexus · getting started</div>
 <h1>Nexus Getting Started</h1>
-<p class="lede">You do all of this inside Claude Code. You give Claude a short instruction. Claude uses Nexus for you. Each lesson shows the instruction to give, what Claude does, and what you see. Nine lessons, about ninety minutes.</p>
+<p class="lede">You do all of this inside Claude Code. You describe what you want. Claude chooses the Nexus tools and skills for you. Each lesson shows the instruction to give, what Claude does, and what you see. Nine lessons, about ninety minutes.</p>
 <p class="note">Words in <span class="ph">ORANGE CAPITALS</span> are placeholders. Replace them with something from your own project before you send the instruction.</p>
 <p class="note">Before you start: install Nexus and the plugin with the <a href="./">install guide</a>. Then open a terminal in a project of yours and run <code>claude</code>. Every lesson happens in that Claude Code session.</p>
 
@@ -159,7 +159,7 @@ ul.plain li{margin:3px 0}
 </table></div></details>
 <details class="gloss"><summary>Claude Code</summary><div class="tbl"><table>
 <tr><td>Tool</td><td>An action that Claude can take. Nexus adds tools to Claude Code. When Claude uses one, Claude Code shows the tool name.</td></tr>
-<tr><td>Skill</td><td>A named procedure that Claude follows. You start one with a command such as <code>/conexus:query</code>.</td></tr>
+<tr><td>Skill</td><td>A named procedure that Claude follows for one kind of situation. Claude chooses it from what you say. A command such as <code>/conexus:query</code> starts it directly.</td></tr>
 <tr><td>Session</td><td>One run of Claude Code. The scratch store belongs to one session.</td></tr>
 <tr><td>RDR</td><td>Research, Design, Review. A short document that records a decision before the code is written.</td></tr>
 <tr><td><code>nx</code></td><td>The Nexus terminal command. Claude runs it for you when needed. You can also run it yourself.</td></tr>
@@ -168,7 +168,7 @@ ul.plain li{margin:3px 0}
 
 <!-- ============ 1 ============ -->
 <section class="lesson" id="l1">
-<div class="lhead"><span class="lnum">1</span><h2>Start a session</h2><span class="ltime">5 min</span></div>
+<div class="lhead"><span class="lnum">1</span><h2>Start a session</h2><span class="ltime">10 min</span></div>
 <p class="why">When Claude Code starts with the Nexus plugin, Nexus gives Claude some context before you type anything. You do not see this context. This lesson shows what it contains, and introduces the three stores that all later lessons use.</p>
 
 <h3>What Claude receives when the session starts</h3>
@@ -184,6 +184,16 @@ ul.plain li{margin:3px 0}
 </table></div>
 <p class="note">Not every project has every block. A project without the <code>bd</code> task tracker has no Ready Beads block. A project without RDRs has no RDR block. A new install has an empty T2 Memory block and a short Knowledge Map. This is normal.</p>
 <p class="note">If Claude reports a block with the heading "nx Preflight: FAILED", a part of the install is missing. Type <code>/conexus:nx-preflight</code>. It tells you which part.</p>
+
+<h3>Why Claude receives this context</h3>
+<p>The context is how Nexus works. Claude does not follow a fixed script. It reads the situation and chooses what to do. The blocks above give it what it needs to choose well:</p>
+<ul class="plain">
+<li>The memory block tells Claude what was decided before, so it does not decide again from zero.</li>
+<li>The capabilities block tells Claude which tools exist, so it searches the store instead of reading every file.</li>
+<li>A guidance block describes situations, not commands: "something is broken", "a plan needs a check", "an answer must come from many documents". For each situation it names the skill that fits. Claude matches your request to a situation and uses the skill by itself.</li>
+</ul>
+<div class="callout rule"><p><strong>What this means for you:</strong> describe what you want in your own words. You do not need to learn a command for each task. If you say "this test fails and I do not know why", Claude recognizes a debugging situation and follows the debugging skill. If you say "is what the docs say about caching true in the code", Claude recognizes a question that needs many documents and plans a search. The <code>/conexus:…</code> commands in later lessons are shortcuts. They are never required. The language model does the routing.</p></div>
+<p>This also means Claude adapts to how you work. A person who writes short instructions and a person who thinks aloud in long paragraphs get the same tools, chosen from what they said. The lessons show one way to phrase each request. Your own phrasing works too.</p>
 
 <h3>The three stores</h3>
 <p>Every Nexus tool works on one of three stores. The stores differ in one way: how long the data lives.</p>
@@ -391,9 +401,10 @@ Which files deal with <span class="ph">A CONCEPT</span>, and how are they connec
 <div class="cmd"><pre>/conexus:query Compare what the documentation says about <span class="ph">A CONCEPT FROM LESSON 2</span> with what the code actually does.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>A tool call named <code>nx_answer</code>. It searches the documentation and the code, extracts the relevant facts from each, compares them, and returns one answer with sources. This takes longer than a normal search, usually 5 to 15 seconds and sometimes more.</p>
-<p class="note">Use <code>/conexus:query</code> when one search cannot hold the answer. For a simple question, a normal sentence to Claude is faster.</p>
+<p class="note">Use <code>/conexus:query</code> when one search cannot hold the answer. For a simple question, a normal sentence to Claude is faster. You can also ask the large question in plain words. Claude recognizes it and plans the search without the command.</p>
 
 <h3>Other commands to know</h3>
+<p>Each command below starts one skill directly. You can also describe the task in your own words, and Claude picks the same skill. The commands are useful when you want to be certain which skill runs.</p>
 <div class="tbl"><table>
 <tr><th>Task</th><th>Command</th></tr>
 <tr><td>Understand a codebase that is new to you</td><td><code>/conexus:analyze-code</code></td></tr>
