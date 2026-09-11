@@ -109,3 +109,98 @@ leg's own progress log lands beside it at `<out>.bloat.log`.
   sha for cross-reference when a build-lease cache hit served a jar
   stamped from an earlier commit with byte-identical `service/`
   content).
+
+# RDR-205 Phase 4 Step 3 — MVV run 1 (`run1.py`)
+
+Bead: `nexus-em75s.21`, the run that closes Phase 4. Ten sub-agents of
+two types, twenty `ledger/<session_id>` tuples, a genuine parked `rd`
+that wakes when a report lands, and the space census agreeing with the
+`expectations.sh` TSV census row for row.
+
+**Why this drives the checkout's hook scripts directly rather than a
+real `Agent` dispatch:** a real Claude Code session on this box runs
+the INSTALLED conexus plugin, which predates this RDR's tuple-space
+projection hooks (`subagent-start-tuple-async.sh`, `subagent-stop-
+tuple-async.sh`, the `agent-dispatch-expect.sh` EXPECT wiring). A real
+dispatch here would exercise the OLD hooks and prove nothing about this
+checkout. `run1.py` instead invokes `conexus/hooks/scripts/{agent-
+dispatch-expect,subagent-start,subagent-start-stamp,subagent-start-
+tuple-async,subagent-stop,subagent-stop-tuple-async}.sh` as real
+subprocesses, with stdin JSON payloads shaped exactly like the ones
+`tests/hooks/test_subagent_start_hook.py`, `test_agent_dispatch_expect.
+py` and `test_subagent_stop_hook.py` already pin as measured Claude
+Code wire shapes. The in-session repeat against a real dispatch, once
+the plugin ships these hooks, is a residual for the RDR close — not
+for this bead.
+
+Unlike MVV run 2, `ledger/<session_id>` is a SHIPPED v1 template
+(`service/src/main/resources/tuples/templates/ledger.yaml`), so no
+`NX_TUPLE_TEMPLATE_DIR` override is needed.
+
+**Tenant identity is the one thing run 2 didn't have to think about.**
+The async projector (`tuple_ledger_project.py`) is hard-pinned to
+tenant `"default"` (no hook mints anything; it only presents whatever
+cross-process data-token lease it finds). `run1.py` therefore issues a
+mint-scoped credential for tenant `"default"` via the real consumer
+surface (`HttpTokenStore.issue_token(..., scope="mint")`, the same call
+`nx service token issue --scope mint` makes against the boot admin
+bearer), then lets the real `nexus.db.data_token.DataTokenManager` mint
+the short-TTL data token AND write the cross-process lease file —
+exactly what `tuple_ledger_project.py` reads, produced by the real
+client code rather than hand-rolled JSON. The harness's own
+verification store uses that SAME data token (measured directly
+against this engine: `AuthFilter`'s Decision 1, Phase E/nexus-
+gmiaf.32.5, means a token's server-side-bound tenant is authoritative
+and the `X-Nexus-Tenant` header is ignored outright — the older
+"wildcard bootstrap token" docstring describes a retired posture, not
+this engine's current behavior, and using the root/admin bearer with a
+`tenant=` header for verification reads silently sees the WRONG
+tenant's rows, zero every time, no error).
+
+## What it verifies
+
+1. **Twenty tuples over ten agent ids** — `subspace_stats("ledger/
+   <sid>").total == 20`, ten agents each carrying both a `start` and a
+   `report` kind.
+2. **The parked `rd`.** One agent's `SubagentStop` pair is deliberately
+   delayed from a background thread; the main thread parks on that
+   agent's report tuple (`HttpTupleStore.rd(..., timeout_s=25)`,
+   *before* the delayed write lands) and LOOPS past the engine's 25s
+   per-call cap (CA 3) rather than sending one longer request — the
+   same "a wait of minutes is a loop of parked calls" contract the
+   orchestration skill's parked-`rd` consumer (`nexus-em75s.20`) uses.
+   Verified at two delays: 3s (found on the first call, woken within
+   ~0.2s of the write) and 28s (found on the SECOND call, after the
+   first 25s park legitimately timed out with nothing to see) — the
+   second run is the genuine evidence that this loops rather than
+   blocking on one oversized request.
+3. **Census agreement, row for row.** `expectations.sh`'s
+   `expectations_census` reads the session's TSV ledger AND (RDR-205
+   Phase 4.1, `nexus-em75s.19`) the space via `nx tuple list --prefix
+   ledger/ --json`; this run compares the ten TSV `AGENT` rows
+   (terminal `REPORTED`) against the space's per-agent kind sets
+   (`{start, report}`) one by one. `nx tuple` ships only in this
+   checkout's own dev build (not yet in the globally installed
+   release), so the script drops a tiny `nx` wrapper
+   (`exec uv run --project <worktree> nx "$@"`) onto `PATH` for the
+   census subprocess only.
+
+The ledger template's retention is 90 days (`retention_seconds:
+7776000` in `ledger.yaml`) — the window the RDR-205 Phase 4.1 census
+comparison is bounded to; irrelevant to this run (session is minutes
+old) but recorded in the JSON summary for completeness.
+
+## Running it
+
+```bash
+scripts/build-gate-jar.sh   # if service/ changed since the last build
+uv run python scripts/spikes/rdr-205-mvv/run1.py
+# exercise the loop explicitly (>25s single-call cap):
+uv run python scripts/spikes/rdr-205-mvv/run1.py --late-delay-s 28 --overall-park-budget-s 40
+```
+
+Exit code is 0 iff every verification held. The JSON summary at
+`--out` (default `scripts/spikes/rdr-205-mvv/last-run1-summary.json`,
+not committed) carries the ten agent ids/types, the parked-`rd`
+timing, the space and TSV census raw output, and the row-for-row
+agreement table.
