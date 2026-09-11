@@ -94,6 +94,18 @@ GRANT UPDATE ON SEQUENCE nexus.topics_id_seq TO ${svcRole};
 
 GRANT USAGE ON SCHEMA staging TO ${svcRole};
 GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA staging TO ${svcRole};
+
+-- nexus-cbo4a batch 13 (fts_matches): the Plans/Memory schema tests probe a
+-- table's fts_vector THROUGH TenantScope.withTenant, i.e. as ${svcRole}, and
+-- the probe is the test-lifecycle function nexus_test.fts_matches (the jOOQ
+-- typed replacement for a condition("... @@ plainto_tsquery(...)") template).
+-- A plain LOGIN role has no USAGE on nexus_test, so the call failed with
+-- "permission denied for schema nexus_test" on the first full-suite run of
+-- that conversion. Grant schema USAGE plus EXECUTE on that ONE function --
+-- not ALL FUNCTIONS: the other nexus_test objects are DDL/grant helpers meant
+-- for the superuser owner connection only (see db.changelog-test-objects.xml).
+GRANT USAGE ON SCHEMA nexus_test TO ${svcRole};
+GRANT EXECUTE ON FUNCTION nexus_test.fts_matches(tsvector, text, text) TO ${svcRole};
         </sql>
         <rollback>
             <!-- Test-only role/grant bootstrap; not automated, same as
