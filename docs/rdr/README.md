@@ -221,6 +221,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-203](rdr-203-composite-nx-answer-run-record.md) | One Composite Run Record: Collapse nx_answer's Three Telemetry Writes into a Single Engine Operation | Architecture | Closed | 2026-09-05 |
 | [RDR-204](rdr-204-embedding-profile-and-collection-authority.md) | Collections Stop Encoding Metadata in Their Names: An Install-Scoped Embedding Profile and catalog_collections as the Authority | Architecture | Closed | 2026-09-06 |
 | [RDR-205](rdr-205-linda-tuple-space-over-postgres.md) | Linda Tuple Space over Postgres: A Coordination Primitive for Agents and Instances | Architecture | Closed | 2026-09-09 |
+| [RDR-206](rdr-206-tuple-claim-renew-and-reply-in-ack.md) | Tuple Space Claim Renewal and Reply-in-Ack: Close the Two Limits RDR-205 Accepted for v1 | Feature | Draft | 2026-09-11 |
 
 > **Scrapped 2026-05-19 (RDR-110-119 arc).** Bundled the storage-substrate split with new abstractions (tuplespace, ORB, host-trust, surfaces-as-tuples, UI fabric); scope discipline failed across nine RDRs and 67 stranded beads. Files preserved as tombstones per the "never delete RDR files" rule. Postmortem: [docs/postmortem/2026-05-16-rdr110-113-remediation-chain.md](../postmortem/2026-05-16-rdr110-113-remediation-chain.md). Active substrate work continues as [RDR-120](rdr-120-storage-substrate-split.md) with an explicit moratorium on co-shipped consumers. Numbers RDR-114 through RDR-117 are unused on `main` (drafted on feature branches that never merged).
 
