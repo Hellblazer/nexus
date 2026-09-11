@@ -136,6 +136,12 @@ class GrantsNexusDiagViewAccessIntegrationTest {
         "nexus.frecency",
         "nexus.relevance_log");
 
+    /** RDR-205's three tuple-space tables (tuples-001-baseline.xml, bead nexus-f1pbh). */
+    private static final List<String> TUPLE_SPACE_TABLES = List.of(
+        "nexus.tuples",
+        "nexus.tuple_claim_log",
+        "nexus.tuple_tenants");
+
     @Test
     void nexusDiagCanSelectTheDiagViewAndEveryUnderlyingTable() throws Exception {
         try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
@@ -208,6 +214,42 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                         + "(not merely classified by AUDIT_ONLY_TABLES), live-schema "
                         + "evidence for the production gc_audit InsufficientPrivilege "
                         + "incident")
+                    .isEmpty();
+            }
+        }
+    }
+
+    /**
+     * bead nexus-f1pbh (2026-09-11): the PITR fork walk rehearsal for
+     * engine-service-v0.1.114 found {@code nexus_diag} holding zero SELECT on the
+     * three RDR-205 tuple-space tables after a full changelog walk. Same class as
+     * the {@code gc_audit} production incident above -- these tables were created
+     * after the estate had already settled into the view era, so
+     * {@code grants-nexus-diag-1}'s legacy branch never granted them, and nothing
+     * downstream re-granted them until {@code grants-nexus-diag-5}. Non-vacuous:
+     * confirmed against the pre-fix tree (reverting grants-nexus-diag-5 reproduces
+     * {@code permission denied for table tuples} for all three).
+     */
+    @Test
+    void nexusDiagCanSelectTupleTables() throws Exception {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+             Connection su = pg.createConnection("")) {
+            provisionAndMigrate(pg, su);
+
+            try (Connection diag = DriverManager.getConnection(
+                    pg.getJdbcUrl(), DIAG_ROLE, DIAG_PASS)) {
+                List<String> denied = new ArrayList<>();
+                for (String table : TUPLE_SPACE_TABLES) {
+                    try {
+                        count(diag, "SELECT count(*) FROM " + table);
+                    } catch (Exception e) {
+                        denied.add(table + ": " + e.getMessage());
+                    }
+                }
+                assertThat(denied)
+                    .as("nexus_diag must hold direct SELECT on nexus.tuples, "
+                        + "nexus.tuple_claim_log and nexus.tuple_tenants after a full "
+                        + "changelog walk (bead nexus-f1pbh)")
                     .isEmpty();
             }
         }

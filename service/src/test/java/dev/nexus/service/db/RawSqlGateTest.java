@@ -911,7 +911,8 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/DenseGateScanBudgetIntegrationTest.java", 7),
         // nexus-cbo4a batch 9 item 0: 13 -> 18 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 18 -> 20 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
-        Map.entry("dev/nexus/service/GrantsNexusDiagViewAccessIntegrationTest.java", 20),
+        // nexus-f1pbh: 20 -> 21 (nexusDiagCanSelectTupleTables's count(diag, "SELECT count(*) FROM " + table) call).
+        Map.entry("dev/nexus/service/GrantsNexusDiagViewAccessIntegrationTest.java", 21),
         // nexus-cbo4a batch 9 item 0: 11 -> 16 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 16 -> 18 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         Map.entry("dev/nexus/service/GrantsPgMonitorTest.java", 18),
@@ -1418,7 +1419,9 @@ class RawSqlGateTest {
      */
     // RDR-205 Phase 1 follow-on (bead nexus-em75s.34): 1129 -> 1134 (+5, the new
     // TupleSweepIndexPlanShapeTest.java entry above).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1134;
+    // RDR-205 P1 follow-on (bead nexus-f1pbh): 1134 -> 1135 (+1,
+    // GrantsNexusDiagViewAccessIntegrationTest.java's nexusDiagCanSelectTupleTables).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 1135;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

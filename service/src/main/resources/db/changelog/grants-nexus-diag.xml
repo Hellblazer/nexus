@@ -446,4 +446,59 @@ $$;
         </rollback>
     </changeSet>
 
+    <changeSet id="grants-nexus-diag-5" author="nexus-f1pbh" runAlways="true">
+        <comment>
+            bead nexus-f1pbh (2026-09-11): the PITR fork walk rehearsal for
+            engine-service-v0.1.114 (T2 conexus ANSWER on nexus-to-conexus-
+            REQUEST-deploy-engine-service-v0.1.114-2026-09-11) found
+            nexus_diag holding zero SELECT on the three RDR-205 tuple-space
+            tables (nexus.tuples, nexus.tuple_claim_log,
+            nexus.tuple_tenants, tuples-001-baseline.xml). Same defect CLASS
+            as -3/-4 above: those tables were created AFTER the estate had
+            already settled into the view era, so grants-nexus-diag-1's
+            legacy branch never granted them (its era guard returns before
+            reaching any bulk GRANT once the view exists — see -1's own
+            comment), and nothing after it re-grants a table outside -3's
+            CHASH_BEARING_TABLES / -4's NEXUS_DIAG_READABLE_TABLES lists.
+            Era-independent by design (matches -4's shape, not -1/-2/-3's
+            view-era dance) — nexus_diag should see the tuple-space tables
+            whether or not the counts view exists, the same posture as
+            install_pings' own no-RLS reasoning
+            (telemetry-014-install-pings.xml's file header,
+            tuples-001-baseline.xml's own comment on tuple_tenants).
+
+            nexus.tuples and nexus.tuple_claim_log ARE RLS-scoped
+            (tenant_isolation policy, tuples-001-baseline.xml changesets 1
+            and 2); nexus_diag's BYPASSRLS attribute (nexus-vounk, see this
+            file's own header) already exempts it from that policy for
+            every other tenant-scoped table it holds SELECT on today (the
+            legacy era's schema-wide grant, before the view narrowed it) —
+            this changeset grants the SAME diagnostic visibility to these
+            three tables specifically, not a new privilege class.
+            nexus.tuple_tenants carries no RLS at all (no tenant_id column
+            — tuples-001-baseline.xml changeset 3's own comment).
+
+            No foreign-owner guard needed (matches -3/-4's own reasoning):
+            nexus_admin creates all three tables via ordinary forward DDL
+            (tuples-001-baseline.xml) and always owns them.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_diag') THEN
+        RAISE NOTICE 'nexus_diag absent — tuple-space table grants skipped (created by pg_provision/DBA; self-heals next boot)';
+        RETURN;
+    END IF;
+
+    GRANT SELECT ON nexus.tuples          TO nexus_diag;
+    GRANT SELECT ON nexus.tuple_claim_log TO nexus_diag;
+    GRANT SELECT ON nexus.tuple_tenants   TO nexus_diag;
+END
+$$;
+        </sql>
+        <rollback>
+            <!-- Revoke is a DBA operation; not automated. -->
+        </rollback>
+    </changeSet>
+
 </databaseChangeLog>
