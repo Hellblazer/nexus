@@ -18,10 +18,13 @@ import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.time.OffsetDateTime;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.NX_ANSWER_RUNS;
+import static dev.nexus.service.jooq.nexus.Tables.NX_ANSWER_STEPS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -153,22 +156,26 @@ class TelemetrySchemaLiquibaseTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, "schema-check-tenant", false);
-            su.createStatement().execute(
-                "INSERT INTO nexus.nx_answer_runs (tenant_id, question, created_at) " +
-                "VALUES ('schema-check-tenant', 'check q', now())");
-            long runId;
-            try (var rs = su.createStatement().executeQuery(
-                    "SELECT id FROM nexus.nx_answer_runs WHERE tenant_id='schema-check-tenant' " +
-                    "AND question='check q' ORDER BY id DESC LIMIT 1")) {
-                assertThat(rs.next()).isTrue();
-                runId = rs.getLong("id");
-            }
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(NX_ANSWER_RUNS, NX_ANSWER_RUNS.TENANT_ID, NX_ANSWER_RUNS.QUESTION, NX_ANSWER_RUNS.CREATED_AT)
+               .values("schema-check-tenant", "check q", OffsetDateTime.now())
+               .execute();
+            Long runId = ctx.select(NX_ANSWER_RUNS.ID)
+                .from(NX_ANSWER_RUNS)
+                .where(NX_ANSWER_RUNS.TENANT_ID.eq("schema-check-tenant")
+                    .and(NX_ANSWER_RUNS.QUESTION.eq("check q")))
+                .orderBy(NX_ANSWER_RUNS.ID.desc())
+                .limit(1)
+                .fetchOne(NX_ANSWER_RUNS.ID);
+            assertThat(runId).isNotNull();
+            long finalRunId = runId;
             org.assertj.core.api.Assertions.assertThatThrownBy(() ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.nx_answer_steps " +
-                    "(run_id, tenant_id, step_index, operator, source, elapsed_ms, ok) " +
-                    "VALUES (" + runId + ", 'schema-check-tenant', 0, 'op', 'not_a_real_source', 0, true)")
-            ).isInstanceOf(java.sql.SQLException.class)
+                ctx.insertInto(NX_ANSWER_STEPS,
+                        NX_ANSWER_STEPS.RUN_ID, NX_ANSWER_STEPS.TENANT_ID, NX_ANSWER_STEPS.STEP_INDEX,
+                        NX_ANSWER_STEPS.OPERATOR, NX_ANSWER_STEPS.SOURCE, NX_ANSWER_STEPS.ELAPSED_MS, NX_ANSWER_STEPS.OK)
+                    .values(finalRunId, "schema-check-tenant", 0, "op", "not_a_real_source", 0, true)
+                    .execute()
+            ).isInstanceOf(org.jooq.exception.DataAccessException.class)
              .hasMessageContaining("nx_answer_steps_source_chk");
         }
     }

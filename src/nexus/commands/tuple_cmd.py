@@ -63,7 +63,15 @@ def tuple_group() -> None:
 @click.option("--dim", "dims", multiple=True, metavar="KEY=VALUE",
               help="A dimension field (repeatable).")
 @click.option("--body", default=None, help="Tuple payload.")
-@click.option("--nonce", default=None, help="Caller-minted nonce, for templates whose id_from includes it.")
+@click.option(
+    "--nonce", default=None,
+    help=(
+        "Caller-minted nonce. REQUIRED for a keys+nonce template (the "
+        "mailbox) -- refused as SchemaViolation without one; omit for a "
+        "keys-only template (the ledger). An id ingredient only, never "
+        "echoed back on a read."
+    ),
+)
 @click.option("--ttl-seconds", "ttl_seconds", type=int, default=None,
               help="Explicit TTL, capped at the template's retention ceiling.")
 def tuple_out_cmd(

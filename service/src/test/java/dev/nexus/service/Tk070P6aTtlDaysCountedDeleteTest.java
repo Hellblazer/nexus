@@ -8,6 +8,11 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.Condition;
+import org.jooq.Field;
+import org.jooq.JSONB;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -20,12 +25,14 @@ import org.w3c.dom.NodeList;
 
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.sql.SQLWarning;
 import java.sql.Statement;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
+import static dev.nexus.service.jooq.nexus.Tables.PLANS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -66,6 +73,12 @@ class Tk070P6aTtlDaysCountedDeleteTest {
     private static final String TENANT_A = "p6a-direct-a";
     private static final String TENANT_B = "p6a-direct-b";
 
+    /** The renamed-back {@code ttl} column, schema-agnostic: at the point every
+     *  {@code count*Rows}/seed call below touches it, the live column is named
+     *  {@code ttl} (test-only relaxation), never the HEAD {@code ttl_days} the
+     *  generated {@code MEMORY.TTL_DAYS}/{@code PLANS.TTL_DAYS} fields carry. */
+    private static final Field<Integer> TTL = DSL.field(DSL.name("ttl"), Integer.class);
+
     PostgreSQLContainer<?> pg;
 
     @BeforeAll
@@ -80,6 +93,11 @@ class Tk070P6aTtlDaysCountedDeleteTest {
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             new Liquibase("db/changelog/db.changelog-master.xml",
                 new ClassLoaderResourceAccessor(), db).update(new Contexts());
+            // nexus_test.* (dropConstraint below) isn't installed by this file's own
+            // migration path (unlike applyProductSchema) -- install it via the SAME
+            // connection/role that just ran the product changelog, so whichever role
+            // owns databasechangelog stays consistent (nexus-cbo4a batch 12 finding).
+            PgContainerHelper.installTestObjects(su);
         }
     }
 
@@ -100,10 +118,10 @@ class Tk070P6aTtlDaysCountedDeleteTest {
             // forbids it) under the ORIGINAL column name the changeset's own
             // SQL text expects (`RENAME COLUMN ttl TO ttl_days` requires the
             // column to currently be named `ttl`).
-            su.createStatement().execute(
-                "ALTER TABLE nexus.memory DROP CONSTRAINT memory_ttl_days_positive_chk");
-            su.createStatement().execute(
-                "ALTER TABLE nexus.memory RENAME COLUMN ttl_days TO ttl");
+            PgContainerHelper.dropConstraint(su, MEMORY, "memory_ttl_days_positive_chk");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .alterTable(MEMORY).renameColumn(MEMORY.TTL_DAYS).to(DSL.name("ttl"))
+                .execute();
 
             // Two ttl=0 rows, spanning two tenants (proves the RLS toggle
             // reaches every tenant, not just one).
@@ -114,7 +132,7 @@ class Tk070P6aTtlDaysCountedDeleteTest {
             seedMemoryRow(su, TENANT_A, "p6a-proj", "permanent-a", null);
             seedMemoryRow(su, TENANT_A, "p6a-proj", "expiring-a", 30);
 
-            assertThat(countMemoryRows(su, "ttl = 0"))
+            assertThat(countMemoryRows(su, TTL.eq(0)))
                 .as("ground truth before re-running memory-003-1's SQL")
                 .isEqualTo(2);
 
@@ -133,12 +151,12 @@ class Tk070P6aTtlDaysCountedDeleteTest {
                 .anyMatch(n -> n.contains("deleted 2 nexus.memory row(s) with ttl = 0"));
 
             // ── Surviving-row ground truth ──
-            assertThat(countMemoryRows(su, "title = 'zero-a'")).isEqualTo(0);
-            assertThat(countMemoryRows(su, "title = 'zero-b'")).isEqualTo(0);
-            assertThat(countMemoryRows(su, "title = 'permanent-a'"))
+            assertThat(countMemoryRows(su, MEMORY.TITLE.eq("zero-a"))).isEqualTo(0);
+            assertThat(countMemoryRows(su, MEMORY.TITLE.eq("zero-b"))).isEqualTo(0);
+            assertThat(countMemoryRows(su, MEMORY.TITLE.eq("permanent-a")))
                 .as("a NULL-ttl (permanent) decoy must survive untouched")
                 .isEqualTo(1);
-            assertThat(countMemoryRows(su, "title = 'expiring-a'"))
+            assertThat(countMemoryRows(su, MEMORY.TITLE.eq("expiring-a")))
                 .as("a positive-ttl decoy must survive untouched")
                 .isEqualTo(1);
 
@@ -154,17 +172,17 @@ class Tk070P6aTtlDaysCountedDeleteTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
 
-            su.createStatement().execute(
-                "ALTER TABLE nexus.plans DROP CONSTRAINT plans_ttl_days_positive_chk");
-            su.createStatement().execute(
-                "ALTER TABLE nexus.plans RENAME COLUMN ttl_days TO ttl");
+            PgContainerHelper.dropConstraint(su, PLANS, "plans_ttl_days_positive_chk");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .alterTable(PLANS).renameColumn(PLANS.TTL_DAYS).to(DSL.name("ttl"))
+                .execute();
 
             seedPlanRow(su, TENANT_A, "p6a-proj", "zero-a query", 0);
             seedPlanRow(su, TENANT_B, "p6a-proj", "zero-b query", 0);
             seedPlanRow(su, TENANT_A, "p6a-proj", "permanent-a query", null);
             seedPlanRow(su, TENANT_A, "p6a-proj", "expiring-a query", 30);
 
-            assertThat(countPlanRows(su, "ttl = 0"))
+            assertThat(countPlanRows(su, TTL.eq(0)))
                 .as("ground truth before re-running plans-003-1's SQL")
                 .isEqualTo(2);
 
@@ -182,12 +200,12 @@ class Tk070P6aTtlDaysCountedDeleteTest {
                 .as("the NOTICE must report the exact row count, not a vague message")
                 .anyMatch(n -> n.contains("deleted 2 nexus.plans row(s) with ttl = 0"));
 
-            assertThat(countPlanRows(su, "query = 'zero-a query'")).isEqualTo(0);
-            assertThat(countPlanRows(su, "query = 'zero-b query'")).isEqualTo(0);
-            assertThat(countPlanRows(su, "query = 'permanent-a query'"))
+            assertThat(countPlanRows(su, PLANS.QUERY.eq("zero-a query"))).isEqualTo(0);
+            assertThat(countPlanRows(su, PLANS.QUERY.eq("zero-b query"))).isEqualTo(0);
+            assertThat(countPlanRows(su, PLANS.QUERY.eq("permanent-a query")))
                 .as("a NULL-ttl (permanent) decoy must survive untouched")
                 .isEqualTo(1);
-            assertThat(countPlanRows(su, "query = 'expiring-a query'"))
+            assertThat(countPlanRows(su, PLANS.QUERY.eq("expiring-a query")))
                 .as("a positive-ttl decoy must survive untouched")
                 .isEqualTo(1);
 
@@ -200,67 +218,44 @@ class Tk070P6aTtlDaysCountedDeleteTest {
     // ── Seeding helpers ───────────────────────────────────────────────────
 
     private static void seedMemoryRow(Connection c, String tenant, String project,
-                                       String title, Integer ttl) throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.memory (tenant_id, project, title, content, timestamp, ttl) "
-            + "VALUES (?, ?, ?, 'content', now(), ?)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, project);
-            ps.setString(3, title);
-            if (ttl == null) {
-                ps.setNull(4, java.sql.Types.INTEGER);
-            } else {
-                ps.setInt(4, ttl);
-            }
-            ps.executeUpdate();
-        }
+                                       String title, Integer ttl) {
+        // TTL, not MEMORY.TTL_DAYS: the live column is named "ttl" here (test-only
+        // relaxation, see this file's own javadoc); every other column matches the
+        // generated HEAD shape, so those stay typed TableFields.
+        DSL.using(c, SQLDialect.POSTGRES)
+            .insertInto(MEMORY, MEMORY.TENANT_ID, MEMORY.PROJECT, MEMORY.TITLE, MEMORY.CONTENT,
+                MEMORY.TIMESTAMP, TTL)
+            .values(tenant, project, title, "content", OffsetDateTime.now(), ttl)
+            .execute();
     }
 
     private static void seedPlanRow(Connection c, String tenant, String project,
-                                     String query, Integer ttl) throws Exception {
+                                     String query, Integer ttl) {
         // verb: plans.verb is NOT NULL (hygiene-001-11, nexus-tk070.p6a
         // follow-on) at the time this seed runs -- the ttl_days->ttl rename
         // and CHECK drop above are historical-shape probes, they don't touch
         // the verb column's constraint.
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.plans (tenant_id, project, query, plan_json, created_at, ttl, verb) "
-            + "VALUES (?, ?, ?, '{}'::jsonb, now(), ?, 'research')")) {
-            ps.setString(1, tenant);
-            ps.setString(2, project);
-            ps.setString(3, query);
-            if (ttl == null) {
-                ps.setNull(4, java.sql.Types.INTEGER);
-            } else {
-                ps.setInt(4, ttl);
-            }
-            ps.executeUpdate();
-        }
+        DSL.using(c, SQLDialect.POSTGRES)
+            .insertInto(PLANS, PLANS.TENANT_ID, PLANS.PROJECT, PLANS.QUERY, PLANS.PLAN_JSON,
+                PLANS.CREATED_AT, TTL, PLANS.VERB)
+            .values(tenant, project, query, JSONB.valueOf("{}"), OffsetDateTime.now(), ttl, "research")
+            .execute();
     }
 
-    private static int countMemoryRows(Connection c, String whereClause) throws Exception {
-        return count(c, "SELECT count(*) FROM nexus.memory WHERE " + whereClause);
+    private static int countMemoryRows(Connection c, Condition where) {
+        return DSL.using(c, SQLDialect.POSTGRES).fetchCount(MEMORY, where);
     }
 
-    private static int countPlanRows(Connection c, String whereClause) throws Exception {
-        return count(c, "SELECT count(*) FROM nexus.plans WHERE " + whereClause);
+    private static int countPlanRows(Connection c, Condition where) {
+        return DSL.using(c, SQLDialect.POSTGRES).fetchCount(PLANS, where);
     }
 
-    private static int count(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            rs.next();
-            return rs.getInt(1);
-        }
+    private static boolean columnExists(Connection c, String table, String column) {
+        return PgCatalogProbes.columnExists(DSL.using(c, SQLDialect.POSTGRES), "nexus", table, column);
     }
 
-    private static boolean columnExists(Connection c, String table, String column) throws Exception {
-        return count(c, "SELECT count(*) FROM information_schema.columns "
-            + "WHERE table_schema = 'nexus' AND table_name = '" + table + "' "
-            + "AND column_name = '" + column + "'") == 1;
-    }
-
-    private static boolean checkConstraintExists(Connection c, String constraintName) throws Exception {
-        return count(c, "SELECT count(*) FROM pg_constraint WHERE conname = '"
-            + constraintName + "' AND contype = 'c'") == 1;
+    private static boolean checkConstraintExists(Connection c, String constraintName) {
+        return PgCatalogProbes.constraintExists(DSL.using(c, SQLDialect.POSTGRES), constraintName);
     }
 
     // ── Shared extraction/notice helpers (mirrors

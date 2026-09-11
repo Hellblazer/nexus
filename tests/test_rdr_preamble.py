@@ -20,6 +20,7 @@ Invocation convention mirrors test_rdr_lint.py:
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -150,6 +151,46 @@ def _seed_rdr_t2(db: T2Database, repo_name: str, rdr_id: str, **fields) -> None:
         title=rdr_id,
         content="\n".join(content_lines),
     )
+
+
+# ---------------------------------------------------------------------------
+# _preamble_resolve_repo — repo_name from a linked worktree (nexus-w5gma)
+# ---------------------------------------------------------------------------
+
+
+class TestPreambleResolveRepoInWorktree:
+    """``git rev-parse --show-toplevel`` returns the WORKTREE's own root
+    when run from a linked worktree, so naively taking its basename prints
+    the worktree directory's name as the repo name. repo_name must resolve
+    via the git common dir instead, which is shared by every worktree and
+    the primary checkout alike."""
+
+    def test_repo_name_is_the_primary_checkout_not_the_worktree_dir(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        primary = tmp_path / "nexus"
+        primary.mkdir()
+        subprocess.run(["git", "init", str(primary)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(primary), "commit", "--allow-empty", "-m", "init"],
+            check=True, capture_output=True,
+            env={**os.environ,
+                 "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+        )
+        worktree = tmp_path / "some-agent-worktree-dir"
+        subprocess.run(
+            ["git", "-C", str(primary), "worktree", "add", str(worktree)],
+            check=True, capture_output=True,
+        )
+
+        monkeypatch.chdir(worktree)
+        from nexus.commands.rdr import _preamble_resolve_repo
+        repo_root, repo_name = _preamble_resolve_repo()
+
+        assert repo_root == str(worktree)
+        assert repo_name == "nexus"
+        assert repo_name != worktree.name
 
 
 # ---------------------------------------------------------------------------
@@ -1473,6 +1514,93 @@ class TestPhaseReviewGate:
         assert "nexus-abc1" in result.output
         assert "nexus-xyz2" in result.output
 
+    #: The repo's own docs/rdr — used to run the gate against REAL RDR
+    #: files (nexus-w5gma), not synthetic fixtures, so the fix is proven
+    #: against the exact documents that surfaced the bug.
+    _REAL_RDR_DIR = Path(__file__).parent.parent / "docs" / "rdr"
+
+    def test_rdr_205_implementation_plan_phase_headings_pass1(self, rdr_env):
+        """RDR-205's real file: §Approach is prose, phases live under
+        §Implementation Plan as `### Phase N` / `#### Step N` headings —
+        the RDR template's own placement (nexus-w5gma). Phase 1 has six
+        Step headings, matching Sam's by-hand cross-walk recorded in T2
+        nexus/phase1-close-nexus-em75s-2026-09-10."""
+        src = self._REAL_RDR_DIR / "rdr-205-linda-tuple-space-over-postgres.md"
+        shutil.copy(src, rdr_env["rdr_dir"] / src.name)
+        result = _runner().invoke(
+            rdr,
+            ["preamble", "phase-review-gate", "--", "205", "--phase", "1"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "ERROR" not in result.output
+        assert "§Approach Cross-Walk" in result.output
+        for i in range(1, 7):
+            assert f"Item{i}" in result.output
+        assert "Settle the pooler fact" in result.output
+        assert "Changesets" in result.output
+        assert "Registry" in result.output
+        assert "Repository and handler" in result.output
+        assert "Sweep" in result.output
+        assert "Local spike" in result.output
+
+    def test_rdr_205_implementation_plan_phase_headings_pass2(self, rdr_env):
+        """Pass 2 cross-walk against RDR-205's real Phase 1 six steps."""
+        src = self._REAL_RDR_DIR / "rdr-205-linda-tuple-space-over-postgres.md"
+        shutil.copy(src, rdr_env["rdr_dir"] / src.name)
+        evidence = ",".join(f"Item{i}=nexus-em75s.{i}" for i in range(1, 7))
+        result = _runner().invoke(
+            rdr,
+            [
+                "preamble", "phase-review-gate", "--", "205", "--phase", "1",
+                "--evidence", evidence,
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "APPROACH CROSS-WALK PASSED" in result.output
+        assert "nexus-em75s.1" in result.output
+        assert "nexus-em75s.6" in result.output
+
+    def test_rdr_204_implementation_plan_plain_numbered_phase(self, rdr_env):
+        """RDR-204's real file: §Approach is prose and its Phase 1 is a
+        plain numbered list (no bold label, no sub-heading) directly under
+        `### Phase 1` — the other real-world shape this bug covered."""
+        src = self._REAL_RDR_DIR / "rdr-204-embedding-profile-and-collection-authority.md"
+        shutil.copy(src, rdr_env["rdr_dir"] / src.name)
+        result = _runner().invoke(
+            rdr,
+            ["preamble", "phase-review-gate", "--", "204", "--phase", "1"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "ERROR" not in result.output
+        assert "§Approach Cross-Walk" in result.output
+        for i in range(1, 7):
+            assert f"Item{i}" in result.output
+
+    def test_neither_layout_still_reports_no_items_parsed(self, rdr_env):
+        """nexus-moht0 non-vacuity: an RDR whose §Approach is prose AND
+        whose §Implementation Plan carries no `### Phase N` structure at
+        all still refuses loudly rather than silently reporting zero
+        items as a pass."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-140-neither-layout.md",
+            {"title": "Neither Layout", "status": "accepted",
+             "type": "architecture", "priority": "P2"},
+            body=(
+                "## Proposed Solution\n\n### Approach\n\n"
+                "Just prose, no numbered items, no bold phase blocks.\n\n"
+                "## Implementation Plan\n\n"
+                "Also just prose here. No Phase headings at all.\n"
+            ),
+        )
+        result = _runner().invoke(
+            rdr,
+            ["preamble", "phase-review-gate", "--", "140", "--phase", "1"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "no items parsed" in result.output
+        assert "Implementation Plan" in result.output
+
 
 class TestApproachSectionExtractor:
     """Unit tests for _prg_extract_approach_section synonym recognition (nexus-2pw1x)."""
@@ -1763,6 +1891,129 @@ class TestPhaseBlockParser:
         from nexus.commands.rdr import _prg_parse_phase_block_items
         items = _prg_parse_phase_block_items(self._APPROACH, phase="Phase 1")
         assert [n for n, _, _ in items] == [1, 2]
+
+
+class TestImplementationPlanSectionExtractor:
+    """Unit tests for _prg_extract_implementation_plan_section (nexus-w5gma)."""
+
+    def test_extracts_the_section_after_a_separate_approach(self):
+        from nexus.commands.rdr import _prg_extract_implementation_plan_section
+        text = (
+            "## Proposed Solution\n\n### Approach\n\nProse, no items.\n\n"
+            "### Technical Design\n\nMore prose.\n\n"
+            "## Implementation Plan\n\n### Phase 1: Foo\n\nbody line.\n\n"
+            "## Test Plan\n\nirrelevant.\n"
+        )
+        section = _prg_extract_implementation_plan_section(text)
+        assert "### Phase 1: Foo" in section
+        assert "body line." in section
+        assert "Test Plan" not in section
+        # Independent of the earliest-match Approach extraction: the
+        # Approach prose itself must not leak into this section.
+        assert "no items" not in section
+
+    def test_empty_when_no_implementation_plan_heading(self):
+        from nexus.commands.rdr import _prg_extract_implementation_plan_section
+        text = "## Proposed Solution\n\n### Approach\n\nProse only.\n"
+        assert _prg_extract_implementation_plan_section(text) == ""
+
+
+class TestPlanPhaseHeadingParser:
+    """Unit tests for _prg_parse_plan_phase_items (nexus-w5gma).
+
+    Covers the RDR template's own §Implementation Plan placement —
+    ``### Phase N: title`` headings, which neither the numbered-bold-item
+    parser nor the ``**Phase N:**`` bold-block parser recognises.
+    """
+
+    #: RDR-205 shape: a step is its own heading, one level under Phase.
+    _HEADING_STEPS = (
+        "### Phase 1: Engine\n\n"
+        "#### Step 1: Settle the pooler fact\n\n"
+        "Some prose about the pooler.\n\n"
+        "#### Step 2: Changesets\n\n"
+        "Some prose about changesets.\n\n"
+        "### Phase 2: Client\n\n"
+        "#### Step 1: `HttpTupleStore`\n\n"
+        "Client prose.\n"
+    )
+
+    #: RDR-204 shape: a plain numbered list directly under the Phase
+    #: heading, no bold label, no sub-heading.
+    _PLAIN_NUMBERED = (
+        "### Phase 1: Schema and backfill\n\n"
+        "1. One Liquibase changeset on the hygiene shape.\n"
+        "2. Engine boot writes the profile.\n"
+        "3. Delete the seven stub inserts.\n\n"
+        "### Phase 2: Engine reads the row\n\n"
+        "1. CollectionRegistry caches the row.\n"
+    )
+
+    #: A phase with no internal structure at all — prose only.
+    _PROSE_ONLY = (
+        "### Phase 4: Consumer one, the ledger\n\n"
+        "Prose describing the whole phase with no sub-list and no\n"
+        "sub-headings whatsoever.\n\n"
+        "### Phase 5: Consumer two\n\n"
+        "More prose.\n"
+    )
+
+    def test_heading_steps_enumerate_requested_phase(self):
+        from nexus.commands.rdr import _prg_parse_plan_phase_items
+        items = _prg_parse_plan_phase_items(self._HEADING_STEPS, phase="1")
+        assert [n for n, _, _ in items] == [1, 2]
+        assert items[0][1] == "Phase 1: Step 1: Settle the pooler fact"
+        assert "pooler" in items[0][2]
+        assert items[1][1] == "Phase 1: Step 2: Changesets"
+
+    def test_heading_steps_second_phase_restarts_step_numbering_as_items(self):
+        from nexus.commands.rdr import _prg_parse_plan_phase_items
+        items = _prg_parse_plan_phase_items(self._HEADING_STEPS, phase="2")
+        assert [n for n, _, _ in items] == [1]
+        assert "HttpTupleStore" in items[0][1]
+
+    def test_heading_steps_no_phase_enumerates_all_sequentially(self):
+        from nexus.commands.rdr import _prg_parse_plan_phase_items
+        items = _prg_parse_plan_phase_items(self._HEADING_STEPS, phase=None)
+        assert [n for n, _, _ in items] == [1, 2, 3]
+
+    def test_plain_numbered_list_under_phase_heading(self):
+        from nexus.commands.rdr import _prg_parse_plan_phase_items
+        items = _prg_parse_plan_phase_items(self._PLAIN_NUMBERED, phase="1")
+        assert [n for n, _, _ in items] == [1, 2, 3]
+        assert items[0][2].startswith("One Liquibase changeset")
+        assert items[2][2].startswith("Delete the seven stub inserts")
+
+    def test_plain_numbered_list_second_phase(self):
+        from nexus.commands.rdr import _prg_parse_plan_phase_items
+        items = _prg_parse_plan_phase_items(self._PLAIN_NUMBERED, phase="2")
+        assert [n for n, _, _ in items] == [1]
+        assert "CollectionRegistry" in items[0][2]
+
+    def test_prose_only_phase_is_still_one_item_not_zero(self):
+        """nexus-moht0 non-vacuity: a phase with real content but no
+        internal structure enumerates as exactly one cross-walkable item,
+        never silently zero."""
+        from nexus.commands.rdr import _prg_parse_plan_phase_items
+        items = _prg_parse_plan_phase_items(self._PROSE_ONLY, phase="4")
+        assert [n for n, _, _ in items] == [1]
+        assert items[0][1] == "Phase 4: Consumer one, the ledger"
+        assert "Prose describing" in items[0][2]
+
+    def test_prose_only_no_phase_enumerates_one_item_per_phase(self):
+        from nexus.commands.rdr import _prg_parse_plan_phase_items
+        items = _prg_parse_plan_phase_items(self._PROSE_ONLY, phase=None)
+        assert [n for n, _, _ in items] == [1, 2]
+
+    def test_empty_when_no_phase_heading_present(self):
+        from nexus.commands.rdr import _prg_parse_plan_phase_items
+        items = _prg_parse_plan_phase_items("Just prose, no phases.\n", phase="1")
+        assert items == []
+
+    def test_empty_when_requested_phase_does_not_exist(self):
+        from nexus.commands.rdr import _prg_parse_plan_phase_items
+        items = _prg_parse_plan_phase_items(self._HEADING_STEPS, phase="99")
+        assert items == []
 
 
 # ---------------------------------------------------------------------------

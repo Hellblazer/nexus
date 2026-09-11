@@ -28,7 +28,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -37,6 +36,8 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
+import static dev.nexus.service.jooq.nexus.Tables.SESSION_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -219,15 +220,13 @@ class AuthFilterTest {
 
     private void insertSessionToken(Connection su, String raw, String tenant,
                                     String sessionId, OffsetDateTime expiresAt) throws Exception {
-        try (var ps = su.prepareStatement(
-            "INSERT INTO nexus.session_tokens (session_token_hash, tenant_id, session_id, expires_at) "
-            + "VALUES (?, ?, ?, ?) ON CONFLICT (session_token_hash) DO NOTHING")) {
-            ps.setString(1, TokenHashing.sha256Hex(raw));
-            ps.setString(2, tenant);
-            ps.setString(3, sessionId);
-            ps.setObject(4, expiresAt);
-            ps.executeUpdate();
-        }
+        DSL.using(su, SQLDialect.POSTGRES)
+            .insertInto(SESSION_TOKENS)
+            .columns(SESSION_TOKENS.SESSION_TOKEN_HASH, SESSION_TOKENS.TENANT_ID,
+                SESSION_TOKENS.SESSION_ID, SESSION_TOKENS.EXPIRES_AT)
+            .values(TokenHashing.sha256Hex(raw), tenant, sessionId, expiresAt)
+            .onConflictDoNothing()
+            .execute();
     }
 
     // ── HTTP-level filter behavior ────────────────────────────────────────────
@@ -541,8 +540,11 @@ class AuthFilterTest {
         assertThat(c.resolveTenant(h)).contains("tenant-a");  // now cached
         // Revoke in DB, then invalidate the cache entry — must be empty immediately.
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute(
-                "UPDATE nexus.service_tokens SET revoked_at = now() WHERE token_hash = '" + h + "'");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .update(SERVICE_TOKENS)
+                .set(SERVICE_TOKENS.REVOKED_AT, DSL.currentOffsetDateTime())
+                .where(SERVICE_TOKENS.TOKEN_HASH.eq(h))
+                .execute();
         }
         c.invalidate(h);
         assertThat(c.resolveTenant(h)).as("invalidate must take effect immediately").isEmpty();
@@ -560,8 +562,11 @@ class AuthFilterTest {
         }
         assertThat(c.resolveTenant(h)).contains("tenant-a");  // cached at T0
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute(
-                "UPDATE nexus.service_tokens SET revoked_at = now() WHERE token_hash = '" + h + "'");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .update(SERVICE_TOKENS)
+                .set(SERVICE_TOKENS.REVOKED_AT, DSL.currentOffsetDateTime())
+                .where(SERVICE_TOKENS.TOKEN_HASH.eq(h))
+                .execute();
         }
         clock.set(T0.plusSeconds(29));   // within TTL — still served (stale)
         assertThat(c.resolveTenant(h)).as("within TTL the revoked token still resolves").contains("tenant-a");
@@ -613,10 +618,11 @@ class AuthFilterTest {
         // Idempotent: a second call does not error or duplicate.
         store.ensureBootstrapToken(raw, defaultTenant);
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) AS c FROM nexus.service_tokens WHERE token_hash = '" + h + "'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getLong("c")).as("bootstrap seed must be idempotent (one row)").isEqualTo(1L);
+            long count = DSL.using(su, SQLDialect.POSTGRES)
+                .selectCount().from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TOKEN_HASH.eq(h))
+                .fetchOne(0, long.class);
+            assertThat(count).as("bootstrap seed must be idempotent (one row)").isEqualTo(1L);
         }
     }
 

@@ -118,8 +118,8 @@ def _write_config_yml(config_dir: Path, credentials: dict[str, str]) -> None:
     actual on-disk shape (nexus-0zsmg) -- verified against a live
     ``~/.config/nexus/config.yml``: a zero-indent ``credentials:`` block
     with each key at a fixed 2-space indent, bare (unquoted) scalar
-    values. This is the shape ``_read_persisted_service_url`` is a narrow
-    mirror of, not a general YAML writer.
+    values. This is the shape ``_endpoint_resolve.read_config_yml_credentials``
+    is a narrow mirror of, not a general YAML writer.
     """
     config_dir.mkdir(parents=True, exist_ok=True)
     lines = ["credentials:"]
@@ -600,7 +600,7 @@ def test_engine_down_is_logged_and_exits_zero_fast(tmp_path: Path) -> None:
     elapsed = time.monotonic() - start
 
     assert proc.returncode == 0, proc.stderr
-    assert elapsed < 10.0, f"engine-down path took {elapsed:.2f}s -- should be bounded by the curl timeout"
+    assert elapsed < 10.0, f"engine-down path took {elapsed:.2f}s -- should be bounded by the transport timeout"
     log = _log_path(tmp_path / "state")
     assert "SKIP kind=start" in log.read_text()
 
@@ -618,6 +618,234 @@ def test_incomplete_payload_skips_without_calling_the_engine(tmp_path: Path, moc
     )
     assert proc.returncode == 0, proc.stderr
     assert engine.requests == []
+
+
+def test_report_kind_with_no_agent_id_logs_nothing(tmp_path: Path, mock_engine) -> None:
+    """nexus-aginu: SubagentStop fires for stops this ledger has no
+    tracked agent for (measured live on this box at ~250 occurrences per
+    session, every one with a present, valid session_id). Nothing is
+    ever lost by this -- the real agent's own report, when one exists,
+    is keyed on ITS OWN agent_id and lands as a separate invocation --
+    so this case must project NOTHING, including no diagnostic log
+    line: at that volume a repeated, non-actionable line is pure noise,
+    unlike every other incomplete-payload case, which keeps its line."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    proc = _run(
+        "report",
+        tmp_path=tmp_path,
+        stdin=json.dumps({"session_id": SESSION_ID}),  # valid session_id, no agent_id
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert engine.requests == []
+    log = _log_path(tmp_path / "state")
+    assert not log.exists(), f"expected no log line for a report with no agent_id, got: {log.read_text()}"
+
+
+def test_start_kind_with_no_agent_id_still_logs(tmp_path: Path, mock_engine) -> None:
+    """Regression guard: the report-only no-agent_id silence above must
+    not spread to the start path -- a start payload missing agent_id
+    still SKIPs WITH a logged reason, exactly as before."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    proc = _run(
+        "start",
+        tmp_path=tmp_path,
+        stdin=json.dumps({"session_id": SESSION_ID}),  # no agent_id
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert engine.requests == []
+    log = _log_path(tmp_path / "state")
+    assert "SKIP kind=start" in log.read_text()
+
+
+def test_post_never_follows_a_redirect(tmp_path: Path, mock_engine) -> None:
+    """nexus-em75s.42 review finding: the engine URL is fixed and
+    internal, so a redirect response must never be followed -- following
+    one would resend the Authorization header to whatever host the
+    redirect names. The attacker/second server must see zero requests;
+    the 3xx itself is logged as a plain HTTP status, not silently
+    swallowed."""
+    import importlib.util
+    from http.server import BaseHTTPRequestHandler
+
+    attacker = mock_engine(status=200)
+
+    spec = importlib.util.spec_from_file_location("tuple_ledger_project_redirect", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class _Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a: object) -> None:
+            pass
+
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(length) if length else b""
+            self.send_response(302)
+            self.send_header("Location", attacker.base_url + "/v1/tuples/out")
+            self.end_headers()
+
+    from http.server import ThreadingHTTPServer
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    import threading
+
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address[:2]
+        with pytest.raises(module._Skip, match=r"engine returned HTTP 302"):
+            module._post_via_urllib(
+                f"http://{host}:{port}", "tok",
+                {"subspace": "ledger/x", "keys": {"agent_id": "a", "kind": "start"}, "dims": {}},
+                is_local_supervisor=True,
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert attacker.requests == [], "redirect must never be followed"
+
+
+def test_post_ignores_ambient_proxy_env_for_a_local_supervisor_endpoint(
+    tmp_path: Path, mock_engine, monkeypatch,
+) -> None:
+    """nexus-em75s.42 review finding, scoped by the fix round: a LOCAL
+    supervisor endpoint (``is_local_supervisor=True``) must never route
+    through an ambient http_proxy/https_proxy -- point the proxy env at
+    a port nothing listens on and confirm the POST still reaches the
+    real engine directly."""
+    import importlib.util
+    import socket
+
+    dead_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    dead_sock.bind(("127.0.0.1", 0))
+    dead_port = dead_sock.getsockname()[1]
+    dead_sock.close()
+
+    monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{dead_port}")
+    monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{dead_port}")
+
+    engine = mock_engine(status=200)
+    spec = importlib.util.spec_from_file_location("tuple_ledger_project_proxy", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    module._post_via_urllib(
+        engine.base_url, "tok",
+        {"subspace": "ledger/x", "keys": {"agent_id": "a", "kind": "start"}, "dims": {}},
+        is_local_supervisor=True,
+    )
+    assert len(engine.requests) == 1
+
+
+def test_post_honours_ambient_proxy_env_for_a_non_local_endpoint(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Fix round on nexus-aginu/nexus-em75s.42 review finding 5: a
+    MANAGED (non-local-supervisor) endpoint must honour an ambient
+    http_proxy/https_proxy, matching t2_prefix_scan.py and
+    routing/_lib.py's plain ``urlopen`` -- otherwise a corporate-proxied
+    cloud-mode box loses ledger writes silently while the sibling hooks
+    keep working. Point the request at a dead port nothing listens on
+    directly, but stand up a real HTTP server as the proxy: the POST
+    must succeed (via the proxy), proving the ambient proxy env was
+    actually used rather than bypassed."""
+    proxied: list[str] = []
+
+    class _ProxyHandler(BaseHTTPRequestHandler):
+        def log_message(self, *a: object) -> None:
+            pass
+
+        def do_POST(self) -> None:  # noqa: N802
+            proxied.append(self.path)
+            length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(length) if length else b""
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    proxy_server = ThreadingHTTPServer(("127.0.0.1", 0), _ProxyHandler)
+    proxy_host, proxy_port = proxy_server.server_address[:2]
+    proxy_thread = threading.Thread(target=proxy_server.serve_forever, daemon=True)
+    proxy_thread.start()
+
+    import socket
+
+    dead_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    dead_sock.bind(("127.0.0.1", 0))
+    dead_host, dead_port = dead_sock.getsockname()[:2]
+    dead_sock.close()
+
+    monkeypatch.setenv("http_proxy", f"http://{proxy_host}:{proxy_port}")
+    monkeypatch.setenv("HTTP_PROXY", f"http://{proxy_host}:{proxy_port}")
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "tuple_ledger_project_proxy_honoured", SCRIPT,
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        module._post_via_urllib(
+            f"http://{dead_host}:{dead_port}", "tok",
+            {"subspace": "ledger/x", "keys": {"agent_id": "a", "kind": "start"}, "dims": {}},
+            is_local_supervisor=False,
+        )
+    finally:
+        proxy_server.shutdown()
+        proxy_server.server_close()
+
+    assert len(proxied) == 1, "the request must have gone through the proxy, not directly"
+    assert f":{dead_port}/v1/tuples/out" in proxied[0], (
+        f"proxy must have received the absolute-form request URI naming the dead port, got {proxied[0]!r}"
+    )
+
+
+def test_post_bounds_the_whole_call_against_a_listening_but_never_accepting_server(
+    tmp_path: Path,
+) -> None:
+    """nexus-em75s.42 review finding: urlopen's own ``timeout`` bounds
+    each individual socket operation, not the whole call -- a server
+    that completes the TCP handshake (listen(), never accept()) could
+    otherwise keep the call alive past any single recv's timeout. The
+    whole POST must still return within roughly _POST_TIMEOUT_S."""
+    import importlib.util
+    import socket
+    import time as _time
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+    host, port = sock.getsockname()[:2]
+
+    spec = importlib.util.spec_from_file_location("tuple_ledger_project_deadline", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        start = _time.monotonic()
+        with pytest.raises(module._Skip):
+            module._post_via_urllib(
+                f"http://{host}:{port}", "tok",
+                {"subspace": "ledger/x", "keys": {"agent_id": "a", "kind": "start"}, "dims": {}},
+                is_local_supervisor=True,
+            )
+        elapsed = _time.monotonic() - start
+        assert elapsed < module._POST_TIMEOUT_S + 2.0, (
+            f"whole-call deadline not enforced: took {elapsed:.2f}s"
+        )
+    finally:
+        sock.close()
 
 
 def test_never_mints_never_imports_nexus_package() -> None:
@@ -674,6 +902,7 @@ def test_bearer_never_appears_in_a_spawned_subprocess(tmp_path: Path, mock_engin
     module._post_via_urllib(
         engine.base_url, "never-in-argv",
         {"subspace": "ledger/x", "keys": {"agent_id": "a", "kind": "start"}, "dims": {}},
+        is_local_supervisor=True,
     )
 
     assert len(engine.requests) == 1

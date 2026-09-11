@@ -10,7 +10,9 @@ import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.DimTables;
+import dev.nexus.service.jooq.binding.Vector;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -25,9 +27,11 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -102,16 +106,14 @@ class CatalogHandlerSweepAndChashesManyTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, TENANT, false);
-            String zeroVec = "[" + "0,".repeat(383) + "0]";
-            var ps = su.prepareStatement(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ")"
-                + " VALUES (?, ?, ?, ?, ?::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
-            ps.setString(1, TENANT);
-            ps.setString(2, collection);
-            ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
-            ps.setString(4, "seed text " + hexChash);
-            ps.setString(5, zeroVec);
-            ps.executeUpdate();
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(CHUNKS,
+                    CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+                .values(TENANT, collection, HexFormat.of().parseHex(hexChash),
+                    "seed text " + hexChash, Vector.of(new float[384]))
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)
+                .doNothing()
+                .execute();
         }
     }
 

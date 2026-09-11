@@ -15,7 +15,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 
 import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -94,17 +93,20 @@ class ServiceTokenScopeBackfillTest {
                 new ClassLoaderResourceAccessor(), db).update(new Contexts());
         }
         try (Connection su = pg.createConnection("")) {
-            ResultSet root = su.createStatement().executeQuery(
-                "SELECT scope FROM nexus.service_tokens WHERE token_hash = 'upgrade-root-hash'");
-            assertThat(root.next()).isTrue();
-            assertThat(root.getString("scope"))
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            var rootScope = dsl.select(SERVICE_TOKENS.SCOPE).from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TOKEN_HASH.eq("upgrade-root-hash"))
+                .fetch(SERVICE_TOKENS.SCOPE);
+            assertThat(rootScope).hasSize(1);
+            assertThat(rootScope.get(0))
                 .as("the deployed operator credential must keep its privilege across the upgrade")
                 .isEqualTo("root");
 
-            ResultSet plain = su.createStatement().executeQuery(
-                "SELECT scope FROM nexus.service_tokens WHERE token_hash = 'upgrade-plain-hash'");
-            assertThat(plain.next()).isTrue();
-            assertThat(plain.getString("scope"))
+            var plainScope = dsl.select(SERVICE_TOKENS.SCOPE).from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TOKEN_HASH.eq("upgrade-plain-hash"))
+                .fetch(SERVICE_TOKENS.SCOPE);
+            assertThat(plainScope).hasSize(1);
+            assertThat(plainScope.get(0))
                 .as("ordinary rows keep their exact prior authority via the 'tenant' default")
                 .isEqualTo("tenant");
         }

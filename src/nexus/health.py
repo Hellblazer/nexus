@@ -4904,8 +4904,10 @@ def _check_stranded_install() -> list[HealthResult]:
 # ``REQUIRED_ENGINE_VERSION`` itself, applied here because this constant
 # names the SAME tag. ``tests/test_health_tuple_doctor_rows.py``'s
 # ``test_tuple_route_first_engine_version_pin`` fails loudly if this ever
-# drifts below ``REQUIRED_ENGINE_VERSION`` or above the newest published
-# ``engine-service-v*`` tag this repo knows about.
+# drifts above the newest published ``engine-service-v*`` tag this repo
+# knows about; it may sit below ``REQUIRED_ENGINE_VERSION`` once the floor
+# moves past it (7.42.0 pinned v0.1.115), which means every reachable engine
+# carries the route and the skip branch below is dead by construction.
 _TUPLE_ROUTE_FIRST_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 114)
 
 #: Doctor heuristic, not derived from any per-template TTL: an unclaimed
@@ -5080,9 +5082,24 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
 
     try:
         templates = store.registry().get("templates") or []
-    except Exception as exc:  # noqa: BLE001 — best-effort: a registry fetch failure must not sink this row; fall back to checking every subspace
+    except Exception as exc:  # noqa: BLE001 — best-effort: a registry fetch failure must not crash `nx doctor`
+        # nexus-em75s.42 review fix: a registry() exception is a
+        # transient registry blip, not evidence about any subspace.
+        # Falling through with templates=[] used to default EVERY
+        # subspace to "checked" (_template_take_enabled's own
+        # unmatched-defaults-True rule) -- including a take.enabled:false
+        # read-only subspace like ledger/<session_id>, whose rows are
+        # never claimed by design and would misreport as a stale-
+        # unclaimed HARD finding purely because the registry blipped.
+        # Report a soft warning for this run instead of guessing.
         _log.debug("doctor_tuple_unclaimed_age_registry_failed", error=str(exc))
-        templates = []
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"templates could not be resolved ({type(exc).__name__}: "
+                f"{exc}); skipping the unclaimed-age check for this run"
+            ),
+        )]
 
     stale: list[str] = []
     reported: list[str] = []
@@ -5104,7 +5121,16 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
                 # unclaimed included, can possibly be older. Skip the
                 # per-subspace rd(n=300) fetch entirely (nexus-em75s.12
                 # review fix).
-                reported.append(f"{census.subspace}={_fmt_age(census_age_s)}")
+                #
+                # nexus-em75s.42 review fix: census_age_s is an UPPER
+                # BOUND (the age of the overall-oldest row, any claim
+                # state), not a verified oldest-UNCLAIMED age -- report
+                # it with "<" ("every row here, unclaimed included, is
+                # younger than this"), never "=", so this row's detail
+                # never reads as a measured oldest-unclaimed age it did
+                # not actually compute. "=" is reserved for the verified
+                # per-row rd() path below.
+                reported.append(f"{census.subspace}<{_fmt_age(census_age_s)}")
                 continue
         try:
             rows = store.rd(census.subspace, None, n=300)

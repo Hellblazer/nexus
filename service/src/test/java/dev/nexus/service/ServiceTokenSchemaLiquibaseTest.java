@@ -2,6 +2,7 @@ package dev.nexus.service;
 
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
+import org.jooq.DSLContext;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -18,10 +19,12 @@ import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.time.OffsetDateTime;
 import java.util.HashSet;
 import java.util.Set;
 
 import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
+import static dev.nexus.service.jooq.nexus.Tables.SESSION_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -144,7 +147,7 @@ class ServiceTokenSchemaLiquibaseTest {
         // PgContainerHelper.seedServiceToken (which always hashes its token argument).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("TRUNCATE nexus.service_tokens");
+            DSL.using(su, SQLDialect.POSTGRES).truncate(SERVICE_TOKENS).execute();
             DSL.using(su, SQLDialect.POSTGRES).insertInto(SERVICE_TOKENS)
                 .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL)
                 .values("hash-tenant-a", "tenant-a", "a-root")
@@ -155,10 +158,9 @@ class ServiceTokenSchemaLiquibaseTest {
         // nexus_svc reads with NO nexus.tenant GUC stamped — must see BOTH rows.
         try (Connection svc = svcDs.getConnection()) {
             svc.setAutoCommit(true);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT COUNT(*) AS cnt FROM nexus.service_tokens");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getLong("cnt"))
+            Long cnt = DSL.using(svc, SQLDialect.POSTGRES)
+                .selectCount().from(SERVICE_TOKENS).fetchOne(0, Long.class);
+            assertThat(cnt)
                 .as("nexus_svc must read ALL service_tokens rows with no tenant GUC "
                     + "(the readability invariant that makes token->tenant resolution possible)")
                 .isEqualTo(2L);
@@ -171,20 +173,21 @@ class ServiceTokenSchemaLiquibaseTest {
     void sessionTokens_readableByServiceRole_withoutTenantGuc() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("TRUNCATE nexus.session_tokens");
-            su.createStatement().execute(
-                "INSERT INTO nexus.session_tokens "
-                + "(session_token_hash, tenant_id, session_id, expires_at) VALUES "
-                + "('sess-hash-a', 'tenant-a', 'session-a', now() + interval '1 hour'), "
-                + "('sess-hash-b', 'tenant-b', 'session-b', now() + interval '1 hour')");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.truncate(SESSION_TOKENS).execute();
+            OffsetDateTime expiresAt = OffsetDateTime.now().plusHours(1);
+            ctx.insertInto(SESSION_TOKENS, SESSION_TOKENS.SESSION_TOKEN_HASH, SESSION_TOKENS.TENANT_ID,
+                    SESSION_TOKENS.SESSION_ID, SESSION_TOKENS.EXPIRES_AT)
+               .values("sess-hash-a", "tenant-a", "session-a", expiresAt)
+               .values("sess-hash-b", "tenant-b", "session-b", expiresAt)
+               .execute();
         }
 
         try (Connection svc = svcDs.getConnection()) {
             svc.setAutoCommit(true);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT COUNT(*) AS cnt FROM nexus.session_tokens");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getLong("cnt"))
+            Long cnt = DSL.using(svc, SQLDialect.POSTGRES)
+                .selectCount().from(SESSION_TOKENS).fetchOne(0, Long.class);
+            assertThat(cnt)
                 .as("nexus_svc must read ALL session_tokens rows with no tenant GUC")
                 .isEqualTo(2L);
         }
@@ -237,7 +240,7 @@ class ServiceTokenSchemaLiquibaseTest {
     void serviceTokens_atMostOneRootToken() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("TRUNCATE nexus.service_tokens");
+            DSL.using(su, SQLDialect.POSTGRES).truncate(SERVICE_TOKENS).execute();
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
             // First root-labelled row inserts fine. Literal (fake) hashes -- typed
             // jOOQ DSL directly, not PgContainerHelper.seedServiceToken (which always
@@ -276,7 +279,7 @@ class ServiceTokenSchemaLiquibaseTest {
     void serviceTokens_scopeCheckConstraint() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("TRUNCATE nexus.service_tokens");
+            DSL.using(su, SQLDialect.POSTGRES).truncate(SERVICE_TOKENS).execute();
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
             // Every member of the scope vocabulary inserts fine. Literal (fake)
             // hashes -- typed jOOQ DSL directly, not PgContainerHelper.seedServiceToken.
@@ -311,17 +314,20 @@ class ServiceTokenSchemaLiquibaseTest {
     void serviceTokens_scopeDefaultsToTenant() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("TRUNCATE nexus.service_tokens");
+            DSL.using(su, SQLDialect.POSTGRES).truncate(SERVICE_TOKENS).execute();
             // Literal (fake) hash -- typed jOOQ DSL directly, not
             // PgContainerHelper.seedServiceToken.
             DSL.using(su, SQLDialect.POSTGRES).insertInto(SERVICE_TOKENS)
                 .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL)
                 .values("default-scope-hash", "tenant-a", "lbl")
                 .execute();
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT scope FROM nexus.service_tokens WHERE token_hash = 'default-scope-hash'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("scope"))
+            java.util.List<String> scopes = DSL.using(su, SQLDialect.POSTGRES)
+                .select(SERVICE_TOKENS.SCOPE)
+                .from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TOKEN_HASH.eq("default-scope-hash"))
+                .fetch(SERVICE_TOKENS.SCOPE);
+            assertThat(scopes).hasSize(1);
+            assertThat(scopes.get(0))
                 .as("a scope-less INSERT (every pre-868dq caller) must default to 'tenant'")
                 .isEqualTo("tenant");
         }

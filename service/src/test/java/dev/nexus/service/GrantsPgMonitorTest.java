@@ -56,6 +56,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class GrantsPgMonitorTest {
 
+    // nexus-cbo4a batch 13 group F: kept raw verbatim (byte-for-byte identical to the
+    // same-named method in every other grants/ladder test file, batch 7/12 precedent) --
+    // CREATE EXTENSION / ALTER EXTENSION SET SCHEMA and a SECURITY DEFINER plpgsql
+    // function body have no typed jOOQ DSL form, and this exact copy is reused
+    // tree-wide for diff parity.
     private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
         exec(su, "CREATE EXTENSION IF NOT EXISTS vector");
         exec(su, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
@@ -136,6 +141,8 @@ class GrantsPgMonitorTest {
             provisionAdminAndSvcRoles(su);
             // THE FIX: pg_provision.py's bootstrap step, replayed by hand here
             // (a real DBA would run this once per docs/configuration.md).
+            // GRANT <role> TO <role> is role-MEMBERSHIP grant, a different statement
+            // from GrantOnStep's object-privilege grant; no typed jOOQ form; raw.
             exec(su, "GRANT pg_monitor TO " + ADMIN_ROLE + " WITH ADMIN OPTION");
 
             liquibaseUpdate(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS);
@@ -156,6 +163,11 @@ class GrantsPgMonitorTest {
                 // plain session -- falsify the naive expectation before proving
                 // the supported path (nexus-bb5c8's decision of record:
                 // src/nexus/db/svc_monitor.py issues SET ROLE unconditionally).
+                // pg_ls_waldir() is a zero-arg set-returning function called in FROM
+                // position; jOOQ's DSL.table(Field<?>) is UNNEST (array-to-table), not
+                // a table-valued-function call (confirmed by reading DSL.java's own
+                // source: "public static Table<?> table(Field<?> cursor) { return
+                // unnest(cursor); }") -- no typed form found for this call shape; raw.
                 try (Statement st = svcConn.createStatement()) {
                     assertThatThrownBy(() -> st.executeQuery("SELECT count(*) FROM pg_ls_waldir()"))
                         .as("pg_ls_waldir() must be permission-denied on a plain NOINHERIT "
@@ -165,6 +177,7 @@ class GrantsPgMonitorTest {
                         .hasMessageContaining("permission denied");
                 }
 
+                // SET ROLE has no typed jOOQ DSL form; raw.
                 try (Statement st = svcConn.createStatement()) {
                     st.execute("SET ROLE pg_monitor");
                 }
@@ -187,6 +200,7 @@ class GrantsPgMonitorTest {
      * case is not a novel, unproven role/grant combination.
      */
     private static void provisionAdminAndSvcRoles(Connection su) throws Exception {
+        // CREATE ROLE has no typed jOOQ DSL (DSLContext exposes no createRole); raw.
         exec(su, "CREATE ROLE " + ADMIN_ROLE + " LOGIN PASSWORD '" + ADMIN_PASS
             + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
         // NOINHERIT (nexus-v80f2, 2026-08-15): this class opts OUT of shared-cluster
@@ -200,6 +214,8 @@ class GrantsPgMonitorTest {
         // production cannot rely on.
         exec(su, "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
             + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT");
+        // GRANT ... ON DATABASE / ON SCHEMA has no typed jOOQ form (GrantOnStep#on
+        // resolves to a relation internally, table-level GRANT only); raw.
         exec(su, "GRANT CREATE ON DATABASE postgres TO " + ADMIN_ROLE);
         exec(su, "GRANT CREATE ON SCHEMA public TO " + ADMIN_ROLE);
         // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05; REDESIGNED per T2

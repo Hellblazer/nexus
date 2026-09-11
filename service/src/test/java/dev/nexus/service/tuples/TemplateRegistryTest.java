@@ -260,6 +260,35 @@ class TemplateRegistryTest {
         assertNull(registry.resolve("mailbox/x"));
     }
 
+    // ── address grammar (RDR-205 follow-on, nexus-mvfm9) ───────────────
+
+    /**
+     * Before this fix, {@code resolve} accepted ANY non-empty segment count
+     * match for a {@code <param>} segment regardless of its content -- an
+     * empty address ({@code "mailbox/"} splits to {@code ["mailbox", ""]},
+     * still two segments) or one carrying bytes outside the address grammar
+     * ({@code "mailbox/bad name!"} -- space and {@code !} unescaped) both
+     * matched {@code mailbox/<address>} and resolved to a live template.
+     */
+    @Test
+    void malformedAddressSegmentDoesNotResolve() {
+        TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
+        assertNull(registry.resolve("mailbox/"), "empty address segment must not resolve");
+        assertNull(registry.resolve("mailbox/bad name!"), "space/! outside the address grammar must not resolve");
+        assertNull(registry.resolve("mailbox/has/extra/slash"), "wrong segment count must not resolve");
+    }
+
+    @Test
+    void wellFormedAddressSegmentsResolve() {
+        TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
+        for (String address : List.of("a", "agent-7", "agent_7", "a7078835292d7bf5e",
+                "01B4US6j2L9sUipcMuYYJoDr", "instance.name")) {
+            TemplateSchema resolved = registry.resolve("mailbox/" + address);
+            assertNotNull(resolved, "address '" + address + "' should resolve");
+            assertEquals("mailbox/<address>", resolved.name());
+        }
+    }
+
     // ── NX_TUPLE_TEMPLATE_DIR second source ─────────────────────────────
 
     @Test

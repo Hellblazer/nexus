@@ -6,6 +6,8 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TokenHashing;
 import dev.nexus.service.db.TokenStore;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -14,9 +16,9 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.time.Clock;
 
+import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -75,7 +77,7 @@ class BootstrapTokenRotationTest {
     void clearTokens() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("TRUNCATE nexus.service_tokens");
+            DSL.using(su, SQLDialect.POSTGRES).truncate(SERVICE_TOKENS).execute();
         }
     }
 
@@ -155,8 +157,11 @@ class BootstrapTokenRotationTest {
         store.ensureBootstrapToken("revoked-root", TENANT);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.service_tokens SET revoked_at = now() WHERE label = '" + ROOT_LABEL + "'");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .update(SERVICE_TOKENS)
+                .set(SERVICE_TOKENS.REVOKED_AT, DSL.currentOffsetDateTime())
+                .where(SERVICE_TOKENS.LABEL.eq(ROOT_LABEL))
+                .execute();
         }
 
         assertThatThrownBy(() -> store.ensureBootstrapToken("brand-new-root", TENANT))
@@ -181,18 +186,22 @@ class BootstrapTokenRotationTest {
 
     private String rootHash() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT token_hash FROM nexus.service_tokens WHERE label = '" + ROOT_LABEL + "'");
-            return rs.next() ? rs.getString(1) : null;
+            // fetchOne (not fetch()+hasSize(1)): the original tolerated zero rows
+            // (returning null), so a permissive fetchOne preserves that behavior
+            // exactly rather than tightening it.
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .select(SERVICE_TOKENS.TOKEN_HASH).from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.LABEL.eq(ROOT_LABEL))
+                .fetchOne(SERVICE_TOKENS.TOKEN_HASH);
         }
     }
 
     private int rootRowCount() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT count(*) FROM nexus.service_tokens WHERE label = '" + ROOT_LABEL + "'");
-            rs.next();
-            return rs.getInt(1);
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .selectCount().from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.LABEL.eq(ROOT_LABEL))
+                .fetchOne(0, int.class);
         }
     }
 }

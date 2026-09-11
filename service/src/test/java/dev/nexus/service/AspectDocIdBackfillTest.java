@@ -10,13 +10,20 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -116,35 +123,40 @@ class AspectDocIdBackfillTest {
 
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                        + "VALUES ('backfill-tenant-2', 'knowledge__bf2__voyage-context-3__v1')");
+                    DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                    ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                        .values("backfill-tenant-2", "knowledge__bf2__voyage-context-3__v1")
+                        .execute();
                     // The row the aspects row is ALREADY (pre-migration) correctly
                     // attributed to — a distinct source_uri from the one below, so a
                     // guard failure (re-matching on source_uri) would be observable
                     // as a CHANGE, not a coincidental no-op.
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.catalog_documents "
-                        + "  (tenant_id, tumbler, title, source_uri, physical_collection) "
-                        + "VALUES ('backfill-tenant-2', 'bf2-doc-preexisting', 'Preexisting Doc', "
-                        + "'file:///legacy/preexisting-source.md', 'knowledge__bf2__voyage-context-3__v1')");
+                    ctx.insertInto(CATALOG_DOCUMENTS,
+                            CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
+                            CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                        .values("backfill-tenant-2", "bf2-doc-preexisting", "Preexisting Doc",
+                            "file:///legacy/preexisting-source.md", "knowledge__bf2__voyage-context-3__v1")
+                        .execute();
                     // A DIFFERENT live document whose source_uri exactly matches the
                     // aspects row's source_uri — if the backfill's WHERE doc_id IS NULL
                     // guard were broken, this is the (wrong) doc_id it would repoint to.
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.catalog_documents "
-                        + "  (tenant_id, tumbler, title, source_uri, physical_collection) "
-                        + "VALUES ('backfill-tenant-2', 'bf2-doc-correct', 'Correct Doc', "
-                        + "'file:///legacy/already-stamped.md', 'knowledge__bf2__voyage-context-3__v1')");
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.document_aspects "
-                        + "  (tenant_id, collection, source_path, proposed_method, "
-                        + "   extracted_at, model_version, extractor_name, source_uri, doc_id) "
-                        + "VALUES ('backfill-tenant-2', 'knowledge__bf2__voyage-context-3__v1', "
-                        + "'legacy/already-stamped.md', 'legacy extraction', "
-                        + "'2025-01-01T00:00:00+00'::timestamptz, 'legacy-model', "
-                        + "'legacy-extractor', 'file:///legacy/already-stamped.md', "
-                        + "'bf2-doc-preexisting')");
+                    ctx.insertInto(CATALOG_DOCUMENTS,
+                            CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
+                            CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                        .values("backfill-tenant-2", "bf2-doc-correct", "Correct Doc",
+                            "file:///legacy/already-stamped.md", "knowledge__bf2__voyage-context-3__v1")
+                        .execute();
+                    ctx.insertInto(DOCUMENT_ASPECTS,
+                            DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH,
+                            DOCUMENT_ASPECTS.PROPOSED_METHOD, DOCUMENT_ASPECTS.EXTRACTED_AT,
+                            DOCUMENT_ASPECTS.MODEL_VERSION, DOCUMENT_ASPECTS.EXTRACTOR_NAME,
+                            DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.DOC_ID)
+                        .values("backfill-tenant-2", "knowledge__bf2__voyage-context-3__v1",
+                            "legacy/already-stamped.md", "legacy extraction",
+                            OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC),
+                            "legacy-model", "legacy-extractor",
+                            "file:///legacy/already-stamped.md", "bf2-doc-preexisting")
+                        .execute();
                 }
 
                 try (Connection conn = adminDs.getConnection()) {
@@ -157,11 +169,14 @@ class AspectDocIdBackfillTest {
                 }
 
                 try (Connection su = pg.createConnection("")) {
-                    ResultSet rs = su.createStatement().executeQuery(
-                        "SELECT doc_id FROM nexus.document_aspects "
-                        + "WHERE tenant_id = 'backfill-tenant-2' AND source_path = 'legacy/already-stamped.md'");
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getString("doc_id"))
+                    DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                    var rows = ctx.select(DOCUMENT_ASPECTS.DOC_ID)
+                        .from(DOCUMENT_ASPECTS)
+                        .where(DOCUMENT_ASPECTS.TENANT_ID.eq("backfill-tenant-2"))
+                        .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq("legacy/already-stamped.md"))
+                        .fetch();
+                    assertThat(rows).hasSize(1);
+                    assertThat(rows.get(0).value1())
                         .as("the backfill's WHERE doc_id IS NULL guard must leave an "
                             + "already-stamped row untouched, even though its source_uri "
                             + "ALSO matches a (different) live catalog document")

@@ -8,12 +8,13 @@ import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
@@ -88,6 +89,11 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  */
 class GrantsNexusDiagViewAccessIntegrationTest {
 
+    // nexus-cbo4a batch 13 group F: kept raw verbatim (byte-for-byte identical to the
+    // same-named method in every other grants/ladder test file, batch 7/12 precedent) --
+    // CREATE EXTENSION / ALTER EXTENSION SET SCHEMA and a SECURITY DEFINER plpgsql
+    // function body have no typed jOOQ DSL form, and this exact copy is reused
+    // tree-wide for diff parity.
     private static void bootstrapVectorExtensionsForFreshWalk(Connection su, String migratingRole) throws Exception {
         exec(su, "CREATE EXTENSION IF NOT EXISTS vector");
         exec(su, "CREATE EXTENSION IF NOT EXISTS pg_trgm");
@@ -136,6 +142,12 @@ class GrantsNexusDiagViewAccessIntegrationTest {
         "nexus.frecency",
         "nexus.relevance_log");
 
+    /** RDR-205's three tuple-space tables (tuples-001-baseline.xml, bead nexus-f1pbh). */
+    private static final List<String> TUPLE_SPACE_TABLES = List.of(
+        "nexus.tuples",
+        "nexus.tuple_claim_log",
+        "nexus.tuple_tenants");
+
     @Test
     void nexusDiagCanSelectTheDiagViewAndEveryUnderlyingTable() throws Exception {
         try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
@@ -144,8 +156,7 @@ class GrantsNexusDiagViewAccessIntegrationTest {
 
             try (Connection diag = DriverManager.getConnection(
                     pg.getJdbcUrl(), DIAG_ROLE, DIAG_PASS)) {
-                assertThatCode(() -> count(diag,
-                        "SELECT count(*) FROM nexus.diag_chash_conformance"))
+                assertThatCode(() -> countAs(diag, "nexus", "diag_chash_conformance"))
                     .as("nexus_diag must be able to SELECT the diag view after a full "
                         + "changelog walk — this is the exact query nx doctor's "
                         + "chash-poison check and the forensics topic run")
@@ -154,7 +165,8 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                 List<String> denied = new ArrayList<>();
                 for (String table : UNDERLYING_TABLES) {
                     try {
-                        count(diag, "SELECT count(*) FROM " + table);
+                        int dot = table.indexOf('.');
+                        countAs(diag, table.substring(0, dot), table.substring(dot + 1));
                     } catch (Exception e) {
                         denied.add(table + ": " + e.getMessage());
                     }
@@ -196,7 +208,7 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                 List<String> denied = new ArrayList<>();
                 for (String table : new TreeSet<>(CatalogRepository.NEXUS_DIAG_READABLE_TABLES)) {
                     try {
-                        count(diag, "SELECT count(*) FROM nexus." + table);
+                        countAs(diag, "nexus", table);
                     } catch (Exception e) {
                         denied.add(table + ": " + e.getMessage());
                     }
@@ -214,6 +226,43 @@ class GrantsNexusDiagViewAccessIntegrationTest {
     }
 
     /**
+     * bead nexus-f1pbh (2026-09-11): the PITR fork walk rehearsal for
+     * engine-service-v0.1.114 found {@code nexus_diag} holding zero SELECT on the
+     * three RDR-205 tuple-space tables after a full changelog walk. Same class as
+     * the {@code gc_audit} production incident above -- these tables were created
+     * after the estate had already settled into the view era, so
+     * {@code grants-nexus-diag-1}'s legacy branch never granted them, and nothing
+     * downstream re-granted them until {@code grants-nexus-diag-5}. Non-vacuous:
+     * confirmed against the pre-fix tree (reverting grants-nexus-diag-5 reproduces
+     * {@code permission denied for table tuples} for all three).
+     */
+    @Test
+    void nexusDiagCanSelectTupleTables() throws Exception {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+             Connection su = pg.createConnection("")) {
+            provisionAndMigrate(pg, su);
+
+            try (Connection diag = DriverManager.getConnection(
+                    pg.getJdbcUrl(), DIAG_ROLE, DIAG_PASS)) {
+                List<String> denied = new ArrayList<>();
+                for (String table : TUPLE_SPACE_TABLES) {
+                    try {
+                        int dot = table.indexOf('.');
+                        countAs(diag, table.substring(0, dot), table.substring(dot + 1));
+                    } catch (Exception e) {
+                        denied.add(table + ": " + e.getMessage());
+                    }
+                }
+                assertThat(denied)
+                    .as("nexus_diag must hold direct SELECT on nexus.tuples, "
+                        + "nexus.tuple_claim_log and nexus.tuple_tenants after a full "
+                        + "changelog walk (bead nexus-f1pbh)")
+                    .isEmpty();
+            }
+        }
+    }
+
+    /**
      * Canonical two-phase provisioning split (mirrors
      * GrantsSvcForeignOwnedRelationTest / SchemaMigratorIntegrationTest): a plain
      * non-superuser admin role owns every schema object it creates, matching production.
@@ -225,6 +274,9 @@ class GrantsNexusDiagViewAccessIntegrationTest {
     private static void provisionAndMigrate(PostgreSQLContainer<?> pg, Connection su) throws Exception {
         su.setAutoCommit(true);
 
+        // CREATE ROLE / role-membership GRANT / database- and schema-level GRANT all
+        // have no typed jOOQ DSL form (see GrantsSvcForeignOwnedRelationTest's own
+        // inline reasons for the derivation); raw.
         exec(su, "CREATE ROLE " + ADMIN_ROLE + " LOGIN PASSWORD '" + ADMIN_PASS
             + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
         exec(su, "GRANT CREATE ON DATABASE postgres TO " + ADMIN_ROLE);
@@ -271,11 +323,15 @@ class GrantsNexusDiagViewAccessIntegrationTest {
         }
     }
 
-    private static int count(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            rs.next();
-            return rs.getInt(1);
-        }
+    /** Runs {@code SELECT count(*) FROM schema.table} AS the connection's own role --
+     * proves the grant is USABLE (see this class's own javadoc), not merely present
+     * in the catalog. Schema-agnostic {@code DSL.name(schema, table)}: some callers
+     * pass a diag-view / table pair with no jOOQ codegen relevance to this probe. */
+    private static long countAs(Connection c, String schema, String table) throws Exception {
+        return DSL.using(c, SQLDialect.POSTGRES)
+            .selectCount()
+            .from(DSL.table(DSL.name(schema, table)))
+            .fetchOne(0, Long.class);
     }
 
     private static void exec(Connection c, String sql) throws Exception {

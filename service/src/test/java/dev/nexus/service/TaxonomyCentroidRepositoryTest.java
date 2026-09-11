@@ -6,6 +6,8 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository.AnnHit;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository.CentroidRecord;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -13,11 +15,10 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
@@ -327,15 +328,16 @@ class TaxonomyCentroidRepositoryTest {
      * separate table name.
      */
     private long superuserCount(int dim, String collection) throws SQLException {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT count(*) FROM nexus.taxonomy_centroids "
-                 + "WHERE collection = ? AND embedding_" + dim + " IS NOT NULL")) {
-            ps.setString(1, collection);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getLong(1);
-            }
+        try (Connection su = pg.createConnection("")) {
+            var embeddingField = switch (dim) {
+                case 384 -> TAXONOMY_CENTROIDS.EMBEDDING_384;
+                case 768 -> TAXONOMY_CENTROIDS.EMBEDDING_768;
+                case 1024 -> TAXONOMY_CENTROIDS.EMBEDDING_1024;
+                default -> throw new IllegalArgumentException("unsupported dim: " + dim);
+            };
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .fetchCount(TAXONOMY_CENTROIDS,
+                    TAXONOMY_CENTROIDS.COLLECTION.eq(collection).and(embeddingField.isNotNull()));
         }
     }
 }

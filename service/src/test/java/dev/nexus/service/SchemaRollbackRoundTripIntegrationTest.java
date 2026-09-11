@@ -257,7 +257,8 @@ class SchemaRollbackRoundTripIntegrationTest {
     private static final String ADMIN_PASS = "nexus_admin_rollback_pass";
 
     /**
-     * The ELEVEN {@code runAlways} changesets, in master order. Formerly ten after
+     * The TWELVE {@code runAlways} changesets, in master order. Formerly eleven
+     * before {@code grants-nexus-diag-5} (see below). Formerly ten after
      * RDR-194's critical fix round (2026-08-17) added {@code taxonomy-011-8} —
      * Liquibase-owned {@code nexus.diag_chash_conformance} view creation +
      * conditional nexus_diag grant, self-healing every boot exactly like
@@ -278,7 +279,14 @@ class SchemaRollbackRoundTripIntegrationTest {
      * (search_telemetry, gc_audit — relevance_log already covered by
      * grants-nexus-diag-3; hook_failures deliberately excluded, see that
      * changeset's own comment); see that changeset's own comment.
-     * Their identity is asserted (not merely their count) so
+     * 2026-09-11 (bead nexus-f1pbh, PITR fork walk on engine-service-v0.1.114)
+     * added {@code grants-nexus-diag-5} — a FIFTH, era-independent nexus_diag
+     * changeset granting direct SELECT on RDR-205's three tuple-space tables
+     * (nexus.tuples, nexus.tuple_claim_log, nexus.tuple_tenants), the same
+     * missing-grant class as -3/-4: created after the estate settles into
+     * view era, so -1's legacy branch never granted them and nothing else
+     * re-grants a table outside -3/-4's own lists; see that changeset's own
+     * comment. Their identity is asserted (not merely their count) so
      * that adding or removing a {@code runAlways} changeset forces a
      * deliberate look at this test rather than silently changing which
      * changesets the rollback leg reaches first.
@@ -294,7 +302,8 @@ class SchemaRollbackRoundTripIntegrationTest {
         "grants-nexus-diag-1",
         "grants-nexus-diag-2",
         "grants-nexus-diag-3",
-        "grants-nexus-diag-4");
+        "grants-nexus-diag-4",
+        "grants-nexus-diag-5");
 
     /**
      * Pins the mechanism the rollback leg depends on: a second {@code migrate}
@@ -455,6 +464,13 @@ class SchemaRollbackRoundTripIntegrationTest {
      * shares that classification but is deliberately excluded from the
      * grant; see grants-nexus-diag-4's own comment). The expected set
      * below is now seven tables, not five.
+     *
+     * <p><strong>REVISED AGAIN (2026-09-11, bead nexus-f1pbh, PITR fork walk
+     * on engine-service-v0.1.114).</strong> {@code grants-nexus-diag-5} adds
+     * three more, era-independent: {@code tuples}, {@code tuple_claim_log},
+     * {@code tuple_tenants} (RDR-205's tuple-space tables) — the same
+     * missing-grant class as -3/-4, found by a live PITR fork walk. The
+     * expected set below is now ten tables, not seven.
      */
     @Test
     void eraTransitionRevokesTableSelectWithoutGrowingTheChangelog() throws Exception {
@@ -490,14 +506,15 @@ class SchemaRollbackRoundTripIntegrationTest {
                         .as("a FRESH cluster must land DIRECTLY in view era — "
                             + "grants-nexus-diag-1's legacy branch must NOT have fired "
                             + "(its bulk ALL-TABLES grant would produce a much wider set "
-                            + "than the seven below) — but grants-nexus-diag-3 must have "
+                            + "than the ten below) — but grants-nexus-diag-3 must have "
                             + "re-granted exactly the tables security_invoker=true "
                             + "requires, restoring what grants-nexus-diag-2's own "
                             + "REVOKE loop stripped earlier in this SAME boot "
-                            + "(nexus-lhuhe), and grants-nexus-diag-4 must have granted "
+                            + "(nexus-lhuhe), grants-nexus-diag-4 must have granted "
                             + "the two NEXUS_DIAG_READABLE_TABLES it does not already "
                             + "cover (2026-08-19 gc_audit incident; hook_failures "
-                            + "deliberately excluded)")
+                            + "deliberately excluded), and grants-nexus-diag-5 must have "
+                            + "granted RDR-205's three tuple-space tables (nexus-f1pbh)")
                         .containsExactly(
                             "nexus.catalog_document_chunks",
                             "nexus.chunks",
@@ -505,7 +522,10 @@ class SchemaRollbackRoundTripIntegrationTest {
                             "nexus.gc_audit",
                             "nexus.relevance_log",
                             "nexus.search_telemetry",
-                            "nexus.topic_assignments");
+                            "nexus.topic_assignments",
+                            "nexus.tuple_claim_log",
+                            "nexus.tuple_tenants",
+                            "nexus.tuples");
                     viewEraRows = changelogRowCount(c);
                 }
 
@@ -519,9 +539,10 @@ class SchemaRollbackRoundTripIntegrationTest {
                         .as("a reboot must re-stamp the runAlways rows in place")
                         .isEqualTo(viewEraRows);
                     assertThat(diagBaseTableGrants(c))
-                        .as("view era holds across a reboot too — the same seven tables, "
-                            + "re-granted fresh by grants-nexus-diag-3 and grants-nexus-diag-4 "
-                            + "every boot (nexus-lhuhe; gc_audit incident 2026-08-19)")
+                        .as("view era holds across a reboot too — the same ten tables, "
+                            + "re-granted fresh by grants-nexus-diag-3, grants-nexus-diag-4 and "
+                            + "grants-nexus-diag-5 every boot (nexus-lhuhe; gc_audit incident "
+                            + "2026-08-19; nexus-f1pbh)")
                         .containsExactly(
                             "nexus.catalog_document_chunks",
                             "nexus.chunks",
@@ -529,7 +550,10 @@ class SchemaRollbackRoundTripIntegrationTest {
                             "nexus.gc_audit",
                             "nexus.relevance_log",
                             "nexus.search_telemetry",
-                            "nexus.topic_assignments");
+                            "nexus.topic_assignments",
+                            "nexus.tuple_claim_log",
+                            "nexus.tuple_tenants",
+                            "nexus.tuples");
                 }
             }
 

@@ -1658,6 +1658,42 @@ class TestCensusSpaceBacked:
         assert "SPACE_NEVER_RAN" not in proc.stdout
         assert "SPACE_OUTSIDE_WINDOW" not in proc.stdout
 
+    def test_wedged_nx_is_bounded_by_a_wall_clock_deadline(self, tmp_path: Path) -> None:
+        """nexus-zn9op (production half): a hung/slow `nx tuple list` must
+        never hang the whole census. No GNU `timeout` dependency (absent on
+        macOS) -- the bound is a portable background-and-poll idiom inside
+        expectations.sh. A stub `nx` that sleeps well past the (overridden,
+        short) bound proves the kill actually fires: the census call
+        returns close to the bound, not anywhere near the stub's real sleep
+        time, and reports SPACE_FALLBACK with the named reason so the
+        census stays non-vacuous rather than silently omitting the space
+        read."""
+        self._write_ledger_row(tmp_path, self.SID)
+        slow_bin = tmp_path / "slow-nx-bin"
+        slow_bin.mkdir()
+        shim = slow_bin / "nx"
+        shim.write_text("#!/bin/sh\nsleep 15\necho '[]'\n")
+        shim.chmod(0o755)
+        bound_s = 1
+        start = time.monotonic()
+        proc = _run_census(
+            tmp_path, self.SID,
+            env_overrides={
+                **self._path_env(slow_bin),
+                "NX_EXPECT_CENSUS_NX_TIMEOUT_S": str(bound_s),
+            },
+        )
+        elapsed = time.monotonic() - start
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert f"SPACE_FALLBACK\treason=nx tuple list exceeded {bound_s}s" in proc.stdout
+        # Generous margin over the bound (process-start + poll-interval
+        # slop), but nowhere near the stub's 15s sleep -- if the bound did
+        # not fire this assertion is the one that catches it.
+        assert elapsed < bound_s + 10, (
+            f"census took {elapsed:.1f}s against a {bound_s}s bound -- "
+            "the wall-clock deadline did not fire"
+        )
+
 
 class TestPluginWiring:
     def test_shellib_parity_with_reference(self) -> None:

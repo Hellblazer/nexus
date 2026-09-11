@@ -18,8 +18,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
-import java.sql.ResultSet;
 
+import static dev.nexus.service.jooq.nexus.Tables.SESSION_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -81,11 +81,14 @@ class SessionTokenHandlerTest {
         assertThat(r.get("session_id").asText()).isEqualTo("sess-store");
         String hash = TokenHashing.sha256Hex(r.get("session_token").asText());
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT tenant_id, session_id FROM nexus.session_tokens WHERE session_token_hash = '" + hash + "'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("tenant_id")).isEqualTo(TENANT);
-            assertThat(rs.getString("session_id")).isEqualTo("sess-store");
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(SESSION_TOKENS.TENANT_ID, SESSION_TOKENS.SESSION_ID)
+                .from(SESSION_TOKENS)
+                .where(SESSION_TOKENS.SESSION_TOKEN_HASH.eq(hash))
+                .fetch();
+            assertThat(rows).hasSize(1);
+            assertThat(rows.get(0).value1()).isEqualTo(TENANT);
+            assertThat(rows.get(0).value2()).isEqualTo("sess-store");
         }
     }
 
@@ -110,15 +113,14 @@ class SessionTokenHandlerTest {
         assertThat(second).isNotEqualTo(first);
         // Exactly one live row for the session; the old token's hash is gone.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) c FROM nexus.session_tokens WHERE tenant_id='" + TENANT
-                + "' AND session_id='sess-remint'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getLong("c")).isEqualTo(1L);
-            ResultSet old = su.createStatement().executeQuery(
-                "SELECT 1 FROM nexus.session_tokens WHERE session_token_hash = '"
-                + TokenHashing.sha256Hex(first) + "'");
-            assertThat(old.next())
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            long count = dsl.selectCount().from(SESSION_TOKENS)
+                .where(SESSION_TOKENS.TENANT_ID.eq(TENANT), SESSION_TOKENS.SESSION_ID.eq("sess-remint"))
+                .fetchOne(0, long.class);
+            assertThat(count).isEqualTo(1L);
+            boolean oldExists = dsl.fetchExists(DSL.selectOne().from(SESSION_TOKENS)
+                .where(SESSION_TOKENS.SESSION_TOKEN_HASH.eq(TokenHashing.sha256Hex(first))));
+            assertThat(oldExists)
                 .as("the prior session token row is gone (DB-level invalidation)").isFalse();
         }
         // The new token works (minted-enforced).
@@ -141,11 +143,11 @@ class SessionTokenHandlerTest {
             .get("closed").asInt()).isEqualTo(0);
         // The row is gone.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) c FROM nexus.session_tokens WHERE session_token_hash = '"
-                + TokenHashing.sha256Hex(token) + "'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getLong("c")).isEqualTo(0L);
+            long count = DSL.using(su, SQLDialect.POSTGRES)
+                .selectCount().from(SESSION_TOKENS)
+                .where(SESSION_TOKENS.SESSION_TOKEN_HASH.eq(TokenHashing.sha256Hex(token)))
+                .fetchOne(0, long.class);
+            assertThat(count).isEqualTo(0L);
         }
     }
 

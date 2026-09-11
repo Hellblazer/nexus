@@ -1013,6 +1013,84 @@ expectations_undeclared() {
 # The comparison below is therefore bounded to this window, not open-ended.
 _EXPECTATIONS_LEDGER_RETENTION_S=$((90 * 24 * 3600))
 
+# _expectations_run_bounded <timeout_s> <out_var> <cmd...> — runs <cmd...>
+# with a portable wall-clock deadline and NEVER hangs the caller past it
+# (bead nexus-zn9op: `nx tuple list` under box load exceeded a test's 30s
+# subprocess timeout three times on 2026-09-11, and the live orchestrator
+# path below runs the same call with no bound at all). No `timeout`(1)
+# dependency — macOS ships no GNU `timeout`, same portable-without-probing
+# posture as the BSD/GNU `stat` fallback in _expectations_file_age_s above.
+#
+# Backgrounds <cmd...> directly (not inside a subshell, so its PID is the
+# real process to signal) and races it against a second backgrounded
+# watchdog that sleeps <timeout_s> then SIGTERMs/SIGKILLs that same PID if
+# it is still alive. The primary `wait` blocks until EITHER side finishes;
+# once it returns, the watchdog — still just sleeping if the primary won
+# the race — is killed outright so it cannot fire a stray signal at a PID
+# recycled after this function returns. A marker file, not the primary's
+# exit code, is the source of truth for "did the deadline fire": a killed
+# process's exit code (typically 143/137) is not a reliable, portable
+# signal to key on, and conflating it with a command that legitimately
+# exits with that code on its own would misreport a real failure as a
+# timeout.
+#
+# The watchdog's own stdio is explicitly redirected away from whatever fds
+# this function inherited (measured live, nexus-zn9op: without this, a
+# CALLER READING VIA A PIPE — any `subprocess.run(capture_output=True)`,
+# which is exactly how the test harness and every real caller of this
+# shellib invoke it — hung for the FULL bound on every call, timeout or
+# not, even when the primary command finished in milliseconds). Killing
+# the watchdog subshell on the fast path does not kill ITS `sleep` child;
+# a plain `kill -TERM $watchdog` (no job control / `set -m` in a
+# non-interactive `bash -c`, so there is no process group to target) only
+# reaches the subshell, orphaning the `sleep` beneath it for the rest of
+# its full duration. An orphaned `sleep` that still holds the caller's
+# stdout/stderr pipe open keeps that pipe from reaching EOF — so a reader
+# blocked on read() waits out the orphan's remaining sleep regardless of
+# how fast the real work finished. Redirecting the subshell's stdio to
+# /dev/null makes that inheritance moot: the orphan can run to completion
+# in the background, invisibly, without ever holding a caller's pipe open.
+#
+# Sets the caller's <out_var> (via `printf -v`, so no subshell — the exit
+# code must reach the caller directly) to <cmd...>'s combined stdout+stderr
+# and returns its exit code, or 124 on a killed-by-deadline expiry — the
+# same convention GNU coreutils `timeout` itself uses.
+_expectations_run_bounded() {
+    local timeout_s="$1" out_var="$2"
+    shift 2
+    local outfile markerfile
+    outfile="$(mktemp "${TMPDIR:-/tmp}/expectations_bounded.XXXXXX")" || return 1
+    markerfile="${outfile}.timedout"
+    rm -f "$markerfile"
+
+    "$@" >"$outfile" 2>&1 &
+    local pid=$!
+
+    (
+        sleep "$timeout_s"
+        if kill -0 "$pid" 2>/dev/null; then
+            : >"$markerfile"
+            kill -TERM "$pid" 2>/dev/null
+            sleep 0.2
+            kill -KILL "$pid" 2>/dev/null
+        fi
+    ) </dev/null >/dev/null 2>&1 &
+    local watchdog=$!
+
+    wait "$pid" 2>/dev/null
+    local rc=$?
+    kill "$watchdog" 2>/dev/null
+    wait "$watchdog" 2>/dev/null
+
+    printf -v "$out_var" '%s' "$(cat "$outfile" 2>/dev/null)"
+    if [[ -e "$markerfile" ]]; then
+        rm -f "$outfile" "$markerfile"
+        return 124
+    fi
+    rm -f "$outfile"
+    return "$rc"
+}
+
 # _expectations_file_age_s <file> — seconds since <file>'s mtime, echoed on
 # stdout, or nothing (rc 1) on any stat failure. Two `stat` invocations
 # (BSD flavor first, GNU second) rather than branching on `uname` — same
@@ -1041,10 +1119,16 @@ _expectations_file_age_s() {
 #
 # Fails open on every axis, each with its OWN named reason on stdout, never
 # a silent skip: no `nx` on PATH, a non-zero `nx tuple list` exit (engine
-# down, endpoint unresolvable, tenant/token trouble), or unparseable JSON
-# all print exactly one SPACE_FALLBACK line and return — the caller sees
-# only the classic TSV-only census beyond that point, i.e. exactly what a
-# box with no tuple space at all has always produced.
+# down, endpoint unresolvable, tenant/token trouble), unparseable JSON, or
+# a WALL-CLOCK DEADLINE EXPIRY (bead nexus-zn9op: under box load the real
+# call exceeded a 30s test timeout three times on 2026-09-11) all print
+# exactly one SPACE_FALLBACK line and return — the caller sees only the
+# classic TSV-only census beyond that point, i.e. exactly what a box with
+# no tuple space at all has always produced. The deadline is bounded by
+# _expectations_run_bounded (portable, no `timeout`(1) dependency),
+# default 45s (the 2026-09-11 measurements reached 30s under box load, ~1s idle), overridable via NX_EXPECT_CENSUS_NX_TIMEOUT_S — this is the
+# ONLY way `nx tuple list --prefix ledger/` can be called from this file:
+# never call it un-bounded elsewhere.
 #
 # VACUITY (bead nexus-em75s.19: "a census that walked zero sessions is a
 # BLINDSPOT, not a pass" — the same doctrine expectations_undeclared's rc=1
@@ -1065,9 +1149,15 @@ _expectations_census_space() {
         return 0
     fi
 
+    local nx_timeout_s="${NX_EXPECT_CENSUS_NX_TIMEOUT_S:-45}"
     local combined rc
-    combined="$(nx tuple list --prefix "ledger/" --json 2>&1)"
+    _expectations_run_bounded "$nx_timeout_s" combined \
+        nx tuple list --prefix "ledger/" --json
     rc=$?
+    if [[ $rc -eq 124 ]]; then
+        printf 'SPACE_FALLBACK\treason=nx tuple list exceeded %ss\n' "$nx_timeout_s"
+        return 0
+    fi
     if [[ $rc -ne 0 ]]; then
         # The reason is ONE field on ONE line: the CLI's error text can span
         # several lines (a Click "No such command" usage block does), and an

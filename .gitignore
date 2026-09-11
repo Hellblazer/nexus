@@ -63,3 +63,14 @@ bench/out/
 # subdir, so an accidental commit would push run artefacts to every user's
 # install via the git-subdir marketplace source. nexus-dkotg.
 conexus/evals/results/
+
+# Eclipse workspace artifacts the Java language server (JDT.LS) drops into
+# any Maven module it opens; never sources, never committed. nexus-8cz4z.
+service/bin/
+service/.project
+service/.classpath
+service/.settings/
+scripts/spikes/s04-build/bin/
+scripts/spikes/s04-build/.project
+scripts/spikes/s04-build/.classpath
+scripts/spikes/s04-build/.settings/

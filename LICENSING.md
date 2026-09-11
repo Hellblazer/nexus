@@ -3,6 +3,15 @@
 Nexus is dual-licensed: AGPL-3.0-or-later for open-source use, with commercial
 licenses available for organizations that need different terms.
 
+## What the license covers
+
+The license covers the Nexus code only: the `nx` command, the service, and the
+plugin. All of it is free to use. Everything you make with Nexus is yours and
+carries no obligation from this license: the repositories you index, the notes
+and memory Claude keeps, the documents you store, the RDRs you write, and
+anything Claude produces in a session. The obligations below apply only if you
+modify Nexus itself and offer the modified version to others.
+
 ## Open source: AGPL-3.0-or-later
 
 Nexus is free software under the [GNU Affero General Public License

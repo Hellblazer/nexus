@@ -613,6 +613,25 @@ class TestBatteryAndWindow:
         listing = _run(repo, "diff", "--name-only", "origin/main")
         assert "PLUGIN_CHANNEL_VERSION" not in listing
 
+    def test_prints_the_does_not_reach_installs_instructions(
+        self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """nexus-konsk: a same-version anchored cut moves no version field,
+        so `perform_cut` must print the recovery instructions naming both
+        the automatic path (`nx upgrade`'s plugin-lockstep ref-drift check)
+        and the manual forcing command (uninstall then install) -- the
+        review round that shipped the fix noted no test asserted this text
+        (`nexus/critique-nexus-konsk-2026-09-11` [25316] Q5)."""
+        repo = _mini_nexus(tmp_path)
+        result = _cut(repo)
+
+        out = capsys.readouterr().out
+        assert f"this cut does NOT reach installs by itself ({result['tag']} moves no version field):" in out
+        assert "nx upgrade" in out
+        assert "already at the latest version" in out
+        assert "claude plugin uninstall <id>@<marketplace> -s <scope> -y" in out
+        assert "claude plugin install <id>@<marketplace> -s <scope> -y" in out
+
 
 # ---------------------------------------------------------------------------
 # The atomic-split precondition (nexus-a2wmi.9): attribution + refusal.

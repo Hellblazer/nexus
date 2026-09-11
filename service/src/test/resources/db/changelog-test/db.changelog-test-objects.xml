@@ -178,4 +178,55 @@ $$;
         <rollback>DROP FUNCTION IF EXISTS nexus_test.insert_chunk_bare_vector(text, text, bytea, int)</rollback>
     </changeSet>
 
+    <changeSet id="test-objects-fts-matches" author="nexus-cbo4a">
+        <comment>nexus_test.fts_matches(tsvector, text, text): SQL-language wrapper for
+        p_vector @@ plainto_tsquery(p_config::regconfig, p_query) (nexus-cbo4a batch 13).
+        jOOQ has no typed text-search operator; the three schema tests that probe a
+        table's fts_vector (Plans, Memory, Scratch) call the generated
+        Routines.ftsMatches Field instead of a condition("...") template. p_config
+        is the regconfig name ('english' / 'simple'), cast inside the function so the
+        Java side passes plain text. STABLE: plainto_tsquery with an explicit
+        configuration does not read session state. SECURITY INVOKER.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.fts_matches(p_vector tsvector, p_config text, p_query text) RETURNS boolean
+    LANGUAGE sql
+    STABLE
+    SECURITY INVOKER
+AS $$
+    SELECT p_vector @@ plainto_tsquery(p_config::regconfig, p_query)
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.fts_matches(tsvector, text, text)</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-drop-index" author="nexus-cbo4a">
+        <comment>nexus_test.drop_index(regclass): plpgsql wrapper for DROP INDEX (nexus-cbo4a
+        batch 13). jOOQ 3.20 never schema-qualifies an index name on POSTGRES
+        (DropIndexImpl renders the index under qualify(false)), so DSLContext#dropIndex
+        renders DROP INDEX "name" and resolves through the session search_path, which this
+        project never relies on. p_index is regclass so PostgreSQL resolves the
+        qualified identity with no string to validate; the body then renders the
+        DROP from pg_class as an explicit %I.%I pair, never through regclassout,
+        so the second resolution is by oid and not by search_path. SECURITY
+        INVOKER so the caller's own privilege authorizes the DROP.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.drop_index(p_index regclass) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_schema text;
+    v_name   text;
+BEGIN
+    SELECT n.nspname, c.relname INTO STRICT v_schema, v_name
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.oid = p_index;
+    EXECUTE format('DROP INDEX %I.%I', v_schema, v_name);
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.drop_index(regclass)</rollback>
+    </changeSet>
+
 </databaseChangeLog>

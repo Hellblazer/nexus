@@ -2076,6 +2076,9 @@ def _isolate_plugin_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     ``tests/test_plugin_lockstep.py`` re-points it at its own sandbox registry.
     """
     monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(tmp_path / "isolated-claude-plugins" / "installed_plugins.json"))
+    # nexus-konsk: the same-version ref-drift check reads known_marketplaces.json
+    # too (to find each marketplace's local clone); isolate it the same way.
+    monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(tmp_path / "isolated-claude-plugins" / "known_marketplaces.json"))
 
 
 @pytest.fixture(autouse=True)

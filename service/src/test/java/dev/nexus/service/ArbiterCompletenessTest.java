@@ -7,6 +7,8 @@ import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.SqlConstraints;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.UniqueRaceRetry;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
@@ -17,6 +19,8 @@ import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -85,7 +89,18 @@ class ArbiterCompletenessTest {
             "tumbler_prefix", prefix, "name", name, "owner_type", type));
     }
 
-    /** Run raw SQL as superuser and return the SQLException, or null if it succeeded. */
+    /**
+     * Run raw SQL as superuser and return the SQLException, or null if it succeeded.
+     *
+     * <p>Kept raw (nexus-cbo4a batch 13): this is a shared harness whose callers hand it
+     * hand-crafted SQL text to prove PostgreSQL's OWN grammar/arbiter behavior across many
+     * ON CONFLICT shapes — bare column list vs ON CONSTRAINT vs a predicate-restated
+     * partial index, and (postgresRefusesTwoConflictTargetsInOneStatement) two ON CONFLICT
+     * clauses in one INSERT, which is a SQL syntax error (42601) jOOQ's fluent insert API
+     * cannot even construct (there is no second {@code .onConflict()} to chain). Re-expressing
+     * this harness's single {@code execute(sql)} in typed DSL would either be impossible for
+     * some callers or would stop testing the raw-SQL surface these tests exist to pin.
+     */
     private SQLException rawFailure(String sql) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -98,28 +113,31 @@ class ArbiterCompletenessTest {
 
     private String ownerNameAt(String prefix) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var rs = su.createStatement().executeQuery(
-                "SELECT name FROM nexus.catalog_owners WHERE tenant_id = '" + TENANT
-                + "' AND tumbler_prefix = '" + prefix + "'");
-            return rs.next() ? rs.getString(1) : null;
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_OWNERS.NAME)
+                .from(CATALOG_OWNERS)
+                .where(CATALOG_OWNERS.TENANT_ID.eq(TENANT).and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(prefix)))
+                .fetchOne(CATALOG_OWNERS.NAME);
         }
     }
 
     private String repoHashAt(String prefix) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var rs = su.createStatement().executeQuery(
-                "SELECT repo_hash FROM nexus.catalog_owners WHERE tenant_id = '" + TENANT
-                + "' AND tumbler_prefix = '" + prefix + "'");
-            return rs.next() ? rs.getString(1) : null;
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_OWNERS.REPO_HASH)
+                .from(CATALOG_OWNERS)
+                .where(CATALOG_OWNERS.TENANT_ID.eq(TENANT).and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(prefix)))
+                .fetchOne(CATALOG_OWNERS.REPO_HASH);
         }
     }
 
     private String sourceUriAt(String tumbler) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var rs = su.createStatement().executeQuery(
-                "SELECT source_uri FROM nexus.catalog_documents WHERE tenant_id = '" + TENANT
-                + "' AND tumbler = '" + tumbler + "'");
-            return rs.next() ? rs.getString(1) : null;
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_DOCUMENTS.SOURCE_URI)
+                .from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)))
+                .fetchOne(CATALOG_DOCUMENTS.SOURCE_URI);
         }
     }
 
@@ -137,9 +155,12 @@ class ArbiterCompletenessTest {
     void constraintNamesAreExactlyWhatPostgresReports() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_hash, repo_root) "
-                + "VALUES ('" + TENANT + "', '9000', 'names-a', 'repo', 'NAMEHASH', '')");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(CATALOG_OWNERS,
+                    CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME,
+                    CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.REPO_ROOT)
+                .values(TENANT, "9000", "names-a", "repo", "NAMEHASH", "")
+                .execute();
         }
 
         var pkDup = rawFailure(
@@ -208,9 +229,12 @@ class ArbiterCompletenessTest {
     void partialUniqueIndexNeedsItsPredicateRestatedToBeArbitrable() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_hash, repo_root) "
-                + "VALUES ('" + TENANT + "', '9200', 'partial-a', 'repo', 'PARTIALHASH', '')");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(CATALOG_OWNERS,
+                    CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME,
+                    CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.REPO_ROOT)
+                .values(TENANT, "9200", "partial-a", "repo", "PARTIALHASH", "")
+                .execute();
         }
         var bare = rawFailure(
             "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_hash, repo_root) "
@@ -616,9 +640,12 @@ class ArbiterCompletenessTest {
     void uniqueRaceRetry_reRunsTheTransactionOnANonArbitratedViolation() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_root) "
-                + "VALUES ('" + TENANT + "', '3000', 'race-seed', 'repo', '')");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(CATALOG_OWNERS,
+                    CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME,
+                    CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_ROOT)
+                .values(TENANT, "3000", "race-seed", "repo", "")
+                .execute();
         }
         SQLException real = rawFailure(
             "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_root) "
@@ -668,9 +695,12 @@ class ArbiterCompletenessTest {
     void uniqueRaceRetry_exhaustionAfterSecondCollisionIsLoud() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_root) "
-                + "VALUES ('" + TENANT + "', '3200', 'race-seed-exhaust', 'repo', '')");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(CATALOG_OWNERS,
+                    CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME,
+                    CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_ROOT)
+                .values(TENANT, "3200", "race-seed-exhaust", "repo", "")
+                .execute();
         }
         SQLException stillColliding = rawFailure(
             "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_root) "

@@ -20,19 +20,53 @@ from nexus import plugin_lockstep as pl
 from nexus.cli import main
 
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
-import os, sys
+import json, os, sys
 log = os.environ["FAKE_CLAUDE_LOG"]
 with open(log, "a") as fh: fh.write(" ".join(sys.argv[1:]) + "\n")
 if sys.stdin.isatty(): sys.exit("stdin must not be a tty")
 mode = os.environ.get("FAKE_CLAUDE_MODE", "updated")
-plugin = sys.argv[3].split("@")[0] if len(sys.argv) > 3 else "?"
-print(f'Checking for updates for plugin "{sys.argv[3]}" at user scope…')
+verb = sys.argv[2] if len(sys.argv) > 2 else ""
+if verb == "marketplace":
+    # `claude plugin marketplace update <name>`: the real CLI does a git
+    # fetch of the already-local clone; the test sets the clone's content
+    # up directly, so this is a no-op success.
+    sys.exit(0)
+plugin_id = sys.argv[3] if len(sys.argv) > 3 else "?"
+plugin = plugin_id.split("@")[0]
+if verb == "uninstall":
+    # `claude plugin uninstall <id> -s <scope> -y` (nexus-konsk ref-drift
+    # path, step 1 of 2 -- a bare `install` alone is a no-op when the
+    # plugin is already installed at the same declared version).
+    ref_mode = os.environ.get("FAKE_CLAUDE_REF_MODE", "ref_moved")
+    if ref_mode == "uninstall_fail":
+        print(f'✘ Failed to uninstall plugin "{plugin_id}"'); sys.exit(1)
+    sys.exit(0)
+if verb == "install":
+    # `claude plugin install <id> -s <scope> -y` (ref-drift path, step 2 of 2).
+    ref_mode = os.environ.get("FAKE_CLAUDE_REF_MODE", "ref_moved")
+    if ref_mode == "fail":
+        print(f'✘ Failed to install plugin "{plugin_id}"'); sys.exit(1)
+    if ref_mode == "no_confirm":
+        # Exits 0 but never touches the registry -- the "not confirmed" case.
+        print(f'✔ Plugin "{plugin}" installed for scope user.'); sys.exit(0)
+    # ref_moved (default): mimic what a real install does -- rewrite the
+    # registry's gitCommitSha for this plugin to the target the test named.
+    reg_path = os.environ["NX_PLUGIN_REGISTRY"]
+    new_sha = os.environ["FAKE_CLAUDE_NEW_SHA"]
+    with open(reg_path) as fh:
+        data = json.load(fh)
+    data["plugins"][plugin_id][0]["gitCommitSha"] = new_sha
+    with open(reg_path, "w") as fh:
+        json.dump(data, fh)
+    print(f'✔ Plugin "{plugin}" installed for scope user.')
+    sys.exit(0)
+print(f'Checking for updates for plugin "{plugin_id}" at user scope…')
 if mode == "updated":
     print(f'✔ Plugin "{plugin}" updated from 7.34.1 to 7.35.0 for scope user. Restart to apply changes.')
 elif mode == "latest":
     print(f'✔ {plugin} is already at the latest version (7.34.1).')
 elif mode == "fail":
-    print(f'✘ Failed to update plugin "{sys.argv[3]}": Plugin "{plugin}" not found'); sys.exit(1)
+    print(f'✘ Failed to update plugin "{plugin_id}": Plugin "{plugin}" not found'); sys.exit(1)
 elif mode == "hang":
     import time; time.sleep(60)
 elif mode == "sn_fails" and plugin == "sn":
@@ -47,23 +81,84 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("NX_NO_TELEMETRY", "1")
-    # The conftest autouse fixture parks the registry at a nonexistent path
-    # for the rest of the suite; this file's tests use the sandbox HOME's.
+    # The conftest autouse fixture parks the registry (and, nexus-konsk, the
+    # known-marketplaces file) at a nonexistent path for the rest of the
+    # suite; this file's tests use the sandbox HOME's.
     monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(tmp_path / ".claude" / "plugins" / "installed_plugins.json"))
+    monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(tmp_path / ".claude" / "plugins" / "known_marketplaces.json"))
     return tmp_path
 
 
 @pytest.fixture
 def registry(home: Path):
-    def write(versions: dict[str, str] | None) -> Path:
+    def entry(k: str, v: str | dict) -> dict:
+        if isinstance(v, dict):
+            d = {"scope": v.get("scope", "user"), "version": v["version"], "installPath": f"/x/{k}/{v['version']}"}
+            if "gitCommitSha" in v:
+                d["gitCommitSha"] = v["gitCommitSha"]
+            return d
+        return {"scope": "user", "version": v, "installPath": f"/x/{k}/{v}"}
+
+    def write(versions: dict[str, str | dict] | None) -> Path:
         p = home / ".claude" / "plugins" / "installed_plugins.json"
         p.parent.mkdir(parents=True, exist_ok=True)
         if versions is None:
             return p
         p.write_text(json.dumps({"version": 2, "plugins": {
-            k: [{"scope": "user", "version": v, "installPath": f"/x/{k}/{v}"}] for k, v in versions.items()}}))
+            k: [entry(k, v)] for k, v in versions.items()}}))
         return p
     return write
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+
+def _git_out(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+@pytest.fixture
+def marketplace(home: Path):
+    """A real local git repo standing in for an already-refreshed
+    marketplace clone (nexus-konsk), plus the ``known_marketplaces.json``
+    entry pointing at it. Returns ``(repo, sha_before, sha_after)``:
+    ``sha_before`` is what the client-tag pin (``v7.35.0``) resolves to,
+    ``sha_after`` is what a same-version anchored plugin-only cut
+    (``plugin-v7.35.0-1``) moves the pin to on the SAME branch -- exactly
+    the RDR-197 channel shape: the version never moves, the ref does."""
+    def make(marketplace_name: str = "nexus-plugins", plugin_name: str = "conexus") -> tuple[Path, str, str]:
+        repo = home / "mp-src" / marketplace_name
+        repo.mkdir(parents=True)
+        _git(repo, "init", "-q", "-b", "main")
+        _git(repo, "config", "user.email", "test@example.invalid")
+        _git(repo, "config", "user.name", "Test")
+        cp_dir = repo / ".claude-plugin"
+        cp_dir.mkdir()
+
+        def write_marketplace(ref: str) -> None:
+            (cp_dir / "marketplace.json").write_text(json.dumps({"plugins": [
+                {"name": plugin_name, "version": "7.35.0",
+                 "source": {"source": "git-subdir", "url": "https://example.invalid/x.git",
+                            "path": plugin_name, "ref": ref}}]}))
+
+        write_marketplace("v7.35.0")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "base")
+        _git(repo, "tag", "v7.35.0")
+        sha_before = _git_out(repo, "rev-parse", "HEAD")
+
+        write_marketplace("plugin-v7.35.0-1")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "plugin-only cut")
+        _git(repo, "tag", "plugin-v7.35.0-1")
+        sha_after = _git_out(repo, "rev-parse", "HEAD")
+
+        known = home / ".claude" / "plugins" / "known_marketplaces.json"
+        known.parent.mkdir(parents=True, exist_ok=True)
+        known.write_text(json.dumps({marketplace_name: {"installLocation": str(repo)}}))
+        return repo, sha_before, sha_after
+    return make
 
 
 @pytest.fixture
@@ -219,6 +314,20 @@ def test_two_plugins_fit_inside_the_rdr143_action_budget() -> None:
     # conexus/hooks/scripts/version_lockstep_action.py bounds the whole
     # `nx upgrade` at 120 s (_NX_UPGRADE_TIMEOUT); two updates must fit.
     assert 2 * pl.UPDATE_TIMEOUT_S <= 100
+    # nexus-konsk: the COMMON ref-drift case (no drift found -- one shared
+    # marketplace refresh plus a local rev-parse per plugin, no reinstall)
+    # is cheap and fits comfortably alongside the above.
+    assert pl.MARKETPLACE_REFRESH_TIMEOUT_S + 2 * pl.REF_RESOLVE_TIMEOUT_S <= 60
+    # The RARE worst case -- BOTH plugins actually drifted, so both get a
+    # full uninstall+install -- is accepted to exceed the 120 s budget
+    # (uninstall+install is the verified two-step dance; a bare `install`
+    # on an already-installed plugin is a no-op, measured against the real
+    # CLI). A timed-out detached action just leaves the marker stale and
+    # retries next session (its own documented failure handling) -- never
+    # a hang, never lost data. Document the shape rather than pretend a
+    # tighter number: this is the honest worst case.
+    worst_case = pl.MARKETPLACE_REFRESH_TIMEOUT_S + 2 * (pl.UNINSTALL_TIMEOUT_S + pl.UPDATE_TIMEOUT_S)
+    assert worst_case == 140
 
 
 def test_timeout_is_a_named_failure(registry, fake_claude: Path, wheel, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -246,6 +355,152 @@ def test_updated_line_with_junk_version_is_not_trusted(registry, wheel) -> None:
         return subprocess.CompletedProcess(cmd, 0, stdout='Plugin "conexus" updated from 7.34.1 to latest for scope user.\n', stderr="")
     o = pl.converge_plugins(run=run, claude_path="/fake/claude").outcomes[0]
     assert o.status == "unknown"
+
+
+# ── ref-drift: a same-version plugin-only cut (nexus-konsk) ────────────────
+# RDR-197's channel moves a plugin's release ref without ever moving the
+# client `version` field -- the CLI's own `update` verb then reports
+# "already at the latest version" and does nothing (measured, nexus-semdv).
+# This is the case: registry version == wheel version, but the registry's
+# gitCommitSha is behind what the marketplace's pinned ref now resolves to.
+
+def test_same_version_ref_move_is_picked_up_and_reinstalled(
+        registry, fake_claude: Path, wheel, marketplace, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, sha_before, sha_after = marketplace()
+    registry({"conexus@nexus-plugins": {"version": "7.35.0", "gitCommitSha": sha_before}})
+    monkeypatch.setenv("FAKE_CLAUDE_NEW_SHA", sha_after)
+    r = pl.converge_plugins()
+    assert r.status == "ran" and r.restart_needed
+    assert len(r.outcomes) == 1
+    o = r.outcomes[0]
+    assert o.plugin_id == "conexus@nexus-plugins" and o.status == "ref_moved" and o.now == "7.35.0"
+    assert sha_before[:7] in o.detail and sha_after[:7] in o.detail
+    log = fake_claude.read_text().splitlines()
+    assert "plugin marketplace update nexus-plugins" in log
+    assert "plugin uninstall conexus@nexus-plugins -s user -y" in log
+    assert "plugin install conexus@nexus-plugins -s user -y" in log
+    assert log.index("plugin uninstall conexus@nexus-plugins -s user -y") < \
+           log.index("plugin install conexus@nexus-plugins -s user -y"), "uninstall must run before install"
+    lines: list[str] = []; pl.render(r, lines.append)
+    assert lines[0] == f"Plugin update: conexus@nexus-plugins 7.35.0: picked up a plugin-only release ({o.detail})"
+    assert lines[-1].startswith("Plugin update: restart the Claude Code session")
+
+
+def test_behind_plugin_at_newest_published_still_gets_the_ref_drift_check(
+        registry, fake_claude: Path, wheel, marketplace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The release-window case (plugin-lockstep-gate.sh step 9 on the
+    7.42.0 battery): the wheel is 7.35.0, the installed plugin is the newest
+    PUBLISHED plugin at 7.34.1, so ``claude plugin update`` reports "already
+    at the latest version (7.34.1)". That plugin's ref can still have moved
+    under it, and the version-only path used to stop there."""
+    repo, sha_before, sha_after = marketplace()
+    registry({"conexus@nexus-plugins": {"version": "7.34.1", "gitCommitSha": sha_before}})
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "latest")
+    monkeypatch.setenv("FAKE_CLAUDE_NEW_SHA", sha_after)
+    r = pl.converge_plugins()
+    statuses = [o.status for o in r.outcomes]
+    assert statuses == ["latest_published", "ref_moved"], statuses
+    assert r.restart_needed
+    log = fake_claude.read_text().splitlines()
+    assert "plugin uninstall conexus@nexus-plugins -s user -y" in log
+    assert "plugin install conexus@nexus-plugins -s user -y" in log
+    lines: list[str] = []; pl.render(r, lines.append)
+    assert any(ln.startswith("Plugin update: conexus@nexus-plugins 7.34.1: picked up a plugin-only release") for ln in lines)
+
+
+def test_same_version_same_ref_is_silent_and_no_reinstall_attempted(
+        registry, fake_claude: Path, wheel, marketplace) -> None:
+    repo, sha_before, sha_after = marketplace()
+    registry({"conexus@nexus-plugins": {"version": "7.35.0", "gitCommitSha": sha_after}})
+    r = pl.converge_plugins()
+    assert r.outcomes == [] and not r.restart_needed
+    log = fake_claude.read_text()
+    assert "plugin marketplace update nexus-plugins" in log
+    assert "install" not in log  # covers "uninstall" too (substring)
+
+
+def test_ref_drift_skipped_when_no_marketplace_info(registry, fake_claude: Path, wheel) -> None:
+    registry({"conexus@nexus-plugins": {"version": "7.35.0", "gitCommitSha": "deadbeef"}})
+    r = pl.converge_plugins()
+    assert r.outcomes == []
+    assert fake_claude.read_text() == ""
+
+
+def test_ref_drift_skipped_when_registry_has_no_commit_sha(registry, fake_claude: Path, wheel, marketplace) -> None:
+    marketplace()
+    registry({"conexus@nexus-plugins": "7.35.0"})  # no gitCommitSha field at all
+    r = pl.converge_plugins()
+    assert r.outcomes == []
+    assert "install" not in fake_claude.read_text()
+
+
+def test_ref_drift_reinstall_failure_reports_manual_command(
+        registry, fake_claude: Path, wheel, marketplace, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, sha_before, sha_after = marketplace()
+    registry({"conexus@nexus-plugins": {"version": "7.35.0", "gitCommitSha": sha_before}})
+    monkeypatch.setenv("FAKE_CLAUDE_REF_MODE", "fail")
+    r = pl.converge_plugins()
+    o = r.outcomes[0]
+    assert o.status == "ref_check_failed" and "Failed to install" in o.detail
+    lines: list[str] = []; pl.render(r, lines.append)
+    assert lines == [
+        "Plugin update: conexus@nexus-plugins 7.35.0: a plugin-only release exists but reinstall failed: "
+        "uninstalled but reinstall failed: ✘ Failed to install plugin \"conexus@nexus-plugins\". "
+        "Run: claude plugin uninstall conexus@nexus-plugins -s user -y "
+        "&& claude plugin install conexus@nexus-plugins -s user -y"]
+
+
+def test_ref_drift_uninstall_failure_reports_manual_command(
+        registry, fake_claude: Path, wheel, marketplace, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, sha_before, sha_after = marketplace()
+    registry({"conexus@nexus-plugins": {"version": "7.35.0", "gitCommitSha": sha_before}})
+    monkeypatch.setenv("FAKE_CLAUDE_REF_MODE", "uninstall_fail")
+    r = pl.converge_plugins()
+    o = r.outcomes[0]
+    assert o.status == "ref_check_failed" and "Failed to uninstall" in o.detail
+    log = fake_claude.read_text()
+    assert "plugin install" not in log  # never attempted after a failed uninstall
+
+
+def test_ref_drift_install_exit_zero_but_sha_unconfirmed_is_not_trusted(
+        registry, fake_claude: Path, wheel, marketplace, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, sha_before, sha_after = marketplace()
+    registry({"conexus@nexus-plugins": {"version": "7.35.0", "gitCommitSha": sha_before}})
+    monkeypatch.setenv("FAKE_CLAUDE_REF_MODE", "no_confirm")
+    r = pl.converge_plugins()
+    o = r.outcomes[0]
+    assert o.status == "ref_check_failed" and "not confirmed" in o.detail
+    assert not r.restart_needed
+
+
+def test_ref_drift_dry_run_makes_no_calls(registry, fake_claude: Path, wheel, marketplace) -> None:
+    repo, sha_before, sha_after = marketplace()
+    registry({"conexus@nexus-plugins": {"version": "7.35.0", "gitCommitSha": sha_before}})
+    r = pl.converge_plugins(dry_run=True)
+    assert r.outcomes == []
+    assert fake_claude.read_text() == ""
+
+
+def test_ref_drift_is_checked_once_per_marketplace_not_per_plugin(
+        registry, fake_claude: Path, wheel, marketplace, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, sha_before, sha_after = marketplace(plugin_name="conexus")
+    # sn shares the same marketplace clone; add it to that clone's manifest too.
+    mp_json = repo / ".claude-plugin" / "marketplace.json"
+    data = json.loads(mp_json.read_text())
+    data["plugins"].append({"name": "sn", "version": "7.35.0",
+                            "source": {"source": "git-subdir", "url": "https://example.invalid/x.git",
+                                       "path": "sn", "ref": "plugin-v7.35.0-1"}})
+    mp_json.write_text(json.dumps(data))
+    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "add sn"); _git(repo, "tag", "-f", "plugin-v7.35.0-1")
+    sha_after2 = _git_out(repo, "rev-parse", "HEAD")
+    registry({"conexus@nexus-plugins": {"version": "7.35.0", "gitCommitSha": sha_before},
+              "sn@nexus-plugins": {"version": "7.35.0", "gitCommitSha": sha_before}})
+    monkeypatch.setenv("FAKE_CLAUDE_NEW_SHA", sha_after2)
+    r = pl.converge_plugins()
+    assert {o.plugin_id: o.status for o in r.outcomes} == {
+        "conexus@nexus-plugins": "ref_moved", "sn@nexus-plugins": "ref_moved"}
+    log = fake_claude.read_text().splitlines()
+    assert log.count("plugin marketplace update nexus-plugins") == 1
 
 
 # ── nx upgrade wiring ─────────────────────────────────────────────────────
@@ -296,3 +551,13 @@ def test_nx_upgrade_in_lockstep_is_silent(registry, fake_claude: Path, wheel, qu
     result = CliRunner().invoke(main, ["upgrade"])
     assert result.exit_code == 0, result.output
     assert "Plugin update" not in result.output
+
+
+def test_nx_upgrade_reports_a_same_version_ref_move(
+        registry, fake_claude: Path, wheel, marketplace, quiet_upgrade, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, sha_before, sha_after = marketplace()
+    registry({"conexus@nexus-plugins": {"version": "7.35.0", "gitCommitSha": sha_before}})
+    monkeypatch.setenv("FAKE_CLAUDE_NEW_SHA", sha_after)
+    result = CliRunner().invoke(main, ["upgrade"])
+    assert result.exit_code == 0, result.output
+    assert "picked up a plugin-only release" in result.output

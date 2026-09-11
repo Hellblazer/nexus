@@ -18,8 +18,7 @@ import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.DSLContext;
-import org.jooq.Record;
-import org.jooq.Result;
+import org.jooq.Field;
 import org.jooq.SQLDialect;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
@@ -31,8 +30,8 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -40,7 +39,12 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.HYBRID_SEARCH_384;
+import static dev.nexus.service.jooq.nexus.Tables.HYBRID_SEARCH_768;
+import static dev.nexus.service.jooq.nexus.Tables.HYBRID_SEARCH_1024;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -295,18 +299,29 @@ class HybridSearchFunctionParityIntegrationTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             for (String id : ids) {
                 boolean tombstoned = id.equals(TOMB_TUMBLER);
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_documents "
-                    + "(tenant_id, tumbler, title, author, content_type, physical_collection, deleted_at) "
-                    + "VALUES ('" + TENANT_A + "', '" + id + "', 'Doc', 'ada', 'paper', '" + COL_MAIN + "', "
-                    + (tombstoned ? "now()" : "NULL") + ") ON CONFLICT (tenant_id, tumbler) DO NOTHING");
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_document_chunks "
-                    + "(tenant_id, doc_id, position, chash, collection) "
-                    + "VALUES ('" + TENANT_A + "', '" + id + "', 0, decode('" + corpusChash.get(id)
-                    + "', 'hex'), '" + COL_MAIN + "') ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+                ctx.insertInto(CATALOG_DOCUMENTS)
+                    .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_A)
+                    .set(CATALOG_DOCUMENTS.TUMBLER, id)
+                    .set(CATALOG_DOCUMENTS.TITLE, "Doc")
+                    .set(CATALOG_DOCUMENTS.AUTHOR, "ada")
+                    .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COL_MAIN)
+                    .set(CATALOG_DOCUMENTS.DELETED_AT, tombstoned ? DSL.currentOffsetDateTime() : null)
+                    .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+                    .doNothing()
+                    .execute();
+                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                    .values(TENANT_A, id, 0, HexFormat.of().parseHex(corpusChash.get(id)), COL_MAIN)
+                    .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION)
+                    .doNothing()
+                    .execute();
             }
         }
     }
@@ -354,22 +369,6 @@ class HybridSearchFunctionParityIntegrationTest {
         return queryRouter.embedOneForCollection(tenantScope, tenant, collection, text);
     }
 
-    /** pgvector cast-safe text literal: {@code [f1,f2,...]} (copy of
-     *  PgVectorRepository's private helper -- kept local since the production method
-     *  is private and this suite must stay a pure external-contract caller). */
-    private static String vectorLiteral(float[] vec) {
-        StringBuilder sb = new StringBuilder(vec.length * 8 + 2).append('[');
-        for (int i = 0; i < vec.length; i++) {
-            if (i > 0) sb.append(',');
-            sb.append(vec[i]);
-        }
-        return sb.append(']').toString();
-    }
-
-    private static String placeholders(int n) {
-        return String.join(",", java.util.Collections.nCopies(n, "?"));
-    }
-
     /**
      * Calls {@code nexus.hybrid_search_<dim>(p_query, p_query_text, p_collections,
      * p_where, p_n)} under the given tenant, with {@code pg_trgm.word_similarity_threshold}
@@ -382,24 +381,36 @@ class HybridSearchFunctionParityIntegrationTest {
     private List<Map<String, Object>> callHybridSearch(String tenant, int dim,
             String queryText, List<String> collections, double trgmThreshold, int n) {
         float[] vec = embedQuery(tenant, collections.get(0), queryText);
-        String sql = "SELECT id, content, collection, score FROM nexus.hybrid_search_" + dim
-            + "(?::nexus.vector, ?, ARRAY[" + placeholders(collections.size()) + "]::text[], NULL::jsonb, ?)";
-        List<Object> binds = new ArrayList<>();
-        binds.add(vectorLiteral(vec));
-        binds.add(queryText);
-        binds.addAll(collections);
-        binds.add(n);
+        String[] cols = collections.toArray(new String[0]);
+        Table<?> fn;
+        switch (dim) {
+            case 384:
+                fn = HYBRID_SEARCH_384.call(Vector.of(vec), queryText, cols, null, n);
+                break;
+            case 768:
+                fn = HYBRID_SEARCH_768.call(Vector.of(vec), queryText, cols, null, n);
+                break;
+            case 1024:
+                fn = HYBRID_SEARCH_1024.call(Vector.of(vec), queryText, cols, null, n);
+                break;
+            default:
+                throw new IllegalArgumentException("unsupported dim: " + dim);
+        }
+        Field<String> id = DSL.field(DSL.name("id"), String.class);
+        Field<String> content = DSL.field(DSL.name("content"), String.class);
+        Field<String> collection = DSL.field(DSL.name("collection"), String.class);
+        Field<Double> score = DSL.field(DSL.name("score"), Double.class);
         return tenantScope.withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold",
                 Double.toString(trgmThreshold));
-            Result<Record> result = ctx.fetch(sql, binds.toArray());
+            var result = ctx.select(id, content, collection, score).from(fn).fetch();
             List<Map<String, Object>> rows = new ArrayList<>(result.size());
-            for (Record rec : result) {
+            for (var rec : result) {
                 Map<String, Object> row = new LinkedHashMap<>();
-                row.put("id",         rec.get("id", String.class));
-                row.put("content",    rec.get("content", String.class));
-                row.put("collection", rec.get("collection", String.class));
-                row.put("score",      rec.get("score", Double.class));
+                row.put("id",         rec.get(id));
+                row.put("content",    rec.get(content));
+                row.put("collection", rec.get(collection));
+                row.put("score",      rec.get(score));
                 rows.add(row);
             }
             return rows;
@@ -423,10 +434,10 @@ class HybridSearchFunctionParityIntegrationTest {
     private String explain(Table<?> fn) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
-            su.createStatement().execute("SET LOCAL enable_seqscan = off");
-            PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
-            su.createStatement().execute("SELECT set_config('pg_trgm.word_similarity_threshold', '0.6', true)");
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgSession.setLocal(ctx, "enable_seqscan", "off");
+            PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
+            PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
             String plan = ctx.explain(ctx.selectFrom(fn)).plan();
             su.rollback();
             return plan;
@@ -477,17 +488,20 @@ class HybridSearchFunctionParityIntegrationTest {
         // older sibling suite's precondition idiom of calling plain search() predates
         // that fold-in and would make this precondition vacuously pass either way).
         try (Connection su = pg.createConnection("")) {
-            try (var rs = su.createStatement().executeQuery(
-                    "SELECT chunk_text FROM nexus.chunks WHERE tenant_id = '" + TENANT_A
-                    + "' AND collection = '" + COL_MAIN + "' AND chash = decode('" + tombChash + "', 'hex')")) {
-                assertThat(rs.next())
-                    .as("precondition: tombstoned chunk row must physically exist pre-filter")
-                    .isTrue();
-                assertThat(rs.getString(1))
-                    .as("precondition: tombstoned chunk text must equal queries.get(0) "
-                        + "exactly, so it is an unbeatable vector+text match if not filtered")
-                    .isEqualTo(queries.get(0) + " tombstoned-probe-only");
-            }
+            var chunkText = DSL.using(su, SQLDialect.POSTGRES)
+                .select(CHUNKS.CHUNK_TEXT)
+                .from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(TENANT_A))
+                .and(CHUNKS.COLLECTION.eq(COL_MAIN))
+                .and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(tombChash)))
+                .fetch(CHUNKS.CHUNK_TEXT);
+            assertThat(chunkText)
+                .as("precondition: tombstoned chunk row must physically exist pre-filter")
+                .hasSize(1);
+            assertThat(chunkText.get(0))
+                .as("precondition: tombstoned chunk text must equal queries.get(0) "
+                    + "exactly, so it is an unbeatable vector+text match if not filtered")
+                .isEqualTo(queries.get(0) + " tombstoned-probe-only");
         }
     }
 

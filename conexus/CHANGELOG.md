@@ -4,6 +4,33 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.42.0] - 2026-09-11
+
+Paired engine: engine-service-v0.1.115 (`REQUIRED_ENGINE_VERSION` (0, 1, 115)).
+Live at this pin, from `PENDING_RELEASE.md`:
+
+- `hooks/scripts/version_lockstep_hook.py`, `version_lockstep_action.py`
+  (nexus-konsk): the SessionStart hook detects a same-version plugin-only
+  ref drift with no network and dispatches the same detached action as a CLI
+  version mismatch, routed to `nx upgrade`; `nx upgrade` also drift-checks
+  a plugin that is behind the CLI but already the newest published one.
+- `hooks/scripts/_endpoint_resolve.py` with `tuple_ledger_project.py`,
+  `t2_prefix_scan.py`, `routing/_lib.py` (nexus-aginu): one shared
+  stdlib-only endpoint and credential resolver; the private copies are gone.
+  The `config.yml` scanner strips a trailing inline comment, and the
+  `NX_SERVICE_HOST`/`PORT` leg fills a missing host from a live supervisor
+  lease.
+- `hooks/scripts/tuple_ledger_project.py`, `subagent-start-tuple-async.sh`
+  (nexus-em75s.42): the POST uses a no-redirect, no-proxy opener and is
+  bounded as a whole; a report with no `agent_id` projects nothing.
+- `hooks/scripts/expectations.sh` (nexus-zn9op): the census's `nx tuple
+  list` call is bounded by a wall-clock deadline, default 45 s, with a named
+  `SPACE_FALLBACK` on expiry.
+- `skills/mailbox/SKILL.md` (nexus-e00lh): the nonce is required for
+  `mailbox/<address>` and never echoed on the read wire.
+- `skills/phase-review-gate/SKILL.md` (nexus-w5gma): names the three
+  phase-structure layouts the parser recognises.
+
 ## [7.41.1] - 2026-09-11
 
 Paired engine: engine-service-v0.1.114 (unchanged from 7.41.0; `REQUIRED_ENGINE_VERSION` stays (0, 1, 114)).

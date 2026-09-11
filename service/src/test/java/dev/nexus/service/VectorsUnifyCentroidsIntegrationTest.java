@@ -5,6 +5,8 @@ import org.jooq.SQLDialect;
 import org.jooq.DSLContext;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.SchemaMigrator.MigrationException;
+import dev.nexus.service.jooq.binding.Vector;
+import org.jooq.exception.DataAccessException;
 import liquibase.Contexts;
 import liquibase.LabelExpression;
 import liquibase.Liquibase;
@@ -19,7 +21,9 @@ import org.junit.jupiter.api.*;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.util.Arrays;
 
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -212,6 +216,16 @@ class VectorsUnifyCentroidsIntegrationTest {
      * search-path-001 (placed near the changelog's end) has relocated the
      * extension out of {@code public} (nexus-cbo4a batch 9 item 0
      * discovery).
+     *
+     * <p>KEPT RAW (nexus-cbo4a batch 13 group D): {@code VectorBinding}
+     * (the generated {@code TAXONOMY_CENTROIDS.EMBEDDING_*} fields' jOOQ
+     * binding) renders the {@code ::nexus.vector} cast UNCONDITIONALLY --
+     * converting this INSERT onto the generated table/binding would
+     * silently change what the statement proves (that a bare cast still
+     * resolves via search_path at this point in the walk), the same
+     * exclusion class batch 12 established for
+     * {@code SchemaMigratorIntegrationTest}'s equivalent bare-cast chunks
+     * seed.
      */
     private static void seedCentroid(PostgreSQLContainer<?> pg, int dim, String tenant, String collection,
                                       long topicId, String label) throws Exception {
@@ -231,11 +245,22 @@ class VectorsUnifyCentroidsIntegrationTest {
         }
     }
 
-    private static long rowCount(Connection conn, String qualifiedTable) throws Exception {
-        try (var rs = conn.createStatement().executeQuery("SELECT COUNT(*) FROM " + qualifiedTable)) {
-            rs.next();
-            return rs.getLong(1);
-        }
+    /**
+     * Row count for either the unified {@code nexus.taxonomy_centroids}
+     * table or one of the pre-unify per-dim shards ({@code
+     * taxonomy_centroids_384/768/1024}) -- {@code table} is the bare
+     * (unqualified) table name under {@code nexus}. Schema-agnostic {@code
+     * DSL.table(DSL.name(...))} uniformly, not the generated {@code
+     * TAXONOMY_CENTROIDS} table, because this ONE helper is called against
+     * BOTH shapes across different tests (some pre-unify, some post) --
+     * the per-dim shards carry no jOOQ codegen at all (dropped at HEAD,
+     * RDR-191), so a single schema-agnostic form covers every call site
+     * without per-site branching (nexus-cbo4a batch 11/12 ladder-file
+     * idiom).
+     */
+    private static long rowCount(Connection conn, String table) {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        return ctx.selectCount().from(DSL.table(DSL.name("nexus", table))).fetchOne(0, long.class);
     }
 
     private static boolean tableExists(Connection conn, String schema, String table) throws Exception {
@@ -316,32 +341,32 @@ class VectorsUnifyCentroidsIntegrationTest {
                 .doesNotThrowAnyException();
 
             try (Connection conn = rig.pg().createConnection("")) {
-                assertThat(rowCount(conn, "nexus.taxonomy_centroids")).isEqualTo(4L);
+                assertThat(rowCount(conn, "taxonomy_centroids")).isEqualTo(4L);
 
-                try (var ps = conn.prepareStatement(
-                        "SELECT embedding_384 IS NOT NULL, embedding_768 IS NOT NULL, "
-                            + "embedding_1024 IS NOT NULL FROM nexus.taxonomy_centroids "
-                            + "WHERE collection = ? AND topic_id = ?")) {
-                    ps.setString(1, "code__demo__minilm__v1");
-                    ps.setLong(2, 1L);
-                    var rs = ps.executeQuery();
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getBoolean(1)).as("topic 1 came from taxonomy_centroids_384").isTrue();
-                    assertThat(rs.getBoolean(2)).isFalse();
-                    assertThat(rs.getBoolean(3)).isFalse();
-                }
-                try (var ps = conn.prepareStatement(
-                        "SELECT embedding_384 IS NOT NULL, embedding_768 IS NOT NULL, "
-                            + "embedding_1024 IS NOT NULL FROM nexus.taxonomy_centroids "
-                            + "WHERE collection = ? AND topic_id = ?")) {
-                    ps.setString(1, "knowledge__demo__voyage__v1");
-                    ps.setLong(2, 3L);
-                    var rs = ps.executeQuery();
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getBoolean(1)).isFalse();
-                    assertThat(rs.getBoolean(2)).isFalse();
-                    assertThat(rs.getBoolean(3)).as("topic 3 came from taxonomy_centroids_1024").isTrue();
-                }
+                DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+                var rows1 = ctx.select(TAXONOMY_CENTROIDS.EMBEDDING_384.isNotNull(),
+                        TAXONOMY_CENTROIDS.EMBEDDING_768.isNotNull(),
+                        TAXONOMY_CENTROIDS.EMBEDDING_1024.isNotNull())
+                    .from(TAXONOMY_CENTROIDS)
+                    .where(TAXONOMY_CENTROIDS.COLLECTION.eq("code__demo__minilm__v1"))
+                    .and(TAXONOMY_CENTROIDS.TOPIC_ID.eq(1L))
+                    .fetch();
+                assertThat(rows1).hasSize(1);
+                assertThat(rows1.get(0).value1()).as("topic 1 came from taxonomy_centroids_384").isTrue();
+                assertThat(rows1.get(0).value2()).isFalse();
+                assertThat(rows1.get(0).value3()).isFalse();
+
+                var rows2 = ctx.select(TAXONOMY_CENTROIDS.EMBEDDING_384.isNotNull(),
+                        TAXONOMY_CENTROIDS.EMBEDDING_768.isNotNull(),
+                        TAXONOMY_CENTROIDS.EMBEDDING_1024.isNotNull())
+                    .from(TAXONOMY_CENTROIDS)
+                    .where(TAXONOMY_CENTROIDS.COLLECTION.eq("knowledge__demo__voyage__v1"))
+                    .and(TAXONOMY_CENTROIDS.TOPIC_ID.eq(3L))
+                    .fetch();
+                assertThat(rows2).hasSize(1);
+                assertThat(rows2.get(0).value1()).isFalse();
+                assertThat(rows2.get(0).value2()).isFalse();
+                assertThat(rows2.get(0).value3()).as("topic 3 came from taxonomy_centroids_1024").isTrue();
             }
         } finally {
             rig.close();
@@ -365,7 +390,7 @@ class VectorsUnifyCentroidsIntegrationTest {
                 .doesNotThrowAnyException();
 
             try (Connection conn = rig.pg().createConnection("")) {
-                assertThat(rowCount(conn, "nexus.taxonomy_centroids")).isEqualTo(1L);
+                assertThat(rowCount(conn, "taxonomy_centroids")).isEqualTo(1L);
                 // The 768/1024 HNSW indexes must still be built UNCONDITIONALLY
                 // even though those shards contributed zero rows.
                 for (String idx : new String[] {
@@ -426,49 +451,56 @@ class VectorsUnifyCentroidsIntegrationTest {
 
             try (Connection su = rig.pg().createConnection("")) {
                 su.setAutoCommit(true);
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
 
                 // Zero embeddings -> rejected. label supplied (hygiene-001-9b
                 // made taxonomy_centroids.label NOT NULL) so the
                 // exactly_one_embedding CHECK -- not the unrelated NOT NULL
                 // constraint -- is what fires here.
-                assertThatThrownBy(() -> {
-                    try (var ps = su.prepareStatement(
-                            "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label) "
-                                + "VALUES ('t1', 'c', 100, 'zero-embedding-label')")) {
-                        ps.executeUpdate();
-                    }
-                }).as("zero-embedding row must violate taxonomy_centroids_exactly_one_embedding")
+                assertThatThrownBy(() -> ctx.insertInto(TAXONOMY_CENTROIDS,
+                        TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                        TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL)
+                    .values("t1", "c", 100L, "zero-embedding-label")
+                    .execute())
+                  .as("zero-embedding row must violate taxonomy_centroids_exactly_one_embedding")
+                  .isInstanceOf(DataAccessException.class)
                   .hasMessageContaining("exactly_one_embedding");
 
                 // Two embeddings -> rejected. label supplied for the same reason.
-                assertThatThrownBy(() -> {
-                    try (var ps = su.prepareStatement(
-                            "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, "
-                                + "embedding_384, embedding_768) "
-                                + "VALUES ('t1', 'c', 101, 'two-embedding-label', ?::nexus.vector, ?::nexus.vector)")) {
-                        String v384 = "[" + "0.01,".repeat(383) + "0.01]";
-                        String v768 = "[" + "0.01,".repeat(767) + "0.01]";
-                        ps.setString(1, v384);
-                        ps.setString(2, v768);
-                        ps.executeUpdate();
-                    }
-                }).as("two-embedding row must violate taxonomy_centroids_exactly_one_embedding")
+                float[] v384 = new float[384];
+                Arrays.fill(v384, 0.01f);
+                float[] v768 = new float[768];
+                Arrays.fill(v768, 0.01f);
+                assertThatThrownBy(() -> ctx.insertInto(TAXONOMY_CENTROIDS,
+                        TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                        TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL,
+                        TAXONOMY_CENTROIDS.EMBEDDING_384, TAXONOMY_CENTROIDS.EMBEDDING_768)
+                    .values("t1", "c", 101L, "two-embedding-label", Vector.of(v384), Vector.of(v768))
+                    .execute())
+                  .as("two-embedding row must violate taxonomy_centroids_exactly_one_embedding")
+                  .isInstanceOf(DataAccessException.class)
                   .hasMessageContaining("exactly_one_embedding");
 
                 // Exactly one, per dim -> accepted. label supplied for the same reason.
                 int[] dims = {384, 768, 1024};
                 for (int i = 0; i < dims.length; i++) {
                     int dim = dims[i];
-                    String vec = "[" + "0.01,".repeat(dim - 1) + "0.01]";
-                    try (var ps = su.prepareStatement(
-                            "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, "
-                                + "embedding_" + dim + ") VALUES ('t1', 'c', ?, 'one-embedding-label', ?::nexus.vector)")) {
-                        ps.setLong(1, 200 + i);
-                        ps.setString(2, vec);
-                        assertThatCode(ps::executeUpdate)
-                            .as("single embedding_%d row must be accepted", dim)
-                            .doesNotThrowAnyException();
-                    }
+                    float[] vec = new float[dim];
+                    Arrays.fill(vec, 0.01f);
+                    var embeddingField = switch (dim) {
+                        case 384 -> TAXONOMY_CENTROIDS.EMBEDDING_384;
+                        case 768 -> TAXONOMY_CENTROIDS.EMBEDDING_768;
+                        case 1024 -> TAXONOMY_CENTROIDS.EMBEDDING_1024;
+                        default -> throw new IllegalArgumentException("unsupported dim " + dim);
+                    };
+                    long topicId = 200L + i;
+                    assertThatCode(() -> ctx.insertInto(TAXONOMY_CENTROIDS,
+                            TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                            TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL, embeddingField)
+                        .values("t1", "c", topicId, "one-embedding-label", Vector.of(vec))
+                        .execute())
+                        .as("single embedding_%d row must be accepted", dim)
+                        .doesNotThrowAnyException();
                 }
             }
         } finally {
@@ -542,9 +574,9 @@ class VectorsUnifyCentroidsIntegrationTest {
                 assertThat(tableExists(conn, "nexus", "taxonomy_centroids_384")).isTrue();
                 assertThat(tableExists(conn, "nexus", "taxonomy_centroids_768")).isTrue();
                 assertThat(tableExists(conn, "nexus", "taxonomy_centroids_1024")).isTrue();
-                assertThat(rowCount(conn, "nexus.taxonomy_centroids_384")).isEqualTo(1L);
-                assertThat(rowCount(conn, "nexus.taxonomy_centroids_768")).isEqualTo(1L);
-                assertThat(rowCount(conn, "nexus.taxonomy_centroids_1024")).isEqualTo(1L);
+                assertThat(rowCount(conn, "taxonomy_centroids_384")).isEqualTo(1L);
+                assertThat(rowCount(conn, "taxonomy_centroids_768")).isEqualTo(1L);
+                assertThat(rowCount(conn, "taxonomy_centroids_1024")).isEqualTo(1L);
 
                 // All three shards: table existence, RLS, HNSW index. No
                 // octet CHECK / FK analog to verify here (neither exists on
@@ -561,7 +593,7 @@ class VectorsUnifyCentroidsIntegrationTest {
                 assertThatCode(() -> applyUnifyChangeset(rig.adminDs()))
                     .as("re-applying after rollback must succeed cleanly")
                     .doesNotThrowAnyException();
-                assertThat(rowCount(conn, "nexus.taxonomy_centroids")).isEqualTo(3L);
+                assertThat(rowCount(conn, "taxonomy_centroids")).isEqualTo(3L);
             }
         } finally {
             rig.close();

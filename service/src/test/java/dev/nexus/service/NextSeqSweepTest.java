@@ -4,6 +4,8 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
@@ -11,6 +13,7 @@ import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -77,13 +80,12 @@ class NextSeqSweepTest {
     private void driftNextSeq(String prefix, long value) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                "UPDATE nexus.catalog_owners SET next_seq = ? WHERE tenant_id = ? AND tumbler_prefix = ?")) {
-                ps.setLong(1, value);
-                ps.setString(2, TENANT);
-                ps.setString(3, prefix);
-                assertThat(ps.executeUpdate()).isEqualTo(1);
-            }
+            int n = DSL.using(su, SQLDialect.POSTGRES)
+                .update(CATALOG_OWNERS)
+                .set(CATALOG_OWNERS.NEXT_SEQ, value)
+                .where(CATALOG_OWNERS.TENANT_ID.eq(TENANT).and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(prefix)))
+                .execute();
+            assertThat(n).isEqualTo(1);
         }
     }
 

@@ -271,10 +271,13 @@ class TestViewEraChangesetLive:
         # grants-nexus-diag-4 (audit-table SELECT grants for the forensics
         # path) — again after all prior ones, so blocks[1] is still
         # changeset-2's body; count moved 3 -> 4.
+        # 50a354fa3 (2026-09-11, nexus-f1pbh) appended a FIFTH changeset,
+        # grants-nexus-diag-5 (SELECT on the three RDR-205 tuple-space
+        # tables) — after all prior ones, blocks[1] unchanged; count 4 -> 5.
         blocks = re.findall(
             r"<sql\s[^>]*>(.*?)</sql>", xml, re.DOTALL,
         )
-        assert len(blocks) == 4, "expected exactly the four grants-nexus-diag changesets"
+        assert len(blocks) == 5, "expected exactly the five grants-nexus-diag changesets"
         return blocks[1]
 
     def test_revoke_changeset_survives_superuser_owned_view(self, diag_cluster):

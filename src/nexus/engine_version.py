@@ -447,7 +447,7 @@ from __future__ import annotations
 #: recall@20 12/12, hybrid p95 1753ms/bound 2646, search p95 781ms/bound
 #: 969), cloud-client-path-gate green including the new tuple-space leg.
 #: Local-mode installs get the tuple-space route ONLY through this pin.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 114)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 115)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

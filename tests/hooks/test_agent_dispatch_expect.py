@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -98,11 +99,45 @@ def _subagent_start(agent_id: str, agent_type: str, session_id: str = SESSION) -
     )
 
 
-def _env(tmp_path: Path, mode: str | None) -> dict[str, str]:
+def _fake_nx_dir(tmp_path: Path) -> Path:
+    """A one-file ``nx`` shim on PATH that execs ``python -m nexus.cli`` —
+    the same pattern as ``tests/hooks/test_subagent_stop_hook.py::_fake_nx_dir``.
+
+    ``expectations_census``'s space-backed half shells out to a real ``nx
+    tuple list``. Left to inherit ``os.environ`` unmodified, that call rides
+    whatever the suite-wide autouse ``_pin_t2_substrate`` fixture (tests/
+    conftest.py) has wired into THIS test's env: a live, per-test-minted
+    engine substrate reached over a real HTTP round trip. A unit test in
+    ``tests/hooks`` must not depend on that — under box load the round trip
+    (not the evidence-gated lease wait: ``NX_SERVICE_URL`` is set, so
+    resolution takes the leg-1 verbatim-URL path, which never consults
+    ``DEFAULT_LEASE_WAIT_BUDGET_S`` at all) stretched from ~1s idle to up to
+    30s, blowing past this test's own 30s subprocess timeout three times on
+    2026-09-11 (nexus-zn9op). The stub plus a blanked/redirected
+    NX_SERVICE_*/NEXUS_CONFIG_DIR env (``_env``'s ``nx_stub`` branch) makes
+    endpoint resolution fail immediately and deterministically instead — the
+    space check reports ``SPACE_FALLBACK`` in well under 2s regardless of
+    ambient load, which is all these tests assert on (a bare ``SPACE_``
+    prefix)."""
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir(exist_ok=True)
+    nx_path = bin_dir / "nx"
+    nx_path.write_text(f'#!/bin/sh\nexec "{sys.executable}" -m nexus.cli "$@"\n')
+    nx_path.chmod(0o755)
+    return bin_dir
+
+
+def _env(tmp_path: Path, mode: str | None, *, nx_stub: bool = False) -> dict[str, str]:
     env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "state")}
     env.pop("NX_ORCH_STOP_GUARD", None)
     if mode is not None:
         env["NX_ORCH_STOP_GUARD"] = mode
+    if nx_stub:
+        fake_bin = _fake_nx_dir(tmp_path)
+        env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+        env["NEXUS_CONFIG_DIR"] = str(tmp_path / "cfg-empty")
+        for key in ("NX_SERVICE_URL", "NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_SERVICE_TOKEN"):
+            env[key] = ""
     return env
 
 
@@ -119,12 +154,20 @@ def _expfile(tmp_path: Path, session_id: str = SESSION) -> Path:
     return tmp_path / "state" / "nexus" / "orchestration" / f"{session_id}.expectations"
 
 
-def _lib_call(func: str, tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    """Invoke a shellib function the way real callers do: source, then call."""
+def _lib_call(
+    func: str, tmp_path: Path, *args: str, nx_stub: bool = False
+) -> subprocess.CompletedProcess[str]:
+    """Invoke a shellib function the way real callers do: source, then call.
+
+    ``nx_stub=True`` (every ``expectations_census`` call site below — the
+    only function that shells out to ``nx``) routes the census's
+    space-backed check to a stub ``nx`` instead of the live per-test engine
+    substrate — see ``_fake_nx_dir``.
+    """
     quoted = " ".join(f"'{a}'" for a in args)
     return subprocess.run(
         ["bash", "-c", f"source '{LIB}'; {func} {quoted}"],
-        capture_output=True, text=True, timeout=30, env=_env(tmp_path, None),
+        capture_output=True, text=True, timeout=30, env=_env(tmp_path, None, nx_stub=nx_stub),
     )
 
 
@@ -259,7 +302,7 @@ class TestPairsWithSubagentStart:
             _subagent_start("a29d3cfdd53ae3e98", "conexus:code-review-expert"),
             tmp_path, script=STAMP,
         )
-        census = _lib_call("expectations_census", tmp_path, SESSION)
+        census = _lib_call("expectations_census", tmp_path, SESSION, nx_stub=True)
         assert census.returncode == 0, f"BLINDSPOT hard-failure: {census.stdout}"
         assert "BLINDSPOT\tchecked=1 recognized=1 unrecognized=0" in census.stdout
         assert "AGENT\ta29d3cfdd53ae3e98\tconexus:code-review-expert\t" in census.stdout
@@ -300,7 +343,7 @@ class TestPairsWithSubagentStart:
             _subagent_start("a29d3cfdd53ae3e98", "conexus:code-review-expert"),
             tmp_path, script=STAMP,
         )
-        census = _lib_call("expectations_census", tmp_path, SESSION)
+        census = _lib_call("expectations_census", tmp_path, SESSION, nx_stub=True)
         assert census.returncode == 0, f"colon form must pair: {census.stdout}"
         assert "BLINDSPOT\tchecked=1 recognized=1 unrecognized=0" in census.stdout
 
@@ -324,7 +367,7 @@ class TestPairsWithSubagentStart:
             _subagent_start("a29d3cfdd53ae3e98", "conexus:code-review-expert"),
             tmp_path, script=STAMP,
         )
-        census = _lib_call("expectations_census", tmp_path, SESSION)
+        census = _lib_call("expectations_census", tmp_path, SESSION, nx_stub=True)
         assert "BLINDSPOT\tchecked=1 recognized=0 unrecognized=1" in census.stdout
         assert "expected_no_start=1" in census.stdout
 
@@ -338,7 +381,7 @@ class TestPairsWithSubagentStart:
             _subagent_start("a29d3cfdd53ae3e98", "conexus:code-review-expert"),
             tmp_path, script=STAMP,
         )
-        census = _lib_call("expectations_census", tmp_path, SESSION)
+        census = _lib_call("expectations_census", tmp_path, SESSION, nx_stub=True)
         assert census.returncode == 0, census.stdout
         assert (
             "AGENT\ta29d3cfdd53ae3e98\tconexus:code-review-expert\tNO_TERMINAL\tundeclared"
@@ -363,7 +406,7 @@ class TestSameTypeDispatchedTwice:
         _run(_pretooluse("general-purpose", tool_use_id="toolu_B"), tmp_path)
         _run(_subagent_start("a94a5d5448a23e359", "general-purpose"), tmp_path, script=STAMP)
         _run(_subagent_start("a4dae47be426023ec", "general-purpose"), tmp_path, script=STAMP)
-        census = _lib_call("expectations_census", tmp_path, SESSION)
+        census = _lib_call("expectations_census", tmp_path, SESSION, nx_stub=True)
         assert census.returncode == 0, census.stdout
         assert "BLINDSPOT\tchecked=2 recognized=2 unrecognized=0" in census.stdout
         assert census.stdout.count("\tdeclared\n") == 2
@@ -377,7 +420,7 @@ class TestSameTypeDispatchedTwice:
         _run(_pretooluse("general-purpose", tool_use_id="toolu_A"), tmp_path)
         _run(_subagent_start("a94a5d5448a23e359", "general-purpose"), tmp_path, script=STAMP)
         _run(_subagent_start("a4dae47be426023ec", "general-purpose"), tmp_path, script=STAMP)
-        census = _lib_call("expectations_census", tmp_path, SESSION)
+        census = _lib_call("expectations_census", tmp_path, SESSION, nx_stub=True)
         assert "undeclared=1" in census.stdout, census.stdout
         undeclared = _lib_call("expectations_undeclared", tmp_path, SESSION)
         assert "UNDECLARED\ta4dae47be426023ec\tgeneral-purpose" in undeclared.stdout
@@ -391,7 +434,7 @@ class TestSameTypeDispatchedTwice:
         _run(_pretooluse("general-purpose", tool_use_id="toolu_B"), tmp_path)
         rows = [ln for ln in _expfile(tmp_path).read_text().splitlines() if "\tEXPECT\t" in ln]
         assert len(rows) == 2
-        census = _lib_call("expectations_census", tmp_path, SESSION)
+        census = _lib_call("expectations_census", tmp_path, SESSION, nx_stub=True)
         assert "expect=2" in census.stdout, census.stdout
 
 
@@ -435,7 +478,7 @@ class TestIdempotence:
         f.write_text(f.read_text() + "\t".join(dup) + "\n")
         _run(_subagent_start("a94a5d5448a23e359", "general-purpose"), tmp_path, script=STAMP)
         _run(_subagent_start("a4dae47be426023ec", "general-purpose"), tmp_path, script=STAMP)
-        census = _lib_call("expectations_census", tmp_path, SESSION)
+        census = _lib_call("expectations_census", tmp_path, SESSION, nx_stub=True)
         assert "undeclared=1" in census.stdout, (
             "a re-registered dispatch inflated the credit pool and masked an "
             "undeclared start:\n" + census.stdout

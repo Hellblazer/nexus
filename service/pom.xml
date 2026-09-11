@@ -227,6 +227,45 @@
     </dependencies>
 
     <build>
+        <!-- nexus-8cz4z: the Java language server (Eclipse JDT.LS via m2e)
+             imports this pom and, without this mapping, executes the jOOQ
+             codegen mojos at import time. Each needs a live PostgreSQL and
+             fails, and the attempt leaves ecj-compiled classes and phantom
+             diagnostics behind. m2e reads only this artifact; command-line
+             Maven never resolves or runs it. -->
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.eclipse.m2e</groupId>
+                    <artifactId>lifecycle-mapping</artifactId>
+                    <version>1.0.0</version>
+                    <configuration>
+                        <lifecycleMappingMetadata>
+                            <pluginExecutions>
+                                <pluginExecution>
+                                    <pluginExecutionFilter>
+                                        <groupId>org.testcontainers</groupId>
+                                        <artifactId>testcontainers-jooq-codegen-maven-plugin</artifactId>
+                                        <versionRange>[0.0.1,)</versionRange>
+                                        <goals><goal>generate</goal></goals>
+                                    </pluginExecutionFilter>
+                                    <action><ignore /></action>
+                                </pluginExecution>
+                                <pluginExecution>
+                                    <pluginExecutionFilter>
+                                        <groupId>org.jooq</groupId>
+                                        <artifactId>jooq-codegen-maven</artifactId>
+                                        <versionRange>[3.0.0,)</versionRange>
+                                        <goals><goal>generate</goal></goals>
+                                    </pluginExecutionFilter>
+                                    <action><ignore /></action>
+                                </pluginExecution>
+                            </pluginExecutions>
+                        </lifecycleMappingMetadata>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
         <plugins>
             <!-- Compiler: Java 25, enable-preview for pattern matching etc. -->
             <plugin>

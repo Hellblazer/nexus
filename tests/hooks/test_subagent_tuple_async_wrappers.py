@@ -11,8 +11,17 @@ entry: research 5 measured a detached child with all three fds on
 ``/dev/null`` at 18ms regardless, and these wrapper scripts are built to
 that exact shape, so even a harness that silently treated this hooks.json
 entry as an ordinary BLOCKING hook would still see it return in tens of
-milliseconds, never the seconds (or the curl timeout ceiling) a slow or
-down engine could otherwise cost.
+milliseconds, never the seconds (or the projector's own POST timeout
+ceiling) a slow or down engine could otherwise cost.
+
+nexus-em75s.42 review finding: none of the three original latency tests
+below would actually catch a regression that removed the backgrounding --
+an unreachable port refuses the TCP handshake instantly (ECONNREFUSED),
+so the projector's SLOW path is never exercised by any of them.
+``test_wrapper_returns_immediately_against_a_listening_but_never_
+accepting_engine`` closes that gap with an endpoint that completes the
+TCP handshake (a real ``listen()`` backlog) but never calls ``accept()``,
+so the projector's own connect/read path genuinely blocks.
 """
 from __future__ import annotations
 
@@ -90,29 +99,14 @@ def test_stop_wrapper_returns_immediately(tmp_path: Path) -> None:
     assert elapsed < 5.0, f"wrapper took {elapsed:.2f}s -- must return near-instantly"
 
 
-def test_wrapper_returns_immediately_even_against_an_unreachable_engine(tmp_path: Path) -> None:
-    """CA 4's actual measured claim: even when the background curl POST
-    would itself take real wall time against a down engine (bounded by
-    tuple_ledger_project.py's own curl timeout, seconds-scale), the
-    WRAPPER's own exit is unaffected -- its fds are redirected away
-    before backgrounding, so Claude Code (or a harness that does not
-    honor `async: true`) never waits on them.
-    """
-    import socket
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    base_url = f"http://127.0.0.1:{port}"
-
-    # A fresh (but useless, since nothing listens) data-token lease so the
-    # projector gets past resolution and actually attempts the curl call.
-    config_dir = tmp_path / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
+def _write_data_token_lease_for(config_dir: Path, base_url: str) -> None:
+    """A fresh (but arbitrary) data-token lease so the projector gets
+    past endpoint/credential resolution and actually attempts the POST
+    -- shared by the two "real transport attempt" latency tests below."""
     import hashlib
     from urllib.parse import urlsplit
 
+    config_dir.mkdir(parents=True, exist_ok=True)
     host = urlsplit(base_url).netloc
     digest = hashlib.sha256(f"{host}\x00default".encode("utf-8")).hexdigest()
     record = {
@@ -126,14 +120,79 @@ def test_wrapper_returns_immediately_even_against_an_unreachable_engine(tmp_path
     }
     (config_dir / f"data_token_lease.{digest}").write_text(json.dumps(record))
 
+
+def test_wrapper_returns_immediately_even_against_an_unreachable_engine(tmp_path: Path) -> None:
+    """CA 4's actual measured claim: even when the background POST would
+    itself take real wall time against a down engine (bounded by
+    tuple_ledger_project.py's own transport timeout, seconds-scale), the
+    WRAPPER's own exit is unaffected -- its fds are redirected away
+    before backgrounding, so Claude Code (or a harness that does not
+    honor `async: true`) never waits on them.
+
+    NOT a real CA-4 pin on its own (nexus-em75s.42 review finding): a
+    refused connection (ECONNREFUSED) fails near-instantly, so this
+    proves the wrapper does not ADD latency, not that it survives a
+    genuinely slow transport attempt --
+    ``test_wrapper_returns_immediately_against_a_listening_but_never_
+    accepting_engine`` below covers that case.
+    """
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    base_url = f"http://127.0.0.1:{port}"
+
+    _write_data_token_lease_for(tmp_path / "config", base_url)
+
     proc, elapsed = _run_wrapper(START_ASYNC, tmp_path, base_url=base_url)
     assert proc.returncode == 0
-    # The wrapper itself must be fast; the curl attempt (bounded at ~7s by
+    # The wrapper itself must be fast; the POST attempt (bounded by
     # tuple_ledger_project.py's own timeout) runs detached in the background.
     assert elapsed < 2.0, (
         f"wrapper took {elapsed:.2f}s against an unreachable engine -- "
-        "the backgrounding must decouple this from the curl timeout"
+        "the backgrounding must decouple this from the transport timeout"
     )
+
+
+def test_wrapper_returns_immediately_against_a_listening_but_never_accepting_engine(
+    tmp_path: Path,
+) -> None:
+    """The REAL CA-4 pin (nexus-em75s.42 review finding): none of this
+    module's other latency tests exercise the projector's actual SLOW
+    path -- an unreachable port refuses the TCP handshake instantly, so
+    a regression that silently removed the backgrounding (e.g. dropped
+    the trailing `&`/fd-redirection) would still pass every other test
+    here.
+
+    This endpoint's socket calls ``listen()`` (so the OS backlog
+    completes the client's TCP handshake, and the projector's
+    ``urlopen``/``connect()`` call succeeds) but never calls ``accept()``
+    -- nothing ever reads the request or writes a response, so the
+    projector's own connect/read path genuinely blocks until ITS
+    internal timeout (tuple_ledger_project.py's ``_POST_TIMEOUT_S``,
+    bounded independently by nexus-em75s.42's whole-call deadline fix).
+    The WRAPPER must still return near-instantly regardless.
+    """
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+    port = sock.getsockname()[1]
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        _write_data_token_lease_for(tmp_path / "config", base_url)
+
+        proc, elapsed = _run_wrapper(START_ASYNC, tmp_path, base_url=base_url)
+        assert proc.returncode == 0
+        assert elapsed < 2.0, (
+            f"wrapper took {elapsed:.2f}s against a listening-but-never-accepting "
+            "engine -- the backgrounding must decouple this from the connect/read path"
+        )
+    finally:
+        sock.close()
 
 
 def test_wrapper_fds_are_redirected_before_backgrounding() -> None:

@@ -21,6 +21,7 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -208,8 +209,10 @@ class CatalogLinksTumblerFkTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            int n = su.createStatement().executeUpdate(
-                "DELETE FROM nexus.catalog_documents WHERE tenant_id = '" + TENANT + "' AND tumbler = 'fk30-a'");
+            int n = DSL.using(su, SQLDialect.POSTGRES)
+                .deleteFrom(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq("fk30-a")))
+                .execute();
             assertThat(n).isEqualTo(1);
         }
 
@@ -238,9 +241,11 @@ class CatalogLinksTumblerFkTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            int n = su.createStatement().executeUpdate(
-                "UPDATE nexus.catalog_documents SET tumbler = 'fk31-new' "
-                + "WHERE tenant_id = '" + TENANT + "' AND tumbler = 'fk31-old'");
+            int n = DSL.using(su, SQLDialect.POSTGRES)
+                .update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TUMBLER, "fk31-new")
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq("fk31-old")))
+                .execute();
             assertThat(n).isEqualTo(1);
         }
 

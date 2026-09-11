@@ -2,6 +2,8 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import org.jooq.DSLContext;
+import org.jooq.JSONB;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -12,14 +14,14 @@ import org.junit.jupiter.api.Timeout;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 
+import static dev.nexus.service.jooq.nexus.Tables.PLANS;
+import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -102,23 +104,19 @@ class NexusServiceScheduledSweepTest {
      * deliberately leaves an eligible row must clean it up.
      */
     private void deleteTokens(String tenant) throws Exception {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "DELETE FROM nexus.service_tokens WHERE tenant_id = ?")) {
-            ps.setString(1, tenant);
-            ps.executeUpdate();
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES)
+                .deleteFrom(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TENANT_ID.eq(tenant))
+                .execute();
         }
     }
 
     private boolean tokenExists(String tenant, String label) throws Exception {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "SELECT 1 FROM nexus.service_tokens WHERE tenant_id = ? AND label = ?")) {
-            ps.setString(1, tenant);
-            ps.setString(2, label);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next();
-            }
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .fetchExists(SERVICE_TOKENS,
+                    SERVICE_TOKENS.TENANT_ID.eq(tenant).and(SERVICE_TOKENS.LABEL.eq(label)));
         }
     }
 
@@ -132,45 +130,38 @@ class NexusServiceScheduledSweepTest {
      */
     private long insertPlan(String tenant, String project, String query, Integer ttlDays,
                              OffsetDateTime createdAt, OffsetDateTime lastUsed) throws Exception {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "INSERT INTO nexus.plans "
-                 + "(tenant_id, project, query, plan_json, outcome, tags, created_at, ttl_days, last_used, verb) "
-                 + "VALUES (?, ?, ?, '{}', 'success', 't', ?, ?, ?, 'research') RETURNING id")) {
-            ps.setString(1, tenant);
-            ps.setString(2, project);
-            ps.setString(3, query);
-            ps.setObject(4, createdAt);
-            if (ttlDays != null) {
-                ps.setInt(5, ttlDays);
-            } else {
-                ps.setNull(5, java.sql.Types.INTEGER);
-            }
-            ps.setObject(6, lastUsed);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getLong(1);
-            }
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            return ctx.insertInto(PLANS)
+                .set(PLANS.TENANT_ID, tenant)
+                .set(PLANS.PROJECT, project)
+                .set(PLANS.QUERY, query)
+                .set(PLANS.PLAN_JSON, JSONB.valueOf("{}"))
+                .set(PLANS.OUTCOME, "success")
+                .set(PLANS.TAGS, "t")
+                .set(PLANS.CREATED_AT, createdAt)
+                .set(PLANS.TTL_DAYS, ttlDays)
+                .set(PLANS.LAST_USED, lastUsed)
+                .set(PLANS.VERB, "research")
+                .returning(PLANS.ID)
+                .fetchOne()
+                .getId();
         }
     }
 
     private boolean planExists(long id) throws Exception {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement("SELECT 1 FROM nexus.plans WHERE id = ?")) {
-            ps.setLong(1, id);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next();
-            }
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchExists(PLANS, PLANS.ID.eq(id));
         }
     }
 
     /** Cleanup counterpart to {@link #insertPlan}, mirroring {@link #deleteTokens}. */
     private void deletePlans(String tenant) throws Exception {
-        try (Connection su = pg.createConnection("");
-             PreparedStatement ps = su.prepareStatement(
-                 "DELETE FROM nexus.plans WHERE tenant_id = ?")) {
-            ps.setString(1, tenant);
-            ps.executeUpdate();
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES)
+                .deleteFrom(PLANS)
+                .where(PLANS.TENANT_ID.eq(tenant))
+                .execute();
         }
     }
 
@@ -228,6 +219,8 @@ class NexusServiceScheduledSweepTest {
         try (Connection blocker = pg.createConnection("")) {
             blocker.setAutoCommit(false);
             try (Statement st = blocker.createStatement()) {
+                // KEPT RAW: no typed jOOQ LOCK clause exists (every LOCK TABLE site in
+                // the tree is raw too, per nexus-cbo4a batch 13 group B's grep).
                 st.execute("LOCK TABLE nexus.service_tokens IN SHARE MODE");
             }
 
@@ -307,6 +300,8 @@ class NexusServiceScheduledSweepTest {
         try (Connection blocker = pg.createConnection("")) {
             blocker.setAutoCommit(false);
             try (Statement st = blocker.createStatement()) {
+                // KEPT RAW: no typed jOOQ LOCK clause exists (every LOCK TABLE site in
+                // the tree is raw too, per nexus-cbo4a batch 13 group B's grep).
                 st.execute("LOCK TABLE nexus.service_tokens IN SHARE MODE");
             }
 
@@ -353,6 +348,7 @@ class NexusServiceScheduledSweepTest {
         try (Connection blocker = pg.createConnection("")) {
             blocker.setAutoCommit(false);
             try (Statement st = blocker.createStatement()) {
+                // KEPT RAW: no typed jOOQ LOCK clause exists (see the SHARE MODE sites above).
                 st.execute("LOCK TABLE nexus.service_tokens IN ACCESS EXCLUSIVE MODE");
             }
 

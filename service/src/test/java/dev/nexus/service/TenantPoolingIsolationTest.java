@@ -11,6 +11,8 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -19,6 +21,7 @@ import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
 
+import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -65,6 +68,10 @@ class TenantPoolingIsolationTest {
         // grants-nexus-svc.xml fail-fasts if the role is absent; create it first.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // KEPT RAW: conditional CREATE ROLE via a DO $$ block -- no typed jOOQ
+            // DDL form for "create this role only if it does not already exist",
+            // and no nexus_test bootstrap function covers it this round (candidate
+            // for one, per the task brief's ladder-file exclusion list).
             su.createStatement().execute(
                 "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='"
                 + PgContainerHelper.SVC_USERNAME + "') THEN CREATE ROLE "
@@ -109,7 +116,7 @@ class TenantPoolingIsolationTest {
         // positive-control counts are not).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("TRUNCATE nexus.memory");
+            DSL.using(su, SQLDialect.POSTGRES).truncate(MEMORY).execute();
         }
     }
 
@@ -123,11 +130,12 @@ class TenantPoolingIsolationTest {
         // the SAME server backend must carry NO lingering nexus.tenant. If set_config's
         // is_local arg were changed true->false, the GUC would persist here and fail.
         repo.upsert(TENANT_A, PROJECT, "g", "v", "", null, null, null);  // stamps + commits as A
-        try (Connection raw = ds.getConnection();
-             var st = raw.createStatement();
-             var rs = st.executeQuery("SELECT current_setting('nexus.tenant', true) AS t")) {
-            assertThat(rs.next()).isTrue();
-            String guc = rs.getString("t");
+        try (Connection raw = ds.getConnection()) {
+            var currentSetting = DSL.function("current_setting", String.class,
+                DSL.val("nexus.tenant"), DSL.val(true));
+            String guc = DSL.using(raw, SQLDialect.POSTGRES)
+                .select(currentSetting)
+                .fetchOne(0, String.class);
             assertThat(guc)
                 .as("nexus.tenant must be reset after the txn commits (transaction-local "
                     + "GUC); a session-scoped GUC would leak to the next pooled borrower")

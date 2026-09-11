@@ -8,6 +8,8 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.OnnxEmbedder;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
@@ -16,7 +18,9 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -24,6 +28,10 @@ import java.util.Random;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -156,36 +164,50 @@ class CombinedQueryParityIntegrationTest {
         // Catalog + manifest + topic via superuser (bypasses RLS for the fixture write).
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            long topicId;
-            try (var rs = su.createStatement().executeQuery(
-                    "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
-                    + "VALUES ('" + TENANT + "', '" + TOPIC + "', '" + COLL + "', "
-                    + "'2026-01-01T00:00:00+00'::timestamptz) RETURNING id")) {
-                rs.next();
-                topicId = rs.getLong(1);
-            }
+            long topicId = DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT)
+                .values(TENANT, TOPIC, COLL, OffsetDateTime.parse("2026-01-01T00:00:00+00:00"))
+                .returning(TOPICS.ID)
+                .fetchOne()
+                .getId();
             for (CqDoc c : docs) {
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_documents "
-                    + "(tenant_id, tumbler, title, author, content_type, physical_collection, deleted_at) "
-                    + "VALUES ('" + TENANT + "', '" + c.tumbler() + "', 'Doc', '" + c.author()
-                    + "', '" + c.contentType() + "', '" + COLL + "', "
-                    + (c.tombstoned() ? "now()" : "NULL") + ") "
-                    + "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+                var insert = DSL.using(su, SQLDialect.POSTGRES)
+                    .insertInto(CATALOG_DOCUMENTS)
+                    .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                    .set(CATALOG_DOCUMENTS.TUMBLER, c.tumbler())
+                    .set(CATALOG_DOCUMENTS.TITLE, "Doc")
+                    .set(CATALOG_DOCUMENTS.AUTHOR, c.author())
+                    .set(CATALOG_DOCUMENTS.CONTENT_TYPE, c.contentType())
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL);
+                if (c.tombstoned()) {
+                    insert = insert.set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime());
+                }
+                insert.onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+                    .doNothing()
+                    .execute();
                 // RDR-180: chash is bytea (32 octets) — decode the 64-hex string.
-                su.createStatement().execute(
-                    "INSERT INTO nexus.catalog_document_chunks "
-                    + "(tenant_id, doc_id, position, chash, collection) "
-                    + "VALUES ('" + TENANT + "', '" + c.tumbler() + "', 0, decode('" + c.chash()
-                    + "', 'hex'), '" + COLL + "') ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+                DSL.using(su, SQLDialect.POSTGRES)
+                    .insertInto(CATALOG_DOCUMENT_CHUNKS,
+                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                    .values(TENANT, c.tumbler(), 0, HexFormat.of().parseHex(c.chash()), COLL)
+                    .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION)
+                    .doNothing()
+                    .execute();
                 if (c.inTopic()) {
                     // RDR-194 P3c: topic_assignments.doc_id is bytea now — decode('hex').
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.topic_assignments "
-                        + "(tenant_id, doc_id, topic_id, source_collection, assigned_at) "
-                        + "VALUES ('" + TENANT + "', decode('" + c.chash() + "', 'hex'), " + topicId + ", '"
-                        + COLL + "', '2026-01-01T00:00:00+00'::timestamptz) "
-                        + "ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING");
+                    DSL.using(su, SQLDialect.POSTGRES)
+                        .insertInto(TOPIC_ASSIGNMENTS,
+                            TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID,
+                            TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+                        .values(TENANT, HexFormat.of().parseHex(c.chash()), topicId, COLL,
+                            OffsetDateTime.parse("2026-01-01T00:00:00+00:00"))
+                        .onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                            TOPIC_ASSIGNMENTS.TOPIC_ID)
+                        .doNothing()
+                        .execute();
                 }
             }
         }

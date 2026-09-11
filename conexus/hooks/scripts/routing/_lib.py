@@ -56,6 +56,12 @@ import sys
 import time
 from typing import Any, Callable
 
+# nexus-aginu: the shared stdlib-only endpoint/credential resolver lives one
+# directory up (conexus/hooks/scripts/_endpoint_resolve.py), alongside this
+# module's siblings t2_prefix_scan.py and tuple_ledger_project.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _endpoint_resolve as _ep  # noqa: E402 -- must follow the sys.path insert
+
 ESCAPE_TOKEN = "# routing-allow:"
 ESCAPE_REASON_MIN_LENGTH = 8
 
@@ -246,156 +252,53 @@ def degraded_token_variants(segment: str) -> list[list[str]]:
 # ---------------------------------------------------------------------------
 
 
-#: Matches ServiceRegistry's tier name for the shared nexus-service engine
-#: (src/nexus/daemon/service_registry.py TIER_TTLS) -- the lease file is
-#: ``<config_dir>/storage_service_addr.<uid>``. Mirrors
-#: ``conexus/hooks/scripts/t2_prefix_scan.py``'s identical constant.
-_STORAGE_SERVICE_TIER = "storage_service"
-
-#: nexus-znvjd: the client's cross-process DATA-token lease, written by
-#: ``nexus.db.data_token.DataTokenManager._write_lease`` at
-#: ``<config_dir>/data_token_lease.<sha256(host[:port]\x00tenant)>``.
-#: Mirrors ``t2_prefix_scan.py``'s identical constants.
-_DATA_TOKEN_LEASE_PREFIX = "data_token_lease."
-_DATA_TOKEN_LEASE_FORMAT_VERSION = 1
-
-
 def _default_config_dir() -> pathlib.Path:
-    """Stdlib-only mirror of ``nexus.config.nexus_config_dir`` (same
-    resolution ``conexus/hooks/scripts/t2_prefix_scan.py``'s identically-
-    named function uses)."""
-    config_dir = os.environ.get("NEXUS_CONFIG_DIR") or os.environ.get("NX_CONFIG_DIR")
-    if config_dir:
-        return pathlib.Path(config_dir)
-    return pathlib.Path.home() / ".config" / "nexus"
+    """Stdlib-only mirror of ``nexus.config.nexus_config_dir``. Delegates
+    to the shared sibling module (nexus-aginu)."""
+    return _ep.default_config_dir()
 
 
 def _read_service_lease(config_dir: pathlib.Path) -> dict | None:
-    """Best-effort read of the local supervisor's ServiceRegistry lease.
+    """Best-effort read of the local supervisor's ServiceRegistry lease:
+    ``{"host", "port", "token"}``, or ``None``.
 
-    Ported verbatim (nexus-gjv9b PART 2 CRITICAL review fix) from
-    ``conexus/hooks/scripts/t2_prefix_scan.py``'s ``_read_lease`` --
-    see that function's own docstring for the full design rationale
-    (this hook cannot import ``nexus.daemon.service_registry`` either,
-    RDR-121 § Contract mirroring nexus-vg6d4's identical constraint for
-    the T2 prefix scan). ``tests/test_routing_hooks.py``'s
-    ``test_parity_read_service_lease_*`` suite (nexus-gjv9b review
-    fold-in round 3, code-review item 2 -- this docstring claimed the
-    suite before it existed) runs BOTH implementations against the SAME
-    on-disk lease fixture and asserts identical return values across
-    fresh/expired/malformed/missing -- edit both functions, or edit one
-    and let the parity test catch the drift. A source-level byte-diff
-    would false-positive: this file uses ``import pathlib`` /
-    ``pathlib.Path``, ``t2_prefix_scan.py`` uses ``from pathlib import
-    Path`` -- behavioral parity is the actual contract, not textual
-    identity.
+    Delegates the raw read to the shared sibling module's
+    :func:`_endpoint_resolve.read_storage_service_lease` (nexus-aginu,
+    replacing the "ported verbatim" copy nexus-gjv9b built from
+    ``t2_prefix_scan.py``'s ``_read_lease``), then applies this caller's
+    own additional requirement: a blank token is treated the same as no
+    lease at all, matching ``t2_prefix_scan.py``'s identical wrapper --
+    ``tests/test_routing_hooks.py``'s ``test_parity_read_service_lease_*``
+    suite still runs both wrappers against the same on-disk fixture and
+    asserts identical return values.
     """
-    path = config_dir / f"{_STORAGE_SERVICE_TIER}_addr.{os.getuid()}"
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError, ValueError):
+    lease = _ep.read_storage_service_lease(config_dir)
+    if lease is None or not lease.get("token"):
         return None
-    try:
-        if str(data.get("status", "live")) != "live":
-            return None
-        heartbeat_epoch = float(data["heartbeat_epoch"])
-        ttl = float(data["ttl"])
-        endpoint = data["endpoint"]
-        host = str(endpoint.get("host", "127.0.0.1"))
-        port = int(endpoint.get("port", 0))
-        token = str(endpoint.get("token", ""))
-    except (KeyError, TypeError, ValueError):
-        return None
-    if port <= 0 or not token:
-        return None
-    if (time.time() - heartbeat_epoch) >= ttl:
-        return None
-    return {"host": host, "port": port, "token": token}
+    return lease
 
 
 def _read_data_token_lease(config_dir: pathlib.Path, base_url: str) -> str | None:
-    """Best-effort read of the client's cached DATA token for *base_url*.
-
-    Ported verbatim (nexus-gjv9b PART 2 CRITICAL review fix) from
-    ``t2_prefix_scan.py``'s identically-named function -- same
-    format-version check, same digest rule, same fail-safe stance.
-    ``tests/test_routing_hooks.py``'s ``test_parity_read_data_token_
-    lease_*`` suite runs both against the same on-disk lease fixture
-    (fresh match, wrong digest, expired, missing) and asserts identical
-    return values.
-    """
-    import hashlib  # noqa: PLC0415 — stdlib, only needed on this path
-    import urllib.parse  # noqa: PLC0415 — stdlib, only needed on this path
-
-    host = urllib.parse.urlsplit(base_url).netloc or base_url
-    now = time.time()
-    best_token, best_expiry = "", 0.0
-    try:
-        candidates = sorted(config_dir.glob(f"{_DATA_TOKEN_LEASE_PREFIX}*"))
-    except OSError:
-        return None
-    for path in candidates:
-        try:
-            data = json.loads(path.read_text())
-            if data.get("format_version") != _DATA_TOKEN_LEASE_FORMAT_VERSION:
-                continue
-            tenant = str(data["tenant"])
-            digest = hashlib.sha256(f"{host}\x00{tenant}".encode("utf-8")).hexdigest()
-            if data.get("base_url_digest") != digest:
-                continue
-            token = str(data["token"])
-            expires_at = float(data["expires_at"])
-        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
-            continue
-        if token and expires_at > now and expires_at > best_expiry:
-            best_token, best_expiry = token, expires_at
-    return best_token or None
+    """Best-effort read of the client's cached DATA token for *base_url*,
+    tenant-scoped to ``"default"`` (nexus-aginu). Delegates to the shared
+    sibling module. ``tests/test_routing_hooks.py``'s
+    ``test_parity_read_data_token_lease_*`` suite still runs both
+    wrappers against the same on-disk lease fixture and asserts
+    identical return values."""
+    return _ep.read_data_token_lease(config_dir, base_url)
 
 
 def _read_config_yml_credentials(config_dir: pathlib.Path) -> dict:
-    """Bounded, stdlib-only extraction of ``service_url``/``service_token``
-    from the persisted ``config.yml``.
-
-    Ported verbatim (nexus-gjv9b PART 2 CRITICAL review fix) from
-    ``t2_prefix_scan.py``'s identically-named function -- see that
-    docstring for the full "why a line-oriented scan, not a YAML parser"
-    rationale. Returns ``{}`` when the file is absent, unreadable, or has
-    no ``credentials:`` block. ``tests/test_routing_hooks.py``'s
-    ``test_parity_read_config_yml_credentials_*`` suite runs both
-    against the same on-disk ``config.yml`` fixture and asserts
+    """``service_url``/``service_token`` from the persisted ``config.yml``.
+    Delegates to the shared sibling module (nexus-aginu), which also
+    strips a trailing inline ``# comment`` -- real YAML does, and the
+    pre-consolidation "ported verbatim" copy did not.
+    ``tests/test_routing_hooks.py``'s
+    ``test_parity_read_config_yml_credentials_*`` suite still runs both
+    wrappers against the same on-disk ``config.yml`` fixture and asserts
     identical return values.
     """
-    path = config_dir / "config.yml"
-    try:
-        text = path.read_text()
-    except OSError:
-        return {}
-
-    result: dict = {}
-    in_credentials = False
-    cred_indent = 0
-    for line in text.splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        indent = len(line) - len(line.lstrip(" "))
-        stripped = line.strip()
-        if not in_credentials:
-            if stripped == "credentials:":
-                in_credentials = True
-                cred_indent = indent
-            continue
-        if indent <= cred_indent:
-            break
-        for key in ("service_url", "service_token"):
-            prefix = f"{key}:"
-            if not stripped.startswith(prefix):
-                continue
-            value = stripped[len(prefix):].strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-                value = value[1:-1]
-            if value:
-                result[key] = value
-    return result
+    return _ep.read_config_yml_credentials(config_dir)
 
 
 def _engine_endpoint() -> "tuple[str, str] | tuple[None, None]":

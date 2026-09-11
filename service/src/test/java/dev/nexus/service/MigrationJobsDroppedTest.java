@@ -10,6 +10,8 @@ import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import liquibase.resource.DirectoryResourceAccessor;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
 
@@ -18,8 +20,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.util.Comparator;
 import java.util.stream.Stream;
 
@@ -147,15 +147,8 @@ class MigrationJobsDroppedTest {
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
-    private static boolean tableExists(Connection c, String table) throws Exception {
-        try (PreparedStatement ps = c.prepareStatement(
-                "SELECT to_regclass('nexus.' || ?) IS NOT NULL")) {
-            ps.setString(1, table);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getBoolean(1);
-            }
-        }
+    private static boolean tableExists(Connection c, String table) {
+        return PgCatalogProbes.tableExists(DSL.using(c, SQLDialect.POSTGRES), "nexus", table);
     }
 
     private static void migrateFull(Connection su) throws Exception {

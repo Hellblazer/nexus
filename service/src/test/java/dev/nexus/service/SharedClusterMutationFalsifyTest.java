@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.Field;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -9,8 +12,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -53,16 +56,13 @@ class SharedClusterMutationFalsifyTest {
         PostgreSQLContainer<?> pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.catalog_owners "
-                + "(tenant_id, tumbler_prefix, name, owner_type) VALUES (?, ?, ?, ?) "
-                + "ON CONFLICT DO NOTHING")) {
-                ps.setString(1, MARKER_TENANT);
-                ps.setString(2, MARKER_PREFIX);
-                ps.setString(3, "yhmav-poison-marker");
-                ps.setString(4, "test");
-                ps.executeUpdate();
-            }
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(CATALOG_OWNERS,
+                    CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX,
+                    CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE)
+                .values(MARKER_TENANT, MARKER_PREFIX, "yhmav-poison-marker", "test")
+                .onConflictDoNothing()
+                .execute();
             // Sanity: the marker IS visible in THIS class's own database --
             // otherwise the negative assertion in the next test would be vacuous.
             assertThat(markerCount(su))
@@ -102,6 +102,8 @@ class SharedClusterMutationFalsifyTest {
             // The exact offender shape from the ~90 bootstrap sites, with a poison
             // value nothing else in the suite would ever set: a CLUSTER-wide
             // (no IN DATABASE clause) role-level GUC on the shared nexus_svc role.
+            // KEPT RAW: no typed jOOQ DDL form for ALTER ROLE ... SET <guc> TO <value>
+            // (candidate for a nexus_test bootstrap function per the task brief).
             su.createStatement().execute(
                 "ALTER ROLE " + PgContainerHelper.SVC_USERNAME
                 + " SET search_path TO yhmav_poison_schema, public");
@@ -139,25 +141,25 @@ class SharedClusterMutationFalsifyTest {
 
     /** All cluster-wide (setdatabase=0) role-level settings in one string --
      *  empty string when none exist (the virgin-cluster baseline). */
-    private static String clusterWideRoleSettings(Connection c) throws Exception {
-        try (var st = c.createStatement();
-             ResultSet rs = st.executeQuery(
-                 "SELECT coalesce(string_agg(p.rolname || '=' "
-                 + "|| array_to_string(s.setconfig, ','), '; '), '') "
-                 + "FROM pg_db_role_setting s JOIN pg_roles p ON p.oid = s.setrole "
-                 + "WHERE s.setdatabase = 0")) {
-            rs.next();
-            return rs.getString(1);
-        }
+    private static String clusterWideRoleSettings(Connection c) {
+        Field<String> rolname = DSL.field(DSL.name("p", "rolname"), String.class);
+        Field<String[]> setconfig = DSL.field(DSL.name("s", "setconfig"), String[].class);
+        Field<String> arrayToString = DSL.function("array_to_string", String.class, setconfig, DSL.val(","));
+        Field<String> entry = rolname.concat(DSL.val("=")).concat(arrayToString);
+        Field<String> agg = DSL.function("string_agg", String.class, entry, DSL.val("; "));
+        Field<String> result = DSL.coalesce(agg, DSL.val(""));
+        return DSL.using(c, SQLDialect.POSTGRES)
+            .select(result)
+            .from(DSL.table(DSL.name("pg_db_role_setting")).as("s"))
+            .join(DSL.table(DSL.name("pg_roles")).as("p"))
+                .on(DSL.field(DSL.name("p", "oid")).eq(DSL.field(DSL.name("s", "setrole"))))
+            .where(DSL.field(DSL.name("s", "setdatabase"), Integer.class).eq(0))
+            .fetchOne(0, String.class);
     }
 
-    private static int markerCount(Connection c) throws Exception {
-        try (var st = c.createStatement();
-             ResultSet rs = st.executeQuery(
-                 "SELECT count(*) FROM nexus.catalog_owners WHERE tenant_id = '"
-                 + MARKER_TENANT + "' AND tumbler_prefix = '" + MARKER_PREFIX + "'")) {
-            rs.next();
-            return rs.getInt(1);
-        }
+    private static int markerCount(Connection c) {
+        return DSL.using(c, SQLDialect.POSTGRES).fetchCount(CATALOG_OWNERS,
+            CATALOG_OWNERS.TENANT_ID.eq(MARKER_TENANT)
+                .and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(MARKER_PREFIX)));
     }
 }

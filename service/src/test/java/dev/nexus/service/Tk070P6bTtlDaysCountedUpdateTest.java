@@ -8,6 +8,11 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.Condition;
+import org.jooq.Field;
+import org.jooq.SQLDialect;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -20,12 +25,12 @@ import org.w3c.dom.NodeList;
 
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -72,6 +77,15 @@ class Tk070P6bTtlDaysCountedUpdateTest {
     private static final String TENANT_A = "p6b-direct-a";
     private static final String TENANT_B = "p6b-direct-b";
 
+    /** Bare column references shared by {@code nexus.frecency}/{@code staging.frecency}
+     *  probes below -- unqualified, so the SAME Condition applies against either
+     *  table (staging.* carries no jOOQ codegen, per nexus-cbo4a batch 13's
+     *  established idiom). */
+    private static final Field<Integer> TTL_DAYS = DSL.field(DSL.name("ttl_days"), Integer.class);
+    private static final Field<String> CHUNK_ID = DSL.field(DSL.name("chunk_id"), String.class);
+
+    private static final Table<?> STAGING_FRECENCY = DSL.table(DSL.name("staging", "frecency"));
+
     PostgreSQLContainer<?> pg;
 
     @BeforeAll
@@ -85,6 +99,11 @@ class Tk070P6bTtlDaysCountedUpdateTest {
                 .findCorrectDatabaseImplementation(new JdbcConnection(su));
             new Liquibase("db/changelog/db.changelog-master.xml",
                 new ClassLoaderResourceAccessor(), db).update(new Contexts());
+            // nexus_test.* (dropConstraint below) isn't installed by this file's own
+            // migration path (unlike applyProductSchema) -- install it via the SAME
+            // connection/role that just ran the product changelog, so whichever role
+            // owns databasechangelog stays consistent (nexus-cbo4a batch 12 finding).
+            PgContainerHelper.installTestObjects(su);
         }
     }
 
@@ -102,10 +121,10 @@ class Tk070P6bTtlDaysCountedUpdateTest {
 
             // Test-only relaxation: undo telemetry-006-1 back to a shape
             // that accepts ttl_days=0 again (the CHECK now forbids it).
-            su.createStatement().execute(
-                "ALTER TABLE nexus.frecency DROP CONSTRAINT frecency_ttl_days_positive_chk");
-            su.createStatement().execute(
-                "ALTER TABLE nexus.frecency ALTER COLUMN ttl_days SET DEFAULT 0");
+            PgContainerHelper.dropConstraint(su, FRECENCY, "frecency_ttl_days_positive_chk");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .alterTable(FRECENCY).alterColumn(FRECENCY.TTL_DAYS).setDefault(0)
+                .execute();
 
             // Two ttl_days=0 rows, spanning two tenants (proves the RLS
             // toggle reaches every tenant, not just one).
@@ -116,7 +135,7 @@ class Tk070P6bTtlDaysCountedUpdateTest {
             seedFrecencyRow(su, TENANT_A, "3".repeat(64), null);
             seedFrecencyRow(su, TENANT_A, "4".repeat(64), 30);
 
-            assertThat(countFrecencyRows(su, "nexus", "ttl_days = 0"))
+            assertThat(countFrecencyRows(su, "nexus", TTL_DAYS.eq(0)))
                 .as("ground truth before re-running telemetry-006-1's SQL")
                 .isEqualTo(2);
 
@@ -135,15 +154,15 @@ class Tk070P6bTtlDaysCountedUpdateTest {
                 .anyMatch(n -> n.contains("converted 2 nexus.frecency row(s)"));
 
             // ── Converted-row ground truth: NULL, not gone ──
-            assertThat(countFrecencyRows(su, "nexus", "chunk_id = '" + "1".repeat(64) + "' AND ttl_days IS NULL"))
+            assertThat(countFrecencyRows(su, "nexus", CHUNK_ID.eq("1".repeat(64)).and(TTL_DAYS.isNull())))
                 .as("a converted row must now read NULL, not be deleted")
                 .isEqualTo(1);
-            assertThat(countFrecencyRows(su, "nexus", "chunk_id = '" + "2".repeat(64) + "' AND ttl_days IS NULL"))
+            assertThat(countFrecencyRows(su, "nexus", CHUNK_ID.eq("2".repeat(64)).and(TTL_DAYS.isNull())))
                 .isEqualTo(1);
-            assertThat(countFrecencyRows(su, "nexus", "chunk_id = '" + "3".repeat(64) + "' AND ttl_days IS NULL"))
+            assertThat(countFrecencyRows(su, "nexus", CHUNK_ID.eq("3".repeat(64)).and(TTL_DAYS.isNull())))
                 .as("a NULL-ttl_days (already permanent) decoy must survive untouched")
                 .isEqualTo(1);
-            assertThat(countFrecencyRows(su, "nexus", "chunk_id = '" + "4".repeat(64) + "' AND ttl_days = 30"))
+            assertThat(countFrecencyRows(su, "nexus", CHUNK_ID.eq("4".repeat(64)).and(TTL_DAYS.eq(30))))
                 .as("a positive-ttl_days decoy must survive untouched")
                 .isEqualTo(1);
 
@@ -159,15 +178,16 @@ class Tk070P6bTtlDaysCountedUpdateTest {
 
             // staging.frecency never had a CHECK — only NOT NULL DEFAULT 0
             // needs restoring to seed ttl_days=0 rows again via the default.
-            su.createStatement().execute(
-                "ALTER TABLE staging.frecency ALTER COLUMN ttl_days SET DEFAULT 0");
+            DSL.using(su, SQLDialect.POSTGRES)
+                .alterTable(STAGING_FRECENCY).alterColumn(TTL_DAYS).setDefault(0)
+                .execute();
 
             seedStagingFrecencyRow(su, TENANT_A, "5".repeat(64), 0);
             seedStagingFrecencyRow(su, TENANT_B, "6".repeat(64), 0);
             seedStagingFrecencyRow(su, TENANT_A, "7".repeat(64), null);
             seedStagingFrecencyRow(su, TENANT_A, "8".repeat(64), 30);
 
-            assertThat(countFrecencyRows(su, "staging", "ttl_days = 0"))
+            assertThat(countFrecencyRows(su, "staging", TTL_DAYS.eq(0)))
                 .as("ground truth before re-running telemetry-006-2's SQL")
                 .isEqualTo(2);
 
@@ -185,14 +205,14 @@ class Tk070P6bTtlDaysCountedUpdateTest {
                 .as("the NOTICE must report the exact row count")
                 .anyMatch(n -> n.contains("converted 2 staging.frecency row(s)"));
 
-            assertThat(countFrecencyRows(su, "staging", "chunk_id = '" + "5".repeat(64) + "' AND ttl_days IS NULL"))
+            assertThat(countFrecencyRows(su, "staging", CHUNK_ID.eq("5".repeat(64)).and(TTL_DAYS.isNull())))
                 .isEqualTo(1);
-            assertThat(countFrecencyRows(su, "staging", "chunk_id = '" + "6".repeat(64) + "' AND ttl_days IS NULL"))
+            assertThat(countFrecencyRows(su, "staging", CHUNK_ID.eq("6".repeat(64)).and(TTL_DAYS.isNull())))
                 .isEqualTo(1);
-            assertThat(countFrecencyRows(su, "staging", "chunk_id = '" + "7".repeat(64) + "' AND ttl_days IS NULL"))
+            assertThat(countFrecencyRows(su, "staging", CHUNK_ID.eq("7".repeat(64)).and(TTL_DAYS.isNull())))
                 .as("a NULL-ttl_days decoy must survive untouched")
                 .isEqualTo(1);
-            assertThat(countFrecencyRows(su, "staging", "chunk_id = '" + "8".repeat(64) + "' AND ttl_days = 30"))
+            assertThat(countFrecencyRows(su, "staging", CHUNK_ID.eq("8".repeat(64)).and(TTL_DAYS.eq(30))))
                 .as("a positive-ttl_days decoy must survive untouched")
                 .isEqualTo(1);
 
@@ -203,50 +223,28 @@ class Tk070P6bTtlDaysCountedUpdateTest {
 
     // ── Seeding helpers ───────────────────────────────────────────────────
 
-    private static void seedFrecencyRow(Connection c, String tenant, String chunkId, Integer ttlDays)
-            throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.frecency (tenant_id, chunk_id, ttl_days) VALUES (?, ?, ?)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, chunkId);
-            if (ttlDays == null) {
-                ps.setNull(3, java.sql.Types.INTEGER);
-            } else {
-                ps.setInt(3, ttlDays);
-            }
-            ps.executeUpdate();
-        }
+    private static void seedFrecencyRow(Connection c, String tenant, String chunkId, Integer ttlDays) {
+        DSL.using(c, SQLDialect.POSTGRES)
+            .insertInto(FRECENCY, FRECENCY.TENANT_ID, FRECENCY.CHUNK_ID, FRECENCY.TTL_DAYS)
+            .values(tenant, chunkId, ttlDays)
+            .execute();
     }
 
-    private static void seedStagingFrecencyRow(Connection c, String tenant, String chunkId, Integer ttlDays)
-            throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO staging.frecency (tenant_id, chunk_id, ttl_days) VALUES (?, ?, ?)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, chunkId);
-            if (ttlDays == null) {
-                ps.setNull(3, java.sql.Types.INTEGER);
-            } else {
-                ps.setInt(3, ttlDays);
-            }
-            ps.executeUpdate();
-        }
+    private static void seedStagingFrecencyRow(Connection c, String tenant, String chunkId, Integer ttlDays) {
+        DSL.using(c, SQLDialect.POSTGRES)
+            .insertInto(STAGING_FRECENCY,
+                DSL.field(DSL.name("tenant_id"), String.class), CHUNK_ID, TTL_DAYS)
+            .values(tenant, chunkId, ttlDays)
+            .execute();
     }
 
-    private static int countFrecencyRows(Connection c, String schema, String whereClause) throws Exception {
-        return count(c, "SELECT count(*) FROM " + schema + ".frecency WHERE " + whereClause);
+    private static int countFrecencyRows(Connection c, String schema, Condition where) {
+        Table<?> table = "nexus".equals(schema) ? FRECENCY : STAGING_FRECENCY;
+        return DSL.using(c, SQLDialect.POSTGRES).fetchCount(table, where);
     }
 
-    private static int count(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            rs.next();
-            return rs.getInt(1);
-        }
-    }
-
-    private static boolean checkConstraintExists(Connection c, String constraintName) throws Exception {
-        return count(c, "SELECT count(*) FROM pg_constraint WHERE conname = '"
-            + constraintName + "' AND contype = 'c'") == 1;
+    private static boolean checkConstraintExists(Connection c, String constraintName) {
+        return PgCatalogProbes.constraintExists(DSL.using(c, SQLDialect.POSTGRES), constraintName);
     }
 
     // ── Shared extraction/notice helpers (mirrors

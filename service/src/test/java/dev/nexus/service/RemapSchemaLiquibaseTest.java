@@ -1,6 +1,7 @@
 package dev.nexus.service;
 
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.jooq.SQLDialect;
 import org.jooq.DSLContext;
 import dev.nexus.service.db.TenantConstants;
@@ -13,9 +14,11 @@ import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHASH_REMAP;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -173,19 +176,13 @@ class RemapSchemaLiquibaseTest {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
                 stampGuc(su, "check-tenant");
-                try (var ps = su.prepareStatement(
-                        "INSERT INTO nexus.chash_remap " +
-                        "(tenant_id, source_collection, old_id, new_chash, target_collection, " +
-                        " created_at, provenance) " +
-                        "VALUES (?, ?, ?, ?, ?, now(), ?)")) {
-                    ps.setString(1, "check-tenant");
-                    ps.setString(2, "src-coll");
-                    ps.setString(3, "legacy-1");
-                    ps.setBytes(4, new byte[16]);  // 16 bytes, not 32
-                    ps.setString(5, "tgt-coll");
-                    ps.setString(6, "test");
-                    ps.execute();
-                }
+                DSL.using(su, SQLDialect.POSTGRES)
+                   .insertInto(CHASH_REMAP, CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION,
+                           CHASH_REMAP.OLD_ID, CHASH_REMAP.NEW_CHASH, CHASH_REMAP.TARGET_COLLECTION,
+                           CHASH_REMAP.CREATED_AT, CHASH_REMAP.PROVENANCE)
+                   .values("check-tenant", "src-coll", "legacy-1", new byte[16],  // 16 bytes, not 32
+                       "tgt-coll", OffsetDateTime.now(), "test")
+                   .execute();
             }
         })
         .as("new_chash whose stored width != 32 bytes must be rejected by the CHECK "
@@ -204,19 +201,13 @@ class RemapSchemaLiquibaseTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             stampGuc(su, "check-tenant-ok");
-            try (var ps = su.prepareStatement(
-                    "INSERT INTO nexus.chash_remap " +
-                    "(tenant_id, source_collection, old_id, new_chash, target_collection, " +
-                    " created_at, provenance) " +
-                    "VALUES (?, ?, ?, ?, ?, now(), ?)")) {
-                ps.setString(1, "check-tenant-ok");
-                ps.setString(2, "src-coll");
-                ps.setString(3, "legacy-1");
-                ps.setBytes(4, new byte[32]);
-                ps.setString(5, "tgt-coll");
-                ps.setString(6, "test");
-                ps.execute();
-            }
+            DSL.using(su, SQLDialect.POSTGRES)
+               .insertInto(CHASH_REMAP, CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION,
+                       CHASH_REMAP.OLD_ID, CHASH_REMAP.NEW_CHASH, CHASH_REMAP.TARGET_COLLECTION,
+                       CHASH_REMAP.CREATED_AT, CHASH_REMAP.PROVENANCE)
+               .values("check-tenant-ok", "src-coll", "legacy-1", new byte[32],
+                   "tgt-coll", OffsetDateTime.now(), "test")
+               .execute();
         }
     }
 
@@ -248,15 +239,15 @@ class RemapSchemaLiquibaseTest {
         }
 
         List<String> alphaIds = tenantScope.withTenant("alpha", ctx ->
-            ctx.fetch("SELECT old_id FROM nexus.chash_remap ORDER BY old_id")
-               .getValues("old_id", String.class));
+            ctx.select(CHASH_REMAP.OLD_ID).from(CHASH_REMAP).orderBy(CHASH_REMAP.OLD_ID)
+               .fetch(CHASH_REMAP.OLD_ID));
         assertThat(alphaIds)
             .as("tenant-alpha must see exactly its 2 rows")
             .containsExactly("old-a1", "old-a2");
 
         List<String> betaIds = tenantScope.withTenant("beta", ctx ->
-            ctx.fetch("SELECT old_id FROM nexus.chash_remap ORDER BY old_id")
-               .getValues("old_id", String.class));
+            ctx.select(CHASH_REMAP.OLD_ID).from(CHASH_REMAP).orderBy(CHASH_REMAP.OLD_ID)
+               .fetch(CHASH_REMAP.OLD_ID));
         assertThat(betaIds)
             .as("tenant-beta must see exactly its 1 row, none of alpha's")
             .containsExactly("old-b1");
@@ -274,11 +265,12 @@ class RemapSchemaLiquibaseTest {
         }
 
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(DISTINCT tenant_id) AS tenants FROM nexus.chash_remap " +
-                "WHERE tenant_id IN ('gamma-su', 'delta-su')");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getLong("tenants"))
+            Long tenants = DSL.using(su, SQLDialect.POSTGRES)
+                .select(DSL.countDistinct(CHASH_REMAP.TENANT_ID))
+                .from(CHASH_REMAP)
+                .where(CHASH_REMAP.TENANT_ID.in("gamma-su", "delta-su"))
+                .fetchOne(0, Long.class);
+            assertThat(tenants)
                 .as("superuser (rolsuper → implicit RLS bypass) must see rows across " +
                     "tenants — the integrity-count read path (nexus-vounk shape)")
                 .isEqualTo(2L);
@@ -297,10 +289,9 @@ class RemapSchemaLiquibaseTest {
 
         try (Connection svc = svcDs.getConnection()) {
             svc.setAutoCommit(true);
-            ResultSet rs = svc.createStatement().executeQuery(
-                "SELECT COUNT(*) AS cnt FROM nexus.chash_remap");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getLong("cnt"))
+            Long cnt = DSL.using(svc, SQLDialect.POSTGRES)
+                .selectCount().from(CHASH_REMAP).fetchOne(0, Long.class);
+            assertThat(cnt)
                 .as("unstamped service connection must see zero rows (RLS fail-closed)")
                 .isEqualTo(0L);
         }
@@ -312,13 +303,13 @@ class RemapSchemaLiquibaseTest {
     void rls_withCheck_blocksCrossTenantInsert() throws Exception {
         assertThatThrownBy(() ->
             tenantScope.withTenant("epsilon", ctx ->
-                ctx.execute(
-                    "INSERT INTO nexus.chash_remap " +
-                    "(tenant_id, source_collection, old_id, new_chash, target_collection, " +
-                    " created_at, provenance) " +
-                    "VALUES (?, ?, ?, ?, ?, now(), ?)",
-                    "zeta",  // tenant_id mismatch — WITH CHECK must reject
-                    "coll-x", "old-x1", chashBytes((byte) 7), "tgt-x", "test"))
+                ctx.insertInto(CHASH_REMAP, CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION,
+                        CHASH_REMAP.OLD_ID, CHASH_REMAP.NEW_CHASH, CHASH_REMAP.TARGET_COLLECTION,
+                        CHASH_REMAP.CREATED_AT, CHASH_REMAP.PROVENANCE)
+                   .values("zeta",  // tenant_id mismatch — WITH CHECK must reject
+                       "coll-x", "old-x1", chashBytes((byte) 7), "tgt-x",
+                       OffsetDateTime.now(), "test")
+                   .execute())
         )
         .as("INSERT with tenant_id != GUC value must be rejected by RLS WITH CHECK "
             + "(new_chash is a conformant 32-byte value so the CHECK constraint does "
@@ -340,34 +331,26 @@ class RemapSchemaLiquibaseTest {
     }
 
     private void stampGuc(Connection conn, String tenant) throws Exception {
-        try (var ps = conn.prepareStatement("SELECT set_config(?, ?, false)")) {
-            ps.setString(1, TenantConstants.GUC_NAME);
-            ps.setString(2, tenant);
-            ps.execute();
-        }
+        DSL.using(conn, SQLDialect.POSTGRES)
+           .select(DSL.function("set_config", SQLDataType.VARCHAR,
+               DSL.val(TenantConstants.GUC_NAME), DSL.val(tenant), DSL.inline(false)))
+           .fetch();
     }
 
     /** Insert a map row via superuser connection (bypasses RLS for seeding). */
     private void insertRow(Connection su, String tenant, String sourceCollection,
                            String oldId, byte[] newChash) throws Exception {
-        try (var ps = su.prepareStatement("SELECT set_config(?, ?, true)")) {
-            ps.setString(1, TenantConstants.GUC_NAME);
-            ps.setString(2, tenant);
-            ps.execute();
-        }
-        try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.chash_remap " +
-                "(tenant_id, source_collection, old_id, new_chash, target_collection, " +
-                " created_at, provenance) " +
-                "VALUES (?, ?, ?, ?, ?, now(), 'test-seed') " +
-                "ON CONFLICT (tenant_id, source_collection, old_id) DO NOTHING")) {
-            ps.setString(1, tenant);
-            ps.setString(2, sourceCollection);
-            ps.setString(3, oldId);
-            ps.setBytes(4, newChash);
-            ps.setString(5, "tgt-" + sourceCollection);
-            ps.executeUpdate();
-        }
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.select(DSL.function("set_config", SQLDataType.VARCHAR,
+            DSL.val(TenantConstants.GUC_NAME), DSL.val(tenant), DSL.inline(true))).fetch();
+        ctx.insertInto(CHASH_REMAP, CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION,
+                CHASH_REMAP.OLD_ID, CHASH_REMAP.NEW_CHASH, CHASH_REMAP.TARGET_COLLECTION,
+                CHASH_REMAP.CREATED_AT, CHASH_REMAP.PROVENANCE)
+           .values(tenant, sourceCollection, oldId, newChash, "tgt-" + sourceCollection,
+               OffsetDateTime.now(), "test-seed")
+           .onConflict(CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.OLD_ID)
+           .doNothing()
+           .execute();
     }
 
     /** A conformant 32-byte new_chash value, distinct per fill byte (test fixtures only). */

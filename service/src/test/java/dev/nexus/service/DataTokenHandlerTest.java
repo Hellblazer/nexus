@@ -20,9 +20,9 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.time.Instant;
 
+import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -470,20 +470,24 @@ class DataTokenHandlerTest {
     }
 
     private String scopeOfRaw(String rawToken) throws Exception {
-        return columnOfRaw(rawToken, "scope");
+        try (Connection su = pg.createConnection("")) {
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(SERVICE_TOKENS.SCOPE).from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TOKEN_HASH.eq(TokenHashing.sha256Hex(rawToken)))
+                .fetch(SERVICE_TOKENS.SCOPE);
+            assertThat(rows).hasSize(1);
+            return rows.get(0);
+        }
     }
 
     private String tenantOfRaw(String rawToken) throws Exception {
-        return columnOfRaw(rawToken, "tenant_id");
-    }
-
-    private String columnOfRaw(String rawToken, String column) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT " + column + " FROM nexus.service_tokens WHERE token_hash = '"
-                + TokenHashing.sha256Hex(rawToken) + "'");
-            assertThat(rs.next()).isTrue();
-            return rs.getString(column);
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(SERVICE_TOKENS.TENANT_ID).from(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TOKEN_HASH.eq(TokenHashing.sha256Hex(rawToken)))
+                .fetch(SERVICE_TOKENS.TENANT_ID);
+            assertThat(rows).hasSize(1);
+            return rows.get(0);
         }
     }
     // ── nexus-4qq1m: cross-tenant sweep enumeration ─────────────────────────
