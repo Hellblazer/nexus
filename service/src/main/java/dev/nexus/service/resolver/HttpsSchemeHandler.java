@@ -23,8 +23,11 @@ import java.time.Duration;
  * <p>Tenant context is accepted but not used for access control (HTTPS URLs
  * are public; tenant scoping for private URL sets is a Phase B concern).
  *
- * <p>Phase A: the handler is registered and unit-tested.  Live /v1
- * reference-only serving is Phase B (bead nexus-dtnpu).
+ * <p>The handler is registered and unit-tested here but remains UN-WIRED
+ * (see {@link UriSchemeResolverRegistry}'s class javadoc for the current,
+ * unowned-as-of-2026-09-11 status of Gap 3's read-time resolution wiring —
+ * distinct from RDR-169 Phase B / bead nexus-zw2em, which lands Gap 1's
+ * schema column and Gap 4's WRITE route only).
  */
 public final class HttpsSchemeHandler implements UriSchemeHandler, AutoCloseable {
 

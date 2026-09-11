@@ -62,7 +62,14 @@ public final class DimTables {
         Field<String> chash,
         Field<String> chunkText,
         Field<Vector> embedding,
-        Field<JSONB> metadata
+        Field<JSONB> metadata,
+        // RDR-169 Phase B (bead nexus-zw2em, vectors-014-retention.xml):
+        // TEXT NOT NULL DEFAULT 'full' CHECK (retention IN
+        // ('reference-only','full')). Generated field (Tables.CHUNKS.RETENTION)
+        // -- replaces the ad-hoc DSL.field(DSL.name("retention"), ...)
+        // placeholder PgVectorRepository#referenceOnlyInsertQuery carried
+        // pre-regen (the column did not exist in the codegen schema yet).
+        Field<String> retention
     ) {
         @SuppressWarnings("unchecked")
         static ChunkTable of(Table<?> t, int dim) {
@@ -76,7 +83,8 @@ public final class DimTables {
                 dev.nexus.service.db.ChashHex.hex(t, "chash"),
                 t.field("chunk_text", String.class),
                 (Field<Vector>) t.field(embeddingColumn(dim)),
-                t.field("metadata", JSONB.class));
+                t.field("metadata", JSONB.class),
+                t.field("retention", String.class));
         }
     }
 

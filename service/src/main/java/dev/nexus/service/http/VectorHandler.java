@@ -30,6 +30,7 @@ import java.util.Map;
  * <p>Routes (all under {@code /v1/vectors/}):
  * <pre>
  *   POST /v1/vectors/upsert-chunks   server-side embed + pgvector write
+ *   POST /v1/vectors/upsert-reference-only  precomputed-vector, NULL-content upsert (RDR-169 G4)
  *   POST /v1/vectors/search          embed query server-side + cosine rank (multi-collection)
  *   POST /v1/vectors/query           alias for search (mirrors MCP query tool)
  *   POST /v1/vectors/hybrid-search   pgvector hybrid fusion (tsvector+pg_trgm gate, vector rank) — RDR-155 P3
@@ -175,6 +176,7 @@ public final class VectorHandler implements HttpHandler {
         try {
             switch (op) {
                 case "/upsert-chunks" -> handleUpsertChunks(exchange, method);
+                case "/upsert-reference-only" -> handleUpsertReferenceOnlyChunk(exchange, method); // RDR-169 G4
                 case "/search"        -> handleSearch(exchange, method);
                 case "/query"         -> handleSearch(exchange, method);   // alias
                 case "/hybrid-search" -> handleHybridSearch(exchange, method);  // RDR-155 P3
@@ -271,12 +273,15 @@ public final class VectorHandler implements HttpHandler {
             log.debug("event=vector_bad_request op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));
         } catch (IllegalStateException e) {
-            // get-all-metadata's row-count cap (well-formed request, just too
-            // big for the single-round-trip fast path) — 422 distinguishes
-            // this from a malformed request (400) or a real server error
-            // (500); the Python client falls back to paginated /get on any
-            // non-2xx, so the exact code just needs to be non-2xx and logged.
-            log.debug("event=vector_get_all_metadata_row_cap_exceeded op={} error={}", op, e.getMessage());
+            // Shared arm for every well-formed-but-rejected request across routes:
+            // get-all-metadata's row-count cap (too big for the single-round-trip
+            // fast path) and upsert-reference-only's full→reference-only transition
+            // guard (RDR-169 §Re-index PROHIBITS, bead nexus-zw2em) both land here.
+            // 422 distinguishes this from a malformed request (400) or a real
+            // server error (500); the Python client falls back to paginated /get
+            // (or surfaces the error) on any non-2xx, so the exact code just needs
+            // to be non-2xx and logged with enough op context to disambiguate.
+            log.debug("event=vector_illegal_state op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 422, json(Map.of("error", e.getMessage())));
         } catch (Exception e) {
             // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
@@ -408,6 +413,67 @@ public final class VectorHandler implements HttpHandler {
         // Emit token count from the doc-embedding call (bead nexus-ehc4q).
         emitTokenUsage(ex, upsertResult.tokens());
         HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size())));
+    }
+
+    /**
+     * POST /v1/vectors/upsert-reference-only  (RDR-169 G4, embed-without-store; Gap 4's
+     * option (b) route, bead nexus-zw2em landed the schema this route needs).
+     *
+     * <p>Request:
+     * <pre>
+     * {
+     *   "collection": "knowledge__owner__voyage-context-3__v1",
+     *   "chash":      "&lt;64-hex sha256&gt;",
+     *   "embedding":  [0.1, 0.2, ...],      // precomputed vector, dim must match collection
+     *   "metadata":   {"source_uri": "obsidian://vault/note#heading", ...}  // optional
+     * }
+     * </pre>
+     *
+     * <p>Stores {@code chunk_text=NULL} + {@code retention='reference-only'} with the
+     * caller-supplied vector verbatim — no embedder call, token usage always 0. Rejects
+     * (422, {@link IllegalStateException}) overwriting a chash that already carries full
+     * content (RDR-169 §Re-index PROHIBITS a full→reference-only transition); the caller
+     * must explicitly delete + re-insert to change retention.
+     *
+     * <p>Response 200: {@code {"upserted": true}}.
+     */
+    private void handleUpsertReferenceOnlyChunk(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        Map<String, Object> body = readBody(ex);
+        String collection = requireString(body, "collection");
+        String chash       = requireString(body, "chash");
+        dev.nexus.service.db.Chash.requireCanonical(chash, "chash");
+        float[] embedding = requireFloatArray(body, "embedding");
+        Map<String, Object> metadata = optMap(body, "metadata");
+        if (metadata == null) metadata = Map.of();
+
+        repo.upsertReferenceOnlyChunk(tenant, collection, chash, embedding, metadata);
+        emitTokenUsage(ex, 0L);
+        HttpUtil.send(ex, 200, json(Map.of("upserted", true)));
+    }
+
+    /**
+     * Required single-vector field (as opposed to {@link #optEmbeddingsList}'s array of
+     * vectors) — the reference-only route accepts exactly one precomputed embedding per
+     * request. Malformed shapes fail loud, mirroring {@link #optEmbeddingsList}'s row
+     * parsing.
+     */
+    private float[] requireFloatArray(Map<String, Object> body, String key) {
+        Object val = body.get(key);
+        if (!(val instanceof List<?> nums)) {
+            throw new IllegalArgumentException("field '" + key + "' must be an array of numbers");
+        }
+        float[] vec = new float[nums.size()];
+        for (int i = 0; i < nums.size(); i++) {
+            Object n = nums.get(i);
+            if (!(n instanceof Number num)) {
+                throw new IllegalArgumentException("field '" + key + "' contains a non-numeric component");
+            }
+            vec[i] = num.floatValue();
+        }
+        return vec;
     }
 
     /**

@@ -22,8 +22,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * schemes only:
  *
  * <ul>
- *   <li>{@code chroma://} — pgvector chunk reassembly (reads
- *       {@code nexus.chunks_<dim>} via the injected PgVectorRepository).</li>
+ *   <li>{@code chroma://} — pgvector chunk reassembly (reads the unified
+ *       {@code nexus.chunks} table, RDR-191 Phase 4, via the injected
+ *       PgVectorRepository).</li>
  *   <li>{@code https://} — HTTP fetch for external documents.</li>
  * </ul>
  *
@@ -44,21 +45,25 @@ import java.util.concurrent.ConcurrentHashMap;
  * a handler that bypasses {@link dev.nexus.service.db.TenantScope} is a
  * security defect.
  *
- * <h2>Phase A only — un-wired POJO</h2>
+ * <h2>Un-wired POJO — no owning bead</h2>
  *
- * <p>This bead lands the registry + concrete handlers + unit tests.
- * This class ships un-wired in Phase A: no production code constructs an
- * instance or registers handlers.
- *
- * <p><strong>Phase B (nexus-dtnpu) MUST:</strong>
+ * <p>This class registered the POJO + concrete handlers + unit tests
+ * (nexus-064jj) but ships UN-WIRED: no production code constructs an
+ * instance or registers handlers. Gap 3's read-time resolution surface is
+ * distinct from Gap 1/Gap 4's write path — RDR-169 Phase B (bead
+ * nexus-zw2em) lands the {@code retention} schema column and the
+ * {@code POST /v1/vectors/upsert-reference-only} WRITE route
+ * ({@link dev.nexus.service.http.VectorHandler}), not this class's wiring.
+ * The bead that previously named this work (nexus-dtnpu) closed via
+ * grooming without doing it; there is no open bead tracking it as of
+ * 2026-09-11 — a new one is needed before any of the following happens:
  * <ol>
  *   <li>Construct a singleton {@code UriSchemeResolverRegistry}.</li>
  *   <li>Register {@link ChromaSchemeHandler} (for {@code chroma://}) and
  *       {@link HttpsSchemeHandler} (for {@code https://}) via
  *       {@link #register(String, UriSchemeHandler)}.</li>
- *   <li>Inject the registry into the /v1 route handler before activation.</li>
+ *   <li>Inject the registry into a read-time /v1 resolution route.</li>
  * </ol>
- * Live /v1 reference-only serving route activation is the Phase B boundary.
  */
 public final class UriSchemeResolverRegistry {
 

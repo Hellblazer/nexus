@@ -20,9 +20,9 @@ import java.net.URI;
  * <p>Example: {@code chroma://knowledge__nexus__bge-base-en-v15-768__v1/abc123ef}
  *
  * <p>Resolution fetches the {@code chunk_text} column for the
- * {@code (tenant, collection, chash)} triple from the
- * {@code nexus.chunks_<dim>} table via the injected {@link ChunkTextFetcher}.
- * In production wire as:
+ * {@code (tenant, collection, chash)} triple from the unified
+ * {@code nexus.chunks} table (RDR-191 Phase 4) via the injected
+ * {@link ChunkTextFetcher}. In production wire as:
  *
  * <pre>  new ChromaSchemeHandler(pgVectorRepository::fetchChunkText)</pre>
  *
@@ -30,8 +30,12 @@ import java.net.URI;
  * stamps {@code nexus.tenant} before touching the table, so cross-tenant rows
  * are invisible.
  *
- * <p>Phase A: the handler is registered and unit-tested here.  Live /v1
- * reference-only serving that calls this handler is Phase B (bead nexus-dtnpu).
+ * <p>The handler is registered and unit-tested here but remains UN-WIRED: no
+ * production code constructs a {@link UriSchemeResolverRegistry} or calls
+ * this handler yet. RDR-169 Phase B (bead nexus-zw2em) lands Gap 1's schema
+ * column and Gap 4's WRITE route only, not this Gap 3 read-time resolution
+ * wiring — see {@link UriSchemeResolverRegistry}'s class javadoc for the
+ * current (unowned, as of 2026-09-11) status.
  */
 public final class ChromaSchemeHandler implements UriSchemeHandler {
 

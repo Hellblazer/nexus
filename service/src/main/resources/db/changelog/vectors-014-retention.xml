@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-169 Phase B, Gap 1 (bead nexus-zw2em) - retention TEXT NOT NULL
+    DEFAULT 'full' CHECK (retention IN ('reference-only','full')) on
+    nexus.chunks, plus ALTER COLUMN chunk_text DROP NOT NULL: the schema
+    slice that lets a chunk row carry identity (address + span + chash +
+    metadata + embedding) without content, for a reference-only consumer
+    (Conductus / any docuverse client) that owns the bytes elsewhere.
+
+    RE-TARGETED FROM chunks_&lt;dim&gt; TO nexus.chunks (session nexus-70,
+    Sam: 'do it', 2026-09-11): RDR-169's own Technical Design section
+    predates RDR-191 Phase 4 (vectors-004-unify-chunks.xml), which collapsed
+    chunks_384/768/1024 into ONE nexus.chunks table with three nullable
+    typed embedding columns (embedding_384/768/1024, exactly_one_embedding
+    CHECK). Every "per chunks_&lt;dim&gt;" instruction in the RDR now applies
+    to nexus.chunks alone - there is only one table to ALTER, not three.
+    (RDR-169's cross-repo conexus etl_t3.py pairing is separately moot:
+    conexus-od6a records the T3 ETL as the retired migration path, so this
+    is engine-only with no paired client-repo edit - unlike memory-003's
+    contemporaneous client pairing, which genuinely needed one.)
+
+    chunk_tsv GENERATED EXPRESSION IS UNCHANGED (CA-2, verified by schema
+    spike, RDR-169 Research Findings): nexus.chunks.chunk_tsv is
+    `GENERATED ALWAYS AS (to_tsvector('english', chunk_text)) STORED` with
+    no NOT NULL of its own (vectors-004-unify-chunks.xml). Postgres
+    evaluates `to_tsvector('english', NULL)` to a NULL tsvector, which the
+    `@@` match operator and the GIN index (idx_chunks_tsv) both treat as a
+    non-match - a reference-only row is excluded from every FTS/hybrid
+    candidate path (vectors-007's hybrid_search_&lt;dim&gt;: `chunk_tsv @@
+    plainto_tsquery(...) OR p_query_text &lt;% chunk_text` - both operands
+    NULL, both false) by construction, with zero edit to the generated
+    column itself. The earlier COALESCE(chunk_text,'') idea (RDR-169
+    Alternatives) is unnecessary: empty and NULL tsvector both exclude.
+
+    embedding_384/768/1024 stay nullable-per-column / exactly_one_embedding
+    CHECK unchanged (a reference-only chunk is still a vector - G4's
+    embed-without-store route stores a caller-supplied precomputed
+    embedding, never a NULL one); tenant_id stays NOT NULL (RDR-169 binding
+    constraint 3: RLS is unconditional, content nullability is orthogonal
+    to tenancy). RLS itself (ENABLE/FORCE + tenant_isolation policy,
+    vectors-004 step 3) is untouched - this changeset is a bare ADD
+    COLUMN + ALTER COLUMN, no DML, so the FORCE-RLS migration-role DML
+    no-op class (nexus-1wjmq) does not apply here (see
+    tests/test_changelog_rls_lint.py's own scope note: only DML against a
+    FORCE table is in-scope for that lint).
+
+    Re-index / retention-transition semantics (RDR-169 Technical Design):
+    a full -> reference-only transition is PROHIBITED at the application
+    layer (PgVectorRepository#upsertReferenceOnlyChunk's pre-INSERT guard
+    SELECT, nexus-xvb6b) - not by a schema-level trigger/CHECK here. The
+    schema only distinguishes "content present" (chunk_text NOT NULL,
+    retention='full') from "content absent" (chunk_text NULL,
+    retention='reference-only'); the invariant "chunk_text NOT NULL implies
+    retention='full'" is an application contract the guard enforces, not
+    something a CHECK across two columns encodes in this changeset (a
+    two-column CHECK would also have to tolerate the legitimate transient
+    ON CONFLICT DO UPDATE path where only embedding/metadata are refreshed
+    - left to the app-layer guard, as designed).
+
+    Placed after tuples-002-sweep-indexes.xml (current tail) and before the
+    grants-nexus-svc.xml runAlways block, matching the established
+    late-append convention (D0.1; see vectors-013's / memory-003's own
+    &lt;include&gt; comments for the identical reasoning).
+
+    D0.6 rollback: drops the CHECK and the column, restores chunk_text NOT
+    NULL. A reference-only row (chunk_text NULL) cannot survive that
+    restoration - stated inline, not silently omitted, matching
+    memory-003-ttl-days.xml's identical rollback discipline: any
+    reference-only row present at rollback time is UNREPRESENTABLE under
+    the pre-migration shape and the ALTER COLUMN ... SET NOT NULL will
+    fail loud (not silently coerce) if one exists. This is deliberate: a
+    rollback that silently deleted or NULL-coerced live docuverse data
+    would be worse than a rollback that refuses.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-014-1" author="nexus-zw2em">
+        <comment>
+            RDR-169 Phase B Gap 1: nexus.chunks gains retention TEXT NOT NULL
+            DEFAULT 'full' CHECK (retention IN ('reference-only','full'));
+            chunk_text DROP NOT NULL. chunk_tsv generated expression,
+            exactly_one_embedding CHECK, tenant_id NOT NULL, and RLS are all
+            unchanged (see file header).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks
+    ADD COLUMN retention TEXT NOT NULL DEFAULT 'full'
+    CONSTRAINT chunks_retention_chk CHECK (retention IN ('reference-only', 'full'));
+
+ALTER TABLE nexus.chunks
+    ALTER COLUMN chunk_text DROP NOT NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks
+    ALTER COLUMN chunk_text SET NOT NULL;
+
+ALTER TABLE nexus.chunks
+    DROP CONSTRAINT IF EXISTS chunks_retention_chk;
+
+ALTER TABLE nexus.chunks
+    DROP COLUMN IF EXISTS retention;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
