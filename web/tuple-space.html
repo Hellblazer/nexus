@@ -219,13 +219,23 @@ figure.fig .take-edge{stroke:var(--brass)}
 <!-- ============ 0 ============ -->
 <section class="lesson" id="s0">
 <div class="lhead"><h2>The problem</h2><span class="ltime">5 min</span></div>
-<p class="why">The tuple space extends the harness where three failures recur in multi-agent work. All three happen exactly where the harness's delivery stops, and the harness keeps doing everything before that point. The first is an agent that finishes without reporting, where the harness has nothing to deliver and nothing records that a report was owed. The second is a correction you send to an agent while it works. The harness delivers it only between turns, so the agent reads it after it has already returned the wrong answer. The third is a request from one of the other sessions on the machine. The harness does not connect that session to you at all, so the request waits in a chat window until a person sees it.</p>
+<p class="why">The tuple space extends the harness where three failures recur in multi-agent work. All three happen exactly where the harness's delivery stops, and the harness keeps doing everything before that point.</p>
+<ul class="plain">
+<li><strong>A report that never arrives.</strong> An agent finishes without reporting. The harness has nothing to deliver, and nothing records that a report was owed.</li>
+<li><strong>A correction that arrives too late.</strong> You send a correction to an agent while it works. The harness delivers it only between turns, so the agent reads it after it has already returned the wrong answer.</li>
+<li><strong>A request nobody sees.</strong> Another session on the machine needs something from you. The harness does not connect that session to you at all, so the request waits in a chat window until a person sees it.</li>
+</ul>
 
 <p>What the harness delivers is a message: it reaches one reader, at a moment the harness chooses, and then it is gone. What the tuple space holds is a record: it exists from the moment it is written until it expires, no matter who reads it or when. An agent can read its mailbox in the middle of a turn instead of waiting for the next delivery. A hook, a script, or any other session on the machine can write and read with the tenant's credential. The harness does not need to connect them. And anyone can look afterwards at what was written, taken, and acked.</p>
 
 <p>The space adds two operations to that record, and no read-many store has either. The take operation hands a record to exactly one of the readers asking for it. If two agents both read "take the next task", only one of them takes it. The wait operation holds a reader until a record with the keys it wants arrives.</p>
 
-<p>Together these turn coordination from a set of conventions into a set of guarantees. A report is owed until a report tuple exists, whether or not the agent remembered. A message is delivered once, whether or not two readers raced for it. A request is open until its ack exists, whether or not a person is watching.</p>
+<p>Together these turn coordination from a set of conventions into a set of guarantees.</p>
+<ul class="plain">
+<li><strong>A report is owed until a report tuple exists</strong>, whether or not the agent remembered.</li>
+<li><strong>A message is delivered once</strong>, whether or not two readers raced for it.</li>
+<li><strong>A request is open until its ack exists</strong>, whether or not a person is watching.</li>
+</ul>
 
 <p>Harness messages, hooks, memory, scratch, the knowledge store, and the file system all stay in use. They are the right design for what they carry. The tuple space is built on them: hooks write it, harness ids address it, and its records point into the stores.</p>
 
