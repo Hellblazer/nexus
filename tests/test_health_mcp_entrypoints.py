@@ -18,6 +18,7 @@ import inspect
 import os
 import stat
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -497,3 +498,85 @@ class TestProbeMcpServer:
 
         assert ok is False
         assert "failed to spawn" in detail
+
+
+class TestProbeMcpServerAliveVsHung:
+    """nexus-jw44t: the v0.1.114 acquire gate's ``nx-mcp`` timeout inside a
+    cold-venv Docker rehearsal container under load (box load ~7.8), while
+    ``nx-mcp-catalog`` answered fine in the SAME run — the process was
+    genuinely still starting, not hung. A fixed-timeout probe cannot tell
+    "slow under load" from "never going to answer"; these pin the fix:
+    a still-alive process gets extra room, an exited/crashed one never
+    does."""
+
+    def test_slow_but_alive_binary_recovers_within_extension(
+        self, tmp_path: Path
+    ) -> None:
+        """Builds the exact lag: the server takes LONGER than the base
+        ``timeout`` to answer (a slow cold start under load) but answers
+        before the extended cap. Against the pre-fix single-timeout
+        ``subprocess.run`` this would be killed and reported as a failure
+        at the base timeout; the fix must recover it.
+
+        Margins are generous (base=1.0s, sleep=2.0s, extended cap=4.0s) so
+        this does not itself flake under a loaded parallel test run (``-n
+        4``) — a narrower margin (0.2s/0.3s/0.8s) was observed to flake
+        under exactly that load, the identical class of timing sensitivity
+        this bead is about."""
+        binary = tmp_path / "nx-mcp"
+        _write_fake_binary(
+            binary,
+            "#!/bin/sh\n"
+            "read -r line\n"
+            "sleep 2.0\n"  # longer than the base timeout below (1.0s)...
+            'printf \'%s\\n\' \'{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"nexus"}}}\'\n',
+        )
+
+        ok, detail = _probe_mcp_server(str(binary), "nexus", timeout=1.0)
+
+        assert ok is True  # ...but well inside the 1.0 * 4 = 4.0s extension
+        assert "nexus" in detail
+
+    def test_genuinely_hung_binary_waits_the_full_extended_cap(
+        self, tmp_path: Path
+    ) -> None:
+        """The truly-hung twin: never answers, stays alive the whole time.
+        Must fail only after roughly the EXTENDED cap (timeout * 4), not
+        the base timeout alone — proving the extension actually ran, not
+        just that some failure eventually happened — and the detail must
+        say the process stayed alive (a hang), not merely "timed out"
+        generically."""
+        binary = tmp_path / "nx-mcp"
+        _write_fake_binary(binary, "#!/bin/sh\nsleep 30\n")
+
+        start = time.monotonic()
+        ok, detail = _probe_mcp_server(str(binary), "nexus", timeout=0.2)
+        elapsed = time.monotonic() - start
+
+        assert ok is False
+        assert "timed out" in detail
+        assert "alive" in detail
+        # Loose bounds (parallel-CI-load tolerant): clearly PAST the base
+        # 0.2s timeout -- proving the extension engaged at all -- and
+        # nowhere near the fake's 30s sleep, without pinning an exact
+        # multiple of the 0.8s extended cap that a busy box could miss.
+        assert elapsed >= 0.4
+        assert elapsed < 15.0
+
+    def test_crashing_binary_fails_fast_never_pays_the_extension(
+        self, tmp_path: Path
+    ) -> None:
+        """The OTHER half of the distinction: a crash must still fail on
+        the very first poll, exactly as before nexus-jw44t — proven by
+        elapsed time staying far below the extended cap even with the
+        DEFAULT (8s) base timeout, where the extended cap would be 32s."""
+        binary = tmp_path / "nx-mcp"
+        _write_fake_binary(binary, _CRASHING_MODULE_NOT_FOUND)
+
+        start = time.monotonic()
+        ok, detail = _probe_mcp_server(str(binary), "nexus")  # default timeout=8.0
+        elapsed = time.monotonic() - start
+
+        assert ok is False
+        assert "ModuleNotFoundError" in detail
+        assert elapsed < 15.0  # nowhere near the 32s extended cap for timeout=8.0

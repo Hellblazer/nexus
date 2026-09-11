@@ -2,6 +2,7 @@
 """Health check data model and runner for nx doctor / nx console."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -1408,9 +1409,33 @@ _MCP_INITIALIZE_REQUEST = (
 
 # nexus-l2ku5 critique round 2: local subprocess handshake, not a network
 # call — parity with this file's other probes (e.g. MinerU's 2.0s HTTP
-# timeout). Two entry points probed serially, so a worst case of both
-# hanging is 2 * 8s = 16s, not the 30s the prior 15.0 implied.
+# timeout). Measured local round trips: 0.6s warm, 0.77s with every
+# bytecode cache cleared (a cold-venv proxy) on this dev box — this
+# constant already carries roughly 10x margin over that baseline.
 _MCP_PROBE_TIMEOUT_S = 8.0
+
+# nexus-jw44t (the v0.1.114 acquire-gate follow-up): the fixed 8s budget
+# above timed out for nx-mcp in 2 of 3 runs inside a cold-venv Docker
+# rehearsal container under load (box load average ~7.8) while nx-mcp-catalog
+# passed alongside it in the SAME run — i.e. the process was genuinely still
+# starting, not hung, and a fixed budget cannot distinguish "slow under load"
+# from "never going to answer" without either guessing a bigger number (which
+# just moves the flake to a busier box) or actually checking. Once the base
+# ``timeout`` elapses WITHOUT the process having exited or crashed, the probe
+# keeps polling up to ``timeout * _MCP_PROBE_ALIVE_EXTENSION_FACTOR`` before
+# giving up — a crashed/exited process is unaffected (it fails on the very
+# first poll, exactly as before: nexus-l2ku5's fail-loud contract is
+# unchanged for that case) and never pays the extension. 4x keeps the total
+# worst-case bound explicit (2 entry points * 32s = 64s) while giving a
+# genuinely-slow-but-alive cold start roughly 4x the already-10x-margined
+# base budget to answer.
+_MCP_PROBE_ALIVE_EXTENSION_FACTOR = 4.0
+
+#: Poll granularity while the process is confirmed alive (nexus-jw44t).
+#: Capped at 2.0s so the extension loop notices a late answer promptly
+#: without spinning; never larger than the caller's own ``timeout`` so a
+#: short test-supplied budget (e.g. ``timeout=0.2``) still polls finely.
+_MCP_PROBE_POLL_INTERVAL_S = 2.0
 
 # Bound both line COUNT and per-line LENGTH — a crashing binary controls
 # its own stderr and could emit one arbitrarily long line (no newlines) to
@@ -1438,37 +1463,85 @@ def _probe_mcp_server(
     this probe (nexus-l2ku5).
 
     LOAD-BEARING ASSUMPTION: the MCP stdio server's read loop exits on
-    stdin EOF. ``subprocess.run(input=...)`` writes the one request then
-    closes stdin, which is what lets a healthy server finish this
-    request/response and exit on its own within *timeout* instead of
-    idling as a long-lived process — the same shape as a real MCP client
-    session, just closed after one turn.
+    stdin EOF. Writing the one request then closing stdin is what lets a
+    healthy server finish this request/response and exit on its own
+    within *timeout* instead of idling as a long-lived process — the same
+    shape as a real MCP client session, just closed after one turn.
+
+    ALIVE-VS-HUNG DISTINCTION (nexus-jw44t): a plain fixed-timeout wait
+    cannot tell a process that is still starting up (slow cold import
+    under load) from one that will never answer (crashed, deadlocked). A
+    crash exits almost immediately regardless of load — Python's own
+    import-time failures are microseconds, not seconds — so this polls in
+    ``timeout``-sized (capped) increments via the documented "catch
+    ``TimeoutExpired`` and retry ``communicate()``" idiom: an exited
+    process is caught and reported on the very FIRST poll (unchanged
+    fail-fast contract), while a process that is still alive and simply
+    slow gets up to ``timeout * _MCP_PROBE_ALIVE_EXTENSION_FACTOR`` before
+    the probe gives up and reports it as genuinely hung.
     """
     try:
-        proc = subprocess.run(  # noqa: S603 — binary_path resolved via shutil.which, not attacker input
+        proc = subprocess.Popen(  # noqa: S603 — binary_path resolved via shutil.which, not attacker input
             [binary_path],
-            input=_MCP_INITIALIZE_REQUEST,
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             errors="replace",  # non-UTF8 crash output (e.g. a mangled traceback) must not raise UnicodeDecodeError out of a health check
-            timeout=timeout,
-            check=False,
         )
-    except subprocess.TimeoutExpired as exc:
-        stderr_excerpt = _first_lines(
-            exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", "replace"),
-            3,
-        )
-        detail = f"timed out after {timeout:.0f}s waiting for initialize response"
-        if stderr_excerpt:
-            detail += f" — stderr: {stderr_excerpt}"
-        return False, detail
     except OSError as exc:
         return False, f"failed to spawn {binary_path}: {exc}"
-    except Exception as exc:  # noqa: BLE001 — any other spawn/communicate failure must still report, not crash `nx doctor`
+    except Exception as exc:  # noqa: BLE001 — any other spawn failure must still report, not crash `nx doctor`
         return False, f"probe error: {exc!r}"
 
-    stderr_excerpt = _first_lines(proc.stderr or "", 3)
+    try:
+        proc.stdin.write(_MCP_INITIALIZE_REQUEST)
+    except (BrokenPipeError, OSError):
+        pass  # a binary that crashes before reading stdin closes it first; the exit-code check below reports the real failure
+    finally:
+        with contextlib.suppress(OSError):
+            proc.stdin.close()
+        # Popen.communicate() flushes/closes ``self.stdin`` itself on its
+        # FIRST call when the attribute is still set — a ValueError ("I/O
+        # operation on closed file") since we already closed it above.
+        # Clearing the attribute (not the underlying fd — already closed)
+        # tells communicate() there is nothing left for it to write.
+        proc.stdin = None
+
+    poll_interval = min(timeout, _MCP_PROBE_POLL_INTERVAL_S)
+    max_wait = timeout * _MCP_PROBE_ALIVE_EXTENSION_FACTOR
+    deadline = time.monotonic() + max_wait
+    stdout_text = ""
+    stderr_text = ""
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Exceeded the extended cap while the process was STILL
+                # ALIVE at every prior poll (an exited/crashed process is
+                # caught below on its first poll and never reaches here) —
+                # a genuine hang, not a slow-but-working cold start.
+                proc.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    stdout_text, stderr_text = proc.communicate(timeout=5.0)
+                stderr_excerpt = _first_lines(stderr_text, 3)
+                detail = (
+                    f"timed out after {max_wait:.0f}s waiting for initialize "
+                    "response (process stayed alive the whole time — a genuine "
+                    "hang, not a crash)"
+                )
+                if stderr_excerpt:
+                    detail += f" — stderr: {stderr_excerpt}"
+                return False, detail
+            try:
+                stdout_text, stderr_text = proc.communicate(timeout=min(poll_interval, remaining))
+                break  # process finished — answered or crashed; checked below
+            except subprocess.TimeoutExpired:
+                continue  # still alive — poll again, no data lost (documented communicate() retry idiom)
+    except OSError as exc:
+        return False, f"probe error: {exc!r}"
+
+    stderr_excerpt = _first_lines(stderr_text or "", 3)
 
     if proc.returncode != 0:
         detail = f"exited {proc.returncode}"
@@ -1477,7 +1550,7 @@ def _probe_mcp_server(
         return False, detail
 
     response: dict | None = None
-    for line in (proc.stdout or "").splitlines():
+    for line in (stdout_text or "").splitlines():
         line = line.strip()
         if not line:
             continue
