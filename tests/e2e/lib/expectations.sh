@@ -1069,8 +1069,14 @@ _expectations_census_space() {
     combined="$(nx tuple list --prefix "ledger/" --json 2>&1)"
     rc=$?
     if [[ $rc -ne 0 ]]; then
+        # The reason is ONE field on ONE line: the CLI's error text can span
+        # several lines (a Click "No such command" usage block does), and an
+        # embedded newline would make the census's last line something other
+        # than a SPACE_ row, which every caller keys on.
+        local reason
+        reason="$(printf '%s' "${combined:-no output}" | tr '\n\t' '  ' | tr -s ' ')"
         printf 'SPACE_FALLBACK\treason=nx tuple list --prefix ledger/ failed (rc=%d): %s\n' \
-            "$rc" "${combined:-no output}"
+            "$rc" "$reason"
         return 0
     fi
 

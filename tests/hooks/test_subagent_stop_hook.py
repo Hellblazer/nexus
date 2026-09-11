@@ -1511,6 +1511,44 @@ class TestCensusSpaceBacked:
         assert "SPACE_FALLBACK\treason=no nx binary on PATH" in proc.stdout
         assert "BLINDSPOT\tchecked=1 recognized=1 unrecognized=0" in proc.stdout
 
+    def test_multiline_cli_error_stays_one_space_line(self, tmp_path: Path) -> None:
+        """An ``nx`` whose ``tuple`` verb fails with a MULTI-LINE error (a
+        Click usage block, which is exactly what every installed client
+        older than the tuple CLI prints) still yields ONE SPACE_FALLBACK
+        line as the census's last line. Found live by the Phase 4 review
+        (nexus-em75s.22): the raw error was interpolated verbatim, so the
+        last line was ``Error: No such command 'tuple'.`` and every caller
+        keying on the SPACE_ tail broke on a real install."""
+        _expect_row(tmp_path, name=self.TYPE, mode="background", session_id=self.SID)
+        self._write_ledger_row(tmp_path, self.SID)
+        old_bin = tmp_path / "old-nx-bin"
+        old_bin.mkdir()
+        shim = old_bin / "nx"
+        shim.write_text(
+            "#!/bin/sh\n"
+            "cat <<'USAGE'\n"
+            "Usage: nx [OPTIONS] COMMAND [ARGS]...\n"
+            "Try 'nx --help' for help.\n"
+            "\n"
+            "USAGE\n"
+            "echo \"Error: No such command 'tuple'.\" >&2\n"
+            "exit 2\n"
+        )
+        shim.chmod(0o755)
+        proc = _run_census(
+            tmp_path, self.SID,
+            env_overrides={"PATH": f"{old_bin}{os.pathsep}/usr/bin:/bin"},
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        # _run_census appends its own RC= trailer; the census's OWN last
+        # line is the one before it.
+        lines = [line for line in proc.stdout.rstrip().splitlines() if not line.startswith("RC=")]
+        assert lines[-1].startswith("SPACE_FALLBACK\treason=nx tuple list --prefix ledger/ failed (rc=2): "), lines[-1]
+        assert "No such command 'tuple'" in lines[-1]
+        assert "Usage: nx" in lines[-1]
+        assert sum(1 for line in lines if line.startswith("SPACE_")) == 1
+        assert "BLINDSPOT\tchecked=1 recognized=1 unrecognized=0" in proc.stdout
+
     def test_engine_unreachable_names_the_real_failure(self, tmp_path: Path) -> None:
         """``nx`` present, engine not: the reason names the actual
         resolution failure, not a placeholder string.
