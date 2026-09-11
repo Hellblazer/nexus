@@ -2,12 +2,12 @@
 title: "Tuple Space Claim Renewal and Reply-in-Ack: Close the Two Limits RDR-205 Accepted for v1"
 id: RDR-206
 type: Feature
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-09-11
-accepted_date:
+accepted_date: 2026-09-11
 related_issues: []
 related_rdrs: [RDR-205, RDR-184]
 ---
