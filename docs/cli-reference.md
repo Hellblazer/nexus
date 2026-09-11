@@ -3599,7 +3599,7 @@ Write a tuple into `SUBSPACE`. Idempotent by construction: the tuple id is deriv
 nx tuple rd SUBSPACE [--pattern KEY=VALUE ...] [-n N] [--timeout-s SECONDS] [--json]
 ```
 
-Non-destructive read from `SUBSPACE`. Matches on equality over whatever subset of the pinned keys `--pattern` supplies (an empty pattern reads the whole subspace); returns dead-lettered rows too (dead-lettering is a claim state, not an exclusion). A probe by default (`--timeout-s 0`, never blocks); parks up to `--timeout-s` seconds (capped by the engine) when nothing matches immediately.
+Non-destructive read from `SUBSPACE`. Matches on equality over whatever subset of the pinned keys `--pattern` supplies (an empty pattern reads the whole subspace); returns dead-lettered rows too (dead-lettering is a claim state, not an exclusion). A probe by default (`--timeout-s 0`, never blocks); parks up to `--timeout-s` seconds when nothing matches immediately. The engine caps this at 25 seconds by default: a `--timeout-s` at the cap returns the probe result at expiry like any other park, but a `--timeout-s` ABOVE the cap is refused outright as `TimeoutTooLong`, never silently clamped. A wait of minutes is a LOOP of parked calls at or under the cap, not one long park.
 
 | Flag | Description |
 |------|-------------|
@@ -3614,7 +3614,7 @@ Non-destructive read from `SUBSPACE`. Matches on equality over whatever subset o
 nx tuple in SUBSPACE --pattern KEY=VALUE ... --claimant ID --lease-s N [--timeout-s SECONDS] [--json]
 ```
 
-Destructive (claiming) read from `SUBSPACE`. Unlike `rd`, every key the template declares must be pinned in `--pattern` (no subset match) and dead-lettered rows are never returned. A probe by default (`--timeout-s 0`); prints the claimed tuple and its claim id, or exits 1 with "No matching tuple." on a probe miss. Ack or nack the claim with `nx tuple ack`/`nx tuple nack` — the row stays claimed (and unavailable to others) until then or until the lease lapses.
+Destructive (claiming) read from `SUBSPACE`. Unlike `rd`, every key the template declares must be pinned in `--pattern` (no subset match) and dead-lettered rows are never returned. A probe by default (`--timeout-s 0`); prints the claimed tuple and its claim id, or exits 1 with "No matching tuple." on a probe miss. `--timeout-s` above the engine's 25-second default cap is refused as `TimeoutTooLong` rather than clamped — loop the call at or under the cap for a wait of minutes. Ack or nack the claim with `nx tuple ack`/`nx tuple nack` — the row stays claimed (and unavailable to others) until then or until the lease lapses.
 
 | Flag | Description |
 |------|-------------|
