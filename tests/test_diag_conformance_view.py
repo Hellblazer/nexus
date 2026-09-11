@@ -286,6 +286,9 @@ def test_grants_changeset_view_era_revokes_tables():
         # (unscrubbed str(exc) capture + BYPASSRLS — see the changeset
         # comment; do not re-add for symmetry).
         "grants-nexus-diag-4",
+        # 50a354fa3 (2026-09-11, nexus-f1pbh): SELECT on the three RDR-205
+        # tuple-space tables (tuples, tuple_claim_log, tuple_tenants).
+        "grants-nexus-diag-5",
     ]
     for cs in diag_sets:
         assert cs.get("runAlways") == "true", (
