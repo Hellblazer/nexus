@@ -75,3 +75,12 @@ mechanize, it matters enough to ship.
   socket) exercises the wrapper's slow path for the first time — the
   existing three latency tests only ever hit an instantly-refused port.
   bead: nexus-em75s.42
+- `conexus/hooks/scripts/expectations.sh`: nexus-zn9op (production half) —
+  `expectations_census`'s space-backed `nx tuple list --prefix ledger/`
+  call is now bounded by a portable wall-clock deadline
+  (`_expectations_run_bounded`, no `timeout`(1) dependency — macOS ships
+  no GNU `timeout`), default 20s, overridable via
+  `NX_EXPECT_CENSUS_NX_TIMEOUT_S`. On expiry the census reports
+  `SPACE_FALLBACK\treason=nx tuple list exceeded <N>s` and returns rather
+  than hanging the live orchestrator session that calls it directly.
+  bead: nexus-zn9op
