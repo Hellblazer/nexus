@@ -37,10 +37,10 @@ live claim, and an `ack` that can carry a reply in its own transaction.
 A take (`in`) holds a claim under a lease, and the mailbox template caps the
 lease at 900 seconds (`max_lease_seconds` in
 `service/src/main/resources/tuples/templates/mailbox.yaml`). RDR-205 §Prior art
-records the safety of that cap as "an assumption the record does not argue:
-that no v1 consumer holds a mailbox claim across work longer than 900 seconds,
-so the absence of a renew operation is safe by scope rather than by
-construction." A reader that is still working when its lease lapses does not
+records the safety of that cap as accepted "on an assumption the record does
+not argue: that no v1 consumer holds a mailbox claim across work longer than
+the template's `max_lease_seconds` of 900", and says the design "avoids it by
+scope, not by" construction. A reader that is still working when its lease lapses does not
 learn that it lost the claim. The sweep, or the next reader, retakes the
 message, `attempts` increments, and two readers act on one message. After three
 lapses the message is dead-lettered while its first reader may still be
@@ -153,7 +153,7 @@ mailbox template, `HttpTupleStore`, the mailbox skill, and RDR-205 §Prior art.
   commit or neither does, and Phase 1 Step 2 pins that atomicity. The reply's
   identity is made stable as well: the engine sets the reply's nonce to the
   request's tuple id in hex. `computeId` folds the nonce into the id only in
-  its `KEYS_NONCE` branch; the `KEYS` branch ignores it. So for a reply target
+  its `KEYS_NONCE` branch; the other branches ignore it. So for a reply target
   whose template is `keys+nonce` (the mailbox), one request produces one reply
   row per responder however many times the write runs, and two replies to two
   requests never collide. For a `keys`-only target (the RDR-184 ledger) the
@@ -254,10 +254,12 @@ sweep released or another claimant now holds.
    a `SchemaViolation`, raised by `TupleHandler`'s reply-object parsing before
    dispatch (`validateOut` checks only for a missing nonce, and the handler's
    body helpers drop unknown keys, so this is a new branch). The reply's
-   subspace must resolve to a `keys+nonce` template; a `keys`-only target is a
-   `SchemaViolation` as well, raised in the same place, because `computeId`
-   ignores the nonce for that shape and a second reply would overwrite the
-   first.
+   subspace must resolve to a `keys+nonce` template; any other `id_from` shape
+   is a `SchemaViolation` as well, raised inside `TupleRepository`'s reply
+   write after `resolveOrThrow` returns the template (the handler holds no
+   template resolver; resolution is private to the repository), because
+   `computeId` ignores the nonce for those shapes and a second reply would
+   overwrite the first.
    On any validation failure of the reply (`UnknownSubspace`, `TtlTooLong`,
    or `SchemaViolation`, the same three `out` raises), nothing is written and
    the request stays claimed, so the responder can correct and retry. Waiters on the reply's
@@ -294,9 +296,11 @@ private TuplesRecord consumeClaim(DSLContext ctx, String tenant, String claimId,
 
 public byte[] ackWithReply(String tenant, String claimId, String claimant, ReplySpec replyOrNull)
     // withTenant: consumeClaim FIRST (a consumed or foreign claim fails here and nothing
-    // else runs), then, if replyOrNull != null, writeOut(ctx, ...) against the reply's
-    // subspace/template in the SAME ctx, with nonce = hex(consumed row's id), set here and
-    // never taken from the caller. After withTenant returns, signalAll(tenant, replySubspace)
+    // else runs), then, if replyOrNull != null, resolveOrThrow(reply subspace) and
+    // SchemaViolation unless the template's id_from is KEYS_NONCE, then writeOut(ctx, ...)
+    // against that template in the SAME ctx, with nonce = hex(consumed row's id), set here
+    // and never taken from the caller (a nonce key in the reply object was already refused
+    // by the handler). After withTenant returns, signalAll(tenant, replySubspace)
     // only if a reply was written. Returns the reply id or null.
 ```
 
@@ -338,7 +342,7 @@ paragraph on the two limits change with it.
 | --- | --- | --- |
 | `renew` | `TupleRepository.ack`/`nack` (claim resolution, ownership check) | Extend: same `liveClaimRow` path, new update and log row; the update is a compare-and-swap on `claim_state`, `claim_id`, and `consumed_at IS NULL` with the row count checked |
 | compare-and-swap on `ack` and `nack` | `TupleRepository.ack`, `releaseOrDeadLetter` (update by id only, research-4) | Extend: add the same `claim_state`/`claim_id`/`consumed_at` conditions and row-count check, so a stale ack or nack fails `ClaimNotFound` instead of writing over a row the sweep released or another claimant now holds |
-| reply-in-ack | `TupleRepository.out` and `.ack` | Extend: compose the two bodies in one transaction; two new validation branches in `TupleHandler`'s reply parsing (a stray `nonce` key, a reply target whose template is not `keys+nonce`), both `SchemaViolation` |
+| reply-in-ack | `TupleRepository.out` and `.ack` | Extend: compose the two bodies in one transaction; two new validation branches, both `SchemaViolation`: a stray `nonce` key, in `TupleHandler`'s reply parsing; a reply target whose template is not `keys+nonce`, in `TupleRepository`'s reply write after template resolution |
 | `/renew` route | `TupleHandler` route switch | Extend: one case |
 | client/MCP/CLI | `HttpTupleStore`, `tuple_*` tools, `nx tuple` | Extend: one method, one tool, one verb, one optional argument |
 
@@ -674,3 +678,4 @@ with execution still owed to Phase 1 Step 2.
 - 2026-09-11: Post-accept amendment — Phase 1 re-derived in dependency order (compare-and-swap first, then factor and compose, then renew, then pins, then the engine-direct MVV); the earlier order was cyclic. Step references, Scope Verification, and the engine pin updated. Fix check on this change recorded in T2 as `nexus_rdr/206-fix-check-<tip>`, where `<tip>` is the RDR file's commit after this amendment.
 - 2026-09-11: Post-accept amendment — the call-order claim removed: the ack and the reply write share one transaction, so their order inside it is immaterial and is no longer pinned; the atomicity pin stays. Fix check on this change recorded in T2 as `nexus_rdr/206-fix-check-<tip>`, where `<tip>` is the RDR file's commit after this amendment.
 - 2026-09-11: Post-accept amendment (bead nexus-h61dl.1) — the four Significants and the Minors gate round 2 left open, at every site: a reply target must be a `keys+nonce` template, otherwise `SchemaViolation` (T2 `nexus_rdr/206-decision-s1-reply-target-error`); the stray-`nonce`-key and target-shape checks are named as two new branches in `TupleHandler`'s reply parsing and the audit row says so; the framing sentences name the compare-and-swap on `ack`/`nack`; the renew audit row carries `consumed_at IS NULL`; a renew is not an attempt, by decision, with its scenario; the Phase 3 tag window; the RDR-205 quote verbatim; three pin sites in two files; the Risks mitigation and the Key Discoveries citation say atomicity from `TenantScope.stampAndRun`, not order. Fix check on this change recorded in T2 as `nexus_rdr/206-fix-check-<tip>`.
+- 2026-09-11: Post-accept amendment — the reply-target shape check moves to `TupleRepository`'s reply write, after template resolution (the handler has no resolver); the stray-`nonce`-key check stays in the handler; the pseudocode names both; the Gap 1 quote of RDR-205 made verbatim. Fix check on this change recorded in T2 as `nexus_rdr/206-fix-check-<tip>`.
