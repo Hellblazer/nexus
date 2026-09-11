@@ -104,8 +104,9 @@ made the two limits the only open items in the tuple space.
   `nx tuple` with eight verbs, the mailbox and orchestration skills.
 - Wire ledger: `docs/wire-contract-pending.md`; every both-halves change is an
   `## Unshipped` entry naming the engine tag, with direction-safety prose.
-- Engine release cadence: `engine-service-v0.1.115` is the newest tag;
-  `REQUIRED_ENGINE_VERSION` is `(0, 1, 114)`.
+- Engine release cadence: `engine-service-v0.1.115` is the newest tag and
+  `REQUIRED_ENGINE_VERSION` is `(0, 1, 115)`; the tag this RDR pairs with is the
+  next one cut after Phase 1 closes.
 
 ## Research Findings
 
@@ -147,7 +148,7 @@ mailbox template, `HttpTupleStore`, the mailbox skill, and RDR-205 §Prior art.
   response fails at the ack step, before the reply write runs, because
   `liveClaimRow` returns nothing once `consumed_at` is set. The ack-first
   ordering is the mechanism that yields exactly one reply row, and Phase 1
-  Step 1 pins that ordering, not only the outcome. The reply's identity is
+  Step 2 pins that ordering, not only the outcome. The reply's identity is
   made stable as well, so a future reordering could not break it: the engine
   sets the reply's nonce to the request's tuple id in hex. `computeId` digests the template
   keys, the `id_dims` (`from` for the mailbox), and the nonce, so one request
@@ -208,11 +209,11 @@ mailbox template, `HttpTupleStore`, the mailbox skill, and RDR-205 §Prior art.
   `withTenant` transaction is expressible with the existing `out` and `ack`
   bodies — **Status**: Documented by reading (research-1 §1: the bodies
   compose once `out`'s is factored onto a caller `DSLContext`); execution
-  not yet run, which is Phase 1 Step 1 — **Method**: Source Search, then Spike
+  not yet run, which is Phase 1 Step 2 — **Method**: Source Search, then Spike
 - [ ] The compare-and-swap conditions on `ack`, `nack`, and `renew` change
   no successful path, only the stale-update race — **Status**: Documented by
   reading the update statements and the sweep's locked select (research-4);
-  the race test in Phase 1 Step 3 executes it — **Method**: Source Search,
+  the race tests in Phase 1 Steps 1 and 3 execute it — **Method**: Source Search,
   then Spike
 - [ ] Adding optional fields to the `/ack` body and one new `/renew` route
   is `[additive]` in both directions (old client ignores them, new client
@@ -270,7 +271,7 @@ private byte[] writeOut(DSLContext ctx, String tenant, String subspace, ..., Str
 
 private TuplesRecord consumeClaim(DSLContext ctx, String tenant, String claimId, String claimant)
     // ack's existing body (liveClaimRow, ownership check, the compare-and-swap update of
-    // Step 3, the ack log row) moved onto a caller-supplied ctx and returning the consumed
+    // Step 1, the ack log row) moved onto a caller-supplied ctx and returning the consumed
     // row; ack itself becomes withTenant(tenant, ctx -> consumeClaim(ctx, ...)). One body,
     // so ackWithReply cannot ship without the compare-and-swap.
 
@@ -415,7 +416,7 @@ may have abandoned.
 ### Prerequisites
 
 - [ ] All Critical Assumptions verified (the transaction-composition spike is
-  Phase 1 Step 1).
+  Phase 1 Step 2).
 
 ### Minimum Viable Validation
 
@@ -428,42 +429,62 @@ sequences are one test each.
 
 ### Phase 1: Engine
 
-#### Step 1: Factor `out` onto a caller context, then compose
+The steps run in dependency order. The compare-and-swap comes first because
+`consumeClaim` (Step 2) is defined as containing it and `renew` (Step 3) uses
+it; the earlier ordering, with the compare-and-swap third, was cyclic.
 
-Move `out`'s body into `writeOut(DSLContext, ...)` and `ack`'s body into
-`consumeClaim(DSLContext, ...)`, with `out` and `ack` unchanged in behaviour
-(their existing tests pin that). Then write `ackWithReply` as `consumeClaim`
-followed by `writeOut` in one `withTenant`, signalling the reply subspace
-after the call returns. Pins: reply visible and request consumed in the same
-read, or neither; a reader parked on the reply subspace wakes after the
-commit; and the ordering itself, by a test that acks with a reply whose
-validation fails and asserts the request is still claimed, which can only
-hold if `consumeClaim` ran first and rolled back with the reply.
+#### Step 1: Compare-and-swap on the shipped claim updates
 
-#### Step 2: `renew`
-
-Repository method, handler route, typed errors, `renew` transition, tests for
-clamp to `expires_at`, cap by template, lapsed-claim refusal, ownership.
-
-#### Step 3: Compare-and-swap on every claim update
-
-`liveClaimRow` reads without a lock and `ack`, `nack`, and the `renew` sketch
-update by id alone, while the sweep's release arm selects the same rows under
-`FOR NO KEY UPDATE SKIP LOCKED`. Change all three updates to
+`liveClaimRow` reads without a lock and `ack` and `nack` update by id alone,
+while the sweep's release arm selects the same rows under
+`FOR NO KEY UPDATE SKIP LOCKED`. Change both updates to
 `WHERE id = ? AND claim_state = 'claimed' AND claim_id = ? AND consumed_at IS NULL`,
-check the affected-row count, and raise `ClaimNotFound` on zero rows; write the
-claim-log row only after a one-row update. Pin with a test that releases the
-row between the read and the update and asserts `ClaimNotFound` and no log
-row. `releaseOrDeadLetter` is shared by `nack` and the sweep's release arm
-(research-4), so the sweep's own call gains the same condition; under its row
-lock the condition is always true there, and a test pins that the sweep's
-counts are unchanged. This changes shipped `ack`/`nack` behaviour in exactly
-that race.
+check the affected-row count, raise `ClaimNotFound` on zero rows on the caller
+paths, and write the claim-log row only after a one-row update.
+`releaseOrDeadLetter` is shared by `nack` and the sweep's release arm
+(research-4), so the sweep's call gains the same condition; under its row lock
+the condition is always true, and on zero rows the sweep logs and continues,
+never raises, because one exception would abort its batch transaction. Pins:
+a test that releases the row between the read and the update and asserts
+`ClaimNotFound` and no log row, through a new ack-side test seam shaped like
+the existing `claimOnce` one; and the sweep's counts unchanged. This changes
+shipped `ack`/`nack` behaviour in exactly that race.
+
+#### Step 2: Factor `out` and `ack` onto a caller context, then compose
+
+Move `out`'s body into `writeOut(DSLContext, ...)` and `ack`'s body, with
+Step 1's compare-and-swap, into `consumeClaim(DSLContext, ...)`, with `out`
+and `ack` unchanged in behaviour (their existing tests pin that). Then write
+`ackWithReply` as `consumeClaim` followed by `writeOut` in one `withTenant`,
+the reply nonce set by the engine to the consumed row's id, signalling the
+reply subspace after the call returns. Pins: reply visible and request
+consumed in the same read, or neither; a reader parked on the reply subspace
+wakes after the commit; a reply whose validation fails leaves the request
+claimed with no reply row (atomicity); and the call order, `consumeClaim`
+before `writeOut`, by a unit test on the composed method, since a rolled-back
+transaction cannot show the order by itself. This executes Critical
+Assumption 2.
+
+#### Step 3: `renew`
+
+Repository method with the compare-and-swap of Step 1, handler route, typed
+errors, `renew` transition, the lease clamp extracted from `claimOnce` into
+one shared helper, `attempts` untouched. Tests for clamp to `expires_at`, cap
+by template, lapsed-claim refusal, ownership, and the race with the sweep's
+release between the read and the update.
 
 #### Step 4: Sweep and census unaffected
 
-Pin that the release arm ignores renewed live claims and that
-`subspace_stats` counts a renewed claim under `claimed`.
+Pin that the release arm ignores renewed live claims, that `subspace_stats`
+counts a renewed claim under `claimed`, and that a renew does not change
+`attempts`.
+
+#### Step 5: Minimum Viable Validation, engine-direct
+
+Run both MVV sequences on a dev jar before Phase 1 closes: the renew sequence
+(claim, renew, ack, no `expire` in the log) and the ack-with-reply sequence (a
+parked reader wakes with the reply and the request is consumed). The client
+half of the MVV runs again in Phase 2 through `HttpTupleStore`.
 
 ### Phase 2: Client
 
@@ -559,13 +580,13 @@ To be completed at the gate.
 
 | API Call | Library | Verification |
 | --- | --- | --- |
-| `TupleRepository.ack`, `.out` composed | engine | Spike (Phase 1 Step 1) |
+| `TupleRepository.ack`, `.out` composed | engine | Spike (Phase 1 Step 2) |
 | `TupleHandler` route addition | engine | Source Search |
 | `HttpTupleStore._post` | client | Source Search |
 
 ### Scope Verification
 
-The MVV is Phase 1 Step 1 and Step 2's tests; not deferred.
+The MVV is Phase 1 Step 5, engine-direct, before the phase closes, and its client half repeats in Phase 2; not deferred.
 
 ### Cross-Cutting Concerns
 
@@ -620,7 +641,9 @@ name pins in three test files are named in the plan. Prior art confirms
 relative-duration renew that fails on a lapsed claim (JavaSpaces, SQS) and
 records pgmq's unconditional `set_vt` as the resurrection anti-pattern this
 design avoids. Critical Assumption 2 moves from Unverified to Documented,
-with execution still owed to Phase 1 Step 1.
+with execution still owed to Phase 1 Step 2.
 
 - 2026-09-11: Gate round 1 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `c10889d15`; critique `nexus_rdr/206-gate-critique-2026-09-11`.
 - 2026-09-11: Gate round 2 — PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `325e6cced`; critique `nexus_rdr/206-gate-critique-2026-09-11b`.
+- 2026-09-11: Post-accept amendment — Phase 1 re-derived in dependency order (compare-and-swap first, then factor and compose, then renew, then pins, then the engine-direct MVV); the earlier order was cyclic. Step references, Scope Verification, and the engine pin updated. Fix check on this change recorded under `nexus_rdr/206-fix-check-26a760617`.
+
