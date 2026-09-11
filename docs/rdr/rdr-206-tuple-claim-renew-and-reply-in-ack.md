@@ -147,8 +147,10 @@ mailbox template, `HttpTupleStore`, the mailbox skill, and RDR-205 §Prior art.
 - **Documented** (research-4): a retried `ack` with reply after a lost
   response fails at the ack step, before the reply write runs, because
   `liveClaimRow` returns nothing once `consumed_at` is set. The ack-first
-  ordering is the mechanism that yields exactly one reply row, and Phase 1
-  Step 2 pins that ordering, not only the outcome. The reply's identity is
+  ordering is the mechanism that yields exactly one reply row. A rolled-back
+  transaction cannot show the order by itself, so Phase 1 Step 2 pins the
+  order by a unit test on the composed method's call sequence, and pins the
+  atomicity separately. The reply's identity is
   made stable as well, so a future reordering could not break it: the engine
   sets the reply's nonce to the request's tuple id in hex. `computeId` digests the template
   keys, the `id_dims` (`from` for the mailbox), and the nonce, so one request
@@ -443,8 +445,9 @@ check the affected-row count, raise `ClaimNotFound` on zero rows on the caller
 paths, and write the claim-log row only after a one-row update.
 `releaseOrDeadLetter` is shared by `nack` and the sweep's release arm
 (research-4), so the sweep's call gains the same condition; under its row lock
-the condition is always true, and on zero rows the sweep logs and continues,
-never raises, because one exception would abort its batch transaction. Pins:
+the condition is always true, and on zero rows the sweep records the row in
+its run log and continues with no claim-log row, never raises, because one
+exception would abort its batch transaction. Pins:
 a test that releases the row between the read and the update and asserts
 `ClaimNotFound` and no log row, through a new ack-side test seam shaped like
 the existing `claimOnce` one; and the sweep's counts unchanged. This changes
@@ -534,8 +537,11 @@ None.
 - **Scenario**: ack with reply retried after lost response — **Verify**: second
   call `ClaimNotFound`, exactly one reply row.
 - **Scenario**: ack with a reply that fails validation — **Verify**: the request
-  is still claimed and no reply row exists, which pins that the claim is
-  consumed before the reply is written and both roll back together.
+  is still claimed and no reply row exists, which pins that the claim and the
+  reply roll back together (atomicity, not order).
+- **Scenario**: the composed method's call sequence — **Verify**: `consumeClaim`
+  runs before `writeOut`, by a unit test on `ackWithReply` in the repository's
+  own package, since a rolled-back transaction cannot show the order.
 - **Scenario**: ack with a reply object that carries a `nonce` key — **Verify**:
   `SchemaViolation`, request still claimed.
 - **Scenario**: old client against new engine and new client against old engine
