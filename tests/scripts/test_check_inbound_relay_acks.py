@@ -628,7 +628,7 @@ class TestFindUnackedRequests:
                  "dims": {"kind": "request", "from": "nexus-a6", "correlation_id": "c-1"}},
             ],
         }
-        findings = gate.find_unacked_requests(rows_by_subspace)
+        findings = gate.find_unacked_requests(rows_by_subspace, max_age_days=0)
         assert len(findings) == 1
         assert findings[0]["subspace"] == "mailbox/conexus-58"
         assert findings[0]["from"] == "nexus-a6"
@@ -645,7 +645,7 @@ class TestFindUnackedRequests:
                  "dims": {"kind": "ack", "from": "conexus-58", "correlation_id": "c-1"}},
             ],
         }
-        assert gate.find_unacked_requests(rows_by_subspace) == []
+        assert gate.find_unacked_requests(rows_by_subspace, max_age_days=0) == []
 
     def test_ack_with_different_correlation_id_does_not_ack(self) -> None:
         rows_by_subspace = {
@@ -658,7 +658,7 @@ class TestFindUnackedRequests:
                  "dims": {"kind": "ack", "from": "conexus-58", "correlation_id": "c-OTHER"}},
             ],
         }
-        findings = gate.find_unacked_requests(rows_by_subspace)
+        findings = gate.find_unacked_requests(rows_by_subspace, max_age_days=0)
         assert len(findings) == 1
 
     def test_ack_at_the_wrong_mailbox_does_not_ack(self) -> None:
@@ -672,7 +672,7 @@ class TestFindUnackedRequests:
                  "dims": {"kind": "ack", "from": "conexus-58", "correlation_id": "c-1"}},
             ],
         }
-        findings = gate.find_unacked_requests(rows_by_subspace)
+        findings = gate.find_unacked_requests(rows_by_subspace, max_age_days=0)
         assert len(findings) == 1
 
     def test_request_missing_correlation_id_is_unverifiable_and_flagged(self) -> None:
@@ -688,7 +688,7 @@ class TestFindUnackedRequests:
                  "dims": {"kind": "ack", "from": "conexus-58"}},
             ],
         }
-        findings = gate.find_unacked_requests(rows_by_subspace)
+        findings = gate.find_unacked_requests(rows_by_subspace, max_age_days=0)
         assert len(findings) == 1
 
     def test_request_missing_from_is_unverifiable_and_flagged(self) -> None:
@@ -698,7 +698,7 @@ class TestFindUnackedRequests:
                  "dims": {"kind": "request", "correlation_id": "c-1"}},
             ],
         }
-        findings = gate.find_unacked_requests(rows_by_subspace)
+        findings = gate.find_unacked_requests(rows_by_subspace, max_age_days=0)
         assert len(findings) == 1
 
     def test_non_request_rows_are_ignored(self) -> None:
@@ -708,10 +708,74 @@ class TestFindUnackedRequests:
                  "dims": {"kind": "directive"}},
             ],
         }
-        assert gate.find_unacked_requests(rows_by_subspace) == []
+        assert gate.find_unacked_requests(rows_by_subspace, max_age_days=0) == []
 
     def test_empty_mailbox_space_is_clean(self) -> None:
         assert gate.find_unacked_requests({}) == []
+
+
+class TestUnackedRequestGracePeriod:
+    """critique nexus-em75s.30 Q4: an unacked ``kind=request`` row younger
+    than ``max_age_days`` is a legitimate in-flight handshake (RDR-205's
+    own "a wait of minutes" pattern), mirroring ``select_stale``'s
+    strict-greater-than boundary for the T2-memory arm, same default (7)."""
+
+    _NOW = dt.datetime(2026, 9, 20, tzinfo=dt.timezone.utc)
+
+    def _rows(self, created_at: str) -> dict[str, list[dict]]:
+        return {
+            "mailbox/conexus-58": [
+                {"id": "r1", "created_at": created_at,
+                 "dims": {"kind": "request", "from": "nexus-a6", "correlation_id": "c-1"}},
+            ],
+        }
+
+    def test_request_within_grace_period_is_not_reported(self) -> None:
+        created_at = (self._NOW - dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert gate.find_unacked_requests(
+            self._rows(created_at), max_age_days=7, now=self._NOW,
+        ) == []
+
+    def test_request_exactly_at_the_boundary_is_not_reported(self) -> None:
+        """Strict-greater-than, mirroring select_stale: exactly max_age_days
+        old is not yet stale."""
+        created_at = (self._NOW - dt.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert gate.find_unacked_requests(
+            self._rows(created_at), max_age_days=7, now=self._NOW,
+        ) == []
+
+    def test_request_just_over_the_boundary_is_reported(self) -> None:
+        created_at = (self._NOW - dt.timedelta(days=7, seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        findings = gate.find_unacked_requests(self._rows(created_at), max_age_days=7, now=self._NOW)
+        assert len(findings) == 1
+
+    def test_request_well_past_grace_period_is_reported(self) -> None:
+        created_at = (self._NOW - dt.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        findings = gate.find_unacked_requests(self._rows(created_at), max_age_days=7, now=self._NOW)
+        assert len(findings) == 1
+
+    def test_missing_created_at_is_reported_regardless_of_grace(self) -> None:
+        rows_by_subspace = {
+            "mailbox/conexus-58": [
+                {"id": "r1",
+                 "dims": {"kind": "request", "from": "nexus-a6", "correlation_id": "c-1"}},
+            ],
+        }
+        findings = gate.find_unacked_requests(rows_by_subspace, max_age_days=7, now=self._NOW)
+        assert len(findings) == 1
+
+    def test_unparseable_created_at_is_reported_regardless_of_grace(self) -> None:
+        findings = gate.find_unacked_requests(
+            self._rows("not-a-timestamp"), max_age_days=7, now=self._NOW,
+        )
+        assert len(findings) == 1
+
+    def test_default_max_age_days_is_seven(self) -> None:
+        """Same default as select_stale's --max-age-days (mirrored semantics,
+        not just the same number by coincidence)."""
+        created_at = (self._NOW - dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # No max_age_days passed -- but `now` is, so the default (7) governs.
+        assert gate.find_unacked_requests(self._rows(created_at), now=self._NOW) == []
 
 
 class TestFormatUnackedRequest:
@@ -823,9 +887,15 @@ class TestMainMailboxIntegration:
         monkeypatch.setattr(gate, "fetch_tuple_list_json", _boom)
         assert gate.main([]) == 2
 
-    def test_main_combines_t2_and_mailbox_findings(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_main_combines_t2_and_mailbox_findings(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
         """Both channels carry an unacked finding at once — a T2-clean
-        mailbox check must not mask a T2 finding, and vice versa."""
+        mailbox check must not mask a T2 finding, and vice versa. Asserts
+        STDOUT (not just the exit code, per code-review-expert F3
+        nexus-em75s.30): a regression that dropped the T2 findings' print
+        while the mailbox findings alone kept the exit code at 1 would
+        pass a bare exit-code check unchanged."""
         now = dt.datetime.now(dt.timezone.utc)
         stale_ts = (now - dt.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
         listing = (
@@ -847,3 +917,36 @@ class TestMainMailboxIntegration:
             ),
         )
         assert gate.main(["--max-age-days", "7"]) == 1
+        out = capsys.readouterr().out
+        assert "RELAY-UNACKED:" in out and "20682" in out
+        assert "MAILBOX-UNACKED-REQUEST:" in out and "mailbox/conexus-58" in out
+
+    def test_main_prints_t2_findings_before_a_mailbox_scan_failure(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """F1 regression (code-review-expert nexus-em75s.30): when the T2
+        arm computes real, non-empty findings and the subsequent mailbox
+        scan raises SweepUnrunnableError, main() must still print every T2
+        finding before the unrunnable line — exit code stays non-zero (2),
+        but the sweep's purpose (naming WHICH relay is unacked) must not
+        be lost in the failure mode most likely in practice (a stale/
+        mismatched `nx` on PATH lacking the `tuple` verb)."""
+        now = dt.datetime.now(dt.timezone.utc)
+        stale_ts = (now - dt.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        listing = (
+            f"[20682] conexus/conexus-to-nexus-REQUEST-nx-mcp-self-minting-client-gap-2026-07-12  (-, {stale_ts})\n"
+        )
+        monkeypatch.setattr(gate, "fetch_memory_listing", lambda project: listing)
+        monkeypatch.setattr(gate, "bd_desc_search", lambda probe: False)
+        monkeypatch.setattr(gate, "bd_desc_id_search", lambda probe: False)
+        monkeypatch.setattr(gate, "bd_desc_id_ack_beads", lambda rid: set())
+        monkeypatch.setattr(gate, "bd_title_search", lambda probe: False)
+
+        def _boom(prefix: str) -> str:
+            raise gate.SweepUnrunnableError("nx: 'tuple' is not an nx command")
+
+        monkeypatch.setattr(gate, "fetch_tuple_list_json", _boom)
+        assert gate.main(["--max-age-days", "7"]) == 2
+        out = capsys.readouterr().out
+        assert "RELAY-UNACKED:" in out and "20682" in out
+        assert "SWEEP UNRUNNABLE (mailbox):" in out

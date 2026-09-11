@@ -58,6 +58,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -1071,9 +1072,98 @@ def test_cross_instance_unacked_request_is_visible_to_the_sweep(t2_service_env) 
             {"id": r.id, "dims": r.dims, "created_at": r.created_at} for r in rows
         ]
 
-    unacked = sweep.find_unacked_requests(rows_by_subspace)
+    # max_age_days=0: this journey proves the ack-matching wiring against
+    # a request written moments ago, not the nexus-em75s.30 Q4 grace-period
+    # gate (which defaults to 7 days and would otherwise treat this
+    # brand-new row as a legitimate in-flight handshake and skip it).
+    unacked = sweep.find_unacked_requests(rows_by_subspace, max_age_days=0)
     matches = [f for f in unacked if f["id"] == request_id]
     assert len(matches) == 1, f"expected the never-acked request among the sweep's findings: {unacked}"
     assert matches[0]["subspace"] == f"mailbox/{b}"
     assert matches[0]["from"] == a
     assert matches[0]["correlation_id"] == correlation_id
+
+
+def _fake_nx_dir(tmp_path: Path) -> Path:
+    """A one-file ``nx`` shim on PATH that execs ``python -m nexus.cli`` --
+    same precedent as ``tests/hooks/test_subagent_stop_hook.py``'s
+    ``_fake_nx_dir``: the real ``nx`` subprocess-wiring test below must not
+    depend on whatever ``nx`` generation happens to be installed on the
+    box's real PATH (it can predate RDR-205 and lack the ``tuple``
+    subcommand entirely, or simply be a different tree than this one)."""
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir(exist_ok=True)
+    nx_path = bin_dir / "nx"
+    nx_path.write_text(f'#!/bin/sh\nexec "{sys.executable}" -m nexus.cli "$@"\n')
+    nx_path.chmod(0o755)
+    return bin_dir
+
+
+@pytest.mark.scenario
+def test_mailbox_sweep_real_nx_subprocess_finds_unacked_skips_acked(
+    t2_service_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """critique nexus-em75s.30 Q4: every other mailbox-scan test drives
+    ``check_inbound_relay_acks``'s IO boundary through monkeypatched
+    ``fetch_tuple_list_json``/``fetch_tuple_rows_json`` (unit tests) or
+    ``HttpTupleStore`` directly (the journey above) -- none exercise the
+    REAL ``subprocess.run(["nx", "tuple", ...])`` call the production
+    script actually makes. This journey does: ``scan_unacked_mailbox_
+    requests`` runs unpatched, so its ``nx tuple list --prefix``/``nx
+    tuple rd`` calls go through a real OS subprocess. ``subprocess.run``
+    inherits ``os.environ`` by default, and ``t2_service_env``'s
+    ``monkeypatch.setenv`` already pointed this test process at the real
+    engine + minted tenant, so the shimmed ``nx`` subprocess lands on the
+    exact same tenant this test writes to via ``CliRunner``.
+    """
+    import check_inbound_relay_acks as sweep  # noqa: PLC0415 — scripts/ is on pythonpath (pyproject.toml)
+
+    runner = CliRunner()
+    run_id = _tuple_uniq("run")
+    a = f"{run_id}-a"
+    b = f"{run_id}-b"
+    corr_unacked = _tuple_uniq("corr-unacked")
+    corr_acked = _tuple_uniq("corr-acked")
+
+    # An unacked request: A -> B, never answered.
+    out_unacked = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{b}",
+        "--key", f"to={b}", "--dim", f"from={a}",
+        "--dim", "kind=request", "--dim", f"correlation_id={corr_unacked}",
+        "--dim", "address_kind=instance", "--body", "never acked",
+        "--nonce", corr_unacked,
+    ])
+    assert out_unacked.exit_code == 0, out_unacked.output
+    unacked_request_id = out_unacked.output.strip().splitlines()[-1]
+
+    # An acked request: A -> B, and B's ack back to A's own mailbox.
+    out_acked = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{b}",
+        "--key", f"to={b}", "--dim", f"from={a}",
+        "--dim", "kind=request", "--dim", f"correlation_id={corr_acked}",
+        "--dim", "address_kind=instance", "--body", "will be acked",
+        "--nonce", corr_acked,
+    ])
+    assert out_acked.exit_code == 0, out_acked.output
+    ack = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{a}",
+        "--key", f"to={a}", "--dim", f"from={b}",
+        "--dim", "kind=ack", "--dim", f"correlation_id={corr_acked}",
+        "--dim", "address_kind=instance", "--body", "done",
+        "--nonce", f"ack-{corr_acked}",
+    ])
+    assert ack.exit_code == 0, ack.output
+
+    shim_dir = _fake_nx_dir(tmp_path)
+    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ['PATH']}")
+
+    # max_age_days=0: both rows were written moments ago; this journey
+    # proves the real subprocess wiring, not the Q4 grace-period gate.
+    findings = sweep.scan_unacked_mailbox_requests(
+        mailbox_prefix=f"mailbox/{run_id}", max_age_days=0,
+    )
+    ids = {f["id"] for f in findings}
+    assert unacked_request_id in ids, f"the never-acked request must be found: {findings}"
+    assert not any(f["correlation_id"] == corr_acked for f in findings), (
+        f"the acked request must not be reported: {findings}"
+    )

@@ -69,7 +69,14 @@ same finding list as the T2-memory check, distinguished by its own
 `MAILBOX-UNACKED-REQUEST:` tag. Unlike the T2-memory corpus (which always
 carries some entries), an empty mailbox tuple space is a legitimate clean
 state, not a BLINDSPOT — Phase 6 is new and most boxes will have no
-cross-instance mailbox traffic yet.
+cross-instance mailbox traffic yet. This arm runs only when the T2-memory
+arm above reaches the end of `main()` without an early return (enumeration
+succeeded and, if a stale set existed, the bd ack-check completed) — the
+two are otherwise independent once both run, and either can carry a
+finding. Like the T2-memory arm's `--max-age-days`, a request younger than
+that window is a legitimate in-flight handshake (RDR-205's own "a wait of
+minutes" pattern) and is not reported, even unacked — see
+`find_unacked_requests`'s docstring (nexus-em75s.30 F1/F2/Q4).
 """
 from __future__ import annotations
 
@@ -482,7 +489,11 @@ def parse_tuple_rows(raw: str) -> list[dict]:
     return data
 
 
-def find_unacked_requests(rows_by_subspace: dict[str, list[dict]]) -> list[dict]:
+def find_unacked_requests(
+    rows_by_subspace: dict[str, list[dict]],
+    max_age_days: int = 7,
+    now: dt.datetime | None = None,
+) -> list[dict]:
     """Every ``kind=request`` row across *rows_by_subspace* with no
     matching ``kind=ack`` row at the requester's own mailbox
     (``mailbox/<from>``), paired on the ``correlation_id`` dim — "the
@@ -491,7 +502,22 @@ def find_unacked_requests(rows_by_subspace: dict[str, list[dict]]) -> list[dict]
     ``correlation_id`` can never be verified and is reported unconditionally
     — the same safe, over-inclusive direction as the T2-memory path's
     unfetchable-ANSWER-body handling above. Pure — unit-testable over
-    planted row dicts, no live `nx` call."""
+    planted row dicts, no live `nx` call.
+
+    ``max_age_days`` mirrors :func:`select_stale`'s T2-memory-arm semantics
+    (same default, same strict-greater-than boundary): a request younger
+    than or exactly *max_age_days* old (by its own ``created_at``) is a
+    legitimate in-flight handshake — RDR-205's own "a wait of minutes"
+    pattern — and is not reported, even if unacked. A request whose
+    ``created_at`` is missing or unparseable can never be aged and is
+    reported unconditionally, the same over-inclusive direction as the
+    missing-``from``/``correlation_id`` handling above (critique
+    nexus-em75s.30 Q4: without this gate, a request one second old from a
+    handshake still in flight would false-positive once this sweep is
+    wired into an automated gate)."""
+    if now is None:
+        now = dt.datetime.now(dt.timezone.utc)
+
     acks_by_subspace: dict[str, set[str]] = {}
     for subspace, rows in rows_by_subspace.items():
         acks: set[str] = set()
@@ -507,6 +533,15 @@ def find_unacked_requests(rows_by_subspace: dict[str, list[dict]]) -> list[dict]
             dims = row.get("dims") or {}
             if dims.get("kind") != "request":
                 continue
+            created_at = row.get("created_at")
+            if created_at:
+                try:
+                    age_days = (now - parse_timestamp(created_at)).total_seconds() / 86400.0
+                except ValueError:
+                    pass  # unparseable timestamp: can't age it — fall through to reporting
+                else:
+                    if age_days <= max_age_days:
+                        continue  # in-flight handshake, not yet stale
             from_addr = dims.get("from")
             correlation_id = dims.get("correlation_id")
             ack_subspace = f"mailbox/{from_addr}" if from_addr else None
@@ -553,11 +588,15 @@ def fetch_tuple_rows_json(subspace: str, limit: int) -> str:
 def scan_unacked_mailbox_requests(
     mailbox_prefix: str = DEFAULT_MAILBOX_PREFIX,
     read_limit: int = DEFAULT_TUPLE_READ_LIMIT,
+    max_age_days: int = 7,
 ) -> list[dict]:
     """Enumerate every ``mailbox/*`` subspace, read its rows, and return the
     unacked ``kind=request`` findings. Raises :class:`SweepUnrunnableError`
     on any IO or parse failure — never a silent empty result standing in
-    for "checked and clean"."""
+    for "checked and clean". ``max_age_days`` is passed straight through to
+    :func:`find_unacked_requests` — see its docstring for the grace-period
+    semantics (mirrors the T2-memory arm's ``--max-age-days``, same
+    default; ``main()`` passes the one shared flag to both arms)."""
     try:
         subspaces = parse_tuple_subspaces(fetch_tuple_list_json(mailbox_prefix))
     except (json.JSONDecodeError, ValueError) as exc:
@@ -575,7 +614,7 @@ def scan_unacked_mailbox_requests(
                 f"nx tuple rd {subspace} returned unparseable JSON: {exc}"
             ) from exc
 
-    return find_unacked_requests(rows_by_subspace)
+    return find_unacked_requests(rows_by_subspace, max_age_days=max_age_days)
 
 
 def format_unacked_request(finding: dict) -> str:
@@ -596,7 +635,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--max-age-days", type=int, default=7,
-        help="Minimum age (days) before an unacked relay is flagged (default 7)",
+        help="Minimum age (days) before an unacked T2 relay or mailbox "
+             "request is flagged (default 7) — shared by both arms",
     )
     parser.add_argument(
         "--project", default="conexus",
@@ -718,11 +758,27 @@ def main(argv: list[str] | None = None) -> int:
 
     # RDR-205 Phase 6 (nexus-em75s.28): mailbox tuple-space unacked
     # requests, the space-native counterpart of the T2-memory check above.
-    # Runs regardless of the T2 path's outcome (stale-empty included) —
-    # the two channels are independent and either can carry a finding.
+    # This arm only RUNS when the T2-memory arm above reached this line
+    # without returning early — i.e. enumeration succeeded, at least one
+    # relay title was recognized, and (when a stale set existed) the bd
+    # ack-check completed without SweepUnrunnableError. It does NOT run on
+    # any of the three earlier early-return paths (enumeration failure,
+    # the BLINDSPOT case, or bd-unavailable during ack-checking) — those
+    # each `return` before this point. When it does run, it and the
+    # T2-memory arm's `findings` are independent and either can carry a
+    # finding (F2 fix, code-review-expert nexus-em75s.30 F2: the prior
+    # comment claimed unconditional "regardless of the T2 path's outcome",
+    # which was false on those three paths).
     try:
-        mailbox_findings = scan_unacked_mailbox_requests(args.mailbox_prefix, args.tuple_read_max)
+        mailbox_findings = scan_unacked_mailbox_requests(
+            args.mailbox_prefix, args.tuple_read_max, max_age_days=args.max_age_days,
+        )
     except SweepUnrunnableError as exc:
+        # F1 fix (code-review-expert nexus-em75s.30): a mailbox-scan
+        # failure must not swallow T2 findings already computed above —
+        # print them before the unrunnable line, exit code stays 2.
+        for f in findings:
+            print(f"RELAY-UNACKED: {f}")
         print(f"SWEEP UNRUNNABLE (mailbox): {exc}")
         return 2
 
