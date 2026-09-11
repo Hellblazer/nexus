@@ -6,6 +6,58 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.42.0] - 2026-09-11
+
+Paired engine: engine-service-v0.1.115. `REQUIRED_ENGINE_VERSION` moves to
+(0, 1, 115). The engine carries one changeset (grants-nexus-diag-5:
+`nexus_diag` SELECT on the three tuple-space tables, nexus-f1pbh), the
+tuple-space address grammar `[A-Za-z0-9][A-Za-z0-9._-]*`, a loud failure from
+`subspace_stats` on an unknown subspace, and lease timestamps normalised to
+millisecond precision (nexus-mvfm9). Every address 7.41.x shipped qualifies.
+Old client and new engine are compatible; the engine is deployed before this
+client tag.
+
+### Fixed
+
+- Plugin lockstep: the SessionStart hook detects a same-version plugin-only
+  ref move on its own (RDR-197) from `installed_plugins.json` and the local
+  marketplace clone, with no network, and routes it to `nx upgrade`, which
+  reinstalls on a ref move; the redispatch is bounded and the git budget is
+  shared across plugins. A plugin that is behind this CLI but already the
+  newest published plugin gets the same ref-drift check, which the
+  version-only path skipped on every dev checkout and release window
+  (nexus-konsk).
+- Hooks: one shared stdlib endpoint and credential resolver for the
+  tuple-ledger projector, the T2 prefix scan, and the routing hooks, replacing
+  three hand-rolled copies; the projector's POST follows no redirect and no
+  ambient proxy and is bounded as a whole; a SubagentStop report with no
+  agent_id projects nothing (nexus-aginu, nexus-em75s.42).
+- `expectations_census`'s `nx tuple list` call is bounded by a portable
+  wall-clock deadline, 45 s by default (`NX_EXPECT_CENSUS_NX_TIMEOUT_S`), and
+  reports one named `SPACE_FALLBACK` line on expiry instead of hanging the
+  session (nexus-zn9op).
+- MCP: a T1 handoff re-lease that fails repeatedly backs off, and a 401 from
+  a token rotation starts one rung up the ladder (10 s) instead of at the
+  300 s cap, so a `/clear` handoff cannot stall for five minutes
+  (nexus-abyi9).
+- Doctor: a registry exception on the tuple rows is a soft warning naming the
+  reason, the census pre-filter label marks an unverified upper bound, and
+  the 8 KB pre-send guard is pinned at both edges against real httpx encoding
+  (nexus-em75s.42).
+- `rdr phase-review-gate` parses the RDR template's own `### Phase N` /
+  `#### Step N` headings under `## Implementation Plan` (nexus-w5gma).
+
+### Changed
+
+- README rewritten install-first with absolute links, so PyPI and GitHub
+  render the same page; the license statement in README, LICENSING.md and the
+  site names what the license covers: the Nexus code only, never what you
+  index, store, write or have Claude produce with it.
+- Engine test tree: 13 more nexus-cbo4a batches convert raw SQL onto typed
+  jOOQ; the raw-SQL ratchet falls from 1135 to 910 sites, and the Java
+  language server no longer runs jOOQ codegen or leaves Eclipse artifacts in
+  the checkout (nexus-8cz4z).
+
 ## [7.41.1] - 2026-09-11
 
 Paired engine: engine-service-v0.1.114 (unchanged from 7.41.0; `REQUIRED_ENGINE_VERSION` stays (0, 1, 114)).
