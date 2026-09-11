@@ -25,7 +25,9 @@ Contract, every branch of which ``tests/test_plugin_lockstep.py`` pins:
   2026-09-07 on a marketplace with ``autoUpdate: false``).
 * "Already at the latest" while still behind the wheel is the dev-tree /
   pre-tag case (this CLI is ahead of every published plugin): reported as
-  such, never as a failure.
+  such, never as a failure -- and when the "latest" the CLI names IS the
+  installed version, the plugin also gets the ref-drift check below, since
+  a same-version cut can have moved its ref while this wheel ran ahead.
 * A failed update never fails ``nx upgrade``: data convergence already
   happened, and a lagging plugin is not data loss. The reason and the manual
   command are printed instead.
@@ -281,8 +283,18 @@ def converge_plugins(
     if not dry_run:
         # At most one marketplace refresh per DISTINCT marketplace, shared
         # across every plugin on it, to stay inside the RDR-143 budget.
+        # A BEHIND plugin whose update came back "already at the latest
+        # version" naming its OWN installed version is at the newest
+        # published plugin while this CLI is ahead of every release (a
+        # dev checkout, or the release window itself); its ref can still
+        # have moved under it, so it joins the drift check (measured by
+        # tests/e2e/plugin-lockstep-gate.sh step 9 on the 7.42.0 battery).
+        drift_candidates = dict(at_wheel)
+        for o in report.outcomes:
+            if o.status == "latest_published" and o.now == o.installed and o.plugin_id in behind:
+                drift_candidates[o.plugin_id] = behind[o.plugin_id]
         refreshed: dict[str, bool] = {}
-        for plugin_id, inst in sorted(at_wheel.items()):
+        for plugin_id, inst in sorted(drift_candidates.items()):
             outcome = _check_ref_drift(run, claude, plugin_id, inst, registry_path, marketplaces_path, refreshed)
             if outcome is not None:
                 report.outcomes.append(outcome)
