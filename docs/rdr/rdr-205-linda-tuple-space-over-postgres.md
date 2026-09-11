@@ -1354,7 +1354,10 @@ A `mailbox` skill and one paragraph in the orchestration skill: send by
 `tuple_out` to the agent's id with a sender-minted message id as the
 nonce, drain by `tuple_in` before composing any hand-back. A scenario
 test with a mid-turn directive, and one with a resent message that
-lands once.
+lands once. The Test Plan's mailbox bullets (two nonces, two senders one
+nonce, missing `from`, the week of resends, dead-letter by nacks and by
+lapsed leases) are scenario journeys in the same phase; Phase 5 ships
+eight journeys, not two.
 
 ### Phase 6: Cross-instance request and ack
 

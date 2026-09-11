@@ -743,7 +743,18 @@ def test_mailbox_resend_every_day_for_a_week_never_extends_expires_at(t2_service
     assert first.exit_code == 0, first.output
     tuple_id = first.output.strip().splitlines()[-1]
     rd0 = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
-    ceiling_expires_at = _tuple_last_json_line(rd0.output)[0]["expires_at"]
+    row0 = _tuple_last_json_line(rd0.output)[0]
+    ceiling_expires_at = row0["expires_at"]
+    # The ceiling is derived INDEPENDENTLY of what the engine wrote: the
+    # template's retention_seconds (mailbox.yaml, 604800) added to the
+    # row's own created_at. Asserting only self-consistency across resends
+    # would pass a regression in the ceiling calculation itself.
+    from datetime import datetime, timedelta
+    created_at = datetime.fromisoformat(row0["created_at"])
+    expected_ceiling = created_at + timedelta(seconds=604800)
+    assert datetime.fromisoformat(ceiling_expires_at) == expected_ceiling, (
+        f"expires_at {ceiling_expires_at!r} is not created_at + 7 days ({expected_ceiling.isoformat()!r})"
+    )
 
     for day in range(1, 8):
         resend = runner.invoke(main, [
@@ -826,6 +837,11 @@ def test_mailbox_max_attempts_lapsed_leases_dead_letters(t2_service_env) -> None
     positive integer, so this sleeps past the 1s minimum lease three times
     rather than controlling a clock -- no seam exists for this engine path
     (see journey 10's docstring).
+    
+    Note: this journey sleeps past three 1-second leases (about 4.5 s
+    wall clock), the outlier against the file's ~1 s per-journey budget;
+    tuples have no engine-side clock seam, the same convention as
+    ``TupleRepositoryTest``'s ``Thread.sleep(1_500)``.
     """
     runner = CliRunner()
     address = _tuple_uniq("agent")
