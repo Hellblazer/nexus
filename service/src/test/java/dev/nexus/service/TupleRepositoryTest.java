@@ -4,13 +4,16 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.ClaimNotFoundException;
 import dev.nexus.service.db.ClaimOwnershipException;
+import dev.nexus.service.db.LeaseTooLongException;
 import dev.nexus.service.db.ParkCapExceededException;
 import dev.nexus.service.db.SchemaViolationException;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.db.TimeoutTooLongException;
 import dev.nexus.service.db.TtlTooLongException;
 import dev.nexus.service.db.TupleRepository;
 import dev.nexus.service.db.UnknownSubspaceException;
 import dev.nexus.service.tuples.TemplateRegistry;
+import dev.nexus.service.tuples.TemplateSchema;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -74,8 +77,24 @@ class TupleRepositoryTest {
     TemplateRegistry registry;
     TupleRepository repo;
 
+    /**
+     * A second, take-enabled template with TWO pinned keys ({@code owner},
+     * {@code kind}) — RDR-205 P1 follow-on (bead nexus-em75s.39): neither
+     * bundled resource template can exercise a "less specific pattern"
+     * claim/read scenario. {@code ledger/<session_id>} has two keys but
+     * {@code take.enabled=false} (throws {@link
+     * dev.nexus.service.db.TakeDisabledException} before the pinned-key
+     * check); {@code mailbox/<address>} is take-enabled but has only ONE
+     * pinned key ({@code to}), so a "missing one of several pinned keys"
+     * pattern cannot be constructed against it. Loaded as a second registry
+     * source the same way {@code TemplateRegistryTest
+     * #templateDirAddsASecondSourceListedByRegistry} does, layered on top of
+     * the bundled resources — production template files are untouched.
+     */
+    private static final String PROBE_PREFIX = "probe/";
+
     @BeforeAll
-    void startAll() throws Exception {
+    void startAll(@org.junit.jupiter.api.io.TempDir java.nio.file.Path extraTemplateDir) throws Exception {
         pg = PgContainerHelper.start();
 
         try (Connection su = pg.createConnection("")) {
@@ -94,7 +113,20 @@ class TupleRepositoryTest {
         svcDs = new com.zaxxer.hikari.HikariDataSource(cfg);
 
         tenantScope = new TenantScope(svcDs);
-        registry = TemplateRegistry.loadAtBoot(null, null, NexusService.SWEEP_INTERVAL_HOURS * 3600L);
+        java.nio.file.Files.writeString(extraTemplateDir.resolve("probe.yaml"), """
+                name: probe/<id>
+                keys:
+                  - owner
+                  - kind
+                id_from: keys
+                take:
+                  enabled: true
+                  max_attempts: 3
+                  max_lease_seconds: 300
+                retention_seconds: 3600
+                """, java.nio.charset.StandardCharsets.UTF_8);
+        registry = TemplateRegistry.loadAtBoot(extraTemplateDir.toString(), null,
+                NexusService.SWEEP_INTERVAL_HOURS * 3600L);
         // Small, fast settings for the blocking/park machinery -- behaviourally
         // identical to the production defaults, just cheap to exercise here.
         repo = new TupleRepository(tenantScope, registry,
@@ -504,6 +536,17 @@ class TupleRepositoryTest {
      * from {@code out} to the result -- well under the 1-second timer -- distinguishes
      * "woke on the signal" from "woke on the next timer tick", which is what actually
      * pins {@link dev.nexus.service.db.TupleWaitRegistry#signalAll}.
+     *
+     * <p>RDR-205 P1 follow-on (nexus-em75s.40, fix-check note): the original 700ms
+     * bound was thin against its own 300ms pre-registration sleep -- not much
+     * margin between "the wake budget this test allows" and "the 300ms it already
+     * spent waiting before measuring". Raised the registration sleep to 600ms (more
+     * room for the reader to genuinely register + park before {@code out} fires,
+     * reducing registration-timing flakiness) and tightened the wake-latency bound
+     * to 300ms -- a real gap against the registry's ~1000ms timer-fallback floor
+     * (see {@code TupleWaitRegistryTest
+     * #awaitSignalOrTimer_noSignal_fallsBackToOneSecondTimer}), not a number close
+     * to nothing.
      */
     @Test
     void rd_withTimeoutS_wakesOnAnotherClientOut() throws Exception {
@@ -513,7 +556,7 @@ class TupleRepositoryTest {
             Future<List<TupleRepository.TupleRow>> parked = pool.submit(() ->
                     repo.rd(TENANT_A, "ledger/" + session, null, 10, null, 8));
 
-            Thread.sleep(300); // let the reader register + park
+            Thread.sleep(600); // let the reader register + park
             long beforeOut = System.nanoTime();
             repo.out(TENANT_A, "ledger/" + session,
                     Map.of("agent_id", "waker", "kind", "start"), Map.of(), null, null, null);
@@ -523,7 +566,7 @@ class TupleRepositoryTest {
             assertThat(result).hasSize(1);
             assertThat(elapsedMs)
                     .as("woke on the signal, not the registry's 1-second timer fallback")
-                    .isLessThan(700);
+                    .isLessThan(300);
         } finally {
             pool.shutdownNow();
         }
@@ -538,6 +581,20 @@ class TupleRepositoryTest {
      * TupleRepository#setTestOnlySignalHook} counts SIGNAL-DRIVEN wakes for subspace
      * B specifically, so a write to subspace A that (incorrectly) signals B's group is
      * now directly observable and asserted to never happen.
+     *
+     * <p><b>Scope, trimmed (RDR-205 P1 follow-on, nexus-em75s.40, fix-check note):</b>
+     * the hook fires on {@code signalAll}'s own (tenant, subspace) ARGUMENTS -- the
+     * exact string {@code TupleRepository.out()} passed it -- not on which {@code
+     * Group}'s {@code Condition} actually got touched internally. So this test only
+     * catches a CALLER-side bug: {@code out()} passing the wrong subspace string to
+     * {@code signalAll}. It does NOT catch {@code signalAll} itself internally
+     * iterating every group and signalling all of them regardless of key -- that
+     * widening would still report exactly (tenant, subspaceA) to this hook (the
+     * caller-supplied argument never changes), so B's counter would stay zero here
+     * even under that bug. The internal-fan-out guarantee is what {@code
+     * TupleWaitRegistryTest#awaitSignalOrTimer_signalForDifferentGroup_doesNotWake}
+     * proves instead: it calls {@code registry.signalAll} with a DIFFERENT subspace
+     * directly and confirms THIS waiter's own {@code Condition} was never touched.
      */
     @Test
     void rd_parkedCallersOnSubspaceB_doNotWakeOnWriteToSubspaceA() throws Exception {
@@ -651,8 +708,395 @@ class TupleRepositoryTest {
     @Test
     void registry_returnsDigestAndTemplates() {
         var snap = repo.registry();
-        assertThat(snap.templates()).hasSize(2);
+        // ledger, mailbox (bundled resources) + probe (this class's extra template
+        // directory, bead nexus-em75s.39's multi-pinned-key fixture — see startAll).
+        assertThat(snap.templates()).hasSize(3);
         assertThat(snap.digest()).isNotBlank();
+    }
+
+    // ── RDR-205 P1 follow-on: Test Plan scenarios with no test (nexus-em75s.39) ──
+
+    @Test
+    void out_ttlSecondsZeroOrNegative_schemaViolation_noRowWritten() {
+        String session = "session-ttl-nonpositive-" + UUID.randomUUID();
+        assertThatThrownBy(() -> repo.out(TENANT_A, "ledger/" + session,
+                Map.of("agent_id", "a", "kind", "start"), Map.of(), null, null, 0L))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("ttl_seconds");
+        assertThatThrownBy(() -> repo.out(TENANT_A, "ledger/" + session,
+                Map.of("agent_id", "a", "kind", "start"), Map.of(), null, null, -1L))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("ttl_seconds");
+        assertThat(repo.rdp(TENANT_A, "ledger/" + session, null, 10, null)).isEmpty();
+    }
+
+    @Test
+    void in_leaseSecondsZeroOrNegative_schemaViolation_noClaim() {
+        String to = "agent-lease-nonpositive-" + UUID.randomUUID();
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "sender"), null, "n1", null);
+        assertThatThrownBy(() -> repo.in(TENANT_A, "mailbox/" + to, Map.of("to", to), "c", 0, 0))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("lease_s");
+        assertThatThrownBy(() -> repo.in(TENANT_A, "mailbox/" + to, Map.of("to", to), "c", -5, 0))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("lease_s");
+        // still available -- neither rejected call claimed it
+        assertThat(repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null)).hasSize(1);
+    }
+
+    @Test
+    void in_leaseSecondsAboveMaxLease_leaseTooLong_noClaim() {
+        String to = "agent-lease-toolong-" + UUID.randomUUID();
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "sender"), null, "n1", null);
+        // mailbox.yaml: take.max_lease_seconds = 900
+        assertThatThrownBy(() -> repo.in(TENANT_A, "mailbox/" + to, Map.of("to", to), "c", 901, 0))
+                .isInstanceOf(LeaseTooLongException.class);
+        var row = repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null);
+        assertThat(row).hasSize(1);
+        assertThat(row.get(0).claimState()).isNull(); // still available -- no claim written
+    }
+
+    @Test
+    void in_leaseWithinCapButRowHasLessTtlLeft_leaseUntilClampedToExpiresAt() {
+        String to = "agent-lease-clamp-" + UUID.randomUUID();
+        // ttl_seconds=5: this row expires in 5s, well under the 30s lease requested below
+        // and well under mailbox's 900s max_lease_seconds cap.
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "sender"), null, "n1", 5L);
+        var claimed = repo.in(TENANT_A, "mailbox/" + to, Map.of("to", to), "claimant-clamp", 30, 0);
+        assertThat(claimed).isPresent();
+        assertThat(claimed.get().tuple().leaseUntil())
+                .as("a claim never outlives its tuple -- lease_until clamped to expires_at")
+                .isEqualTo(claimed.get().tuple().expiresAt());
+    }
+
+    /**
+     * RDR-205 P1 follow-on (nexus-mvfm9): {@code lease_until} must carry the SAME
+     * precision a later read-back of the identical row would -- before this fix,
+     * {@code claimOnce} wrote {@code now.plusSeconds(leaseSeconds)} verbatim, which
+     * can carry sub-microsecond noise the JVM clock supplies but a Postgres
+     * TIMESTAMPTZ column (and any later read-back through it) cannot represent,
+     * producing a claim response with more fractional digits than a subsequent
+     * {@code rd} of the same row. Two checks: (1) the CONTRACT, environment-
+     * independent -- {@code getNano()} is always an exact microsecond multiple,
+     * which only holds if the truncation actually runs; (2) the END-TO-END proof
+     * -- a raw-SQL read-back of the persisted column equals the claim response's
+     * in-memory value exactly, the literal claim-vs-read-back symptom reported.
+     */
+    @Test
+    void in_leaseUntilIsMicrosecondPrecision_matchesRawReadBackExactly() throws Exception {
+        String to = "agent-lease-precision-" + UUID.randomUUID();
+        byte[] id = repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "sender"),
+                null, "n1", null);
+        var claimed = repo.in(TENANT_A, "mailbox/" + to, Map.of("to", to), "claimant-precision", 60, 0);
+        assertThat(claimed).isPresent();
+        OffsetDateTime leaseUntil = claimed.get().tuple().leaseUntil();
+        assertThat(leaseUntil.getNano() % 1000)
+                .as("lease_until must never carry sub-microsecond precision -- Postgres TIMESTAMPTZ cannot store it")
+                .isZero();
+
+        try (Connection su = pg.createConnection("")) {
+            var rec = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .select(dev.nexus.service.jooq.nexus.Tables.TUPLES.LEASE_UNTIL)
+                    .from(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(id))
+                    .fetchOne();
+            assertThat(rec.value1())
+                    .as("the claim response's lease_until must match a raw read-back of the same row exactly")
+                    .isEqualTo(leaseUntil);
+        }
+    }
+
+    @Test
+    void rd_timeoutSAboveCap_timeoutTooLong_noRowRead() {
+        String session = "session-timeout-toolong-" + UUID.randomUUID();
+        // repo's timeoutCapSeconds is 10 (see startAll's fully-parameterized constructor)
+        assertThatThrownBy(() -> repo.rd(TENANT_A, "ledger/" + session, null, 10, null, 11))
+                .isInstanceOf(TimeoutTooLongException.class);
+    }
+
+    @Test
+    void rd_negativeTimeoutS_schemaViolation() {
+        String session = "session-timeout-negative-" + UUID.randomUUID();
+        assertThatThrownBy(() -> repo.rd(TENANT_A, "ledger/" + session, null, 10, null, -1))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("timeout_s");
+        assertThatThrownBy(() -> repo.in(TENANT_A, "mailbox/negtimeout", Map.of("to", "x"), "c", 10, -1))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("timeout_s");
+    }
+
+    @Test
+    void in_lessSpecificPatternMissingPinnedKey_schemaViolation_rdWithSamePatternSucceeds() {
+        String owner = "owner-partial-" + UUID.randomUUID();
+        String subspace = PROBE_PREFIX + owner;
+        repo.out(TENANT_A, subspace, Map.of("owner", owner, "kind", "a"), Map.of(), null, null, null);
+        repo.out(TENANT_A, subspace, Map.of("owner", owner, "kind", "b"), Map.of(), null, null, null);
+
+        // "in" requires every pinned key -- "kind" is missing here.
+        assertThatThrownBy(() -> repo.in(TENANT_A, subspace, Map.of("owner", owner), "claimant", 30, 0))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("kind");
+
+        // "rd" matches only the keys supplied -- both rows come back.
+        var rows = repo.rd(TENANT_A, subspace, Map.of("owner", owner), 10, null, 0);
+        assertThat(rows).hasSize(2);
+    }
+
+    @Test
+    void in_mailboxMissingPinnedKeyTo_schemaViolation() {
+        assertThatThrownBy(() -> repo.in(TENANT_A, "mailbox/agent-missing-key", Map.of(),
+                "claimant", 30, 0))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("to");
+    }
+
+    @Test
+    void out_mailboxWithoutFrom_schemaViolation_noRowWritten() {
+        String to = "agent-nofrom-" + UUID.randomUUID();
+        assertThatThrownBy(() -> repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of(),
+                "body", "nonce-nofrom", null))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("from");
+        assertThat(repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null)).isEmpty();
+    }
+
+    @Test
+    void out_twoSendersMintSameNonce_produceTwoRows() {
+        String to = "agent-two-senders-" + UUID.randomUUID();
+        String nonce = "shared-nonce-" + UUID.randomUUID();
+        byte[] id1 = repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "sender-1"),
+                "body", nonce, null);
+        byte[] id2 = repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "sender-2"),
+                "body", nonce, null);
+        assertThat(id2).as("from enters the id -- two senders' identical nonce never collides").isNotEqualTo(id1);
+        assertThat(repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null)).hasSize(2);
+    }
+
+    @Test
+    void out_mailboxResentSameNonce_oneRow_expiresAtUnchangedUnderDefaultTtl() {
+        String to = "agent-resend-" + UUID.randomUUID();
+        byte[] id1 = repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "sender"),
+                "body", "nonce-resend", null);
+        var firstRead = repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null);
+        assertThat(firstRead).hasSize(1);
+        OffsetDateTime expiresAt1 = firstRead.get(0).expiresAt();
+
+        byte[] id2 = repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "sender"),
+                "body", "nonce-resend", null);
+        assertThat(id2).isEqualTo(id1);
+
+        var secondRead = repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null);
+        assertThat(secondRead).as("the resend refreshes the SAME row, not a second one").hasSize(1);
+        assertThat(secondRead.get(0).expiresAt())
+                .as("default ttl == retention: the refire clamp ceiling equals the original expires_at exactly")
+                .isEqualTo(expiresAt1);
+    }
+
+    /**
+     * RDR-205 Test Plan: "a message resent every day for a week -- its expires_at
+     * never passes created_at plus retention". A row backdated to look six days old
+     * (still live) stands in for six real days of prior resends -- behaviourally
+     * identical to this file's own small-explicit-cap-instead-of-16-real-threads
+     * convention (class javadoc): a resend against an artificially-aged row proves
+     * the SAME ceiling property ({@code TUPLES.CREATED_AT.add(retentionInterval)})
+     * a seventh real resend would.
+     */
+    @Test
+    void out_weekLongRefireClamp_expiresAtNeverPastOriginalCreatedAtPlusRetention() throws Exception {
+        String to = "agent-week-refire-" + UUID.randomUUID();
+        byte[] id = repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "sender"),
+                "body", "nonce-week", null);
+
+        OffsetDateTime sixDaysAgo = OffsetDateTime.now(java.time.ZoneOffset.UTC).minusDays(6);
+        try (Connection su = pg.createConnection("")) {
+            org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .update(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                    .set(dev.nexus.service.jooq.nexus.Tables.TUPLES.CREATED_AT, sixDaysAgo)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(id))
+                    .execute();
+        }
+
+        // A "day 7" resend: without the ceiling clamp this would set expires_at to
+        // now + 7 days (604800s), well past created_at (six days ago) + 7 days.
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "sender"),
+                "body", "nonce-week", null);
+
+        var row = repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null).get(0);
+        OffsetDateTime ceiling = sixDaysAgo.plusSeconds(604_800L); // mailbox.yaml retention_seconds
+        assertThat(row.expiresAt())
+                .as("expires_at clamped to the ORIGINAL created_at plus retention, never now plus retention")
+                .isCloseTo(ceiling, org.assertj.core.api.Assertions.within(2, java.time.temporal.ChronoUnit.SECONDS));
+        assertThat(row.expiresAt()).isBefore(OffsetDateTime.now(java.time.ZoneOffset.UTC).plusDays(7).minusHours(1));
+    }
+
+    @Test
+    void rd_mixedStateAvailableClaimedAcked_returnsAvailableAndClaimedNotAcked() {
+        String to = "agent-mixed-state-" + UUID.randomUUID();
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "s"), null, "n-avail", null);
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "s"), null, "n-claimed", null);
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "s"), null, "n-acked", null);
+
+        var claimedRow = repo.in(TENANT_A, "mailbox/" + to, Map.of("to", to), "claimant-mixed", 60, 0);
+        assertThat(claimedRow).isPresent();
+        var ackedRow = repo.in(TENANT_A, "mailbox/" + to, Map.of("to", to), "claimant-mixed-2", 60, 0);
+        assertThat(ackedRow).isPresent();
+        repo.ack(TENANT_A, ackedRow.get().claimId(), "claimant-mixed-2");
+
+        var rows = repo.rd(TENANT_A, "mailbox/" + to, null, 10, null, 0);
+        assertThat(rows).as("available + claimed, not the acked (consumed) row").hasSize(2);
+        assertThat(rows).noneMatch(r -> r.consumedAt() != null);
+        assertThat(rows).anyMatch(r -> r.claimState() == null);
+        assertThat(rows).anyMatch(r -> "claimed".equals(r.claimState()));
+    }
+
+    @Test
+    void rd_emptyPatternReturnsAllRows_kindReportPatternOnlyReturnsReports() {
+        String session = "session-ten-agents-" + UUID.randomUUID();
+        for (int i = 0; i < 10; i++) {
+            repo.out(TENANT_A, "ledger/" + session, Map.of("agent_id", "agent-" + i, "kind", "start"),
+                    Map.of(), null, null, null);
+            repo.out(TENANT_A, "ledger/" + session, Map.of("agent_id", "agent-" + i, "kind", "report"),
+                    Map.of(), null, null, null);
+        }
+
+        var all = repo.rd(TENANT_A, "ledger/" + session, Map.of(), 30, null, 0);
+        assertThat(all).hasSize(20);
+
+        var reportsOnly = repo.rd(TENANT_A, "ledger/" + session, Map.of("kind", "report"), 30, null, 0);
+        assertThat(reportsOnly).hasSize(10);
+        assertThat(reportsOnly).allMatch(r -> "report".equals(r.keys().get("kind")));
+    }
+
+    /**
+     * RDR-205 Test Plan: "rd with timeout_s ... with the signal suppressed by a
+     * test hook, within the one-second re-run timer". Writes the row via RAW SQL
+     * rather than {@code repo.out()} -- {@code out()} always calls {@code
+     * waitRegistry.signalAll}, so a raw write is what "the signal never fires"
+     * actually looks like from the repository's own perspective (no test hook can
+     * suppress a signal that already fired without racing the wake itself). The
+     * parked {@code rd} must still find the row, via {@link
+     * dev.nexus.service.db.TupleWaitRegistry}'s one-second timer fallback -- the
+     * same property {@code TupleWaitRegistryTest
+     * #awaitSignalOrTimer_noSignal_fallsBackToOneSecondTimer} pins at the
+     * wait-registry unit level, exercised here through the full repository.
+     */
+    @Test
+    void rd_suppressedSignal_stillFindsRowViaOneSecondTimer() throws Exception {
+        String session = "session-suppressed-signal-" + UUID.randomUUID();
+        String subspace = "ledger/" + session;
+        ExecutorService pool = Executors.newFixedThreadPool(1);
+        try {
+            Future<List<TupleRepository.TupleRow>> parked = pool.submit(() ->
+                    repo.rd(TENANT_A, subspace, null, 10, null, 3));
+            Thread.sleep(300); // let the reader register + park
+
+            byte[] id = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(("suppressed-signal-" + session).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            try (Connection su = pg.createConnection("")) {
+                org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                        .insertInto(dev.nexus.service.jooq.nexus.Tables.TUPLES,
+                                dev.nexus.service.jooq.nexus.Tables.TUPLES.ID,
+                                dev.nexus.service.jooq.nexus.Tables.TUPLES.TENANT_ID,
+                                dev.nexus.service.jooq.nexus.Tables.TUPLES.SUBSPACE,
+                                dev.nexus.service.jooq.nexus.Tables.TUPLES.TEMPLATE,
+                                dev.nexus.service.jooq.nexus.Tables.TUPLES.KEYS,
+                                dev.nexus.service.jooq.nexus.Tables.TUPLES.ATTEMPTS,
+                                dev.nexus.service.jooq.nexus.Tables.TUPLES.EXPIRES_AT,
+                                dev.nexus.service.jooq.nexus.Tables.TUPLES.CREATED_AT)
+                        .values(id, TENANT_A, subspace, "ledger",
+                                org.jooq.JSONB.valueOf("{\"agent_id\": \"raw-writer\", \"kind\": \"start\"}"),
+                                0, OffsetDateTime.now(java.time.ZoneOffset.UTC).plusHours(1),
+                                OffsetDateTime.now(java.time.ZoneOffset.UTC))
+                        .execute();
+            }
+            // Deliberately NO waitRegistry.signalAll -- the raw insert above never calls it.
+
+            List<TupleRepository.TupleRow> result = parked.get(5, TimeUnit.SECONDS);
+            assertThat(result).as("found via the 1s timer fallback, not a signal").hasSize(1);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void subspaceStats_unknownSubspace_unknownSubspaceException() {
+        assertThatThrownBy(() -> repo.subspaceStats(TENANT_A, "nonexistent/xyz"))
+                .isInstanceOf(UnknownSubspaceException.class);
+    }
+
+    /**
+     * RDR-205 follow-on (nexus-mvfm9): a subspace whose address segment fails the
+     * template's address grammar (empty, or containing bytes outside
+     * {@code [A-Za-z0-9._-]}) must be refused the SAME way a wholly unregistered
+     * subspace name is -- across every operation, not merely {@code resolve()} in
+     * isolation ({@code TemplateRegistryTest} pins the pure-logic case directly).
+     */
+    @Test
+    void malformedSubspaceAddress_unknownSubspace_everyOperation() {
+        for (String bad : List.of("mailbox/", "mailbox/bad name!")) {
+            assertThatThrownBy(() -> repo.out(TENANT_A, bad, Map.of("to", "x"), Map.of("from", "y"),
+                    null, "n", null))
+                    .as("out() on '%s'", bad)
+                    .isInstanceOf(UnknownSubspaceException.class);
+            assertThatThrownBy(() -> repo.rdp(TENANT_A, bad, null, 10, null))
+                    .as("rdp() on '%s'", bad)
+                    .isInstanceOf(UnknownSubspaceException.class);
+            assertThatThrownBy(() -> repo.in(TENANT_A, bad, Map.of("to", "x"), "c", 30, 0))
+                    .as("in() on '%s'", bad)
+                    .isInstanceOf(UnknownSubspaceException.class);
+            assertThatThrownBy(() -> repo.subspaceStats(TENANT_A, bad))
+                    .as("subspaceStats() on '%s'", bad)
+                    .isInstanceOf(UnknownSubspaceException.class);
+        }
+    }
+
+    /**
+     * RDR-205 Phase 1 review (nexus-em75s.7 fix-check, nexus-em75s.40): the ORIGINAL
+     * {@code computeId} joined fields with a literal NUL byte (0x00) and a plain
+     * {@code '='} inside a key/dim pair, neither escaped. {@code
+     * out_distinctFromNoncePairsWithEmbeddedFieldBoundary_produceDistinctIds} above
+     * substitutes {@code "_"} for that delimiter so it can go through {@code out()}
+     * (Postgres text/JSONB columns reject an embedded NUL byte outright) -- which
+     * means it passes identically whether {@code computeId} uses the length-prefixed
+     * fix OR the reverted NUL-delimited original, since {@code '_'} was never the
+     * real delimiter either way: a VACUOUS pin (review finding, T2
+     * nexus/review-nexus-em75s-phase1-fixcheck-2026-09-10). This test calls the
+     * private {@code computeId} DIRECTLY via reflection with an ACTUAL NUL byte as
+     * the delimiter stand-in, bypassing the database entirely -- the real collision
+     * construction the reverted implementation is vulnerable to. Hand-verified: with
+     * delim = NUL, {@code "from=" + from1 + NUL + "nonce=" + nonce1} and
+     * {@code "from=" + from2 + NUL + "nonce=" + nonce2} are the IDENTICAL byte
+     * sequence for both rows below (both reduce to
+     * {@code "from=sender1" NUL "nonce=n1" NUL "nonce=n1b"}), which is exactly what a
+     * naive NUL-delimited encoding would collide on; the length-prefixed
+     * implementation must not.
+     */
+    @Test
+    void computeId_directCall_nulDelimiterFieldBoundaryCollision_producesDistinctIds() throws Exception {
+        String delim = "\u0000"; // the ACTUAL original delimiter byte (RDR-110 C3 class)
+        String from1 = "sender1" + delim + "nonce=n1";
+        String nonce1 = "n1b";
+        String from2 = "sender1";
+        String nonce2 = "n1" + delim + "nonce=n1b";
+
+        TemplateSchema mailboxSchema = repo.registry().templates().stream()
+                .filter(t -> "mailbox/<address>".equals(t.name()))
+                .findFirst()
+                .orElseThrow();
+
+        var computeId = TupleRepository.class.getDeclaredMethod("computeId",
+                String.class, String.class, TemplateSchema.class, Map.class, Map.class, String.class, String.class);
+        computeId.setAccessible(true);
+
+        String to = "agent-computeid-direct-" + UUID.randomUUID();
+        byte[] id1 = (byte[]) computeId.invoke(null, TENANT_A, "mailbox/" + to, mailboxSchema,
+                Map.of("to", to), Map.of("from", from1), nonce1, "body");
+        byte[] id2 = (byte[]) computeId.invoke(null, TENANT_A, "mailbox/" + to, mailboxSchema,
+                Map.of("to", to), Map.of("from", from2), nonce2, "body");
+
+        assertThat(id2)
+                .as("a real NUL-delimited field-boundary collision must not produce the same id")
+                .isNotEqualTo(id1);
     }
 
     // ── sweep batch arms (RDR-205 Phase 1 Step 5, bead nexus-em75s.5) ───────────
