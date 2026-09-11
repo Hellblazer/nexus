@@ -58,6 +58,8 @@ import json
 import os
 import re
 import subprocess
+import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -507,3 +509,370 @@ def test_cross_corpus_search_routes_correctly(t2_service_env, tmp_path: Path) ->
         f"combined --corpus {combined_corpus!r} did not route to both corpora: "
         f"{all_collections_seen}"
     )
+
+
+# ── RDR-205 Phase 5: the mailbox consumer (bead nexus-em75s.25) ─────────────
+#
+# Eight journeys against the ``mailbox/<address>`` template (``service/src/
+# main/resources/tuples/templates/mailbox.yaml``): keys ``[to]``, dims
+# ``{from (required), kind, correlation_id, address_kind}``, ``id_from=
+# keys+nonce``, ``id_dims=[from]`` -- the tuple id is a hash of (tenant,
+# subspace, to, from, nonce), never of body or the other dims (``Tuple
+# Repository.computeId``). Every journey below drives ``nx tuple`` through
+# the CLI (cross-verb by construction: out/rd/in/ack/nack/stats), matching
+# this file's own binding constraint.
+
+
+def _tuple_uniq(label: str) -> str:
+    return f"{label}-{uuid.uuid4().hex[:10]}"
+
+
+def _tuple_last_json_line(output: str):
+    """Parse the LAST non-empty line of *output* as JSON -- a structlog
+    line can land on stdout ahead of the command's own JSON line."""
+    lines = [line for line in output.splitlines() if line.strip()]
+    return json.loads(lines[-1])
+
+
+@pytest.mark.scenario
+def test_mailbox_mid_turn_directive_is_drained_before_hand_back(t2_service_env) -> None:
+    """Journey 5: the mailbox skill's convention -- send by ``tuple out`` to
+    the agent's address, drain by ``tuple in`` BEFORE composing any
+    hand-back.
+
+    A directive lands mid-turn; the drain step finds and acks it before any
+    hand-back would be composed; afterwards the mailbox is empty by both
+    reads a caller might use -- ``rd`` never returns a consumed row and a
+    fresh ``in`` probe misses.
+    """
+    runner = CliRunner()
+    address = _tuple_uniq("agent")
+    nonce = _tuple_uniq("nonce")
+
+    out = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=orchestrator",
+        "--dim", "kind=directive", "--body", "check X before finishing",
+        "--nonce", nonce,
+    ])
+    assert out.exit_code == 0, out.output
+    directive_id = out.output.strip().splitlines()[-1]
+
+    # The drain, run BEFORE the agent composes its hand-back.
+    claim = runner.invoke(main, [
+        "tuple", "in", f"mailbox/{address}", "--pattern", f"to={address}",
+        "--claimant", address, "--lease-s", "30", "--json",
+    ])
+    assert claim.exit_code == 0, claim.output
+    payload = _tuple_last_json_line(claim.output)
+    assert payload["tuple"]["id"] == directive_id
+    assert payload["tuple"]["body"] == "check X before finishing"
+    assert payload["tuple"]["dims"] == {"from": "orchestrator", "kind": "directive"}
+
+    ack = runner.invoke(main, ["tuple", "ack", payload["claim_id"], "--claimant", address])
+    assert ack.exit_code == 0, ack.output
+
+    # Hand-back would be composed only now. The mailbox reads empty either
+    # way a caller looks.
+    rd = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
+    assert rd.exit_code == 0, rd.output
+    assert _tuple_last_json_line(rd.output) == [], "an acked row must never come back from rd"
+
+    probe = runner.invoke(main, [
+        "tuple", "in", f"mailbox/{address}", "--pattern", f"to={address}",
+        "--claimant", address, "--lease-s", "5",
+    ])
+    assert probe.exit_code == 1, probe.output
+
+
+@pytest.mark.scenario
+def test_mailbox_resent_message_lands_once_with_expires_at_unchanged(t2_service_env) -> None:
+    """Journey 6: the same sender resending the same nonce to one address
+    is ONE row -- the id is a hash of (to, from, nonce), so a resend is an
+    idempotent upsert that touches ``expires_at`` only (never body, per
+    ``TupleRepository.out``'s DO UPDATE clause), and under the default TTL
+    (== the template's retention) ``expires_at`` is already clamped to
+    ``created_at + retention`` and cannot move.
+    """
+    runner = CliRunner()
+    address = _tuple_uniq("agent")
+    nonce = _tuple_uniq("nonce")
+
+    first = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-a",
+        "--body", "v1", "--nonce", nonce,
+    ])
+    assert first.exit_code == 0, first.output
+    tuple_id = first.output.strip().splitlines()[-1]
+
+    rd1 = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
+    row1 = _tuple_last_json_line(rd1.output)[0]
+    assert row1["id"] == tuple_id
+
+    resend = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-a",
+        "--body", "v2-should-not-land", "--nonce", nonce,
+    ])
+    assert resend.exit_code == 0, resend.output
+    assert resend.output.strip().splitlines()[-1] == tuple_id, (
+        "a resend with the same nonce must land on the SAME tuple id"
+    )
+
+    rd2 = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
+    rows2 = _tuple_last_json_line(rd2.output)
+    assert len(rows2) == 1, f"a resend must be one row, not a second: {rows2}"
+    assert rows2[0]["id"] == tuple_id
+    assert rows2[0]["body"] == "v1", "a resend's DO UPDATE never touches body"
+    assert rows2[0]["expires_at"] == row1["expires_at"], "expires_at must not move on a resend"
+
+
+@pytest.mark.scenario
+def test_mailbox_two_different_nonces_to_one_address_are_two_rows(t2_service_env) -> None:
+    """Journey 7 (RDR-205 Test Plan): two mailbox messages to one address
+    with different sender-minted nonces are two independent rows -- the
+    nonce is part of the tuple's identity."""
+    runner = CliRunner()
+    address = _tuple_uniq("agent")
+
+    first = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-a",
+        "--body", "first", "--nonce", _tuple_uniq("nonce"),
+    ])
+    assert first.exit_code == 0, first.output
+    second = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-a",
+        "--body", "second", "--nonce", _tuple_uniq("nonce"),
+    ])
+    assert second.exit_code == 0, second.output
+    id1, id2 = first.output.strip().splitlines()[-1], second.output.strip().splitlines()[-1]
+    assert id1 != id2, "two different nonces must never collide onto one tuple id"
+
+    rd = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}",
+                              "-n", "10", "--json"])
+    assert rd.exit_code == 0, rd.output
+    rows = _tuple_last_json_line(rd.output)
+    assert {r["id"] for r in rows} == {id1, id2}, f"expected exactly two rows: {rows}"
+
+
+@pytest.mark.scenario
+def test_mailbox_two_senders_minting_the_same_nonce_are_two_rows(t2_service_env) -> None:
+    """Journey 8 (RDR-205 Test Plan): two SENDERS minting the same nonce to
+    one address are two rows -- ``from`` is an ``id_dims`` field, so the
+    sender is part of the tuple's identity and a nonce need only be unique
+    among ONE sender's own messages."""
+    runner = CliRunner()
+    address = _tuple_uniq("agent")
+    shared_nonce = _tuple_uniq("nonce")
+
+    from_a = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-a",
+        "--body", "from a", "--nonce", shared_nonce,
+    ])
+    assert from_a.exit_code == 0, from_a.output
+    from_b = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-b",
+        "--body", "from b", "--nonce", shared_nonce,
+    ])
+    assert from_b.exit_code == 0, from_b.output
+    id_a, id_b = from_a.output.strip().splitlines()[-1], from_b.output.strip().splitlines()[-1]
+    assert id_a != id_b, "the same nonce from two different senders must never collide"
+
+    rd = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}",
+                              "-n", "10", "--json"])
+    assert rd.exit_code == 0, rd.output
+    rows = _tuple_last_json_line(rd.output)
+    assert {r["id"] for r in rows} == {id_a, id_b}, f"expected exactly two rows: {rows}"
+
+
+@pytest.mark.scenario
+def test_mailbox_out_with_no_from_is_a_schema_violation(t2_service_env) -> None:
+    """Journey 9 (RDR-205 Test Plan): a mailbox ``out`` naming no ``from``
+    is a SchemaViolation -- ``from`` is the template's one required
+    dimension, and it is what keeps two senders' nonces from colliding."""
+    runner = CliRunner()
+    address = _tuple_uniq("agent")
+
+    out = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--body", "no sender named",
+        "--nonce", _tuple_uniq("nonce"),
+    ])
+    assert out.exit_code == 1, out.output
+    assert "SchemaViolation" in out.output, out.output
+
+    rd = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
+    assert rd.exit_code == 0, rd.output
+    assert _tuple_last_json_line(rd.output) == [], "a refused out() must write no row"
+
+
+@pytest.mark.scenario
+def test_mailbox_resend_every_day_for_a_week_never_extends_expires_at(t2_service_env) -> None:
+    """Journey 10 (RDR-205 Test Plan): a message resent every day for a
+    week never pushes ``expires_at`` past ``created_at`` plus the
+    template's 7-day retention.
+
+    No engine test-only clock seam exists for tuples (``TupleRepository``
+    stamps every column from the JVM's own ``OffsetDateTime.now()``), so
+    this asserts the invariant directly rather than fast-forwarding a real
+    week: under the default TTL (== retention), each resend's candidate
+    expiry is ``now() + retention``, always AFTER the original row's
+    ``created_at + retention`` ceiling (``now() > created_at`` for every
+    resend after the first), so ``LEAST(candidate, ceiling)`` picks the
+    fixed ceiling every time -- seven resends back-to-back exercises the
+    same clamp seven real weeks apart would. The purge-with-claim-history
+    leg of this Test Plan bullet is engine-sweep/admin-SQL territory with
+    no client-reachable trigger (Day 2 Operations table: "no client
+    operation reads the log in v1") and is out of scope here; Phase 3's
+    sweep beads (nexus-em75s.37/.38) own that half in Java.
+    """
+    runner = CliRunner()
+    address = _tuple_uniq("agent")
+    nonce = _tuple_uniq("nonce")
+
+    first = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-a",
+        "--body", "day 0", "--nonce", nonce,
+    ])
+    assert first.exit_code == 0, first.output
+    tuple_id = first.output.strip().splitlines()[-1]
+    rd0 = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
+    ceiling_expires_at = _tuple_last_json_line(rd0.output)[0]["expires_at"]
+
+    for day in range(1, 8):
+        resend = runner.invoke(main, [
+            "tuple", "out", f"mailbox/{address}",
+            "--key", f"to={address}", "--dim", "from=sender-a",
+            "--body", f"day {day}", "--nonce", nonce,
+        ])
+        assert resend.exit_code == 0, resend.output
+        assert resend.output.strip().splitlines()[-1] == tuple_id
+
+        rd = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
+        rows = _tuple_last_json_line(rd.output)
+        assert len(rows) == 1, f"day {day}: still one row, not {len(rows)}"
+        assert rows[0]["expires_at"] == ceiling_expires_at, (
+            f"day {day}: expires_at moved past created_at + retention: "
+            f"{rows[0]['expires_at']!r} != {ceiling_expires_at!r}"
+        )
+
+
+@pytest.mark.scenario
+def test_mailbox_nack_by_max_attempts_different_claimants_dead_letters(t2_service_env) -> None:
+    """Journey 11 (RDR-205 Test Plan): ``nack`` by ``max_attempts`` (3)
+    DIFFERENT claimants dead-letters the row either way -- parked out of
+    every future claimant's view, still readable by ``rd`` with
+    ``claim_state=dead``, and counted under ``dead`` by ``tuple stats``.
+    """
+    runner = CliRunner()
+    address = _tuple_uniq("agent")
+
+    out = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-a",
+        "--body", "keeps getting nacked", "--nonce", _tuple_uniq("nonce"),
+    ])
+    assert out.exit_code == 0, out.output
+
+    for i in range(3):
+        claimant = _tuple_uniq(f"claimant{i}")
+        claim = runner.invoke(main, [
+            "tuple", "in", f"mailbox/{address}", "--pattern", f"to={address}",
+            "--claimant", claimant, "--lease-s", "30", "--json",
+        ])
+        assert claim.exit_code == 0, f"claim #{i}: {claim.output}"
+        claim_id = _tuple_last_json_line(claim.output)["claim_id"]
+
+        nack = runner.invoke(main, ["tuple", "nack", claim_id, "--claimant", claimant])
+        assert nack.exit_code == 0, f"nack #{i}: {nack.output}"
+
+    # A fourth claimant finds nothing: the row is dead, not available.
+    probe = runner.invoke(main, [
+        "tuple", "in", f"mailbox/{address}", "--pattern", f"to={address}",
+        "--claimant", _tuple_uniq("claimant-late"), "--lease-s", "30",
+    ])
+    assert probe.exit_code == 1, probe.output
+
+    rd = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
+    rows = _tuple_last_json_line(rd.output)
+    assert len(rows) == 1
+    assert rows[0]["claim_state"] == "dead"
+    assert rows[0]["claimant"] is None
+
+    stats = runner.invoke(main, ["tuple", "stats", f"mailbox/{address}", "--json"])
+    assert stats.exit_code == 0, stats.output
+    census = _tuple_last_json_line(stats.output)
+    assert census["dead"] == 1, census
+    assert census["available"] == 0, census
+    assert census["claimed"] == 0, census
+
+
+@pytest.mark.scenario
+def test_mailbox_max_attempts_lapsed_leases_dead_letters(t2_service_env) -> None:
+    """Journey 12 (RDR-205 Test Plan): ``max_attempts`` (3) LAPSED leases
+    -- nobody ever nacks -- dead-letter the row exactly as explicit nacks
+    do: a claim that finds a lapsed prior lease releases it (an ``expire``
+    log row) and re-claims with ``attempts`` incremented; the claim that
+    brings ``attempts`` to ``max_attempts`` dead-letters the row IN THAT
+    SAME transaction and its own select re-runs, returning the probe
+    result (RDR-205 Test Plan: "the claim re-runs its select and returns
+    the next candidate or the probe result"). ``lease_s`` must be a
+    positive integer, so this sleeps past the 1s minimum lease three times
+    rather than controlling a clock -- no seam exists for this engine path
+    (see journey 10's docstring).
+    """
+    runner = CliRunner()
+    address = _tuple_uniq("agent")
+
+    out = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-a",
+        "--body", "keeps lapsing", "--nonce", _tuple_uniq("nonce"),
+    ])
+    assert out.exit_code == 0, out.output
+
+    # Three claims, each left to lapse rather than acked or nacked.
+    for i in range(3):
+        claim = runner.invoke(main, [
+            "tuple", "in", f"mailbox/{address}", "--pattern", f"to={address}",
+            "--claimant", _tuple_uniq(f"claimant{i}"), "--lease-s", "1",
+        ])
+        assert claim.exit_code == 0, f"claim #{i}: {claim.output}"
+        time.sleep(1.5)  # let the 1-second lease lapse (house convention: TupleRepositoryTest.java)
+
+    # The fourth claim attempt is the one that dead-letters: the first of
+    # the three loop claims takes the fresh row at attempts=0 (no prior
+    # lapsed lease to notice); the second and third each find the PREVIOUS
+    # lease lapsed and raise attempts by one on their way to re-claiming
+    # (0->1, then 1->2); this fourth call finds the third claim's lease
+    # lapsed too, raises attempts to 3 = max_attempts, dead-letters in that
+    # same transaction, and its own re-run select finds no other candidate.
+    dead_letter_claim = runner.invoke(main, [
+        "tuple", "in", f"mailbox/{address}", "--pattern", f"to={address}",
+        "--claimant", _tuple_uniq("claimant-final"), "--lease-s", "1",
+    ])
+    assert dead_letter_claim.exit_code == 1, dead_letter_claim.output
+
+    rd = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
+    rows = _tuple_last_json_line(rd.output)
+    assert len(rows) == 1
+    assert rows[0]["claim_state"] == "dead"
+    assert rows[0]["claimant"] is None
+
+    stats = runner.invoke(main, ["tuple", "stats", f"mailbox/{address}", "--json"])
+    assert stats.exit_code == 0, stats.output
+    census = _tuple_last_json_line(stats.output)
+    assert census["dead"] == 1, census
+
+    # No further in returns it.
+    probe = runner.invoke(main, [
+        "tuple", "in", f"mailbox/{address}", "--pattern", f"to={address}",
+        "--claimant", _tuple_uniq("claimant-later"), "--lease-s", "5",
+    ])
+    assert probe.exit_code == 1, probe.output
