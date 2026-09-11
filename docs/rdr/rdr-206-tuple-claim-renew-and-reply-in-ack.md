@@ -143,11 +143,16 @@ mailbox template, `HttpTupleStore`, the mailbox skill, and RDR-205 §Prior art.
   `ClaimNotFound`, exactly as a late `ack` does today, so a holder that missed
   its window learns it lost the claim instead of extending a claim it no longer
   holds.
-- **Documented**: `out` is idempotent by construction (id from caller fields).
-  A reply carried inside `ack` therefore has a stable identity, and a retried
-  `ack` after a lost response lands on the same reply tuple; the second `ack`
-  itself fails `ClaimNotFound` because the first consumed the request, which
-  is the existing contract for a repeated `ack`.
+- **Documented** (research-4): a retried `ack` with reply after a lost
+  response fails at the ack step, before the reply write runs, because
+  `liveClaimRow` returns nothing once `consumed_at` is set. The ack-first
+  ordering is the mechanism that yields exactly one reply row, and Phase 1
+  Step 1 pins that ordering, not only the outcome. The reply's identity is
+  made stable as well, so a future reordering could not break it: the reply's
+  nonce is the request's tuple id in hex. `computeId` digests the template
+  keys, the `id_dims` (`from` for the mailbox), and the nonce, so one request
+  can produce one reply row per responder however many times the write runs,
+  and two replies to two requests never collide.
 - **Documented**: the waiter signal fires after the transaction commits. A
   reply written inside the ack transaction must signal the requester's mailbox
   waiters after that commit, from the same place `out` does today.
@@ -164,11 +169,14 @@ mailbox template, `HttpTupleStore`, the mailbox skill, and RDR-205 §Prior art.
   sweep's release arm and the claim statement's lapsed branch both compare
   the live `lease_until` column against `now()`, so a renewed row stops
   matching them with no other change.
-- **Documented** (research-1 §3, research-2 §1): no new typed error is needed
-  on either side. `renew` raises `ClaimNotFound`, `ClaimOwnership`,
-  `LeaseTooLong`, `SchemaViolation`; a bad reply raises `SchemaViolation`
-  from `validateOut`. `tests/test_tuple_error_table_pin.py` is a floor of
-  nine and stays green.
+- **Documented** (research-1 §3, research-2 §1, research-4): no new typed error
+  is needed on either side. `renew` raises `ClaimNotFound`, `ClaimOwnership`,
+  `LeaseTooLong`, `SchemaViolation`. A reply inside `ack` runs the same
+  validation as `out` and can raise everything `out` can: `UnknownSubspace`
+  when the reply subspace does not resolve, `TtlTooLong` when its
+  `ttl_seconds` exceeds the reply template's retention, and `SchemaViolation`
+  for a bad key, dimension, nonce, or non-positive TTL.
+  `tests/test_tuple_error_table_pin.py` is a floor of nine and stays green.
 - **Documented** (research-2 §2, §3): three test files pin the MCP tool names
   and must change together; the comment block above the tools says "Eight
   MCP tools". The CLI convention is repeatable `KEY=VALUE` flags parsed by
@@ -201,6 +209,11 @@ mailbox template, `HttpTupleStore`, the mailbox skill, and RDR-205 §Prior art.
   bodies — **Status**: Documented by reading (research-1 §1: the bodies
   compose once `out`'s is factored onto a caller `DSLContext`); execution
   not yet run, which is Phase 1 Step 1 — **Method**: Source Search, then Spike
+- [ ] The compare-and-swap conditions on `ack`, `nack`, and `renew` change
+  no successful path, only the stale-update race — **Status**: Documented by
+  reading the update statements and the sweep's locked select (research-4);
+  the race test in Phase 1 Step 3 executes it — **Method**: Source Search,
+  then Spike
 - [ ] Adding optional fields to the `/ack` body and one new `/renew` route
   is `[additive]` in both directions (old client ignores them, new client
   against an old engine gets 404 on `/renew` and a plain ack on `/ack`) —
@@ -223,9 +236,12 @@ Add two operations to the primitive and nothing else.
 2. `ack(claim_id, claimant, reply=None)`: as today, plus an optional reply
    object `{subspace, keys, dims, body, nonce, ttl_seconds}` (the same fields
    `out` accepts) that the engine writes with the same validation as `out`,
-   in the same transaction that consumes the claim.
-   On any validation failure of the reply, nothing is written and the request
-   stays claimed, so the responder can correct and retry. Waiters on the reply's
+   in the same transaction that consumes the claim. The reply's `nonce` is
+   the request's tuple id in hex; the client fills it from the claimed tuple
+   and a caller never mints one.
+   On any validation failure of the reply (`UnknownSubspace`, `TtlTooLong`,
+   or `SchemaViolation`, the same three `out` raises), nothing is written and
+   the request stays claimed, so the responder can correct and retry. Waiters on the reply's
    subspace are signalled after commit.
 
 Both consumers stay as they are. The mailbox skill gains two rules: renew
@@ -241,8 +257,10 @@ Engine (`TupleRepository`):
 public OffsetDateTime renew(String tenant, String claimId, String claimant, long leaseSeconds)
     // withTenant: liveClaimRow -> ownership check -> LeaseTooLong check against
     // template.take().maxLeaseSeconds() -> leaseUntil = min(now + leaseSeconds,
-    // expires_at), truncated to micros -> update LEASE_UNTIL -> insertClaimLog(renew)
-    // -> return leaseUntil
+    // expires_at), truncated to micros -> update LEASE_UNTIL WHERE id = ? AND
+    // claim_state = 'claimed' AND claim_id = ? AND consumed_at IS NULL -> if the update
+    // touched zero rows, throw ClaimNotFound (the sweep or a concurrent release won)
+    // -> insertClaimLog(renew) -> return leaseUntil
 
 private byte[] writeOut(DSLContext ctx, String tenant, String subspace, ..., String nonce, Long ttlSeconds)
     // out's existing body (validateOut, computeId, upsert, maintainTenant) moved onto a
@@ -250,10 +268,12 @@ private byte[] writeOut(DSLContext ctx, String tenant, String subspace, ..., Str
     // followed by signalAll, unchanged in behaviour (research-1 §1).
 
 public byte[] ackWithReply(String tenant, String claimId, String claimant, ReplySpec replyOrNull)
-    // withTenant: the existing ack body, then, if replyOrNull != null, writeOut(ctx, ...)
-    // against the reply's subspace/template in the SAME ctx. After withTenant returns,
-    // signalAll(tenant, replySubspace) only if a reply was written. Returns the reply id
-    // or null.
+    // withTenant: the existing ack body FIRST (a consumed or foreign claim fails here and
+    // nothing else runs), then, if replyOrNull != null, writeOut(ctx, ...) against the
+    // reply's subspace/template in the SAME ctx, with the reply nonce = the request's
+    // tuple id (hex). After withTenant returns, signalAll(tenant, replySubspace) only if
+    // a reply was written. Returns the reply id or null. The ack-before-reply order is
+    // pinned by a test in Phase 1 Step 1.
 ```
 
 Routes (`TupleHandler`): `POST /v1/tuples/renew` with body
@@ -291,7 +311,8 @@ paragraph on the two limits change with it.
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| `renew` | `TupleRepository.ack`/`nack` (claim resolution, ownership check) | Extend: same `liveClaimRow` path, new update and log row |
+| `renew` | `TupleRepository.ack`/`nack` (claim resolution, ownership check) | Extend: same `liveClaimRow` path, new update and log row; the update is a compare-and-swap on `claim_state` and `claim_id` with the row count checked |
+| compare-and-swap on `ack` and `nack` | `TupleRepository.ack`, `releaseOrDeadLetter` (update by id only, research-4) | Extend: add the same `claim_state`/`claim_id`/`consumed_at` conditions and row-count check, so a stale ack or nack fails `ClaimNotFound` instead of writing over a row the sweep released or another claimant now holds |
 | reply-in-ack | `TupleRepository.out` and `.ack` | Extend: compose the two bodies in one transaction; no new validation code |
 | `/renew` route | `TupleHandler` route switch | Extend: one case |
 | client/MCP/CLI | `HttpTupleStore`, `tuple_*` tools, `nx tuple` | Extend: one method, one tool, one verb, one optional argument |
@@ -345,6 +366,8 @@ may have abandoned.
 ### Consequences
 
 - One new route, one extended route, one new transition string, no DDL.
+- `ack` and `nack` gain a compare-and-swap condition; a stale ack or nack that
+  today silently writes over a released row now fails `ClaimNotFound`.
 - Two new skill rules; the mailbox convention becomes slightly longer.
 - The claim log gains `renew` rows, which the census and any audit must treat
   as non-terminal.
@@ -361,19 +384,24 @@ may have abandoned.
   **Mitigation**: the error names the reply field, nothing is written, and the
   claim is still live to retry; documented in the skill.
 - **Risk**: a retried `ack` with reply after a lost response.
-  **Mitigation**: the reply is idempotent by id; the retried `ack` fails
-  `ClaimNotFound` as any repeated `ack` does, and the responder reads that as
-  "already consumed".
+  **Mitigation**: the ack step runs first and fails `ClaimNotFound` on a
+  consumed claim, so the reply write is never reached on a retry; the
+  responder reads that as "already consumed". The reply's nonce is the
+  request's tuple id, so even a write that did run would land on the same
+  row.
 
 ### Failure Modes
 
 - Visible: `renew` on a lapsed claim fails `ClaimNotFound`; the holder learns
   it lost the claim.
 - Visible: `LeaseTooLong` on a renew above the cap.
-- Visible: reply validation failure on `ack` returns `SchemaViolation` naming
-  the field, request still claimed.
+- Visible: reply validation failure on `ack` returns `UnknownSubspace`,
+  `TtlTooLong`, or `SchemaViolation` naming the field, request still claimed.
 - Silent, resolved: a crash after `ack` with reply commits leaves nothing
   pending on either side.
+- Visible: a `renew`, `ack`, or `nack` that loses the race with the sweep's
+  release fails `ClaimNotFound` and writes nothing; before this RDR, `ack` and
+  `nack` wrote over the released row.
 
 ## Implementation Plan
 
@@ -407,7 +435,19 @@ wakes after the commit.
 Repository method, handler route, typed errors, `renew` transition, tests for
 clamp to `expires_at`, cap by template, lapsed-claim refusal, ownership.
 
-#### Step 3: Sweep and census unaffected
+#### Step 3: Compare-and-swap on every claim update
+
+`liveClaimRow` reads without a lock and `ack`, `nack`, and the `renew` sketch
+update by id alone, while the sweep's release arm selects the same rows under
+`FOR NO KEY UPDATE SKIP LOCKED`. Change all three updates to
+`WHERE id = ? AND claim_state = 'claimed' AND claim_id = ? AND consumed_at IS NULL`,
+check the affected-row count, and raise `ClaimNotFound` on zero rows; write the
+claim-log row only after a one-row update. Pin with a test that releases the
+row between the read and the update and asserts `ClaimNotFound` and no log
+row. This changes shipped `ack`/`nack` behaviour in exactly that race and
+nowhere else.
+
+#### Step 4: Sweep and census unaffected
 
 Pin that the release arm ignores renewed live claims and that
 `subspace_stats` counts a renewed claim under `claimed`.
@@ -441,6 +481,9 @@ None.
   one `renew` log row, claim still held.
 - **Scenario**: renew after lapse — **Verify**: `ClaimNotFound`, row available
   or retaken, no log row.
+- **Scenario**: renew, ack, or nack whose claim the sweep released between the
+  read and the update — **Verify**: zero rows updated, `ClaimNotFound`, no
+  log row, the released row untouched.
 - **Scenario**: renew by another claimant — **Verify**: `ClaimOwnership`.
 - **Scenario**: renew past `expires_at` — **Verify**: clamped, never after
   expiry.
@@ -449,6 +492,11 @@ None.
   present in one read; waiter on the reply subspace wakes.
 - **Scenario**: ack with invalid reply — **Verify**: `SchemaViolation`, request
   still claimed, no reply row.
+- **Scenario**: ack with a reply whose `ttl_seconds` exceeds the reply
+  template's retention — **Verify**: `TtlTooLong`, request still claimed, no
+  reply row.
+- **Scenario**: ack with a reply to an unregistered subspace — **Verify**:
+  `UnknownSubspace`, request still claimed, no reply row.
 - **Scenario**: ack with reply retried after lost response — **Verify**: second
   call `ClaimNotFound`, exactly one reply row.
 - **Scenario**: old client against new engine and new client against old engine
