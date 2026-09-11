@@ -1425,10 +1425,36 @@ _MCP_PROBE_TIMEOUT_S = 8.0
 # keeps polling up to ``timeout * _MCP_PROBE_ALIVE_EXTENSION_FACTOR`` before
 # giving up — a crashed/exited process is unaffected (it fails on the very
 # first poll, exactly as before: nexus-l2ku5's fail-loud contract is
-# unchanged for that case) and never pays the extension. 4x keeps the total
-# worst-case bound explicit (2 entry points * 32s = 64s) while giving a
-# genuinely-slow-but-alive cold start roughly 4x the already-10x-margined
-# base budget to answer.
+# unchanged for that case) and never pays the extension.
+#
+# 4.0 is now sized from an evidence-carrying measurement, not a round
+# number (the review of the first jw44t commit, T2
+# nexus/review-nexus-jw44t-and-mcp-probe-1fc784da7-2026-09-11 Q3, is what
+# flagged the prior version as ungrounded). Measured directly on a dev
+# box (16 cores), same ``.venv/bin/nx-mcp`` initialize handshake this
+# probe drives:
+#   * warm (bytecode cached):                          0.686s
+#   * cold (every .pyc under .venv/ and src/ cleared,
+#     ambient load average ~15 from unrelated sessions): 1.014s
+#   * cold + 4 synthetic CPU-bound python loops added on
+#     top of that ambient load (1-min load average
+#     20.1 -> 28.9 across the window, i.e. roughly
+#     1.3-1.8x per core on this 16-core box), 3 trials: 2.414s / 2.013s / 1.615s
+# The worst of those three (2.414s) is itself well under the base 8s
+# budget alone — a bare-metal reproduction of "busy box" does not by
+# itself explain the acquire gate's actual >=8s timeouts. The gap is
+# most plausibly the Docker rehearsal container's OWN overhead on top of
+# raw CPU contention (cgroup CPU-share throttling, a cold image's
+# not-yet-page-cached layers, possible cross-arch emulation) — none of
+# which a same-host, no-container benchmark can reproduce. Rather than
+# guess that container tax directly, 4x is kept as a wide multiplier
+# layered on the base budget's OWN already-measured ~10x margin over the
+# unloaded-cold baseline: even a further 2-3x container tax on top of
+# the worst measured 2.414s (roughly 5-7s) still lands under the bare
+# 8s, and the 32s extended cap leaves comfortable room past that for
+# whatever container-specific slowdown this measurement could not
+# capture, while staying a bounded, finite wait (2 entry points * 32s =
+# 64s worst case) rather than an open-ended one.
 _MCP_PROBE_ALIVE_EXTENSION_FACTOR = 4.0
 
 #: Poll granularity while the process is confirmed alive (nexus-jw44t).

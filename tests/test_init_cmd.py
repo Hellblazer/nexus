@@ -1689,3 +1689,45 @@ class TestProvisionStackModeOrdering:
 
         assert init_mod.provision_service_stack() is True
         assert ("install.mode", "local") in stamped
+
+
+# ── nexus-jw44t follow-up: _poll_service_lease marks the evidence flag ──────
+
+
+class TestPollServiceLeaseMarksEvidence:
+    """nexus-jw44t review (T2 nexus/review-nexus-jw44t-and-mcp-probe-1fc784da7-2026-09-11,
+    Q1): ``_poll_service_lease`` is the default `nx init --service --yes`
+    autostart path on any host with a session bus (the common case — the
+    Docker-headless fallback that happened to route through the already-fixed
+    ``ensure_storage_supervisor`` is the EXCEPTION). It called
+    ``ServiceRegistry.discover()`` directly, bypassing both
+    ``service_endpoint.discover_lease`` and the b70990c54 per-site mark, so
+    the evidence-gate flag stayed False after a real autostart lease was
+    found. RED-FIRST: fails if ``_poll_service_lease`` reverts to a bare
+    ``registry.discover(scope)``."""
+
+    def test_finding_a_live_lease_marks_the_evidence_flag(self, tmp_path: Path) -> None:
+        import os as _os
+
+        from nexus.daemon.service_registry import ServiceRegistry, mint_owner_token
+        from nexus.db import service_endpoint as se
+
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+        assert se.has_ever_resolved_lease() is False  # sanity: autouse reset ran
+
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service")
+        registry.publish(
+            str(_os.getuid()),
+            endpoint={"host": "127.0.0.1", "port": 18101},
+            version="7.40.0",
+            owner_token=mint_owner_token(),
+        )
+
+        import nexus.commands.init as init_mod
+
+        rec = init_mod._poll_service_lease(config_dir, timeout=2.0)
+
+        assert rec is not None
+        assert se.has_ever_resolved_lease() is True

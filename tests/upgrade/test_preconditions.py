@@ -561,3 +561,50 @@ def test_plan_library_failure_never_blocks_the_upgrade():
     axis = _axis(reports, "plan-library")
     assert axis.applicable and not axis.current
     assert "nx plan reseed" in axis.detail
+
+
+# ── nexus-jw44t follow-up: _default_lease marks the evidence flag ─────────
+
+
+def test_default_lease_feeding_the_ladder_deferred_read_marks_evidence(
+    tmp_path: pathlib.Path,
+) -> None:
+    """nexus-jw44t review (T2
+    nexus/review-nexus-jw44t-and-mcp-probe-1fc784da7-2026-09-11, Q1):
+    ``_default_lease`` -- the process axis's deferred read, consumed by
+    both ``check_preconditions`` and ``converge_preconditions`` -- called
+    ``ServiceRegistry.discover()`` directly, bypassing both
+    ``service_endpoint.discover_lease`` and the b70990c54 per-site mark. An
+    independent ``nx upgrade`` invocation hitting the ladder-convergence
+    race got no bounded-wait retry despite this process holding a
+    just-confirmed live lease. This exercises the REAL deferred read (no
+    ``_lease_fn`` override), publishing an actual lease to a real
+    ``ServiceRegistry`` -- not the injected-stub path every other test in
+    this file uses. RED-FIRST: fails if ``_default_lease`` reverts to a
+    bare ``registry.discover(scope)``."""
+    import os
+
+    from nexus.daemon.service_registry import ServiceRegistry, mint_owner_token
+    from nexus.db import service_endpoint as se
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    assert se.has_ever_resolved_lease() is False  # sanity: autouse reset ran
+
+    registry = ServiceRegistry(dir=config_dir, tier="storage_service")
+    registry.publish(
+        str(os.getuid()),
+        endpoint={"host": "127.0.0.1", "port": 18102},
+        version="7.40.0",
+        owner_token=mint_owner_token(),
+    )
+
+    kwargs = _converge_kwargs(
+        config_dir=config_dir,
+        _lease_fn=None,  # the real deferred read -- _default_lease(config_dir)
+        _installed_version_fn=lambda: "7.40.0",
+    )
+    converge_preconditions(**kwargs)
+
+    assert se.has_ever_resolved_lease() is True

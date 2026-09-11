@@ -601,7 +601,7 @@ def ensure_storage_supervisor(config_dir: Path):
 
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
     scope = str(os.getuid())
-    existing = registry.discover(scope)
+    existing = _service_endpoint.discover_storage_service_lease(registry, scope)
     if existing is not None:
         # RDR-175 heal-on-next-use hardening: a fresh (TTL-live) lease whose
         # ``supervisor_pid`` points at a DEAD process is a hard-crashed
@@ -654,13 +654,10 @@ def ensure_storage_supervisor(config_dir: Path):
             # lease predates artifact-identity tracking; no-ops otherwise
             # (ambient well-known-path flows set neither var).
             _ssd._raise_or_warn_on_artifact_mismatch(config_dir, existing.endpoint)
-            # nexus-jw44t: this discovery bypassed service_endpoint.discover_lease
-            # (it went through the ServiceRegistry instance above directly), so
-            # the evidence-gate flag it feeds would otherwise stay False despite
-            # a live lease in hand — mark it so a resolution moments later (the
-            # ladder/plan-seed steps that immediately follow in `nx init
-            # --service`) gets the bounded-wait retry instead of failing fast.
-            _service_endpoint.note_lease_resolved_out_of_band()
+            # nexus-jw44t: the evidence-gate mark now happens inside
+            # discover_storage_service_lease() above, on every hit — no
+            # per-site call needed here any more (see that function's
+            # docstring in db/service_endpoint.py).
             return existing
 
     argv = [
@@ -687,12 +684,8 @@ def ensure_storage_supervisor(config_dir: Path):
             spawn_log.close()
     deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline:
-        existing = registry.discover(scope)
+        existing = _service_endpoint.discover_storage_service_lease(registry, scope)
         if existing is not None:
-            # nexus-jw44t: same reasoning as the short-circuit branch above —
-            # this discovery never touched service_endpoint.discover_lease,
-            # so mark the evidence flag directly.
-            _service_endpoint.note_lease_resolved_out_of_band()
             return existing
         time.sleep(0.5)
     raise StorageServiceStartError(
