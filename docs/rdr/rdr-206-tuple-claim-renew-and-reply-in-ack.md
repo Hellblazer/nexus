@@ -148,8 +148,8 @@ mailbox template, `HttpTupleStore`, the mailbox skill, and RDR-205 §Prior art.
   `liveClaimRow` returns nothing once `consumed_at` is set. The ack-first
   ordering is the mechanism that yields exactly one reply row, and Phase 1
   Step 1 pins that ordering, not only the outcome. The reply's identity is
-  made stable as well, so a future reordering could not break it: the reply's
-  nonce is the request's tuple id in hex. `computeId` digests the template
+  made stable as well, so a future reordering could not break it: the engine
+  sets the reply's nonce to the request's tuple id in hex. `computeId` digests the template
   keys, the `id_dims` (`from` for the mailbox), and the nonce, so one request
   can produce one reply row per responder however many times the write runs,
   and two replies to two requests never collide.
@@ -234,11 +234,12 @@ Add two operations to the primitive and nothing else.
    another claimant), `LeaseTooLong` (above the template cap), `SchemaViolation`
    (`lease_s` at or below zero).
 2. `ack(claim_id, claimant, reply=None)`: as today, plus an optional reply
-   object `{subspace, keys, dims, body, nonce, ttl_seconds}` (the same fields
-   `out` accepts) that the engine writes with the same validation as `out`,
-   in the same transaction that consumes the claim. The reply's `nonce` is
-   the request's tuple id in hex; the client fills it from the claimed tuple
-   and a caller never mints one.
+   object `{subspace, keys, dims, body, ttl_seconds}` (the fields `out`
+   accepts, minus `nonce`) that the engine writes with the same validation as
+   `out`, in the same transaction that consumes the claim. The engine sets the
+   reply's `nonce` itself to the request's tuple id in hex; no client, tool,
+   or CLI flag carries a reply nonce, and a `nonce` key in the reply object is
+   a `SchemaViolation`.
    On any validation failure of the reply (`UnknownSubspace`, `TtlTooLong`,
    or `SchemaViolation`, the same three `out` raises), nothing is written and
    the request stays claimed, so the responder can correct and retry. Waiters on the reply's
@@ -267,13 +268,18 @@ private byte[] writeOut(DSLContext ctx, String tenant, String subspace, ..., Str
     // caller-supplied ctx; out itself becomes withTenant(tenant, ctx -> writeOut(ctx, ...))
     // followed by signalAll, unchanged in behaviour (research-1 §1).
 
+private TuplesRecord consumeClaim(DSLContext ctx, String tenant, String claimId, String claimant)
+    // ack's existing body (liveClaimRow, ownership check, the compare-and-swap update of
+    // Step 3, the ack log row) moved onto a caller-supplied ctx and returning the consumed
+    // row; ack itself becomes withTenant(tenant, ctx -> consumeClaim(ctx, ...)). One body,
+    // so ackWithReply cannot ship without the compare-and-swap.
+
 public byte[] ackWithReply(String tenant, String claimId, String claimant, ReplySpec replyOrNull)
-    // withTenant: the existing ack body FIRST (a consumed or foreign claim fails here and
-    // nothing else runs), then, if replyOrNull != null, writeOut(ctx, ...) against the
-    // reply's subspace/template in the SAME ctx, with the reply nonce = the request's
-    // tuple id (hex). After withTenant returns, signalAll(tenant, replySubspace) only if
-    // a reply was written. Returns the reply id or null. The ack-before-reply order is
-    // pinned by a test in Phase 1 Step 1.
+    // withTenant: consumeClaim FIRST (a consumed or foreign claim fails here and nothing
+    // else runs), then, if replyOrNull != null, writeOut(ctx, ...) against the reply's
+    // subspace/template in the SAME ctx, with nonce = hex(consumed row's id), set here and
+    // never taken from the caller. After withTenant returns, signalAll(tenant, replySubspace)
+    // only if a reply was written. Returns the reply id or null.
 ```
 
 Routes (`TupleHandler`): `POST /v1/tuples/renew` with body
@@ -289,8 +295,9 @@ MCP: `tuple_renew`; `tuple_ack` gains an optional `reply` argument; the
 three name pins and the "Eight MCP tools" comment change together. CLI:
 `nx tuple renew --claim-id --claimant --lease-s`; `nx tuple ack` gains
 `--reply-subspace`, repeatable `--reply-key KEY=VALUE` and
-`--reply-dim KEY=VALUE`, `--reply-body`, `--reply-nonce`, and
-`--reply-ttl-seconds`, parsed by the existing `_parse_kv_pairs`. No JSON
+`--reply-dim KEY=VALUE`, `--reply-body`, and `--reply-ttl-seconds`, parsed
+by the existing `_parse_kv_pairs`; there is no reply nonce flag, because the
+engine sets it. `ReplySpec` on the client carries the same five fields. No JSON
 blob: the CLI has no JSON input today and this keeps parity with `out`
 (research-2 §3). `docs/cli-reference.md` § `nx tuple` gains the verb and the
 flags.
@@ -423,12 +430,15 @@ sequences are one test each.
 
 #### Step 1: Factor `out` onto a caller context, then compose
 
-Move `out`'s body into `writeOut(DSLContext, ...)` with `out` unchanged in
-behaviour (its existing tests pin that). Then write `ackWithReply` as the
-existing `ack` body followed by `writeOut` in one `withTenant`, signalling the
-reply subspace after the call returns. Pin: reply visible and request
-consumed in the same read, or neither; a reader parked on the reply subspace
-wakes after the commit.
+Move `out`'s body into `writeOut(DSLContext, ...)` and `ack`'s body into
+`consumeClaim(DSLContext, ...)`, with `out` and `ack` unchanged in behaviour
+(their existing tests pin that). Then write `ackWithReply` as `consumeClaim`
+followed by `writeOut` in one `withTenant`, signalling the reply subspace
+after the call returns. Pins: reply visible and request consumed in the same
+read, or neither; a reader parked on the reply subspace wakes after the
+commit; and the ordering itself, by a test that acks with a reply whose
+validation fails and asserts the request is still claimed, which can only
+hold if `consumeClaim` ran first and rolled back with the reply.
 
 #### Step 2: `renew`
 
@@ -444,8 +454,11 @@ update by id alone, while the sweep's release arm selects the same rows under
 check the affected-row count, and raise `ClaimNotFound` on zero rows; write the
 claim-log row only after a one-row update. Pin with a test that releases the
 row between the read and the update and asserts `ClaimNotFound` and no log
-row. This changes shipped `ack`/`nack` behaviour in exactly that race and
-nowhere else.
+row. `releaseOrDeadLetter` is shared by `nack` and the sweep's release arm
+(research-4), so the sweep's own call gains the same condition; under its row
+lock the condition is always true there, and a test pins that the sweep's
+counts are unchanged. This changes shipped `ack`/`nack` behaviour in exactly
+that race.
 
 #### Step 4: Sweep and census unaffected
 
@@ -499,6 +512,11 @@ None.
   `UnknownSubspace`, request still claimed, no reply row.
 - **Scenario**: ack with reply retried after lost response — **Verify**: second
   call `ClaimNotFound`, exactly one reply row.
+- **Scenario**: ack with a reply that fails validation — **Verify**: the request
+  is still claimed and no reply row exists, which pins that the claim is
+  consumed before the reply is written and both roll back together.
+- **Scenario**: ack with a reply object that carries a `nonce` key — **Verify**:
+  `SchemaViolation`, request still claimed.
 - **Scenario**: old client against new engine and new client against old engine
   — **Verify**: plain ack unchanged; `/renew` 404 surfaces as a bare
   `httpx.HTTPStatusError`, never a silent no-op.
