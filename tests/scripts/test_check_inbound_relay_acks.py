@@ -14,6 +14,16 @@ import pytest
 import check_inbound_relay_acks as gate
 
 
+@pytest.fixture(autouse=True)
+def _no_live_mailbox_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RDR-205 Phase 6 (nexus-em75s.28): every ``main()`` call now also runs
+    the mailbox tuple-space scan. Default it to "zero subspaces" for every
+    test in this file so the pre-existing T2-only tests stay deterministic
+    and untouched by a real ``nx tuple list`` subprocess call; tests that
+    exercise the mailbox path override this."""
+    monkeypatch.setattr(gate, "fetch_tuple_list_json", lambda prefix: "[]")
+
+
 # ---------------------------------------------------------------------
 # classify_relay_title
 # ---------------------------------------------------------------------
@@ -554,3 +564,286 @@ class TestAnswerTitleMarkerPosition:
         assert not gate.is_answer_title(
             "nexus-to-conexus-prod-cloud-token-answer-2026-06-29"
         )
+
+
+# ---------------------------------------------------------------------
+# RDR-205 Phase 6: mailbox tuple-space unacked requests (nexus-em75s.28)
+# ---------------------------------------------------------------------
+
+
+def _fresh_t2_listing() -> str:
+    """A T2 listing with one recognized-but-fresh relay title, so the
+    T2-memory path contributes zero findings and falls through cleanly to
+    the mailbox scan (mirrors ``test_main_exit_0_clean_when_all_recognized_
+    relays_are_fresh``'s fixture)."""
+    now = dt.datetime.now(dt.timezone.utc)
+    fresh_ts = (now - dt.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return f"[99999] conexus/conexus-to-nexus-REQUEST-fixture-2026-01-01  (-, {fresh_ts})\n"
+
+
+class TestParseTupleSubspaces:
+    def test_extracts_subspace_names(self) -> None:
+        raw = '[{"subspace": "mailbox/nexus-a6", "total": 2}, {"subspace": "mailbox/conexus-58", "total": 1}]'
+        assert gate.parse_tuple_subspaces(raw) == ["mailbox/nexus-a6", "mailbox/conexus-58"]
+
+    def test_empty_raw_is_empty_list(self) -> None:
+        assert gate.parse_tuple_subspaces("") == []
+        assert gate.parse_tuple_subspaces("  ") == []
+
+    def test_empty_json_array_is_empty_list(self) -> None:
+        assert gate.parse_tuple_subspaces("[]") == []
+
+    def test_rows_missing_subspace_key_are_skipped(self) -> None:
+        raw = '[{"total": 2}, {"subspace": "mailbox/a"}]'
+        assert gate.parse_tuple_subspaces(raw) == ["mailbox/a"]
+
+    def test_non_array_top_level_raises(self) -> None:
+        with pytest.raises(ValueError):
+            gate.parse_tuple_subspaces('{"subspace": "mailbox/a"}')
+
+    def test_malformed_json_raises(self) -> None:
+        with pytest.raises(Exception):  # noqa: B017 — json.JSONDecodeError, exercised via main()'s wrap
+            gate.parse_tuple_subspaces("not json at all")
+
+
+class TestParseTupleRows:
+    def test_extracts_row_dicts(self) -> None:
+        raw = '[{"id": "abc", "dims": {"kind": "request"}}]'
+        rows = gate.parse_tuple_rows(raw)
+        assert rows == [{"id": "abc", "dims": {"kind": "request"}}]
+
+    def test_empty_raw_is_empty_list(self) -> None:
+        assert gate.parse_tuple_rows("") == []
+
+    def test_non_array_top_level_raises(self) -> None:
+        with pytest.raises(ValueError):
+            gate.parse_tuple_rows('{"id": "abc"}')
+
+
+class TestFindUnackedRequests:
+    def test_request_with_no_ack_anywhere_is_unacked(self) -> None:
+        rows_by_subspace = {
+            "mailbox/conexus-58": [
+                {"id": "r1", "created_at": "2026-09-10T00:00:00Z",
+                 "dims": {"kind": "request", "from": "nexus-a6", "correlation_id": "c-1"}},
+            ],
+        }
+        findings = gate.find_unacked_requests(rows_by_subspace)
+        assert len(findings) == 1
+        assert findings[0]["subspace"] == "mailbox/conexus-58"
+        assert findings[0]["from"] == "nexus-a6"
+        assert findings[0]["correlation_id"] == "c-1"
+
+    def test_request_with_matching_ack_at_requesters_mailbox_is_acked(self) -> None:
+        rows_by_subspace = {
+            "mailbox/conexus-58": [
+                {"id": "r1", "created_at": "2026-09-10T00:00:00Z",
+                 "dims": {"kind": "request", "from": "nexus-a6", "correlation_id": "c-1"}},
+            ],
+            "mailbox/nexus-a6": [
+                {"id": "a1", "created_at": "2026-09-10T00:05:00Z",
+                 "dims": {"kind": "ack", "from": "conexus-58", "correlation_id": "c-1"}},
+            ],
+        }
+        assert gate.find_unacked_requests(rows_by_subspace) == []
+
+    def test_ack_with_different_correlation_id_does_not_ack(self) -> None:
+        rows_by_subspace = {
+            "mailbox/conexus-58": [
+                {"id": "r1", "created_at": "2026-09-10T00:00:00Z",
+                 "dims": {"kind": "request", "from": "nexus-a6", "correlation_id": "c-1"}},
+            ],
+            "mailbox/nexus-a6": [
+                {"id": "a1", "created_at": "2026-09-10T00:05:00Z",
+                 "dims": {"kind": "ack", "from": "conexus-58", "correlation_id": "c-OTHER"}},
+            ],
+        }
+        findings = gate.find_unacked_requests(rows_by_subspace)
+        assert len(findings) == 1
+
+    def test_ack_at_the_wrong_mailbox_does_not_ack(self) -> None:
+        """An ack row must live at mailbox/<requester>, not mailbox/<peer> —
+        the same subspace the request itself was read from."""
+        rows_by_subspace = {
+            "mailbox/conexus-58": [
+                {"id": "r1", "created_at": "2026-09-10T00:00:00Z",
+                 "dims": {"kind": "request", "from": "nexus-a6", "correlation_id": "c-1"}},
+                {"id": "a1", "created_at": "2026-09-10T00:05:00Z",
+                 "dims": {"kind": "ack", "from": "conexus-58", "correlation_id": "c-1"}},
+            ],
+        }
+        findings = gate.find_unacked_requests(rows_by_subspace)
+        assert len(findings) == 1
+
+    def test_request_missing_correlation_id_is_unverifiable_and_flagged(self) -> None:
+        """No correlation_id means the ack can never be matched — reported
+        unconditionally, the safe over-inclusive direction."""
+        rows_by_subspace = {
+            "mailbox/conexus-58": [
+                {"id": "r1", "created_at": "2026-09-10T00:00:00Z",
+                 "dims": {"kind": "request", "from": "nexus-a6"}},
+            ],
+            "mailbox/nexus-a6": [
+                {"id": "a1", "created_at": "2026-09-10T00:05:00Z",
+                 "dims": {"kind": "ack", "from": "conexus-58"}},
+            ],
+        }
+        findings = gate.find_unacked_requests(rows_by_subspace)
+        assert len(findings) == 1
+
+    def test_request_missing_from_is_unverifiable_and_flagged(self) -> None:
+        rows_by_subspace = {
+            "mailbox/conexus-58": [
+                {"id": "r1", "created_at": "2026-09-10T00:00:00Z",
+                 "dims": {"kind": "request", "correlation_id": "c-1"}},
+            ],
+        }
+        findings = gate.find_unacked_requests(rows_by_subspace)
+        assert len(findings) == 1
+
+    def test_non_request_rows_are_ignored(self) -> None:
+        rows_by_subspace = {
+            "mailbox/nexus-a6": [
+                {"id": "d1", "created_at": "2026-09-10T00:00:00Z",
+                 "dims": {"kind": "directive"}},
+            ],
+        }
+        assert gate.find_unacked_requests(rows_by_subspace) == []
+
+    def test_empty_mailbox_space_is_clean(self) -> None:
+        assert gate.find_unacked_requests({}) == []
+
+
+class TestFormatUnackedRequest:
+    def test_includes_the_pairing_fields(self) -> None:
+        finding = {
+            "subspace": "mailbox/conexus-58", "id": "r1", "from": "nexus-a6",
+            "correlation_id": "c-1", "created_at": "2026-09-10T00:00:00Z",
+        }
+        rendered = gate.format_unacked_request(finding)
+        assert "mailbox/conexus-58" in rendered
+        assert "nexus-a6" in rendered
+        assert "c-1" in rendered
+        assert rendered.startswith("MAILBOX-UNACKED-REQUEST:")
+
+
+class TestScanUnackedMailboxRequests:
+    def test_no_subspaces_is_clean(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(gate, "fetch_tuple_list_json", lambda prefix: "[]")
+        assert gate.scan_unacked_mailbox_requests() == []
+
+    def test_reads_rows_from_every_listed_subspace(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            gate, "fetch_tuple_list_json",
+            lambda prefix: '[{"subspace": "mailbox/conexus-58"}, {"subspace": "mailbox/nexus-a6"}]',
+        )
+
+        def _rows(subspace: str, limit: int) -> str:
+            if subspace == "mailbox/conexus-58":
+                return '[{"id": "r1", "created_at": "t", "dims": {"kind": "request", "from": "nexus-a6", "correlation_id": "c-1"}}]'
+            return "[]"
+
+        monkeypatch.setattr(gate, "fetch_tuple_rows_json", _rows)
+        findings = gate.scan_unacked_mailbox_requests()
+        assert len(findings) == 1
+        assert findings[0]["subspace"] == "mailbox/conexus-58"
+
+    def test_list_failure_raises_sweep_unrunnable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _boom(prefix: str) -> str:
+            raise gate.SweepUnrunnableError("nx not found on PATH")
+
+        monkeypatch.setattr(gate, "fetch_tuple_list_json", _boom)
+        with pytest.raises(gate.SweepUnrunnableError):
+            gate.scan_unacked_mailbox_requests()
+
+    def test_malformed_list_json_raises_sweep_unrunnable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(gate, "fetch_tuple_list_json", lambda prefix: "not json")
+        with pytest.raises(gate.SweepUnrunnableError):
+            gate.scan_unacked_mailbox_requests()
+
+    def test_malformed_rows_json_raises_sweep_unrunnable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            gate, "fetch_tuple_list_json", lambda prefix: '[{"subspace": "mailbox/a"}]',
+        )
+        monkeypatch.setattr(gate, "fetch_tuple_rows_json", lambda subspace, limit: "not json")
+        with pytest.raises(gate.SweepUnrunnableError):
+            gate.scan_unacked_mailbox_requests()
+
+
+class TestMainMailboxIntegration:
+    """``main()`` end-to-end with the T2 path clean (fresh relay, 0 stale)
+    so only the mailbox path's contribution to the exit code is exercised."""
+
+    def test_main_exit_1_on_unacked_mailbox_request(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(gate, "fetch_memory_listing", lambda project: _fresh_t2_listing())
+        monkeypatch.setattr(
+            gate, "fetch_tuple_list_json", lambda prefix: '[{"subspace": "mailbox/conexus-58"}]',
+        )
+        monkeypatch.setattr(
+            gate, "fetch_tuple_rows_json",
+            lambda subspace, limit: (
+                '[{"id": "r1", "created_at": "t", '
+                '"dims": {"kind": "request", "from": "nexus-a6", "correlation_id": "c-1"}}]'
+            ),
+        )
+        assert gate.main([]) == 1
+
+    def test_main_exit_0_when_mailbox_request_is_acked(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(gate, "fetch_memory_listing", lambda project: _fresh_t2_listing())
+        monkeypatch.setattr(
+            gate, "fetch_tuple_list_json",
+            lambda prefix: '[{"subspace": "mailbox/conexus-58"}, {"subspace": "mailbox/nexus-a6"}]',
+        )
+
+        def _rows(subspace: str, limit: int) -> str:
+            if subspace == "mailbox/conexus-58":
+                return (
+                    '[{"id": "r1", "created_at": "t", '
+                    '"dims": {"kind": "request", "from": "nexus-a6", "correlation_id": "c-1"}}]'
+                )
+            return (
+                '[{"id": "a1", "created_at": "t2", '
+                '"dims": {"kind": "ack", "from": "conexus-58", "correlation_id": "c-1"}}]'
+            )
+
+        monkeypatch.setattr(gate, "fetch_tuple_rows_json", _rows)
+        assert gate.main([]) == 0
+
+    def test_main_exit_0_when_mailbox_space_is_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(gate, "fetch_memory_listing", lambda project: _fresh_t2_listing())
+        monkeypatch.setattr(gate, "fetch_tuple_list_json", lambda prefix: "[]")
+        assert gate.main([]) == 0
+
+    def test_main_exit_2_when_mailbox_scan_unrunnable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(gate, "fetch_memory_listing", lambda project: _fresh_t2_listing())
+
+        def _boom(prefix: str) -> str:
+            raise gate.SweepUnrunnableError("nx tuple not reachable")
+
+        monkeypatch.setattr(gate, "fetch_tuple_list_json", _boom)
+        assert gate.main([]) == 2
+
+    def test_main_combines_t2_and_mailbox_findings(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Both channels carry an unacked finding at once — a T2-clean
+        mailbox check must not mask a T2 finding, and vice versa."""
+        now = dt.datetime.now(dt.timezone.utc)
+        stale_ts = (now - dt.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        listing = (
+            f"[20682] conexus/conexus-to-nexus-REQUEST-nx-mcp-self-minting-client-gap-2026-07-12  (-, {stale_ts})\n"
+        )
+        monkeypatch.setattr(gate, "fetch_memory_listing", lambda project: listing)
+        monkeypatch.setattr(gate, "bd_desc_search", lambda probe: False)
+        monkeypatch.setattr(gate, "bd_desc_id_search", lambda probe: False)
+        monkeypatch.setattr(gate, "bd_desc_id_ack_beads", lambda rid: set())
+        monkeypatch.setattr(gate, "bd_title_search", lambda probe: False)
+        monkeypatch.setattr(
+            gate, "fetch_tuple_list_json", lambda prefix: '[{"subspace": "mailbox/conexus-58"}]',
+        )
+        monkeypatch.setattr(
+            gate, "fetch_tuple_rows_json",
+            lambda subspace, limit: (
+                '[{"id": "r1", "created_at": "t", '
+                '"dims": {"kind": "request", "from": "nexus-a6", "correlation_id": "c-1"}}]'
+            ),
+        )
+        assert gate.main(["--max-age-days", "7"]) == 1
