@@ -58,3 +58,16 @@ mechanize, it matters enough to ship.
   occurrences per session) now projects nothing, silently, instead of
   logging an identical non-actionable line every time.
   bead: nexus-aginu
+
+- `conexus/hooks/scripts/tuple_ledger_project.py` `conexus/hooks/scripts/subagent-start-tuple-async.sh`:
+  nexus-em75s.42 — projector residuals from the Phase 2 review. The POST
+  now runs through a no-redirect, no-proxy ``urllib`` opener (an internal
+  fixed engine URL must never follow a 3xx or route through an ambient
+  ``http_proxy``/``https_proxy``) and the whole call is bounded to
+  ``_POST_TIMEOUT_S`` wall-clock time via a joined daemon thread, not just
+  each individual socket operation. ``subagent-start-tuple-async.sh``'s
+  stale "curl" wording is corrected (the POST has used stdlib ``urllib``
+  since nexus-em75s.12). A new CA-4 pin (a listening-but-never-accepting
+  socket) exercises the wrapper's slow path for the first time — the
+  existing three latency tests only ever hit an instantly-refused port.
+  bead: nexus-em75s.42

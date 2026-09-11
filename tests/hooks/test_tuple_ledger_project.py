@@ -600,7 +600,7 @@ def test_engine_down_is_logged_and_exits_zero_fast(tmp_path: Path) -> None:
     elapsed = time.monotonic() - start
 
     assert proc.returncode == 0, proc.stderr
-    assert elapsed < 10.0, f"engine-down path took {elapsed:.2f}s -- should be bounded by the curl timeout"
+    assert elapsed < 10.0, f"engine-down path took {elapsed:.2f}s -- should be bounded by the transport timeout"
     log = _log_path(tmp_path / "state")
     assert "SKIP kind=start" in log.read_text()
 
@@ -663,6 +663,116 @@ def test_start_kind_with_no_agent_id_still_logs(tmp_path: Path, mock_engine) -> 
     assert engine.requests == []
     log = _log_path(tmp_path / "state")
     assert "SKIP kind=start" in log.read_text()
+
+
+def test_post_never_follows_a_redirect(tmp_path: Path, mock_engine) -> None:
+    """nexus-em75s.42 review finding: the engine URL is fixed and
+    internal, so a redirect response must never be followed -- following
+    one would resend the Authorization header to whatever host the
+    redirect names. The attacker/second server must see zero requests;
+    the 3xx itself is logged as a plain HTTP status, not silently
+    swallowed."""
+    import importlib.util
+    from http.server import BaseHTTPRequestHandler
+
+    attacker = mock_engine(status=200)
+
+    spec = importlib.util.spec_from_file_location("tuple_ledger_project_redirect", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class _Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a: object) -> None:
+            pass
+
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(length) if length else b""
+            self.send_response(302)
+            self.send_header("Location", attacker.base_url + "/v1/tuples/out")
+            self.end_headers()
+
+    from http.server import ThreadingHTTPServer
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    import threading
+
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address[:2]
+        with pytest.raises(module._Skip, match=r"engine returned HTTP 302"):
+            module._post_via_urllib(
+                f"http://{host}:{port}", "tok",
+                {"subspace": "ledger/x", "keys": {"agent_id": "a", "kind": "start"}, "dims": {}},
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert attacker.requests == [], "redirect must never be followed"
+
+
+def test_post_ignores_ambient_proxy_env(tmp_path: Path, mock_engine, monkeypatch) -> None:
+    """nexus-em75s.42 review finding: a fixed internal engine URL must
+    never route through an ambient http_proxy/https_proxy -- point the
+    proxy env at a port nothing listens on and confirm the POST still
+    reaches the real engine directly."""
+    import importlib.util
+    import socket
+
+    dead_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    dead_sock.bind(("127.0.0.1", 0))
+    dead_port = dead_sock.getsockname()[1]
+    dead_sock.close()
+
+    monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{dead_port}")
+    monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{dead_port}")
+
+    engine = mock_engine(status=200)
+    spec = importlib.util.spec_from_file_location("tuple_ledger_project_proxy", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    module._post_via_urllib(
+        engine.base_url, "tok",
+        {"subspace": "ledger/x", "keys": {"agent_id": "a", "kind": "start"}, "dims": {}},
+    )
+    assert len(engine.requests) == 1
+
+
+def test_post_bounds_the_whole_call_against_a_listening_but_never_accepting_server(
+    tmp_path: Path,
+) -> None:
+    """nexus-em75s.42 review finding: urlopen's own ``timeout`` bounds
+    each individual socket operation, not the whole call -- a server
+    that completes the TCP handshake (listen(), never accept()) could
+    otherwise keep the call alive past any single recv's timeout. The
+    whole POST must still return within roughly _POST_TIMEOUT_S."""
+    import importlib.util
+    import socket
+    import time as _time
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+    host, port = sock.getsockname()[:2]
+
+    spec = importlib.util.spec_from_file_location("tuple_ledger_project_deadline", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        start = _time.monotonic()
+        with pytest.raises(module._Skip):
+            module._post_via_urllib(
+                f"http://{host}:{port}", "tok",
+                {"subspace": "ledger/x", "keys": {"agent_id": "a", "kind": "start"}, "dims": {}},
+            )
+        elapsed = _time.monotonic() - start
+        assert elapsed < module._POST_TIMEOUT_S + 2.0, (
+            f"whole-call deadline not enforced: took {elapsed:.2f}s"
+        )
+    finally:
+        sock.close()
 
 
 def test_never_mints_never_imports_nexus_package() -> None:

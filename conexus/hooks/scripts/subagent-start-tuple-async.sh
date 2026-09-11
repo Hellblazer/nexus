@@ -6,16 +6,18 @@
 # inherits a blocking hook's fds holds the whole dispatch, CA 4).
 #
 # INERT-SAFE BY CONSTRUCTION, not by trusting `async: true`. The actual
-# work (endpoint/lease resolution + one curl POST) runs in a detached
-# background subshell whose stdin/stdout/stderr are ALL redirected to
-# /dev/null before backgrounding; this script then exits immediately.
-# Research 5 (RDR-205, Claude Code 2.1.266) measured that exact shape at
-# 18ms regardless of whether the harness honors `async: true` on this
-# event — so even an installed harness that silently ignored the
-# `async` key on a hooks.json entry (treating it as an ordinary blocking
-# hook) would still see this script's own fds close in tens of
-# milliseconds, never the seconds a curl round trip against a
-# down/rate-limited engine could otherwise cost.
+# work (endpoint/lease resolution + one urllib POST — nexus-em75s.12
+# review fix replaced the original curl invocation, which put the
+# bearer in that process's argv) runs in a detached background subshell
+# whose stdin/stdout/stderr are ALL redirected to /dev/null before
+# backgrounding; this script then exits immediately. Research 5
+# (RDR-205, Claude Code 2.1.266) measured that exact shape at 18ms
+# regardless of whether the harness honors `async: true` on this event
+# — so even an installed harness that silently ignored the `async` key
+# on a hooks.json entry (treating it as an ordinary blocking hook)
+# would still see this script's own fds close in tens of milliseconds,
+# never the seconds a POST round trip against a down/rate-limited
+# engine could otherwise cost.
 #
 # NO HOOK MINTS ANYTHING: all resolution/posting logic lives in the
 # stdlib-only sibling tuple_ledger_project.py (never nexus.db.data_token,

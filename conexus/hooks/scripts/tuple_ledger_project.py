@@ -78,7 +78,10 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -96,7 +99,11 @@ import _endpoint_resolve as _ep  # noqa: E402 -- must follow the sys.path insert
 #: Bound on the whole POST round trip -- research 5 measured ~10ms for a
 #: healthy engine; this is a ceiling for a degraded/rate-limiting one, not
 #: a target. The wrapper has already detached, so this bound only keeps a
-#: hung engine from leaving an orphaned connection open forever.
+#: hung engine from leaving an orphaned connection open forever. Enforced
+#: as a bound on the WHOLE call (nexus-em75s.42: urlopen's own `timeout`
+#: is a PER-SOCKET-OP timeout, reset by every individual connect/recv --
+#: a server that trickles bytes could otherwise keep the call alive far
+#: past this many seconds), not just passed to urlopen.
 _POST_TIMEOUT_S = 5
 
 _ROUTE = "/v1/tuples/out"
@@ -199,6 +206,30 @@ def _extract_fields(raw_payload: str) -> tuple[str, str, str]:
     return session_id, agent_id, agent_type
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuses to follow any 3xx (nexus-em75s.42 review finding): the
+    engine URL is fixed and internal, so a redirect response is never a
+    legitimate "moved" answer -- following one would resend the
+    Authorization header to whatever host the redirect names. The 3xx
+    itself still reaches the caller as ``exc.code`` via the normal
+    ``HTTPError`` path (``_do_post`` below), so it is logged as
+    ``engine returned HTTP 3xx``, never silently swallowed.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ANN201, N802
+        raise urllib.error.HTTPError(newurl, code, "redirect refused", headers, fp)
+
+
+def _build_opener() -> urllib.request.OpenerDirector:
+    """A fresh no-proxy, no-redirect opener (nexus-em75s.42 review
+    finding): an explicit empty :class:`~urllib.request.ProxyHandler`
+    overrides ``build_opener``'s default of reading ``http_proxy``/
+    ``https_proxy`` from the environment -- this is a fixed internal
+    engine URL, never a request that should route through an ambient
+    proxy setting."""
+    return urllib.request.build_opener(_NoRedirectHandler(), urllib.request.ProxyHandler({}))
+
+
 def _post_via_urllib(base_url: str, token: str, body: dict[str, Any]) -> None:
     """POST *body* to ``{base_url}/v1/tuples/out`` via stdlib
     ``urllib.request`` -- never via a subprocess argv (nexus-em75s.12
@@ -208,10 +239,17 @@ def _post_via_urllib(base_url: str, token: str, body: dict[str, Any]) -> None:
     Same repo precedent as ``routing/_lib.py``'s routing-event POST and
     ``t2_prefix_scan.py``'s ``_http_get_json``. Raises :class:`_Skip`
     naming the failure; never raises anything else.
-    """
-    import urllib.error  # noqa: PLC0415 — stdlib, only needed on this path
-    import urllib.request  # noqa: PLC0415 — stdlib, only needed on this path
 
+    Never follows a redirect and never honours an ambient proxy env var
+    (:func:`_build_opener`, nexus-em75s.42). Bounds the WHOLE call to
+    ``_POST_TIMEOUT_S`` wall-clock time, not just each individual socket
+    operation (nexus-em75s.42: ``urlopen``'s own ``timeout`` resets on
+    every connect/recv, so a server that trickles bytes could otherwise
+    keep the call alive indefinitely) -- the request runs on a daemon
+    thread and the caller joins it with a deadline; a thread still alive
+    past the deadline is treated as a transport failure and abandoned
+    (daemon=True means it can never block process exit).
+    """
     payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
     url = f"{base_url}{_ROUTE}"
     req = urllib.request.Request(
@@ -223,13 +261,31 @@ def _post_via_urllib(base_url: str, token: str, body: dict[str, Any]) -> None:
             "Content-Type": "application/json",
         },
     )
-    try:
-        with urllib.request.urlopen(req, timeout=_POST_TIMEOUT_S) as resp:  # noqa: S310 — fixed internal engine URL, not user input
-            status = resp.status
-    except urllib.error.HTTPError as exc:
-        status = exc.code
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise _Skip(f"transport failure posting to {url}: {exc}") from exc
+    outcome: dict[str, Any] = {}
+
+    def _do_post() -> None:
+        try:
+            opener = _build_opener()
+            with opener.open(req, timeout=_POST_TIMEOUT_S) as resp:  # noqa: S310 — fixed internal engine URL, not user input
+                outcome["status"] = resp.status
+        except urllib.error.HTTPError as exc:
+            outcome["status"] = exc.code
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_do_post, daemon=True)
+    thread.start()
+    thread.join(timeout=_POST_TIMEOUT_S)
+    if thread.is_alive():
+        raise _Skip(
+            f"transport failure posting to {url}: exceeded the {_POST_TIMEOUT_S}s "
+            "whole-call deadline"
+        )
+    if "error" in outcome:
+        raise _Skip(f"transport failure posting to {url}: {outcome['error']}") from outcome["error"]
+    status = outcome.get("status")
+    if status is None:
+        raise _Skip(f"transport failure posting to {url}: no response received")
     if not (200 <= status < 300):
         raise _Skip(f"engine returned HTTP {status} posting to {url}")
 
