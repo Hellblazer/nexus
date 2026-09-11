@@ -21,6 +21,7 @@ Start on the site, then find your section below by what you're trying to do.
 - **Fix empty search results after upgrading** — [Getting Started § Troubleshooting](getting-started.md#troubleshooting) (`nx search` returns no results); if you upgraded straight from a pre-PG install, see [Upgrading an existing install](getting-started.md#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) for the two-hop path
 - **Check my install's health** — `nx doctor`, see [CLI Reference — nx doctor](cli-reference.md#nx-doctor)
 - **Upgrade an existing install** — [Getting Started § Upgrading an existing install](getting-started.md#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) — [`nx self install`](cli-reference.md#nx-self-install) + `nx upgrade`; installs still on ChromaDB (5.x, or 6.x that never migrated) need a two-hop through `conexus==6.18.1` first, since the Chroma-era migration machinery retired at RDR-155 P4b
+- **Coordinate agents or sessions** (a mailbox, a work queue, a dispatch ledger) — [Tuple Space](tuple-space.md) — `nx tuple`, the `tuple_*` MCP tools, atomic claim under a lease
 
 ## Operator reference
 
@@ -38,7 +39,7 @@ Start on the site, then find your section below by what you're trying to do.
 - [Architecture](architecture.md) — Reference architecture, module map, design decisions
 - [Benchmarking](benchmarking.md) — `scripts/bench/` harnesses: retrieval-quality scoring (RDR-090) and the operator quality proxy (RDR-196 .p2a)
 - [Wire Contract Pending](wire-contract-pending.md) — Ledger of engine/client wire-contract pairings deployed ahead of their client half (nexus-1vogq tripwire)
-- [Tuple Space](tuple-space.md) — design reference for the RDR-205 coordination substrate (not yet shipped); [walkthroughs](tuple-space-walkthroughs.md)
+- [Tuple Space](tuple-space.md) — reference for the RDR-205 coordination substrate: engine and client (`nx tuple`, the `tuple_*` MCP tools) are both on `develop`, and the route shipped on `engine-service-v0.1.114`; a fresh local install gets it once the paired client release bumps its pinned engine floor; [walkthroughs](tuple-space-walkthroughs.md)
 - [`testing/`](testing/) — [6.0.0 plugin surface coverage matrix](testing/6.0.0-plugin-surface-coverage-matrix.md)
 - [`tutorial/`](tutorial/) — **In progress, not on `main`.** The tutorial-recording pipeline lives on the `wip/tutorial` branch; this directory on `main` is a placeholder.
 
