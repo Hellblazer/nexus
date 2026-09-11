@@ -32,4 +32,10 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.41.1)
 
-(none)
+- `conexus/skills/phase-review-gate/SKILL.md`: nexus-w5gma — the
+  Limitations section now names all three phase-structure layouts the
+  gate's parser recognises, including the new `### Phase N` / `#### Step
+  N` headings under `## Implementation Plan` (the RDR template's own
+  placement, RDR-205/RDR-204's actual shape), which the prior text did
+  not mention at all.
+  bead: nexus-w5gma

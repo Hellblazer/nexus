@@ -109,16 +109,36 @@ _PREAMBLE_EXCLUDED: frozenset[str] = frozenset({
 
 
 def _preamble_resolve_repo() -> tuple[str, str]:
-    """Return (repo_root, repo_name) by probing git; fall back to cwd."""
+    """Return (repo_root, repo_name) by probing git; fall back to cwd.
+
+    ``repo_root`` is the current worktree's own toplevel (correct: RDR
+    files, config, etc. are read from here). ``repo_name`` is resolved via
+    the git COMMON dir, not the toplevel (nexus-w5gma) — `git rev-parse
+    --show-toplevel` returns the linked WORKTREE's own root when run from
+    one, so naively taking its basename prints the worktree directory's
+    name (e.g. an agent-dispatch worktree name) as the repo name instead
+    of the actual repo. The common dir (``<repo>/.git``) is shared by every
+    worktree and the primary checkout alike; its parent is the real repo
+    root in both cases.
+    """
     try:
         repo_root = subprocess.check_output(
             ["git", "rev-parse", "--show-toplevel"],
             stderr=subprocess.DEVNULL, text=True,
         ).strip()
-        repo_name = Path(repo_root).name
     except Exception:  # noqa: BLE001 — best-effort cwd derivation; falls back to working dir on failure
         repo_root = str(Path.cwd())
-        repo_name = Path(repo_root).name
+
+    repo_name = Path(repo_root).name
+    try:
+        common_dir = subprocess.check_output(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        if common_dir:
+            repo_name = Path(common_dir).resolve().parent.name
+    except Exception:  # noqa: BLE001 — repo_name falls back to repo_root's basename (worktree name) on failure
+        pass
     return repo_root, repo_name
 
 
@@ -4622,6 +4642,145 @@ def _prg_parse_phase_block_items(
     return items
 
 
+def _prg_extract_implementation_plan_section(text: str) -> str:
+    """Extract the §Implementation Plan section verbatim (nexus-w5gma).
+
+    Independent of :func:`_prg_extract_approach_section`, which returns the
+    EARLIEST Approach/Implementation Plan/Phases/Plan heading in the
+    document. The RDR template (``conexus/resources/rdr/TEMPLATE.md``)
+    places a real §Approach ahead of §Implementation Plan, so an RDR whose
+    §Approach is prose (RDR-205, RDR-204) never reaches its phase/step
+    structure through that earliest-match extraction — it lives in a later,
+    separate section this function reaches directly. Returns ``""`` when no
+    ``Implementation Plan`` heading exists.
+    """
+    heading = re.search(
+        r"\n(#{2,4})[ \t]+Implementation Plan\b[^\n]*\r?\n",
+        text,
+        re.IGNORECASE,
+    )
+    if not heading:
+        return ""
+    start = heading.end()
+    heading_depth = len(heading.group(1))
+    end_pat = r"\n#{1," + str(heading_depth) + r"} "
+    nxt = re.search(end_pat, text[start:])
+    return text[start: start + nxt.start()] if nxt else text[start:]
+
+
+_PRG_PHASE_HEADING_RE = re.compile(
+    r"^(#{2,4})\s+Phase\s+([0-9]+(?:\.[0-9]+)?)\b\s*:?\s*(.*)$",
+    re.IGNORECASE,
+)
+_PRG_PLAIN_ITEM_RE = re.compile(r"^(\d+)\.\s+(.*)")
+
+
+def _prg_parse_plan_phase_items(
+    plan_text: str, phase: str | None = None,
+) -> list[tuple[int, str, str]]:
+    """Parse §Implementation Plan ``### Phase N: title`` heading structure
+    (nexus-w5gma) — the RDR template's own placement
+    (``conexus/resources/rdr/TEMPLATE.md`` § Implementation Plan). Neither
+    :func:`_prg_parse_approach_items` (top-level numbered bold items) nor
+    :func:`_prg_parse_phase_block_items` (``**Phase N: title**`` bold
+    blocks) recognise this shape — both expect the phase structure at the
+    TOP of the section they're handed, not nested under its own
+    ``### Phase N`` headings deeper in the document (RDR-205's case).
+
+    Each phase block is scanned for, in priority order:
+
+    1. ``####`` (one level deeper than the phase heading) sub-headings —
+       ``#### Step N: title`` in the template, but any heading text is
+       accepted as a step label (RDR-205: plain prose per step, no
+       further nested structure).
+    2. A plain numbered list (``1. text``, no bold label required) directly
+       in the phase body — RDR-204's shape.
+    3. Neither: the phase has no internal structure to enumerate (a prose
+       paragraph, e.g. RDR-205 Phase 4-6). The phase itself is still one
+       cross-walkable item — a real phase with real content is never
+       silently zero items (nexus-moht0 non-vacuity).
+
+    When *phase* is given, only the matching phase block is enumerated
+    (Items 1..K within that phase). When *phase* is ``None``, every phase
+    block is enumerated in document order, item numbers continuing
+    sequentially, each label prefixed with its phase.
+
+    Returns ``[]`` when *plan_text* contains no ``### Phase N`` heading at
+    all — "not phase-structured". (Also ``[]`` when phase headings exist
+    but none matches the requested *phase*; the caller distinguishes these
+    the same way it already does for :func:`_prg_parse_phase_block_items`.)
+    """
+    want_phase: str | None = None
+    if phase:
+        pm = re.search(r"(\d+(?:\.\d+)?)", phase)
+        want_phase = pm.group(1) if pm else phase.strip()
+
+    lines = plan_text.splitlines()
+    all_matches = [
+        (k, m) for k, line in enumerate(lines)
+        if (m := _PRG_PHASE_HEADING_RE.match(line))
+    ]
+    if not all_matches:
+        return []
+    # Only headings at the SAME depth as the first phase heading found —
+    # a coincidental deeper "#### Phase ..." heading inside a phase body
+    # is not a sibling phase.
+    phase_depth = len(all_matches[0][1].group(1))
+    phase_idx = [(k, m) for k, m in all_matches if len(m.group(1)) == phase_depth]
+
+    blocks: list[tuple[str, str, int, int]] = []
+    for i, (k, m) in enumerate(phase_idx):
+        body_start = k + 1
+        body_end = phase_idx[i + 1][0] if i + 1 < len(phase_idx) else len(lines)
+        blocks.append((m.group(2), m.group(3).strip(), body_start, body_end))
+
+    selected = [b for b in blocks if b[0] == want_phase] if want_phase else blocks
+
+    sub_heading_re = re.compile(r"^(#{" + str(phase_depth + 1) + r",6})\s+(.*)$")
+    items: list[tuple[int, str, str]] = []
+    n = 0
+    for num, title, body_start, body_end in selected:
+        body_lines = lines[body_start:body_end]
+        sub_idx = [
+            (k, mm) for k, line in enumerate(body_lines)
+            if (mm := sub_heading_re.match(line)) and len(mm.group(1)) == phase_depth + 1
+        ]
+        if sub_idx:
+            for j, (k, mm) in enumerate(sub_idx):
+                n += 1
+                sub_start = k + 1
+                sub_end = sub_idx[j + 1][0] if j + 1 < len(sub_idx) else len(body_lines)
+                summary = " ".join(
+                    line.strip() for line in body_lines[sub_start:sub_end] if line.strip()
+                )[:400]
+                items.append((n, f"Phase {num}: {mm.group(2).strip()}", summary))
+            continue
+
+        item_idx = [
+            (k, mm) for k, line in enumerate(body_lines)
+            if (mm := _PRG_PLAIN_ITEM_RE.match(line))
+        ]
+        if item_idx:
+            for j, (k, mm) in enumerate(item_idx):
+                n += 1
+                item_start = k
+                item_end = item_idx[j + 1][0] if j + 1 < len(item_idx) else len(body_lines)
+                text_lines = [mm.group(2).strip()] if mm.group(2).strip() else []
+                for line in body_lines[item_start + 1: item_end]:
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith("-"):
+                        text_lines.append(stripped)
+                summary = " ".join(text_lines).strip()
+                label = summary.split(".")[0][:60].strip() or f"Item {mm.group(1)}"
+                items.append((n, f"Phase {num}: {label}", summary))
+            continue
+
+        n += 1
+        summary = " ".join(line.strip() for line in body_lines if line.strip())[:400]
+        items.append((n, f"Phase {num}: {title}" if title else f"Phase {num}", summary))
+    return items
+
+
 def _prg_parse_evidence(evidence_str: str) -> dict[int, str]:
     """Parse 'Item1=val1,Item2=val2,...' -> {1: 'val1', 2: 'val2'}."""
     out: dict[int, str] = {}
@@ -4745,13 +4904,26 @@ def preamble_phase_review_gate(args: tuple[str, ...]) -> None:
         # block; enumerates that block's bullets as Items 1..K.
         items = _prg_parse_phase_block_items(approach_text, phase=phase_arg)
     if not items:
+        # nexus-w5gma: fall back to §Implementation Plan phase/step heading
+        # structure — the RDR template's own placement (RDR-205, RDR-204).
+        # Independent extraction: the template puts a real §Approach ahead
+        # of §Implementation Plan, so the earliest-match extraction above
+        # (which found §Approach first) never reaches the phase headings.
+        plan_text = _prg_extract_implementation_plan_section(text)
+        if plan_text.strip():
+            items = _prg_parse_plan_phase_items(plan_text, phase=phase_arg)
+    if not items:
         print("> **ERROR**: §Approach section found but no items parsed.")
-        print("> Expected either `N. **Label**: description` numbered items")
-        print("> or `**Phase N: title**` blocks followed by `- bullet` lists.")
+        print("> Expected `N. **Label**: description` numbered items,")
+        print("> `**Phase N: title**` blocks followed by `- bullet` lists,")
+        print(
+            "> or `### Phase N: title` / `#### Step N: title` headings "
+            "under `## Implementation Plan`."
+        )
         if phase_arg:
             print(
-                f"> (Searched for phase-block matching `--phase {phase_arg}`; "
-                "check the phase number exists in §Approach.)"
+                f"> (Searched for phase {phase_arg} under §Approach and "
+                "§Implementation Plan; check the phase number exists in one of them.)"
             )
         return
 
