@@ -32,4 +32,3 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.41.0)
 
-(none)
