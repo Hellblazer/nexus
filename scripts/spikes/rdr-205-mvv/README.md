@@ -204,3 +204,86 @@ Exit code is 0 iff every verification held. The JSON summary at
 not committed) carries the ten agent ids/types, the parked-`rd`
 timing, the space and TSV census raw output, and the row-for-row
 agreement table.
+
+# RDR-205 Phase 3 Step 3, edge half — MVV run 3 (`run3_edge.py`)
+
+Bead: `nexus-em75s.33`, split out of `nexus-em75s.16` (MVV run 2) at
+audit round 1 so Phase 4's close does not wait on an engine tag. This
+is the SIXTH MVV metric — wake latency for a blocking `in_()` through
+the PUBLIC EDGE (`https://api.conexus-nexus.com`), against the
+DEPLOYED engine, rather than the developer engine run 2 boots itself.
+
+## What this is
+
+A client-only driver — it boots nothing and touches no `service/`
+source. Two real OS processes, never threads:
+
+- **parker**: for each cycle, writes a local coordination marker
+  recording park-start, then calls `in_()` in a loop (each call capped
+  at the engine's 25 s park limit, CA 3) until it claims the sender's
+  tuple, records wake-time and how many `in_()` calls it took, `ack`s
+  the claim.
+- **sender**: for each cycle, waits for the parker's marker (a genuine
+  park-then-wake, not a poll-then-see — the marker exists before the
+  parker's blocking call could plausibly have returned), sleeps
+  `--delay-s`, then `out()`s the probe tuple and records the confirmed
+  send time.
+
+Both use a dedicated `mailbox/<address>` subspace (never the ledger or
+any real agent mailbox) — `keys={"to": address}`,
+`dims={"from": "mvv-run3", "kind": "probe", "correlation_id": <cycle>}`,
+following the mailbox template's own shape
+(`tests/db/test_http_tuple_store.py`'s convention). Every probe tuple
+written is taken (`in_` + `ack`) before the next cycle starts, so the
+space ends with the same zero available/claimed rows it started with.
+
+Every write goes through a real production write against the
+operator's live store, so `NX_ALLOW_PROD_WRITE` must carry an explicit
+reason (`nexus.db.service_endpoint.guard_production_write`,
+nexus-a2qhz) — the module sets a default reason naming the dispatching
+bead, but never overrides an explicit caller-set value.
+
+## Running it
+
+A 10-minute wall-clock cap on the tool driving this script (not a
+limit of the script itself) means a 30-cycle, 28 s-delay group
+(~850 s) cannot run in one `measure` invocation — split it into
+batches via `--start-cycle`/`--n` under the SAME `--label`; `report`
+aggregates by label, not by invocation.
+
+```bash
+RUN_ID="mvv-run3-$(date +%s)"
+
+# Two groups well under the engine's 25s park cap:
+uv run python scripts/spikes/rdr-205-mvv/run3_edge.py measure \
+    --run-id "$RUN_ID" --label d0_5 --delay-s 0.5 --n 30
+uv run python scripts/spikes/rdr-205-mvv/run3_edge.py measure \
+    --run-id "$RUN_ID" --label d3 --delay-s 3 --n 30
+
+# Past the cap — proves the client loops rather than blocking on one
+# oversized request. Split into batches to stay under a 10-minute cap.
+uv run python scripts/spikes/rdr-205-mvv/run3_edge.py measure \
+    --run-id "$RUN_ID" --label d28 --delay-s 28 --n 15 --start-cycle 0
+uv run python scripts/spikes/rdr-205-mvv/run3_edge.py measure \
+    --run-id "$RUN_ID" --label d28 --delay-s 28 --n 15 --start-cycle 15
+
+uv run python scripts/spikes/rdr-205-mvv/run3_edge.py report
+```
+
+`report` reads `--results-file` (default
+`scripts/spikes/rdr-205-mvv/last-run3-results.jsonl`, not committed)
+and prints per-label p50/p95 of wake latency (`wake - send`) and
+end-to-end (`wake - park_start`), plus how many cycles in each group
+needed 2 or more `in_()` calls (the over-the-cap evidence — every
+28 s-delay cycle should show exactly 2).
+
+## Reproducibility
+
+- `--run-id` fixes the mailbox address across every invocation of one
+  run — parker and sender in every group must share it so they address
+  the same subspace.
+- No randomness: fixed cycle counts, deterministic nonces
+  (`<run-id>-<label>-<cycle>`).
+- The measured record for the 2026-09-11 run against
+  `engine-service-v0.1.114` is `nexus_rdr/205-research-14` (T2), which
+  also sets the sixth MVV target from these numbers.
