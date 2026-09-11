@@ -409,6 +409,65 @@ the atomic-split check refuses a deliberately-straddling test entry. After
 the next real client release: parity tests green, window logic correct,
 `git log` shows the spike commit in main's history.
 
+MEASURED 2026-09-11 (nexus-konsk, P0), the gap this section had recorded
+since 2026-08-30 finally exercised for real: `plugin-v7.41.0-1` tagged on
+`01eb1c6a6`, the verify-only workflow green, marketplace clones refreshed
+(`/plugin update` + `/reload-plugins`). The cut did NOT reach installs.
+Claude Code keys both the plugin CACHE directory
+(`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>`) and
+`installed_plugins.json`'s own `version` field on the client `version`
+string alone, never on `source.ref`; a same-version anchored cut moves
+the marketplace's pinned ref but leaves that key unchanged, so `claude
+plugin update` reports "already at the latest version" and reinstalls
+nothing (confirmed against the CLI's own docs by nexus-semdv, filed
+2026-09-08, three days before this fired for real). A live dispatch on
+the stale install logged the pre-fix behaviour; `tests/e2e/
+post-publish-dispatch-check.sh` failed with `space_start_match=0`. Two
+hours lost; the immediate mitigation was a same-content client hotfix
+(conexus 7.41.1, wheel unchanged, version bumped so the cache key moves)
+per AGENTS.md's ordinary release path — never the channel itself.
+
+FIXED the same day by extending `nexus.plugin_lockstep.converge_plugins`
+(the `nx upgrade` plugin step, RDR-143's other direction): a plugin whose
+registry version already equals the wheel is now ALSO checked for a
+moved release ref — the marketplace is refreshed
+(`claude plugin marketplace update <name>`, once per distinct
+marketplace per call), its pinned `source.ref` is resolved to a commit
+inside the refreshed local clone, and that commit is compared against
+the registry's own `gitCommitSha`. A mismatch runs
+`claude plugin uninstall <id> -s <scope> -y` THEN
+`claude plugin install <id> -s <scope> -y` (not `update` — an anchored
+ref names no new *version* for `update` to move to; and not a bare
+`install` alone — measured against the real CLI during this fix's own
+gate rehearsal, `install` on an already-installed plugin at the SAME
+declared version is a no-op even when the ref moved underneath it, so
+the two-step dance is load-bearing) and then RE-READS the registry to
+confirm the sha actually moved, rather than trusting the exit code or an
+output string. `tests/e2e/plugin-lockstep-gate.sh` gained a
+same-version-ref-move leg exercising this against the real `claude`
+CLI — confirmed RED on the pre-fix code (no pickup, the version-only
+comparison reports the plugin already in lockstep) and PASSED after.
+See `src/nexus/plugin_lockstep.py`'s module docstring for the full
+contract; `tests/test_plugin_lockstep.py` pins every branch.
+
+Option (b) considered and rejected: having the cut bump the plugin
+`version` field to an anchored form (e.g. `7.41.0+1`) so the CLI's own
+version-keyed cache picks it up for free. Rejected because
+`scripts/cut_plugin_release.py` enforces "no version field moves, ever"
+as a load-bearing invariant (`CutRefused` on any drift in
+`marketplace.json`'s `version` fields against `origin/main`) — this is
+the channel's core guarantee that a plugin-only cut never touches the
+surfaces the seven-way client-release parity set owns. Moving it would
+require re-deriving that invariant, teaching the parity tests and
+`plugin_channel.py`'s window logic (currently exactly two ref shapes:
+client `vX.Y.Z` and anchored `plugin-vX.Y.Z-n`) a third shape, and an
+unverified assumption that Claude Code's own marketplace schema accepts
+a non-strict-semver `version` string. The lockstep fix stays entirely
+inside `nx upgrade`'s existing convergence step, touches no channel
+invariant, and reuses machinery (`_update_one`'s shape, the registry
+reader, the RDR-143 timeout budget) that already existed for the
+ordinary version-behind case.
+
 ## Finalization Gate
 
 Not yet run. Gate after Sam's review of this draft.
@@ -424,6 +483,15 @@ Not yet run. Gate after Sam's review of this draft.
 
 ## Revision History
 
+- 2026-09-11 (nexus-konsk, P0): the GAP this file recorded on 2026-08-30
+  ("sandboxed `/plugin update` picks up the anchored tag within one
+  refresh" never directly exercised) fired for real on `plugin-v7.41.0-1`
+  — it did NOT deliver; see Validation for the measured failure and the
+  fix (`nx upgrade`'s plugin-lockstep step now also checks for a moved
+  release ref on a same-version plugin, `src/nexus/plugin_lockstep.py`).
+  Mitigated same-day by an ordinary client hotfix (conexus 7.41.1); the
+  channel fix landed separately and does not require a channel cut to
+  verify (`tests/e2e/plugin-lockstep-gate.sh`'s new leg covers it).
 - 2026-08-30 (a2wmi.13 R3 gate, both stacked reviewers): Critical
   Assumptions flipped to verified with evidence pointers — bead .12's
   acceptance required the flip and it had never been done. Operational-doc

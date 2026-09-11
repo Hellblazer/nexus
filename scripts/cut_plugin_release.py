@@ -554,6 +554,23 @@ def perform_cut(
     # conexus/PENDING_RELEASE.md by construction; the script resolves that
     # one conflict (main wins) and runs develop's drift contract as the net.
     print("  scripts/plugin_cut_back_merge.sh . && scripts/git-push-develop.sh HEAD")
+    # nexus-konsk: a same-version anchored tag does NOT reach installs on
+    # its own -- Claude Code keys the plugin cache and installed_plugins.json
+    # on the client `version` field alone, never on `source.ref`, so
+    # `/plugin update` (and a stale `nx upgrade` before this fix) reports
+    # "already at the latest version" and reinstalls nothing. Delivery now
+    # runs through `nx upgrade`'s plugin-lockstep step (src/nexus/
+    # plugin_lockstep.py), which checks a same-version plugin's release ref
+    # against the marketplace and reinstalls on a mismatch. Say so, every cut.
+    print(f"this cut does NOT reach installs by itself ({tag} moves no version field):")
+    print("  installs pick it up the next time they run `nx upgrade` (the plugin-lockstep")
+    print("  ref-drift check, nexus-konsk) -- NOT from `/plugin update` alone, which compares")
+    print("  only the version field and reports \"already at the latest version\".")
+    print("  to force one now: claude plugin uninstall <id>@<marketplace> -s <scope> -y \\")
+    print("                    && claude plugin install <id>@<marketplace> -s <scope> -y")
+    print("  (a bare `install` on an already-installed plugin at the same declared version")
+    print("  is a no-op even when the ref moved -- measured against the real CLI; the")
+    print("  uninstall-then-install pair is what plugin_lockstep.py itself runs.)")
     return {"n": n, "tag": tag, "branch": branch, "moved_plugins": moved}
 
 

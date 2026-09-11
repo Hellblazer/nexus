@@ -1830,6 +1830,7 @@ nexus-abhy
 nexus-abnn8
 nexus-abnn8.1
 nexus-abyi9
+nexus-abyi9.1
 nexus-ac2l
 nexus-ac40
 nexus-ac40.1
@@ -2474,6 +2475,7 @@ nexus-dz6b1.1
 nexus-dzf1q
 nexus-dzs62
 nexus-e00lh
+nexus-e00lh.1
 nexus-e01zm
 nexus-e0hd2
 nexus-e0hd2.1
@@ -4907,6 +4909,7 @@ nexus-r9b
 nexus-r9b.1
 nexus-r9c78
 nexus-r9c78.1
+nexus-r9esy
 nexus-r9hq0
 nexus-ra2vj
 nexus-rb67a
@@ -5782,6 +5785,7 @@ nexus-w48ru
 nexus-w48ru.1
 nexus-w4k
 nexus-w5gma
+nexus-w5gma.1
 nexus-w5v8j
 nexus-w5v8j.1
 nexus-w5xgy
