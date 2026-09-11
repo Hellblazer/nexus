@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="The Nexus tuple space: one place where sessions, agents, hooks, and peer sessions leave records for each other, take them exclusively, wait for them, and query them, beside the three stores.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
+<title>The Nexus Tuple Space</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#EEF1F4; --paper:#FFFFFF; --ink:#1B2430; --ink-2:#4A5666; --ink-3:#7A8697;
+  --line:#D5DBE3; --brass:#A87A22; --brass-soft:#F3EAD3; --blue:#24466B; --blue-soft:#E1E9F3;
+  --ok:#2E7D4F; --ok-soft:#E3F1E8; --warn:#9A6A12; --code-bg:#1B2430; --code-fg:#E9EDF2; --code-cmt:#8A97A8;
+  --t1:#B96E2B; --t2:#24466B; --t3:#2E7D4F;
+  --radius:6px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+    --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+    --ok:#6CC58F; --ok-soft:#1B2E22; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+    --t1:#E0955A; --t2:#8FB4DD; --t3:#6CC58F;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+  --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+  --ok:#6CC58F; --ok-soft:#1B2E22; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+  --t1:#E0955A; --t2:#8FB4DD; --t3:#6CC58F;
+}
+*{box-sizing:border-box}
+/* Code blocks scroll sideways inside their column. A grid or flex child defaults to min-width:auto, which lets a long <pre> line widen the track and the page; min-width:0 on every wrapper between the track and the <pre> stops that. */
+.wrap,.wrap>*,main,.step,.cmd,.tbl,.further,.callout,.lesson{min-width:0}
+pre{max-width:100%}
+
+html{margin:0}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;font-size:16px;line-height:1.55;padding-inline:clamp(16px,4vw,40px);padding-block:40px 80px;}
+.wrap{max-width:1040px;margin:0 auto;display:grid;grid-template-columns:220px minmax(0,1fr);gap:48px;align-items:start}
+@media (max-width:820px){.wrap{grid-template-columns:1fr;gap:24px}.rail{position:static!important}}
+h1,h2,h3{font-family:"Source Serif 4",Georgia,"Times New Roman",serif;font-weight:600;line-height:1.15;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,5vw,46px);letter-spacing:-.01em}
+h2{font-size:27px}
+h3{font-size:18px;margin-top:26px}
+p{margin:12px 0;max-width:68ch}
+.lede{font-size:18px;color:var(--ink-2);max-width:62ch}
+.topnav{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:12px}
+.topnav a{font-size:14px;font-weight:500;text-decoration:none}
+.topnav a:hover{text-decoration:underline}
+.eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--brass);font-weight:600;margin-bottom:12px}
+a{color:var(--blue)}
+code{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em;background:var(--blue-soft);padding:1px 5px;border-radius:4px}
+.hidden{display:none!important}
+
+/* rail */
+.rail{position:sticky;top:24px}
+.rail .eyebrow{margin-bottom:8px}
+.rail ol{list-style:none;padding:0;margin:0;display:grid;gap:2px}
+.rail a{display:block;padding:7px 8px;border-radius:4px;color:var(--ink-2);text-decoration:none;font-size:14px;line-height:1.35}
+.rail a:hover{background:var(--paper)}
+.rail .meta{font-size:12px;color:var(--ink-3);margin-top:14px;line-height:1.5}
+
+/* lessons */
+.lesson{padding:36px 0 8px;border-top:1px solid var(--line);scroll-margin-top:16px}
+.lesson:first-of-type{border-top:0;padding-top:8px}
+.lhead{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.lnum{font-family:"Source Serif 4",Georgia,serif;font-size:30px;font-weight:600;color:var(--brass);line-height:1}
+.ltime{font-size:13px;color:var(--ink-3);margin-left:auto}
+.why{border-left:3px solid var(--brass);padding:2px 0 2px 14px;color:var(--ink-2);margin:16px 0 10px;max-width:66ch}
+pre{margin:0;background:var(--code-bg);color:var(--code-fg);border-radius:var(--radius);padding:14px 16px;font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:14px;line-height:1.6;overflow-x:auto}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;padding-right:76px}
+pre .c{color:var(--code-cmt)}
+.cmd{position:relative;margin:12px 0}
+.copy{position:absolute;top:8px;right:8px;font:inherit;font-size:12px;font-weight:500;padding:4px 9px;border-radius:4px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:var(--code-fg);cursor:pointer}
+.copy:hover{background:rgba(255,255,255,.14)}
+.copy:focus-visible{outline:2px solid var(--brass)}
+.see{margin:10px 0 4px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+pre.out{background:var(--paper);color:var(--ink-2);border:1px dashed var(--line);font-size:13px}
+pre.out b{color:var(--ink);font-weight:500}
+.note{font-size:14px;color:var(--ink-2);margin:8px 0;max-width:68ch}
+.callout{border-left:3px solid var(--brass);background:var(--brass-soft);padding:12px 16px;border-radius:0 var(--radius) var(--radius) 0;margin:18px 0;font-size:15px;max-width:68ch}
+.callout p{margin:4px 0}
+.callout.rule{border-color:var(--blue);background:var(--blue-soft)}
+
+.ph{color:var(--brass);font-style:italic}
+pre .ph{color:#E0B24C}
+
+
+/* figures */
+figure.fig{margin:18px 0;max-width:68ch}
+figure.fig svg{width:100%;height:auto;display:block;color:var(--ink)}
+figure.fig figcaption{font-size:13px;color:var(--ink-3);margin-top:6px}
+figure.fig text{font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:12.5px;fill:currentColor}
+figure.fig .sm{font-size:10.5px;fill:var(--ink-3);letter-spacing:.05em;text-transform:uppercase}
+figure.fig .lbl{font-size:11px;fill:var(--ink-2)}
+figure.fig rect.box{fill:var(--paper);stroke:currentColor;stroke-width:1}
+figure.fig rect.you{fill:var(--brass-soft);stroke:var(--brass);stroke-width:1.2}
+figure.fig line,figure.fig path{stroke:currentColor;stroke-width:1.2;fill:none}
+figure.fig .you-edge{stroke:var(--brass)}
+figure.fig .dash{stroke-dasharray:4 3}
+
+/* investigate further */
+.further{margin:22px 0 6px;border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:0 var(--radius) var(--radius) 0;background:var(--paper);padding:12px 16px;max-width:68ch}
+.further h4{margin:0 0 6px;font-family:"Source Serif 4",Georgia,serif;font-size:16px;font-weight:600;color:var(--blue)}
+.further ul{margin:0;padding-left:20px;font-size:15px;color:var(--ink-2)}
+.further li{margin:4px 0}
+
+/* tier diagram */
+.tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px 0;max-width:68ch}
+@media (max-width:560px){.tiers{grid-template-columns:1fr}}
+.tier{background:var(--paper);border:1px solid var(--line);border-top:4px solid var(--tc);border-radius:var(--radius);padding:12px 14px}
+.tier b{font-family:"Source Serif 4",Georgia,serif;font-size:20px;font-weight:600;color:var(--tc);display:block}
+.tier small{display:block;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:6px}
+.tier p{font-size:14px;margin:4px 0;color:var(--ink-2)}
+.tier code{font-size:.85em}
+.arrowrow{font-size:13px;color:var(--ink-3);margin:-6px 0 14px;max-width:68ch}
+
+/* entry table */
+table{border-collapse:collapse;width:100%;font-size:15px;margin:14px 0;max-width:68ch}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+.tbl{overflow-x:auto}
+.gloss-wrap{margin:22px 0 8px;max-width:68ch}
+details.gloss{border:1px solid var(--line);border-radius:var(--radius);background:var(--paper);margin:6px 0}
+details.gloss summary{cursor:pointer;padding:10px 14px;font-weight:500;list-style:none;display:flex;justify-content:space-between}
+details.gloss summary::after{content:"+";color:var(--brass);font-family:"IBM Plex Mono",monospace}
+details.gloss[open] summary::after{content:"–"}
+details.gloss table{margin:0;font-size:14px}
+details.gloss td:first-child{font-weight:500;white-space:nowrap;width:9em}
+details.gloss tr:last-child td{border-bottom:0}
+ol.plain,ul.plain{margin:6px 0 10px;padding-left:22px;max-width:66ch}
+ol.plain li,ul.plain li{margin:3px 0}
+.finish{border:1px solid var(--line);background:var(--paper);border-radius:var(--radius);padding:18px 20px;margin-top:40px;max-width:68ch}
+.finish h2{font-size:24px}
+.footer{margin-top:60px;font-size:13px;color:var(--ink-3)}
+@media (prefers-reduced-motion:reduce){.copy{transition:none}}
+</style>
+<style>
+.lesson .lnum{display:none}
+details.gloss td:first-child{width:11em;white-space:normal}
+.further .ttl{margin:0 0 6px;font-family:"Source Serif 4",Georgia,serif;font-size:16px;font-weight:600;color:var(--blue)}
+.shapes td:first-child,.terms td:first-child{font-weight:500;white-space:nowrap}
+.ops{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:18px 0;max-width:68ch}
+@media (max-width:560px){.ops{grid-template-columns:1fr}}
+.op{background:var(--paper);border:1px solid var(--line);border-top:4px solid var(--blue);border-radius:var(--radius);padding:12px 14px;min-width:0}
+.op b{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:18px;font-weight:500;color:var(--blue);display:block}
+.op small{display:block;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:6px}
+.op p{font-size:14px;margin:4px 0;color:var(--ink-2)}
+.op.take{border-top-color:var(--brass)}.op.take b{color:var(--brass)}
+figure.fig .bag{fill:var(--blue-soft);stroke:var(--blue);stroke-width:1.2}
+figure.fig .tuple{fill:var(--paper);stroke:currentColor;stroke-width:1}
+figure.fig .op{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11.5px;fill:var(--blue)}
+figure.fig .op.take{fill:var(--brass)}
+figure.fig .take-edge{stroke:var(--brass)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<nav class="rail" aria-label="Sections">
+  <div class="eyebrow">The tuple space</div>
+  <ol id="toc">
+    <li><a href="#s0">The problem</a></li>
+    <li><a href="#s1">Operations</a></li>
+    <li><a href="#s1b">The tuple space and the three stores</a></li>
+    <li><a href="#s2">Communication</a></li>
+    <li><a href="#s3">Rendezvous</a></li>
+    <li><a href="#s4">Queries</a></li>
+    <li><a href="#s5">Sessions and instances</a></li>
+    <li><a href="#s6">Implementation</a></li>
+    <li><a href="#s7">Tools and commands</a></li>
+    <li><a href="#s8">Scope and status</a></li>
+  </ol>
+  <div class="meta"><a href="research.html">← Research with Nexus</a><br><a href="getting-started.html">← Getting started</a><br><a href="./">← Install guide</a></div>
+</nav>
+
+<main>
+<div class="topnav"><span class="eyebrow" style="margin:0">Nexus · coordination</span><a href="getting-started.html">← Getting started</a></div>
+<h1>The Nexus Tuple Space</h1>
+<p class="lede">Nexus serves several processes at once. There is the Claude Code session you talk to, the agents it starts, and the hooks that run around every tool call. There are usually several other sessions on the same machine as well, each working on its own repository. They already have ways to talk, and the tuple space uses those ways rather than replacing them. The harness carries messages between a session and its agents and between teammates in their own terminal panes. Hooks inject context when an agent starts. Memory and scratch hold shared notes. The tuple space is written by those hooks, addressed by the ids the harness assigns, and read through the same tools Claude already calls.</p>
+<p class="lede">What none of those mechanisms provide is a home for coordination itself. Who is working, who owes a report, which message is waiting, which request has no answer: before the tuple space, each of these facts was kept in a different place, in a file or a shell function written for that one case, readable only from the process that wrote it, and gone with the session. The tuple space gives all of them one home.</p>
+<p class="lede">A record in that home has five properties. It is exclusive: a process can take it so that no other process gets it. It is durable: it outlives the session that wrote it. It is addressed: it has keys, so a reader asks for exactly the record it wants. It is queryable: any process with the tenant's credential can ask what is there. And it can be waited for: a reader can block until a record that does not exist yet arrives. Linda, the coordination language that introduced the idea, showed that these same operations build several things: a work queue, a mailbox, a lock, a meeting point, and a request with its reply. Only the shape of the record changes. Nexus keeps the space in the same Postgres database as its three stores, behind the same engine. A record can therefore point at a document, a memory entry, or a link, and the reader follows the pointer with the credential it already holds.</p>
+<p class="note">This page is an introduction. The reference, with the exact parameters of every operation and every state a tuple can be in, is <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space.md">docs/tuple-space.md</a>. The <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space-walkthroughs.md">walkthroughs</a> draw each use as a sequence, and RDR-205 records the design and its reasons.</p>
+
+<div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><table class="terms">
+<tr><th>Term</th><th>Meaning</th></tr>
+<tr><td>tuple</td><td>One record in the tuple space. It has keys, dimensions, and a body.</td></tr>
+<tr><td>keys</td><td>The fields a take operation matches on. A take operation must give every key exactly.</td></tr>
+<tr><td>dimensions</td><td>Fields that describe the tuple without being part of a take operation's match. A read can match on them.</td></tr>
+<tr><td>subspace</td><td>A named part of the tuple space, such as the mailbox of one agent. Every tuple belongs to exactly one subspace.</td></tr>
+<tr><td>template</td><td>The rules for one kind of subspace: required keys, allowed dimensions, lifetime, and whether take operations are allowed.</td></tr>
+<tr><td>claim</td><td>The state of a tuple between a take operation and its ack. The taker holds the claim.</td></tr>
+<tr><td>lease</td><td>The time limit on a claim. When the lease ends, the tuple becomes available again.</td></tr>
+<tr><td>ack, nack</td><td>Ack ends a claim and marks the tuple consumed. Nack ends a claim and returns the tuple to the space.</td></tr>
+<tr><td>dead letter</td><td>A tuple that failed too many take operations. Nobody can take it, but anybody can read it.</td></tr>
+<tr><td>agent</td><td>A process that a Claude Code session starts to do one task.</td></tr>
+<tr><td>instance</td><td>One Claude Code session, under the name the harness gives it.</td></tr>
+<tr><td>engine</td><td>The Nexus service that owns the database and answers every tuple call.</td></tr>
+<tr><td>hook</td><td>A script that the harness runs automatically around an event, such as an agent starting or stopping.</td></tr>
+<tr><td>tenant</td><td>One customer of the engine. Every store is separated by tenant, and one credential gives access to one tenant.</td></tr>
+<tr><td>read-many store</td><td>A store where any number of readers see the same entry and nobody can claim it.</td></tr>
+<tr><td>bead</td><td>One tracked unit of work in the project's issue tracker.</td></tr>
+<tr><td>digest</td><td>A short fingerprint of a set of templates. It changes when any template changes.</td></tr>
+</table></details></div>
+
+<!-- ============ 0 ============ -->
+<section class="lesson" id="s0">
+<div class="lhead"><h2>The problem</h2><span class="ltime">5 min</span></div>
+<p class="why">The tuple space extends the harness where three failures recur in multi-agent work. All three happen exactly where the harness's delivery stops, and the harness keeps doing everything before that point. The first is an agent that finishes without reporting, where the harness has nothing to deliver and nothing records that a report was owed. The second is a correction you send to an agent while it works. The harness delivers it only between turns, so the agent reads it after it has already returned the wrong answer. The third is a request from one of the other sessions on the machine. The harness does not connect that session to you at all, so the request waits in a chat window until a person sees it.</p>
+
+<p>What the harness delivers is a message: it reaches one reader, at a moment the harness chooses, and then it is gone. What the tuple space holds is a record: it exists from the moment it is written until it expires, no matter who reads it or when. An agent can read its mailbox in the middle of a turn instead of waiting for the next delivery. A hook, a script, or any other session on the machine can write and read with the tenant's credential. The harness does not need to connect them. And anyone can look afterwards at what was written, taken, and acked.</p>
+
+<p>The space adds two operations to that record, and no read-many store has either. The take operation hands a record to exactly one of the readers asking for it. If two agents both read "take the next task", only one of them takes it. The wait operation holds a reader until a record with the keys it wants arrives.</p>
+
+<p>Together these turn coordination from a set of conventions into a set of guarantees. A report is owed until a report tuple exists, whether or not the agent remembered. A message is delivered once, whether or not two readers raced for it. A request is open until its ack exists, whether or not a person is watching.</p>
+
+<p>Harness messages, hooks, memory, scratch, the knowledge store, and the file system all stay in use. They are the right design for what they carry. The tuple space is built on them: hooks write it, harness ids address it, and its records point into the stores.</p>
+
+<p>The engine could already do this in one place. The queue that feeds structured extraction hands each row to exactly one worker with a single database statement. The tuple space takes that statement and opens it to every process, for records whose shapes the engine checks.</p>
+
+<p>Moving coordination into the database changes three things at once.</p>
+<ul class="plain">
+<li><strong>A tuple outlives the session that wrote it.</strong> Your next session, or another process on the same machine, reads what this session recorded before it ended.</li>
+<li><strong>Every process sees the same tuple space.</strong> Every session on a machine, and every agent in every session, reads and writes one space, so there are no per-session copies to merge.</li>
+<li><strong>You can ask it questions.</strong> "Which agents in this session started and never reported" is one query rather than a loop over files.</li>
+</ul>
+</section>
+
+<!-- ============ 1 ============ -->
+<section class="lesson" id="s1">
+<div class="lhead"><h2>Operations</h2><span class="ltime">10 min</span></div>
+<p class="why">The tuple space has three operations and one closing step, and that is the whole interface. Each operation has one exact meaning. Every use on this page is these same operations applied to a different shape of tuple.</p>
+
+<div class="ops">
+<div class="op"><small>add</small><b>out</b><p>Add a tuple. The tuple's identity comes from fields that the caller supplies. If you send the same tuple twice, the space stores it once.</p></div>
+<div class="op"><small>read</small><b>rd</b><p>Read matching tuples. The tuples stay in the space. Any number of readers can read. With a timeout, the read waits until a tuple arrives.</p></div>
+<div class="op take"><small>take</small><b>in</b><p>Claim one matching tuple. Exactly one caller wins. The winner holds a lease and ends it with <code>ack</code>, or returns the tuple with <code>nack</code>.</p></div>
+</div>
+
+<figure class="fig">
+<svg viewBox="0 0 760 360" role="img" aria-label="Four kinds of process around one shared tuple space: a session, its agents, the hooks, and a peer session. Arrows labelled out, rd and in connect each to the space.">
+  <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
+  <marker id="arb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--brass)"/></marker></defs>
+  <text x="380" y="94" text-anchor="middle" class="sm">one tuple space, in postgres</text>
+  <ellipse class="bag" cx="380" cy="185" rx="150" ry="80"/>
+  <rect class="tuple" x="280" y="127" width="90" height="26" rx="3"/><text x="325" y="144" text-anchor="middle" class="lbl">start · agent a</text>
+  <rect class="tuple" x="380" y="127" width="100" height="26" rx="3"/><text x="430" y="144" text-anchor="middle" class="lbl">report · agent a</text>
+  <rect class="tuple" x="282" y="163" width="120" height="26" rx="3"/><text x="342" y="180" text-anchor="middle" class="lbl">message → agent b</text>
+  <rect class="tuple" x="412" y="163" width="66" height="26" rx="3"/><text x="445" y="180" text-anchor="middle" class="lbl">request</text>
+  <rect class="tuple" x="340" y="199" width="80" height="26" rx="3"/><text x="380" y="216" text-anchor="middle" class="lbl">ack · r-41</text>
+
+  <rect class="you" x="20" y="40" width="130" height="44" rx="4"/><text x="85" y="58" text-anchor="middle">your session</text><text x="85" y="74" text-anchor="middle" class="lbl">starts the agents</text>
+  <rect class="box" x="20" y="286" width="130" height="44" rx="4"/><text x="85" y="304" text-anchor="middle">agents</text><text x="85" y="320" text-anchor="middle" class="lbl">started by it</text>
+  <rect class="box" x="610" y="40" width="130" height="44" rx="4"/><text x="675" y="58" text-anchor="middle">hooks</text><text x="675" y="74" text-anchor="middle" class="lbl">run around tool calls</text>
+  <rect class="box" x="610" y="286" width="130" height="44" rx="4"/><text x="675" y="304" text-anchor="middle">peer session</text><text x="675" y="320" text-anchor="middle" class="lbl">same machine</text>
+
+  <line x1="150" y1="52" x2="300" y2="108" class="dash" marker-end="url(#ar)"/><text x="162" y="44" class="op">out message</text>
+  <line x1="150" y1="76" x2="245" y2="150" marker-end="url(#ar)"/><text x="150" y="152" class="op">rd, waits</text>
+  <line x1="150" y1="298" x2="262" y2="232" class="take-edge" marker-end="url(#arb)"/><text x="162" y="322" class="op take">in, read mailbox</text>
+  <line x1="610" y1="62" x2="470" y2="118" marker-end="url(#ar)"/><text x="600" y="46" text-anchor="end" class="op">out start, report</text>
+  <line x1="610" y1="298" x2="520" y2="236" class="dash take-edge" marker-end="url(#arb)"/><text x="600" y="234" text-anchor="end" class="op take">in request</text>
+  <line x1="610" y1="322" x2="496" y2="262" marker-end="url(#ar)"/><text x="600" y="344" text-anchor="end" class="op">out ack</text>
+  <text x="380" y="352" text-anchor="middle" class="sm">brass: a take, exactly one winner</text>
+</svg>
+<figcaption>Every process talks to the tuple space and to no other process. Hooks write for the agents. Your session waits for a report. An agent takes messages from its mailbox. A peer session takes a request and adds an ack.</figcaption>
+</figure>
+
+<h3>Templates</h3>
+<p>A tuple has keys, dimensions, and a body. The keys are what a take operation matches on, and the dimensions describe the tuple without being part of that match. Subspaces divide the space into named parts, and the engine registers a template for each kind of subspace. The template fixes four things: which keys are required, which dimensions are allowed, how long a tuple lives, and whether take operations are allowed. If they are allowed, it also fixes how many failed take operations turn a tuple into a dead letter. The engine checks every <code>out</code> against its template and refuses one that does not fit before it stores anything. Because only the engine holds the templates, every client sees the same shapes, and no client can hold an outdated copy.</p>
+
+<h3>Uses</h3>
+<div class="tbl"><table class="shapes">
+<tr><th>Use</th><th>Tuple</th><th>Operations</th></tr>
+<tr><td>work queue</td><td>one tuple per task</td><td>A producer calls <code>out</code> for each task, and workers call <code>in</code> and <code>ack</code>. Each task reaches one worker.</td></tr>
+<tr><td>mailbox</td><td>one tuple per message, keyed on the recipient</td><td>A sender calls <code>out</code> to the address. The recipient calls <code>in</code> before it acts.</td></tr>
+<tr><td>lock</td><td>one tuple per resource</td><td>A process calls <code>in</code> to hold the lock and <code>out</code> to release it. A lease that ends releases it for you.</td></tr>
+<tr><td>rendezvous</td><td>a tuple that means "I am here" or "I am done"</td><td>One process calls <code>out</code> when it arrives. The other calls <code>rd</code> with a timeout and wakes.</td></tr>
+<tr><td>request and reply</td><td>a request in the peer's mailbox and a reply in yours, sharing an id</td><td>You call <code>out</code> for the request, then <code>in</code> on your own mailbox for the reply.</td></tr>
+<tr><td>ledger</td><td>tuples that are read and counted, never taken</td><td>Hooks call <code>out</code>. A reader calls <code>rd</code> with an empty pattern to see every tuple.</td></tr>
+</table></div>
+<p>Two of these uses exist today: the ledger, and the mailbox, which also carries request and reply when the address is a session instead of an agent (see <a href="#s5">Sessions and instances</a>). The other three are in the table to show what the operations can do, not because anyone has planned them.</p>
+
+<h3>Small on purpose</h3>
+<p>Three operations with exact meanings are easier to build correctly, easier to analyze, and easier to combine than a larger interface would be. Each one is a short database transaction, so the space scales the way the database scales, and a busy subspace does not slow a quiet one. A take operation matches on keys alone and always ends in an ack or a nack. You can therefore say exactly what happens to any tuple under any sequence of calls, including a crash between a take operation and its ack. The uses in the table are not features of the space. They are compositions of the three operations, and a new use is a new composition rather than new code in the engine.</p>
+
+<p>A tuple is metadata, not data. It says that an agent started, that a report exists, that a message is waiting, that a request needs an answer. It carries keys and a few dimensions, and its body is a pointer to whatever it is about: a document, a memory entry, a catalog link, a bead. There are no tuple documents. The documents stay in the stores built for them, and the tuple space holds only the signals about them. Keeping the two apart keeps the operations simple. An operation over a small typed record with exact keys can be specified completely. An operation over arbitrary content cannot.</p>
+</section>
+
+<!-- ============ 1b ============ -->
+<section class="lesson" id="s1b">
+<div class="lhead"><h2>The tuple space and the three stores</h2><span class="ltime">5 min</span></div>
+<p class="why">The tuple space is a fourth store beside the three Nexus already keeps, in the same database and behind the same engine. It holds coordination and nothing else, and points at the other three for everything else: scratch for a session, memory for a project, and knowledge for permanent documents.</p>
+
+<div class="tbl"><table>
+<tr><th>Store</th><th>Holds</th><th>Lifetime</th><th>Readers</th></tr>
+<tr><td>Scratch (T1)</td><td>Working notes of one session and its agents</td><td>The session</td><td>Many</td></tr>
+<tr><td>Memory (T2)</td><td>Decisions, findings, and the state of the work, by project and title</td><td>The project</td><td>Many</td></tr>
+<tr><td>Knowledge (T3)</td><td>Documents, chunks, the catalog, and its links</td><td>Permanent</td><td>Many</td></tr>
+<tr><td>Tuple space</td><td>Coordination: who is present, who owes a report, a message, a request</td><td>Days, set by the template</td><td>Many read, one takes</td></tr>
+</table></div>
+
+<p>All four stores share one database and one tenant. A tuple can therefore name an item in any of the other three, and the reader opens it with the credential it already has. That is what decides what a tuple should contain.</p>
+
+<h3>References, not values</h3>
+<p>A tuple is a signal about data, so a message carries a pointer to its content, not the content itself. A chunk has a content hash, a document has a catalog address, a memory entry has a project and a title, and a scratch entry has an id. A message says "read this" with one of those pointers, and the reader opens the content where it is stored. This is a rule rather than a preference, for three reasons.</p>
+<ul class="plain">
+<li><strong>The content is already stored once, in the right store.</strong> A finding lives in memory and a document in the knowledge store. A copy inside a message becomes wrong the moment somebody corrects the original.</li>
+<li><strong>A tuple stays small.</strong> Tuples travel the same network path as every other call. Small tuples are what let a mailbox hold many messages and a ledger hold every dispatch of a session for ninety days.</li>
+<li><strong>A pointer can be checked.</strong> "The result is in memory under this title" can be verified by opening the entry. A message that copies the result cannot be distinguished from one that copies it incorrectly. The research page asks for the passage behind every claim for the same reason.</li>
+</ul>
+
+<div class="see">A message, as sent</div>
+<div class="cmd"><pre>to: <span class="ph">&lt;AGENT-ID&gt;</span>   from: <span class="ph">&lt;YOUR-ID&gt;</span>   kind: directive
+body: The schema changed. Read memory <span class="ph">&lt;PROJECT&gt;</span>/<span class="ph">&lt;TITLE&gt;</span> before you write the migration.</pre><button class="copy" type="button">Copy</button></div>
+<p>The body names the memory entry, and the entry holds the full change. If somebody edits the entry before the agent reaches the message, the agent reads the edited version. It always reads what exists when it opens the entry, not what existed when the message was written.</p>
+</section>
+
+<!-- ============ 2 ============ -->
+<section class="lesson" id="s2">
+<div class="lhead"><h2>Communication</h2><span class="ltime">10 min</span></div>
+<p class="why">A message to an agent is a tuple in the agent's mailbox. The agent reads its mailbox before it writes any reply to you. A correction you send while it works is read before that reply is written, not after.</p>
+
+<p>Every agent gets an address when it starts. The hook that runs at agent start tells the agent its own id and its matching mailbox address. To send a message, you add a tuple to that mailbox with a message id that you create yourself. That id becomes the identity of the tuple. If the connection fails and you send again, the second send matches the same tuple, and the agent never sees the message twice.</p>
+
+<div class="see">You might say</div>
+<div class="cmd"><pre>Tell the agent that works on <span class="ph">&lt;THE TASK&gt;</span> that the schema changed. Put the message in its mailbox.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>Claude makes one <code>tuple_out</code> call to the agent's mailbox with the message body and a message id. The agent's instructions tell it to read its mailbox before every reply, so on its next read it takes the message, acts on it, and acks it.</p>
+
+<p>The body of the message is a pointer, not the content. It names the memory entry, the document, or the scratch note that holds what the agent needs, and the agent opens that item (see <a href="#s1b">the three stores</a>). A message that carried the content would be a copy, and the copy would be wrong the moment somebody corrected the original.</p>
+
+<p>Each message reaches exactly one reader. When two readers take from the same mailbox, the claim statement hands each message to one of them, and the other does not receive it. A reader that takes a message and then crashes never acks it, so its lease ends, the message becomes available again, and the next reader gets it. After three failed take operations the engine marks the message as a dead letter. Nobody can take it, but anybody can read it, so a message that makes every reader crash stays visible instead of disappearing. An unclaimed or dead-lettered message survives at most seven days before the sweep removes it.</p>
+
+<p class="note">The agent never talks to the sender, and the sender never has to wait until the agent is between turns. Both talk to the tuple space. Neither has to know when the other is running. That is why a shared space works better than a direct message between two processes on different schedules.</p>
+</section>
+
+<!-- ============ 3 ============ -->
+<section class="lesson" id="s3">
+<div class="lhead"><h2>Rendezvous</h2><span class="ltime">10 min</span></div>
+<p class="why">A read with a timeout lets the tuple space act as a meeting point. One process adds a tuple that means "done", and another process wakes when it arrives, whether it started waiting before or after.</p>
+
+<p>The first use is waiting for an agent's report. When an agent stops, a hook adds a report tuple to the session's ledger with the agent's id as the key. Your session reads that key with a timeout. If the tuple is already there, the read returns immediately. If not, the read waits inside the engine and wakes when the tuple is written or the timeout ends. The agent does nothing to make this work, because the hook writes the tuple from the data the harness gives it.</p>
+
+<div class="see">You might say</div>
+<div class="cmd"><pre>Wait until <span class="ph">&lt;THE AGENT&gt;</span> reports. Then continue with its result.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>Claude calls <code>tuple_rd</code> on the ledger with the agent's id and a timeout. Each call waits for at most twenty-five seconds and returns what it found, so a wait of minutes is a loop of these calls. The limit is deliberate. It keeps every wait shorter than every network timeout between the client and the engine, so a wait can never become a dropped connection.</p>
+
+<p>The second use is waiting for the reply to a request. A session sends a request to a peer session, then calls <code>in</code> on its own mailbox with a timeout and wakes when the ack arrives. The request and the ack share a correlation id, which is how the reply is paired with its question.</p>
+
+<p>The engine wakes a waiting read with a signal rather than by polling. When a tuple is written, the engine signals every reader waiting on that subspace once the write is committed, and readers on other subspaces are not signalled. A waiting read holds no database connection. When the engine stops for a deploy, it wakes every waiting read, and each returns what it has. A deploy therefore requires one retry, never a stall.</p>
+</section>
+
+<!-- ============ 4 ============ -->
+<section class="lesson" id="s4">
+<div class="lhead"><h2>Queries</h2><span class="ltime">10 min</span></div>
+<p class="why">You can query the coordination state of the whole system, because tuples are rows with registered shapes. Before the tuple space, "who owes a report" was stored in a file that one shell function on one machine could read.</p>
+
+<p>Three kinds of question have direct answers.</p>
+<ul class="plain">
+<li><strong>What is in a subspace.</strong> A read with an empty pattern returns every live tuple in it: for a ledger, every start and every report of the session, and for a mailbox, every waiting message. Tuples under a live claim and dead letters are included, each with its state. This read is the census, and only <code>rd</code> can do it. A take operation must give every key exactly, so a wide pattern can never claim a tuple by accident.</li>
+<li><strong>Which subspaces exist, and how full they are.</strong> A list by prefix returns every subspace that exists, with counts of available, claimed, dead, and consumed tuples and the oldest and newest timestamps. "Every session that started an agent in the last ninety days" is one call.</li>
+<li><strong>What happened to a tuple.</strong> Every claim, ack, nack, lease end, and dead letter writes one row to a claim log that is never edited. The history of a message is in that log, and the log is the only history. A restore from backup keeps the log, and any claim that was live at backup time ends when its lease ends.</li>
+</ul>
+
+<p>Three rows in <code>nx doctor</code> watch the space as a whole. They report the age of the oldest unclaimed tuple in each subspace, the health of the database table, and the age of the last sweep. The sweep is the job that ends leases nobody renewed, removes expired tuples, and removes old claim-log rows after their own longer retention. A healthy space shows small numbers in all three. What these rows catch is a sweep that has stopped, which no single read would notice.</p>
+
+<div class="see">You might say</div>
+<div class="cmd"><pre>Which agents started in this session and did not report?</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>Claude reads the session's ledger with an empty pattern and compares the start tuples with the report tuples by agent id. The same question over the last several sessions is one list by prefix followed by that read for each session.</p>
+
+<p class="note">The tuple space has no embeddings and no similarity search. Reads match on equality only, and that is a decision rather than a gap. A lock or a mailbox must never be taken by a pattern less specific than the tuple, and a similarity match is exactly that. If similarity is ever added, it goes on <code>rd</code> only, where a wrong match costs a read and not a claim.</p>
+</section>
+
+<!-- ============ 5 ============ -->
+<section class="lesson" id="s5">
+<div class="lhead"><h2>Sessions and instances</h2><span class="ltime">10 min</span></div>
+<p class="why">The tuple space is where sessions meet, because no single session owns it. A session's conversation is gone when it ends, and the sessions on one machine cannot see each other's context. All of them can read and write the same tuples.</p>
+
+<h3>Across sessions</h3>
+<p>A session that starts tomorrow can read which agents a session last week started and whether they reported, without that session's transcript. The ledger makes this possible: it is keyed on the session id and the agent id the harness assigns, and its tuples live for ninety days. Memory holds the findings of a session, and the ledger holds that session's accounting. Because hooks write the ledger rather than Claude, it is complete whether or not anyone remembered to write it.</p>
+
+<h3>Across instances</h3>
+<p>A mailbox addressed to a session's name is a channel between any two of the sessions on one machine. All of them share the same engine and the same tenant, and each has a name that the harness shows. One session adds a request to the other's mailbox with a correlation id, then calls <code>in</code> on its own mailbox and waits. The other session reads its mailbox, opens what the request names, and does the work. Then it adds an ack with the same correlation id to the first session's mailbox, and that wakes the first session. No person relays anything. An unanswered request is a tuple with an age that the census shows, not a line in a chat window that nobody reads.</p>
+
+<div class="see">You might say</div>
+<div class="cmd"><pre>Ask the <span class="ph">&lt;PEER SESSION&gt;</span> session to rebuild its gate jar. Wait for its ack.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>Claude calls <code>tuple_out</code> to the peer's mailbox with kind "request" and a new correlation id. Then it calls <code>tuple_in</code> on this session's own mailbox in a loop, until an ack with that id arrives or you tell it to stop.</p>
+
+<p>A request names its subject with a pointer, whether a bead id, a memory title, or a document address. If the work produces a result, the ack names where the result was written, and the requester opens it there.</p>
+
+<p class="note">No new addressing scheme was needed for this. Both sessions use one tenant, so the call that reaches an agent's mailbox reaches the peer session's mailbox too. A channel between two tenants is neither designed nor needed.</p>
+</section>
+
+<!-- ============ 6 ============ -->
+<section class="lesson" id="s6">
+<div class="lhead"><h2>Implementation</h2><span class="ltime">10 min</span></div>
+<p class="why">One table, one log, and one handler, in the engine that already serves every other store. The design is small on purpose, and most of its value is what the database and the engine already provide.</p>
+
+<ul class="plain">
+<li><strong>One Postgres table holds the tuples.</strong> Subspace, keys, dimensions, body, expiry time, and claim state are columns, and a claim log table beside it records every claim event. The row-level security that separates one tenant's memory from another's applies to tuples unchanged.</li>
+<li><strong>A take is one statement.</strong> In one short transaction, the engine selects the oldest available row for the given keys, skipping any row another transaction holds, then locks it, marks it claimed, and logs the claim. A row someone else holds is skipped rather than waited for, so two hundred readers on one mailbox do not queue behind each other.</li>
+<li><strong>A lease bounds every failure.</strong> Every claim has an end time. A reader that crashes loses its claim when the lease ends, and a sweep on the engine's existing scheduler releases claims that nobody retook. A claim can never outlast its tuple, and after a fixed number of failed take operations the engine marks the tuple as a dead letter.</li>
+<li><strong>Every out is idempotent: sending the same one twice has no extra effect.</strong> The engine computes a tuple's identity from fields the caller supplies, never from the insert time. The same <code>out</code> sent twice, across a failed connection or an engine restart, is therefore one tuple. A retry needs no protocol of its own.</li>
+<li><strong>Waiting happens inside the engine.</strong> There is one engine process, so a waiting read waits on a signal for its subspace, which the engine sends after commit. The client does not poll, the wait holds no connection, and each wait is bounded so the client's own timeouts never fire first.</li>
+<li><strong>Templates are delivered with the engine.</strong> They are files the engine loads and checks at start. A bad template stops the start with the file and field named. A client can ask the engine for the templates and their digest, a short fingerprint that changes when the templates change, and detect a mismatch instead of guessing.</li>
+</ul>
+
+<p>Building on the engine's Postgres gave the design durability, tenants, backup and restore, and a proven claim statement without designing any of them. An earlier version ran on a local database file and a vector store, and it was removed together with that storage layer. The design itself survived: registered templates, leases with ack and nack, a claim log that is never edited, and exact match for take operations. The move also removed the earlier version's bottleneck, where every operation queued behind one writer. Here each call is its own transaction, and a busy row is skipped.</p>
+</section>
+
+<!-- ============ 7 ============ -->
+<section class="lesson" id="s7">
+<div class="lhead"><h2>Tools and commands</h2><span class="ltime">5 min</span></div>
+<p class="why">These are the surfaces for when you want to check for yourself. Most of the time you use none of them directly: the hooks write the ledger, the agents read their mailboxes, and Claude calls the tools when you ask it to wait or to send.</p>
+
+<div class="tbl"><table>
+<tr><th>Surface</th><th>What it is</th></tr>
+<tr><td>Eight MCP tools</td><td><code>tuple_out</code>, <code>tuple_rd</code>, <code>tuple_in</code>, <code>tuple_ack</code>, <code>tuple_nack</code>, <code>tuple_registry</code>, <code>tuple_list</code>, <code>tuple_stats</code>. Claude calls these inside a session.</td></tr>
+<tr><td><code>nx tuple</code></td><td>The same operations from the terminal: <code>out</code>, <code>rd</code>, <code>in</code>, <code>ack</code>, <code>nack</code>, <code>templates</code>, <code>list</code>, <code>stats</code>. Hooks and scripts call these.</td></tr>
+<tr><td>Hooks</td><td>The agent-start hook gives each agent its id and mailbox address. The start and stop hooks write the ledger's start and report tuples without blocking the agent.</td></tr>
+<tr><td>Skills</td><td><code>/conexus:mailbox</code> holds the rules for sending and reading messages. <code>/conexus:orchestration</code> holds the rule for waiting on a report.</td></tr>
+<tr><td><code>nx doctor</code></td><td>The three rows described under <a href="#s4">Queries</a>.</td></tr>
+</table></div>
+
+<div class="see">From the terminal</div>
+<div class="cmd"><pre>nx tuple templates
+nx tuple list --prefix ledger/
+nx tuple rd ledger/<span class="ph">&lt;SESSION-ID&gt;</span> -n 300</pre><button class="copy" type="button">Copy</button></div>
+<p>The first command shows the templates and their digest. The second shows every session's ledger with counts. The third is the census of one session.</p>
+</section>
+
+<!-- ============ 8 ============ -->
+<section class="lesson" id="s8">
+<div class="lhead"><h2>Scope and status</h2><span class="ltime">5 min</span></div>
+<p class="why">Two uses are named, and no others. RDR-205 itself says that any third use needs a design record of its own. That rule is what keeps the earlier failure from repeating: the primitive stays small, and each use is decided on its own.</p>
+
+<p>The tuple space deliberately excludes five things. The lease that protects an engine build stays out because it has to work while the engine is down. The files that hold a session's identity stay out because a reader needs a credential before it can read a tuple. The check that guards a push from a shared checkout stays out for the same reason: it must work with no engine. Scratch, memory, and plans stay out because they are read-many stores and should remain so. Rendered surfaces stay out because Nexus does not produce them.</p>
+
+<p>Two limits are known and accepted for now. A claim cannot be extended, so a mailbox claim lasts at most fifteen minutes. Nothing enforces that fifteen minutes is enough. It holds only because nothing today asks for longer, and a task that needs more time loses its claim. A reply is a separate <code>out</code> from the take operation that claimed the request. A reader that crashes after taking the request and before sending the reply leaves the request unanswered. The request is delivered again when the lease ends, the work is repeated, and no reply is lost, because none was sent. Both limits could be removed later, with a renew operation and an ack that carries its reply in the same transaction. Neither is designed yet.</p>
+
+<p><strong>Status.</strong> The tuple space is live. The engine release that serves the tuple routes is published and deployed to the managed service. The current client release requires that engine, so a local install and a cloud install both have it. The ledger, the mailbox, and the request and ack between instances are in the released plugin. Every install class has been fully tested. A real dispatch on an installed plugin reaches the ledger, and a cloud client reads the tuples back through the public service address, not only from the engine directly.</p>
+
+<div class="further"><p class="ttl">Read next</p><ul>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space.md">Tuple space reference</a>: operations, templates, the states of a tuple, leases, waiting reads, the sweep, errors, and prior art.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space-walkthroughs.md">Walkthroughs</a>: ledger, mailbox, crash and dead letter, and request and ack between instances, drawn as sequences.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-205-linda-tuple-space-over-postgres.md">RDR-205</a>: the problem, the research, the alternatives, and the gate history.</li>
+</ul></div>
+</section>
+
+<p class="footer">Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a> docs and the RDR-205 design record.</p>
+</main>
+</div>
+
+<script>
+(function(){
+  document.querySelectorAll(".copy").forEach(function(btn){
+    btn.addEventListener("click",function(){
+      var pre=btn.parentElement.querySelector("pre");
+      var text=pre.textContent.split("\n").map(function(l){return l.replace(/\s+#.*$/,"");}).filter(function(l){return l.trim();}).join("\n");
+      function ok(){btn.textContent="Copied";setTimeout(function(){btn.textContent="Copy";},1400);}
+      function fail(){btn.textContent="Select and copy";setTimeout(function(){btn.textContent="Copy";},2200);}
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(ok,fail);}else{fail();}
+    });
+  });
+})();
+</script>
+</body>
+</html>

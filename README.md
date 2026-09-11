@@ -17,6 +17,7 @@ Three pages, in order:
 - [**Getting started**](https://hellblazer.github.io/nexus/getting-started.html) — learn the tooling, eleven lessons done inside Claude Code.
 - [**Working with RDRs**](https://hellblazer.github.io/nexus/rdr.html) — record a decision with an RDR, eight lessons on the practised cycle.
 - [**Research with Nexus**](https://hellblazer.github.io/nexus/research.html) — how the store grounds answers, and what it does for each step of research work.
+- [**The Nexus Tuple Space**](https://hellblazer.github.io/nexus/tuple-space.html) — how sessions, agents, and hooks coordinate: exclusive take, wait, and query over one shared record space.
 
 ## Prerequisites
 
@@ -89,6 +90,19 @@ The full deployment story across all three surfaces is [docs/desktop-deployment.
 10. [Rendering](https://hellblazer.github.io/nexus/research.html#p8)
 11. [Where it ends up](https://hellblazer.github.io/nexus/research.html#p9)
 12. [Appendix: topics, aspects, sections, projections](https://hellblazer.github.io/nexus/research.html#p6b)
+
+[The Nexus Tuple Space](https://hellblazer.github.io/nexus/tuple-space.html) — coordination for sessions, agents, and hooks:
+
+1. [The problem](https://hellblazer.github.io/nexus/tuple-space.html#s0)
+2. [Operations](https://hellblazer.github.io/nexus/tuple-space.html#s1)
+3. [The tuple space and the three stores](https://hellblazer.github.io/nexus/tuple-space.html#s1b)
+4. [Communication](https://hellblazer.github.io/nexus/tuple-space.html#s2)
+5. [Rendezvous](https://hellblazer.github.io/nexus/tuple-space.html#s3)
+6. [Queries](https://hellblazer.github.io/nexus/tuple-space.html#s4)
+7. [Sessions and instances](https://hellblazer.github.io/nexus/tuple-space.html#s5)
+8. [Implementation](https://hellblazer.github.io/nexus/tuple-space.html#s6)
+9. [Tools and commands](https://hellblazer.github.io/nexus/tuple-space.html#s7)
+10. [Scope and status](https://hellblazer.github.io/nexus/tuple-space.html#s8)
 
 ## Updating
 
