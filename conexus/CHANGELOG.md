@@ -12,7 +12,8 @@ Live at this pin, from `PENDING_RELEASE.md`:
 - `hooks/scripts/version_lockstep_hook.py`, `version_lockstep_action.py`
   (nexus-konsk): the SessionStart hook detects a same-version plugin-only
   ref drift with no network and dispatches the same detached action as a CLI
-  version mismatch, routed to `nx upgrade`.
+  version mismatch, routed to `nx upgrade`; `nx upgrade` also drift-checks
+  a plugin that is behind the CLI but already the newest published one.
 - `hooks/scripts/_endpoint_resolve.py` with `tuple_ledger_project.py`,
   `t2_prefix_scan.py`, `routing/_lib.py` (nexus-aginu): one shared
   stdlib-only endpoint and credential resolver; the private copies are gone.

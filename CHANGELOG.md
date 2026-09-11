@@ -23,7 +23,10 @@ client tag.
   ref move on its own (RDR-197) from `installed_plugins.json` and the local
   marketplace clone, with no network, and routes it to `nx upgrade`, which
   reinstalls on a ref move; the redispatch is bounded and the git budget is
-  shared across plugins (nexus-konsk).
+  shared across plugins. A plugin that is behind this CLI but already the
+  newest published plugin gets the same ref-drift check, which the
+  version-only path skipped on every dev checkout and release window
+  (nexus-konsk).
 - Hooks: one shared stdlib endpoint and credential resolver for the
   tuple-ledger projector, the T2 prefix scan, and the routing hooks, replacing
   three hand-rolled copies; the projector's POST follows no redirect and no
