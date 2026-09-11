@@ -283,8 +283,9 @@ _EXCLUDED_SITES: dict[tuple[str, int], str] = {
     # Line moved 7887 -> 7900 (nexus-ft04v.21's funnel of this file's other
     # three sites) -> 7934 (nexus-ft04v.26's THE REPOINT: _resolve_corpus_target/
     # _group_collections_by_model rewritten, _collection_family_prefix added)
-    # -> 8317 (nexus-em75s.10's eight tuple_* MCP tools inserted above it; +10 at the Phase 2 fix round).
-    ("src/nexus/mcp/core.py", 8317): (
+    # -> 8317 (nexus-em75s.10's eight tuple_* MCP tools inserted above it; +10 at the Phase 2 fix round)
+    # -> 8321 (nexus-e00lh's tuple_out nonce docstring grew by 4 lines, above this site).
+    ("src/nexus/mcp/core.py", 8321): (
         "mcp__ tool name: `raw_tool.rsplit(\"__\", 1)[-1] if "
         'raw_tool.startswith("mcp__")` strips an MCP tool-name prefix for '
         "planner-step normalization, not a collection name."
