@@ -1036,8 +1036,8 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/TaxonomyPersistHandlerTest.java", 2),
         Map.entry("dev/nexus/service/TaxonomyRepositoryTest.java", 6),
         Map.entry("dev/nexus/service/TenantPoolingIsolationTest.java", 1),
-        Map.entry("dev/nexus/service/Tk070P6aTtlDaysCountedDeleteTest.java", 4),
-        Map.entry("dev/nexus/service/Tk070P6bTtlDaysCountedUpdateTest.java", 4),
+        Map.entry("dev/nexus/service/Tk070P6aTtlDaysCountedDeleteTest.java", 2),
+        Map.entry("dev/nexus/service/Tk070P6bTtlDaysCountedUpdateTest.java", 2),
         Map.entry("dev/nexus/service/TokenBoundaryAdversarialTest.java", 2),
         Map.entry("dev/nexus/service/TokenStoreDataTokenSweepTest.java", 1),
         Map.entry("dev/nexus/service/TopicsDocCountDeadlockConcurrencyTest.java", 8),
@@ -1393,7 +1393,7 @@ class RawSqlGateTest {
     // TupleSweepIndexPlanShapeTest.java entry above).
     // RDR-205 P1 follow-on (bead nexus-f1pbh): 1134 -> 1135 (+1,
     // GrantsNexusDiagViewAccessIntegrationTest.java's nexusDiagCanSelectTupleTables).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 914;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 910;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
