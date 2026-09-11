@@ -386,6 +386,28 @@ def test_same_version_ref_move_is_picked_up_and_reinstalled(
     assert lines[-1].startswith("Plugin update: restart the Claude Code session")
 
 
+def test_behind_plugin_at_newest_published_still_gets_the_ref_drift_check(
+        registry, fake_claude: Path, wheel, marketplace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The release-window case (plugin-lockstep-gate.sh step 9 on the
+    7.42.0 battery): the wheel is 7.35.0, the installed plugin is the newest
+    PUBLISHED plugin at 7.34.1, so ``claude plugin update`` reports "already
+    at the latest version (7.34.1)". That plugin's ref can still have moved
+    under it, and the version-only path used to stop there."""
+    repo, sha_before, sha_after = marketplace()
+    registry({"conexus@nexus-plugins": {"version": "7.34.1", "gitCommitSha": sha_before}})
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "latest")
+    monkeypatch.setenv("FAKE_CLAUDE_NEW_SHA", sha_after)
+    r = pl.converge_plugins()
+    statuses = [o.status for o in r.outcomes]
+    assert statuses == ["latest_published", "ref_moved"], statuses
+    assert r.restart_needed
+    log = fake_claude.read_text().splitlines()
+    assert "plugin uninstall conexus@nexus-plugins -s user -y" in log
+    assert "plugin install conexus@nexus-plugins -s user -y" in log
+    lines: list[str] = []; pl.render(r, lines.append)
+    assert any(ln.startswith("Plugin update: conexus@nexus-plugins 7.34.1: picked up a plugin-only release") for ln in lines)
+
+
 def test_same_version_same_ref_is_silent_and_no_reinstall_attempted(
         registry, fake_claude: Path, wheel, marketplace) -> None:
     repo, sha_before, sha_after = marketplace()
