@@ -119,4 +119,6 @@ Once a day the MCP server sends one anonymous message with six values: a random 
 
 ## License
 
-AGPL-3.0-or-later ([LICENSE](https://github.com/Hellblazer/nexus/blob/main/LICENSE)). Commercial licenses are available for organizations that need other terms; see [LICENSING.md](https://github.com/Hellblazer/nexus/blob/main/LICENSING.md).
+Nexus, the `nx` command, and the plugin are free to use. The license covers the Nexus code only. Everything you make with it is yours: the repositories you index, the notes and memory Claude keeps, the documents you store, the RDRs you write, and anything Claude produces in a session are not covered by this license and carry no obligation from it.
+
+The code is AGPL-3.0-or-later ([LICENSE](https://github.com/Hellblazer/nexus/blob/main/LICENSE)). That matters only if you modify Nexus itself and offer the modified version to others. Commercial licenses are available for organizations that need other terms; see [LICENSING.md](https://github.com/Hellblazer/nexus/blob/main/LICENSING.md).
