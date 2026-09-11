@@ -173,6 +173,26 @@ dependencies = [
     # is the exact patch. Bump deliberately, with the -m slow MinerU tests,
     # the MVV and the shakedown, never by widening this cap.
     "mineru[pipeline]>=3.1.11,<3.1.12",
+    # nexus-gqrg0 (GH #1533) round 2: the override below only reaches an
+    # invoking-project resolve (uv sync in this checkout, or a generation
+    # install through install_generation.sh's overrides.txt copy) --
+    # install_generation.sh:162-166 says the override table is read from
+    # the PROJECT doing the resolve, never from installed wheel metadata.
+    # A fresh `uv tool install conexus` (README step one) or any legacy
+    # uv-tool layout resolves mineru's floor-only `pdftext>=0.6.3` fresh
+    # off PyPI regardless of the override two lines below. A version bound
+    # that must travel with the wheel is an ordinary direct dependency, not
+    # an override: this entry lands in Requires-Dist, so it binds every
+    # install path uv has, generation or bare uv-tool alike. torch above is
+    # the precedent for a declared-but-never-imported dependency pinned
+    # here solely to steer resolution. Only mineru and
+    # docling-slim[format-pdf] (pinned above to pypdfium2 4.30.0, the
+    # locked pdftext-compatible pair) depend on pdftext; the bound affects
+    # nothing else. Keep in lockstep with the `[tool.uv]
+    # override-dependencies` entry below and `src/nexus/_install/overrides.txt`
+    # (pinned identical by tests/test_install_source_wiring_pins.py) and
+    # with tests/test_dependency_bounds_lint.py.
+    "pdftext>=0.6.3,<0.7",
 ]
 
 [project.optional-dependencies]

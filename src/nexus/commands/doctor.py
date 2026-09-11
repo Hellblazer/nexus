@@ -1766,7 +1766,15 @@ _MINERU_DOCTOR_PARSE_TIMEOUT_S = 180
 # line ("ExceptionClass: message") IS the diagnosis this check exists to
 # surface. GH #1533 shipped with the real error visible only in
 # ~/.config/nexus/logs/mineru_server.log, nowhere doctor looked.
+#
+# ``os._exit(0)`` after a successful parse, same discipline as
+# ``pdf_extractor.py``'s ``_MINERU_WORKER_SCRIPT`` (see its comment there):
+# MinerU's pipeline can leave daemon threads / worker pools running that
+# hang or abort ordinary interpreter teardown (onnxruntime's telemetry
+# dispatcher racing exit is the concrete case) -- a successful parse that
+# then dies in teardown would render as a doctor FAIL for nothing.
 _MINERU_DOCTOR_PARSE_SCRIPT = '''
+import os
 import sys
 from pathlib import Path
 from mineru.cli.common import do_parse
@@ -1782,6 +1790,7 @@ do_parse(
     start_page_id=0,
     end_page_id=0,
 )
+os._exit(0)
 '''
 
 
@@ -1794,23 +1803,36 @@ class _MineruDoctorParseFailed(RuntimeError):
     """
 
 
-def _mineru_doctor_fixture_path() -> Path | None:
-    """Locate the committed formula-bearing fixture PDF
-    (``tests/fixtures/bft-to-smr.pdf``) for the real-parse check, walking
-    up from this file.
+def _synthesize_mineru_probe_pdf(directory: Path) -> Path:
+    """Render a one-page, formula-shaped probe PDF into *directory* via
+    ``reportlab`` and return its path.
 
-    Only resolvable inside a dev/CI checkout — ``tests/`` is not shipped
-    in the published wheel, so a published install always takes the
-    ``None`` branch here and the check stays import-only there. That is a
-    documented skip, not a FAIL: a missing fixture says nothing about
-    whether the install is broken.
+    nexus-gqrg0 round 2 (GH #1533): the original real-parse probe located
+    a *committed* fixture (``tests/fixtures/bft-to-smr.pdf``) by walking up
+    from this file. ``tests/`` is never shipped in the published wheel, so
+    that walk always came back empty outside a dev/CI checkout -- the
+    real-parse check silently downgraded to an informational skip on
+    every installed box, precisely where the GH #1533 report came from.
+    Synthesizing the page here instead means the probe has something to
+    parse on ANY install: dev checkout, CI, or a bare `pip install` /
+    `uv tool install` wheel alike. ``reportlab`` is already a resolved
+    ``mineru[pipeline]`` transitive dependency (see uv.lock), so this adds
+    no new install surface.
     """
-    here = Path(__file__).resolve()
-    for parent in here.parents:
-        candidate = parent / "tests" / "fixtures" / "bft-to-smr.pdf"
-        if candidate.is_file():
-            return candidate
-    return None
+    from reportlab.pdfgen import canvas  # noqa: PLC0415 — optional/heavy dependency deferred (mineru transitive)
+
+    pdf_path = directory / "nx-doctor-mineru-probe.pdf"
+    c = canvas.Canvas(str(pdf_path), pagesize=(612, 792))
+    c.setFont("Helvetica", 14)
+    c.drawString(72, 700, "nx doctor --check-mineru real-parse probe")
+    # A formula-shaped line -- superscripts and a summation -- so the
+    # probe exercises the same span_pre_proc.py code path (mineru's
+    # PageChars iteration, the exact GH #1533 break site) a real
+    # formula-bearing PDF does, not just plain prose.
+    c.drawString(72, 670, "E = m c^2, and sum_{i=1}^n x_i^2 = y^2 + 1")
+    c.showPage()
+    c.save()
+    return pdf_path
 
 
 def _mineru_pipeline_model_dir_configured() -> bool:
@@ -1827,10 +1849,16 @@ def _mineru_pipeline_model_dir_configured() -> bool:
     return bool(pipeline_dir) and Path(pipeline_dir).is_dir()
 
 
-def _mineru_parse_fixture_once(
-    fixture: Path, timeout_s: float = _MINERU_DOCTOR_PARSE_TIMEOUT_S,
-) -> None:
-    """Parse page 1 of *fixture* via a real ``do_parse`` subprocess.
+def _mineru_parse_fixture_once(timeout_s: float = _MINERU_DOCTOR_PARSE_TIMEOUT_S) -> None:
+    """Synthesize a one-page probe PDF and parse it via a real ``do_parse``
+    subprocess.
+
+    The probe PDF is generated fresh into this call's own
+    ``TemporaryDirectory`` (see ``_synthesize_mineru_probe_pdf``) rather
+    than resolved from a bundled fixture -- nexus-gqrg0 round 2, GH #1533:
+    a committed ``tests/fixtures/`` PDF is never shipped in the published
+    wheel, so a lookup-based probe silently skipped on every installed
+    box. Synthesizing means this probe always has something to parse.
 
     Raises ``subprocess.TimeoutExpired`` on timeout, or
     ``_MineruDoctorParseFailed`` on a non-zero exit naming whatever the
@@ -1840,29 +1868,60 @@ def _mineru_parse_fixture_once(
     import sys  # noqa: PLC0415 — deferred to keep CLI startup fast
     import tempfile  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-    with tempfile.TemporaryDirectory(prefix="nx-doctor-mineru-") as result_dir:
-        proc = subprocess.run(
-            [sys.executable, "-c", _MINERU_DOCTOR_PARSE_SCRIPT, str(fixture), result_dir],
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-        )
+    with tempfile.TemporaryDirectory(prefix="nx-doctor-mineru-") as work_dir:
+        # Separate subdirectories for the source PDF and do_parse's own
+        # output tree -- measured necessary: do_parse builds its result
+        # path as ``result_dir/<pdf_file_names[0]>/auto/...`` using the
+        # name VERBATIM (extension included), so a synthesized
+        # ``nx-doctor-mineru-probe.pdf`` living directly inside the same
+        # directory passed as result_dir collides with that path
+        # component -- do_parse then raises ``NotADirectoryError`` trying
+        # to create a directory where the source PDF file already sits.
+        src_dir = Path(work_dir) / "src"
+        src_dir.mkdir()
+        result_dir = Path(work_dir) / "result"
+        result_dir.mkdir()
+        fixture = _synthesize_mineru_probe_pdf(src_dir)
+        # File-redirected stderr, NOT `capture_output=True`/PIPE (measured
+        # necessary, nexus-gqrg0 round 2): mineru's pipeline leaves a
+        # "persistent PDF render executor" pool running after do_parse
+        # returns, whose WORKER PROCESSES inherit any PIPE file
+        # descriptor. `_MINERU_DOCTOR_PARSE_SCRIPT`'s `os._exit(0)`
+        # terminates only the direct child -- it does not reap that pool
+        # -- so with a PIPE the pool's workers keep the pipe's write end
+        # open and `subprocess.run`'s `communicate()` blocks reading it
+        # until the FULL timeout elapses, every single run (measured:
+        # 100% reproducible deterministic timeout with
+        # `capture_output=True`; the identical invocation completes in
+        # ~10s writing to a real file instead). A file has no such
+        # fd-inheritance hazard: `Popen.wait()` returns the moment the
+        # immediate child process exits, independent of who else still
+        # holds the file open.
+        stderr_path = Path(work_dir) / "stderr.log"
+        with stderr_path.open("w") as stderr_f:
+            proc = subprocess.run(
+                [sys.executable, "-c", _MINERU_DOCTOR_PARSE_SCRIPT, str(fixture), str(result_dir)],
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_f,
+                timeout=timeout_s,
+            )
+        stderr_text = stderr_path.read_text(errors="replace")
     if proc.returncode != 0:
-        tail = [ln for ln in proc.stderr.splitlines() if ln.strip()]
+        tail = [ln for ln in stderr_text.splitlines() if ln.strip()]
         summary = tail[-1] if tail else f"exit {proc.returncode}, no stderr captured"
         raise _MineruDoctorParseFailed(summary)
 
 
-def _run_check_mineru_parse(fixture: Path) -> None:
+def _run_check_mineru_parse() -> None:
     """Report the one-page real-parse probe as its own doctor line."""
     import subprocess  # noqa: PLC0415 — deferred to keep CLI startup fast
 
     try:
-        _mineru_parse_fixture_once(fixture)
+        _mineru_parse_fixture_once()
     except subprocess.TimeoutExpired:
         click.echo(_check(
             "MinerU parse", False,
-            f"timed out after {_MINERU_DOCTOR_PARSE_TIMEOUT_S}s parsing {fixture.name}",
+            f"timed out after {_MINERU_DOCTOR_PARSE_TIMEOUT_S}s parsing the synthesized probe PDF",
         ))
         click.echo(
             "  ↳ the model may still be downloading, or the box is under "
@@ -1882,7 +1941,7 @@ def _run_check_mineru_parse(fixture: Path) -> None:
             f"Reinstall with `{_reinstall_command()}`."
         )
     else:
-        click.echo(_check("MinerU parse", True, f"parsed page 1 of {fixture.name}"))
+        click.echo(_check("MinerU parse", True, "parsed a synthesized one-page probe PDF"))
 
 
 def _run_check_mineru() -> None:
@@ -1902,9 +1961,11 @@ def _run_check_mineru() -> None:
     a list. Every import succeeded; every real parse raised ``TypeError:
     'PageChars' object is not iterable``, visible only in
     ``mineru_server.log``, never in doctor. The real-parse probe below
-    closes that gap when a fixture and model weights are available;
-    otherwise it reports a skip, matching the MinerU-server check's
-    existing not-configured semantics just below.
+    synthesizes its own one-page PDF (round 2, nexus-gqrg0: no bundled
+    fixture to go missing on an installed wheel) and closes that gap
+    whenever model weights are available; otherwise it reports a skip,
+    matching the MinerU-server check's existing not-configured semantics
+    just below.
     """
     try:
         from mineru.cli.common import do_parse  # noqa: PLC0415 — optional/heavy dependency deferred (mineru)
@@ -1926,16 +1987,13 @@ def _run_check_mineru() -> None:
 
     click.echo(_check("MinerU import", True, "mineru.cli.common.do_parse OK"))
 
-    fixture = _mineru_doctor_fixture_path()
-    if fixture is None:
-        click.echo("  (no fixture PDF bundled outside a dev checkout; real-parse check skipped)")
-    elif not _mineru_pipeline_model_dir_configured():
+    if not _mineru_pipeline_model_dir_configured():
         click.echo(
             "  (MinerU pipeline model weights not downloaded; real-parse "
             "check skipped — run `mineru-models-download`)"
         )
     else:
-        _run_check_mineru_parse(fixture)
+        _run_check_mineru_parse()
 
     # Optional: surface server-side state. The mineru-api server is opt-in;
     # not running is fine. Just report status.
