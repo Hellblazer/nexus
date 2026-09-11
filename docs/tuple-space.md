@@ -194,7 +194,7 @@ Three `nx doctor` rows: oldest unclaimed age per subspace over claimable rows on
 
 Nine typed errors, one base class (`TupleException`) carrying a `code` and the HTTP status `TupleHandler` sends for it, so a new subtype cannot be added without also declaring how it renders. Every error is rendered `{"error": "<code>", "detail": "<message>"}` at its own status; `TupleHandler` catches this base type ahead of the generic 500 ladder.
 
-- `UnknownSubspace` (404): the subspace does not match a registered template.
+- `UnknownSubspace` (404): the subspace does not match a registered template, or its address segment is not of the form `[A-Za-z0-9][A-Za-z0-9._-]*` (one segment, no spaces, no empty address; a session id, an agent id, or an instance name such as `nexus-70` all qualify). `subspace_stats` on such a name is this error, never a zero census (engines after v0.1.114).
 - `SchemaViolation` (400): a field and reason, checked before any write; covers a missing pinned key, a missing required dim, an `out` without a nonce on a `keys+nonce` template, and a `ttl_seconds` or `lease_s` at or below zero or a negative `timeout_s`.
 - `TakeDisabled` (422): the template's `take.enabled` is false.
 - `TimeoutTooLong` (400): `timeout_s` above the engine's cap.
