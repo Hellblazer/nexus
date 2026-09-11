@@ -1061,7 +1061,7 @@ _expectations_census_space() {
     local target="ledger/${sid}"
 
     if ! command -v nx &>/dev/null; then
-        printf 'SPACE_FALLBACK\treason=no nx binary on PATH\n'
+        printf 'SPACE_FALLBACK\treason=PATH has no nx\n'
         return 0
     fi
 

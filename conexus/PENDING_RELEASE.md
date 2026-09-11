@@ -83,3 +83,14 @@ mechanize, it matters enough to ship.
   own exit code — the space lines are additional report lines, not a
   new verdict.
   bead: nexus-em75s.19
+- `conexus/skills/mailbox/SKILL.md` (new): RDR-205 Phases 5 and 6 — the
+  mailbox convention as rules: send by `tuple_out` to the agent id with a
+  sender-minted nonce, drain by `tuple_in` before any hand-back, a resent
+  message is one tuple, missing `from` is a SchemaViolation, dead-letter
+  after three attempts; the instance-addressed form (`address_kind`
+  instance, the ListAgents session name, `correlation_id` request/ack
+  pairing, a parked `in` on the requester's own mailbox).
+  bead: nexus-em75s.24, nexus-em75s.28
+- `conexus/skills/using-nx-skills/SKILL.md`: RDR-205 Phase 5 — routing
+  line for the new standalone `mailbox` skill.
+  bead: nexus-em75s.24

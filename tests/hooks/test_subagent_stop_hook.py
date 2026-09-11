@@ -1508,7 +1508,7 @@ class TestCensusSpaceBacked:
             fh.write(f"2026-09-01T00:00:05Z\tREPORTED\t{self.AGENT}\t{self.TYPE}\n")
         proc = _run_census(tmp_path, self.SID, env_overrides={"PATH": "/usr/bin:/bin"})
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        assert "SPACE_FALLBACK\treason=no nx binary on PATH" in proc.stdout
+        assert "SPACE_FALLBACK\treason=PATH has no nx" in proc.stdout
         assert "BLINDSPOT\tchecked=1 recognized=1 unrecognized=0" in proc.stdout
 
     def test_multiline_cli_error_stays_one_space_line(self, tmp_path: Path) -> None:
