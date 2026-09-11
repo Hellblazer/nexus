@@ -138,9 +138,6 @@ ol.plain li,ul.plain li{margin:3px 0}
 </style>
 <style>
 .lesson .lnum{display:none}
-.lede-list{font-size:17px;color:var(--ink-2);max-width:62ch}
-.lede-list li{margin:5px 0}
-.lede-list strong{color:var(--ink)}
 details.gloss td:first-child{width:11em;white-space:normal}
 .further .ttl{margin:0 0 6px;font-family:"Source Serif 4",Georgia,serif;font-size:16px;font-weight:600;color:var(--blue)}
 .shapes td:first-child,.terms td:first-child{font-weight:500;white-space:nowrap}
@@ -165,7 +162,7 @@ figure.fig .take-edge{stroke:var(--brass)}
 <nav class="rail" aria-label="Sections">
   <div class="eyebrow">The tuple space</div>
   <ol id="toc">
-    <li><a href="#s0">The problem</a></li>
+    <li><a href="#s0">What it does for you</a></li>
     <li><a href="#s1">Operations</a></li>
     <li><a href="#s1b">The tuple space and the three stores</a></li>
     <li><a href="#s2">Communication</a></li>
@@ -182,18 +179,10 @@ figure.fig .take-edge{stroke:var(--brass)}
 <main>
 <div class="topnav"><span class="eyebrow" style="margin:0">Nexus · coordination</span><a href="getting-started.html">← Getting started</a></div>
 <h1>The Nexus Tuple Space</h1>
-<p class="lede">Nexus serves several processes at once. There is the Claude Code session you talk to, the agents it starts, and the hooks that run around every tool call. There are usually several other sessions on the same machine as well, each working on its own repository. Those processes already talk to each other. The harness delivers messages between a session and its agents, and between teammates in their own terminal panes. Hooks give an agent its context when it starts. Memory and scratch hold what the processes want to share. Each of these does its job well, and the tuple space keeps all of them and is built from them: the hooks write its records, the ids the harness assigns are its addresses, and Claude reads it through the same tools it already calls.</p>
-<p class="lede">What none of those mechanisms provide is a home for coordination itself. Who is working, who owes a report, which message is waiting, which request has no answer: before the tuple space, each of these facts was kept in a different place, in a file or a shell function written for that one case, readable only from the process that wrote it, and gone with the session. The tuple space gives all of them one home.</p>
-<p class="lede">A record in that home has five properties.</p>
-<ul class="plain lede-list">
-<li><strong>Exclusive.</strong> A process can take the record so that no other process gets it.</li>
-<li><strong>Durable.</strong> The record outlives the session that wrote it and stays until it expires.</li>
-<li><strong>Addressed.</strong> The record has keys, so a reader asks for exactly the record it wants and receives no other.</li>
-<li><strong>Queryable.</strong> Any process with the tenant's credential can ask what records exist, who holds them, and what happened to them.</li>
-<li><strong>Waitable.</strong> A reader can block until a record that does not exist yet arrives, and wakes the moment it is written.</li>
-</ul>
-<p class="lede">Linda, the coordination language that introduced the idea, showed that these same operations build several things: a work queue, a mailbox, a lock, a meeting point, and a request with its reply. Only the shape of the record changes. Nexus keeps the space in the same Postgres database as its three stores, behind the same engine. A record can therefore point at a document, a memory entry, or a link, and the reader follows the pointer with the credential it already holds.</p>
-<p class="note">This page is an introduction. The reference, with the exact parameters of every operation and every state a tuple can be in, is <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space.md">docs/tuple-space.md</a>. The <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space-walkthroughs.md">walkthroughs</a> draw each use as a sequence, and <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-205-linda-tuple-space-over-postgres.md">RDR-205</a> records the design and its reasons.</p>
+<p class="lede">The tuple space is where the processes that work with you coordinate: the Claude Code session you talk to, the agents it starts, the hooks that run around every tool call, and the other sessions on the same machine. It is a shared collection of small typed records. Any process can add a record, read one, or take one, and a take is exclusive: when two processes reach for the same record, one gets it and the other does not. A read can wait for a record that has not arrived yet.</p>
+<p class="lede">You use it for three things. You wait for an agent's report instead of polling for it. You send a message to an agent while it works, and the agent reads it before it replies. You send a request to another session on the machine and wait for its ack. Each is a few words to Claude, and the rest of this page shows them.</p>
+<p class="note">The harness, hooks, memory, and scratch keep doing what they do. The tuple space is built from them: hooks write its records, the ids the harness assigns are its addresses, and Claude reads it with the same kind of tools it already calls. Everything on this page is live in the current release.</p>
+<p class="note">The reference, with the exact parameters of every operation and every state a tuple can be in, is <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space.md">docs/tuple-space.md</a>. The <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space-walkthroughs.md">walkthroughs</a> draw each use as a sequence, and <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-205-linda-tuple-space-over-postgres.md">RDR-205</a> records the design and its reasons.</p>
 
 <div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><table class="terms">
 <tr><th>Term</th><th>Meaning</th></tr>
@@ -218,35 +207,28 @@ figure.fig .take-edge{stroke:var(--brass)}
 
 <!-- ============ 0 ============ -->
 <section class="lesson" id="s0">
-<div class="lhead"><h2>The problem</h2><span class="ltime">5 min</span></div>
-<p class="why">The tuple space extends the harness where three failures recur in multi-agent work. All three happen exactly where the harness's delivery stops, and the harness keeps doing everything before that point.</p>
-<ul class="plain">
-<li><strong>A report that never arrives.</strong> An agent finishes without reporting. The harness has nothing to deliver, and nothing records that a report was owed.</li>
-<li><strong>A correction that arrives too late.</strong> You send a correction to an agent while it works. The harness delivers it only between turns, so the agent reads it after it has already returned the wrong answer.</li>
-<li><strong>A request nobody sees.</strong> Another session on the machine needs something from you. The harness does not connect that session to you at all, so the request waits in a chat window until a person sees it.</li>
-</ul>
+<div class="lhead"><h2>What it does for you</h2><span class="ltime">5 min</span></div>
+<p class="why">Three situations come up in every multi-agent session, and each is one instruction.</p>
 
-<p>What the harness delivers is a message: it reaches one reader, at a moment the harness chooses, and then it is gone. What the tuple space holds is a record: it exists from the moment it is written until it expires, no matter who reads it or when. An agent can read its mailbox in the middle of a turn instead of waiting for the next delivery. A hook, a script, or any other session on the machine can write and read with the tenant's credential. The harness does not need to connect them. And anyone can look afterwards at what was written, taken, and acked.</p>
+<h3>Wait for an agent to report</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Wait until <span class="ph">&lt;THE AGENT&gt;</span> reports, then continue with its result.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What happens</div>
+<p>When the agent stops, a hook writes a report tuple to the session's ledger. Claude reads that tuple with a timeout and wakes the moment it lands. The agent does nothing to make this work, and if it never reports, the missing tuple is the evidence.</p>
 
-<p>The space adds two operations to that record, and no read-many store has either. The take operation hands a record to exactly one of the readers asking for it. If two agents both read "take the next task", only one of them takes it. The wait operation holds a reader until a record with the keys it wants arrives.</p>
+<h3>Tell an agent something while it works</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Tell the agent that works on <span class="ph">&lt;THE TASK&gt;</span> that the schema changed. Put the message in its mailbox.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What happens</div>
+<p>Claude writes a message tuple to the agent's mailbox. The agent reads its mailbox before every reply, so it acts on the message before it hands back its next result, not after. The message reaches exactly one reader.</p>
 
-<p>Together these turn coordination from a set of conventions into a set of guarantees.</p>
-<ul class="plain">
-<li><strong>A report is owed until a report tuple exists</strong>, whether or not the agent remembered.</li>
-<li><strong>A message is delivered once</strong>, whether or not two readers raced for it.</li>
-<li><strong>A request is open until its ack exists</strong>, whether or not a person is watching.</li>
-</ul>
+<h3>Ask another session for something</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Ask the <span class="ph">&lt;PEER SESSION&gt;</span> session to rebuild its gate jar. Wait for its ack.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What happens</div>
+<p>Claude writes a request tuple to the other session's mailbox and waits on its own mailbox for the ack. The other session takes the request, does the work, and writes the ack. Nobody relays anything by hand, and an unanswered request stays visible with its age.</p>
 
-<p>Harness messages, hooks, memory, scratch, the knowledge store, and the file system all stay in use. They are the right design for what they carry. The tuple space is built on them: hooks write it, harness ids address it, and its records point into the stores.</p>
-
-<p>The engine could already do this in one place. The queue that feeds structured extraction hands each row to exactly one worker with a single database statement. The tuple space takes that statement and opens it to every process, for records whose shapes the engine checks.</p>
-
-<p>Moving coordination into the database changes three things at once.</p>
-<ul class="plain">
-<li><strong>A tuple outlives the session that wrote it.</strong> Your next session, or another process on the same machine, reads what this session recorded before it ended.</li>
-<li><strong>Every process sees the same tuple space.</strong> Every session on a machine, and every agent in every session, reads and writes one space, so there are no per-session copies to merge.</li>
-<li><strong>You can ask it questions.</strong> "Which agents in this session started and never reported" is one query rather than a loop over files.</li>
-</ul>
+<p>What makes these work is that a tuple is a record, not a message. It exists from the moment it is written until it expires, whoever reads it and whenever. It can be taken by exactly one reader, it can be waited for, and anyone with the tenant's credential can query it afterwards. The rest of this page explains the operations behind that and what else you can do with them.</p>
 </section>
 
 <!-- ============ 1 ============ -->
