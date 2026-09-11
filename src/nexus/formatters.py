@@ -197,7 +197,9 @@ def _format_with_bat(
                 ls = int(r.metadata.get("line_start", 1))
                 le = int(r.metadata.get("line_end", 0))
                 if le < ls:
-                    le = ls + max(0, len(r.content.splitlines()) - 1)
+                    # RDR-169 Phase B fix round 1: a reference-only chunk's
+                    # content is None -- guard before .splitlines().
+                    le = ls + max(0, len((r.content or "").splitlines()) - 1)
                 ranges.append((ls, le))
 
         merged = _merge_line_ranges(ranges)
@@ -219,7 +221,7 @@ def _format_with_bat(
         all_content_lines: dict[int, str] = {}
         for r in file_results:
             ls = int(r.metadata.get("line_start", 1))
-            for i, line in enumerate(r.content.splitlines()):
+            for i, line in enumerate((r.content or "").splitlines()):
                 all_content_lines[ls + i] = line
 
         if all_content_lines:
@@ -230,7 +232,7 @@ def _format_with_bat(
                 stdin_lines.append(all_content_lines.get(ln, ""))
             stdin_text = "\n".join(stdin_lines)
         else:
-            stdin_text = "\n".join(r.content for r in file_results)
+            stdin_text = "\n".join(r.content or "" for r in file_results)
 
         # Use stdin mode: bat reads from stdin with --file-name for language detection
         # Replace the file arg with "-" for stdin
@@ -276,14 +278,17 @@ def format_compact(
     for r in results:
         source_path = _display_path(r.metadata)
         line_start = int(r.metadata.get("line_start", 0))
-        chunk_lines = r.content.splitlines()
+        # RDR-169 Phase B fix round 1: a reference-only chunk's content is
+        # None -- guard before .splitlines().
+        content = r.content or ""
+        chunk_lines = content.splitlines()
         if not chunk_lines:
             output.append(f"{source_path}:{line_start}:")
             continue
 
         if query:
             matches = _find_matching_lines(
-                r.content, query,
+                content, query,
                 rg_matched_lines=r.metadata.get("rg_matched_lines"),
                 chunk_line_start=line_start,
             )
@@ -307,11 +312,18 @@ def format_vimgrep(results: list[SearchResult], query: str | None = None) -> lis
     for r in results:
         source_path = _display_path(r.metadata)
         line_start = int(r.metadata.get("line_start", 0))
-        chunk_lines = r.content.splitlines() if r.content else [""]
+        # RDR-169 Phase B fix round 1: a reference-only chunk's content is
+        # None -- the ternary already guarded chunk_lines, but the
+        # _find_matching_lines(r.content, ...) call below did NOT: with
+        # content=None, chunk_lines becomes [""] (truthy), so the `query and
+        # chunk_lines` branch still ran and crashed on r.content.splitlines()
+        # one level down. Guard the value passed in, not just chunk_lines.
+        content = r.content or ""
+        chunk_lines = content.splitlines() if content else [""]
 
         if query and chunk_lines:
             matches = _find_matching_lines(
-                r.content, query,
+                content, query,
                 rg_matched_lines=r.metadata.get("rg_matched_lines"),
                 chunk_line_start=line_start,
             )
@@ -364,7 +376,9 @@ def format_plain(results: list[SearchResult]) -> list[str]:
                 lines.append(f"  {snippet}")
             continue
         line_start = r.metadata.get("line_start", 0)
-        for i, content_line in enumerate(r.content.splitlines()):
+        # RDR-169 Phase B fix round 1: a reference-only chunk's content is
+        # None -- guard before .splitlines().
+        for i, content_line in enumerate((r.content or "").splitlines()):
             line_no = int(line_start) + i
             lines.append(f"{source_path}:{line_no}:{content_line}")
     return lines
@@ -393,13 +407,16 @@ def format_plain_with_context(
     for r in results:
         source_path = _display_path(r.metadata)
         line_start = int(r.metadata.get("line_start", 0))
-        chunk_lines = r.content.splitlines()
+        # RDR-169 Phase B fix round 1: a reference-only chunk's content is
+        # None -- guard before .splitlines().
+        content = r.content or ""
+        chunk_lines = content.splitlines()
         total = len(chunk_lines)
 
         if query and (lines_before > 0 or lines_after > 0):
             # Smart windowing: center on matching lines
             matches = _find_matching_lines(
-                r.content, query,
+                content, query,
                 rg_matched_lines=r.metadata.get("rg_matched_lines"),
                 chunk_line_start=line_start,
             )

@@ -841,7 +841,16 @@ def search_cross_corpus(
                     continue
                 results.append(SearchResult(
                     id=r["id"],
-                    content=r["content"],
+                    # RDR-169 Phase B fix round 1 (T2 review-nexus-zw2em-
+                    # rdr169-phase-b-2026-09-11, CRITICAL): a reference-only
+                    # chunk (chunk_text=NULL) is reachable through plain
+                    # /v1/vectors/search (hybrid_search's FTS/trigram gate is
+                    # the only path that excludes it). Coerce None -> "" here,
+                    # at the SINGLE boundary where the raw engine dict becomes
+                    # a SearchResult, so every downstream consumer (mcp/core's
+                    # render code, formatters.py, the CLI) sees a plain string
+                    # and never has to re-guard defensively.
+                    content=r.get("content") or "",
                     distance=distance,
                     collection=col,
                     metadata={k: v for k, v in r.items()
@@ -1453,7 +1462,7 @@ def _flag_contradictions(
             meta = dict(r.metadata)
             meta["_contradiction_flag"] = True
             out.append(SearchResult(
-                id=r.id, content=r.content, distance=r.distance,
+                id=r.id, content=r.content or "", distance=r.distance,
                 collection=r.collection, metadata=meta,
                 hybrid_score=r.hybrid_score,
             ))
@@ -1569,7 +1578,7 @@ def _apply_clustering(
                 meta["_cluster_label"] = rd["_cluster_label"]
             out.append(SearchResult(
                 id=rd["id"],
-                content=rd["content"],
+                content=rd.get("content") or "",
                 distance=rd["distance"],
                 collection=rd["collection"],
                 metadata=meta,
@@ -1610,7 +1619,7 @@ def _apply_topic_grouping(
             meta = dict(r.metadata)
             meta["_topic_label"] = label
             out.append(SearchResult(
-                id=r.id, content=r.content, distance=r.distance,
+                id=r.id, content=r.content or "", distance=r.distance,
                 collection=r.collection, metadata=meta,
                 hybrid_score=r.hybrid_score,
             ))

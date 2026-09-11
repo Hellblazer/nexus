@@ -2288,7 +2288,11 @@ def _search_render(
             )
             dist = f"{r.distance:.4f}"
             label = title or source or r.id
-            snippet = r.content[:200].replace("\n", " ")
+            # RDR-169 Phase B fix round 1 (reference-only chunks, content=None):
+            # coerced to "" at the SearchResult boundary (search_engine.py), but
+            # guarded again here too (defense-in-depth -- this render code should
+            # never assume upstream never regresses).
+            snippet = (r.content or "")[:200].replace("\n", " ")
             flag = " [CONTRADICTS ANOTHER RESULT]" if r.metadata.get("_contradiction_flag") else ""
             note = annotation_line(r.metadata)
             note_line = f"\n  {note}" if note else ""
@@ -4017,7 +4021,8 @@ def query(
                     # raw distance. ``distance`` above stays the winning
                     # chunk's raw vector distance for display.
                     "hybrid_score": r.hybrid_score,
-                    "snippet": r.content[:300].replace("\n", " "),
+                    # RDR-169 Phase B fix round 1: see the sibling guard above.
+                    "snippet": (r.content or "")[:300].replace("\n", " "),
                     "bib_year": meta.get("bib_year", ""),
                     "bib_authors": meta.get("bib_authors", ""),
                     "bib_citation_count": meta.get("bib_citation_count", ""),
@@ -4057,7 +4062,8 @@ def query(
                 # Better matching chunk — update snippet
                 docs[doc_key]["distance"] = r.distance
                 docs[doc_key]["hybrid_score"] = r.hybrid_score
-                docs[doc_key]["snippet"] = r.content[:300].replace("\n", " ")
+                # RDR-169 Phase B fix round 1: see the sibling guard above.
+                docs[doc_key]["snippet"] = (r.content or "")[:300].replace("\n", " ")
 
         # Sort by best match hybrid_score (), limit
         all_docs = sorted(docs.values(), key=lambda d: d["hybrid_score"], reverse=True)

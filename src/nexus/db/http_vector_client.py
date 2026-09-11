@@ -2755,6 +2755,19 @@ class HttpVectorClient:
         populate ``source_uri`` on each row (RDR-169 G5, bead nexus-jkv85).
         Default False — omits the field so default callers pay zero JOIN cost.
 
+        RDR-169 Phase B (bead nexus-zw2em): a row may carry ``content: null``
+        (a reference-only chunk, RDR-169 G1) and a ``retention`` key
+        (``"full"`` or ``"reference-only"``). This method passes rows
+        through verbatim — no field validation, no coercion — so both are
+        already tolerated here by construction; the None-coercion that
+        matters happens one layer up, at ``search_engine.py``'s
+        ``SearchResult`` construction (the actual crash boundary a bare
+        ``r["content"]`` or ``r.content[...]`` would hit). Only a plain
+        vector search (this method, ``structured=False``) can surface such
+        a row; the engine's ``hybrid_search`` route excludes it via its
+        FTS/trigram gate (chunk_tsv/word_similarity are both NULL/false
+        for NULL content).
+
         RDR-188 (bead nexus-9o6y2.8): ``rerank=True`` requests the server's
         fused rerank stage. The response becomes an object envelope
         ``{"results": [...], "rerank_degraded": ..., ...}``; scored rows carry

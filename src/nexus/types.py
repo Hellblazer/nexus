@@ -29,10 +29,19 @@ class PromotionReport:
 
 @dataclass
 class SearchResult:
-    """A single result returned by semantic or hybrid search."""
+    """A single result returned by semantic or hybrid search.
+
+    ``content`` is ``str | None`` (RDR-169 Phase B, bead nexus-zw2em):
+    ``None`` means a reference-only chunk (``retention='reference-only'``,
+    ``chunk_text`` is NULL at the store) — the wire genuinely allows this
+    for a row reached via plain vector search. Most construction sites
+    (``search_engine.py``'s ``SearchResult`` boundary) coerce it to ``""``
+    before it reaches a caller, but the type says what the wire allows
+    rather than what one call site happens to guarantee.
+    """
 
     id: str
-    content: str
+    content: str | None
     distance: float
     collection: str
     metadata: dict[str, Any] = field(default_factory=dict)
