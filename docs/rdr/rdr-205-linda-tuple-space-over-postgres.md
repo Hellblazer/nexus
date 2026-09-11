@@ -2,7 +2,8 @@
 title: "Linda Tuple Space over Postgres: A Coordination Primitive for Agents and Instances"
 id: RDR-205
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-09-11
 priority: medium
 author: Sam
 reviewed-by: self

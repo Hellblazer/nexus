@@ -1858,6 +1858,7 @@ nexus-afnht.1
 nexus-afudo
 nexus-afudo.1
 nexus-aginu
+nexus-aginu.1
 nexus-agsq7
 nexus-agsq7.1
 nexus-ahai
@@ -2682,6 +2683,7 @@ nexus-f1m8s
 nexus-f1mbo
 nexus-f1mbo.1
 nexus-f1pbh
+nexus-f1pbh.1
 nexus-f1syh
 nexus-f1syh.1
 nexus-f20el
@@ -4040,6 +4042,7 @@ nexus-mv0p.7
 nexus-mv0p.8
 nexus-mv0p.9
 nexus-mvfm9
+nexus-mvfm9.1
 nexus-mw2kg
 nexus-mw2kg.1
 nexus-mw86l
@@ -6376,6 +6379,7 @@ nexus-zm2n
 nexus-zmfal
 nexus-zmfan
 nexus-zn9op
+nexus-zn9op.1
 nexus-znvjd
 nexus-znwc2
 nexus-znwc2.1

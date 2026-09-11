@@ -80,16 +80,18 @@ beads listed below. Closed 2026-09-11.
    dead wire. Schedule the relay sweep and the dispatch check, or wire them
    into the release checklist where they now sit (step 11d).
 
-## Follow-on beads open at close
+## Follow-on beads at close
 
-nexus-em75s.39 (eight Phase 1 Test Plan scenarios with no test), .40 (Java
-pins), .42 (projector residuals), nexus-f1pbh (diagnostics role has no SELECT
-on the three tuple tables; next engine tag), nexus-aginu (one shared endpoint
-resolver for the hook scripts; also the stop-payload skip lines), nexus-w5gma
-(phase-review-gate parses nothing on this RDR's layout), nexus-zn9op (census
-test under box load), nexus-e00lh and nexus-mvfm9 (polish), nexus-konsk (the
-plugin-only channel), nexus-joqdj (wire-ledger timing; resolved by the 7.41.0
-release, left for the author to close). The "claimable" wording amendment at
+Finished the same day, on Sam's direction to finish rather than defer:
+nexus-em75s.39 (fifteen Test Plan scenarios), .40 (Java pins), .42
+(projector hardening and the doctor rows), nexus-f1pbh (diagnostics grants,
+next engine tag), nexus-mvfm9 (address grammar, stats on an unknown
+subspace, lease precision, next engine tag), nexus-aginu (one shared endpoint
+resolver for the hook scripts), nexus-zn9op (the census's bounded call),
+nexus-e00lh, nexus-w5gma, nexus-abyi9 (the stale relay's backoff),
+nexus-joqdj. Open after close: nexus-konsk (the plugin-only channel, an
+RDR-197 defect, fix round in flight), nexus-r9esy (one phase grammar at the
+gate), nexus-ujdha (a box-local test). The "claimable" wording amendment at
 RDR lines 911 to 913 is the author's.
 
 ## Records
