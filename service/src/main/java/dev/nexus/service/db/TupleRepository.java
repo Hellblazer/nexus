@@ -615,9 +615,19 @@ public final class TupleRepository {
                 }
 
                 String newClaimId = UUID.randomUUID().toString();
-                OffsetDateTime leaseUntil = now.plusSeconds(leaseSeconds);
+                // RDR-205 follow-on (nexus-mvfm9): truncate to microseconds -- Postgres
+                // TIMESTAMPTZ (and the JDBC driver reading it back) is microsecond-
+                // precision, but the JVM clock underneath OffsetDateTime.now() can carry
+                // more digits. Without truncating here, the claim RESPONSE (built from
+                // this in-memory value, never re-fetched) and a later READ-BACK of the
+                // same row disagree on lease_until's fractional-second precision even
+                // though both name the identical instant once rounded. row.getExpiresAt()
+                // in the clamp branch already came from a DB fetch, so it is already at
+                // this precision; truncating it too is a no-op, not a second source of
+                // truth.
+                OffsetDateTime leaseUntil = now.plusSeconds(leaseSeconds).truncatedTo(java.time.temporal.ChronoUnit.MICROS);
                 if (leaseUntil.isAfter(row.getExpiresAt())) {
-                    leaseUntil = row.getExpiresAt(); // clamped: a claim never outlives its tuple
+                    leaseUntil = row.getExpiresAt().truncatedTo(java.time.temporal.ChronoUnit.MICROS); // clamped: a claim never outlives its tuple
                 }
                 ctx.update(TUPLES)
                         .set(TUPLES.CLAIM_STATE, CLAIM_STATE_CLAIMED)
@@ -916,8 +926,21 @@ public final class TupleRepository {
 
     // ── subspace_list / subspace_stats ──────────────────────────────────────
 
-    /** {@code subspace_stats(subspace) -> {total, available, claimed, dead, consumed, expired_unpurged}}. */
+    /**
+     * {@code subspace_stats(subspace) -> {total, available, claimed, dead, consumed, expired_unpurged}}.
+     *
+     * <p>RDR-205 follow-on (nexus-mvfm9): resolves the subspace against the
+     * registry FIRST — before this fix an unknown subspace silently answered
+     * a zero census (no rows match a subspace nothing ever wrote to) instead
+     * of the same {@code UnknownSubspaceException} every other operation
+     * raises. {@link #subspaceList}, which enumerates subspaces that
+     * genuinely hold rows, deliberately keeps its own unchecked call to
+     * {@link #computeCensus} — those subspace names come from live data,
+     * not caller input, and may legitimately outlive a template that was
+     * since removed from the registry.
+     */
     public SubspaceCensus subspaceStats(String tenant, String subspace) {
+        resolveOrThrow(subspace);
         return tenantScope.withTenant(tenant, ctx -> computeCensus(ctx, tenant, subspace));
     }
 

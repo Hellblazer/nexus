@@ -23,6 +23,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.regex.Pattern;
 
 /**
  * RDR-205 §Technical Design "Registry": loads, validates, and serves the
@@ -125,6 +126,28 @@ public final class TemplateRegistry {
     }
 
     /**
+     * The tuple-space address grammar (nexus-mvfm9, RDR-205 follow-on): a
+     * {@code <param>} segment of a template name — the address portion of a
+     * subspace like {@code mailbox/<address>} — must be non-empty and match
+     * this shape. Before this fix {@link #matchesTemplate} accepted ANY
+     * segment count match regardless of the param segment's content,
+     * including the empty string ({@code "mailbox/"} splits to
+     * {@code ["mailbox", ""]}, two segments, matching {@code ["mailbox",
+     * "<address>"]}) and arbitrary bytes ({@code "mailbox/bad name!"} —
+     * space and {@code !} are neither escaped nor rejected). Every real
+     * address in this codebase (claimant ids, session ids, instance names —
+     * see {@code conexus/skills/mailbox/SKILL.md}, the ledger/mailbox test
+     * fixtures) is a bare identifier: letters, digits, {@code .}, {@code _},
+     * {@code -}. A subspace whose address fails this grammar now simply
+     * fails to match ANY template, so {@link #resolve} returns {@code null}
+     * and every caller's {@code resolveOrThrow} raises
+     * {@code UnknownSubspaceException} uniformly — the same failure mode as
+     * a template name that does not exist at all, deliberately not a new
+     * error type.
+     */
+    static final Pattern ADDRESS_SEGMENT_PATTERN = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]*");
+
+    /**
      * Literal-before-template resolution — the May load rule RDR-205 carries
      * verbatim: "a literal name is looked up before templates". Returns
      * {@code null} when nothing matches.
@@ -151,6 +174,10 @@ public final class TemplateRegistry {
         for (int i = 0; i < templateSegments.size(); i++) {
             String ts = templateSegments.get(i);
             if (TemplateSchema.isParamSegment(ts)) {
+                String address = input.get(i);
+                if (!ADDRESS_SEGMENT_PATTERN.matcher(address).matches()) {
+                    return false;
+                }
                 continue;
             }
             if (!ts.equals(input.get(i))) {
