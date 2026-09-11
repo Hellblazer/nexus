@@ -1097,6 +1097,11 @@ public final class PgVectorRepository {
             row.put("content",    rec.get("content", String.class));
             row.put("distance",   rec.get("distance", Double.class));
             row.put("collection", rec.get("collection", String.class));
+            // RDR-169 Phase B fix round 1 (Gap 2, T2 critique-nexus-zw2em-
+            // rdr169-phase-b-2026-09-11): additive, alongside the already-
+            // nullable content -- plain_search_<dim> now selects it
+            // (vectors-015-retention-search-return.xml).
+            row.put("retention",  rec.get("retention", String.class));
             JSONB meta = rec.get("metadata", JSONB.class);
             row.putAll(fromJson(meta != null ? meta.data() : null));
             rows.add(row);
@@ -1418,6 +1423,14 @@ public final class PgVectorRepository {
             row.put("content",    rec.get("content", String.class));
             row.put("distance",   rec.get("distance", Double.class));
             row.put("collection", rec.get("collection", String.class));
+            // RDR-169 Phase B fix round 1 (Gap 2): additive, alongside the
+            // already-nullable content -- text_gated_search_hnsw_first_<dim>
+            // / text_gated_search_by_chash_<dim> now select it
+            // (vectors-015-retention-search-return.xml). hybridSearch's own
+            // FTS/trigram gate excludes a reference-only row from ever
+            // reaching here in practice, but the field rides along for
+            // response-shape consistency with plain search.
+            row.put("retention",  rec.get("retention", String.class));
             JSONB meta = rec.get("metadata", JSONB.class);
             row.putAll(fromJson(meta != null ? meta.data() : null));
             rows.add(row);

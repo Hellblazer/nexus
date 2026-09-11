@@ -489,7 +489,12 @@ public final class VectorHandler implements HttpHandler {
      * }
      * </pre>
      *
-     * <p>Response 200: [{"id","content","distance","collection", ...metadata}]
+     * <p>Response 200: [{"id","content","distance","collection","retention", ...metadata}]
+     *
+     * <p>{@code retention} ({@code "full"} or {@code "reference-only"}, RDR-169 Phase B
+     * fix round 1, Gap 2) and a nullable {@code content} are additive — existing consumers
+     * that ignore the two new fields see the same shape they always have. A
+     * {@code retention="reference-only"} row's {@code content} is {@code null}.
      *
      * <p>Optional: {@code "include_source_uri": true} gates a catalog JOIN to populate
      * {@code source_uri} on each row. Default false — omits the field entirely so default

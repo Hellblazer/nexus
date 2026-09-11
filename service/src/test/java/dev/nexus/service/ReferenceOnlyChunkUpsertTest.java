@@ -149,6 +149,17 @@ class ReferenceOnlyChunkUpsertTest {
         }
     }
 
+    /** Direct typed-jOOQ read of {@code retention} for one chash — bypasses the repo. */
+    private String retentionOf(String chash) throws Exception {
+        try (Connection conn = ds.getConnection()) {
+            DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+            DimTables.ChunkTable ch = DimTables.CHUNKS.get(1024);
+            return ctx.select(ch.retention()).from(ch.table())
+                .where(ch.tenantId().eq(TENANT).and(ch.chash().eq(chash)))
+                .fetchOne(ch.retention());
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Null / empty embedding — pre-SQL, no DB needed
     // -------------------------------------------------------------------------
@@ -225,10 +236,13 @@ class ReferenceOnlyChunkUpsertTest {
      * When no existing row occupies the chash, the write gate is open
      * ({@link PgVectorRepository#REFERENCE_ONLY_WRITES_ENABLED} == true, Phase B) and the
      * INSERT succeeds. {@link PgVectorRepository#search} (pure vector ranking, vectors-009
-     * {@code plain_search_<dim>}, no FTS gate) must return the row with {@code content=null}.
+     * {@code plain_search_<dim>}, no FTS gate) must return the row with {@code content=null}
+     * AND {@code retention="reference-only"} (RDR-169 Phase B fix round 1, Gap 2,
+     * vectors-015-retention-search-return.xml) — the additive field a reference-aware
+     * consumer reads to distinguish this row from an ordinary full-content hit.
      */
     @Test
-    void referenceOnlyOnNewChash_succeeds_andSearchReturnsNullContent() {
+    void referenceOnlyOnNewChash_succeeds_andSearchReturnsNullContentAndRetention() {
         repo.upsertReferenceOnlyChunk(TENANT, COL, REFONLY_CHASH, REFONLY_VEC, Map.of("k", "v"));
 
         List<Map<String, Object>> rows = repo.search(TENANT, REFONLY_QUERY, List.of(COL), 10, null);
@@ -244,6 +258,9 @@ class ReferenceOnlyChunkUpsertTest {
         assertThat(row.get("content"))
             .as("a reference-only hit's content must be null on the wire")
             .isNull();
+        assertThat(row.get("retention"))
+            .as("a reference-only hit's retention must read back 'reference-only'")
+            .isEqualTo("reference-only");
     }
 
     /**
@@ -291,5 +308,39 @@ class ReferenceOnlyChunkUpsertTest {
         assertThat(chunkTextOf(REWRITE_CHASH))
             .as("rewrite must not have materialized any content")
             .isEmpty();
+    }
+
+    // -------------------------------------------------------------------------
+    // reference-only → full promotion via the ORDINARY content-write path
+    // -------------------------------------------------------------------------
+
+    /**
+     * A chash first written reference-only, then re-submitted through the ORDINARY
+     * {@link PgVectorRepository#upsertChunks} path with real text, must end up with
+     * {@code chunk_text} present AND {@code retention='full'} — closing the "reference-only
+     * row silently promoted to full content while retention stays stale" gap
+     * (T2 review-nexus-zw2em-rdr169-phase-b-2026-09-11 Important finding): the ordinary
+     * path's {@code ON CONFLICT DO UPDATE} now sets {@code retention='full'} explicitly
+     * (PgVectorRepository#upsertChunksInternal), not just {@code chunk_text}.
+     */
+    @Test
+    void referenceOnlyPromotedToFull_viaOrdinaryUpsert_retentionReadsFull() throws Exception {
+        String promoteChash = dev.nexus.service.db.Chash.ofText("rpromote").toHex();
+        repo.upsertReferenceOnlyChunk(TENANT, COL, promoteChash,
+            FakeEmbedder.unitVector(1024, 0.6f, 0.8f), Map.of());
+        assertThat(chunkTextOf(promoteChash)).as("reference-only: no content yet").isEmpty();
+        assertThat(retentionOf(promoteChash)).isEqualTo("reference-only");
+
+        // Promote: the SAME chash, now with real content, through the ordinary path.
+        repo.upsertChunks(TENANT, COL,
+            List.of(promoteChash), List.of("promoted to full content"), List.of(Map.of()));
+
+        assertThat(chunkTextOf(promoteChash))
+            .as("the promoted row must carry real content")
+            .contains("promoted to full content");
+        assertThat(retentionOf(promoteChash))
+            .as("retention must flip to 'full' -- it must not stay stale at "
+                + "'reference-only' once real content has genuinely arrived")
+            .isEqualTo("full");
     }
 }
