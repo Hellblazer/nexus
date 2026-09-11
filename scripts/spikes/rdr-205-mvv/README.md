@@ -110,6 +110,33 @@ leg's own progress log lands beside it at `<out>.bloat.log`.
   stamped from an earlier commit with byte-identical `service/`
   content).
 
+## Run 2b — re-run on the tagged tree, bloat leg to the stated million cycles
+
+Bead `nexus-em75s.17`, Phase 3 fix round. Re-run of the five engine-direct
+legs above (same seeds and shapes: default `--tuples 200 --workers 10`,
+default `--bloat-row-pool 1000 --bloat-workers 20`, default
+`--bloat-max-cycles 1000000`) against a jar built from a tree whose
+`service/` content is byte-identical to `a2801dfc9` (`git diff a2801dfc9
+HEAD -- service/` is empty) — the tip of RDR-205 Phase 1's engine range,
+which INCLUDES the two `fix(service)` commits (`fd830727d`, `4fde06763`)
+that landed after run 2's engine build and that the Phase 3 critique
+(T2 `nexus/critique-nexus-em75s.17-phase3-2026-09-11`, Finding 2) flagged
+as an unclosed traceability gap against run 2's targets.
+
+The only change from run 2's invocation is `--bloat-max-seconds 3600`
+(raised so the leg's own `--bloat-max-cycles` default, not the wall
+clock, is what ends it): `uv run python scripts/spikes/rdr-205-mvv/
+harness.py --bloat-max-seconds 3600 --out <path>`.
+
+Result: the bloat leg reached **1,000,031 cycles in 1495.64s** wall time
+(`stopped_reason=max_cycles`) — the RDR's Test Plan and MVV-section
+statement of "a million cycles" (`docs/rdr/rdr-205-linda-tuple-space-
+over-postgres.md:1170,1474`) is now literally true, not just approached
+(run 2 reached 473,994 before its wall-clock bound fired first). Full
+numbers, the five-target re-derivation, and the post-fix-engine
+disposition of Finding 2 are recorded in T2 `nexus_rdr/205-research-15:
+MVV run 2b, engine-direct legs on the tagged tree a2801dfc9`.
+
 # RDR-205 Phase 4 Step 3 — MVV run 1 (`run1.py`)
 
 Bead: `nexus-em75s.21`, the run that closes Phase 4. Ten sub-agents of

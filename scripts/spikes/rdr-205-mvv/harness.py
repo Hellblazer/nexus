@@ -609,7 +609,16 @@ def summarize(engine: Engine, audit: AuditLegResult, lease_probe: LeaseProbeResu
                     "note": "client-observed in_()/inp() round-trip latency "
                             "(network + server transaction) -- an upper bound "
                             "on the raw DB transaction time research-3 measured "
-                            "directly over psql (p50 3.96ms, p99 6.01ms)",
+                            "directly over psql (p50 3.96ms, p99 6.01ms). "
+                            "CAVEAT: a parked in_(timeout_s=...) call that finds "
+                            "nothing claimable blocks for up to the full "
+                            "claim-timeout before returning None, so p99/max can "
+                            "be dominated by that parking latency rather than by "
+                            "transaction time -- see empty_claims_after_wake's "
+                            "count for how many of the calls in this sample "
+                            "parked (run 2: 9 of 209 calls parked the full 5s "
+                            "timeout, giving p99=5018.8ms/max=5022.5ms; p50 is "
+                            "the representative successful-claim latency).",
                     "n": len(durations),
                     "mean": statistics.mean(durations) if durations else 0.0,
                     "p50": _pctile(durations, 0.50),
