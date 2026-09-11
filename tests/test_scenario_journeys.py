@@ -58,6 +58,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -66,6 +67,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.db.t2.http_tuple_store import HttpTupleStore
 from tests._catalog_fixture_ops import active_reader, documents_by_file_path, documents_by_title
 from tests._engine_substrate import ensure_engine
 
@@ -892,3 +894,186 @@ def test_mailbox_max_attempts_lapsed_leases_dead_letters(t2_service_env) -> None
         "--claimant", _tuple_uniq("claimant-later"), "--lease-s", "5",
     ])
     assert probe.exit_code == 1, probe.output
+
+
+# ── RDR-205 Phase 6: cross-instance request and ack (bead nexus-em75s.29) ───
+#
+# Two sessions on one box, both minting against the ONE tenant t2_service_env
+# provisions -- the RDR's own "not a third consumer" clause: address_kind
+# `instance` reuses the mailbox/<address> template, addressed to a session
+# name instead of an agent id. Journey per docs/tuple-space-walkthroughs.md
+# § Cross-instance request and ack: A outs a request to B's mailbox and
+# parks an `in` on its OWN mailbox for the ack; B drains, acks by outing
+# back to A's address; A's parked `in` returns.
+
+
+def _parked_in_loop(
+    runner: CliRunner, address: str, *, claimant: str, lease_s: int,
+    per_call_timeout_s: int, overall_budget_s: float,
+) -> tuple[dict | None, int]:
+    """Mirror ``scripts/spikes/rdr-205-mvv/run1.py``'s
+    ``parked_rd_for_report``: loop ``tuple in --timeout-s <n>`` calls
+    within an overall budget rather than depending on one park call
+    outlasting it -- the orchestration skill's "a wait of minutes is a
+    LOOP of parked calls" contract, restated here for `in` instead of
+    `rd`. ``per_call_timeout_s`` stands in for the engine's real 25 s
+    per-call cap (CA 3) at a scale a unit test can afford; the shape of
+    the loop -- not the literal 25 -- is what this journey proves.
+    Returns ``(claim_payload_or_None, calls_made)``.
+    """
+    deadline = time.monotonic() + overall_budget_s
+    calls = 0
+    while time.monotonic() < deadline:
+        calls += 1
+        result = runner.invoke(main, [
+            "tuple", "in", f"mailbox/{address}", "--pattern", f"to={address}",
+            "--claimant", claimant, "--lease-s", str(lease_s),
+            "--timeout-s", str(per_call_timeout_s), "--json",
+        ])
+        if result.exit_code == 0:
+            return _tuple_last_json_line(result.output), calls
+    return None, calls
+
+
+@pytest.mark.scenario
+def test_cross_instance_request_and_ack_two_sessions_one_box(t2_service_env) -> None:
+    """Journey (RDR-205 Test Plan / Phase 6): A (session ``nexus-a6``-shaped)
+    sends a ``kind=request`` to B's (``conexus-58``-shaped) mailbox and
+    parks an `in` on its OWN mailbox for the ack, looping past a per-call
+    cap rather than depending on a single park to outlast B's work; B
+    drains the request, does its own bookkeeping, and acks by ``out``ing a
+    ``kind=ack`` tuple carrying the same ``correlation_id`` back to A's
+    mailbox; A's parked loop returns it.
+
+    A drives entirely through the ``nx tuple`` CLI (this file's own
+    cross-verb binding constraint); B runs off a background thread and
+    drives ``HttpTupleStore`` directly -- ``click.testing.CliRunner``
+    patches process-wide stdout around each invocation and is not safe
+    for two threads to call concurrently, and B's actions must genuinely
+    overlap A's parked wait for this journey to prove the loop rather
+    than a lucky single park.
+    """
+    runner = CliRunner()
+    a = _tuple_uniq("nexus-a")
+    b = _tuple_uniq("conexus-b")
+    correlation_id = _tuple_uniq("corr")
+
+    # A -> B: the request, address_kind instance (RDR-205 Phase 6 addressing).
+    out = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{b}",
+        "--key", f"to={b}", "--dim", f"from={a}",
+        "--dim", "kind=request", "--dim", f"correlation_id={correlation_id}",
+        "--dim", "address_kind=instance", "--body", "deploy and re-gate",
+        "--nonce", correlation_id,
+    ])
+    assert out.exit_code == 0, out.output
+    request_id = out.output.strip().splitlines()[-1]
+
+    # Before B has acted at all, a bare probe on A's own mailbox finds
+    # nothing -- no ack exists yet.
+    early_probe = runner.invoke(main, [
+        "tuple", "in", f"mailbox/{a}", "--pattern", f"to={a}",
+        "--claimant", a, "--lease-s", "30",
+    ])
+    assert early_probe.exit_code == 1, early_probe.output
+
+    # B's side, run off a background thread (its own HttpTupleStore, never
+    # the CliRunner A uses) so it lands WHILE A's parked loop below is
+    # already waiting -- proving the loop (not one park outlasting the
+    # cap) is what finds the ack.
+    b_result: dict[str, object] = {}
+
+    def _b_drains_and_acks() -> None:
+        b_store = HttpTupleStore()
+        time.sleep(1.5)
+        claimed = b_store.in_(
+            f"mailbox/{b}", {"to": b}, claimant=b, lease_s=60,
+        )
+        assert claimed is not None, "B must find the request A sent"
+        row, claim_id = claimed
+        assert row.id == request_id
+        assert row.dims["kind"] == "request"
+        assert row.dims["correlation_id"] == correlation_id
+        b_result["claim_id"] = claim_id
+
+        ack_id = b_store.out(
+            f"mailbox/{a}", {"to": a},
+            {"from": b, "kind": "ack", "correlation_id": correlation_id},
+            "done", nonce=f"ack-{correlation_id}",
+        )
+        b_result["ack_id"] = ack_id
+        b_store.ack(claim_id, b)
+
+    b_thread = threading.Thread(target=_b_drains_and_acks)
+    b_thread.start()
+
+    # A parks on its OWN mailbox for the ack, looping at a short per-call
+    # cap over an overall budget comfortably longer than B's delay.
+    found, calls = _parked_in_loop(
+        runner, a, claimant=a, lease_s=30, per_call_timeout_s=1, overall_budget_s=8,
+    )
+    b_thread.join(timeout=10)
+    assert not b_thread.is_alive(), "B's background thread did not finish within the test's budget"
+
+    assert found is not None, "A's parked loop must find B's ack within the overall budget"
+    assert calls >= 2, (
+        f"a single park call must not have outlasted B's work -- expected the loop to make "
+        f"more than one call, got {calls}"
+    )
+    assert found["tuple"]["dims"]["kind"] == "ack"
+    assert found["tuple"]["dims"]["from"] == b
+    assert found["tuple"]["dims"]["correlation_id"] == correlation_id
+    assert found["tuple"]["id"] == b_result["ack_id"]
+
+    a_ack = runner.invoke(main, ["tuple", "ack", found["claim_id"], "--claimant", a])
+    assert a_ack.exit_code == 0, a_ack.output
+
+    # B's own claim on the request tuple was acked too -- the request is
+    # fully consumed on both sides.
+    assert b_result.get("claim_id")
+    rd_b = runner.invoke(main, ["tuple", "rd", f"mailbox/{b}", "--pattern", f"to={b}", "--json"])
+    assert rd_b.exit_code == 0, rd_b.output
+    assert _tuple_last_json_line(rd_b.output) == [], "B's acked request row must never come back from rd"
+
+
+@pytest.mark.scenario
+def test_cross_instance_unacked_request_is_visible_to_the_sweep(t2_service_env) -> None:
+    """The nexus-w374z sweep's mailbox-scan half (nexus-em75s.28): a
+    ``kind=request`` tuple with no matching ``kind=ack`` at the requester's
+    own mailbox is exactly what ``check_inbound_relay_acks.find_unacked_
+    requests`` must flag. Exercised against REAL engine data via
+    ``HttpTupleStore`` in-process (never the installed ``nx`` binary from
+    a dev session) -- the same shape the sweep's ``fetch_tuple_list_json``/
+    ``fetch_tuple_rows_json`` IO boundary hands to that pure function.
+    """
+    import check_inbound_relay_acks as sweep  # noqa: PLC0415 — scripts/ is on pythonpath (pyproject.toml)
+
+    runner = CliRunner()
+    a = _tuple_uniq("nexus-a")
+    b = _tuple_uniq("conexus-b")
+    correlation_id = _tuple_uniq("corr")
+
+    out = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{b}",
+        "--key", f"to={b}", "--dim", f"from={a}",
+        "--dim", "kind=request", "--dim", f"correlation_id={correlation_id}",
+        "--dim", "address_kind=instance", "--body", "never acked",
+        "--nonce", correlation_id,
+    ])
+    assert out.exit_code == 0, out.output
+    request_id = out.output.strip().splitlines()[-1]
+
+    store = HttpTupleStore()
+    rows_by_subspace: dict[str, list[dict]] = {}
+    for census in store.subspace_list("mailbox/"):
+        rows = store.rd(census.subspace, n=300)
+        rows_by_subspace[census.subspace] = [
+            {"id": r.id, "dims": r.dims, "created_at": r.created_at} for r in rows
+        ]
+
+    unacked = sweep.find_unacked_requests(rows_by_subspace)
+    matches = [f for f in unacked if f["id"] == request_id]
+    assert len(matches) == 1, f"expected the never-acked request among the sweep's findings: {unacked}"
+    assert matches[0]["subspace"] == f"mailbox/{b}"
+    assert matches[0]["from"] == a
+    assert matches[0]["correlation_id"] == correlation_id
