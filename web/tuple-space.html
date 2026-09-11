@@ -327,10 +327,7 @@ body: The schema changed. Read memory <span class="ph">&lt;PROJECT&gt;</span>/<s
 
 <p>Every agent gets an address when it starts. The hook that runs at agent start tells the agent its own id and its matching mailbox address. To send a message, you add a tuple to that mailbox with a message id that you create yourself. That id becomes the identity of the tuple. If the connection fails and you send again, the second send matches the same tuple, and the agent never sees the message twice.</p>
 
-<div class="see">You might say</div>
-<div class="cmd"><pre>Tell the agent that works on <span class="ph">&lt;THE TASK&gt;</span> that the schema changed. Put the message in its mailbox.</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What Claude does</div>
-<p>Claude makes one <code>tuple_out</code> call to the agent's mailbox with the message body and a message id. The agent's instructions tell it to read its mailbox before every reply, so on its next read it takes the message, acts on it, and acks it.</p>
+<p>Behind the instruction in <a href="#s0">the first section</a>, Claude makes one <code>tuple_out</code> call to the agent's mailbox with the message body and a message id. The agent's instructions tell it to read its mailbox before every reply, so on its next read it takes the message, acts on it, and acks it.</p>
 
 <p>The body of the message is a pointer, not the content. It names the memory entry, the document, or the scratch note that holds what the agent needs, and the agent opens that item (see <a href="#s1b">the three stores</a>). A message that carried the content would be a copy, and the copy would be wrong the moment somebody corrected the original.</p>
 
@@ -346,10 +343,7 @@ body: The schema changed. Read memory <span class="ph">&lt;PROJECT&gt;</span>/<s
 
 <p>The first use is waiting for an agent's report. When an agent stops, a hook adds a report tuple to the session's ledger with the agent's id as the key. Your session reads that key with a timeout. If the tuple is already there, the read returns immediately. If not, the read waits inside the engine and wakes when the tuple is written or the timeout ends. The agent does nothing to make this work, because the hook writes the tuple from the data the harness gives it.</p>
 
-<div class="see">You might say</div>
-<div class="cmd"><pre>Wait until <span class="ph">&lt;THE AGENT&gt;</span> reports. Then continue with its result.</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What Claude does</div>
-<p>Claude calls <code>tuple_rd</code> on the ledger with the agent's id and a timeout. Each call waits for at most twenty-five seconds and returns what it found, so a wait of minutes is a loop of these calls. The limit is deliberate. It keeps every wait shorter than every network timeout between the client and the engine, so a wait can never become a dropped connection.</p>
+<p>Behind the instruction in <a href="#s0">the first section</a>, Claude calls <code>tuple_rd</code> on the ledger with the agent's id and a timeout. Each call waits for at most twenty-five seconds and returns what it found, so a wait of minutes is a loop of these calls. The limit is deliberate. It keeps every wait shorter than every network timeout between the client and the engine, so a wait can never become a dropped connection.</p>
 
 <p>The second use is waiting for the reply to a request. A session sends a request to a peer session, then calls <code>in</code> on its own mailbox with a timeout and wakes when the ack arrives. The request and the ack share a correlation id, which is how the reply is paired with its question.</p>
 
@@ -389,10 +383,7 @@ body: The schema changed. Read memory <span class="ph">&lt;PROJECT&gt;</span>/<s
 <h3>Across instances</h3>
 <p>A mailbox addressed to a session's name is a channel between any two of the sessions on one machine. All of them share the same engine and the same tenant, and each has a name that the harness shows. One session adds a request to the other's mailbox with a correlation id, then calls <code>in</code> on its own mailbox and waits. The other session reads its mailbox, opens what the request names, and does the work. Then it adds an ack with the same correlation id to the first session's mailbox, and that wakes the first session. No person relays anything. An unanswered request is a tuple with an age that the census shows, not a line in a chat window that nobody reads.</p>
 
-<div class="see">You might say</div>
-<div class="cmd"><pre>Ask the <span class="ph">&lt;PEER SESSION&gt;</span> session to rebuild its gate jar. Wait for its ack.</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What Claude does</div>
-<p>Claude calls <code>tuple_out</code> to the peer's mailbox with kind "request" and a new correlation id. Then it calls <code>tuple_in</code> on this session's own mailbox in a loop, until an ack with that id arrives or you tell it to stop.</p>
+<p>Behind the instruction in <a href="#s0">the first section</a>, Claude calls <code>tuple_out</code> to the peer's mailbox with kind "request" and a new correlation id. Then it calls <code>tuple_in</code> on this session's own mailbox in a loop, until an ack with that id arrives or you tell it to stop.</p>
 
 <p>A request names its subject with a pointer, whether a bead id, a memory title, or a document address. If the work produces a result, the ack names where the result was written, and the requester opens it there.</p>
 
