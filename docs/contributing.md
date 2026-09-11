@@ -337,7 +337,12 @@ Every step below is **required**. Missing any one of them has caused problems in
    gates (rehearsal, era-hop, guided) which all start from a populated
    install — the 2026-07-21 fresh-box defect class was invisible to every
    one of them. Must end `FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL,
-   release-battery layer)`.
+   release-battery layer)`. Leg 8d/10 (nexus-cbo4a) additionally drives the
+   real SubagentStart/SubagentStop tuple-ledger-projector hook wrappers
+   against this virgin install, and `tests/e2e/cloud-client-path-gate.sh`'s
+   leg G does the same against a live cloud config — together the only
+   pre-tag proof that `conexus/hooks/scripts/tuple_ledger_project.py`
+   actually lands a tuple on both install classes (nexus-g2lln / nexus-0zsmg).
 
    This is the LOCAL WHEEL layer: it builds and installs the tree under
    test, so it proves the release candidate works, but it resolves
@@ -562,6 +567,8 @@ Every step below is **required**. Missing any one of them has caused problems in
     CONVERGENCE MVV PASSED — ... -> published conexus X.Y.Z -> ...`; a
     plain `-> working tree` here means `NEXUS_TARGET_RELEASE` was not set
     and the loop was not actually closed.
+
+11d. **Post-publish: real-dispatch check** (nexus-0zsmg, T2 `nexus/shakedown-playbook` §2 S18) — dispatch one trivial agent in a live Claude Code session on each box class (managed cloud, local supervisor), then run `tests/e2e/post-publish-dispatch-check.sh <session_id>` against that session; must end `POST-PUBLISH DISPATCH CHECK PASSED` on both.
 
 12. **Reinstall local tool and verify**
     ```bash

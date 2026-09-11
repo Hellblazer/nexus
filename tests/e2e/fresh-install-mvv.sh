@@ -1004,6 +1004,127 @@ if [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ]; then
     fi
 fi
 
+echo "── 8d/10 tuple ledger projector hook drive (nexus-g2lln pre-tag proof, nexus-cbo4a) ──"
+# No pre-tag gate previously drove the SubagentStart/SubagentStop ledger
+# projection hooks against a REAL install -- every case in
+# tests/hooks/test_tuple_ledger_project.py hand-writes the data-token lease
+# the projector reads (T2 nexus/shakeout-7.41.0-projector-local-install-
+# proof-2026-09-11), so a fully-inert projector shipped through every
+# existing gate unnoticed. This leg drives the real wrapper scripts against
+# the sandbox's own local install (supervisor up since leg 4/10) with a
+# synthetic SubagentStart/SubagentStop payload and polls for the tuples
+# they are supposed to write.
+#
+# The wheel under test does NOT ship conexus/hooks/scripts -- only
+# conexus/plans/ travels into the wheel (pyproject.toml's [tool.hatch.
+# build.targets.wheel.force-include] comment: "the rest of conexus/
+# (agents, skills, commands, hooks, .claude-plugin/plugin.json) is
+# consumed by Claude Code from the repo at plugin-install time, not from
+# the Python wheel"). The plugin is what actually runs these scripts on a
+# user's box, never the installed package, so there is no wheel copy to
+# prefer here -- this drives THIS CHECKOUT's own conexus/hooks/scripts.
+#
+# EXPECTED TO FAIL while bead nexus-g2lln is open: the projector presents
+# ONLY a data-token-lease bearer, and a default local install runs on the
+# supervisor's static service_token with no mint_token configured, so no
+# data-token lease is ever written and every projection SKIPs. This leg
+# exists to CLOSE that blind spot, not to pass silently -- it starts
+# passing once nexus-g2lln's fix (owned separately) lands.
+HOOK_PY_DIR="$WORK/hook-py"
+mkdir -p "$HOOK_PY_DIR"
+# Symlink to $PROBE_PYTHON (already proven >=3.12 by the install this
+# journey just ran) rather than trust the ambient host `python3` --
+# tuple_ledger_project.py hard-refuses below 3.12, and an operator's system
+# python3 is routinely older (T2 proof: macOS /usr/bin/python3 3.9.6).
+ln -sf "$PROBE_PYTHON" "$HOOK_PY_DIR/python3"
+
+HOOK_SID="$("$PROBE_PYTHON" -c 'import uuid; print(uuid.uuid4().hex)')"
+HOOK_AGENT="mvv-hook-probe"
+HOOK_LOG="$HOME_DIR/.local/state/nexus/orchestration/$HOOK_SID.tuple-projection.log"
+
+_drive_hook() {
+    # $1 = wrapper script basename under conexus/hooks/scripts; stdin = the
+    # JSON payload. Scrubbed env, matching _nx()'s discipline -- HOME
+    # points at the sandbox so the script resolves the sandbox's own
+    # config dir / state dir / data-token lease, never the operator's.
+    env -i \
+        HOME="$HOME_DIR" \
+        PATH="$HOOK_PY_DIR:/usr/bin:/bin" \
+        TERM="${TERM:-dumb}" \
+        NX_NO_TELEMETRY=1 \
+        bash "$REPO_ROOT/conexus/hooks/scripts/$1"
+}
+
+printf '{"session_id":"%s","agent_id":"%s","agent_type":"Explore","hook_event_name":"SubagentStart"}' \
+    "$HOOK_SID" "$HOOK_AGENT" | _drive_hook subagent-start-tuple-async.sh
+printf '{"session_id":"%s","agent_id":"%s","hook_event_name":"SubagentStop"}' \
+    "$HOOK_SID" "$HOOK_AGENT" | _drive_hook subagent-stop-tuple-async.sh
+
+# Both wrappers detach a background subshell and return in milliseconds
+# (see their own headers) -- the actual resolve+POST can take up to the
+# projector's 5s per-call timeout, so poll rather than assume completion.
+HOOK_DEADLINE=$(( $(date +%s) + 30 ))
+HOOK_TOTAL=0
+HOOK_STATS=""
+while :; do
+    HOOK_STATS="$(_nx tuple stats "ledger/$HOOK_SID" 2>/dev/null || true)"
+    HOOK_TOTAL="$(printf '%s\n' "$HOOK_STATS" | sed -n 's/^total: //p')"
+    [ -n "$HOOK_TOTAL" ] || HOOK_TOTAL=0
+    if [ "$HOOK_TOTAL" -ge 2 ] 2>/dev/null; then
+        break
+    fi
+    HOOK_SKIP_LINES=0
+    if [ -f "$HOOK_LOG" ]; then
+        HOOK_SKIP_LINES="$(grep -c 'SKIP' "$HOOK_LOG" 2>/dev/null || echo 0)"
+    fi
+    # Both kinds have already given up -- no further wait will change that.
+    if [ "$HOOK_SKIP_LINES" -ge 2 ] 2>/dev/null; then
+        break
+    fi
+    [ "$(date +%s)" -lt "$HOOK_DEADLINE" ] || break
+    sleep 1
+done
+
+HOOK_START_ROWS="$(_nx tuple rd "ledger/$HOOK_SID" --pattern kind=start -n 5 2>&1 || true)"
+HOOK_REPORT_ROWS="$(_nx tuple rd "ledger/$HOOK_SID" --pattern kind=report -n 5 2>&1 || true)"
+HOOK_LOG_CONTENT=""
+[ -f "$HOOK_LOG" ] && HOOK_LOG_CONTENT="$(cat "$HOOK_LOG")"
+
+{
+    echo "session_id: $HOOK_SID"
+    echo "agent_id: $HOOK_AGENT"
+    echo "-- tuple stats --"
+    echo "$HOOK_STATS"
+    echo "-- kind=start rows --"
+    echo "$HOOK_START_ROWS"
+    echo "-- kind=report rows --"
+    echo "$HOOK_REPORT_ROWS"
+    echo "-- projection log ($HOOK_LOG) --"
+    printf '%s\n' "$HOOK_LOG_CONTENT"
+} > "$LOGS/tuple-hook-drive.log"
+
+HOOK_FAIL=""
+if ! [ "$HOOK_TOTAL" -ge 2 ] 2>/dev/null; then
+    HOOK_FAIL="ledger/$HOOK_SID total=$HOOK_TOTAL (want >=2) after 30s"
+fi
+case "$HOOK_START_ROWS" in
+    *"'agent_id': '$HOOK_AGENT'"*) : ;;
+    *) HOOK_FAIL="${HOOK_FAIL:+$HOOK_FAIL; }no kind=start row for agent_id=$HOOK_AGENT" ;;
+esac
+case "$HOOK_REPORT_ROWS" in
+    *"'agent_id': '$HOOK_AGENT'"*) : ;;
+    *) HOOK_FAIL="${HOOK_FAIL:+$HOOK_FAIL; }no kind=report row for agent_id=$HOOK_AGENT" ;;
+esac
+case "$HOOK_LOG_CONTENT" in
+    *SKIP*) HOOK_FAIL="${HOOK_FAIL:+$HOOK_FAIL; }projection log carries a SKIP line" ;;
+esac
+
+if [ -n "$HOOK_FAIL" ]; then
+    cat "$LOGS/tuple-hook-drive.log" >&2
+    _fail "tuple ledger projector hook drive: $HOOK_FAIL — expected while nexus-g2lln is open (a default local install has no data-token lease, so every projection SKIPs); see $LOGS/tuple-hook-drive.log. Will pass once nexus-g2lln's fix lands."
+fi
+echo "  ok: ledger/$HOOK_SID total=$HOOK_TOTAL, kind=start and kind=report rows present for $HOOK_AGENT, no SKIP in the projection log"
+
 echo "── 9/10 generation install path on the virgin HOME (nexus-utpuw.19) ──"
 # This gate installs via `uv pip install` into a scrubbed venv and never
 # touches the tool layout, so it is unaffected by the generation change AND
@@ -1046,7 +1167,7 @@ echo "── 10/10 non-vacuity ──"
 # despite a background-thread exception) read as fine. This calls
 # _leg_log_is_substantive instead, which adds the one thing `-s` cannot: no
 # unhandled Python traceback anywhere in the leg's own log.
-LEGS_TO_CHECK="mcp-entrypoints.log init.log store.log store-reput.log search-reput.log index.log doctor.log resolver-bound.log generation-install.log"
+LEGS_TO_CHECK="mcp-entrypoints.log init.log store.log store-reput.log search-reput.log index.log doctor.log resolver-bound.log tuple-hook-drive.log generation-install.log"
 if [ "$PUBLISHED_MODE" = 1 ]; then
     LEGS_TO_CHECK="install.log $LEGS_TO_CHECK"
 else

@@ -113,6 +113,21 @@ def _write_storage_lease(
     (config_dir / f"storage_service_addr.{os.getuid()}").write_text(json.dumps(record))
 
 
+def _write_config_yml(config_dir: Path, credentials: dict[str, str]) -> None:
+    """Hand-written ``config.yml`` matching ``nexus.config.set_config_value``'s
+    actual on-disk shape (nexus-0zsmg) -- verified against a live
+    ``~/.config/nexus/config.yml``: a zero-indent ``credentials:`` block
+    with each key at a fixed 2-space indent, bare (unquoted) scalar
+    values. This is the shape ``_read_persisted_service_url`` is a narrow
+    mirror of, not a general YAML writer.
+    """
+    config_dir.mkdir(parents=True, exist_ok=True)
+    lines = ["credentials:"]
+    for k, v in credentials.items():
+        lines.append(f"  {k}: {v}")
+    (config_dir / "config.yml").write_text("\n".join(lines) + "\n")
+
+
 def _data_token_digest(base_url: str, tenant: str) -> str:
     from urllib.parse import urlsplit
 
@@ -339,6 +354,215 @@ def test_resolves_host_port_from_storage_service_lease(tmp_path: Path, mock_engi
     assert proc.returncode == 0, proc.stderr
     assert len(engine.requests) == 1
     assert engine.auth_headers[0] == "Bearer via-lease"
+
+
+def test_local_supervisor_with_no_data_token_lease_falls_back_to_its_own_token(
+    tmp_path: Path, mock_engine
+) -> None:
+    """nexus-g2lln: the exact dead-on-every-local-install shape proven by
+    the 7.41.0 shakeout (T2
+    ``nexus/shakeout-7.41.0-projector-local-install-proof-2026-09-11``) --
+    a local supervisor lease, NO data-token lease at all (the default
+    local install has no ``mint_token`` configured, so no client ever
+    writes one). Must fall back to the storage lease's own ``endpoint.
+    token`` field -- the same static credential the real local client
+    presents on this box -- and post successfully, no SKIP."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(engine.base_url)
+    _write_storage_lease(config_dir, host=parsed.hostname, port=parsed.port)
+    lease_path = config_dir / f"storage_service_addr.{os.getuid()}"
+    os.chmod(lease_path, 0o600)
+    # No data-token lease written at all.
+
+    proc = _run("start", tmp_path=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+    assert engine.auth_headers[0] == "Bearer static-mint-locked"
+    log = _log_path(tmp_path / "state")
+    assert not log.exists() or "SKIP" not in log.read_text()
+
+
+def test_local_supervisor_with_stale_data_token_lease_falls_back_to_its_own_token(
+    tmp_path: Path, mock_engine
+) -> None:
+    """A data-token lease exists but is past the near-expiry threshold --
+    treated as absent, exactly like the existing near-expiry pin -- and
+    the local supervisor endpoint still falls back to its own token."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(engine.base_url)
+    _write_storage_lease(config_dir, host=parsed.hostname, port=parsed.port)
+    os.chmod(config_dir / f"storage_service_addr.{os.getuid()}", 0o600)
+    _write_data_token_lease(
+        config_dir, base_url=engine.base_url, token="stale-data-token",
+        ttl_seconds=3600.0, remaining_s=100.0,  # well within the 20% near-expiry band
+    )
+
+    proc = _run("start", tmp_path=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+    assert engine.auth_headers[0] == "Bearer static-mint-locked"
+
+
+def test_local_supervisor_token_refused_when_lease_file_is_group_or_world_readable(
+    tmp_path: Path, mock_engine
+) -> None:
+    """nexus-g2lln: the fallback token authorizes real engine writes, so a
+    lease file another local account could read must never be trusted as
+    its source -- SKIP, and the reason names the permission problem."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(engine.base_url)
+    _write_storage_lease(config_dir, host=parsed.hostname, port=parsed.port)
+    lease_path = config_dir / f"storage_service_addr.{os.getuid()}"
+    os.chmod(lease_path, 0o644)  # group/other-readable -- must be refused
+
+    proc = _run("start", tmp_path=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert engine.requests == []
+    log = _log_path(tmp_path / "state")
+    content = log.read_text()
+    assert "SKIP kind=start" in content
+    assert "group/other-accessible" in content
+
+
+def test_managed_endpoint_never_falls_back_to_a_local_lease_token(
+    tmp_path: Path, mock_engine
+) -> None:
+    """nexus-em75s.12's guarantee must survive nexus-g2lln's fallback: a
+    MANAGED endpoint (``service_url`` resolved) with no fresh data-token
+    lease must SKIP even when a live, owner-only local supervisor lease
+    with a usable token happens to also exist on the same box (e.g. a
+    dev box running both a local supervisor and pointed at a managed
+    service_url for testing) -- the local static token is never an
+    acceptable substitute for a managed-endpoint bearer."""
+    engine = mock_engine(status=200)
+    managed_engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(engine.base_url)
+    _write_storage_lease(config_dir, host=parsed.hostname, port=parsed.port)
+    os.chmod(config_dir / f"storage_service_addr.{os.getuid()}", 0o600)
+    # No data-token lease for the managed endpoint.
+
+    proc = _run(
+        "start", tmp_path=tmp_path, env_overrides={"NX_SERVICE_URL": managed_engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert engine.requests == []
+    assert managed_engine.requests == []
+    log = _log_path(tmp_path / "state")
+    assert "SKIP kind=start" in log.read_text()
+    assert "no fresh data-token lease" in log.read_text()
+
+
+def test_cloud_mode_persisted_service_url_resolves_with_no_env_and_no_lease(
+    tmp_path: Path, mock_engine
+) -> None:
+    """nexus-0zsmg: the exact cloud-mode shape -- a managed-service
+    ``config.yml`` (``credentials.service_url`` persisted by ``nx config
+    set``, no ``NX_SERVICE_URL``/``NX_SERVICE_PORT`` env, no local
+    supervisor lease at all) must still resolve the endpoint and post,
+    matching ``nexus.db.service_endpoint.resolve_service_endpoint``'s own
+    precedence. Before the fix this always fell through to 'no service
+    endpoint resolvable' on a real cloud-mode box."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_config_yml(config_dir, {"service_url": engine.base_url, "service_token": "irrelevant-here"})
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="cloud-data-token")
+
+    proc = _run("start", tmp_path=tmp_path)  # NO env_overrides -- config.yml only
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+    assert engine.auth_headers[0] == "Bearer cloud-data-token"
+    log = _log_path(tmp_path / "state")
+    assert not log.exists() or "SKIP" not in log.read_text()
+
+
+def test_no_env_no_persisted_url_no_lease_names_persisted_config_in_skip(tmp_path: Path) -> None:
+    """The absence case: a config.yml exists (some unrelated credential
+    persisted) but carries no ``service_url``, and there is no env and no
+    local lease -- SKIP, and the reason names the persisted-config leg
+    that was checked, not just the env/lease legs."""
+    config_dir = tmp_path / "config"
+    _write_config_yml(config_dir, {"voyage_api_key": "unrelated"})
+
+    proc = _run("start", tmp_path=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    log = _log_path(tmp_path / "state")
+    content = log.read_text()
+    assert "SKIP kind=start" in content
+    assert "persisted config.yml service_url" in content
+
+
+def test_env_service_url_wins_over_persisted_config_service_url(tmp_path: Path, mock_engine) -> None:
+    """Precedence: NX_SERVICE_URL env must win over a DIFFERENT persisted
+    config.yml service_url, exactly like
+    ``nexus.config.get_credential``'s env-first contract -- a stale or
+    wrong persisted value must never override an explicit env pin."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_config_yml(config_dir, {"service_url": "https://wrong-host.example.invalid"})
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="via-env")
+
+    proc = _run("start", tmp_path=tmp_path, env_overrides={"NX_SERVICE_URL": engine.base_url})
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+    assert engine.auth_headers[0] == "Bearer via-env"
+
+
+def test_report_kind_tolerates_missing_agent_type(tmp_path: Path, mock_engine) -> None:
+    """nexus-0zsmg: a SubagentStop payload without ``agent_type`` must
+    still project the report tuple -- the ledger.yaml template's
+    ``agent_type`` dimension is not ``required: true``, so a blank
+    dimension value is engine-safe. session_id + agent_id remain
+    mandatory."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    proc = _run(
+        "report",
+        tmp_path=tmp_path,
+        stdin=json.dumps({"session_id": SESSION_ID, "agent_id": AGENT_ID}),  # no agent_type
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+    body = engine.requests[0]
+    assert body["keys"] == {"agent_id": AGENT_ID, "kind": "report"}
+    assert body["dims"] == {"agent_type": ""}
+    log = _log_path(tmp_path / "state")
+    assert not log.exists() or "SKIP" not in log.read_text()
+
+
+def test_start_kind_still_requires_agent_type(tmp_path: Path, mock_engine) -> None:
+    """Regression guard: the report-only tolerance above must not loosen
+    the start path -- SubagentStart's agent_type is the dispatch's own
+    subagent_type and is expected to always be present; a start payload
+    missing it still SKIPs without calling the engine."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    proc = _run(
+        "start",
+        tmp_path=tmp_path,
+        stdin=json.dumps({"session_id": SESSION_ID, "agent_id": AGENT_ID}),  # no agent_type
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert engine.requests == []
+    log = _log_path(tmp_path / "state")
+    assert "SKIP kind=start" in log.read_text()
 
 
 def test_engine_returns_429_is_logged_and_exits_zero(tmp_path: Path, mock_engine) -> None:

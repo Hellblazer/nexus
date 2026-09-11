@@ -130,7 +130,12 @@ zero ✗ / zero ⚠ / warnings checked against the script's allowlist. Must end
 `FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL, release-battery layer)`.
 `FRESH_MVV_CACHE=/tmp/fresh-mvv-cache` reuses the 416MB model download across
 runs. Every new fresh-box warning is a decision: fix it or allowlist it in
-the script WITH a rationale + bead reference.
+the script WITH a rationale + bead reference. Leg 8d/10 (nexus-cbo4a) drives
+the real SubagentStart/SubagentStop tuple-ledger-projector hook wrappers
+against this virgin install, and `tests/e2e/cloud-client-path-gate.sh`'s leg
+G does the same against a live cloud config — together the only pre-tag
+proof that `conexus/hooks/scripts/tuple_ledger_project.py` actually lands a
+tuple on both install classes (nexus-g2lln / nexus-0zsmg).
 
 This step's plain invocation is the LOCAL WHEEL layer only (dependencies
 resolve from this checkout's `uv.lock`/wheel metadata). It cannot reproduce a
@@ -535,6 +540,10 @@ pins, or on a cadence alongside the shakedown's own MinerU leg (Step
 6c/release checklist `release-sandbox.sh shakedown` step 3b/11) — that leg
 already exercises MinerU end-to-end against the LOCAL wheel; this one is
 the published-bytes counterpart.
+
+### 11d. Post-publish: real-dispatch check (nexus-0zsmg, T2 `nexus/shakedown-playbook` §2 S18)
+
+Dispatch one trivial agent in a live Claude Code session on each box class (managed cloud, local supervisor), then run `tests/e2e/post-publish-dispatch-check.sh <session_id>` against that session; must end `POST-PUBLISH DISPATCH CHECK PASSED` on both — a hook that never runs in one deployment mode (e.g. the tuple-ledger projector, dead on every cloud box at 7.41.0) ships green through every gate that only ever tests a consistent pair or a fixture.
 
 ### 12. Reinstall local tool and verify
 
