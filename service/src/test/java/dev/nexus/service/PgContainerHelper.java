@@ -846,7 +846,8 @@ public final class PgContainerHelper {
      * jOOQ's own {@code dropIndex} never schema-qualifies the index name on
      * POSTGRES, so it would resolve through the session search_path; the
      * qualified {@link Name} is rendered into the function's regclass argument
-     * instead, so PostgreSQL resolves the identity itself.
+     * instead, so PostgreSQL resolves the identity itself, and the function
+     * renders the DROP from pg_class by oid as an explicit schema.name pair.
      */
     public static void dropIndex(Connection conn, Name qualifiedIndex) throws SQLException {
         DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
