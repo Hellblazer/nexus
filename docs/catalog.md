@@ -239,11 +239,11 @@ taxonomy:
 
 ### How it works
 
-> **Note (6.0):** Taxonomy *discovery*, *rebuild*, and per-document *assignment*
-> run on the nexus-service backend (the default since 6.0): embeddings are read
-> server-side and topics + centroids persist through the service (nexus-7ydks).
-> Still being ported (`nexus-7ydks`): `nx taxonomy split` / `project` and the
-> automatic cross-collection projection pass refuse cleanly on the service.
+> **Note:** The whole taxonomy runs on the nexus-service backend: embeddings are
+> read server-side and topics + centroids persist through the service
+> (nexus-7ydks), and `nx taxonomy split`, `nx taxonomy project`, and the
+> automatic cross-collection projection pass run there too (their
+> service-backend refusal was removed at nexus-i711w).
 
 After `nx index repo` (or `nx taxonomy discover --all`):
 
