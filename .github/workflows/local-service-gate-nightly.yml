@@ -113,7 +113,7 @@ jobs:
         # The gate rebuilds the dev jar; the runner's default JDK 17 cannot run
         # the jOOQ codegen (class-file 65 = Java 21+). Same toolchain as ci.yml's
         # write-seam job / service-ci.
-        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
+        uses: graalvm/setup-graalvm@0426e2e191540e8514dff98dc52a5f5146a2a276  # v1
         with:
           java-version: "25.0.3"
           distribution: "graalvm"
