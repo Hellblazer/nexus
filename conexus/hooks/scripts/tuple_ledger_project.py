@@ -220,17 +220,34 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         raise urllib.error.HTTPError(newurl, code, "redirect refused", headers, fp)
 
 
-def _build_opener() -> urllib.request.OpenerDirector:
-    """A fresh no-proxy, no-redirect opener (nexus-em75s.42 review
-    finding): an explicit empty :class:`~urllib.request.ProxyHandler`
-    overrides ``build_opener``'s default of reading ``http_proxy``/
-    ``https_proxy`` from the environment -- this is a fixed internal
-    engine URL, never a request that should route through an ambient
-    proxy setting."""
-    return urllib.request.build_opener(_NoRedirectHandler(), urllib.request.ProxyHandler({}))
+def _build_opener(is_local_supervisor: bool) -> urllib.request.OpenerDirector:
+    """A fresh no-redirect opener, no-proxy ONLY for a LOCAL supervisor
+    endpoint (fix round on nexus-em75s.42's review finding): an explicit
+    empty :class:`~urllib.request.ProxyHandler` overrides
+    ``build_opener``'s default of reading ``http_proxy``/``https_proxy``
+    from the environment -- correct for ``base_url``'s
+    ``127.0.0.1``/lease-host leg, which is a fixed loopback address an
+    ambient proxy setting could never legitimately need to route to, but
+    WRONG for the managed-cloud ``NX_SERVICE_URL``/``service_url`` leg --
+    a genuine internet destination a corporate-proxied box may need
+    proxied to reach at all. ``t2_prefix_scan.py`` and ``routing/_lib.py``
+    hit that same managed endpoint via a bare ``urlopen`` with no explicit
+    opener, so they already honour the ambient proxy env there; omitting
+    the empty :class:`~urllib.request.ProxyHandler` override here (letting
+    ``build_opener``'s own default ``ProxyHandler`` -- which reads
+    ``http_proxy``/``https_proxy`` -- apply) matches that behavior for the
+    non-local leg instead of silently and permanently breaking ledger
+    writes on a proxied cloud-mode box while the sibling hooks keep
+    working."""
+    handlers: list[urllib.request.BaseHandler] = [_NoRedirectHandler()]
+    if is_local_supervisor:
+        handlers.append(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(*handlers)
 
 
-def _post_via_urllib(base_url: str, token: str, body: dict[str, Any]) -> None:
+def _post_via_urllib(
+    base_url: str, token: str, body: dict[str, Any], *, is_local_supervisor: bool
+) -> None:
     """POST *body* to ``{base_url}/v1/tuples/out`` via stdlib
     ``urllib.request`` -- never via a subprocess argv (nexus-em75s.12
     review fix: the prior ``curl -H "Authorization: Bearer <token>"``
@@ -240,8 +257,9 @@ def _post_via_urllib(base_url: str, token: str, body: dict[str, Any]) -> None:
     ``t2_prefix_scan.py``'s ``_http_get_json``. Raises :class:`_Skip`
     naming the failure; never raises anything else.
 
-    Never follows a redirect and never honours an ambient proxy env var
-    (:func:`_build_opener`, nexus-em75s.42). Bounds the WHOLE call to
+    Never follows a redirect; honours an ambient proxy env var except on
+    a LOCAL supervisor endpoint (:func:`_build_opener`, nexus-em75s.42
+    fix round). Bounds the WHOLE call to
     ``_POST_TIMEOUT_S`` wall-clock time, not just each individual socket
     operation (nexus-em75s.42: ``urlopen``'s own ``timeout`` resets on
     every connect/recv, so a server that trickles bytes could otherwise
@@ -265,7 +283,7 @@ def _post_via_urllib(base_url: str, token: str, body: dict[str, Any]) -> None:
 
     def _do_post() -> None:
         try:
-            opener = _build_opener()
+            opener = _build_opener(is_local_supervisor)
             with opener.open(req, timeout=_POST_TIMEOUT_S) as resp:  # noqa: S310 — fixed internal engine URL, not user input
                 outcome["status"] = resp.status
         except urllib.error.HTTPError as exc:
@@ -332,13 +350,13 @@ def main(argv: list[str]) -> int:
 
     config_dir = _ep.default_config_dir()
     try:
-        base_url, token, _is_local_supervisor = _resolve_endpoint_and_token(config_dir)
+        base_url, token, is_local_supervisor = _resolve_endpoint_and_token(config_dir)
         body = {
             "subspace": f"ledger/{session_id}",
             "keys": {"agent_id": agent_id, "kind": kind},
             "dims": {"agent_type": agent_type},
         }
-        _post_via_urllib(base_url, token, body)
+        _post_via_urllib(base_url, token, body, is_local_supervisor=is_local_supervisor)
     except _Skip as exc:
         _log_skip(session_id, f"SKIP kind={kind} agent_id={agent_id} {exc}")
         return 0

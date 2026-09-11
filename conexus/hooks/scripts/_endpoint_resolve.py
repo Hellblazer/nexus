@@ -337,21 +337,31 @@ def resolve_base_url(config_dir: Path) -> tuple[str, bool]:
     ``NX_SERVICE_URL`` exported -- an all-persisted-config install, the
     common shape after ``nx init`` -- must still resolve).
 
-    The ``NX_SERVICE_HOST``/``NX_SERVICE_PORT`` env leg fills a missing
-    HOST from a live local supervisor lease before defaulting to
-    ``127.0.0.1`` (nexus-aginu, matching ``resolve_service_config``'s
-    per-field lease merge -- the pre-consolidation
-    ``tuple_ledger_project.py`` mirror always defaulted host to
-    ``127.0.0.1`` here without ever consulting a live lease).
+    The ``NX_SERVICE_HOST``/``NX_SERVICE_PORT`` env leg fills EITHER
+    missing field -- HOST from a live local supervisor lease when only
+    PORT is set, or PORT from that same lease when only HOST is set --
+    before HOST defaults to ``127.0.0.1`` (nexus-aginu fix round,
+    completing the earlier nexus-aginu fix's PORT-set/HOST-missing
+    direction with the HOST-set/PORT-missing mirror: matching
+    ``resolve_service_config``'s per-field lease merge, which triggers
+    whenever ANY of host/port/token is missing, not only when PORT
+    happens to be the one present. The pre-fix version here gated the
+    whole env leg on ``NX_SERVICE_PORT`` being set, so a HOST-only env
+    (PORT unset) fell straight through to the pure-lease leg below and
+    silently returned the LEASE's host instead of the env-set one.
+    PORT itself has no such default -- unlike HOST, an unresolvable
+    PORT (env unset, no lease, or a lease that doesn't supply one) is a
+    loud failure, mirroring ``resolve_service_config``'s identical
+    behavior for port there).
 
     ``is_local_supervisor`` is True ONLY for the last leg -- the endpoint
     was resolved by literally reading the ``storage_service_addr.<uid>``
     lease file for BOTH host and port. It is False for every other leg,
-    the host/port-env leg included even when that leg's host came from
-    the same lease file: naming a port via env is an explicit pin, and a
-    caller that wants to know whether a lease record specifically backed
-    the credential should check the lease directly rather than infer it
-    from this flag.
+    the host/port-env leg included even when part or all of that leg's
+    host/port came from the same lease file: naming EITHER field via env
+    is an explicit pin, and a caller that wants to know whether a lease
+    record specifically backed the credential should check the lease
+    directly rather than infer it from this flag.
     """
     url = os.environ.get("NX_SERVICE_URL", "").strip().rstrip("/")
     if not url:
@@ -359,18 +369,33 @@ def resolve_base_url(config_dir: Path) -> tuple[str, bool]:
     if url:
         return url, False
 
+    host_str = os.environ.get("NX_SERVICE_HOST", "").strip()
     port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
-    if port_str:
-        try:
-            port = int(port_str)
-        except ValueError as exc:
-            raise EndpointUnresolvable(
-                f"NX_SERVICE_PORT is not an integer: {port_str!r}"
-            ) from exc
-        host = os.environ.get("NX_SERVICE_HOST", "").strip()
-        if not host:
+    if host_str or port_str:
+        port: int | None = None
+        if port_str:
+            try:
+                port = int(port_str)
+            except ValueError as exc:
+                raise EndpointUnresolvable(
+                    f"NX_SERVICE_PORT is not an integer: {port_str!r}"
+                ) from exc
+        host: str | None = host_str or None
+        if host is None or port is None:
             lease = read_storage_service_lease(config_dir)
-            host = lease["host"] if lease else "127.0.0.1"
+            if lease is not None:
+                if host is None:
+                    host = lease["host"]
+                if port is None:
+                    port = lease["port"]
+        host = host or "127.0.0.1"
+        if port is None:
+            lease_path = storage_service_lease_path(config_dir)
+            raise EndpointUnresolvable(
+                f"NX_SERVICE_HOST={host_str!r} is set but NX_SERVICE_PORT is "
+                f"not, and no live local supervisor lease at {lease_path} "
+                f"supplies a port"
+            )
         return f"http://{host}:{port}", False
 
     lease = read_storage_service_lease(config_dir)

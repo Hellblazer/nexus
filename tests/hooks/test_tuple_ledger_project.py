@@ -118,8 +118,8 @@ def _write_config_yml(config_dir: Path, credentials: dict[str, str]) -> None:
     actual on-disk shape (nexus-0zsmg) -- verified against a live
     ``~/.config/nexus/config.yml``: a zero-indent ``credentials:`` block
     with each key at a fixed 2-space indent, bare (unquoted) scalar
-    values. This is the shape ``_read_persisted_service_url`` is a narrow
-    mirror of, not a general YAML writer.
+    values. This is the shape ``_endpoint_resolve.read_config_yml_credentials``
+    is a narrow mirror of, not a general YAML writer.
     """
     config_dir.mkdir(parents=True, exist_ok=True)
     lines = ["credentials:"]
@@ -705,6 +705,7 @@ def test_post_never_follows_a_redirect(tmp_path: Path, mock_engine) -> None:
             module._post_via_urllib(
                 f"http://{host}:{port}", "tok",
                 {"subspace": "ledger/x", "keys": {"agent_id": "a", "kind": "start"}, "dims": {}},
+                is_local_supervisor=True,
             )
     finally:
         server.shutdown()
@@ -712,11 +713,14 @@ def test_post_never_follows_a_redirect(tmp_path: Path, mock_engine) -> None:
     assert attacker.requests == [], "redirect must never be followed"
 
 
-def test_post_ignores_ambient_proxy_env(tmp_path: Path, mock_engine, monkeypatch) -> None:
-    """nexus-em75s.42 review finding: a fixed internal engine URL must
-    never route through an ambient http_proxy/https_proxy -- point the
-    proxy env at a port nothing listens on and confirm the POST still
-    reaches the real engine directly."""
+def test_post_ignores_ambient_proxy_env_for_a_local_supervisor_endpoint(
+    tmp_path: Path, mock_engine, monkeypatch,
+) -> None:
+    """nexus-em75s.42 review finding, scoped by the fix round: a LOCAL
+    supervisor endpoint (``is_local_supervisor=True``) must never route
+    through an ambient http_proxy/https_proxy -- point the proxy env at
+    a port nothing listens on and confirm the POST still reaches the
+    real engine directly."""
     import importlib.util
     import socket
 
@@ -736,8 +740,76 @@ def test_post_ignores_ambient_proxy_env(tmp_path: Path, mock_engine, monkeypatch
     module._post_via_urllib(
         engine.base_url, "tok",
         {"subspace": "ledger/x", "keys": {"agent_id": "a", "kind": "start"}, "dims": {}},
+        is_local_supervisor=True,
     )
     assert len(engine.requests) == 1
+
+
+def test_post_honours_ambient_proxy_env_for_a_non_local_endpoint(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Fix round on nexus-aginu/nexus-em75s.42 review finding 5: a
+    MANAGED (non-local-supervisor) endpoint must honour an ambient
+    http_proxy/https_proxy, matching t2_prefix_scan.py and
+    routing/_lib.py's plain ``urlopen`` -- otherwise a corporate-proxied
+    cloud-mode box loses ledger writes silently while the sibling hooks
+    keep working. Point the request at a dead port nothing listens on
+    directly, but stand up a real HTTP server as the proxy: the POST
+    must succeed (via the proxy), proving the ambient proxy env was
+    actually used rather than bypassed."""
+    proxied: list[str] = []
+
+    class _ProxyHandler(BaseHTTPRequestHandler):
+        def log_message(self, *a: object) -> None:
+            pass
+
+        def do_POST(self) -> None:  # noqa: N802
+            proxied.append(self.path)
+            length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(length) if length else b""
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    proxy_server = ThreadingHTTPServer(("127.0.0.1", 0), _ProxyHandler)
+    proxy_host, proxy_port = proxy_server.server_address[:2]
+    proxy_thread = threading.Thread(target=proxy_server.serve_forever, daemon=True)
+    proxy_thread.start()
+
+    import socket
+
+    dead_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    dead_sock.bind(("127.0.0.1", 0))
+    dead_host, dead_port = dead_sock.getsockname()[:2]
+    dead_sock.close()
+
+    monkeypatch.setenv("http_proxy", f"http://{proxy_host}:{proxy_port}")
+    monkeypatch.setenv("HTTP_PROXY", f"http://{proxy_host}:{proxy_port}")
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "tuple_ledger_project_proxy_honoured", SCRIPT,
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        module._post_via_urllib(
+            f"http://{dead_host}:{dead_port}", "tok",
+            {"subspace": "ledger/x", "keys": {"agent_id": "a", "kind": "start"}, "dims": {}},
+            is_local_supervisor=False,
+        )
+    finally:
+        proxy_server.shutdown()
+        proxy_server.server_close()
+
+    assert len(proxied) == 1, "the request must have gone through the proxy, not directly"
+    assert f":{dead_port}/v1/tuples/out" in proxied[0], (
+        f"proxy must have received the absolute-form request URI naming the dead port, got {proxied[0]!r}"
+    )
 
 
 def test_post_bounds_the_whole_call_against_a_listening_but_never_accepting_server(
@@ -766,6 +838,7 @@ def test_post_bounds_the_whole_call_against_a_listening_but_never_accepting_serv
             module._post_via_urllib(
                 f"http://{host}:{port}", "tok",
                 {"subspace": "ledger/x", "keys": {"agent_id": "a", "kind": "start"}, "dims": {}},
+                is_local_supervisor=True,
             )
         elapsed = _time.monotonic() - start
         assert elapsed < module._POST_TIMEOUT_S + 2.0, (
@@ -829,6 +902,7 @@ def test_bearer_never_appears_in_a_spawned_subprocess(tmp_path: Path, mock_engin
     module._post_via_urllib(
         engine.base_url, "never-in-argv",
         {"subspace": "ledger/x", "keys": {"agent_id": "a", "kind": "start"}, "dims": {}},
+        is_local_supervisor=True,
     )
 
     assert len(engine.requests) == 1

@@ -9,15 +9,28 @@ precedence existed (``t2_prefix_scan.py``, ``routing/_lib.py``,
 ``tuple_ledger_project.py``) and one of them (the third, and the one that
 fell behind) is exactly how nexus-0zsmg happened.
 
-This suite pins :func:`_endpoint_resolve.resolve_base_url`'s precedence
-against the REAL client's ``nexus.db.service_endpoint.resolve_service_endpoint``
--- the cases below are built from that module's own pinning suite,
-``tests/db/test_shared_service_endpoint.py`` -- plus the primitive readers
-(``read_config_yml_credentials``, ``read_data_token_lease``,
-``read_storage_service_lease``) and the two nexus-aginu-specific fixes:
-inline-comment/quoted-value handling in the config.yml scanner, and the
-host/port-env leg's host now merging from a live local lease instead of
-always defaulting to 127.0.0.1 (critique observation 1).
+``TestResolveBaseUrlPrecedence`` below pins expectations that are HAND-
+COPIED from the real client's own pinning suite,
+``tests/db/test_shared_service_endpoint.py`` -- a snapshot of cases, not a
+live cross-check: it never imports or calls the real
+``nexus.db.service_endpoint.resolve_service_endpoint``, so a future
+precedence change there could silently stop being mirrored here with no
+red anywhere (review finding on b32416d47, fix round). The suite closes
+that gap with a SECOND class, ``TestResolveBaseUrlParityWithRealClient``,
+which imports and calls the real resolver on the SAME env/config/lease
+state as the hook module and asserts the two sides agree -- THAT class is
+the genuine parity check; the precedence-snapshot class above it is kept
+as documentation of the individual cases, not as the thing that would
+catch drift.
+
+Also covers the primitive readers (``read_config_yml_credentials``,
+``read_data_token_lease``, ``read_storage_service_lease``) and the two
+nexus-aginu-specific fixes: inline-comment/quoted-value handling in the
+config.yml scanner, and the host/port-env leg now merging EITHER missing
+field (host from a live local lease when only PORT is set, or PORT from
+that lease when only HOST is set -- fix round on the critique's Q1
+finding: the first cut only merged host-from-port, not the reverse)
+instead of always defaulting host to 127.0.0.1.
 
 The suite-wide autouse ``_isolate_config_dir`` fixture (``tests/conftest.py``)
 redirects ``NEXUS_CONFIG_DIR`` to a fresh ``tmp_path`` per test, so both the
@@ -105,9 +118,11 @@ def test_every_consumer_imports_the_shared_module(consumer_path: Path) -> None:
     )
 
 
-# ── resolve_base_url precedence, pinned against the real client ────────────
+# ── resolve_base_url precedence -- hand-copied case snapshot ───────────────
 # Cases mirror tests/db/test_shared_service_endpoint.py's
-# TestResolveServiceEndpoint / TestSchemeAwareEndpoint / TestConfigYmlFallback.
+# TestResolveServiceEndpoint / TestSchemeAwareEndpoint / TestConfigYmlFallback,
+# but do NOT call that module -- see the module docstring and
+# TestResolveBaseUrlParityWithRealClient below for the actual cross-check.
 
 
 class TestResolveBaseUrlPrecedence:
@@ -206,6 +221,93 @@ class TestResolveBaseUrlPrecedence:
         monkeypatch.setenv("NX_SERVICE_PORT", "9999")
         base_url, _ = ep.resolve_base_url(_config_dir())
         assert base_url == "http://192.168.1.1:9999"
+
+    def test_host_only_env_leg_fills_port_from_live_lease(self, ep, monkeypatch) -> None:
+        """Fix round on the critique's Q1 finding: resolve_service_config
+        merges a missing field from the lease whenever ANY of host/port/
+        token is missing, not only when PORT happens to be the one
+        present. NX_SERVICE_HOST set alone (PORT unset) must keep the
+        ENV host and fill PORT from the lease -- the pre-fix version
+        gated the whole env leg on NX_SERVICE_PORT being set, so a
+        HOST-only env fell straight through to the pure-lease leg below
+        and silently returned the LEASE's host instead of the env-set
+        one."""
+        _publish_lease(host="10.0.0.9", port=4242, token="lease-tok")
+        monkeypatch.setenv("NX_SERVICE_HOST", "192.168.1.1")  # a DIFFERENT host than the lease
+        base_url, is_local = ep.resolve_base_url(_config_dir())
+        assert base_url == "http://192.168.1.1:4242"
+        assert is_local is False  # still not the bare-lease leg -- HOST was explicit env
+
+    def test_host_only_env_leg_fails_loud_with_no_lease_port(self, ep, monkeypatch) -> None:
+        """The mirror image of test_fail_loud_when_nothing_resolvable:
+        HOST is pinned via env but no PORT is resolvable from anywhere
+        (no NX_SERVICE_PORT, no live lease) -- unlike HOST, PORT has no
+        default, so this must fail loud rather than silently guessing a
+        port."""
+        monkeypatch.setenv("NX_SERVICE_HOST", "192.168.1.1")
+        with pytest.raises(ep.EndpointUnresolvable, match="NX_SERVICE_PORT"):
+            ep.resolve_base_url(_config_dir())
+
+
+# ── resolve_base_url parity with the real client ────────────────────────────
+# Fix round on the review's Q2 / the critique's Q1 finding: the cases above
+# are hand-copied from tests/db/test_shared_service_endpoint.py's own cases
+# -- a snapshot, not a live cross-check, so a future precedence change to
+# the real resolver would silently stop being mirrored with no red anywhere.
+# This class instead imports and calls the real
+# nexus.db.service_endpoint.resolve_service_endpoint on the SAME env/config/
+# lease state as the hook module and asserts the base_url each side
+# resolves is identical -- it fails if either side's precedence changes,
+# not just if this file's copied expectations happen to be wrong.
+
+
+class TestResolveBaseUrlParityWithRealClient:
+    def _real_base_url(self) -> str:
+        from nexus.db.service_endpoint import resolve_service_endpoint
+
+        base_url, _token = resolve_service_endpoint()
+        return base_url
+
+    def test_service_url_env(self, ep, monkeypatch) -> None:
+        monkeypatch.setenv("NX_SERVICE_URL", "https://api.conexus-nexus.com:443")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
+        hook_url, is_local = ep.resolve_base_url(_config_dir())
+        assert hook_url == self._real_base_url()
+        assert is_local is False
+
+    def test_config_yml_service_url(self, ep, monkeypatch) -> None:
+        from nexus.config import set_credential
+
+        set_credential("service_url", "https://api.conexus-nexus.com")
+        set_credential("service_token", "tok")
+        hook_url, is_local = ep.resolve_base_url(_config_dir())
+        assert hook_url == self._real_base_url()
+        assert is_local is False
+
+    def test_env_host_port(self, ep, monkeypatch) -> None:
+        monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_SERVICE_PORT", "8123")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
+        hook_url, _ = ep.resolve_base_url(_config_dir())
+        assert hook_url == self._real_base_url()
+
+    def test_host_only_env_fills_port_from_lease(self, ep, monkeypatch) -> None:
+        _publish_lease(host="10.0.0.9", port=4242, token="lease-tok")
+        monkeypatch.setenv("NX_SERVICE_HOST", "192.168.1.1")
+        hook_url, _ = ep.resolve_base_url(_config_dir())
+        assert hook_url == self._real_base_url()
+
+    def test_port_only_env_fills_host_from_lease(self, ep, monkeypatch) -> None:
+        _publish_lease(host="10.0.0.9", port=4242, token="lease-tok")
+        monkeypatch.setenv("NX_SERVICE_PORT", "9999")
+        hook_url, _ = ep.resolve_base_url(_config_dir())
+        assert hook_url == self._real_base_url()
+
+    def test_bare_lease(self, ep) -> None:
+        _publish_lease(port=5555, token="lease-tok")
+        hook_url, is_local = ep.resolve_base_url(_config_dir())
+        assert hook_url == self._real_base_url()
+        assert is_local is True
 
 
 # ── config.yml credential parsing: quoted values + inline comments ─────────
