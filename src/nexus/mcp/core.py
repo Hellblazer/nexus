@@ -5824,8 +5824,12 @@ def tuple_out(
         keys: The template's pinned key fields (required, non-empty).
         dims: Optional dimension fields the template declares.
         body: Optional tuple payload.
-        nonce: Optional caller-minted nonce (for templates whose
-            ``id_from`` includes it).
+        nonce: Caller-minted nonce. REQUIRED for any template whose
+            ``id_from`` is ``keys+nonce`` (the mailbox) — an ``out`` with
+            no nonce on such a template is refused as ``SchemaViolation``;
+            omit it for a ``keys``-only template (the ledger). It is an id
+            ingredient only, never echoed back on a read (``rd``/``in``
+            and their probe forms return no ``nonce`` field).
         ttl_seconds: Optional explicit TTL, capped at the template's
             retention ceiling (``TtlTooLong`` if it isn't).
     """
