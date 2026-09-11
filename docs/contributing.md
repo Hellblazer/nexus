@@ -563,6 +563,8 @@ Every step below is **required**. Missing any one of them has caused problems in
     plain `-> working tree` here means `NEXUS_TARGET_RELEASE` was not set
     and the loop was not actually closed.
 
+11d. **Post-publish: real-dispatch check** (nexus-0zsmg, T2 `nexus/shakedown-playbook` §2 S18) — dispatch one trivial agent in a live Claude Code session on each box class (managed cloud, local supervisor), then run `tests/e2e/post-publish-dispatch-check.sh <session_id>` against that session; must end `POST-PUBLISH DISPATCH CHECK PASSED` on both.
+
 12. **Reinstall local tool and verify**
     ```bash
     scripts/reinstall-tool.sh    # preserves [local] and other extras

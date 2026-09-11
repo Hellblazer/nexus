@@ -536,6 +536,10 @@ pins, or on a cadence alongside the shakedown's own MinerU leg (Step
 already exercises MinerU end-to-end against the LOCAL wheel; this one is
 the published-bytes counterpart.
 
+### 11d. Post-publish: real-dispatch check (nexus-0zsmg, T2 `nexus/shakedown-playbook` §2 S18)
+
+Dispatch one trivial agent in a live Claude Code session on each box class (managed cloud, local supervisor), then run `tests/e2e/post-publish-dispatch-check.sh <session_id>` against that session; must end `POST-PUBLISH DISPATCH CHECK PASSED` on both — a hook that never runs in one deployment mode (e.g. the tuple-ledger projector, dead on every cloud box at 7.41.0) ships green through every gate that only ever tests a consistent pair or a fixture.
+
 ### 12. Reinstall local tool and verify
 
 **CLOUD-MODE BOX GATE (nexus-1emxn (c)):** on a cloud-mode box, run the
