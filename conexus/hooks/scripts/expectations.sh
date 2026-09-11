@@ -1126,7 +1126,7 @@ _expectations_file_age_s() {
 # classic TSV-only census beyond that point, i.e. exactly what a box with
 # no tuple space at all has always produced. The deadline is bounded by
 # _expectations_run_bounded (portable, no `timeout`(1) dependency),
-# default 20s, overridable via NX_EXPECT_CENSUS_NX_TIMEOUT_S — this is the
+# default 45s (the 2026-09-11 measurements reached 30s under box load, ~1s idle), overridable via NX_EXPECT_CENSUS_NX_TIMEOUT_S — this is the
 # ONLY way `nx tuple list --prefix ledger/` can be called from this file:
 # never call it un-bounded elsewhere.
 #
@@ -1149,7 +1149,7 @@ _expectations_census_space() {
         return 0
     fi
 
-    local nx_timeout_s="${NX_EXPECT_CENSUS_NX_TIMEOUT_S:-20}"
+    local nx_timeout_s="${NX_EXPECT_CENSUS_NX_TIMEOUT_S:-45}"
     local combined rc
     _expectations_run_bounded "$nx_timeout_s" combined \
         nx tuple list --prefix "ledger/" --json
