@@ -32,29 +32,3 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.41.0)
 
-- `conexus/hooks/scripts/tuple_ledger_project.py`: nexus-0zsmg — endpoint
-  resolution now mirrors ``nexus.db.service_endpoint.resolve_service_endpoint``'s
-  FULL precedence, not just the local-supervisor leg: ``NX_SERVICE_URL`` env,
-  then the persisted ``config.yml`` ``credentials.service_url`` (``nx config
-  set service_url``), then ``NX_SERVICE_HOST``/``NX_SERVICE_PORT`` env, then
-  the local lease. Before this fix a cloud-mode box with no
-  ``NX_SERVICE_URL`` exported (an all-persisted-config install — the common
-  shape after ``nx init``) skipped every ledger projection. Also: the
-  ``report`` kind now tolerates a missing ``agent_type`` (the SubagentStop
-  payload does not reliably carry it; the ``ledger.yaml`` template's
-  ``agent_type`` dimension is not ``required: true``) — ``session_id`` +
-  ``agent_id`` stay mandatory for both kinds.
-  bead: nexus-0zsmg
-  Also nexus-g2lln: the endpoint-resolution fix above did not make the
-  projector live on a LOCAL install — a default local install has no
-  ``mint_token`` configured, so it never writes a data-token lease at
-  all, and the projector accepted only that one bearer. Now, on a LOCAL
-  SUPERVISOR endpoint specifically (the last leg above — the storage
-  lease file resolved host/port), a missing/near-expiry data-token lease
-  falls back to that SAME lease record's own ``endpoint.token`` field —
-  the static credential the real local client already presents on this
-  box when unminted. Refused if the lease file is not owner-only
-  (group/other read/write/execute bits set). A MANAGED endpoint
-  (``service_url`` resolved) never gets this fallback — the data-token
-  lease stays the only accepted credential there, unchanged.
-  bead: nexus-g2lln
