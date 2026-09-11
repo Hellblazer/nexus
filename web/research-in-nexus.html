@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Research in Nexus: the thinking behind the research method, what was borrowed from experimental science, what was left out, and what it changes for you.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
+<title>Research in Nexus</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#EEF1F4; --paper:#FFFFFF; --ink:#1B2430; --ink-2:#4A5666; --ink-3:#7A8697;
+  --line:#D5DBE3; --brass:#A87A22; --brass-soft:#F3EAD3; --blue:#24466B; --blue-soft:#E1E9F3;
+  --ok:#2E7D4F; --ok-soft:#E3F1E8; --warn:#9A6A12; --code-bg:#1B2430; --code-fg:#E9EDF2; --code-cmt:#8A97A8;
+  --t1:#B96E2B; --t2:#24466B; --t3:#2E7D4F;
+  --radius:6px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+    --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+    --ok:#6CC58F; --ok-soft:#1B2E22; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+    --t1:#E0955A; --t2:#8FB4DD; --t3:#6CC58F;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+  --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+  --ok:#6CC58F; --ok-soft:#1B2E22; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+  --t1:#E0955A; --t2:#8FB4DD; --t3:#6CC58F;
+}
+*{box-sizing:border-box}
+/* Code blocks scroll sideways inside their column. A grid or flex child defaults to min-width:auto, which lets a long <pre> line widen the track and the page; min-width:0 on every wrapper between the track and the <pre> stops that. */
+.wrap,.wrap>*,main,.step,.cmd,.tbl,.further,.callout,.lesson{min-width:0}
+pre{max-width:100%}
+
+html{margin:0}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;font-size:16px;line-height:1.55;padding-inline:clamp(16px,4vw,40px);padding-block:40px 80px;}
+.wrap{max-width:1040px;margin:0 auto;display:grid;grid-template-columns:220px minmax(0,1fr);gap:48px;align-items:start}
+@media (max-width:820px){.wrap{grid-template-columns:1fr;gap:24px}.rail{position:static!important}}
+h1,h2,h3{font-family:"Source Serif 4",Georgia,"Times New Roman",serif;font-weight:600;line-height:1.15;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,5vw,46px);letter-spacing:-.01em}
+h2{font-size:27px}
+h3{font-size:18px;margin-top:26px}
+p{margin:12px 0;max-width:68ch}
+.lede{font-size:18px;color:var(--ink-2);max-width:62ch}
+.topnav{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:12px}
+.topnav a{font-size:14px;font-weight:500;text-decoration:none}
+.topnav a:hover{text-decoration:underline}
+.eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--brass);font-weight:600;margin-bottom:12px}
+a{color:var(--blue)}
+code{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em;background:var(--blue-soft);padding:1px 5px;border-radius:4px}
+.hidden{display:none!important}
+
+/* rail */
+.rail{position:sticky;top:24px}
+.rail .eyebrow{margin-bottom:8px}
+.rail ol{list-style:none;padding:0;margin:0;display:grid;gap:2px}
+.rail a{display:block;padding:7px 8px;border-radius:4px;color:var(--ink-2);text-decoration:none;font-size:14px;line-height:1.35}
+.rail a:hover{background:var(--paper)}
+.rail .meta{font-size:12px;color:var(--ink-3);margin-top:14px;line-height:1.5}
+
+/* lessons */
+.lesson{padding:36px 0 8px;border-top:1px solid var(--line);scroll-margin-top:16px}
+.lesson:first-of-type{border-top:0;padding-top:8px}
+.lhead{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.lnum{font-family:"Source Serif 4",Georgia,serif;font-size:30px;font-weight:600;color:var(--brass);line-height:1}
+.ltime{font-size:13px;color:var(--ink-3);margin-left:auto}
+.why{border-left:3px solid var(--brass);padding:2px 0 2px 14px;color:var(--ink-2);margin:16px 0 10px;max-width:66ch}
+pre{margin:0;background:var(--code-bg);color:var(--code-fg);border-radius:var(--radius);padding:14px 16px;font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:14px;line-height:1.6;overflow-x:auto}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;padding-right:76px}
+pre .c{color:var(--code-cmt)}
+.cmd{position:relative;margin:12px 0}
+.copy{position:absolute;top:8px;right:8px;font:inherit;font-size:12px;font-weight:500;padding:4px 9px;border-radius:4px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:var(--code-fg);cursor:pointer}
+.copy:hover{background:rgba(255,255,255,.14)}
+.copy:focus-visible{outline:2px solid var(--brass)}
+.see{margin:10px 0 4px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+pre.out{background:var(--paper);color:var(--ink-2);border:1px dashed var(--line);font-size:13px}
+pre.out b{color:var(--ink);font-weight:500}
+.note{font-size:14px;color:var(--ink-2);margin:8px 0;max-width:68ch}
+.callout{border-left:3px solid var(--brass);background:var(--brass-soft);padding:12px 16px;border-radius:0 var(--radius) var(--radius) 0;margin:18px 0;font-size:15px;max-width:68ch}
+.callout p{margin:4px 0}
+.callout.rule{border-color:var(--blue);background:var(--blue-soft)}
+
+.ph{color:var(--brass);font-style:italic}
+pre .ph{color:#E0B24C}
+
+
+/* figures */
+figure.fig{margin:18px 0;max-width:68ch}
+figure.fig svg{width:100%;height:auto;display:block;color:var(--ink)}
+figure.fig figcaption{font-size:13px;color:var(--ink-3);margin-top:6px}
+figure.fig text{font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:12.5px;fill:currentColor}
+figure.fig .sm{font-size:10.5px;fill:var(--ink-3);letter-spacing:.05em;text-transform:uppercase}
+figure.fig .lbl{font-size:11px;fill:var(--ink-2)}
+figure.fig rect.box{fill:var(--paper);stroke:currentColor;stroke-width:1}
+figure.fig rect.you{fill:var(--brass-soft);stroke:var(--brass);stroke-width:1.2}
+figure.fig line,figure.fig path{stroke:currentColor;stroke-width:1.2;fill:none}
+figure.fig .you-edge{stroke:var(--brass)}
+figure.fig .dash{stroke-dasharray:4 3}
+
+/* investigate further */
+.further{margin:22px 0 6px;border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:0 var(--radius) var(--radius) 0;background:var(--paper);padding:12px 16px;max-width:68ch}
+.further h4{margin:0 0 6px;font-family:"Source Serif 4",Georgia,serif;font-size:16px;font-weight:600;color:var(--blue)}
+.further ul{margin:0;padding-left:20px;font-size:15px;color:var(--ink-2)}
+.further li{margin:4px 0}
+
+/* tier diagram */
+.tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px 0;max-width:68ch}
+@media (max-width:560px){.tiers{grid-template-columns:1fr}}
+.tier{background:var(--paper);border:1px solid var(--line);border-top:4px solid var(--tc);border-radius:var(--radius);padding:12px 14px}
+.tier b{font-family:"Source Serif 4",Georgia,serif;font-size:20px;font-weight:600;color:var(--tc);display:block}
+.tier small{display:block;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:6px}
+.tier p{font-size:14px;margin:4px 0;color:var(--ink-2)}
+.tier code{font-size:.85em}
+.arrowrow{font-size:13px;color:var(--ink-3);margin:-6px 0 14px;max-width:68ch}
+
+/* entry table */
+table{border-collapse:collapse;width:100%;font-size:15px;margin:14px 0;max-width:68ch}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+.tbl{overflow-x:auto}
+.gloss-wrap{margin:22px 0 8px;max-width:68ch}
+details.gloss{border:1px solid var(--line);border-radius:var(--radius);background:var(--paper);margin:6px 0}
+details.gloss summary{cursor:pointer;padding:10px 14px;font-weight:500;list-style:none;display:flex;justify-content:space-between}
+details.gloss summary::after{content:"+";color:var(--brass);font-family:"IBM Plex Mono",monospace}
+details.gloss[open] summary::after{content:"–"}
+details.gloss table{margin:0;font-size:14px}
+details.gloss td:first-child{font-weight:500;white-space:nowrap;width:9em}
+details.gloss tr:last-child td{border-bottom:0}
+ol.plain,ul.plain{margin:6px 0 10px;padding-left:22px;max-width:66ch}
+ol.plain li,ul.plain li{margin:3px 0}
+.finish{border:1px solid var(--line);background:var(--paper);border-radius:var(--radius);padding:18px 20px;margin-top:40px;max-width:68ch}
+.finish h2{font-size:24px}
+.footer{margin-top:60px;font-size:13px;color:var(--ink-3)}
+@media (prefers-reduced-motion:reduce){.copy{transition:none}}
+</style>
+<style>
+.wrap{grid-template-columns:minmax(0,1fr)}
+.topnav .links{display:flex;gap:16px;flex-wrap:wrap}
+nav.rail{display:none}
+main{max-width:68ch}
+main h2{margin-top:36px}
+main h3{margin-top:24px}
+main p,main li{font-size:16.5px;line-height:1.6}
+main ul{padding-left:1.2em}
+main li{margin:6px 0}
+main ol li{margin:8px 0}
+main code{font-size:.9em}
+</style>
+<script data-goatcounter="https://hellblazer-nexus.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+<div class="wrap">
+<main>
+<div class="topnav"><span class="eyebrow" style="margin:0">Nexus · exploration</span><span class="links"><a href="research.html">← Research with Nexus</a><a href="rdr.html">Working with RDRs →</a><a href="./">Install guide</a></span></div>
+<h1 id="research-in-nexus">Research in Nexus</h1>
+<p>Nexus borrows three instruments from experimental science, the
+laboratory notebook, pre-registration, and adversarial review, and
+applies them to research done with language-model agents over a curated
+store. The notebook is the catalog: every reading, mapping, proposal,
+verdict, and result becomes a document, linked to the paper it came from
+and to the step before it. Pre-registration is one paragraph written
+before an experiment spends anything, naming the arms, the single
+variable, the confounds, the statistic, and the result that would show
+the hypothesis wrong. Adversarial review is a second agent, briefed with
+the code and the design records, that reads a plan or a result and says
+which of its claims are false on inspection.</p>
+<p>To be clear: this is a method for reading papers and deciding what to
+build from them, not a research automation system. We needed three
+things. A reading had to outlive the session that did it. A proposal had
+to carry the result that would kill it, so that the next experiment was
+obvious instead of one option among five. A claim about our own system,
+made by an agent that had read a paper and not the schema, had to be
+checked before anyone acted on it. The instruments of experimental
+science provided all three in a form that was old, well understood, and
+cheap. We could have kept doing what most people do with a model and a
+store: ask, read the answer, decide. We chose the method because the
+failures of the plain approach kept recurring in the same three shapes,
+and each shape had a known remedy.</p>
+<p>This document explains the problem, how the suite applies the method,
+what we took from the sciences, what we left out, and what it changes
+for you. The worked case is one day of research on one paper, recorded
+in full in the store as a chain of linked documents, and the findings
+document at the end of that chain is where the method was written down.
+The public page, <a
+href="research.html">Research with
+Nexus</a>, shows what you say at each step and what you see.</p>
+<h2 id="the-problem-an-agent-reads-fluently-and-wrongly">The problem: an
+agent reads fluently and wrongly</h2>
+<p>Claude with a curated store already does the plain thing well. It
+retrieves before it answers, it names the chunk each claim came from,
+and a question about a paper that is not in the store gets "not found"
+and not an invented summary. Memory carries decisions between sessions,
+and the catalog links a design record to the code that implements it.
+That is a good base, and it is where the edge is.</p>
+<p>Three failures sit at that edge, and all three come from the same
+source: retrieval snippets feel like reading. First, a synthesis written
+from the chunks of a paper produces a plausible plan with false
+premises. On the worked case, an agent proposed reusing a telemetry
+table as a read-count signal, and the table had no document identity in
+any column. It proposed a design that a record of ours had already
+built, and that record had in fact rejected the design by name. It
+proposed a validation gate over a field, and the field held paraphrases,
+so there was nothing to validate. None of that is in any paper, and none
+of it is reachable by semantic search over prose. Second, an experiment
+produces a correct number with a wrong explanation. The first write-up
+of the worked case said the treated arm mostly answered wrongly. The raw
+log showed that forty-five of its fifty-six failures were no answer at
+all, which is a different finding, and nobody had read the answers.
+Third, the source is read through its derivatives. The paper's aspects,
+its chunks, and an extracted protocol served as the reading, and the
+fact that it was a six-page position paper with its protocol in an
+unpublished companion surfaced only in the second round of critique.</p>
+<p>Each of these failures has a remedy the sciences worked out long ago.
+A plan is reviewed by someone with access to the apparatus. A result is
+recomputed from the data. A source is read in full. The method is those
+remedies, made mechanical enough that an agent does them by default.</p>
+<h2 id="how-the-suite-leverages-it">How the suite leverages it</h2>
+<p>The worked case ran on 2026-09-07 against a paper on ingest-time
+compilation for retrieval systems, and it is recorded as six catalog
+documents linked to the paper and to each other, plus memory entries at
+every step. Seven gates ran, in this order.</p>
+<ol type="1">
+<li><strong>Index with every enrichment on, and read the log while it
+runs.</strong> Three and a half minutes. Reading the log line by line
+found three lifecycle defects in the indexing pipeline that the summary
+line did not show.</li>
+<li><strong>A first-pass mapping</strong> of the paper onto the system,
+claim by claim, written to memory and to the store with catalog links to
+the design records it touched.</li>
+<li><strong>A research synthesis</strong> by an agent briefed with the
+mapping, the linked records, the code paths, and a web check, and
+required to attach a falsifier and a cost to every proposal and to
+include a do-nothing option. Five proposals came back.</li>
+<li><strong>An adversarial critique</strong> of the proposals by a
+second agent with access to the code, the schema changelogs, and the
+design records. It killed three of the five as factually wrong about the
+system, not as premature, and found one thing the synthesis had
+missed.</li>
+<li><strong>A verdict document</strong> reducing the synthesis and the
+critique to what survived, with the corrections to the mapping stated
+out loud. It supersedes both in the catalog.</li>
+<li><strong>One experiment</strong>, the one every surviving proposal
+was gated on, designed and run the same day: aspects against chunks as
+the payload a reader receives, forty questions, paired counts.</li>
+<li><strong>A methodology critique</strong> of the experiment by an
+agent given the raw trial data and told to recompute rather than read
+the summary. It found four defects in the write-up and one in the
+harness.</li>
+</ol>
+<p>Gates four and seven carried the value. Gate three alone would have
+produced a plan with two false premises. Gate six alone would have
+produced a correct number with a wrong explanation attached. The same
+shape ran again the next day on a second paper, with a pre-registration
+paragraph written first, and the gate-seven critic found the decisive
+defect all three times it ran that week: a headline forced by the
+construction of the questions, a leg that passed without testing the
+signal it claimed to test, and half the validity windows wrong when the
+ground truth was in the file being parsed.</p>
+<p>The critic agent is the standing one the suite runs on plans,
+designs, and code. What changed is the brief: it is given paths to open
+and told which claims to verify against which artifact. It answers in
+its own fixed format, the issues it found with the artifact that decides
+each, and an outcome of justified, partial, or not justified. The
+verdict per proposal, survives, survives with amendment, or dies, is
+written by Claude afterwards, reducing the critique and the synthesis to
+one document. The research agent is likewise the standing one. What
+changed is the requirement that every proposal carry its falsifier and
+its cost.</p>
+<h2 id="what-we-borrowed">What we borrowed</h2>
+<h3 id="the-notebook">The notebook</h3>
+<p>A laboratory notebook is written as the work happens, in ink, and
+never rewritten. The catalog gives us that. Every document a step
+produces is registered with a permanent address, linked to the paper by
+a <code>cites</code> or <code>comments</code> link and to the step
+before it by <code>relates</code>, and a verdict that reduces two
+earlier documents <code>supersedes</code> them rather than replacing
+them. A reader who opens the paper a year later finds the current state
+first and the drafts behind it. The methodology critic in the worked
+case reconstructed the whole chain from the links without being told it
+existed. This is the same append-only discipline the <a
+href="https://github.com/Hellblazer/nexus/blob/main/docs/exploration/xanadu-in-nexus.md">catalog</a> applies to everything else, and it
+is why the record survives the session that made it.</p>
+<h3 id="pre-registration">Pre-registration</h3>
+<p>Clinical trials and, since the 2010s, much of psychology register the
+design before the data exist: the hypothesis, the arms, the primary
+metric, the analysis, and what counts as a null result. The reason is
+that a design chosen after seeing the data can be made to pass. We ask
+for one paragraph before any spend, and every later check runs against
+it. The worked case did not have one, and the critic later showed that
+one arm had changed two variables at once, which the design could not
+then separate. The second experiment had one, and the critic's most
+useful finding was that the pre-registration had disclosed a confound
+and got the fact wrong, which is exactly the kind of error a written
+design makes visible and an unwritten one hides.</p>
+<h3 id="the-falsifier">The falsifier</h3>
+<p>Popper's criterion, that a claim is scientific only if some
+observation could refute it, becomes a requirement on the research
+agent's output: every proposal names the result that would show it is
+wrong, and a proposal that cannot be wrong is recorded as an opinion.
+This is what made the experiment in the worked case the obvious next
+step rather than one option among five. It was the falsifier of the most
+expensive proposal, and the paper's own stated limitation named it.</p>
+<h3 id="adversarial-review-with-the-apparatus">Adversarial review with
+the apparatus</h3>
+<p>Peer review as journals practise it reads the manuscript. The review
+that catches the failures above reads the apparatus: the schema, the
+changelog, the alternatives section of the design record that rejected
+the idea. The critic is briefed with paths, not with the paper, because
+the paper-side claims were all correct in the worked case and the
+system-side claims were the ones that were false. The critic's outcome
+field is fixed to three values so that a downstream reader, human or
+agent, can count what failed without reading the argument, and the
+verdict document carries the per-proposal reduction in the same
+spirit.</p>
+<h3 id="recompute-from-the-data">Recompute from the data</h3>
+<p>Reproducibility, in the narrow sense of recomputing a reported number
+from the recorded data, is the check that found the largest defects. It
+requires that the harness keep what a recompute needs: the exact text
+each arm received, the reader's structured flags, the cost of every
+model call, the seed, and the model identifiers. The first harness kept
+a summary table and document ids, and every later question about why a
+trial failed had to be answered by re-reading a live store that had
+moved. The requirement is now standing: a harness that produces only a
+summary table cannot be audited, so it is not finished.</p>
+<h2 id="what-we-left-out">What we left out</h2>
+<p><strong>No automatic ingestion.</strong> The store is curated. A
+paper is chosen, described, indexed, and linked by a person or on a
+person's instruction, never collected by a crawler or a feed. "Not in
+the store" is a result the method relies on, and it is only a result
+when the store's contents were chosen.</p>
+<p><strong>No agent chooses the direction.</strong> The research agent
+reads and collects, the critic checks, and the person decides what to
+look at next and when to stop. Every gate returns to the person before
+the next one runs. The method automates the checks, not the
+judgment.</p>
+<p><strong>No claim-level store.</strong> The paper in the worked case
+argues for atomic claims with quote-exact provenance as the unit of
+retrieval. Our aspects are per document and paraphrased. The experiment
+we ran showed that per-document paraphrase aspects are not a retrieval
+payload at all, by a margin no harness defect could reverse, and it did
+not test claims. The claims layer is a recorded open question with its
+compile cost now measured, not a plan.</p>
+<p><strong>No automated grader validation.</strong> The method requires
+that a generated grader be checked against a human-labelled sample and
+that generated data be checked against its own generation contract. Both
+are cheap and both are done by hand. A harness library that does them by
+default is designed and not built.</p>
+<p><strong>No skill yet.</strong> The seven gates, the two agent briefs,
+and the harness requirements are written down as a design of record in
+the findings document and in memory. The
+<code>research-experiment</code> skill that would carry them, and the
+harness library under <code>scripts/experiments/lib/</code> that the
+worked case's script would be refactored onto, are proposed and waiting
+on a decision. Today the method is followed from the record, by hand,
+and the public page shows the prompts that do it.</p>
+<p><strong>No renormalisation of the literature.</strong> The outward
+reading in the second gate checks the authors, the venue, and
+independent evaluations, and marks what it could not verify. It does not
+attempt to weigh a source by citation count or venue rank. A paper in
+the store can be wrong, and grounding says where a claim came from so
+that a person can judge the source.</p>
+<h2 id="what-it-changes-for-you">What it changes for you</h2>
+<p>Most of the time you say what you want and Claude does the step:
+index this, read this two ways, map it, propose, have the critic read it
+with the code, pre-register, run, recompute, render. What changes is
+what you can rely on afterwards. A reading is a document you can open,
+with its claims marked as sourced or unverified. A proposal carries the
+result that would kill it, so the next experiment is a decision and not
+a search. A claim about your own system has been checked against the
+schema before you act on it. A number in a report reproduces from data
+the harness kept. A reader who was not present can follow the links from
+the paper through everything that was done with it, and a session next
+year starts from that chain instead of from the paper.</p>
+<h2 id="further-reading">Further reading</h2>
+<ul>
+<li><a href="research.html">Research
+with Nexus</a>, the public page: what you say at each step and what you
+see</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/exploration/xanadu-in-nexus.md">Xanadu in Nexus</a>, the catalog's
+linking substrate that the notebook is built on</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md">Querying guide</a> and <a
+href="https://github.com/Hellblazer/nexus/blob/main/docs/plan-centric-retrieval.md">plan-centric retrieval</a>, how a
+question across papers is planned and answered</li>
+<li><a href="rdr.html">Working with
+RDRs</a>, the design record that a decision to build ends in</li>
+<li>Nosek, B. A., Ebersole, C. R., DeHaven, A. C., Mellor, D. T. "The
+preregistration revolution." Proceedings of the National Academy of
+Sciences 115(11), 2018.</li>
+<li>Popper, K. <em>The Logic of Scientific Discovery.</em> 1959.</li>
+</ul>
+<p class="footer">Source: <a href="https://github.com/Hellblazer/nexus/blob/main/docs/exploration/research-in-nexus.md">docs/exploration/research-in-nexus.md</a> in <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a>.</p>
+</main>
+</div>
+</body>
+</html>
