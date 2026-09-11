@@ -54,13 +54,14 @@ class _FakeTupleStore:
 
     def __init__(
         self, subspaces=None, rd_by_subspace=None, list_exc=None,
-        templates=None, rd_calls: list[str] | None = None,
+        templates=None, rd_calls: list[str] | None = None, registry_exc=None,
     ) -> None:
         self._subspaces = subspaces or []
         self._rd_by_subspace = rd_by_subspace or {}
         self._list_exc = list_exc
         self._templates = templates if templates is not None else []
         self._rd_calls = rd_calls
+        self._registry_exc = registry_exc
 
     def subspace_list(self, prefix=None):
         if self._list_exc is not None:
@@ -68,6 +69,8 @@ class _FakeTupleStore:
         return self._subspaces
 
     def registry(self):
+        if self._registry_exc is not None:
+            raise self._registry_exc
         return {"templates": self._templates}
 
     def rd(self, subspace, keys_pattern, n=1, since=None, timeout_s=0):
@@ -223,7 +226,17 @@ class TestCheckTupleUnclaimedAgeBehavior:
         """nexus-em75s.12 review fix: when the census's own oldest_created_at
         (spans ALL rows) is already younger than the staleness threshold,
         nothing in the subspace -- unclaimed included -- can possibly be
-        stale, so the per-subspace rd(n=300) fetch is skipped entirely."""
+        stale, so the per-subspace rd(n=300) fetch is skipped entirely.
+
+        nexus-em75s.42 review fix: this census-derived figure is an
+        upper BOUND on every row's age (all rows, not verified to be the
+        oldest UNCLAIMED row specifically -- computeCensus's
+        oldest_created_at is a min() over live+claimed+dead+consumed
+        rows), so it must be labelled differently from the verified
+        per-row computation the rd() path reports (``=``,
+        e.g. test_fresh_unclaimed_tuple_is_ok) -- ``<`` here, never
+        ``=``, so a reader cannot mistake a census bound for a verified
+        oldest-unclaimed age."""
         import datetime as _dt
         fresh = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(seconds=10)).isoformat().replace("+00:00", "Z")
         rd_calls: list[str] = []
@@ -236,7 +249,8 @@ class TestCheckTupleUnclaimedAgeBehavior:
         r = _run_unclaimed(monkeypatch, store)
         assert rd_calls == []
         assert r.ok is True
-        assert "mailbox/a=" in r.detail
+        assert "mailbox/a<" in r.detail
+        assert "mailbox/a=" not in r.detail
 
     def test_unmatched_subspace_defaults_to_checked(self, monkeypatch) -> None:
         """A subspace with no resolving template (registry unavailable or
@@ -254,6 +268,32 @@ class TestCheckTupleUnclaimedAgeBehavior:
         r = _run_unclaimed(monkeypatch, store)
         assert r.ok is False and r.warn is not True
         assert "mailbox/a" in r.detail
+
+    def test_registry_exception_is_a_soft_warn_not_a_hard_fail(self, monkeypatch) -> None:
+        """nexus-em75s.42 review fix: a registry() exception (a transient
+        registry blip) must not fall through to checking every subspace as
+        claimable -- that risks misreporting a take.enabled=false subspace
+        (e.g. ledger/<session_id>, read-only by design, rows never
+        claimed) as a stale-unclaimed HARD finding for a run where the
+        registry merely blipped. A day-old ledger row with a live registry
+        would never even be checked (test_take_disabled_ledger_subspace_
+        with_day_old_rows_is_ok); here the registry raises, so the
+        pre-fix code fell back to templates=[] and defaulted this
+        subspace to checked, hard-failing the row on a transient blip.
+        Must report warn=True instead, and never call rd()."""
+        import datetime as _dt
+        old = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(days=1)).isoformat().replace("+00:00", "Z")
+        rd_calls: list[str] = []
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("ledger/sess1", available=1, oldest_created_at=old)],
+            rd_by_subspace={"ledger/sess1": [_FakeTupleRow("id1", old, None)]},
+            registry_exc=RuntimeError("registry temporarily unavailable"),
+            rd_calls=rd_calls,
+        )
+        r = _run_unclaimed(monkeypatch, store)
+        assert r.ok is False and r.warn is True
+        assert "templates could not be resolved" in r.detail
+        assert rd_calls == []
 
 
 # ── rows 2 and 3: psql-backed ────────────────────────────────────────────────

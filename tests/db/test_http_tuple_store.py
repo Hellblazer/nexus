@@ -26,7 +26,6 @@ for exactly that reason.
 """
 from __future__ import annotations
 
-import json
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
@@ -370,16 +369,47 @@ class TestParkCapExceeded:
 # ── 8 KB pre-send guard (RDR-205 Test Plan: "over 8 KB with a body under it") ──
 
 
+def _httpx_json_body_len(payload: dict) -> int:
+    """The exact byte length httpx puts on the wire for *payload* as a
+    JSON request body -- via httpx's own public ``json=`` request-building
+    path (``httpx.Request``), not a hand-copied ``json.dumps`` literal
+    (nexus-em75s.42 review fix: a literal restates ``_check_request_size``'s
+    own implementation, so a drift between that literal and httpx's real
+    encoder would go unnoticed by both the guard and a test built the same
+    way; this measures against whatever httpx version ``>=0.27,<1.0`` is
+    actually installed, not one snapshot of its separators/ensure_ascii/
+    allow_nan choice)."""
+    return len(httpx.Request("POST", "http://example.invalid", json=payload).content)
+
+
 class TestPreSendGuard:
     def test_a_payload_at_the_cap_is_accepted(self) -> None:
-        # ensure_ascii=False + separators=(",", ":") -- see _check_request_size's
-        # own docstring for why this exact call matches what httpx sends.
         payload = {"subspace": "x", "keys": {"to": "y" * 10}}
-        size = len(json.dumps(
-            payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
-        ).encode("utf-8"))
-        assert size < _MAX_REQUEST_BODY_BYTES
+        assert _httpx_json_body_len(payload) < _MAX_REQUEST_BODY_BYTES
         _check_request_size(payload)  # must not raise
+
+    def test_a_payload_exactly_at_the_cap_boundary_is_accepted(self) -> None:
+        """Pads a payload until httpx's REAL wire encoding is exactly
+        ``_MAX_REQUEST_BODY_BYTES`` (sized via ``_httpx_json_body_len``,
+        never a recomputed ``json.dumps`` literal), pinning the guard's
+        inclusive boundary against the installed httpx's own byte count
+        (nexus-em75s.42 review fix, item 6)."""
+        payload: dict = {"subspace": "x", "keys": {"to": ""}}
+        base = _httpx_json_body_len(payload)
+        payload["keys"]["to"] = "y" * (_MAX_REQUEST_BODY_BYTES - base)
+        assert _httpx_json_body_len(payload) == _MAX_REQUEST_BODY_BYTES
+        _check_request_size(payload)  # exactly at the cap -- must not raise
+
+    def test_one_byte_over_the_cap_via_httpx_encoding_is_refused(self) -> None:
+        """The mirror of the boundary-accepted test above: one byte past
+        ``_MAX_REQUEST_BODY_BYTES``, measured the same way (real httpx
+        encoding, not a literal), is refused."""
+        payload: dict = {"subspace": "x", "keys": {"to": ""}}
+        base = _httpx_json_body_len(payload)
+        payload["keys"]["to"] = "y" * (_MAX_REQUEST_BODY_BYTES - base + 1)
+        assert _httpx_json_body_len(payload) == _MAX_REQUEST_BODY_BYTES + 1
+        with pytest.raises(RequestTooLargeError):
+            _check_request_size(payload)
 
     def test_over_8kb_serialised_request_is_refused_before_any_send(self) -> None:
         store = HttpTupleStore.__new__(HttpTupleStore)
