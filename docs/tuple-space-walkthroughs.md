@@ -39,7 +39,7 @@ sequenceDiagram
     E-->>O: every start and report row for this session
 ```
 
-Waiting for a report is a parked read on the ledger. The report tuple needs no cooperation from the agent: the stop hook writes it from the harness payload. The census compares the space against the TSV only inside the 90-day retention window and reports a session that is in the TSV but absent from `subspace_list("ledger/")` as a projection that never ran.
+Waiting for a report is a parked read on the ledger. The report tuple needs no cooperation from the agent: the stop hook writes it from the harness payload. `expectations_census`'s space-backed read (`conexus/hooks/scripts/expectations.sh`, RDR-205 Phase 4.1) compares the space against the TSV only inside the 90-day retention window: `SPACE_PRESENT`/`SPACE_AGE` when the subspace exists, `SPACE_NEVER_RAN` when it is absent and the session is younger than the retention window, `SPACE_OUTSIDE_WINDOW` when absent and older, `SPACE_BLINDSPOT` when the walk examined no ledger subspace at all (never read as every session being outside the window), and `SPACE_FALLBACK` with a named reason when the engine cannot be consulted (no `nx` on PATH, unreachable, unparseable output). These lines never change the census function's own exit code — they are additional report lines on top of the TSV verdict, not a new one.
 
 ## Mailbox: send, contend, drain
 
