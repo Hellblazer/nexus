@@ -57,6 +57,12 @@ def _isolate_handoff_globals(monkeypatch):
     # default; individual tests override this to exercise the stale path.
     monkeypatch.setattr(core, "_T1_SERVER_START_TIME", 0.0)
     monkeypatch.setattr(core, "_DEFERRED_T1_MINT", {})
+    # nexus-abyi9: the consecutive-failure backoff state must not leak
+    # between tests any more than the other globals above do.
+    monkeypatch.setattr(core, "_T1_HANDOFF_CONSECUTIVE_FAILURES", 0)
+    monkeypatch.setattr(core, "_T1_HANDOFF_BACKOFF_SESSION_ID", None)
+    monkeypatch.setattr(core, "_T1_HANDOFF_NEXT_ATTEMPT_AT", 0.0)
+    monkeypatch.setattr(core, "_T1_HANDOFF_GIVE_UP_LOGGED", False)
     mcp_infra.set_t1_pre_init_hook(None)
     mcp_infra.reset_t1_for_release()
     yield
@@ -389,12 +395,16 @@ async def test_mint_failure_reinstates_marker_at_live_path(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_reinstated_marker_is_processed_by_a_later_tick(monkeypatch) -> None:
     """The reinstated marker isn't just present on disk -- a SUBSEQUENT
-    tick actually picks it up and completes the re-lease."""
+    tick actually picks it up and completes the re-lease. A fake clock
+    advanced past the first failure's backoff window (nexus-abyi9) stands
+    in for the real wall-clock gap between two actual watch-loop ticks."""
     from nexus.db import t1 as t1_mod
 
     monkeypatch.setattr(
         "nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID,
     )
+    clock = _FakeMonotonic()
+    monkeypatch.setattr(core.time, "monotonic", clock)
     config_dir = nexus_config_dir()
     write_handoff_marker(
         _MCP_PID, new_session_id="new-sess", claude_pid=_CLAUDE_PID,
@@ -407,6 +417,7 @@ async def test_reinstated_marker_is_processed_by_a_later_tick(monkeypatch) -> No
     log = MagicMock()
     await core._t1_handoff_tick(_MCP_PID, log)  # fails, reinstates
 
+    clock.advance(core._T1_HANDOFF_BACKOFF_BASE_S)  # past the first-failure backoff window
     monkeypatch.setattr(t1_mod, "mint_t1_session_token", _fake_mint)
     await core._t1_handoff_tick(_MCP_PID, log)  # succeeds on retry
 
@@ -477,6 +488,254 @@ async def test_mint_failure_racing_a_newer_marker_does_not_clobber_it(monkeypatc
 
     assert os.environ["NX_T1_SESSION_ID"] == "fresh-sess"
     assert read_handoff_marker(_MCP_PID, config_dir) is None
+
+
+# ── consecutive-failure backoff (nexus-abyi9, conexus-7hx5) ────────────────
+#
+# A deterministic mint failure (e.g. a 401 from a bad credential under
+# pass-through) must not retry the real network mint call on every 5s
+# tick forever -- that is exactly the spray that tripped the edge's
+# credential-stuffing alarm on the operator box (233 iterations / 21
+# min). These tests drive the tick directly (as all the tests above do)
+# with a controllable fake `time.monotonic()` so the backoff windows are
+# exercised without any real sleeping.
+
+
+class _FakeMonotonic:
+    """A settable stand-in for ``time.monotonic()`` (seconds, arbitrary
+    origin -- only deltas matter, matching real monotonic semantics)."""
+
+    def __init__(self, start: float = 1_000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _unauthorized_boom(sid, **kw):
+    """Mirrors ``mint_t1_session_token``'s real wrapping of an httpx 401:
+    the RuntimeError message embeds httpx's default ``raise_for_status``
+    text verbatim."""
+    raise RuntimeError(
+        f"T1 T1 handoff re-lease failed for session {sid!r}: "
+        "Client error '401 Unauthorized' for url "
+        "'https://api.example.com/v1/sessions/start'"
+    )
+
+
+def _transient_boom(sid, **kw):
+    raise RuntimeError("service unreachable")
+
+
+@pytest.mark.asyncio
+async def test_second_consecutive_failure_defers_the_next_mint_attempt(monkeypatch) -> None:
+    """After a SECOND consecutive (non-401) failure the backoff delay is
+    10s (> the 5s tick interval) -- a tick that fires only 5s later must
+    NOT attempt the mint again; the marker stays reinstated for a LATER
+    tick instead."""
+    from nexus.db import t1 as t1_mod
+
+    monkeypatch.setattr(
+        "nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID,
+    )
+    clock = _FakeMonotonic()
+    monkeypatch.setattr(core.time, "monotonic", clock)
+
+    mint_calls: list[str] = []
+
+    def _boom(sid, **kw):
+        mint_calls.append(sid)
+        _transient_boom(sid, **kw)
+
+    monkeypatch.setattr(t1_mod, "mint_t1_session_token", _boom)
+
+    config_dir = nexus_config_dir()
+    write_handoff_marker(
+        _MCP_PID, new_session_id="new-sess", claude_pid=_CLAUDE_PID,
+        config_dir=config_dir,
+    )
+
+    log = MagicMock()
+    await core._t1_handoff_tick(_MCP_PID, log)  # failure #1 (delay=5s)
+    assert mint_calls == ["new-sess"]
+
+    clock.advance(5.0)  # marker reinstated by write_handoff_marker_if_absent
+    await core._t1_handoff_tick(_MCP_PID, log)  # failure #2 (delay=10s)
+    assert mint_calls == ["new-sess", "new-sess"]
+
+    clock.advance(5.0)  # only 5s of the 10s window elapsed
+    await core._t1_handoff_tick(_MCP_PID, log)  # must NOT attempt the mint
+    assert mint_calls == ["new-sess", "new-sess"]  # unchanged
+
+    # Marker survived the deferred tick, untouched.
+    marker = read_handoff_marker(_MCP_PID, config_dir)
+    assert marker is not None
+    assert marker.new_session_id == "new-sess"
+
+    clock.advance(5.0)  # now the full 10s window has elapsed
+    monkeypatch.setattr(t1_mod, "mint_t1_session_token", _fake_mint)
+    await core._t1_handoff_tick(_MCP_PID, log)  # eligible again -> succeeds
+    assert os.environ["NX_T1_SESSION_ID"] == "new-sess"
+
+
+@pytest.mark.asyncio
+async def test_401_failure_jumps_straight_to_the_cap(monkeypatch) -> None:
+    """A 401 must not be retried faster than the cap even on its FIRST
+    failure -- no escalating ladder for a credential rejection."""
+    from nexus.db import t1 as t1_mod
+
+    monkeypatch.setattr(
+        "nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID,
+    )
+    clock = _FakeMonotonic()
+    monkeypatch.setattr(core.time, "monotonic", clock)
+    monkeypatch.setattr(t1_mod, "mint_t1_session_token", _unauthorized_boom)
+
+    config_dir = nexus_config_dir()
+    write_handoff_marker(
+        _MCP_PID, new_session_id="new-sess", claude_pid=_CLAUDE_PID,
+        config_dir=config_dir,
+    )
+
+    log = MagicMock()
+    await core._t1_handoff_tick(_MCP_PID, log)  # one 401 failure
+
+    assert log.warning.call_args.kwargs["next_attempt_in_s"] == core._T1_HANDOFF_BACKOFF_CAP_S
+
+    # Well short of the cap: no re-attempt yet.
+    clock.advance(core._T1_HANDOFF_BACKOFF_CAP_S - 1.0)
+    await core._t1_handoff_tick(_MCP_PID, log)
+    assert log.warning.call_count == 1  # no second attempt logged
+
+    # At the cap: eligible again.
+    clock.advance(1.0)
+    monkeypatch.setattr(t1_mod, "mint_t1_session_token", _fake_mint)
+    await core._t1_handoff_tick(_MCP_PID, log)
+    assert os.environ["NX_T1_SESSION_ID"] == "new-sess"
+
+
+@pytest.mark.asyncio
+async def test_backoff_reaching_the_cap_logs_giving_up_exactly_once(monkeypatch) -> None:
+    """The loud give-up line fires the first time a streak's backoff
+    reaches the cap, naming a remedy, and never repeats for the same
+    streak even on further capped retries."""
+    from nexus.db import t1 as t1_mod
+
+    monkeypatch.setattr(
+        "nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID,
+    )
+    clock = _FakeMonotonic()
+    monkeypatch.setattr(core.time, "monotonic", clock)
+    monkeypatch.setattr(t1_mod, "mint_t1_session_token", _transient_boom)
+
+    config_dir = nexus_config_dir()
+    write_handoff_marker(
+        _MCP_PID, new_session_id="new-sess", claude_pid=_CLAUDE_PID,
+        config_dir=config_dir,
+    )
+
+    log = MagicMock()
+    # 5, 10, 20, 40, 80, 160 -- 6 failures, still under the 300s cap.
+    delays = [5.0, 10.0, 20.0, 40.0, 80.0, 160.0]
+    for i, delay in enumerate(delays, start=1):
+        await core._t1_handoff_tick(_MCP_PID, log)
+        assert log.warning.call_args.kwargs["consecutive_failures"] == i
+        assert log.warning.call_args.kwargs["next_attempt_in_s"] == delay
+        clock.advance(delay)
+    log.error.assert_not_called()  # cap not reached yet
+
+    # 7th failure: 5 * 2**6 = 320, capped to 300 -- crosses the cap.
+    await core._t1_handoff_tick(_MCP_PID, log)
+    assert log.warning.call_args.kwargs["next_attempt_in_s"] == core._T1_HANDOFF_BACKOFF_CAP_S
+    log.error.assert_called_once()
+    assert log.error.call_args.args[0] == "t1_handoff_release_giving_up"
+    assert "401" in log.error.call_args.kwargs["remedy"]  # names the remedy
+    clock.advance(core._T1_HANDOFF_BACKOFF_CAP_S)
+
+    # 8th failure: still capped, must NOT log give-up again.
+    await core._t1_handoff_tick(_MCP_PID, log)
+    log.error.assert_called_once()  # still exactly once
+
+
+@pytest.mark.asyncio
+async def test_successful_release_resets_the_failure_streak(monkeypatch) -> None:
+    """A successful re-lease clears the backoff state -- a LATER,
+    unrelated marker must not inherit an already-escalated delay."""
+    from nexus.db import t1 as t1_mod
+
+    monkeypatch.setattr(
+        "nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID,
+    )
+    clock = _FakeMonotonic()
+    monkeypatch.setattr(core.time, "monotonic", clock)
+
+    config_dir = nexus_config_dir()
+    write_handoff_marker(
+        _MCP_PID, new_session_id="new-sess", claude_pid=_CLAUDE_PID,
+        config_dir=config_dir,
+    )
+
+    log = MagicMock()
+    monkeypatch.setattr(t1_mod, "mint_t1_session_token", _transient_boom)
+    await core._t1_handoff_tick(_MCP_PID, log)  # failure #1
+    assert core._T1_HANDOFF_CONSECUTIVE_FAILURES == 1
+
+    clock.advance(5.0)
+    monkeypatch.setattr(t1_mod, "mint_t1_session_token", _fake_mint)
+    await core._t1_handoff_tick(_MCP_PID, log)  # succeeds
+
+    assert core._T1_HANDOFF_CONSECUTIVE_FAILURES == 0
+    assert core._T1_HANDOFF_BACKOFF_SESSION_ID is None
+    assert core._T1_HANDOFF_NEXT_ATTEMPT_AT == 0.0
+    assert core._T1_HANDOFF_GIVE_UP_LOGGED is False
+
+
+@pytest.mark.asyncio
+async def test_a_different_session_id_is_not_deferred_by_a_prior_streak(monkeypatch) -> None:
+    """A DIFFERENT marker (a subsequent /clear) must get an immediate
+    first attempt, never an inherited backoff from an unrelated
+    session id's failure streak."""
+    from nexus.db import t1 as t1_mod
+
+    monkeypatch.setattr(
+        "nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID,
+    )
+    clock = _FakeMonotonic()
+    monkeypatch.setattr(core.time, "monotonic", clock)
+
+    config_dir = nexus_config_dir()
+    write_handoff_marker(
+        _MCP_PID, new_session_id="sess-A", claude_pid=_CLAUDE_PID,
+        config_dir=config_dir,
+    )
+
+    log = MagicMock()
+    monkeypatch.setattr(t1_mod, "mint_t1_session_token", _transient_boom)
+    await core._t1_handoff_tick(_MCP_PID, log)  # sess-A failure #1 (delay=5s)
+    assert core._T1_HANDOFF_CONSECUTIVE_FAILURES == 1
+    assert core._T1_HANDOFF_BACKOFF_SESSION_ID == "sess-A"
+
+    # A fresh /clear supersedes sess-A with sess-B before sess-A's own
+    # backoff window (5s, not yet advanced) has elapsed.
+    write_handoff_marker(
+        _MCP_PID, new_session_id="sess-B", claude_pid=_CLAUDE_PID,
+        config_dir=config_dir,
+    )
+
+    mint_calls: list[str] = []
+
+    def _mint_b(sid, **kw):
+        mint_calls.append(sid)
+        return _fake_mint(sid, **kw)
+
+    monkeypatch.setattr(t1_mod, "mint_t1_session_token", _mint_b)
+    await core._t1_handoff_tick(_MCP_PID, log)  # must attempt sess-B immediately
+
+    assert mint_calls == ["sess-B"]
+    assert os.environ["NX_T1_SESSION_ID"] == "sess-B"
 
 
 # ── TOCTOU: a second /clear landing mid-tick is not dropped ────────────────

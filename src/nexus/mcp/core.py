@@ -616,6 +616,59 @@ _T1_HANDOFF_WATCH_TASK: Any = None
 #: token`'s pre-existing behavior, unchanged by this bead either way.
 _T1_HANDOFF_MINT_DEADLINE_S: float = 30.0
 
+#: nexus-abyi9 (conexus-7hx5): consecutive-failure backoff for the re-lease
+#: mint attempt itself, layered ON TOP OF the fixed `_T1_HANDOFF_WATCH_
+#: INTERVAL_S` poll tick. Without this, a DETERMINISTIC mint failure (a
+#: bad service credential presented under pass-through, e.g.) retries the
+#: real network mint call every single 5s tick forever -- measured on the
+#: operator box as 233 iterations / 21 min, enough to trip the edge's
+#: credential-stuffing alarm (conexus-7hx5, T2 [23783]). The watch loop
+#: itself keeps ticking every 5s regardless (cheap local file I/O only --
+#: claim/reinstate never touches the network); this backoff instead gates
+#: whether a given tick's claimed marker is allowed to attempt the actual
+#: mint call, via `_T1_HANDOFF_NEXT_ATTEMPT_AT` below.
+#:
+#: Base matches the tick interval itself: `min(BASE * 2**(k-1), CAP)` for
+#: the k-th consecutive failure gives 5, 10, 20, 40, 80, 160, 300(capped),
+#: ... -- the first failure changes nothing (delay == the ordinary tick
+#: interval), escalation only bites from the second failure on.
+_T1_HANDOFF_BACKOFF_BASE_S: float = _T1_HANDOFF_WATCH_INTERVAL_S
+
+#: Ceiling for the backoff delay. Nothing else in this module names a
+#: fixed multi-minute interval that fits here: `_T1_SESSION_REFRESH_MIN_
+#: INTERVAL_S` (5.0) is a FLOOR under an hours-scale token-TTL refresh,
+#: not a ceiling for anything, so it is not reusable for this purpose.
+#: Five minutes is the fixed number the bead's own framing ("the token-
+#: refresh interval or 5 minutes, whichever the code's own constants make
+#: coherent") resolves to once the token-refresh interval is seen to be
+#: dynamic (`ttl * _T1_SESSION_REFRESH_FRACTION`, hours by default) rather
+#: than a fixed constant this backoff could borrow directly.
+_T1_HANDOFF_BACKOFF_CAP_S: float = 300.0
+
+#: Consecutive re-lease mint FAILURES for the marker currently being
+#: retried, keyed to `_T1_HANDOFF_BACKOFF_SESSION_ID` below -- reset to 0
+#: on any successful re-lease, and also implicitly restarted (see
+#: `_t1_handoff_tick`) whenever the marker being processed names a
+#: DIFFERENT `new_session_id` than the one this streak was tracking: a
+#: fresh handoff (a subsequent `/clear`) deserves an immediate first
+#: attempt, never an inherited backoff from an unrelated prior marker.
+_T1_HANDOFF_CONSECUTIVE_FAILURES: int = 0
+
+#: The `new_session_id` the two counters above are currently tracking a
+#: failure streak for. `None` until the first failure of a streak.
+_T1_HANDOFF_BACKOFF_SESSION_ID: str | None = None
+
+#: `time.monotonic()` deadline before which the NEXT mint attempt for
+#: `_T1_HANDOFF_BACKOFF_SESSION_ID` must not run. `0.0` (the default)
+#: never blocks -- every session id starts eligible immediately.
+_T1_HANDOFF_NEXT_ATTEMPT_AT: float = 0.0
+
+#: Set once the "giving up" line (see `_t1_handoff_tick`) has been logged
+#: for the CURRENT failure streak -- logged exactly once per streak, at
+#: the point backoff first reaches the cap, never on every subsequent
+#: capped retry. Reset alongside the two counters above.
+_T1_HANDOFF_GIVE_UP_LOGGED: bool = False
+
 
 def _start_t1_handoff_watch_task() -> None:
     """Create the handoff-watch task on the CURRENT (running) loop.
@@ -671,6 +724,24 @@ async def _t1_handoff_watch_loop() -> None:
             _hw_log.warning("t1_handoff_watch_tick_failed", error=str(exc))
 
 
+def _is_unauthorized_mint_failure(exc: BaseException) -> bool:
+    """True when *exc* stringifies to an HTTP 401 from the mint call.
+
+    ``mint_t1_session_token`` (``nexus.db.t1``) translates any exception
+    from ``HttpTokenStore.start_session`` -- including httpx's
+    ``HTTPStatusError`` on a non-2xx response -- into a ``RuntimeError``
+    whose message embeds the original exception VERBATIM (``f"... failed
+    for session {session_id!r}: {exc}"``), so no structured status code
+    survives to this call site. httpx's default ``raise_for_status``
+    message reads ``"Client error '401 Unauthorized' for url '...'"`` --
+    checking that exact substring is the same pattern
+    ``SESSION_UNAUTHORIZED_MARKER`` already uses elsewhere in this
+    codebase (``nexus.db.http_scratch_store``) for the identical
+    string-only-signal problem on a different call path.
+    """
+    return "401 Unauthorized" in str(exc)
+
+
 async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     """One handoff-watch step: claim, verify, and either re-lease or reject.
 
@@ -722,6 +793,30 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     via the T1 TTL sweep (design decision, nexus-d76vc bead body) — migrating
     would silently merge two conversations the user explicitly separated
     with `/clear`.
+
+    Consecutive-failure backoff (nexus-abyi9, conexus-7hx5): a mint
+    failure is NOT retried on the very next 5s tick unconditionally
+    anymore. `_T1_HANDOFF_NEXT_ATTEMPT_AT` gates the actual mint call
+    (not the tick itself, which keeps polling every 5s doing only cheap
+    local claim/reinstate file I/O) behind an escalating per-streak delay
+    -- 5s, 10s, 20s, 40s, ... capped at `_T1_HANDOFF_BACKOFF_CAP_S` (5
+    min); a 401 specifically jumps straight to the cap on its FIRST
+    failure, since a credential rejection is far more likely persistent
+    than transient and a fast retry ladder for it is exactly the spray
+    that trips the edge's credential-stuffing alarm (measured: 233
+    unthrottled retries / 21 min). The marker is still REINSTATED on
+    every failure, capped or not -- this backoff throttles the retry
+    RATE, it never gives up on the handoff itself (JDR-001's "a rejected
+    marker is ... never retried forever" governs a structurally invalid
+    marker being deleted, a different code path from this one; a mint
+    failure names a perfectly legitimate pending handoff that deserves to
+    keep retrying, just slower). One `t1_handoff_release_giving_up` error
+    line fires the first time a streak's backoff reaches the cap, naming
+    the remedy -- never repeated for the same streak, so the alarm this
+    bead exists to silence is not simply replaced with a slower alarm.
+    The streak resets to a clean first-attempt on any successful re-lease
+    or whenever the marker being processed names a session id different
+    from the one the current streak is tracking.
     """
     from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.daemon.t1_handoff import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -792,6 +887,35 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
         consume_claimed_marker(claimed_path)
         return
 
+    global _T1_HANDOFF_CONSECUTIVE_FAILURES, _T1_HANDOFF_BACKOFF_SESSION_ID
+    global _T1_HANDOFF_NEXT_ATTEMPT_AT, _T1_HANDOFF_GIVE_UP_LOGGED
+
+    if _T1_HANDOFF_BACKOFF_SESSION_ID != new_session_id:
+        # A fresh handoff target (first marker ever seen for this session
+        # id, or a DIFFERENT session id than whatever prior streak was
+        # backing off) starts clean -- an unrelated marker's failures must
+        # never delay this one's first attempt (nexus-abyi9).
+        _T1_HANDOFF_CONSECUTIVE_FAILURES = 0
+        _T1_HANDOFF_BACKOFF_SESSION_ID = new_session_id
+        _T1_HANDOFF_NEXT_ATTEMPT_AT = 0.0
+        _T1_HANDOFF_GIVE_UP_LOGGED = False
+
+    now_mono = time.monotonic()
+    if now_mono < _T1_HANDOFF_NEXT_ATTEMPT_AT:
+        # Still inside this streak's backoff window: reinstate the marker
+        # UNTOUCHED and defer to a later tick without attempting the mint
+        # -- the network call (and, for a 401, the credential it presents)
+        # is exactly what must not run faster than the backoff allows.
+        # Silent, like the steady-state "no marker" tick: this is not a
+        # new failure, just a scheduled deferral of one already logged.
+        write_handoff_marker_if_absent(
+            mcp_pid, new_session_id=marker.new_session_id,
+            claude_pid=marker.claude_pid, config_dir=config_dir,
+            clock=lambda: marker.written_at,
+        )
+        consume_claimed_marker(claimed_path)
+        return
+
     import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
     from nexus.db.t1 import _lock_guarded_mint_or_borrow  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -804,10 +928,51 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
             deadline=time.monotonic() + _T1_HANDOFF_MINT_DEADLINE_S,
         )
     except Exception as exc:  # noqa: BLE001 — a re-lease failure must not crash the watcher; the marker is REINSTATED (not left claimed-and-orphaned) so a transient failure retries next tick
+        # nexus-abyi9 (conexus-7hx5): consecutive-failure backoff. A 401
+        # is very likely a persistent credential problem (a bad/mismatched
+        # service token presented where a data token belongs), not a
+        # transient blip -- retry it no faster than the cap from the very
+        # FIRST failure, rather than climbing the escalating ladder other
+        # error classes (a momentary network blip, an unreachable engine)
+        # get a chance to recover within.
+        _T1_HANDOFF_CONSECUTIVE_FAILURES += 1
+        if _is_unauthorized_mint_failure(exc):
+            delay = _T1_HANDOFF_BACKOFF_CAP_S
+        else:
+            delay = min(
+                _T1_HANDOFF_BACKOFF_BASE_S
+                * (2 ** (_T1_HANDOFF_CONSECUTIVE_FAILURES - 1)),
+                _T1_HANDOFF_BACKOFF_CAP_S,
+            )
+        _T1_HANDOFF_NEXT_ATTEMPT_AT = now_mono + delay
         log.warning(
             "t1_handoff_release_failed",
             mcp_pid=mcp_pid, new_session_id=new_session_id, error=str(exc),
+            consecutive_failures=_T1_HANDOFF_CONSECUTIVE_FAILURES,
+            next_attempt_in_s=delay,
         )
+        if delay >= _T1_HANDOFF_BACKOFF_CAP_S and not _T1_HANDOFF_GIVE_UP_LOGGED:
+            # Give-up line: logged exactly ONCE per failure streak, the
+            # first time backoff reaches the cap -- not on every
+            # subsequent capped retry, which would just be the same
+            # spam this bead exists to stop, one tier slower.
+            _T1_HANDOFF_GIVE_UP_LOGGED = True
+            log.error(
+                "t1_handoff_release_giving_up",
+                mcp_pid=mcp_pid, new_session_id=new_session_id,
+                consecutive_failures=_T1_HANDOFF_CONSECUTIVE_FAILURES,
+                retry_interval_s=_T1_HANDOFF_BACKOFF_CAP_S,
+                remedy=(
+                    f"T1 handoff re-lease has failed "
+                    f"{_T1_HANDOFF_CONSECUTIVE_FAILURES} consecutive times "
+                    f"for session {new_session_id!r} ({exc}). Retrying "
+                    f"every {_T1_HANDOFF_BACKOFF_CAP_S:.0f}s -- the marker "
+                    "is not abandoned. If this is a 401, check the service "
+                    "credential presented on /v1/sessions/start (nx doctor "
+                    "--check-t1); the handoff resumes automatically once "
+                    "it mints."
+                ),
+            )
         # Re-instate at the LIVE path: having claimed the marker away
         # from the live name before attempting the mint, we must put it
         # back on failure or the handoff is lost forever (no future tick
@@ -841,6 +1006,14 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
             )
         consume_claimed_marker(claimed_path)
         return
+
+    # Re-lease succeeded: this streak (if any) is over. Reset so a FUTURE
+    # failure for a future marker starts its own backoff from scratch
+    # rather than inheriting an already-escalated delay.
+    _T1_HANDOFF_CONSECUTIVE_FAILURES = 0
+    _T1_HANDOFF_BACKOFF_SESSION_ID = None
+    _T1_HANDOFF_NEXT_ATTEMPT_AT = 0.0
+    _T1_HANDOFF_GIVE_UP_LOGGED = False
 
     # Stop refreshing the OLD lease BEFORE adopting the new identity, so
     # the cancelled task can never race a re-mint against the swap below
