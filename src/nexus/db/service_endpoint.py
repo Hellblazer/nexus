@@ -131,6 +131,39 @@ def has_ever_resolved_lease() -> bool:
     return _has_ever_resolved_lease
 
 
+def note_lease_resolved_out_of_band() -> None:
+    """Record a live storage-service lease confirmed via a path OTHER than
+    :func:`discover_lease` (nexus-jw44t).
+
+    :func:`nexus.commands.daemon.ensure_storage_supervisor` discovers the
+    lease it just spawned (or found already live) through its OWN
+    ``ServiceRegistry(...).discover()`` call, never through this module's
+    :func:`discover_lease` — so the process-wide evidence flag stays False
+    even though the caller is holding a just-confirmed, live
+    ``LeaseRecord``. A fresh ``nx init --service`` that immediately goes on
+    to construct a service-backed store (the upgrade ladder's completion
+    store, the plan-template seed's ``T2Database``) then makes its
+    FIRST-EVER in-process resolution through
+    :func:`resolve_service_endpoint_with_evidence_gate` with
+    ``has_ever_resolved_lease()`` still False. A resolution landing in the
+    normal window between the supervisor publishing its lease and that
+    write becoming visible to a second reader — measured in the
+    v0.1.114 acquire gate, run 2: ``ladder_completion_backend_read_deferred``
+    and ``init_plan_seed_failed`` both landed within 28ms of the lease being
+    printed as live — then gets the fail-fast branch (zero wait) instead of
+    the bounded-wait retry the evidence gate exists to provide, and the step
+    gives up on a single missed read rather than the same lease the caller
+    is already holding.
+
+    Call this the instant a caller confirms a live storage-service lease
+    through any path other than :func:`discover_lease` itself, so a
+    resolution moments later in the same process gets the bounded wait it
+    has already earned. Idempotent; safe to call on every discovery.
+    """
+    global _has_ever_resolved_lease
+    _has_ever_resolved_lease = True
+
+
 def resolve_service_endpoint_with_evidence_gate() -> "tuple[str, str]":
     """:func:`resolve_service_endpoint` with the evidence-gated bounded
     wait (nexus-bgh2j — the GH #1405 residual).

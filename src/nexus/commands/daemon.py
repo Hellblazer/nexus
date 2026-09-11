@@ -596,6 +596,7 @@ def ensure_storage_supervisor(config_dir: Path):
     """
     from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.db import service_endpoint as _service_endpoint  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     StorageServiceStartError = _ssd.StorageServiceStartError
 
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
@@ -653,6 +654,13 @@ def ensure_storage_supervisor(config_dir: Path):
             # lease predates artifact-identity tracking; no-ops otherwise
             # (ambient well-known-path flows set neither var).
             _ssd._raise_or_warn_on_artifact_mismatch(config_dir, existing.endpoint)
+            # nexus-jw44t: this discovery bypassed service_endpoint.discover_lease
+            # (it went through the ServiceRegistry instance above directly), so
+            # the evidence-gate flag it feeds would otherwise stay False despite
+            # a live lease in hand — mark it so a resolution moments later (the
+            # ladder/plan-seed steps that immediately follow in `nx init
+            # --service`) gets the bounded-wait retry instead of failing fast.
+            _service_endpoint.note_lease_resolved_out_of_band()
             return existing
 
     argv = [
@@ -681,6 +689,10 @@ def ensure_storage_supervisor(config_dir: Path):
     while time.monotonic() < deadline:
         existing = registry.discover(scope)
         if existing is not None:
+            # nexus-jw44t: same reasoning as the short-circuit branch above —
+            # this discovery never touched service_endpoint.discover_lease,
+            # so mark the evidence flag directly.
+            _service_endpoint.note_lease_resolved_out_of_band()
             return existing
         time.sleep(0.5)
     raise StorageServiceStartError(

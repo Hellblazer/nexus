@@ -777,3 +777,96 @@ class TestServingPathAuditClosure:
         # The proof: the request reached the stub authenticated with the
         # LEASE token, with zero env plumbing.
         assert stub_server.request_auths == ["Bearer lease-tok"]
+
+
+class TestNoteLeaseResolvedOutOfBand:
+    """nexus-jw44t: ``ensure_storage_supervisor`` confirms a live lease
+    through its OWN ``ServiceRegistry.discover()`` call, never through
+    :func:`discover_lease` — so the process-wide evidence flag stayed
+    False even though the caller held a just-confirmed live lease, and a
+    resolution moments later (the ``nx init --service`` ladder-converge /
+    plan-seed steps) landing in the supervisor's lease-file-visibility
+    window got the fail-fast branch instead of the bounded-wait retry.
+    :func:`note_lease_resolved_out_of_band` is the fix seam: mark the
+    evidence directly from an out-of-band discovery."""
+
+    def test_marks_the_evidence_flag(self):
+        from nexus.db import service_endpoint as se
+
+        assert se.has_ever_resolved_lease() is False  # sanity: autouse reset ran
+        se.note_lease_resolved_out_of_band()
+        assert se.has_ever_resolved_lease() is True
+
+    def test_closes_the_init_race_a_bare_discovery_misses_first(self, monkeypatch):
+        """Builds the exact lag from the v0.1.114 acquire gate run 2: a lease
+        exists (the supervisor just published it) but the FIRST read after
+        it misses — plausible lease-file-visibility jitter between the
+        supervisor process and a second reader under load — before
+        succeeding on a retry. Without the out-of-band mark this is
+        indistinguishable from a genuinely cold process and fails instantly
+        with zero wait (the control case below); with it, the SAME flaky
+        read recovers via the bounded-wait retry."""
+        from nexus.db import service_endpoint as se
+
+        calls = {"n": 0}
+
+        def _flaky():
+            calls["n"] += 1
+            if calls["n"] < 2:
+                return (None, None)
+            return ("http://127.0.0.1:35225", "tok-init-race")
+
+        monkeypatch.setattr(se, "discover_lease", _flaky)
+        fc = _FakeClock()
+        real_dlw = se.discover_lease_with_wait
+
+        def _dlw_with_fake_clock(**kw):
+            kw["clock"] = fc.clock
+            kw["sleep"] = fc.sleep
+            return real_dlw(**kw)
+
+        monkeypatch.setattr(se, "discover_lease_with_wait", _dlw_with_fake_clock)
+
+        # The fix: ensure_storage_supervisor's own out-of-band discovery
+        # marks the evidence BEFORE the ladder/plan-seed steps make their
+        # first in-process resolution.
+        se.note_lease_resolved_out_of_band()
+
+        url, token = se.resolve_service_endpoint_with_evidence_gate()
+        assert (url, token) == ("http://127.0.0.1:35225", "tok-init-race")
+        assert calls["n"] == 2  # missed once, recovered on retry -- never a sleep-based patch
+
+    def test_without_the_mark_the_same_flaky_read_fails_instantly(self, monkeypatch):
+        """Control case: the identical flaky discovery, but with NO prior
+        evidence (the pre-fix shape) -- must fail loud on the first miss,
+        zero wait. This is the exact bug: a live lease the caller is
+        already holding is indistinguishable from a cold process."""
+        from nexus.db import service_endpoint as se
+
+        assert se.has_ever_resolved_lease() is False  # sanity: autouse reset ran; no mark call here
+
+        calls = {"n": 0}
+
+        def _flaky():
+            calls["n"] += 1
+            if calls["n"] < 2:
+                return (None, None)
+            return ("http://127.0.0.1:35225", "tok-init-race")
+
+        monkeypatch.setattr(se, "discover_lease", _flaky)
+
+        real_dlw = se.discover_lease_with_wait
+
+        def _poison_nonzero_budget(*, budget_s: float = 0.0, **kw):
+            if budget_s > 0:
+                raise AssertionError(
+                    "discover_lease_with_wait must never be called with a "
+                    "nonzero budget with no prior-success evidence"
+                )
+            return real_dlw(budget_s=budget_s, **kw)
+
+        monkeypatch.setattr(se, "discover_lease_with_wait", _poison_nonzero_budget)
+
+        with pytest.raises(se.ServiceEndpointUnresolvableError):
+            se.resolve_service_endpoint_with_evidence_gate()
+        assert calls["n"] == 1  # exactly one immediate read, no retry
