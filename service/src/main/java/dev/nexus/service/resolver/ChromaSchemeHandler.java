@@ -34,8 +34,8 @@ import java.net.URI;
  * production code constructs a {@link UriSchemeResolverRegistry} or calls
  * this handler yet. RDR-169 Phase B (bead nexus-zw2em) lands Gap 1's schema
  * column and Gap 4's WRITE route only, not this Gap 3 read-time resolution
- * wiring — see {@link UriSchemeResolverRegistry}'s class javadoc for the
- * current (unowned, as of 2026-09-11) status.
+ * wiring — tracked as bead nexus-aphki (see {@link UriSchemeResolverRegistry}'s
+ * class javadoc for the full status).
  */
 public final class ChromaSchemeHandler implements UriSchemeHandler {
 

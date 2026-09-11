@@ -19,7 +19,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * RDR-169 Phase B (bead nexus-zw2em) -- Liquibase schema-apply test for
  * {@code vectors-014-retention.xml}: {@code nexus.chunks} gains a
  * {@code retention TEXT NOT NULL DEFAULT 'full' CHECK (retention IN
- * ('reference-only','full'))} column and {@code chunk_text} becomes nullable.
+ * ('reference-only','full'))} column, {@code chunk_text} becomes nullable,
+ * and (fix round 1, T2 critique-nexus-zw2em-rdr169-phase-b-2026-09-11) a
+ * biconditional CHECK ({@code chunks_content_retention_consistent})
+ * enforces {@code (chunk_text IS NULL) = (retention = 'reference-only')}.
  *
  * <p>Modelled on {@link Catalog036EmbeddingProfileSchemaLiquibaseTest}: runs
  * against {@link PgContainerHelper#start()}'s shared, already-fully-migrated
@@ -27,13 +30,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * connection (RLS-bypassing by construction, so no {@code TenantScope}
  * ceremony is needed for a pure schema-shape/CHECK-behaviour probe).
  *
- * <p>Uses {@link DimTables#CHUNKS} for the pre-existing typed columns
- * (tenant_id/collection/chash/chunk_text/embedding/metadata) plus an
- * AD-HOC {@code DSL.field(DSL.name("retention"), ...)} reference for the
- * new column -- exactly the idiom {@code PgVectorRepository
- * #referenceOnlyInsertQuery} itself uses pre-jOOQ-regen (typed jOOQ DSL,
- * no raw SQL strings; the RawSqlGateTest ratchet forbids new raw-SQL
- * sites in the test tree, nexus-cbo4a).
+ * <p>Uses {@link DimTables#CHUNKS} for every column referenced, including
+ * {@link DimTables.ChunkTable#retention()} -- fix round 1 replaced
+ * {@code PgVectorRepository#referenceOnlyInsertQuery}'s Phase-A ad-hoc
+ * {@code DSL.field(DSL.name("retention"), ...)} placeholder with the same
+ * generated accessor this test now uses, so there is no longer a distinct
+ * "ad-hoc idiom" to model here (no raw SQL strings either way; the
+ * RawSqlGateTest ratchet forbids new raw-SQL sites in the test tree,
+ * nexus-cbo4a).
  */
 class VectorsRetentionSchemaLiquibaseTest {
 
@@ -96,7 +100,6 @@ class VectorsRetentionSchemaLiquibaseTest {
              Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             DimTables.ChunkTable ch = DimTables.CHUNKS.get(DIM);
-            var retention = DSL.field(DSL.name("retention"), String.class);
             String tenant = "t-retention-schema-check";
             String collection = "knowledge__retention-schema-check__voyage-context-3__v1";
             String chash = dev.nexus.service.db.Chash.ofText("retention-check-bogus").toHex();
@@ -105,7 +108,7 @@ class VectorsRetentionSchemaLiquibaseTest {
             assertThatThrownBy(() ->
                 ctx.insertInto(ch.table())
                    .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(),
-                            ch.embedding(), retention)
+                            ch.embedding(), ch.retention())
                    .values(tenant, collection, chash, "text",
                            Vector.of(new float[DIM]), "bogus-retention-value")
                    .execute())
@@ -120,7 +123,6 @@ class VectorsRetentionSchemaLiquibaseTest {
              Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             DimTables.ChunkTable ch = DimTables.CHUNKS.get(DIM);
-            var retention = DSL.field(DSL.name("retention"), String.class);
             String tenant = "t-retention-schema-default";
             String collection = "knowledge__retention-schema-default__voyage-context-3__v1";
             String chash = dev.nexus.service.db.Chash.ofText("retention-check-default").toHex();
@@ -133,9 +135,9 @@ class VectorsRetentionSchemaLiquibaseTest {
                        Vector.of(new float[DIM]))
                .execute();
 
-            String stored = ctx.select(retention).from(ch.table())
+            String stored = ctx.select(ch.retention()).from(ch.table())
                 .where(ch.tenantId().eq(tenant).and(ch.chash().eq(chash)))
-                .fetchOne(retention);
+                .fetchOne(ch.retention());
             assertThat(stored).as("an omitted retention column must default to 'full'").isEqualTo("full");
         }
     }
@@ -146,7 +148,6 @@ class VectorsRetentionSchemaLiquibaseTest {
              Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             DimTables.ChunkTable ch = DimTables.CHUNKS.get(DIM);
-            var retention = DSL.field(DSL.name("retention"), String.class);
             var chunkTsv = DSL.field(DSL.name("chunk_tsv"), Object.class);
             String tenant = "t-retention-schema-tsv";
             String collection = "knowledge__retention-schema-tsv__voyage-context-3__v1";
@@ -155,12 +156,12 @@ class VectorsRetentionSchemaLiquibaseTest {
 
             ctx.insertInto(ch.table())
                .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(),
-                        ch.embedding(), retention)
+                        ch.embedding(), ch.retention())
                .values(tenant, collection, chash, null,
                        Vector.of(new float[DIM]), "reference-only")
                .execute();
 
-            var row = ctx.select(ch.chunkText(), chunkTsv, retention).from(ch.table())
+            var row = ctx.select(ch.chunkText(), chunkTsv, ch.retention()).from(ch.table())
                 .where(ch.tenantId().eq(tenant).and(ch.chash().eq(chash)))
                 .fetchOne();
             assertThat(row).isNotNull();
@@ -172,7 +173,65 @@ class VectorsRetentionSchemaLiquibaseTest {
                     + "UNCHANGED (CA-2 verified: to_tsvector('english', NULL) -> NULL), which is "
                     + "what excludes the row from FTS (@@ on NULL is false) and the GIN index")
                 .isNull();
-            assertThat(row.get(retention)).isEqualTo("reference-only");
+            assertThat(row.get(ch.retention())).isEqualTo("reference-only");
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Biconditional CHECK (fix round 1, T2 critique-nexus-zw2em-rdr169-phase-b-
+    // 2026-09-11): (chunk_text IS NULL) = (retention = 'reference-only')
+    // -------------------------------------------------------------------------
+
+    @Test
+    void biconditionalCheck_rejectsNullContentMarkedFull() throws Exception {
+        try (var pg = PgContainerHelper.start();
+             Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            DimTables.ChunkTable ch = DimTables.CHUNKS.get(DIM);
+            String tenant = "t-retention-biconditional-null-full";
+            String collection = "knowledge__retention-biconditional-null-full__voyage-context-3__v1";
+            String chash = dev.nexus.service.db.Chash.ofText("retention-biconditional-null-full").toHex();
+            PgContainerHelper.insertCollection(ctx, tenant, collection);
+
+            // chunk_text=NULL + retention='full' -- the dangerous mismatch: a
+            // consumer trusting retention='full' as "safe to assume content
+            // present" would get NULL. Must be rejected.
+            assertThatThrownBy(() ->
+                ctx.insertInto(ch.table())
+                   .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(),
+                            ch.embedding(), ch.retention())
+                   .values(tenant, collection, chash, null,
+                           Vector.of(new float[DIM]), "full")
+                   .execute())
+                .as("chunk_text=NULL with retention='full' must violate the biconditional CHECK")
+                .isInstanceOf(DataAccessException.class);
+        }
+    }
+
+    @Test
+    void biconditionalCheck_rejectsNonNullContentMarkedReferenceOnly() throws Exception {
+        try (var pg = PgContainerHelper.start();
+             Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            DimTables.ChunkTable ch = DimTables.CHUNKS.get(DIM);
+            String tenant = "t-retention-biconditional-content-refonly";
+            String collection = "knowledge__retention-biconditional-content-refonly__voyage-context-3__v1";
+            String chash = dev.nexus.service.db.Chash.ofText("retention-biconditional-content-refonly").toHex();
+            PgContainerHelper.insertCollection(ctx, tenant, collection);
+
+            // chunk_text NOT NULL + retention='reference-only' -- the OTHER
+            // mismatch: content present but marked as if it weren't. Must
+            // also be rejected.
+            assertThatThrownBy(() ->
+                ctx.insertInto(ch.table())
+                   .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(),
+                            ch.embedding(), ch.retention())
+                   .values(tenant, collection, chash, "real content present",
+                           Vector.of(new float[DIM]), "reference-only")
+                   .execute())
+                .as("chunk_text present with retention='reference-only' must violate the "
+                    + "biconditional CHECK")
+                .isInstanceOf(DataAccessException.class);
         }
     }
 }

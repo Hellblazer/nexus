@@ -24,8 +24,8 @@ import java.time.Duration;
  * are public; tenant scoping for private URL sets is a Phase B concern).
  *
  * <p>The handler is registered and unit-tested here but remains UN-WIRED
- * (see {@link UriSchemeResolverRegistry}'s class javadoc for the current,
- * unowned-as-of-2026-09-11 status of Gap 3's read-time resolution wiring —
+ * (see {@link UriSchemeResolverRegistry}'s class javadoc for the full status
+ * of Gap 3's read-time resolution wiring, tracked as bead nexus-aphki —
  * distinct from RDR-169 Phase B / bead nexus-zw2em, which lands Gap 1's
  * schema column and Gap 4's WRITE route only).
  */

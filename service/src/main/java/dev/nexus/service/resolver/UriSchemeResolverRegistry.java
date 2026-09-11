@@ -45,7 +45,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * a handler that bypasses {@link dev.nexus.service.db.TenantScope} is a
  * security defect.
  *
- * <h2>Un-wired POJO — no owning bead</h2>
+ * <h2>Un-wired POJO — tracked by bead nexus-aphki</h2>
  *
  * <p>This class registered the POJO + concrete handlers + unit tests
  * (nexus-064jj) but ships UN-WIRED: no production code constructs an
@@ -55,8 +55,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * {@code POST /v1/vectors/upsert-reference-only} WRITE route
  * ({@link dev.nexus.service.http.VectorHandler}), not this class's wiring.
  * The bead that previously named this work (nexus-dtnpu) closed via
- * grooming without doing it; there is no open bead tracking it as of
- * 2026-09-11 — a new one is needed before any of the following happens:
+ * grooming without doing it; bead nexus-aphki (opened 2026-09-11 during the
+ * Phase B landing) now tracks it — the following remains undone until it
+ * is picked up:
  * <ol>
  *   <li>Construct a singleton {@code UriSchemeResolverRegistry}.</li>
  *   <li>Register {@link ChromaSchemeHandler} (for {@code chroma://}) and

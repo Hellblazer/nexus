@@ -65,10 +65,15 @@ public final class DimTables {
         Field<JSONB> metadata,
         // RDR-169 Phase B (bead nexus-zw2em, vectors-014-retention.xml):
         // TEXT NOT NULL DEFAULT 'full' CHECK (retention IN
-        // ('reference-only','full')). Generated field (Tables.CHUNKS.RETENTION)
-        // -- replaces the ad-hoc DSL.field(DSL.name("retention"), ...)
+        // ('reference-only','full')). A runtime field lookup via
+        // t.field("retention", ...) below, the SAME idiom every other
+        // ChunkTable column uses (chunkText/embedding/metadata) -- not a
+        // static reference into codegen's Tables.CHUNKS.RETENTION. It
+        // replaces the ad-hoc DSL.field(DSL.name("retention"), ...)
         // placeholder PgVectorRepository#referenceOnlyInsertQuery carried
-        // pre-regen (the column did not exist in the codegen schema yet).
+        // before the column existed in the migrated schema jOOQ codegen
+        // ran against -- a misspelled column name here still fails only
+        // at runtime, exactly like every other field in this record.
         Field<String> retention
     ) {
         @SuppressWarnings("unchecked")

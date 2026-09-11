@@ -47,15 +47,30 @@
     Re-index / retention-transition semantics (RDR-169 Technical Design):
     a full -> reference-only transition is PROHIBITED at the application
     layer (PgVectorRepository#upsertReferenceOnlyChunk's pre-INSERT guard
-    SELECT, nexus-xvb6b) - not by a schema-level trigger/CHECK here. The
-    schema only distinguishes "content present" (chunk_text NOT NULL,
-    retention='full') from "content absent" (chunk_text NULL,
-    retention='reference-only'); the invariant "chunk_text NOT NULL implies
-    retention='full'" is an application contract the guard enforces, not
-    something a CHECK across two columns encodes in this changeset (a
-    two-column CHECK would also have to tolerate the legitimate transient
-    ON CONFLICT DO UPDATE path where only embedding/metadata are refreshed
-    - left to the app-layer guard, as designed).
+    SELECT, nexus-xvb6b). The GUARD is still application-level (a DB CHECK
+    cannot express "reject this specific transition, but allow the row to
+    already be in the target state") - but the STATIC invariant the guard
+    relies on, "chunk_text IS NULL iff retention='reference-only'", IS now
+    a schema-level biconditional CHECK (chunks_content_retention_consistent,
+    fix round 1, T2 critique-nexus-zw2em-rdr169-phase-b-2026-09-11): defense-
+    in-depth against any FUTURE write path that might not honour the two
+    existing paths' own discipline. REVISED RATIONALE (corrects this file's
+    original text, which claimed a two-column CHECK "would also have to
+    tolerate a legitimate transient ON CONFLICT DO UPDATE state" - traced
+    both write paths and that transient state never occurs: Postgres
+    evaluates a CHECK constraint against the FINAL post-statement row, not
+    incrementally mid-UPDATE, and neither upsertChunksInternal's ordinary
+    DO UPDATE (always pairs non-null chunk_text with retention='full',
+    fix round 1's own added `.set(ch.retention(), "full")`) nor
+    upsertReferenceOnlyChunk's DO UPDATE (never touches chunk_text, always
+    binds retention='reference-only') ever asks Postgres to accept a row
+    where the two columns disagree, transiently or otherwise). The ONE-WAY
+    full->reference-only prohibition itself remains app-level, because the
+    biconditional alone cannot distinguish "this chash never had content"
+    from "this chash HAD content and is being silently NULLed" - both are
+    chunk_text=NULL + retention='reference-only', which the CHECK accepts
+    either way; only the guard's pre-INSERT SELECT (which reads the ROW
+    THAT WOULD BE OVERWRITTEN) can tell them apart.
 
     Placed after tuples-002-sweep-indexes.xml (current tail) and before the
     grants-nexus-svc.xml runAlways block, matching the established
@@ -82,9 +97,13 @@
         <comment>
             RDR-169 Phase B Gap 1: nexus.chunks gains retention TEXT NOT NULL
             DEFAULT 'full' CHECK (retention IN ('reference-only','full'));
-            chunk_text DROP NOT NULL. chunk_tsv generated expression,
-            exactly_one_embedding CHECK, tenant_id NOT NULL, and RLS are all
-            unchanged (see file header).
+            chunk_text DROP NOT NULL; and (fix round 1) the biconditional
+            chunks_content_retention_consistent CHECK ((chunk_text IS NULL) =
+            (retention = 'reference-only')), defense-in-depth against any
+            future write path bypassing the two existing paths' own
+            discipline. chunk_tsv generated expression, exactly_one_embedding
+            CHECK, tenant_id NOT NULL, and RLS are all unchanged (see file
+            header).
         </comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.chunks
@@ -93,9 +112,16 @@ ALTER TABLE nexus.chunks
 
 ALTER TABLE nexus.chunks
     ALTER COLUMN chunk_text DROP NOT NULL;
+
+ALTER TABLE nexus.chunks
+    ADD CONSTRAINT chunks_content_retention_consistent
+    CHECK ((chunk_text IS NULL) = (retention = 'reference-only'));
         </sql>
         <rollback>
             <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks
+    DROP CONSTRAINT IF EXISTS chunks_content_retention_consistent;
+
 ALTER TABLE nexus.chunks
     ALTER COLUMN chunk_text SET NOT NULL;
 
