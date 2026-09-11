@@ -181,7 +181,7 @@ figure.fig .take-edge{stroke:var(--brass)}
 <p class="lede">Nexus serves several processes at once. There is the Claude Code session you talk to, the agents it starts, and the hooks that run around every tool call. There are usually several other sessions on the same machine as well, each working on its own repository. They already have ways to talk, and the tuple space augments those ways rather than replacing them. The harness carries messages between a session and its agents and between teammates in their own terminal panes. Hooks inject context when an agent starts. Memory and scratch hold shared notes. The tuple space is written by those hooks, addressed by the ids the harness assigns, and read through the same tools Claude already calls.</p>
 <p class="lede">What none of those mechanisms provide is a home for coordination itself. Who is working, who owes a report, which message is waiting, which request has no answer: before the tuple space, each of these facts was kept in a different place, in a file or a shell function written for that one case, readable only from the process that wrote it, and gone with the session. The tuple space gives all of them one home.</p>
 <p class="lede">A record in that home has five properties. It is exclusive: a process can take it so that no other process gets it. It is durable: it outlives the session that wrote it. It is addressed: it has keys, so a reader asks for exactly the record it wants. It is queryable: any process with the tenant's credential can ask what is there. And it can be waited for: a reader can block until a record that does not exist yet arrives. Linda, the coordination language that introduced the idea, showed that these same operations build several things: a work queue, a mailbox, a lock, a meeting point, and a request with its reply. Only the shape of the record changes. Nexus keeps the space in the same Postgres database as its three stores, behind the same engine. A record can therefore point at a document, a memory entry, or a link, and the reader follows the pointer with the credential it already holds.</p>
-<p class="note">This page is an introduction. The reference, with the exact parameters of every operation and every state a tuple can be in, is <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space.md">docs/tuple-space.md</a>. The <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space-walkthroughs.md">walkthroughs</a> draw each use as a sequence, and RDR-205 records the design and its reasons.</p>
+<p class="note">This page is an introduction. The reference, with the exact parameters of every operation and every state a tuple can be in, is <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space.md">docs/tuple-space.md</a>. The <a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space-walkthroughs.md">walkthroughs</a> draw each use as a sequence, and <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-205-linda-tuple-space-over-postgres.md">RDR-205</a> records the design and its reasons.</p>
 
 <div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><table class="terms">
 <tr><th>Term</th><th>Meaning</th></tr>
@@ -436,7 +436,7 @@ nx tuple rd ledger/<span class="ph">&lt;SESSION-ID&gt;</span> -n 300</pre><butto
 <!-- ============ 8 ============ -->
 <section class="lesson" id="s8">
 <div class="lhead"><h2>Scope and status</h2><span class="ltime">5 min</span></div>
-<p class="why">Two uses are named, and no others. RDR-205 itself says that any third use needs a design record of its own. That rule is what keeps the earlier failure from repeating: the primitive stays small, and each use is decided on its own.</p>
+<p class="why">Two uses are named, and no others. <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-205-linda-tuple-space-over-postgres.md">RDR-205</a> itself says that any third use needs a design record of its own. That rule is what keeps the earlier failure from repeating: the primitive stays small, and each use is decided on its own.</p>
 
 <p>The tuple space deliberately excludes five things. The lease that protects an engine build stays out because it has to work while the engine is down. The files that hold a session's identity stay out because a reader needs a credential before it can read a tuple. The check that guards a push from a shared checkout stays out for the same reason: it must work with no engine. Scratch, memory, and plans stay out because they are read-many stores and should remain so. Rendered surfaces stay out because Nexus does not produce them.</p>
 
@@ -451,7 +451,7 @@ nx tuple rd ledger/<span class="ph">&lt;SESSION-ID&gt;</span> -n 300</pre><butto
 </ul></div>
 </section>
 
-<p class="footer">Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a> docs and the RDR-205 design record.</p>
+<p class="footer">Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a> docs and the <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-205-linda-tuple-space-over-postgres.md">RDR-205</a> design record.</p>
 </main>
 </div>
 
