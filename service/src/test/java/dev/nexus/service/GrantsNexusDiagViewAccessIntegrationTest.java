@@ -247,7 +247,8 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                 List<String> denied = new ArrayList<>();
                 for (String table : TUPLE_SPACE_TABLES) {
                     try {
-                        count(diag, "SELECT count(*) FROM " + table);
+                        int dot = table.indexOf('.');
+                        countAs(diag, table.substring(0, dot), table.substring(dot + 1));
                     } catch (Exception e) {
                         denied.add(table + ": " + e.getMessage());
                     }

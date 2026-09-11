@@ -1636,7 +1636,7 @@ class TelemetryRepositoryTest {
                     .insertInto(RELEVANCE_LOG,
                         RELEVANCE_LOG.TENANT_ID, RELEVANCE_LOG.QUERY, RELEVANCE_LOG.CHUNK_ID,
                         RELEVANCE_LOG.ACTION, RELEVANCE_LOG.TIMESTAMP)
-                    .values(TENANT_B, "q", "c", "a", DSL.currentOffsetDateTime())
+                    .values(TENANT_B, "q", "c", "a", OffsetDateTime.now(ZoneOffset.UTC))
                     .execute();
             }
         }).as("RLS WITH CHECK must reject INSERT with wrong tenant_id")
