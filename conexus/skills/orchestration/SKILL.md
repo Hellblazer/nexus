@@ -98,6 +98,10 @@ A call parks for at most the 25 s cap, so LOOP the call for a wait of minutes: a
 
 This is one of exactly two v1 parked callers (the other is Phase 6's instance waiting for its ack on its own mailbox). Add no other consumer.
 
+## Sending a Mid-Turn Message to an Agent (RDR-205 Phase 5)
+
+To send a directive or other message to a dispatched agent while it works, `tuple_out` to `mailbox/<agent id>` with a sender-minted nonce; the agent drains its mailbox with `tuple_in` before composing any hand-back, and a resend of the same nonce lands on the same tuple rather than piling up. Full convention, dead-letter rule, and the template shape: `/conexus:mailbox`.
+
 ## VERIFY Line Convention (MANDATORY)
 
 Agent write-backs end with a machine-checkable line, not prose (nexus-pjzz8, T2 [21371] §Q5):

@@ -111,6 +111,7 @@ conexus/
     ├── writing-nx-skills/   # Standalone: plugin authorship guide
     ├── brainstorming-gate/  # Standalone: design gate before implementation
     ├── orchestration/       # Standalone: routing reference
+    ├── mailbox/             # Standalone: RDR-205 mailbox/<address> tuple-space convention
     │
     │   # RDR-078 verb skills (dispatch plan_match + plan_run)
     ├── research/            # verb: research / design / architecture
@@ -149,7 +150,7 @@ conexus/
     └── rdr-audit/           # RDR: audit project RDR lifecycle
 ```
 
-## Standalone Skills (25)
+## Standalone Skills (26)
 
 Skills that dispatch a tool or agent directly — no relay to a full sub-agent.
 This includes RDR-078 verb skills, RDR-080 MCP-tool pointers, and infrastructure skills.
@@ -184,6 +185,7 @@ This includes RDR-078 verb skills, RDR-080 MCP-tool pointers, and infrastructure
 | composition-probe | Runtime composition smoke test for coordinator beads |
 | finishing-branch | Guide branch completion — verify tests, present merge/PR/keep/discard |
 | git-worktrees | Isolated workspace setup via git worktrees with safety verification |
+| mailbox | RDR-205 mailbox/<address> tuple-space convention — send by tuple_out, drain by tuple_in before hand-back |
 | nexus | Nexus CLI reference for all tiers (T1/T2/T3) |
 | orchestration | Agent routing reference — routing tables, pipeline templates |
 | phase-review-gate | Phase-boundary gate — cross-walks RDR §Approach against closing beads to block silent scope reduction |

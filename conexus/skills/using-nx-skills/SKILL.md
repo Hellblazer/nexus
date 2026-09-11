@@ -75,6 +75,8 @@ Catalog and linking: entries, links, tumblers, link-context seeding → `/conexu
 
 Reference (no agent dispatch): `/conexus:serena-code-nav`, `/conexus:nexus`, `/conexus:cli-controller`, `/conexus:writing-nx-skills`.
 
+Sending or draining a tuple-space message to an agent's or instance's mailbox → `/conexus:mailbox`.
+
 ## Essential MCP Tools (always available)
 
 Sequential Thinking (`mcp__plugin_conexus_sequential-thinking__sequentialthinking`): call it BEFORE every decision, not only "non-trivial" ones. That qualifier measured to zero top-level calls in a full session on 2026-08-19. Decisions include what to dispatch, which fix, how to read a reviewer's verdict or a measurement, and whether to push. The orchestrator holds itself to the same rule it writes into briefs. Workflow: hypothesis → evidence → evaluate → branch or proceed. `needsMoreThoughts: true` to continue, `isRevision: true` to correct, `branchFromThought: N` + `branchId` to explore alternatives. The thought is the record: it is what reviewers, siblings, and the census can see; internal reasoning is not.
