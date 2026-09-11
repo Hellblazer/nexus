@@ -4871,43 +4871,42 @@ def _check_stranded_install() -> list[HealthResult]:
 
 # ── RDR-205 Phase 2 Step 2 (bead nexus-em75s.10): tuple-space doctor rows ────
 #
-# ``/v1/tuples`` (RDR-205 Phase 1, nexus-em75s.2/.4/.5) is on ``develop``
-# but has not shipped on any RELEASED ``engine-service`` tag as of this
-# writing — Phase 3 (the engine cut + deploy) is OPTIONAL and PARALLEL to
-# this client-side Phase 2 step, so a client running these checks against
-# any engine a user can actually install today will find the route absent.
-# All three rows below resolve their severity through the SAME
+# ``/v1/tuples`` (RDR-205 Phase 1, nexus-em75s.2/.4/.5) shipped on
+# ``engine-service-v0.1.114`` (Phase 3, nexus-em75s.14), deployed and
+# cloud-gated before the paired client release (conexus 7.41.0). A client
+# on an OLDER pinned engine (below v0.1.114) still finds the route
+# absent, so all three rows below still resolve their severity through the SAME
 # route_predates_floor idiom ``_check_manifest_null_collection`` uses
 # (health.py, RDR-204-era: "the pin at the time this route was added")
 # rather than an unconditional WARN, for the identical reason: an
 # unconditional WARN here would fail ``tests/e2e/fresh-install-mvv.sh`` on
 # every virgin box and name no action a user can take.
 #
-# The anchor is FROZEN at today's ``REQUIRED_ENGINE_VERSION`` (audit round
-# 2 residual, nexus-em75s.10 bead notes) rather than computed some other
-# way, because there is no known future tag yet to anchor on — Phase 3
-# has not cut one.
+# The anchor now equals ``REQUIRED_ENGINE_VERSION`` (audit round 2
+# residual, nexus-em75s.10 bead notes) because Phase 3's tag is the exact
+# tag this release pins — see the hazard note below for what stays true
+# when a future engine tag moves ``REQUIRED_ENGINE_VERSION`` again without
+# touching this route.
 #
 # THE REAL HAZARD (nexus-em75s.12 review fix — the prior wording here
 # claimed this constant marks "the pin at the time this route was
 # added", which reads as though the route already shipped on a released
-# engine; it has not): this constant is truthful ONLY as long as NO
-# released engine-service tag actually carries ``/v1/tuples``, and it
-# MUST be updated, the moment one does, to equal that tag's own version
-# — not left frozen at whatever ``REQUIRED_ENGINE_VERSION`` happened to
-# be when this comment was written. Today's floor, (0, 1, 113), does NOT
-# carry the route (Phase 3 has not cut a tag yet) — the equality with
-# ``REQUIRED_ENGINE_VERSION`` below is coincidental to when this was
-# written, not a claim that the route ships at that version. Whoever cuts
-# the Phase 3 engine tag MUST bump this constant to that tag's own
-# version (the same discipline AGENTS.md's paired-release choreography
-# already requires for ``REQUIRED_ENGINE_VERSION`` itself) — see bead
-# nexus-em75s.14, which carries this as a downstream reference to bump at
-# the cut. ``tests/test_health_tuple_doctor_rows.py``'s
+# engine; it had not, at the time that comment was written): this
+# constant is truthful ONLY as long as it equals the tag that ACTUALLY
+# carries ``/v1/tuples`` — not left frozen at whatever
+# ``REQUIRED_ENGINE_VERSION`` happened to be when a given comment was
+# written. Phase 3 has now cut that tag: ``engine-service-v0.1.114``
+# (nexus-em75s.14), the route's first shipping engine, tagged on
+# a2801dfc9 and deployed/cloud-gated GREEN before the paired client
+# release (conexus 7.41.0) bumps ``REQUIRED_ENGINE_VERSION`` to the same
+# value in the same commit — the bump discipline AGENTS.md's
+# paired-release choreography already requires for
+# ``REQUIRED_ENGINE_VERSION`` itself, applied here because this constant
+# names the SAME tag. ``tests/test_health_tuple_doctor_rows.py``'s
 # ``test_tuple_route_first_engine_version_pin`` fails loudly if this ever
 # drifts below ``REQUIRED_ENGINE_VERSION`` or above the newest published
 # ``engine-service-v*`` tag this repo knows about.
-_TUPLE_ROUTE_FIRST_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 113)
+_TUPLE_ROUTE_FIRST_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 114)
 
 #: Doctor heuristic, not derived from any per-template TTL: an unclaimed
 #: tuple sitting in a claimable subspace for longer than this is reported

@@ -1,6 +1,6 @@
 # Tuple Space
 
-> Status: design of record from RDR-205 (accepted). Phase 1 (engine) and Phase 2 (client — `nx tuple`, the eight `tuple_*` MCP tools, the doctor rows) are both on `develop`. **`/v1/tuples` shipped on `engine-service-v0.1.114`** (Phase 3), deployed to the managed cloud — but a fresh **local** install stays pinned to whatever `REQUIRED_ENGINE_VERSION` names (`src/nexus/engine_version.py`) until the paired client release bumps that floor to `v0.1.114`; until then a local-mode call 404s (the three `nx doctor` rows report this as informational, not a defect, below that floor).
+> Status: design of record from RDR-205 (accepted). Phase 1 (engine) and Phase 2 (client — `nx tuple`, the eight `tuple_*` MCP tools, the doctor rows) have both shipped. `/v1/tuples` shipped on `engine-service-v0.1.114` (Phase 3), deployed to the managed cloud since 2026-09-11. The client shipped in conexus 7.41.0, which also bumps the pinned local-mode engine floor (`REQUIRED_ENGINE_VERSION`, `src/nexus/engine_version.py`) to `v0.1.114` — a local install on 7.41.0 or later has the route live. An install on an older release stays pinned below the floor and a local-mode call 404s (the three `nx doctor` rows report this as informational, not a defect, below that floor).
 
 ## What it is
 

@@ -6,8 +6,9 @@ and the full operational reference: [Tuple Space](../tuple-space.md);
 scenario diagrams: [Tuple Space Walkthroughs](../tuple-space-walkthroughs.md).
 
 All three doctor rows below are gated the same way against the engine
-floor that first serves `/v1/tuples` (`engine-service-v0.1.114`): an
-install pinned below that floor reports the row as informational, never a
+floor that first serves `/v1/tuples` (`engine-service-v0.1.114`, the
+pinned floor since conexus 7.41.0): an install pinned below that floor
+(any release before 7.41.0) reports the row as informational, never a
 defect; an install at or above the floor that still 404s or reports no
 tables reports UNKNOWN and asks you to investigate the engine install.
 

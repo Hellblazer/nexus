@@ -39,7 +39,7 @@ Start on the site, then find your section below by what you're trying to do.
 - [Architecture](architecture.md) — Reference architecture, module map, design decisions
 - [Benchmarking](benchmarking.md) — `scripts/bench/` harnesses: retrieval-quality scoring (RDR-090) and the operator quality proxy (RDR-196 .p2a)
 - [Wire Contract Pending](wire-contract-pending.md) — Ledger of engine/client wire-contract pairings deployed ahead of their client half (nexus-1vogq tripwire)
-- [Tuple Space](tuple-space.md) — reference for the RDR-205 coordination substrate: engine and client (`nx tuple`, the `tuple_*` MCP tools) are both on `develop`, and the route shipped on `engine-service-v0.1.114`; a fresh local install gets it once the paired client release bumps its pinned engine floor; [walkthroughs](tuple-space-walkthroughs.md)
+- [Tuple Space](tuple-space.md) — reference for the RDR-205 coordination substrate: engine and client (`nx tuple`, the `tuple_*` MCP tools) shipped together in conexus 7.41.0, paired with `engine-service-v0.1.114`; [walkthroughs](tuple-space-walkthroughs.md)
 - [`testing/`](testing/) — [6.0.0 plugin surface coverage matrix](testing/6.0.0-plugin-surface-coverage-matrix.md)
 - [`tutorial/`](tutorial/) — **In progress, not on `main`.** The tutorial-recording pipeline lives on the `wip/tutorial` branch; this directory on `main` is a placeholder.
 

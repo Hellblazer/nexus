@@ -1,6 +1,6 @@
 # Tuple Space Walkthroughs
 
-> Status: design of record from RDR-205 (accepted). The engine (Phase 1) and client surface (Phase 2 — `nx tuple`, the eight `tuple_*` MCP tools, the doctor rows) are on `develop`; `/v1/tuples` shipped on `engine-service-v0.1.114` (Phase 3) and is deployed to the managed cloud, but a local install stays pinned to whatever `REQUIRED_ENGINE_VERSION` names until the paired client release bumps that floor, so a local-mode call 404s until then.
+> Status: design of record from RDR-205 (accepted). The engine (Phase 1) and client surface (Phase 2 — `nx tuple`, the eight `tuple_*` MCP tools, the doctor rows) have both shipped: `/v1/tuples` on `engine-service-v0.1.114` (Phase 3, deployed to the managed cloud since 2026-09-11), and the client in conexus 7.41.0, which also bumps the pinned local-mode engine floor to the same tag. A local install on 7.41.0 or later has the route live; an install on an older release stays pinned below the floor and a local-mode call 404s until it upgrades.
 
 Scenario walkthroughs for the [Tuple Space reference](tuple-space.md). Each section follows one use of the space from the caller's side, drawn as a sequence between the processes involved.
 

@@ -535,6 +535,7 @@ nexus-2zmfw
 nexus-2zv75
 nexus-308ph
 nexus-308ph.1
+nexus-31c6x
 nexus-31cr
 nexus-31m3t
 nexus-320a
@@ -2598,6 +2599,7 @@ nexus-em75s.39
 nexus-em75s.4
 nexus-em75s.40
 nexus-em75s.41
+nexus-em75s.42
 nexus-em75s.5
 nexus-em75s.6
 nexus-em75s.7
@@ -2672,6 +2674,7 @@ nexus-f1itv.1
 nexus-f1m8s
 nexus-f1mbo
 nexus-f1mbo.1
+nexus-f1pbh
 nexus-f1syh
 nexus-f1syh.1
 nexus-f20el
@@ -3043,6 +3046,8 @@ nexus-gq5f9
 nexus-gq5f9.1
 nexus-gq5i7
 nexus-gq5i7.1
+nexus-gqrg0
+nexus-gqrg0.1
 nexus-gr9n
 nexus-grg79
 nexus-grg79.1
@@ -3560,6 +3565,8 @@ nexus-jvlmc
 nexus-jvma
 nexus-jvma.1
 nexus-jvtj6
+nexus-jw44t
+nexus-jw44t.1
 nexus-jwqjm
 nexus-jwqjm.1
 nexus-jwqjm.1.1
@@ -3644,6 +3651,7 @@ nexus-k8ma
 nexus-k8mpp
 nexus-k8s4v
 nexus-k9er
+nexus-kard5
 nexus-kbn97
 nexus-kc4x
 nexus-kcaqk
@@ -5493,6 +5501,7 @@ nexus-ui654
 nexus-uieig
 nexus-uizok
 nexus-uizok.1
+nexus-ujdha
 nexus-ujlew
 nexus-ujn5
 nexus-ujomp

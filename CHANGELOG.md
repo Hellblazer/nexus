@@ -6,6 +6,80 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.41.0] - 2026-09-11
+
+Paired engine: engine-service-v0.1.114 (tagged on a2801dfc9; deployed and
+live before this client tag, all-additive on the wire). `REQUIRED_ENGINE_VERSION`
+is (0, 1, 114).
+
+### RDR-205: tuple space client surface
+
+- `HttpTupleStore` over `/v1/tuples` (ten operations: out, rd, rdp, in,
+  inp, ack, nack, registry, subspace_list, subspace_stats), typed
+  errors, an 8 KB pre-send guard, and `db.tuples` on the T2 facade
+  (nexus-em75s.9).
+- Eight `tuple_*` MCP tools, the `nx tuple` CLI verb, and three `nx
+  doctor` rows, gated behind the tuple route's floor
+  (`_TUPLE_ROUTE_FIRST_ENGINE_VERSION`, now (0, 1, 114)) so an older
+  pinned engine reads as an informational skip, never a false FAIL
+  (nexus-em75s.10, nexus-em75s.12).
+- Two async ledger-projection hooks (`subagent-start-tuple-async.sh`,
+  `subagent-stop-tuple-async.sh`) post start/report tuples beside the
+  existing blocking TSV hooks, over stdlib `urllib.request` with a
+  tenant-scoped lease, never a bearer token on a subprocess argv
+  (nexus-em75s.11).
+- `expectations_census` reads the ledger space first (`nx tuple list
+  --prefix ledger/`), falls back to the TSV with a named
+  `SPACE_FALLBACK` reason when the engine is unreachable, and reports
+  projections that never ran; a zero-subspace read is `SPACE_BLINDSPOT`,
+  never a silent "every session outside the window" (nexus-em75s.19,
+  nexus-em75s.22).
+- The `mailbox` skill and a new orchestration paragraph: send by
+  `tuple_out` with a sender-minted nonce, drain by `tuple_in` before any
+  hand-back, dead-letter after three attempts, plus the
+  instance-addressed form for cross-instance request/ack pairing
+  (nexus-em75s.20, nexus-em75s.24, nexus-em75s.28, nexus-em75s.29).
+- The relay sweep's mailbox-scan arm: T2 findings survive an unrunnable
+  mailbox scan, and the mailbox arm gets the same `max_age_days` grace
+  as the T2 arm (nexus-em75s.30).
+
+### Paired engine: engine-service-v0.1.114
+
+- One new route family, `/v1/tuples` (RDR-205): `out`, `rd`, `rdp`,
+  `in`, `inp`, `ack`, `nack`, `registry`, `subspace_list`,
+  `subspace_stats`, backed by three new tables (`nexus.tuples`,
+  `nexus.tuple_claim_log`, `nexus.tuple_tenants`) across seven
+  Liquibase changesets, and a second scheduled sweep task. No existing
+  route, request field, or response field changed shape -- all-additive,
+  deployed and cloud-gated before this client tag (see
+  `docs/wire-contract-pending.md`).
+
+### GH #1533: pdftext bound below mineru's breaking release
+
+- `pdftext` now travels as a real `[project.dependencies]` entry
+  (bounded below 0.7.0) rather than only an override, so a bare `uv
+  tool install conexus` sees the bound in `Requires-Dist`. `nx doctor
+  --check-mineru`'s real-parse probe synthesizes its own one-page
+  formula PDF instead of relying on a fixture the published wheel never
+  ships, so the check runs on any installed box, not only an editable
+  checkout. The shakedown's MinerU verdict filter and the fresh-install
+  MVV both widened to see the new parse line and assert the resolved
+  `pdftext` on both the uv-tool and generation layers (nexus-gqrg0;
+  Closes #1533).
+
+### Fixes
+
+- `ensure_storage_supervisor` marks the process-wide lease-evidence flag
+  from its own `ServiceRegistry.discover()` call, not only from
+  `discover_lease()` -- a fresh `nx init --service` install could lose
+  the ladder-converge and plan-seed steps' first-ever resolution to a
+  zero-wait fail-fast, landing with no builtin plan templates until `nx
+  plan reseed` (nexus-jw44t).
+- The MCP entrypoint probe distinguishes a slow-but-alive server from a
+  genuine hang: a crashed process still fails within a few hundred
+  milliseconds, while a process that is alive and simply slow under
+  load gets up to 4x the base timeout before being reported as hung.
+
 ## [7.40.0] - 2026-09-10
 
 Paired engine: engine-service-v0.1.113, unchanged from 7.39.0 (no

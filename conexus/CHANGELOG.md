@@ -4,6 +4,70 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.41.0] - 2026-09-11
+
+Plugin version aligned with conexus 7.41.0. Live at this pin, from
+`PENDING_RELEASE.md`:
+
+- `hooks/scripts/subagent-start.sh` (nexus-em75s.11): RDR-205 "Identity
+  and addressing" -- parses `agent_id` from its own SubagentStart
+  payload and adds one line to the injected `additionalContext` giving
+  the agent its claimant id and mailbox address (`mailbox/<agent_id>`).
+  No network I/O.
+- `hooks/hooks.json` (nexus-em75s.11): two new `async: true` projection
+  entries, each beside its blocking hook -- `subagent-start-tuple-async.sh`
+  on `SubagentStart`, `subagent-stop-tuple-async.sh` on `SubagentStop`.
+  The three blocking TSV hooks (`agent-dispatch-expect.sh`,
+  `subagent-start-stamp.sh`, `subagent-stop.sh`) are untouched.
+- `hooks/scripts/subagent-start-tuple-async.sh`, `hooks/scripts/subagent-stop-tuple-async.sh`
+  (new; nexus-em75s.11): thin, inert-safe wrappers -- read the hook's own
+  stdin payload, then background `tuple_ledger_project.py` with all
+  three fds redirected to `/dev/null` before backgrounding, so the
+  wrapper returns in milliseconds regardless of whether the installed
+  harness honors `async: true` on this hooks.json entry.
+- `hooks/scripts/tuple_ledger_project.py` (new; nexus-em75s.11): the
+  async projection body. Reads the client's cached storage-service and
+  data-token lease files under `~/.config/nexus/`, POSTs the ledger
+  start/report tuple to `/v1/tuples/out` with stdlib
+  `urllib.request` (bearer in a header, never a subprocess argv), never
+  mints, and on a missing or near-expiry data-token lease scoped to the
+  resolved tenant skips and appends the reason to
+  `<session_id>.tuple-projection.log` beside the session's
+  `.expectations` ledger.
+- `hooks/scripts/auto-approve-nx-mcp.sh` (nexus-em75s.12): RDR-205 Phase
+  2 review fix -- the eight tuple-space MCP tools (`tuple_out`,
+  `tuple_rd`, `tuple_in`, `tuple_ack`, `tuple_nack`, `tuple_registry`,
+  `tuple_list`, `tuple_stats`) were registered by `nexus.mcp.core`
+  without a matching allow-list entry, so every call prompted for
+  permission instead of auto-approving.
+- `skills/orchestration/SKILL.md` (nexus-em75s.20): RDR-205 Phase 4 --
+  one new section, "Waiting for One Agent's Report", telling the
+  orchestrator to wait for a named agent's report with a parked
+  `tuple_rd` on `ledger/<session_id>` (looping at the 25s cap) instead
+  of polling.
+- `hooks/scripts/expectations.sh` (nexus-em75s.19): RDR-205 Phase 4.1 --
+  `expectations_census` gains a space-backed read path: `nx tuple list
+  --prefix ledger/` enumerates ledger subspaces, reports a session's
+  ledger tuples present (with an age comparison against the TSV's own
+  newest row), absent-and-younger-than-the-90-day-retention as
+  `SPACE_NEVER_RAN`, absent-and-older as `SPACE_OUTSIDE_WINDOW`, and
+  falls back to the TSV alone with a named `SPACE_FALLBACK` reason when
+  the engine is unreachable. A `nx tuple list` call that succeeds with
+  zero subspaces at all is `SPACE_BLINDSPOT`, never silently read as
+  every session being outside the window. Never changes the function's
+  own exit code -- the space lines are additional report lines, not a
+  new verdict.
+- `skills/mailbox/SKILL.md` (new; nexus-em75s.24, nexus-em75s.28):
+  RDR-205 Phases 5 and 6 -- the mailbox convention as rules: send by
+  `tuple_out` to the agent id with a sender-minted nonce, drain by
+  `tuple_in` before any hand-back, a resent message is one tuple,
+  missing `from` is a SchemaViolation, dead-letter after three attempts;
+  the instance-addressed form (`address_kind` instance, the ListAgents
+  session name, `correlation_id` request/ack pairing, a parked `in` on
+  the requester's own mailbox).
+- `skills/using-nx-skills/SKILL.md` (nexus-em75s.24): RDR-205 Phase 5 --
+  routing line for the new standalone `mailbox` skill.
+
 ## [7.40.0] - 2026-09-10
 
 Plugin version aligned with conexus 7.40.0. Live at this pin, from
