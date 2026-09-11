@@ -83,6 +83,50 @@ class TestSubagentStartHook:
         assert len(m.group(1).encode()) < 500
 
 
+class TestClaimantIdInjection:
+    """RDR-205 "Identity and addressing" (bead nexus-em75s.11): this is the
+    ONE line subagent-start.sh adds beyond its existing injection -- the
+    harness's own opaque per-instance agent_id, plus the tuple-space
+    mailbox address derived from it (``mailbox/<agent_id>``). No hook
+    mints anything, and this script does no network I/O at all: the
+    async SubagentStart/SubagentStop entries beside it write the actual
+    ledger tuples independently, keyed on this same id.
+    """
+
+    def test_claimant_id_and_mailbox_line_injected(self) -> None:
+        payload = json.dumps({
+            "session_id": "test-session",
+            "hook_event_name": "SubagentStart",
+            "agent_id": "aworker1234567890abcdef",
+            "task": "general research task",
+            "prompt": "look into something",
+        })
+        result = _run_hook(stdin=payload)
+        assert result.returncode == 0, result.stderr
+        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Claimant id: aworker1234567890abcdef" in ctx
+        assert "mailbox/aworker1234567890abcdef" in ctx
+
+    def test_no_claimant_line_when_agent_id_absent(self) -> None:
+        """The original STDIN_PAYLOAD fixture carries no agent_id -- the
+        injected line must not appear with nothing to fill it."""
+        result = _run_hook()
+        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Claimant id:" not in ctx
+
+    def test_script_does_no_network_io(self) -> None:
+        """RDR-205: "It does no network I/O." A crude but effective source
+        scan -- no curl/wget/socket/urllib/requests token anywhere in the
+        script. The actual tuple write lives in the separate async hook
+        entries (subagent-start-tuple-async.sh), never here.
+        """
+        src = SCRIPT.read_text()
+        for forbidden in ("curl ", "wget ", "urllib", "socket.", "requests."):
+            assert forbidden not in src, (
+                f"subagent-start.sh must perform no network I/O; found {forbidden!r}"
+            )
+
+
 class TestSessionIdExport:
     """nexus-7o1zh: this hook runs detached from any live nx-mcp process and
     cannot rely on env-var inheritance from a parent Claude session. It must

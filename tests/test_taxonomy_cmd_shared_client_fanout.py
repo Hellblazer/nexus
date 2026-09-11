@@ -125,9 +125,9 @@ def test_default_taxonomy_construction_outside_a_command_is_unchanged(
 
     db = _T2Database(tmp_path / "memory.db")
     try:
-        assert len(client_tally) == 8, (
+        assert len(client_tally) == 9, (
             f"expected _T2Database() called with no active Click context "
-            f"to build 8 independent httpx.Client()s (default, unwired "
+            f"to build 9 independent httpx.Client()s (default, unwired "
             f"behavior); got {len(client_tally)}"
         )
     finally:

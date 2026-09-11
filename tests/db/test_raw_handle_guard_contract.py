@@ -42,11 +42,12 @@ def _service_stores() -> list[tuple[str, object]]:
     from nexus.db.t2.http_plan_library import HttpPlanLibrary
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
     from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
+    from nexus.db.t2.http_tuple_store import HttpTupleStore
 
     classes = [
         HttpAspectQueue, HttpChashIndex, HttpDocumentAspectsStore,
         HttpDocumentHighlightsStore, HttpMemoryStore, HttpPlanLibrary,
-        HttpTaxonomyStore, HttpTelemetryStore, HttpCatalogClient,
+        HttpTaxonomyStore, HttpTelemetryStore, HttpTupleStore, HttpCatalogClient,
     ]
     return [(c.__name__, c.__new__(c)) for c in classes]
 

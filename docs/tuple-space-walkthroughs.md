@@ -1,6 +1,6 @@
 # Tuple Space Walkthroughs
 
-> Status: design of record from RDR-205 (gated 2026-09-09, not yet accepted), not yet shipped. The routes, tools and verbs named here land with RDR-205 Phases 1 and 2; until then nothing in a running install serves them.
+> Status: design of record from RDR-205 (accepted). The engine (Phase 1) and client surface (Phase 2 — `nx tuple`, the eight `tuple_*` MCP tools, the doctor rows) have both shipped: `/v1/tuples` on `engine-service-v0.1.114` (Phase 3, deployed to the managed cloud since 2026-09-11), and the client in conexus 7.41.0, which also bumps the pinned local-mode engine floor to the same tag. A local install on 7.41.0 or later has the route live; an install on an older release stays pinned below the floor and a local-mode call 404s until it upgrades.
 
 Scenario walkthroughs for the [Tuple Space reference](tuple-space.md). Each section follows one use of the space from the caller's side, drawn as a sequence between the processes involved.
 
@@ -39,7 +39,7 @@ sequenceDiagram
     E-->>O: every start and report row for this session
 ```
 
-Waiting for a report is a parked read on the ledger. The report tuple needs no cooperation from the agent: the stop hook writes it from the harness payload. The census compares the space against the TSV only inside the 90-day retention window and reports a session that is in the TSV but absent from `subspace_list("ledger/")` as a projection that never ran.
+Waiting for a report is a parked read on the ledger. The report tuple needs no cooperation from the agent: the stop hook writes it from the harness payload. `expectations_census`'s space-backed read (`conexus/hooks/scripts/expectations.sh`, RDR-205 Phase 4.1) compares the space against the TSV only inside the 90-day retention window: `SPACE_PRESENT`/`SPACE_AGE` when the subspace exists, `SPACE_NEVER_RAN` when it is absent and the session is younger than the retention window, `SPACE_OUTSIDE_WINDOW` when absent and older, `SPACE_BLINDSPOT` when the walk examined no ledger subspace at all (never read as every session being outside the window), and `SPACE_FALLBACK` with a named reason when the engine cannot be consulted (no `nx` on PATH, unreachable, unparseable output). These lines never change the census function's own exit code — they are additional report lines on top of the TSV verdict, not a new one.
 
 ## Mailbox: send, contend, drain
 
@@ -143,6 +143,8 @@ sequenceDiagram
 
 A wait of minutes is a loop of parked calls, never one long park. Each call parks for at most 25 s because the public edge times out a response that has not started within 30 s; at the cap the engine returns the probe result and the client loops. The `correlation_id` dim is what pairs an ack with its request.
 
+`scripts/check_inbound_relay_acks.py`'s mailbox arm is that unacked-request sweep, addressed by `--mailbox-prefix`/`--tuple-read-max`: it scans every `mailbox/*` subspace for `kind=request` rows with no matching `kind=ack` row at `mailbox/<from>`, distinguished in its findings by a `MAILBOX-UNACKED-REQUEST:` tag, and reports into the same finding list as the older T2-memory ack check (the pre-tuple-space relay convention between the nexus and conexus repos). An empty mailbox tuple space is a legitimate clean state for this arm, not a blindspot; a request younger than `--max-age-days` is a legitimate in-flight handshake and is not reported even unacked.
+
 ## How a blocking read parks
 
 The wake path is what makes `rd` and `in` with a timeout cheap. There is one engine JVM and every `out` passes through it, so a per-subspace condition variable is enough; `LISTEN`/`NOTIFY` is deferred until a second JVM exists. See [Blocking reads](tuple-space.md#blocking-reads).
@@ -182,7 +184,7 @@ Every six hours the existing sweep scheduler runs a second task. It enumerates t
 <svg viewBox="0 0 760 210" role="img" aria-label="The sweep visits tenants in last_swept_at order, stamps a tenant only when its sweep finishes, and a tenant cut short by the budget keeps its old stamp so it is first next run.">
   <defs><marker id="tuple-sweep-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
   <g font-family="monospace" font-size="12" fill="currentColor" stroke="currentColor">
-    <text x="20" y="28" font-weight="700" font-size="13" stroke="none">Run N (budget: 40 batches per tenant, 90 s wall clock)</text>
+    <text x="20" y="28" font-weight="700" font-size="13" stroke="none">Run N (budget: 50 batches per tenant, 120 s wall clock)</text>
     <rect x="20" y="44" width="150" height="46" rx="4" fill="none"/>
     <text x="95" y="63" text-anchor="middle" stroke="none">tenant c</text>
     <text x="95" y="80" text-anchor="middle" stroke="none" font-size="11">last_swept_at NULL</text>

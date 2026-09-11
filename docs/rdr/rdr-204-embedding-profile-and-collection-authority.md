@@ -2,7 +2,8 @@
 title: "Collections Stop Encoding Metadata in Their Names: An Install-Scoped Embedding Profile and catalog_collections as the Authority"
 id: RDR-204
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-09-10
 priority: medium
 author: Sam
 reviewed-by: self
@@ -858,3 +859,5 @@ scope on purpose.
 ## Revision History
 - 2026-09-09: Phase 4 (opaque names) rejected on Sam's ruling after the 7.38.0 shakeout; the section records the grounds and the reopen trigger.
 - 2026-09-07: Gate round 9 (T2 `204-gate-critique-2026-09-07i`) PASSED with one residual, the stale critique count in the Finalization Gate; fixed in `a7efb15df`. Accepted.
+
+- 2026-09-10: Closed as implemented (Sam). Phases 1 to 3 and Day 2 shipped in conexus 7.37.0 through 7.39.0 with engine-service-v0.1.109 and v0.1.111; Phase 4 rejected 2026-09-09; every bead under epic nexus-ft04v closed; no unshipped wire-ledger entry.

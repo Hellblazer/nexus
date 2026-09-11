@@ -2346,6 +2346,54 @@ class TestEnsureStorageSupervisor:
         popen.assert_not_called()  # absent supervisor_pid → trust TTL, no re-spawn
         assert rec is not None and rec.endpoint.get("port") == 18095
 
+    def test_short_circuit_marks_lease_evidence_out_of_band(
+        self, config_dir: Path
+    ) -> None:
+        """nexus-jw44t: the live-lease short-circuit discovers the lease
+        through this function's OWN ``ServiceRegistry`` instance, never
+        through ``service_endpoint.discover_lease`` — so without the fix
+        the process-wide evidence flag stays False despite a live lease in
+        hand, and a resolution moments later (the ladder-converge /
+        plan-seed steps `nx init --service` runs immediately after) gets
+        no bounded-wait retry on a transient miss. RED-FIRST: fails before
+        the fix (nothing marks the flag on this branch)."""
+        from nexus.commands import daemon as daemon_mod
+        from nexus.db import service_endpoint as se
+
+        self._publish_fresh_lease(config_dir)
+        assert se.has_ever_resolved_lease() is False  # sanity: autouse reset ran
+
+        with patch("nexus.daemon.service_registry.process_state", return_value="S"), \
+             patch.object(daemon_mod, "_popen") as popen:
+            rec = daemon_mod.ensure_storage_supervisor(config_dir)
+
+        popen.assert_not_called()  # the short-circuit branch under test
+        assert rec is not None
+        assert se.has_ever_resolved_lease() is True
+
+    def test_spawn_and_discover_marks_lease_evidence_out_of_band(
+        self, config_dir: Path
+    ) -> None:
+        """nexus-jw44t: the spawn-then-poll branch's own discover() call
+        must also mark the evidence flag — the OTHER return site that
+        bypasses ``service_endpoint.discover_lease``. RED-FIRST: fails
+        before the fix."""
+        from nexus.commands import daemon as daemon_mod
+        from nexus.db import service_endpoint as se
+
+        assert se.has_ever_resolved_lease() is False  # sanity: autouse reset ran
+
+        def _popen_publishes(*_a, **_k):
+            self._publish_fresh_lease(config_dir, port=18098)
+            return MagicMock()
+
+        with patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
+             patch.object(daemon_mod, "_popen", side_effect=_popen_publishes):
+            rec = daemon_mod.ensure_storage_supervisor(config_dir)
+
+        assert rec is not None and rec.endpoint.get("port") == 18098
+        assert se.has_ever_resolved_lease() is True
+
 
 # ---------------------------------------------------------------------------
 # nexus-lz3f2: lease-TTL margin + optional service heap bound

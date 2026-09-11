@@ -43,6 +43,9 @@ _STANDALONE_SKILLS = {
     "sequential-thinking",
     "serena-code-nav", "catalog",
     "receiving-review", "git-worktrees", "finishing-branch",
+    # RDR-205 Phase 5 (bead nexus-em75s.24) — reference card for the
+    # mailbox/<address> tuple-space convention, no agent dispatch.
+    "mailbox",
     # RDR-080 P3: pointer skills — delegate directly to MCP tools, no relay structure needed
     "query", "enrich-plan", "knowledge-tidying", "plan-validation",
     # RDR-078 verb skills — dispatch plan_match + plan_run directly, no agent relay

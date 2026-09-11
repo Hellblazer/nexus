@@ -28,9 +28,12 @@ import os
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
+
+if TYPE_CHECKING:
+    from nexus.daemon.service_registry import LeaseRecord, ServiceRegistry
 
 _log = structlog.get_logger(__name__)
 
@@ -88,6 +91,27 @@ DEFAULT_LEASE_POLL_INTERVAL_S: float = 0.5
 #: :func:`has_ever_resolved_lease` to decide whether a resolution
 #: failure is "probably mid-respawn-gap" (worth a bounded wait) or
 #: "probably never configured" (fail fast, no evidence to wait on).
+#:
+#: NOT scoped by ``config_dir`` or tier (nexus-jw44t review, Q2). A
+#: caller that confirms a lease under one ``config_dir`` (e.g.
+#: ``nx daemon service start --config-dir X``) and later resolves
+#: against a DIFFERENT (ambient ``nexus_config_dir()``) one would get a
+#: spurious bounded wait where fail-fast was correct. Deliberately left
+#: unscoped rather than fixed here: every reader of this flag —
+#: :func:`resolve_service_endpoint_with_evidence_gate` and
+#: ``nexus.db.t2._refreshable_client``'s evidence-gate check — calls
+#: :func:`has_ever_resolved_lease` with NO ``config_dir`` argument
+#: today, resolving unconditionally against the AMBIENT
+#: ``nexus_config_dir()``; scoping only the WRITE side (this flag)
+#: without threading ``config_dir`` through every READ site would just
+#: move the mismatch rather than close it, and doing both is a wider
+#: refactor than this fix — it would also break the several existing
+#: tests that monkeypatch this module global directly as a bare bool
+#: (``tests/db/test_refreshable_client.py``, ``tests/db/test_bug_cluster_http.py``).
+#: Pre-existing since nexus-7dsgp (not a regression introduced by the
+#: jw44t marking fix); practical blast radius stays low because the
+#: only realistic trigger is test/programmatic code mixing config dirs
+#: within one process — already covered by the escape hatch below.
 _has_ever_resolved_lease: bool = False
 
 
@@ -129,6 +153,89 @@ def has_ever_resolved_lease() -> bool:
     erase the evidence that this IS a lease-based topology.
     """
     return _has_ever_resolved_lease
+
+
+def note_lease_resolved_out_of_band() -> None:
+    """Record a live storage-service lease confirmed via a path OTHER than
+    :func:`discover_lease` (nexus-jw44t).
+
+    :func:`nexus.commands.daemon.ensure_storage_supervisor` discovers the
+    lease it just spawned (or found already live) through its OWN
+    ``ServiceRegistry(...).discover()`` call, never through this module's
+    :func:`discover_lease` — so the process-wide evidence flag stays False
+    even though the caller is holding a just-confirmed, live
+    ``LeaseRecord``. A fresh ``nx init --service`` that immediately goes on
+    to construct a service-backed store (the upgrade ladder's completion
+    store, the plan-template seed's ``T2Database``) then makes its
+    FIRST-EVER in-process resolution through
+    :func:`resolve_service_endpoint_with_evidence_gate` with
+    ``has_ever_resolved_lease()`` still False. A resolution landing in the
+    normal window between the supervisor publishing its lease and that
+    write becoming visible to a second reader — measured in the
+    v0.1.114 acquire gate, run 2: ``ladder_completion_backend_read_deferred``
+    and ``init_plan_seed_failed`` both landed within 28ms of the lease being
+    printed as live — then gets the fail-fast branch (zero wait) instead of
+    the bounded-wait retry the evidence gate exists to provide, and the step
+    gives up on a single missed read rather than the same lease the caller
+    is already holding.
+
+    Call this the instant a caller confirms a live storage-service lease
+    through any path other than :func:`discover_lease` itself, so a
+    resolution moments later in the same process gets the bounded wait it
+    has already earned. Idempotent; safe to call on every discovery.
+
+    Retained as the low-level primitive rather than inlined into
+    :func:`discover_storage_service_lease` below: it is that function's
+    own implementation (every current production caller goes through
+    the shared helper now — see its docstring for the nexus-jw44t
+    follow-up that moved the per-site calls there), and it stays the
+    documented seam for a hypothetical FUTURE caller that confirms
+    liveness through something other than ``ServiceRegistry.discover()``
+    at all (e.g. a direct ``/health`` probe response) and so cannot use
+    :func:`discover_storage_service_lease`.
+    """
+    global _has_ever_resolved_lease
+    _has_ever_resolved_lease = True
+
+
+def discover_storage_service_lease(
+    registry: "ServiceRegistry", scope_key: str
+) -> "LeaseRecord | None":
+    """The shared discover-AND-mark seam for a caller holding its OWN
+    ``ServiceRegistry(tier="storage_service")`` instance (nexus-jw44t
+    follow-up).
+
+    :func:`discover_lease` is the ONE path for callers who need only
+    ``(base_url, token)`` and can let this module own the
+    ``ServiceRegistry`` construction. Three call sites instead need the
+    raw :class:`~nexus.daemon.service_registry.LeaseRecord` itself — to
+    inspect ``endpoint``/``payload``, or (in
+    :func:`nexus.commands.daemon.ensure_storage_supervisor`'s case) to
+    call ``registry.relinquish()`` on a dead-supervisor reclaim — so
+    each builds its own ``ServiceRegistry`` and previously called
+    ``.discover()`` on it directly, bypassing :func:`discover_lease` and
+    the evidence flag it feeds.
+
+    b70990c54 patched two of those three call sites (both return
+    branches of ``ensure_storage_supervisor``) with a hand-written
+    :func:`note_lease_resolved_out_of_band` call at each. The review of
+    that commit (T2
+    ``nexus/review-nexus-jw44t-and-mcp-probe-1fc784da7-2026-09-11``, Q1)
+    found the other two doing the identical bare ``registry.discover(scope)``
+    left unmarked: :func:`nexus.commands.init._poll_service_lease` (the
+    default `nx init --service --yes` autostart path on any host with a
+    session bus) and :func:`nexus.upgrade_ladder.preconditions._default_lease`
+    (feeding the upgrade ladder's process-currency read). This function
+    is the fix: all three now route their discovery through here, so a
+    live hit marks the evidence exactly once, with no per-site call to
+    duplicate or forget. ``ensure_storage_supervisor``'s two direct
+    :func:`note_lease_resolved_out_of_band` calls are removed in favor
+    of this — see its diff.
+    """
+    record = registry.discover(scope_key)
+    if record is not None:
+        note_lease_resolved_out_of_band()
+    return record
 
 
 def resolve_service_endpoint_with_evidence_gate() -> "tuple[str, str]":

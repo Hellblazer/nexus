@@ -90,6 +90,18 @@ Task notifications are at-least-once, unbounded-delay, and cross session boundar
 4. A late notification arriving after recovery work is already complete is informational only. Reconcile it, and CORRECT any recovery note that recorded a now-falsified claim.
 5. Never background-dispatch near a session pause; a live agent at session end cannot be recovered except by hand.
 
+## Waiting for One Agent's Report (RDR-205 Phase 4, MANDATORY)
+
+To wait for ONE named agent's report, call `mcp__plugin_conexus_nexus__tuple_rd(subspace="ledger/<session_id>", keys_pattern={"agent_id": "<agent id>", "kind": "report"}, timeout_s=25)`. Never poll and never guess elapsed time. `<agent id>` is the harness id `subagent-start.sh` injects into that agent's own additionalContext (its "Claimant id: <id>" line) — never a resolved session id, never an invented name.
+
+A call parks for at most the 25 s cap, so LOOP the call for a wait of minutes: a wait of minutes is a loop of parked calls, never one long park. An empty result means loop again; a `ParkCapExceeded` error means back off, and the caller keeps the probe result it already has.
+
+This is one of exactly two v1 parked callers (the other is Phase 6's instance waiting for its ack on its own mailbox). Add no other consumer.
+
+## Sending a Mid-Turn Message to an Agent (RDR-205 Phase 5)
+
+To send a directive or other message to a dispatched agent while it works, `tuple_out` to `mailbox/<agent id>` with a sender-minted nonce; the agent drains its mailbox with `tuple_in` before composing any hand-back, and a resend of the same nonce lands on the same tuple rather than piling up. Full convention, dead-letter rule, and the template shape: `/conexus:mailbox`.
+
 ## VERIFY Line Convention (MANDATORY)
 
 Agent write-backs end with a machine-checkable line, not prose (nexus-pjzz8, T2 [21371] §Q5):

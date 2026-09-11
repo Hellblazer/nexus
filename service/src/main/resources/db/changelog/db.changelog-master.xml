@@ -1143,6 +1143,16 @@
          view), so it is safe ahead of the extension relocation. -->
     <include file="db/changelog/hygiene-002-collection-attributes-walk.xml"/>
 
+    <!-- RDR-205 Phase 1 Step 2 (bead nexus-em75s.2): the Linda tuple space
+         baseline — nexus.tuples, nexus.tuple_claim_log (both RLS), and
+         nexus.tuple_tenants (no RLS, sweep-cursor bookkeeping only). No
+         earlier changeset references it and nothing here is vector-typed,
+         so it is safe anywhere in this pre-grants tail; placed immediately
+         after hygiene-002-collection-attributes-walk.xml (current tail) and
+         before search-path-001 (reserved changeset-id family "tuples-001",
+         unused on develop at this bead's base). -->
+    <include file="db/changelog/tuples-001-baseline.xml"/>
+
     <!--
         nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): relocates the
         pgvector-family extensions into the nexus schema. GUARDED (a
@@ -1262,6 +1272,20 @@
         convention, before the grants tail.
     -->
     <include file="db/changelog/hygiene-007-doc-count-recount.xml"/>
+
+    <!--
+        RDR-205 Phase 1 follow-on (bead nexus-em75s.34): four indexes serving
+        the tuple sweep's three arm predicates (lapsed-claim release,
+        expired-tuple purge, claim-log purge) plus the ack/nack claim_id
+        lookup on nexus.tuples / nexus.tuple_claim_log (tuples-001-baseline.xml)
+        — tuples-001-1's idx_tuples_claim_scan is partial on
+        `claim_state IS NULL`, so it deliberately excludes every claimed row
+        and serves none of these. Late-append convention, before the grants
+        tail — NOT spliced back into the tuples-001 family's own block above
+        (see tuples-002-sweep-indexes.xml's own header for the full
+        per-predicate trace).
+    -->
+    <include file="db/changelog/tuples-002-sweep-indexes.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

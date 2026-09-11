@@ -249,19 +249,24 @@ for c in data.get("checks", []):
 
 # nexus-jy4hd: extractor-identity verdicts for the MinerU shakedown step.
 # (1) `nx doctor --check-mineru` prints check lines but its rc is not a
-# reliable failure signal for this one check — parse the output for the
-# MinerU line and require it to be a pass; no MinerU line at all is a FAIL
-# (a probe that produced nothing is never a pass). (2) after step 3b
-# indexes with an EXPLICIT --extractor mineru, the indexed chunk's
-# Extractor field must literally be mineru — belt-and-braces against any
-# future in-extractor fallback quietly substituting a different engine.
+# reliable failure signal for this one check — parse the output for any
+# MinerU line and require all of them to be a pass; no MinerU line at all
+# is a FAIL (a probe that produced nothing is never a pass). Filters on
+# any line containing "MinerU" (not the narrower "MinerU import"/"do_parse"
+# substrings) so nexus-gqrg0's real-parse probe's own "MinerU parse: ..."
+# line -- the one line that can actually surface the GH #1533 PageChars
+# TypeError -- is not silently excluded from the verdict (measured absent
+# under the narrower filter: a real-parse FAIL rendered as a false OK
+# here, invisible at shakedown step 3b). (2) after step 3b indexes with an
+# EXPLICIT --extractor mineru, the indexed chunk's Extractor field must
+# literally be mineru — belt-and-braces against any future in-extractor
+# fallback quietly substituting a different engine.
 _mineru_doctor_verdict() {
     # stdin: `nx doctor --check-mineru` output → "OK" or "FAIL|<cause>"
     python3 -c '
 import sys
 out = sys.stdin.read()
-lines = [l for l in out.splitlines()
-         if "MinerU import" in l or "do_parse" in l]
+lines = [l for l in out.splitlines() if "MinerU" in l]
 if not lines:
     print("FAIL|doctor output carries no MinerU line at all — the probe ran nothing")
     raise SystemExit(0)
@@ -386,6 +391,16 @@ _self_test() {
     out=$(printf 'unrelated doctor chatter\n' | _mineru_doctor_verdict)
     [[ "$out" == FAIL\|*"no MinerU line"* ]] && _st_ok "RED: probe produced no MinerU line -> FAIL, never a silent pass" \
         || _st_bad "empty probe -> expected FAIL, got: $out"
+    # nexus-gqrg0: the real-parse probe's "MinerU parse: ..." line must be
+    # seen by the verdict, not silently excluded by a narrower filter --
+    # this is the exact line that can carry the GH #1533 PageChars
+    # TypeError, and a filter blind to it renders a real-parse FAIL as OK.
+    out=$(printf '✓ MinerU import\n✗ MinerU parse: TypeError: '"'"'PageChars'"'"' object is not iterable\n' | _mineru_doctor_verdict)
+    [[ "$out" == FAIL\|*"PageChars"* ]] && _st_ok "RED: real-parse PageChars TypeError -> FAIL naming it ($out)" \
+        || _st_bad "real-parse failure -> expected FAIL naming PageChars, got: $out"
+    out=$(printf '✓ MinerU import\n✓ MinerU parse: parsed a synthesized one-page probe PDF\n' | _mineru_doctor_verdict)
+    [[ "$out" == "OK" ]] && _st_ok "GREEN: real-parse success line -> OK" \
+        || _st_bad "real-parse success -> expected OK, got: $out"
 
     echo "== self-test: _new_chunk_ids (nexus-jy4hd review Critical) =="
     tdir_ids="$(mktemp -d)"

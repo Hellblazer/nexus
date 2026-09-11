@@ -189,7 +189,10 @@ class JooqRecordReflectionFeatureTest {
     // each a generated Record type (TopicsDocCountDriftRecord,
     // TopicsRecountDocCountRecord), same shape as the taxonomy_ann_query
     // / plain_search RETURNS TABLE functions above, +2.
-    private static final int EXPECTED_RECORD_TYPES = 92;
+    // 92 -> 95: RDR-205 Phase 1 (nexus-em75s.2), tuples-001-baseline.xml
+    // added three tables — nexus.tuples, nexus.tuple_claim_log,
+    // nexus.tuple_tenants — each a generated Record type, +3.
+    private static final int EXPECTED_RECORD_TYPES = 95;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

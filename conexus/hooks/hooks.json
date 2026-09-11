@@ -97,6 +97,12 @@
             "type": "command",
             "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/subagent-start-stamp.sh",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/subagent-start-tuple-async.sh",
+            "timeout": 10,
+            "async": true
           }
         ]
       }
@@ -109,6 +115,12 @@
             "type": "command",
             "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/subagent-stop.sh",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/subagent-stop-tuple-async.sh",
+            "timeout": 10,
+            "async": true
           }
         ]
       }

@@ -517,6 +517,25 @@ gate owns the FRESH-WRITE axis against a CANDIDATE engine, pre-deploy; this
 step owns the UPGRADE axis against the REAL published engine identity,
 post-publish. See either script's header for the full ownership split.
 
+**Formula-PDF / MinerU coverage (opt-in; nexus-gqrg0, GH #1533).** The
+pre-tag battery's resolver-bound lint (`tests/test_install_source_wiring_pins.py`)
+covers the LOCAL wheel's dependency resolution only. To also prove the
+PUBLISHED dependency resolution indexes a real formula PDF through MinerU
+and keeps its LaTeX, set `NX_MVV_FORMULA_PDF_CHECK=1` on the fresh-install-mvv
+invocation above:
+
+```bash
+NX_MVV_FORMULA_PDF_CHECK=1 tests/e2e/fresh-install-mvv.sh --published X.Y.Z
+```
+
+Off by default (including in the plain command above) because it pays a
+MinerU pipeline model download (~2-3 GB) that would dominate every default
+MVV run. Run it whenever a release touches `mineru`/`pdftext`/`pypdfium2`
+pins, or on a cadence alongside the shakedown's own MinerU leg (Step
+6c/release checklist `release-sandbox.sh shakedown` step 3b/11) — that leg
+already exercises MinerU end-to-end against the LOCAL wheel; this one is
+the published-bytes counterpart.
+
 ### 12. Reinstall local tool and verify
 
 **CLOUD-MODE BOX GATE (nexus-1emxn (c)):** on a cloud-mode box, run the

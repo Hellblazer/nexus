@@ -331,12 +331,17 @@ def _poll_service_lease(config_dir: Path, *, timeout: float = 60.0):  # noqa: AN
     import time  # noqa: PLC0415 — deferred local import
 
     from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred local import — CLI startup cost
+    from nexus.db import service_endpoint as _service_endpoint  # noqa: PLC0415 — deferred local import — CLI startup cost
 
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
     scope = str(os.getuid())  # POSIX-only; service mode is Linux/macOS
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        rec = registry.discover(scope)
+        # nexus-jw44t: route through the shared discover-and-mark seam — this
+        # is the default `nx init --service --yes` autostart path on any host
+        # with a session bus, and a bare registry.discover() here left the
+        # evidence-gate flag unmarked (review of b70990c54, Q1).
+        rec = _service_endpoint.discover_storage_service_lease(registry, scope)
         if rec is not None:
             return rec
         time.sleep(0.5)

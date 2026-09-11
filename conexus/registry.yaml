@@ -424,6 +424,14 @@ standalone_skills:
       - "REPL sessions"
     tools: [Bash, Read, Write]
 
+  mailbox:
+    description: "RDR-205 Phase 5 — the mailbox/<address> tuple-space convention: send by tuple_out with a sender-minted nonce, drain by tuple_in before any hand-back"
+    triggers:
+      - "sending a message to another agent's or instance's address"
+      - "draining a mailbox before composing a hand-back"
+      - "authoring or reviewing code against the mailbox/<address> template"
+    tools: []
+
   catalog:
     description: "Catalog manipulation — resolve tumblers, create links, seed auto-linker context, file link context"
     triggers:

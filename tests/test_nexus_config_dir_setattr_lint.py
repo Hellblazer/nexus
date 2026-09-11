@@ -235,7 +235,7 @@ _SETATTR_EXEMPT: frozenset[str] = frozenset({
     # time from one whose module-level import already captured the real
     # (unpoisoned) function; only literally replacing the function object
     # and observing whether the replacement propagates proves the shape.
-    "tests/test_health_service_checks.py:2677",
+    "tests/test_health_service_checks.py:2679",
     # test_backfill_state_path_uses_config_module_attr_not_frozen_import:
     # same class, for nexus.commands.t3._backfill_state_path(). Proves the
     # consumer reads nexus.config.nexus_config_dir via module-attribute
@@ -471,7 +471,7 @@ _MODULE_LEVEL_BY_VALUE_IMPORT_CEILING = 0
 # `from nexus.config import nexus_config_dir` import (inside
 # remediation_opt_in()) was deleted with the whole file, shrinking the
 # total by 1.
-_TOTAL_BY_VALUE_IMPORT_CEILING = 78  # +1: _session_end_launcher._sweep_local_garbage (nexus-fjwk7), deferred  # -1: _session_end_census.capability_census_log_path deleted at nexus-gjv9b PART 3; +1: upgrade_finish.py aspect-worker respawn (nexus-06fu4/restart-stale fix); the 3o4lt bump to 79 was reverted by switching doc_indexer to a module import
+_TOTAL_BY_VALUE_IMPORT_CEILING = 80  # +1: _session_end_launcher._sweep_local_garbage (nexus-fjwk7), deferred  # -1: _session_end_census.capability_census_log_path deleted at nexus-gjv9b PART 3; +1: upgrade_finish.py aspect-worker respawn (nexus-06fu4/restart-stale fix); the 3o4lt bump to 79 was reverted by switching doc_indexer to a module import  # +2: health.py's two new RDR-205 tuple doctor rows (nexus-em75s.10), each a function-scoped deferred `from nexus.config import nexus_config_dir`
 
 
 def test_module_level_by_value_import_ratchet() -> None:

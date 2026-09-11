@@ -313,5 +313,6 @@ T3 (knowledge)
 | Project decisions that survive restarts | T2 | Local, fast, searchable |
 | Research findings for future sessions | T3 | Semantic search across time |
 | Indexed code/docs | T3 | Vector similarity + reranking |
+| Cross-agent/cross-instance coordination (mailbox, work queue, a dispatch ledger) | Tuple space (`db.tuples`, a T2-adjacent ninth store) | Atomic claim under a lease, `ack`/`nack`, dead letter — not a fit for a note or a search hit; see [Tuple Space](tuple-space.md) |
 
 See [cli-reference.md](cli-reference.md) for command details.

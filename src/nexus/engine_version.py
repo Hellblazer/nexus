@@ -431,7 +431,23 @@ from __future__ import annotations
 #: entry leads with [additive], so the engine is deployed before this client
 #: tag (nexus-1emxn choreography (a)). Local-mode installs get the restore
 #: verb and the tombstone protection ONLY through this pin.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 113)
+#: ->(0,1,114) 2026-09-11: paired with conexus 7.41.0 (RDR-205 tuple space).
+#: The engine delta over v0.1.113 is additive only: the `/v1/tuples` route
+#: family (`out`, `rd`, `rdp`, `in`, `inp`, `ack`, `nack`, `registry`,
+#: `subspace_list`, `subspace_stats`), its own tables (`nexus.tuples`,
+#: `nexus.tuple_claim_log`, `nexus.tuple_tenants`), and a second scheduled
+#: sweep task. No existing route, request field or response field changed
+#: shape. Two Liquibase changesets (tuples-001-baseline.xml,
+#: tuples-002-sweep-indexes.xml; seven changesets total), so the PITR fork
+#: walk WAS run (437->444, delta 7, live boot identical). The wire-ledger
+#: entry (`36ab3504d`, bead nexus-em75s.14) leads with [additive], so the
+#: engine was tagged (a2801dfc9), deployed and cloud-gated GREEN BEFORE
+#: this client tag (nexus-1emxn choreography (a)): live 2026-09-11 01:47Z,
+#: STEP-6 gate-report-20260911T014803Z-v011.json exit 0 (parity 113/113,
+#: recall@20 12/12, hybrid p95 1753ms/bound 2646, search p95 781ms/bound
+#: 969), cloud-client-path-gate green including the new tuple-space leg.
+#: Local-mode installs get the tuple-space route ONLY through this pin.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 114)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

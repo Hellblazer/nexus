@@ -830,15 +830,15 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh:101",
         "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh:175",
         "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:120",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:162",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:173",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:229",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:246",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:251",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:268",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:295",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:365",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:372",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:175",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:186",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:242",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:259",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:264",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:281",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:308",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:378",
+        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:385",
         "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:74",
         "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:98",
         # gap-8/gap-15 (T2 [22511]): retargeted after the `-e` addition +
@@ -1002,8 +1002,12 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # dist-info sniffing. The former third entry (the `--version`
         # banner sniff) was FIXED rather than exempted -- it needed no
         # live infra, being a plain capture-then-parameter-expansion.
-        "tests/e2e/fresh-install-mvv.sh:579",
-        "tests/e2e/fresh-install-mvv.sh:605",
+        #   Retargeted (nexus-gqrg0 round 2: the always-on resolver-bound
+        #   leg 8c + the formula-index block moved before leg 9, +72 lines
+        #   before this region): :589 -> :661, :615 -> :687. Same 2 sites,
+        #   same rationale -- only an earlier, unrelated section grew.
+        "tests/e2e/fresh-install-mvv.sh:661",
+        "tests/e2e/fresh-install-mvv.sh:687",
         # --- tests/e2e/local-index-memory-gate.sh (1 entry): owned by a
         # concurrent agent in the authoring session (nexus-wbeyi itself)
         # -- reported to that hand-off, not fixed here. This is a
@@ -1064,7 +1068,7 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:641",
     }
 )
-# 157: +1 for rehearse_package_upgrade.sh:173 -- the 898d41762 axis-naming
+# 157: +1 for rehearse_package_upgrade.sh:186 -- the 898d41762 axis-naming
 # stage added a GOT_CLIENT_VER extraction that is the same rc-irrelevant
 # `nx --version | grep | head` derivation pattern as the pre-existing :98 site.
 # 167: +10 for rehearse_candidate_migration.sh (nexus-z0ylb) -- see the
@@ -1229,9 +1233,14 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         #   can be appended only for --check-schema, +11 lines before this
         #   region): :1130 -> :1141, :1134 -> :1145, :1182 -> :1193. Same 3
         #   sites, same rationale -- only an earlier, unrelated loop grew.
-        "tests/e2e/release-sandbox.sh:1242",
-        "tests/e2e/release-sandbox.sh:1246",
-        "tests/e2e/release-sandbox.sh:1294",
+        #   Retargeted AGAIN (nexus-gqrg0 round 2: widened
+        #   _mineru_doctor_verdict's filter to any "MinerU" line plus two
+        #   new self-test cases, +15 lines before this region): :1242 ->
+        #   :1257, :1246 -> :1261, :1294 -> :1309. Same 3 sites, same
+        #   rationale -- only an earlier, unrelated function grew.
+        "tests/e2e/release-sandbox.sh:1257",
+        "tests/e2e/release-sandbox.sh:1261",
+        "tests/e2e/release-sandbox.sh:1309",
     }
 )
 _PIPEFAIL_OR_TRUE_SITES_CEILING = 9

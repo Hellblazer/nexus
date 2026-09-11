@@ -2542,7 +2542,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--fail-on-violation` | With `--check-storage-boundary`, exit 1 if any violation is found (otherwise the lint is informational). With `--check-schema`, treat an honest N/A (fingerprint withheld by design) as a failure too — for release-gate callers that need an actual OK rather than an unprovable N/A that reads identically to a pass (nexus-b1v9z) |
 | `--phase ID` | With `--check-storage-boundary`, the RDR-120 phase identifier used to record the `120-phase-<phase>-catalog-allowlist-count` T2 metric |
 | `--check-t1` | Diagnose T1 session lease presence + freshness. Checks `~/.config/nexus/t1_session_lease.<session_id>`. Exits 1 only when a session-id resolves AND a lease file exists AND it is expired/corrupt; a resolved session with no lease file at all is informational (a bare CLI legitimately has none — the MCP lifespan mints its own) |
-| `--check-mineru` | Verify MinerU is importable — surfaces a corrupt install at doctor-time instead of waiting for the first math-heavy PDF index to fail |
+| `--check-mineru` | Verify MinerU is importable and run a real one-page parse against a synthesized formula PDF (nexus-gqrg0, GH #1533) — surfaces a corrupt install, or a resolved dependency (e.g. `pdftext`) that breaks mineru's own parse path, at doctor-time instead of waiting for the first math-heavy PDF index to fail. Reports an informational skip when model weights are not yet downloaded |
 | `--check-wal-retention` | Sample retained WAL bytes (local service only) via `pg_ls_waldir()`, escalating a `nexus_svc` session to `pg_monitor` with `SET ROLE` first — unconditionally, since `nexus_svc` is `NOINHERIT` in every deployment posture, so `pg_monitor`'s privileges are never ambient without it. Purely informational (RDR-191 Phase 4 trough-window context, not a pass/fail gate): **always exits 0**. Reports UNMEASURED (never a false clean) when the sample can't be taken |
 | `--check-collection-shape` | Read-only shape audit of the collection set against [docs/collections.md](collections.md), the doctor surface of `nx collection shape`: one row per check with its finding count and an examined count so a clean tenant is never confused with an audit that saw nothing. Findings are curation input and never fail doctor; **exit 1 only when the tenant cannot be read** (nexus-ger23) |
 | `--git-hooks-scope PATH` | Restrict the git-hooks stanza-drift check (part of the default sweep, not a `--check-*` flag) to repos registered at or under `PATH`; repos elsewhere are excluded from the walk rather than reported. The registered-repo catalog is shared machine-wide, not scoped to `$HOME`, so an unscoped sweep run from an isolated automation sandbox also sees (and can be reddened by) every other repo ever indexed on the same machine. Default: unscoped, walks every registered repo (nexus-jds59) |
@@ -3572,6 +3572,118 @@ nx tenant create NAME
 ```
 
 Create tenant `NAME` and mint its first bound service token. The token is printed **once** (store it immediately); only its hash is kept server-side. The name `*` is reserved for the bootstrap token and is rejected.
+
+## nx tuple
+
+The RDR-205 Linda tuple space: a coordination primitive over Postgres for cross-agent/cross-instance state (mailboxes, ledgers, work queues). Every subcommand calls through `HttpTupleStore` over `/v1/tuples`; requires `NX_SERVICE_PORT` / `NX_SERVICE_TOKEN`. A *subspace* (e.g. `mailbox/agent-7`) resolves to a registered template (`nx tuple templates`), which pins which `--key`/`--dim` fields it accepts.
+
+### nx tuple out
+
+```
+nx tuple out SUBSPACE [--key KEY=VALUE ...] [--dim KEY=VALUE ...] [--body TEXT] [--nonce TEXT] [--ttl-seconds N]
+```
+
+Write a tuple into `SUBSPACE`. Idempotent by construction: the tuple id is derived from the template's `id_from` fields only (never the insert time), so a retry lands on the same tuple. Prints the tuple id (lowercase hex).
+
+| Flag | Description |
+|------|-------------|
+| `--key KEY=VALUE` | A pinned key field (repeatable; every key the template requires) |
+| `--dim KEY=VALUE` | A dimension field (repeatable) |
+| `--body TEXT` | Tuple payload |
+| `--nonce TEXT` | Caller-minted nonce, for templates whose `id_from` includes it |
+| `--ttl-seconds N` | Explicit TTL, capped at the template's retention ceiling (`TtlTooLong` if it isn't) |
+
+### nx tuple rd
+
+```
+nx tuple rd SUBSPACE [--pattern KEY=VALUE ...] [-n N] [--timeout-s SECONDS] [--json]
+```
+
+Non-destructive read from `SUBSPACE`. Matches on equality over whatever subset of the pinned keys `--pattern` supplies (an empty pattern reads the whole subspace); returns dead-lettered rows too (dead-lettering is a claim state, not an exclusion). A probe by default (`--timeout-s 0`, never blocks); parks up to `--timeout-s` seconds (capped by the engine) when nothing matches immediately.
+
+| Flag | Description |
+|------|-------------|
+| `--pattern KEY=VALUE` | A key-equality filter (repeatable; subset match) |
+| `-n N` | Max rows to return (default 1) |
+| `--timeout-s SECONDS` | Seconds to park when nothing matches immediately; 0 (default) never blocks |
+| `--json` | Output as a JSON array |
+
+### nx tuple in
+
+```
+nx tuple in SUBSPACE --pattern KEY=VALUE ... --claimant ID --lease-s N [--timeout-s SECONDS] [--json]
+```
+
+Destructive (claiming) read from `SUBSPACE`. Unlike `rd`, every key the template declares must be pinned in `--pattern` (no subset match) and dead-lettered rows are never returned. A probe by default (`--timeout-s 0`); prints the claimed tuple and its claim id, or exits 1 with "No matching tuple." on a probe miss. Ack or nack the claim with `nx tuple ack`/`nx tuple nack` — the row stays claimed (and unavailable to others) until then or until the lease lapses.
+
+| Flag | Description |
+|------|-------------|
+| `--pattern KEY=VALUE` | Every pinned key the template declares, exact match (repeatable, required) |
+| `--claimant ID` | This caller's identity (required) |
+| `--lease-s N` | Claim lease length, capped at the template's `max_lease_seconds` and the row's remaining TTL (required) |
+| `--timeout-s SECONDS` | Seconds to park when nothing matches immediately; 0 (default) never blocks |
+| `--json` | Output as JSON |
+
+### nx tuple ack
+
+```
+nx tuple ack CLAIM_ID --claimant ID
+```
+
+Consume a claimed tuple. The row is invisible to `rd`/`in` after this.
+
+| Flag | Description |
+|------|-------------|
+| `--claimant ID` | Must match the identity that made the claim (required) |
+
+### nx tuple nack
+
+```
+nx tuple nack CLAIM_ID --claimant ID
+```
+
+Release a claim back to available. Counts an attempt toward the template's `max_attempts` (dead-lettered at the cap).
+
+| Flag | Description |
+|------|-------------|
+| `--claimant ID` | Must match the identity that made the claim (required) |
+
+### nx tuple templates
+
+```
+nx tuple templates [--json]
+```
+
+The boot-loaded template registry: digest, source directories, and the registered template names. `digest` changes whenever a template file changes.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output as JSON |
+
+### nx tuple list
+
+```
+nx tuple list [--prefix PREFIX] [--json]
+```
+
+Concrete tuple subspaces that exist, optionally filtered to those starting with `--prefix`. Each row reports `total`/`available`/`claimed`/`dead`/`consumed`/`expired_unpurged`.
+
+| Flag | Description |
+|------|-------------|
+| `--prefix PREFIX` | Filter to subspaces starting with this prefix |
+| `--json` | Output as a JSON array |
+
+### nx tuple stats
+
+```
+nx tuple stats SUBSPACE [--json]
+```
+
+The census for one subspace: `total`, `available`, `claimed`, `dead`, `consumed`, `expired_unpurged`, `oldest_created_at`, `newest_created_at`.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output as JSON |
 
 ## nx service
 

@@ -1,0 +1,31 @@
+# RDR-205 v1 template: agent/instance mailbox messages.
+#
+# The nonce in id_from is a sender-minted message id; "from" also enters
+# the id (id_dims) and so must be declared required.
+name: mailbox/<address>
+
+keys:
+  - to
+
+dimensions:
+  from:
+    type: string
+    required: true
+  kind:
+    type: string
+  correlation_id:
+    type: string
+  address_kind:
+    type: string
+    values: [agent, instance]
+
+id_from: keys+nonce
+id_dims:
+  - from
+
+take:
+  enabled: true
+  max_attempts: 3
+  max_lease_seconds: 900
+
+retention_seconds: 604800

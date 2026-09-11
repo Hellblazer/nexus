@@ -1,6 +1,10 @@
 # Nexus Documentation
 
-Start with [Getting Started](getting-started.md) for installation. Then find your section below by what you're trying to do.
+Start on the site, then find your section below by what you're trying to do.
+
+- [Install guide](https://hellblazer.github.io/nexus/) — setup for Claude Code, the `nx` CLI alone, or Claude Desktop, with copyable commands
+- [Getting started](https://hellblazer.github.io/nexus/getting-started.html) — eleven lessons inside Claude Code: your first search, memory, scratch, knowledge, and RDRs
+- [Working with RDRs](https://hellblazer.github.io/nexus/rdr.html) — the RDR lifecycle as it's practised, in eight lessons
 
 `docs/*.md` is living reference documentation — kept current with the codebase and safe to trust as-is. `docs/rdr/*.md` is a different thing entirely: an append-only historical decision log (196+ RDR files, plus per-RDR post-mortems) capturing the reasoning behind past design choices, some since superseded. If you're looking for a how-to or a current design reference, stay in `docs/`; only dig into `docs/rdr/` when you need the "why" behind a decision.
 
@@ -17,6 +21,7 @@ Start with [Getting Started](getting-started.md) for installation. Then find you
 - **Fix empty search results after upgrading** — [Getting Started § Troubleshooting](getting-started.md#troubleshooting) (`nx search` returns no results); if you upgraded straight from a pre-PG install, see [Upgrading an existing install](getting-started.md#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) for the two-hop path
 - **Check my install's health** — `nx doctor`, see [CLI Reference — nx doctor](cli-reference.md#nx-doctor)
 - **Upgrade an existing install** — [Getting Started § Upgrading an existing install](getting-started.md#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) — [`nx self install`](cli-reference.md#nx-self-install) + `nx upgrade`; installs still on ChromaDB (5.x, or 6.x that never migrated) need a two-hop through `conexus==6.18.1` first, since the Chroma-era migration machinery retired at RDR-155 P4b
+- **Coordinate agents or sessions** (a mailbox, a work queue, a dispatch ledger) — [Tuple Space](tuple-space.md) — `nx tuple`, the `tuple_*` MCP tools, atomic claim under a lease
 
 ## Operator reference
 
@@ -25,7 +30,7 @@ Start with [Getting Started](getting-started.md) for installation. Then find you
 - [Agent Lifecycle & Operations](operations/agent-lifecycle.md) — Install → provision → run → upgrade → uninstall: the state model + the three walkthroughs
 - [Migration Runbook](migration-runbook.md) — Operator's manual order of operations, quiescence, rollback, and the deprecation window
 - [Privacy Policy](privacy-policy.md) — What data nexus stores and where
-- [`operations/`](operations/) — Operator runbooks: [Apple code signing](operations/apple-code-signing.md), [audit-membership interpretation](operations/audit-membership-interpretation.md), [T3 health checks (historical template)](operations/t3-health.md)
+- [`operations/`](operations/) — Operator runbooks: [Apple code signing](operations/apple-code-signing.md), [audit-membership interpretation](operations/audit-membership-interpretation.md), [T3 health checks (historical template)](operations/t3-health.md), [Tuple space](operations/tuple-space.md) — the three `nx doctor` rows, dead-letter triage, sweep reading
 - [`runbooks/`](runbooks/) — One-off operational runbooks for specific incidents/phases: [RDR-191 Phase 5 cloud FK runbook](runbooks/rdr-191-phase5-cloud-fk.md)
 
 ## Contributor reference
@@ -34,7 +39,7 @@ Start with [Getting Started](getting-started.md) for installation. Then find you
 - [Architecture](architecture.md) — Reference architecture, module map, design decisions
 - [Benchmarking](benchmarking.md) — `scripts/bench/` harnesses: retrieval-quality scoring (RDR-090) and the operator quality proxy (RDR-196 .p2a)
 - [Wire Contract Pending](wire-contract-pending.md) — Ledger of engine/client wire-contract pairings deployed ahead of their client half (nexus-1vogq tripwire)
-- [Tuple Space](tuple-space.md) — design reference for the RDR-205 coordination substrate (not yet shipped); [walkthroughs](tuple-space-walkthroughs.md)
+- [Tuple Space](tuple-space.md) — reference for the RDR-205 coordination substrate: engine and client (`nx tuple`, the `tuple_*` MCP tools) shipped together in conexus 7.41.0, paired with `engine-service-v0.1.114`; [walkthroughs](tuple-space-walkthroughs.md)
 - [`testing/`](testing/) — [6.0.0 plugin surface coverage matrix](testing/6.0.0-plugin-surface-coverage-matrix.md)
 - [`tutorial/`](tutorial/) — **In progress, not on `main`.** The tutorial-recording pipeline lives on the `wip/tutorial` branch; this directory on `main` is a placeholder.
 

@@ -6,3 +6,7 @@
 # tests/test_install_source_wiring_pins.py pins the three copies (this file,
 # pyproject.toml, mcpb/pyproject.toml) to the same entries.
 av; sys_platform == 'never'
+# nexus-gqrg0 (GH #1533): same pdftext<0.7 bound as the root pyproject.toml
+# and mcpb/pyproject.toml -- pdftext 0.7.x broke mineru's span_pre_proc.py
+# (see root pyproject.toml for detail).
+pdftext>=0.6.3,<0.7

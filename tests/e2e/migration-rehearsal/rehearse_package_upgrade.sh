@@ -146,13 +146,26 @@ fi
 # ── Stage 3: seed a PRE-UPGRADE T1 row that must survive the service cycle ──
 say "Stage 3 — seed a pre-upgrade T1 scratch row"
 MARKER="pre-upgrade-marker-$$-$(date +%s)"
-PUT_OUT="$(nx scratch put "$MARKER" --tags rehearsal-cfgo9 2>&1)"
+# The id is read ONLY from a "Stored: <id>" line. An error message also
+# carries a UUID (the session id), and the first grep here once parsed that
+# out of "T1 CLI-dedicated session mint failed for session '<uuid>'" and
+# reported the seed as PASS while no row existed (7.41.0 battery, 2026-09-11).
+# The PREVIOUS client is the published release by design, and releases up to
+# 7.40.0 carry the nexus-jw44t lease race right after the service starts, so
+# the seed retries a bounded number of times; an error on the last try fails.
+PRE_ID=""
+for _try in 1 2 3 4 5 6; do
+  PUT_OUT="$(nx scratch put "$MARKER" --tags rehearsal-cfgo9 2>&1)"
+  PRE_ID="$(printf '%s\n' "$PUT_OUT" | sed -n 's/^Stored: \([0-9a-fA-F-]\{8,\}\).*/\1/p' | tail -1)"
+  [ -n "$PRE_ID" ] && break
+  say "  seed attempt $_try did not store a row: $(printf '%s\n' "$PUT_OUT" | sed -n 1p)"
+  sleep 5
+done
 printf '%s\n' "$PUT_OUT" | sed 's/^/       /'
-PRE_ID="$(printf '%s\n' "$PUT_OUT" | grep -oE '[0-9a-fA-F-]{8,}' | tail -1)"
 if [ -n "$PRE_ID" ]; then
   ok "seeded pre-upgrade T1 row $PRE_ID"
 else
-  bad "could not parse a T1 entry id from: $PUT_OUT"; say "ABORT"; exit 1
+  bad "could not seed a T1 row after 6 attempts: $PUT_OUT"; say "ABORT"; exit 1
 fi
 
 # ── Stage 4: PACKAGE upgrade ONLY — the engine binary is NEVER touched from
@@ -361,7 +374,7 @@ _diag "pre-T1-roundtrip"
 POST_MARKER="post-convergence-marker-$$-$(date +%s)"
 POST_PUT="$(nx scratch put "$POST_MARKER" --tags rehearsal-cfgo9 2>&1)"
 printf '%s\n' "$POST_PUT" | sed 's/^/       /'
-POST_ID="$(printf '%s\n' "$POST_PUT" | grep -oE '[0-9a-fA-F-]{8,}' | tail -1)"
+POST_ID="$(printf '%s\n' "$POST_PUT" | sed -n 's/^Stored: \([0-9a-fA-F-]\{8,\}\).*/\1/p' | tail -1)"
 if [ -n "$POST_ID" ] && nx scratch get "$POST_ID" 2>/dev/null | grep -q "$POST_MARKER"; then
   ok "post-convergence T1 put/get round-trips"
 else

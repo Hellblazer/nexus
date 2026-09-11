@@ -1,6 +1,6 @@
 # Tuple Space
 
-> Status: design of record from RDR-205 (gated 2026-09-09, not yet accepted), not yet shipped. The routes, tools and verbs named here land with RDR-205 Phases 1 and 2; until then nothing in a running install serves them.
+> Status: design of record from RDR-205 (accepted). Phase 1 (engine) and Phase 2 (client — `nx tuple`, the eight `tuple_*` MCP tools, the doctor rows) have both shipped. `/v1/tuples` shipped on `engine-service-v0.1.114` (Phase 3), deployed to the managed cloud since 2026-09-11. The client shipped in conexus 7.41.0, which also bumps the pinned local-mode engine floor (`REQUIRED_ENGINE_VERSION`, `src/nexus/engine_version.py`) to `v0.1.114` — a local install on 7.41.0 or later has the route live. An install on an older release stays pinned below the floor and a local-mode call 404s (the three `nx doctor` rows report this as informational, not a defect, below that floor).
 
 ## What it is
 
@@ -27,7 +27,7 @@ subspace_list(prefix) -> [{subspace, total, available, claimed, dead, consumed, 
                                                                      # expired included (the census needs
                                                                      # the newest write, not the newest live row);
                                                                      # total counts live rows only
-registry() -> {digest, templates: [TemplateSchema]}
+registry() -> {digest, sources, templates: [TemplateSchema]}
 subspace_stats(subspace) -> {total, available, claimed, dead, consumed, expired_unpurged}
                                                             # the exact-name form of subspace_list, kept
                                                             # for the CLI verb; total counts live rows only
@@ -46,7 +46,7 @@ subspace_stats(subspace) -> {total, available, claimed, dead, consumed, expired_
 | `subspace_list` | no | yes | none |
 | `subspace_stats` | no | yes | none |
 
-Matching differs by read. `in` and `inp` require every pinned key and match by equality, because exclusion needs an exact target. `rd` and `rdp` match by equality on every key the pattern supplies and place no condition on keys it omits; a pattern of `None` or `{}` reads the whole subspace, which is what a census does and what a claimant never may. `rd` and `rdp` return up to `n` live tuples, live meaning `expires_at > now()` and not acked, whatever the claim state: a row under a live claim and a dead-lettered row are both returned, with their state. `n` is capped by the engine setting `NX_TUPLE_READ_MAX` (default 300, the client's paging convention); an `n` above the cap is clamped, not refused. Results are ordered by `(created_at, id)`, resuming strictly after `since`, a `(created_at, id)` cursor the caller keeps. Acked rows are never returned by any read.
+Matching differs by read. `in` and `inp` require every pinned key and match by equality, because exclusion needs an exact target. `rd` and `rdp` match by equality on every key the pattern supplies and place no condition on keys it omits; a pattern of `None` or `{}` reads the whole subspace, which is what a census does and what a claimant never may. `rd` and `rdp` return up to `n` live tuples, live meaning `expires_at > now()` and not acked, whatever the claim state: a row under a live claim and a dead-lettered row are both returned, with their state — but never their `claim_id`: that field is rendered only by `in`/`inp`'s own top-level response, the ack/nack credential, so reading a claimed row without having won the claim never leaks the means to ack or nack it. `n` is capped by the engine setting `NX_TUPLE_READ_MAX` (default 300, the client's paging convention); an `n` above the cap is clamped, not refused. Results are ordered by `(created_at, id)`, resuming strictly after `since`, a `(created_at, id)` cursor the caller keeps. Acked rows are never returned by any read.
 
 ## Templates and subspaces
 
@@ -146,6 +146,7 @@ row = select(...).from(TUPLES)
         .orderBy(CREATED_AT).limit(1)
         .forNoKeyUpdate().skipLocked().fetchOne();
 // if row.leaseLapsed and row.attempts + 1 == maxAttempts: mark dead, log, re-run select
+// (bounded re-run: NX_TUPLE_CLAIM_PASSES, default 8)
 update(TUPLES).set(CLAIM_STATE, "claimed").set(CLAIMANT, c)
         .set(CLAIM_ID, id).set(LEASE_UNTIL, now + lease)
         .where(ID.eq(row.id)).execute();
@@ -158,9 +159,9 @@ insert claim_log(tuple_id, claim_id, c, 'claim', now)
 
 A claim is the state between `in` and `ack`/`nack`, held under a lease, a deadline after which the claim is released by a sweep. `lease_until` is clamped to the row's `expires_at` at claim time, so a claim can never outlive its tuple. `attempts` counts nacks and lapsed leases alike; at the template's `max_attempts` the row is dead-lettered (`claim_state = 'dead'`, a `dead` log row), whether the cap was reached by nacks or by lapsed leases nobody re-took. A dead-lettered row leaves every claimant's view but stays readable by `rd`, and `subspace_stats` counts it under `dead`.
 
-A same-claimant retake is idempotent: before the claim statement, `in` reads for a live claim already held by this claimant on a matching tuple and, if one exists, returns its claim id with no new update and no log row. Without that read a retry after a lost response could never recover its claim.
+A same-claimant retake is idempotent: before the claim statement, `in` reads for a live claim already held by this claimant on a matching tuple — `claim_state = 'claimed'`, this claimant, unconsumed, unexpired, and `lease_until` still in the future — and, if one exists, returns its claim id with no new update and no log row. Without that read a retry after a lost response could never recover its claim. The `lease_until` check is load-bearing: a lapsed claim is not retaken by this shortcut even for its own former holder — once the lease passes, the same claimant falls through to the ordinary claim loop below like anyone else, and either reclaims the same row (if nobody else won it first) or a different one; only a claim whose lease has not yet lapsed is ever handed back as-is.
 
-Every claim reaches a terminal transition: `ack`, `nack`, `expire` or `dead`. `ack` sets `consumed_at` and logs `ack`; `nack` releases the claim (`claim_state`, `claimant`, `claim_id` and `lease_until` to NULL) and increments `attempts`. When a claim finds a row whose previous lease has lapsed, the same transaction writes the `expire` row for the previous claim and increments `attempts`; if that brings `attempts` to `max_attempts` the row is dead-lettered there and then and the claim re-runs its select. The re-run is bounded: each pass either claims or dead-letters one row, and the call gives up after `NX_TUPLE_READ_MAX` passes and returns the probe result. `ack` and `nack` are checked against ownership: `ClaimOwnership` if a live claim is held by someone else, `ClaimNotFound` if no live claim matches the id (including a second `ack` on an already-acked claim).
+Every claim reaches a terminal transition: `ack`, `nack`, `expire` or `dead`. `ack` sets `consumed_at` and logs `ack`; `nack` releases the claim (`claim_state`, `claimant`, `claim_id` and `lease_until` to NULL) and increments `attempts`. When a claim finds a row whose previous lease has lapsed, the same transaction writes the `expire` row for the previous claim and increments `attempts`; if that brings `attempts` to `max_attempts` the row is dead-lettered there and then and the claim re-runs its select. The re-run is bounded: each pass either claims or dead-letters one row, and the call gives up after `NX_TUPLE_CLAIM_PASSES` passes (default 8, an engine setting distinct from `NX_TUPLE_READ_MAX`) and returns the probe result. `ack` and `nack` are checked against ownership: `ClaimOwnership` if a live claim is held by someone else, `ClaimNotFound` if no live claim matches the id (including a second `ack` on an already-acked claim, or a claim_id whose lease has already lapsed but nobody has re-claimed or swept it yet).
 
 ## Blocking reads
 
@@ -183,23 +184,49 @@ Two more guards live in the client: the request it is about to send is measured 
 
 ## The sweep
 
-Every `SWEEP_INTERVAL_HOURS` (six hours today), a second scheduled task on the same scheduler that runs the existing sweep enumerates tenants from `nexus.tuple_tenants`, a small table with no row-level security, one row per tenant that has ever written a tuple, upserted by `out`, visited least-recently-swept first (`last_swept_at` ascending, nulls first, `tenant_id` as the tie-break). Per tenant it releases lapsed claims nobody re-took with an `expire` log row and an `attempts` increment, dead-lettering at `max_attempts`; purges expired and consumed-past-retention tuple rows (setting the claim log's `tuple_id` to null); then purges log rows past the log's own longer TTL (`NX_TUPLE_CLAIM_LOG_TTL_DAYS`, default 180); all in batches of a few hundred, committing per batch. Two bounds keep it from starving the T1 crash-safety sweep sharing the same single-thread scheduler: the token loop's statement bound on every statement, and a budget on the task itself, a cap on batches per tenant per run and a wall-clock budget per run. A tenant is stamped only when its sweep finishes cleanly; a tenant cut short by the budget keeps its old stamp and is therefore first next run, so the order lives in the table and survives a restart with no cursor held in the JVM.
+Every `SWEEP_INTERVAL_HOURS` (six hours today), a second scheduled task on the same scheduler that runs the existing sweep enumerates tenants from `nexus.tuple_tenants`, a small table with no row-level security, one row per tenant that has ever written a tuple, upserted by `out`, visited least-recently-swept first (`last_swept_at` ascending, nulls first, `tenant_id` as the tie-break). Per tenant it runs three arms, each committing one batch of up to `NX_TUPLE_SWEEP_BATCH_SIZE` rows (default 300) at a time until drained or its own share of the per-tenant cap runs out: (1) release lapsed claims nobody re-took, with an `expire` log row and an `attempts` increment, dead-lettering at `max_attempts`; (2) purge expired and consumed-past-retention tuple rows (setting the claim log's `tuple_id` to null); (3) purge log rows past the log's own longer TTL (`NX_TUPLE_CLAIM_LOG_TTL_DAYS`, default 180 days). Two budgets keep the sweep from starving the T1 crash-safety sweep sharing the same single-thread scheduler and from letting one tenant starve the rest: `NX_TUPLE_SWEEP_MAX_BATCHES_PER_TENANT` (default 50) caps the batches one tenant spends in one visit, split into three roughly-equal per-arm shares — so a large release-arm backlog can no longer exhaust the whole cap on arm one and leave the two purge arms unrun that visit, each arm's loop runs unconditionally regardless of the others' outcome; `NX_TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS` (default 120) caps the whole run and is checked only at a tenant boundary, before starting the next tenant, never mid-tenant — a tenant already underway always finishes cleanly or hits its own per-arm share first. Every statement the sweep issues, including the tenant enumeration itself, also carries the engine's ordinary per-statement timeout. A tenant is stamped only when all three arms finish cleanly within its share this visit; a tenant cut short by either budget keeps its old stamp and is therefore first next run, so the order lives in the table and survives a restart with no cursor held in the JVM.
 
-Every run logs a counted outcome record: tenants visited, the oldest `last_swept_at` after the run, scanned, released, dead-lettered, purged, log rows purged, and whether the budget was exhausted. A run that finds nothing expired is the normal state of a healthy table; the failure the counts detect is a run that scanned nothing at all, or a run that did not happen, which the doctor row on last-sweep age reports.
+Every run logs one structured `event=tuple_sweep_run` line: `tenants_visited`, `oldest_last_swept_at` (after the run), `scanned`, `released`, `dead_lettered`, `purged`, `purge_examined`, `log_rows_purged`, `log_purge_examined`, and `incomplete_cause` — `NONE`, `TENANT_CAP` (a tenant hit its own per-arm share), `TENANT_ERROR` (a tenant's arms threw), or `WALL_CLOCK` (the run's wall-clock budget was exhausted at a tenant boundary), reported as the worst cause seen across every tenant the run touched (the enum's own ordinal order is the severity order). A run that finds nothing expired is the normal state of a healthy table; the failure the counts detect is a run that scanned nothing at all, or a run that did not happen, which the doctor row on last-sweep age reports. This line is a log record only, never a persisted row — `nx doctor`'s sweep-freshness check reads `nexus.tuple_tenants.last_swept_at` alone and cannot see `incomplete_cause`.
 
-Three `nx doctor` rows: oldest unclaimed age per subspace over claimable rows only (live, unclaimed, not dead-lettered); dead-tuple ratio and last autovacuum on the table; age of the last tuple sweep and whether its budget was exhausted. `autovacuum_vacuum_scale_factor = 0.01` on `nexus.tuples` and `nexus.tuple_claim_log`, the first per-table storage parameter in the changelog, reclaims during sustained churn; the default already self-heals once churn stops.
+Three `nx doctor` rows: oldest unclaimed age per subspace over claimable rows only (live, unclaimed, not dead-lettered); dead-tuple ratio and last autovacuum on the table; age of the last tuple sweep, read off `nexus.tuple_tenants.last_swept_at` alone. The third row cannot see a run's `incomplete_cause` — that value is a structured log line only (`event=tuple_sweep_run ...`), never a persisted row a client can read back — so it reports staleness, not cause: any of "scanned nothing", "did not run" or "hit its budget every visit" looks the same to it, a `last_swept_at` older than expected. `autovacuum_vacuum_scale_factor = 0.01` on `nexus.tuples` and `nexus.tuple_claim_log`, the first per-table storage parameter in the changelog, reclaims during sustained churn; the default already self-heals once churn stops.
 
 ## Errors
 
-- `UnknownSubspace`: the subspace does not match a registered template.
-- `SchemaViolation`: a field and reason, checked before any write; covers a missing pinned key, a missing required dim, an `out` without a nonce on a `keys+nonce` template, and a `ttl_seconds` or `lease_s` at or below zero or a negative `timeout_s`.
-- `TakeDisabled`: the template's `take.enabled` is false.
-- `TimeoutTooLong`: `timeout_s` above the engine's cap.
-- `ClaimNotFound`: no live claim with that id.
-- `ClaimOwnership`: a live claim held by someone else.
-- `ParkCapExceeded`: the per-claimant or global park cap is reached; the caller gets the probe result and backs off.
-- `TtlTooLong`: a `ttl_seconds` above the template's `retention_seconds`.
-- `LeaseTooLong`: a `lease_s` above the template's `max_lease_seconds`; a lease longer than the row's remaining TTL is clamped, not refused.
+Nine typed errors, one base class (`TupleException`) carrying a `code` and the HTTP status `TupleHandler` sends for it, so a new subtype cannot be added without also declaring how it renders. Every error is rendered `{"error": "<code>", "detail": "<message>"}` at its own status; `TupleHandler` catches this base type ahead of the generic 500 ladder.
+
+- `UnknownSubspace` (404): the subspace does not match a registered template.
+- `SchemaViolation` (400): a field and reason, checked before any write; covers a missing pinned key, a missing required dim, an `out` without a nonce on a `keys+nonce` template, and a `ttl_seconds` or `lease_s` at or below zero or a negative `timeout_s`.
+- `TakeDisabled` (422): the template's `take.enabled` is false.
+- `TimeoutTooLong` (400): `timeout_s` above the engine's cap.
+- `ClaimNotFound` (404): no live claim with that id.
+- `ClaimOwnership` (403): a live claim held by someone else.
+- `ParkCapExceeded` (429): the per-claimant or global park cap is reached; the caller gets the probe result and backs off.
+- `TtlTooLong` (400): a `ttl_seconds` above the template's `retention_seconds`.
+- `LeaseTooLong` (400): a `lease_s` above the template's `max_lease_seconds`; a lease longer than the row's remaining TTL is clamped, not refused.
+
+Three refusals outside the nine, all in `TupleHandler` itself: a request against a route with the wrong HTTP method refuses 405 (every write route is POST-only, `registry`/`subspace_list`/`subspace_stats` are GET-only); a malformed or missing required field in the request body refuses 400 (`IllegalArgumentException`, the same mapping every other handler in this package uses); a request with no tenant resolved refuses 500 (`internal: tenant not set` — never reachable through the auth filter on a correctly configured route).
+
+## Client surface
+
+`nexus.db.t2.http_tuple_store.HttpTupleStore` is a ninth T2 domain store (`db.tuples`), an HTTP client over `/v1/tuples` built the same way every other `Http*Store` is (constructor injection, credential/endpoint self-heal, `RefreshableHttpStoreMixin`'s default idempotent gateway retry on 502/503/504 — no operation here opts out: `rd`/`rdp` are freely retryable, a retried `out` lands on the same tuple by its id formula, and a retried `in`/`inp` shares the identical crash-after-claim ambiguity the lease and sweep already cover). Two things it carries that no other T2 store needs:
+
+- **8 KB pre-send guard.** The edge WAF rejects request bodies over 8 KB. The client measures the exact serialised request `json.dumps` would put on the wire and refuses before sending (`RequestTooLargeError`), rather than letting a request die at the edge with no local signal.
+- **Typed-error mapping.** The engine renders each of the nine errors below as `{"error": "<code>", "detail": "<message>"}` at the error's own HTTP status. Some codes share a status (`UnknownSubspace` and `ClaimNotFound` are both 404), so the client classifies by the `error` field, never the bare status code, and re-raises the matching `TupleError` subclass (`UnknownSubspaceError`, `SchemaViolationError`, `TakeDisabledError`, `TimeoutTooLongError`, `ClaimNotFoundError`, `ClaimOwnershipError`, `ParkCapExceededError`, `TtlTooLongError`, `LeaseTooLongError`) — a code the engine did not name this way passes through as an ordinary `httpx.HTTPStatusError`.
+
+**HTTP timeout ordering.** A blocking `rd`/`in_` call (`timeout_s > 0`) passes a per-call HTTP timeout of `timeout_s` plus a five-second margin — strictly above the caller's park budget, so the engine's own cap (25 s by default) always returns its probe result before the client's own transport timeout could fire first.
+
+Two access paths sit on top of `HttpTupleStore`:
+
+- **`nx tuple`** — `out`, `rd`, `in`, `ack`, `nack`, `templates`, `list`, `stats`. See [CLI Reference — nx tuple](cli-reference.md#nx-tuple) for every flag.
+- **Eight `tuple_*` MCP tools** — `tuple_out`, `tuple_rd`, `tuple_in`, `tuple_ack`, `tuple_nack`, `tuple_registry`, `tuple_list`, `tuple_stats` (`rd`/`in`'s own `timeout_s=0` default covers the probe case; there are no separate `tuple_rdp`/`tuple_inp` tools). See [MCP Servers — Tuple space](mcp-servers.md#tuple-space-t2-adjacent-rdr-205) for signatures and the routing rule of thumb.
+
+**Three `nx doctor` rows**, each gated the same way against the engine floor that first serves `/v1/tuples` — an install below that floor reports the check as informational, not a defect, and an install at or above the floor that still 404s reports UNKNOWN and asks you to investigate the engine install:
+
+| Label | What it reports |
+| --- | --- |
+| `tuples.oldest_unclaimed` | Oldest unclaimed tuple's age, per subspace, over claimable rows only (live, unclaimed, not dead-lettered); subspaces whose template disables `take` are skipped |
+| `tuples.dead_tuple_ratio` | Dead-tuple ratio and last autovacuum on `nexus.tuples` / `nexus.tuple_claim_log` (local-only admin-psql path, same as the migration-state and RLS checks) |
+| `tuples.sweep_freshness` | Age of the last tuple sweep, read off `nexus.tuple_tenants.last_swept_at` alone — the sweep's own incomplete-cause classification is a structured log line, never a persisted row, so this row reports staleness, not cause |
 
 ## What it is not for
 

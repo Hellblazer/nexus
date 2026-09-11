@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-205 Phase 1 Step 2 (bead nexus-em75s.2) — Linda tuple space baseline:
+    nexus.tuples (the space itself), nexus.tuple_claim_log (append-only
+    claim-lifecycle audit trail), and nexus.tuple_tenants (sweep-cursor
+    bookkeeping, install-wide, no tenant data of its own). See RDR-205
+    Technical Design's table block for the illustrative shape this changeset
+    is the AUTHORITY over.
+
+    ADDITIVE ONLY: no consumer exists yet (TupleRepository/TupleHandler land
+    in nexus-em75s.4, the RLS behavioural proof against a real claimant in
+    P1.4). This changeset is pure schema.
+
+    Changeset ids: family "tuples-001" is unused on develop at this bead's
+    base — reserved here for this bead only.
+
+    id derivation (RDR-205 Technical Design): nexus.tuples.id is a caller-
+    computed sha256 over the canonical form of (tenant, subspace, keys
+    [, id_dims, nonce | body]) per the tuple's template id_from — every
+    input to that hash is caller-supplied, so `out` is idempotent by
+    construction. The column is a plain BYTEA PK; nothing in this changeset
+    computes or validates the hash.
+
+    Shape precedent (catalog-036-embedding-profile.xml): CREATE TABLE +
+    ENABLE/FORCE ROW LEVEL SECURITY + the tenant_isolation policy landing in
+    ONE changeset with one rollback block, per RLS-scoped table. nexus.tuples
+    (tuples-001-1) and nexus.tuple_claim_log (tuples-001-2) both follow that
+    shape. nexus.tuple_tenants (tuples-001-3) follows telemetry-014-install-
+    pings.xml's non-RLS posture instead — see that changeset's own comment
+    for why.
+
+    Storage parameter: autovacuum_vacuum_scale_factor = 0.01 on nexus.tuples
+    and nexus.tuple_claim_log — the FIRST per-table storage parameter in
+    this changelog. Both tables are high-churn (claim/ack/nack/expire cycles
+    and their audit rows) relative to their size, so the default 20%
+    dead-tuple threshold before autovacuum runs leaves stale rows around far
+    longer than these tables' own churn rate warrants; not set on
+    nexus.tuple_tenants, which is low-churn (one row per tenant, touched at
+    most once a minute by `out`'s own read-then-maybe-upsert).
+
+    tuple_claim_log.tuple_id REFERENCES nexus.tuples(id) ON DELETE SET NULL,
+    indexed: the sweep's purge of expired/consumed nexus.tuples rows deletes
+    through this FK, and an unindexed child turns every purge batch into a
+    sequential scan of the log (precedent: taxonomy-014-topics-tenant-
+    unique.xml's topics_parent_fk / taxonomy-001-baseline.xml's self-
+    referential FK, both ON DELETE SET NULL).
+
+    Partial index (aspects-001-baseline.xml precedent for the WHERE-clause
+    shape): nexus.tuples (tenant_id, subspace, created_at) WHERE
+    consumed_at IS NULL AND claim_state IS NULL — the claim-scan predicate
+    every `in`/`inp` walks.
+
+    Grants: nexus_svc and nexus_diag pick all three new tables up
+    automatically. grants-nexus-svc.xml's grants-nexus-svc-1 changeset
+    iterates every relation nexus_admin owns in schema nexus at EXECUTION
+    time (a runAlways per-relation DO $$ loop, not a fixed table list), and
+    grants-nexus-diag.xml's grants-nexus-diag-1 issues a bulk "GRANT SELECT
+    ON ALL TABLES IN SCHEMA nexus" (also runAlways). Both changesets run
+    AFTER this file in db.changelog-master.xml, so nexus.tuples /
+    nexus.tuple_claim_log / nexus.tuple_tenants already exist by the time
+    either grant statement executes on a fresh walk — no edit needed to
+    either grants file.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: nexus.tuples (the space) + claim-scan index + RLS ─── -->
+    <changeSet id="tuples-001-1" author="nexus-em75s.2">
+        <comment>nexus.tuples: the Linda tuple space (RDR-205 Technical Design). Tenant-scoped: RLS ENABLE+FORCE with the tenant_isolation policy shape from catalog-036-embedding-profile.xml's changeset catalog-036-3. id is a caller-computed sha256 (see file header); this changeset does not derive it. autovacuum_vacuum_scale_factor=0.01: first per-table storage parameter in this changelog, set here because of this table's claim/ack/nack/expire churn rate relative to size.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.tuples (
+    id           BYTEA       NOT NULL,
+    tenant_id    TEXT        NOT NULL,
+    subspace     TEXT        NOT NULL,
+    template     TEXT        NOT NULL,
+    keys         JSONB       NOT NULL,
+    dims         JSONB,
+    body         TEXT,
+    claim_state  TEXT,
+    claimant     TEXT,
+    claim_id     TEXT,
+    lease_until  TIMESTAMPTZ,
+    attempts     INTEGER     NOT NULL DEFAULT 0,
+    consumed_at  TIMESTAMPTZ,
+    consumed_by  TEXT,
+    expires_at   TIMESTAMPTZ NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL,
+    CONSTRAINT tuples_pk PRIMARY KEY (id)
+);
+
+-- Claim-scan predicate every in/inp walks: unconsumed, unclaimed rows for
+-- a (tenant, subspace), oldest first.
+CREATE INDEX idx_tuples_claim_scan ON nexus.tuples (tenant_id, subspace, created_at)
+    WHERE consumed_at IS NULL AND claim_state IS NULL;
+
+ALTER TABLE nexus.tuples SET (autovacuum_vacuum_scale_factor = 0.01);
+
+ALTER TABLE nexus.tuples ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.tuples FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.tuples
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.tuples;
+            ALTER TABLE nexus.tuples NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.tuples DISABLE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.tuples RESET (autovacuum_vacuum_scale_factor);
+            DROP INDEX IF EXISTS nexus.idx_tuples_claim_scan;
+            DROP TABLE IF EXISTS nexus.tuples CASCADE;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: nexus.tuple_claim_log (append-only audit) + RLS ────── -->
+    <changeSet id="tuples-001-2" author="nexus-em75s.2">
+        <comment>nexus.tuple_claim_log: append-only claim|ack|nack|expire|dead audit trail (RDR-205 Technical Design). subspace/template denormalised so a row reads standalone even after its tuple is purged (May's nexus-pce1.4 fix). tuple_id FK to nexus.tuples(id) ON DELETE SET NULL, indexed — the purge deletes through it (see file header). Tenant-scoped: RLS ENABLE+FORCE with its own tenant_isolation policy, same shape as every audit table here. autovacuum_vacuum_scale_factor=0.01, same rationale as tuples-001-1.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.tuple_claim_log (
+    log_id      BIGSERIAL   NOT NULL,
+    tenant_id   TEXT        NOT NULL,
+    subspace    TEXT        NOT NULL,
+    template    TEXT        NOT NULL,
+    tuple_id    BYTEA,
+    claim_id    TEXT,
+    claimant    TEXT,
+    transition  TEXT        NOT NULL,
+    at          TIMESTAMPTZ NOT NULL,
+    expires_at  TIMESTAMPTZ NOT NULL,
+    CONSTRAINT tuple_claim_log_pk PRIMARY KEY (log_id),
+    CONSTRAINT tuple_claim_log_tuple_fk FOREIGN KEY (tuple_id)
+        REFERENCES nexus.tuples (id) ON DELETE SET NULL
+);
+
+-- FK-enforcement + purge lookup path (file header: "the purge deletes
+-- through it").
+CREATE INDEX idx_tuple_claim_log_tuple_id ON nexus.tuple_claim_log (tuple_id);
+
+ALTER TABLE nexus.tuple_claim_log SET (autovacuum_vacuum_scale_factor = 0.01);
+
+ALTER TABLE nexus.tuple_claim_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.tuple_claim_log FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.tuple_claim_log
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.tuple_claim_log;
+            ALTER TABLE nexus.tuple_claim_log NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.tuple_claim_log DISABLE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.tuple_claim_log RESET (autovacuum_vacuum_scale_factor);
+            DROP INDEX IF EXISTS nexus.idx_tuple_claim_log_tuple_id;
+            DROP TABLE IF EXISTS nexus.tuple_claim_log CASCADE;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: nexus.tuple_tenants (sweep cursor, no RLS) ──────────── -->
+    <changeSet id="tuples-001-3" author="nexus-em75s.2">
+        <comment>nexus.tuple_tenants: sweep-cursor bookkeeping (RDR-205 Technical Design). No tenant_id, no RLS — same posture as service_tokens/install_pings/embedding_models (telemetry-014-install-pings.xml's file header, catalog-036-1's comment): this table names tenants and holds no tenant-owned data of its own, and the sweep that reads it needs to see every tenant's row, not one tenant's slice.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.tuple_tenants (
+    tenant_id      TEXT        NOT NULL,
+    first_seen     TIMESTAMPTZ NOT NULL,
+    last_seen      TIMESTAMPTZ NOT NULL,
+    last_swept_at  TIMESTAMPTZ,
+    CONSTRAINT tuple_tenants_pk PRIMARY KEY (tenant_id)
+);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.tuple_tenants CASCADE</rollback>
+    </changeSet>
+
+</databaseChangeLog>

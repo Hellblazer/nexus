@@ -51,6 +51,32 @@ bead (nexus-w374z) are NOT built here — that wiring is conexus-plugin-tree
 work outside this script's scope; this script is the executable sweep the
 future SessionStart/doctor integration would call. See nexus-w374z comments
 for the residue note. Run: python3 scripts/check_inbound_relay_acks.py
+
+RDR-205 Phase 6 addendum (nexus-em75s.28): the T2-memory path above covers
+the pre-tuple-space relay convention. Phase 6 adds a second cross-instance
+channel — the mailbox tuple space (`mailbox/<address>`, `docs/tuple-space-
+walkthroughs.md` § Cross-instance request and ack) — whose own convention
+is: `tuple_out` to the peer's address with `kind=request` and a
+`correlation_id`, and a parked `in` on the requester's own mailbox for the
+`kind=ack` reply carrying the same `correlation_id`. This sweep also scans
+every `mailbox/*` subspace for `kind=request` rows with no matching
+`kind=ack` row at `mailbox/<from>` — the space-native counterpart of the
+T2-memory ack check above, addressed by `--mailbox-prefix` /
+`--tuple-read-max`. It runs through the same `nx` CLI IO boundary
+(`nx tuple list` / `nx tuple rd`), the same SweepUnrunnableError contract
+(a scan that cannot run is never a silent clean pass), and reports into the
+same finding list as the T2-memory check, distinguished by its own
+`MAILBOX-UNACKED-REQUEST:` tag. Unlike the T2-memory corpus (which always
+carries some entries), an empty mailbox tuple space is a legitimate clean
+state, not a BLINDSPOT — Phase 6 is new and most boxes will have no
+cross-instance mailbox traffic yet. This arm runs only when the T2-memory
+arm above reaches the end of `main()` without an early return (enumeration
+succeeded and, if a stale set existed, the bd ack-check completed) — the
+two are otherwise independent once both run, and either can carry a
+finding. Like the T2-memory arm's `--max-age-days`, a request younger than
+that window is a legitimate in-flight handshake (RDR-205's own "a wait of
+minutes" pattern) and is not reported, even unacked — see
+`find_unacked_requests`'s docstring (nexus-em75s.30 F1/F2/Q4).
 """
 from __future__ import annotations
 
@@ -422,6 +448,185 @@ def _grep_jsonl_fallback(probe: str) -> bool:
 
 
 # ---------------------------------------------------------------------
+# RDR-205 Phase 6: unacked mailbox requests (nexus-em75s.28)
+#
+# The mailbox `rd`/`in` pattern match is over the template's KEYS only
+# (`TupleRepository.queryOnce`'s `matchCondition` — `mailbox/<address>`'s
+# only key is `to`); `kind` and `correlation_id` are DIMS, so filtering on
+# them happens client-side here, not via the pattern argument. `rd` never
+# returns a consumed (acked) row, so a request tuple the recipient has
+# fully drained-and-acked at the CLAIM level simply disappears — the
+# design's own accepted scope (docs/tuple-space-walkthroughs.md § Cross-
+# instance request and ack: "the unacked-request sweep is rd over every
+# mailbox for kind request with no matching ack").
+# ---------------------------------------------------------------------
+
+DEFAULT_MAILBOX_PREFIX = "mailbox/"
+#: AGENTS.md's documented pagination ceiling (`MAX_QUERY_RESULTS`); this
+#: script avoids importing the `nexus` package (subprocess-only IO
+#: boundary, matching the rest of the file), so the value is restated,
+#: not imported.
+DEFAULT_TUPLE_READ_LIMIT = 300
+
+
+def parse_tuple_subspaces(raw: str) -> list[str]:
+    """Subspace names from ``nx tuple list --json`` output. Raises
+    ``json.JSONDecodeError``/``ValueError`` on malformed input — the IO
+    boundary wraps that into :class:`SweepUnrunnableError`."""
+    data = json.loads(raw) if raw.strip() else []
+    if not isinstance(data, list):
+        raise ValueError(f"expected a JSON array of subspace census rows, got {type(data).__name__}")
+    return [row["subspace"] for row in data if isinstance(row, dict) and row.get("subspace")]
+
+
+def parse_tuple_rows(raw: str) -> list[dict]:
+    """Tuple rows from ``nx tuple rd <subspace> --json`` output. Raises
+    ``json.JSONDecodeError``/``ValueError`` on malformed input — the IO
+    boundary wraps that into :class:`SweepUnrunnableError`."""
+    data = json.loads(raw) if raw.strip() else []
+    if not isinstance(data, list):
+        raise ValueError(f"expected a JSON array of tuple rows, got {type(data).__name__}")
+    return data
+
+
+def find_unacked_requests(
+    rows_by_subspace: dict[str, list[dict]],
+    max_age_days: int = 7,
+    now: dt.datetime | None = None,
+) -> list[dict]:
+    """Every ``kind=request`` row across *rows_by_subspace* with no
+    matching ``kind=ack`` row at the requester's own mailbox
+    (``mailbox/<from>``), paired on the ``correlation_id`` dim — "the
+    correlation_id dim is what pairs an ack with its request"
+    (docs/tuple-space-walkthroughs.md). A request row missing ``from`` or
+    ``correlation_id`` can never be verified and is reported unconditionally
+    — the same safe, over-inclusive direction as the T2-memory path's
+    unfetchable-ANSWER-body handling above. Pure — unit-testable over
+    planted row dicts, no live `nx` call.
+
+    ``max_age_days`` mirrors :func:`select_stale`'s T2-memory-arm semantics
+    (same default, same strict-greater-than boundary): a request younger
+    than or exactly *max_age_days* old (by its own ``created_at``) is a
+    legitimate in-flight handshake — RDR-205's own "a wait of minutes"
+    pattern — and is not reported, even if unacked. A request whose
+    ``created_at`` is missing or unparseable can never be aged and is
+    reported unconditionally, the same over-inclusive direction as the
+    missing-``from``/``correlation_id`` handling above (critique
+    nexus-em75s.30 Q4: without this gate, a request one second old from a
+    handshake still in flight would false-positive once this sweep is
+    wired into an automated gate)."""
+    if now is None:
+        now = dt.datetime.now(dt.timezone.utc)
+
+    acks_by_subspace: dict[str, set[str]] = {}
+    for subspace, rows in rows_by_subspace.items():
+        acks: set[str] = set()
+        for row in rows:
+            dims = row.get("dims") or {}
+            if dims.get("kind") == "ack" and dims.get("correlation_id"):
+                acks.add(dims["correlation_id"])
+        acks_by_subspace[subspace] = acks
+
+    unacked: list[dict] = []
+    for subspace, rows in rows_by_subspace.items():
+        for row in rows:
+            dims = row.get("dims") or {}
+            if dims.get("kind") != "request":
+                continue
+            created_at = row.get("created_at")
+            if created_at:
+                try:
+                    age_days = (now - parse_timestamp(created_at)).total_seconds() / 86400.0
+                except ValueError:
+                    pass  # unparseable timestamp: can't age it — fall through to reporting
+                else:
+                    if age_days <= max_age_days:
+                        continue  # in-flight handshake, not yet stale
+            from_addr = dims.get("from")
+            correlation_id = dims.get("correlation_id")
+            ack_subspace = f"mailbox/{from_addr}" if from_addr else None
+            acked = bool(
+                correlation_id
+                and ack_subspace is not None
+                and correlation_id in acks_by_subspace.get(ack_subspace, set())
+            )
+            if not acked:
+                unacked.append({
+                    "subspace": subspace,
+                    "id": row.get("id"),
+                    "from": from_addr,
+                    "correlation_id": correlation_id,
+                    "created_at": row.get("created_at"),
+                })
+    return unacked
+
+
+def fetch_tuple_list_json(prefix: str) -> str:
+    try:
+        r = _run(["nx", "tuple", "list", "--prefix", prefix, "--json"])
+    except FileNotFoundError as exc:
+        raise SweepUnrunnableError(f"nx not found on PATH: {exc}") from exc
+    if r.returncode != 0:
+        raise SweepUnrunnableError(
+            f"nx tuple list --prefix {prefix} rc={r.returncode}: {r.stderr.strip()[:300]}"
+        )
+    return r.stdout
+
+
+def fetch_tuple_rows_json(subspace: str, limit: int) -> str:
+    try:
+        r = _run(["nx", "tuple", "rd", subspace, "-n", str(limit), "--json"])
+    except FileNotFoundError as exc:
+        raise SweepUnrunnableError(f"nx not found on PATH: {exc}") from exc
+    if r.returncode != 0:
+        raise SweepUnrunnableError(
+            f"nx tuple rd {subspace} rc={r.returncode}: {r.stderr.strip()[:300]}"
+        )
+    return r.stdout
+
+
+def scan_unacked_mailbox_requests(
+    mailbox_prefix: str = DEFAULT_MAILBOX_PREFIX,
+    read_limit: int = DEFAULT_TUPLE_READ_LIMIT,
+    max_age_days: int = 7,
+) -> list[dict]:
+    """Enumerate every ``mailbox/*`` subspace, read its rows, and return the
+    unacked ``kind=request`` findings. Raises :class:`SweepUnrunnableError`
+    on any IO or parse failure — never a silent empty result standing in
+    for "checked and clean". ``max_age_days`` is passed straight through to
+    :func:`find_unacked_requests` — see its docstring for the grace-period
+    semantics (mirrors the T2-memory arm's ``--max-age-days``, same
+    default; ``main()`` passes the one shared flag to both arms)."""
+    try:
+        subspaces = parse_tuple_subspaces(fetch_tuple_list_json(mailbox_prefix))
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise SweepUnrunnableError(
+            f"nx tuple list --prefix {mailbox_prefix} returned unparseable JSON: {exc}"
+        ) from exc
+
+    rows_by_subspace: dict[str, list[dict]] = {}
+    for subspace in subspaces:
+        raw = fetch_tuple_rows_json(subspace, read_limit)
+        try:
+            rows_by_subspace[subspace] = parse_tuple_rows(raw)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise SweepUnrunnableError(
+                f"nx tuple rd {subspace} returned unparseable JSON: {exc}"
+            ) from exc
+
+    return find_unacked_requests(rows_by_subspace, max_age_days=max_age_days)
+
+
+def format_unacked_request(finding: dict) -> str:
+    return (
+        f"MAILBOX-UNACKED-REQUEST: {finding['subspace']} id={finding['id']} "
+        f"from={finding['from']} correlation_id={finding['correlation_id']} "
+        f"created_at={finding['created_at']} — no kind=ack row at "
+        f"mailbox/{finding['from']} referencing this correlation_id"
+    )
+
+
+# ---------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------
 
@@ -430,11 +635,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--max-age-days", type=int, default=7,
-        help="Minimum age (days) before an unacked relay is flagged (default 7)",
+        help="Minimum age (days) before an unacked T2 relay or mailbox "
+             "request is flagged (default 7) — shared by both arms",
     )
     parser.add_argument(
         "--project", default="conexus",
         help="T2 project namespace to enumerate inbound relays from (default: conexus)",
+    )
+    parser.add_argument(
+        "--mailbox-prefix", default=DEFAULT_MAILBOX_PREFIX,
+        help=f"Tuple-space subspace prefix to scan for unacked requests (default: {DEFAULT_MAILBOX_PREFIX!r})",
+    )
+    parser.add_argument(
+        "--tuple-read-max", type=int, default=DEFAULT_TUPLE_READ_LIMIT,
+        help=f"Max rows to read per mailbox subspace (default: {DEFAULT_TUPLE_READ_LIMIT})",
     )
     args = parser.parse_args(argv)
 
@@ -463,102 +677,126 @@ def main(argv: list[str] | None = None) -> int:
     now = dt.datetime.now(dt.timezone.utc)
     stale = select_stale(inbound, args.max_age_days, now)
 
-    if not stale:
-        print(
-            f"relay ack sweep: {len(inbound)} relay title(s) recognized in project "
-            f"'{args.project}', 0 older than {args.max_age_days}d — clean"
-        )
-        return 0
-
-    # ANSWER-ack arm (protocol of record, [22834]->[22835]): QUESTION-shaped
-    # relays close via an ANSWER entry whose body references the question
-    # title. Candidate bodies are fetched lazily and cached; an unfetchable
-    # body is not an ack.
-    answer_candidates = parse_answer_titles(raw)
-    _body_cache: dict[tuple[str, str], str] = {}
-
-    def _answered(entry: RelayEntry) -> bool:
-        if entry.marker not in ANSWERABLE_MARKERS:
-            return False
-        for proj, title in answer_candidates:
-            if answer_title_pairs_question(title, entry.title, entry.timestamp):
-                return True  # grandfathered exact suffix pair (pre-cutover only)
-            key = (proj, title)
-            if key not in _body_cache:
-                _body_cache[key] = fetch_memory_body(proj, title)
-            if answer_acks_question(_body_cache[key], entry.title):
-                return True
-        return False
-
     findings: list[str] = []
-    try:
-        # Pass 1: collect id-granular bead acks for every stale entry, then
-        # demote enumeration/bulk beads (BULK_ACK_THRESHOLD) — a sweep
-        # report pasted into one umbrella bead must not blanket-clear its
-        # whole list (T2 [22836] ship-blocker).
-        acks_by_relay: dict[str, set[str]] = {
-            e.id: bd_desc_id_ack_beads(e.id) for e in stale
-        }
-        dedicated, bulk = demote_bulk_ack_beads(acks_by_relay)
 
-        for entry in stale:
-            if dedicated.get(entry.id):
-                continue
-            if is_acked(entry, bd_desc_search, bd_title_search, lambda _p: False):
-                # title-verbatim / title-in-bead-title forms (id form is
-                # handled granularly above; the injected no-op keeps
-                # is_acked from re-running the un-demoted id probe).
-                continue
-            if _answered(entry):
-                continue
-            age = age_in_days(entry, now)
-            bulk_note = ""
-            if bulk.get(entry.id):
-                bulk_note = (
-                    f" (bulk-tracking bead(s) {sorted(bulk[entry.id])} reference it "
-                    "as part of an enumeration — NOT counted as a per-relay ack; "
-                    "triage it there or give it a dedicated ack)"
+    if stale:
+        # ANSWER-ack arm (protocol of record, [22834]->[22835]): QUESTION-shaped
+        # relays close via an ANSWER entry whose body references the question
+        # title. Candidate bodies are fetched lazily and cached; an unfetchable
+        # body is not an ack.
+        answer_candidates = parse_answer_titles(raw)
+        _body_cache: dict[tuple[str, str], str] = {}
+
+        def _answered(entry: RelayEntry) -> bool:
+            if entry.marker not in ANSWERABLE_MARKERS:
+                return False
+            for proj, title in answer_candidates:
+                if answer_title_pairs_question(title, entry.title, entry.timestamp):
+                    return True  # grandfathered exact suffix pair (pre-cutover only)
+                key = (proj, title)
+                if key not in _body_cache:
+                    _body_cache[key] = fetch_memory_body(proj, title)
+                if answer_acks_question(_body_cache[key], entry.title):
+                    return True
+            return False
+
+        try:
+            # Pass 1: collect id-granular bead acks for every stale entry, then
+            # demote enumeration/bulk beads (BULK_ACK_THRESHOLD) — a sweep
+            # report pasted into one umbrella bead must not blanket-clear its
+            # whole list (T2 [22836] ship-blocker).
+            acks_by_relay: dict[str, set[str]] = {
+                e.id: bd_desc_id_ack_beads(e.id) for e in stale
+            }
+            dedicated, bulk = demote_bulk_ack_beads(acks_by_relay)
+
+            for entry in stale:
+                if dedicated.get(entry.id):
+                    continue
+                if is_acked(entry, bd_desc_search, bd_title_search, lambda _p: False):
+                    # title-verbatim / title-in-bead-title forms (id form is
+                    # handled granularly above; the injected no-op keeps
+                    # is_acked from re-running the un-demoted id probe).
+                    continue
+                if _answered(entry):
+                    continue
+                age = age_in_days(entry, now)
+                bulk_note = ""
+                if bulk.get(entry.id):
+                    bulk_note = (
+                        f" (bulk-tracking bead(s) {sorted(bulk[entry.id])} reference it "
+                        "as part of an enumeration — NOT counted as a per-relay ack; "
+                        "triage it there or give it a dedicated ack)"
+                    )
+                remedy = (
+                    "answer it with a T2 ANSWER entry referencing this title in its body, "
+                    "or file a bead if it spawned work"
+                    if entry.marker in ANSWERABLE_MARKERS
+                    else "file a bead and record the T2 id + relay title in its description as the ack"
                 )
-            remedy = (
-                "answer it with a T2 ANSWER entry referencing this title in its body, "
-                "or file a bead if it spawned work"
-                if entry.marker in ANSWERABLE_MARKERS
-                else "file a bead and record the T2 id + relay title in its description as the ack"
+                findings.append(
+                    f"{entry.id} ({entry.marker}, {age:.1f}d old): {entry.project}/{entry.title} "
+                    f"has no dedicated ack — {remedy}{bulk_note}"
+                )
+        except SweepUnrunnableError as exc:
+            print(f"BD-UNAVAILABLE: {exc}")
+            print(
+                "Attempting degraded .beads/issues.jsonl grep fallback for informational purposes "
+                "only — this file is a partial export and a miss here does NOT prove no ack exists."
             )
-            findings.append(
-                f"{entry.id} ({entry.marker}, {age:.1f}d old): {entry.project}/{entry.title} "
-                f"has no dedicated ack — {remedy}{bulk_note}"
-            )
-    except SweepUnrunnableError as exc:
-        print(f"BD-UNAVAILABLE: {exc}")
-        print(
-            "Attempting degraded .beads/issues.jsonl grep fallback for informational purposes "
-            "only — this file is a partial export and a miss here does NOT prove no ack exists."
-        )
-        # Best-effort degraded check against whatever remains unverified.
-        remaining = [e for e in stale]
-        any_grep_hit = False
-        for entry in remaining:
-            probes = build_ack_probes(entry)
-            if _grep_jsonl_fallback(probes["id"]) or _grep_jsonl_fallback(probes["title"]):
-                any_grep_hit = True
-                print(f"  degraded-grep hit for {entry.id} — still UNVERIFIED without bd")
-        if not any_grep_hit:
-            print("  degraded-grep found no hits for any stale entry — still UNVERIFIED without bd")
-        return 2
+            # Best-effort degraded check against whatever remains unverified.
+            remaining = [e for e in stale]
+            any_grep_hit = False
+            for entry in remaining:
+                probes = build_ack_probes(entry)
+                if _grep_jsonl_fallback(probes["id"]) or _grep_jsonl_fallback(probes["title"]):
+                    any_grep_hit = True
+                    print(f"  degraded-grep hit for {entry.id} — still UNVERIFIED without bd")
+            if not any_grep_hit:
+                print("  degraded-grep found no hits for any stale entry — still UNVERIFIED without bd")
+            return 2
 
-    if findings:
+    # RDR-205 Phase 6 (nexus-em75s.28): mailbox tuple-space unacked
+    # requests, the space-native counterpart of the T2-memory check above.
+    # This arm only RUNS when the T2-memory arm above reached this line
+    # without returning early — i.e. enumeration succeeded, at least one
+    # relay title was recognized, and (when a stale set existed) the bd
+    # ack-check completed without SweepUnrunnableError. It does NOT run on
+    # any of the three earlier early-return paths (enumeration failure,
+    # the BLINDSPOT case, or bd-unavailable during ack-checking) — those
+    # each `return` before this point. When it does run, it and the
+    # T2-memory arm's `findings` are independent and either can carry a
+    # finding (F2 fix, code-review-expert nexus-em75s.30 F2: the prior
+    # comment claimed unconditional "regardless of the T2 path's outcome",
+    # which was false on those three paths).
+    try:
+        mailbox_findings = scan_unacked_mailbox_requests(
+            args.mailbox_prefix, args.tuple_read_max, max_age_days=args.max_age_days,
+        )
+    except SweepUnrunnableError as exc:
+        # F1 fix (code-review-expert nexus-em75s.30): a mailbox-scan
+        # failure must not swallow T2 findings already computed above —
+        # print them before the unrunnable line, exit code stays 2.
         for f in findings:
             print(f"RELAY-UNACKED: {f}")
+        print(f"SWEEP UNRUNNABLE (mailbox): {exc}")
+        return 2
+
+    if findings or mailbox_findings:
+        for f in findings:
+            print(f"RELAY-UNACKED: {f}")
+        for mf in mailbox_findings:
+            print(format_unacked_request(mf))
         print(
-            f"\n{len(findings)} unacked stale relay(s) of {len(stale)} checked "
-            f"({len(inbound)} relay title(s) recognized total). File a nexus bead per finding."
+            f"\n{len(findings)} unacked stale T2 relay(s) of {len(stale)} checked "
+            f"({len(inbound)} relay title(s) recognized total); "
+            f"{len(mailbox_findings)} unacked mailbox request(s). File a nexus bead per finding."
         )
         return 1
 
     print(
         f"relay ack sweep: {len(inbound)} relay title(s) recognized, {len(stale)} older than "
-        f"{args.max_age_days}d, all acked — clean"
+        f"{args.max_age_days}d, all acked — clean; mailbox scan: 0 unacked request(s) — clean"
     )
     return 0
 

@@ -1,6 +1,6 @@
 # sn — Serena + Context7 MCP Plugin for Claude Code
 
-A Claude Code plugin that bundles two MCP servers, injects their usage guidance into every subagent, and auto-approves their tools.
+A Claude Code plugin that bundles two MCP servers, injects their usage guidance into every subagent, and auto-approves their tools. It has no dependency on Nexus (see [Relationship to conexus](#relationship-to-conexus)); if you're also setting up the [Nexus CLI and its plugin](https://hellblazer.github.io/nexus/), the site's [install guide](https://hellblazer.github.io/nexus/) covers that separately.
 
 ## What It Does
 

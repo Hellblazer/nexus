@@ -7,11 +7,16 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/conexus)](https://pypi.org/project/conexus/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-<a href="https://i0.wp.com/tensegrity.blog/wp-content/uploads/2026/04/a-stately-pleasure-dome.png?w=1024&ssl=1">
-  <img src="https://i0.wp.com/tensegrity.blog/wp-content/uploads/2026/04/a-stately-pleasure-dome.png?w=480&ssl=1" alt="A brass-ribbed crystal dome on a hilltop at dusk" align="right" width="320" />
-</a>
+<img src="web/assets/a-stately-pleasure-dome.png" alt="A brass-ribbed crystal dome on a hilltop at dusk" align="right" width="320" />
 
-**Start here**: [**How I actually use Nexus**](https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/) — the conceptual overview and the shape of the substrate. Then [**Installing Nexus**](https://tensegrity.blog/2026/04/26/installing-nexus/) — a ten-minute hands-on walkthrough from `uv tool install` through your first search.
+## Start here
+
+Three pages, in order:
+
+- [**Install**](https://hellblazer.github.io/nexus/) — set up Nexus for how you use Claude: Claude Desktop, Claude Code, or Claude Cowork.
+- [**Getting started**](https://hellblazer.github.io/nexus/getting-started.html) — learn the tooling, eleven lessons done inside Claude Code.
+- [**Working with RDRs**](https://hellblazer.github.io/nexus/rdr.html) — record a decision with an RDR, eight lessons on the practised cycle.
+- [**Research with Nexus**](https://hellblazer.github.io/nexus/research.html) — how the store grounds answers, and what it does for each step of research work.
 
 ## Prerequisites
 
@@ -19,30 +24,21 @@ Python 3.12–3.13 (3.14 not yet supported — [upstream dependency issue](https
 
 ## Install for Claude
 
-Three surfaces share one host substrate: the `nx` CLI (the `conexus` package). Claude Desktop's `.mcpb` bundles it and resolves it on first launch; the Claude Code plugin and Cowork use a **separately-installed** CLI (`uv tool install conexus`). Pick the one that matches how you use Claude.
+One host package, the `nx` CLI (`conexus` on PyPI), serves three surfaces. The [install guide](https://hellblazer.github.io/nexus/) walks each one with copyable commands; the short form:
 
-### Claude Desktop chat
+- **Claude Desktop**: download `conexus.mcpb` from the [latest release](https://github.com/Hellblazer/nexus/releases/latest) and double-click it. Requires [uv](https://docs.astral.sh/uv/) on the host.
+- **Claude Code**:
+  ```bash
+  uv tool install conexus                  # the nx CLI; the plugin's MCP servers are this package
+  nx self install                          # move it onto the generation layout
+  nx init                                  # provision the local service (Postgres + pgvector + bge-768)
+  /plugin marketplace add Hellblazer/nexus
+  /plugin install conexus@nexus-plugins
+  ```
+  The CLI must be installed first: `/plugin install` alone leaves the servers unable to launch.
+- **Claude Cowork**: works once the plugin is installed in Claude Code on the host.
 
-Download `conexus.mcpb` from the [latest release](https://github.com/Hellblazer/nexus/releases/latest) and double-click. Claude Desktop registers it under Settings → Connectors. Requires [uv](https://docs.astral.sh/uv/) installed on the host (the standard installer or Homebrew puts it where Claude Desktop resolves it — no PATH setup needed); deps resolve on first launch (~20s).
-
-### Claude Code (terminal)
-
-```bash
-uv tool install conexus                  # 1. the nx CLI (the plugin's MCP servers ARE this package)
-nx self install                          #    then move it onto the generation layout (drops the stray `av` wheel; on Linux, CPU-only torch instead of the CUDA build)
-/plugin marketplace add Hellblazer/nexus # 2. add the marketplace
-/plugin install conexus@nexus-plugins    # 3. install the plugin
-```
-
-The plugin's MCP servers (`nx-mcp`, `nx-mcp-catalog`) are console-scripts from the `conexus` package, so **the `nx` CLI must be installed too**: `/plugin install` alone leaves the servers unable to launch. Install the CLI first (step 1; see [CLI quick-start](#cli-quick-start) to then provision the storage backend).
-
-The plugin ships 13 specialized agents, 43 skills (RDR lifecycle, plan-centric retrieval, dev workflows), and 48 MCP tools split across two focused servers. Session hooks load project context at startup.
-
-### Claude Cowork
-
-Works automatically once the conexus plugin is installed in Claude Code on the host. State round-trips bidirectionally with the host CLI through the storage service.
-
-For the full deployment story across all three surfaces (install, service lifecycle, drift detection, uninstall), see [docs/desktop-deployment.md](docs/desktop-deployment.md).
+The full deployment story across all three surfaces is [docs/desktop-deployment.md](docs/desktop-deployment.md).
 
 ## What it does
 
@@ -52,50 +48,56 @@ For the full deployment story across all three surfaces (install, service lifecy
 - **RDR: Research-Design-Review** — write a spec before you code. Captures the problem, research, alternatives, and chosen approach. The corpus is searchable, so prior decisions surface during new design work.
 - **Local-first** — runs entirely on your machine: an on-device bge-768 ONNX embedder over a bundled Postgres 17 + pgvector service that `nx init` provisions for you. Voyage AI (server-side embeddings) is opt-in for the managed-cloud deployment.
 
-## CLI quick-start
+## Learn
 
-```bash
-uv tool install conexus        # install the nx CLI
-nx self install                # move it onto the generation layout: uv's own tree carries `av` (PyAV) whose bundled ffmpeg collides with opencv's, and on Linux the CUDA torch build (~4.5 GB); the generation build excludes av and installs CPU-only torch (NX_TORCH_BACKEND=auto opts a GPU box back in)
-nx init                        # acquires the signed engine + Postgres bundle, provisions pgvector + bge-768, starts the service, offers autostart
-nx doctor                      # verify the stack
-nx index repo .                # index your repo + discover topics
-nx search "how does retry work"   # semantic search, fully local
-```
+[Getting started](https://hellblazer.github.io/nexus/getting-started.html) — eleven lessons, done inside Claude Code:
 
-You never choose an engine version: every conexus release is built pinned to the exact `engine-service` release it was tested against, and `nx init` acquires that signed binary + Postgres bundle automatically (cosign-verified). You do **not** need PostgreSQL installed — nexus always provisions from its own self-contained Postgres bundle (pgvector already compiled in) and never touches a PostgreSQL you may already have. Advanced: export `NEXUS_SERVICE_TAG=engine-service-vX.Y.Z` to override the pin (air-gapped installs, engine testing).
+1. [Start a session](https://hellblazer.github.io/nexus/getting-started.html#l1)
+2. [End a session, start the next one](https://hellblazer.github.io/nexus/getting-started.html#l2)
+3. [Index your repository, then search it](https://hellblazer.github.io/nexus/getting-started.html#l3)
+4. [Memory: what Claude keeps between sessions](https://hellblazer.github.io/nexus/getting-started.html#l4)
+5. [Scratch: how Claude and its agents share notes](https://hellblazer.github.io/nexus/getting-started.html#l5)
+6. [Knowledge: notes, documents, and the catalog](https://hellblazer.github.io/nexus/getting-started.html#l6)
+7. [Explore: research, links, and the topic map](https://hellblazer.github.io/nexus/getting-started.html#l7)
+8. [Render and iterate](https://hellblazer.github.io/nexus/getting-started.html#l8)
+9. [Questions that need many documents](https://hellblazer.github.io/nexus/getting-started.html#l9)
+10. [Record a decision with an RDR](https://hellblazer.github.io/nexus/getting-started.html#l10)
+11. [Maintenance](https://hellblazer.github.io/nexus/getting-started.html#l11)
 
-`nx init` provisions the bundled Postgres 17 + pgvector cluster, fetches the bge-768 ONNX model the service embeds with, starts the persistent service, and offers to register the OS autostart unit so it restarts at login/boot (prompt defaults to yes; `--yes` accepts non-interactively, `--no-autostart` starts a session supervisor only). There is **no** separate `nx daemon t2 install` step — T2 (notes/plans) is served by the same service in the default config. The permanent vector store (T3) serves through this native service; the bundled binary + Postgres are cosign-verified and acquired automatically. `nx init` is idempotent — safe to re-run. (The older `nx init --service` flag still works but is deprecated — plain `nx init` is the path now.) **First run only:** this downloads roughly 600 MB (the signed ~134 MB service binary, the relocatable Postgres bundle, and the ~416 MB bge-768 ONNX model) and takes a few minutes; subsequent starts are fast.
+[Working with RDRs](https://hellblazer.github.io/nexus/rdr.html) — eight lessons on the practised cycle:
 
-The `nx` CLI provides direct access to all storage tiers, indexing, search, the catalog, and taxonomy. See [Getting Started](docs/getting-started.md) for a walkthrough, [CLI Reference](docs/cli-reference.md) for every command and flag.
+1. [What an RDR is here](https://hellblazer.github.io/nexus/rdr.html#l1)
+2. [It starts as a conversation](https://hellblazer.github.io/nexus/rdr.html#l2)
+3. [Research, in cycles](https://hellblazer.github.io/nexus/rdr.html#l3)
+4. [Read it, react, repeat](https://hellblazer.github.io/nexus/rdr.html#l4)
+5. [The gate](https://hellblazer.github.io/nexus/rdr.html#l5)
+6. [Accept, and the plan follows](https://hellblazer.github.io/nexus/rdr.html#l6)
+7. [Build it, across many sessions](https://hellblazer.github.io/nexus/rdr.html#l7)
+8. [Close it, and what remains](https://hellblazer.github.io/nexus/rdr.html#l8)
+
+[Research with Nexus](https://hellblazer.github.io/nexus/research.html) — what the store does for each step of research work:
+
+1. [What the system does](https://hellblazer.github.io/nexus/research.html#p0)
+2. [Grounding](https://hellblazer.github.io/nexus/research.html#pg)
+3. [Curating](https://hellblazer.github.io/nexus/research.html#p1)
+4. [Reading](https://hellblazer.github.io/nexus/research.html#p2)
+5. [Chronicling](https://hellblazer.github.io/nexus/research.html#p3)
+6. [Coupling](https://hellblazer.github.io/nexus/research.html#p6)
+7. [Asking and analyzing](https://hellblazer.github.io/nexus/research.html#p4)
+8. [Synthesizing and extracting](https://hellblazer.github.io/nexus/research.html#p5)
+9. [Verifying](https://hellblazer.github.io/nexus/research.html#p7)
+10. [Rendering](https://hellblazer.github.io/nexus/research.html#p8)
+11. [Where it ends up](https://hellblazer.github.io/nexus/research.html#p9)
+12. [Appendix: topics, aspects, sections, projections](https://hellblazer.github.io/nexus/research.html#p6b)
 
 ## Updating
 
 ```bash
-nx self install                          # 1. update the code (keeps your extras, e.g. [local])
-nx upgrade                               # 2. converge the data
+nx self install                          # 1. update the code (keeps your extras)
+nx upgrade                               # 2. converge the service, the data, and the plugins
 ```
 
-Both steps, every time. Step 1 installs a new generation beside the one you
-are running and repoints `current`; nothing is swapped under a live process,
-so it is safe with Claude Code sessions open and the service up. Step 2
-converges the package, engine, and service, walks any pending data rung,
-and brings the Claude Code plugins up to the same release (it runs
-`claude plugin update` for a plugin that is behind; the updated plugin
-loads at your next session). Either entry point converges the others:
-`/plugin update` in Claude Code triggers the same two steps at the next
-session start. `nx doctor` shows what is pending; `nx upgrade --dry-run`
-previews.
-
-Do not upgrade with `uv tool install conexus` or `--force`: that resets the
-environment and drops `[local]`, which downgrades the embedder and makes
-search return nothing. If you did, `nx self install` repairs it.
-
-After `/plugin update`, the next session start runs both steps for you;
-run them by hand to converge now.
-
-Installs that never left ChromaDB (5.x, or 6.x never migrated) take a
-different path: [Getting Started § Upgrading from a pre-PG install](docs/getting-started.md#upgrading-from-a-pre-pg-install).
+Both steps, every time. Never `uv tool install conexus` or `--force` to upgrade: that drops `[local]` and empties search; `nx self install` repairs it. Details, including what `/plugin update` does and the path for an install that never left ChromaDB, are on the site under [Update](https://hellblazer.github.io/nexus/#update).
 
 ### Telemetry
 
@@ -116,6 +118,7 @@ export NX_NO_TELEMETRY=1    # or per environment
 
 ### Something broken?
 
+The site's [Problems](https://hellblazer.github.io/nexus/#problems) section covers the common ones. For a broken install,
 [nexus-recovery-runbook](https://gist.github.com/Hellblazer/08f0a615e3d73e47d8062bce4829b611) is a
 diagnose-first recovery procedure meant to be handed to a Claude Code session as its first message —
 the assistant runs it phase by phase, pausing for your explicit go-ahead before anything that upgrades
@@ -140,9 +143,6 @@ especially the first time.
 | Back up my knowledge store | [Storage Tiers § T3 Backup and Migration](docs/storage-tiers.md#t3-backup-and-migration-exportimport) |
 | Fix empty search results after upgrading | [Getting Started § Troubleshooting](docs/getting-started.md#troubleshooting) |
 | Browse the docs tree | [docs/README.md](docs/README.md) |
-| Read the conceptual story | [How I actually use Nexus](https://tensegrity.blog/2026/04/26/how-i-actually-use-nexus/) |
-| Walk through a fresh install | [Installing Nexus](https://tensegrity.blog/2026/04/26/installing-nexus/) |
-| Browse the full series | [Tensegrity blog](https://tensegrity.blog/) |
 
 ## License
 

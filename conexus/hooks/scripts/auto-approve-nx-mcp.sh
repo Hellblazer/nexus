@@ -55,6 +55,14 @@ case "$TOOL_NAME" in
   mcp__plugin_conexus_nexus-catalog__link_query|\
   mcp__plugin_conexus_nexus-catalog__resolve|\
   mcp__plugin_conexus_nexus-catalog__stats|\
+  mcp__plugin_conexus_nexus__tuple_out|\
+  mcp__plugin_conexus_nexus__tuple_rd|\
+  mcp__plugin_conexus_nexus__tuple_in|\
+  mcp__plugin_conexus_nexus__tuple_ack|\
+  mcp__plugin_conexus_nexus__tuple_nack|\
+  mcp__plugin_conexus_nexus__tuple_registry|\
+  mcp__plugin_conexus_nexus__tuple_list|\
+  mcp__plugin_conexus_nexus__tuple_stats|\
   mcp__plugin_conexus_sequential-thinking__sequentialthinking)
     # Event-aware output. PermissionRequest fires only when a PROMPT would be
     # shown; under defaultMode:auto the classifier decides first and never

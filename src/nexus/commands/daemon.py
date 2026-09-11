@@ -596,11 +596,12 @@ def ensure_storage_supervisor(config_dir: Path):
     """
     from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.db import service_endpoint as _service_endpoint  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     StorageServiceStartError = _ssd.StorageServiceStartError
 
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
     scope = str(os.getuid())
-    existing = registry.discover(scope)
+    existing = _service_endpoint.discover_storage_service_lease(registry, scope)
     if existing is not None:
         # RDR-175 heal-on-next-use hardening: a fresh (TTL-live) lease whose
         # ``supervisor_pid`` points at a DEAD process is a hard-crashed
@@ -653,6 +654,10 @@ def ensure_storage_supervisor(config_dir: Path):
             # lease predates artifact-identity tracking; no-ops otherwise
             # (ambient well-known-path flows set neither var).
             _ssd._raise_or_warn_on_artifact_mismatch(config_dir, existing.endpoint)
+            # nexus-jw44t: the evidence-gate mark now happens inside
+            # discover_storage_service_lease() above, on every hit — no
+            # per-site call needed here any more (see that function's
+            # docstring in db/service_endpoint.py).
             return existing
 
     argv = [
@@ -679,7 +684,7 @@ def ensure_storage_supervisor(config_dir: Path):
             spawn_log.close()
     deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline:
-        existing = registry.discover(scope)
+        existing = _service_endpoint.discover_storage_service_lease(registry, scope)
         if existing is not None:
             return existing
         time.sleep(0.5)

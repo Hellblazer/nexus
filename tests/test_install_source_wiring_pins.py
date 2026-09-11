@@ -14,6 +14,8 @@ import re
 import tomllib
 from pathlib import Path
 
+from packaging.requirements import Requirement
+
 _REPO = Path(__file__).resolve().parents[1]
 
 
@@ -134,3 +136,52 @@ def test_the_av_override_is_identical_across_its_three_homes() -> None:
     shipped = _override_entries_from_overrides_txt()
     assert root == mcpb == shipped, (root, mcpb, shipped)
     assert any(entry.startswith("av;") or entry.startswith("av ") for entry in root)
+
+
+def test_the_pdftext_override_bounds_below_07_and_matches_across_homes() -> None:
+    """GH #1533 / nexus-gqrg0: mineru declares `pdftext>=0.6.3` with no
+    upper bound; pdftext 0.7.1 rewrote `PageChars` into a column-oriented
+    type with no `__iter__`, while mineru's own span_pre_proc.py:60 still
+    iterates `page_chars['chars']` as a list -- every `import mineru`
+    still succeeds and every real parse raises `TypeError: 'PageChars'
+    object is not iterable`. Same three-home parity as the av override
+    above, plus the bound's own ceiling: unlike av's exclusion, a copy of
+    this entry that silently widened to e.g. `<0.8` would reintroduce the
+    exact bug wherever it drifted, so the version range is asserted, not
+    just the package name's presence."""
+    root = _override_entries_from_toml("pyproject.toml")
+    mcpb = _override_entries_from_toml("mcpb/pyproject.toml")
+    shipped = _override_entries_from_overrides_txt()
+    assert root == mcpb == shipped, (root, mcpb, shipped)
+
+    pdftext_entries = [e for e in root if Requirement(e).name == "pdftext"]
+    assert len(pdftext_entries) == 1, root
+    specifier = Requirement(pdftext_entries[0]).specifier
+    assert specifier.contains("0.6.3"), specifier
+    assert not specifier.contains("0.7.0"), specifier
+    assert not specifier.contains("0.7.1"), specifier
+
+
+def test_the_pdftext_bound_travels_as_a_project_dependency() -> None:
+    """GH #1533 round 2 (nexus-gqrg0): the override above is read only from
+    the invoking project's own resolve -- install_generation.sh:162-166 says
+    the override table never reaches installed wheel metadata. A fresh
+    `uv tool install conexus` or any legacy uv-tool layout resolves mineru's
+    unbounded `pdftext>=0.6.3` floor fresh off PyPI regardless of the
+    override, since nothing in Requires-Dist bounds it. The bound must
+    additionally live as an ordinary `[project.dependencies]` entry (the
+    torch declared-but-unimported precedent, pyproject.toml ~:110) so it
+    ships in every wheel's Requires-Dist, not just the checkout/generation
+    override paths."""
+    data = tomllib.loads(_text("pyproject.toml"))
+    deps = data["project"]["dependencies"]
+    pdftext_entries = [d for d in deps if Requirement(d).name == "pdftext"]
+    assert len(pdftext_entries) == 1, (
+        "pyproject.toml [project.dependencies] carries no direct `pdftext` "
+        "entry -- the GH #1533 bound does not travel with the wheel to a "
+        "bare `uv tool install conexus`"
+    )
+    specifier = Requirement(pdftext_entries[0]).specifier
+    assert specifier.contains("0.6.3"), specifier
+    assert not specifier.contains("0.7.0"), specifier
+    assert not specifier.contains("0.7.1"), specifier

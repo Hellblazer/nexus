@@ -72,6 +72,24 @@
 #   --self-test        run the pure-function unit checks (nexus-1ktd5 items
 #                       A/B/C) against synthetic fixtures only — no wheel
 #                       build, no venv, no engine, no network. Safe anywhere.
+#
+# Leg 8c (always-on, every mode, no NX_MVV_FORMULA_PDF_CHECK needed): a
+# fresh resolve's own pdftext/pypdfium2 versions are asserted below the
+# GH #1533 bound directly against $PROBE_PYTHON -- no model weights, so
+# it costs nothing to run by default and closes the gap the pre-tag
+# battery's dev-venv-only lint (tests/test_install_source_wiring_pins.py)
+# cannot: that lint proves the LOCAL checkout's uv.lock is bounded, not
+# that a fresh --published resolve actually landed there.
+#
+# NX_MVV_FORMULA_PDF_CHECK=1 (opt-in, --published mode only; nexus-gqrg0 /
+# GH #1533): additionally indexes tests/fixtures/bft-to-smr.pdf through the
+# real MinerU path against the PUBLISHED dependency resolution, BEFORE leg 9
+# replaces the uv-tool shim with a generation, and asserts the ADDED chunk's
+# extraction_method is literally mineru (release-sandbox.sh's nexus-jy4hd
+# chunk-id-set-diff shape, not a LaTeX-content grep). Off by default — it
+# pays a MinerU pipeline model download (~2-3 GB) that would dominate every
+# default MVV run. The release skill's Step 11c post-publish invocation is
+# where this is meant to run; see that step for the exact command.
 # Exit 0 == FRESH-INSTALL MVV PASSED (the literal sentinel on the last line).
 set -euo pipefail
 
@@ -149,6 +167,52 @@ _leg_log_is_substantive() {
         return
     fi
     echo "OK"
+}
+
+# nexus-gqrg0 round 2 (GH #1533): the formula-PDF identity verdict helpers
+# below are DUPLICATED from tests/e2e/release-sandbox.sh's nexus-jy4hd
+# shape rather than sourced -- release-sandbox.sh is an executable script
+# with its own unconditional `case "$MODE" in ... esac` dispatch at the
+# bottom, not a library; `source`ing it here would run THAT dispatch
+# inside this script's own shell and abort the journey. Keep both copies
+# in the same shape if either changes.
+_mineru_doctor_verdict() {
+    # stdin: `nx doctor --check-mineru` output → "OK" or "FAIL|<cause>"
+    python3 -c '
+import sys
+out = sys.stdin.read()
+lines = [l for l in out.splitlines() if "MinerU" in l]
+if not lines:
+    print("FAIL|doctor output carries no MinerU line at all — the probe ran nothing")
+    raise SystemExit(0)
+bad = [l.strip() for l in lines if "✗" in l]
+if bad:
+    print("FAIL|" + "; ".join(bad)[:300])
+else:
+    print("OK")
+'
+}
+
+_new_chunk_ids() {
+    # $1 = file of before-ids, $2 = file of after-ids -> new ids, one/line
+    comm -13 <(sort -u "$1") <(sort -u "$2")
+}
+
+_extractor_identity_verdict() {
+    # stdin: `nx store get <chunk-id>` output → "OK" or "FAIL|<cause>"
+    python3 -c '
+import sys
+out = sys.stdin.read()
+for line in out.splitlines():
+    if line.startswith("Extractor:"):
+        method = line.split(":", 1)[1].strip()
+        if method == "mineru":
+            print("OK")
+        else:
+            print(f"FAIL|indexed chunk carries extraction_method={method!r}, not mineru — the step exercised a DIFFERENT extractor than the one it claims to gate")
+        raise SystemExit(0)
+print("FAIL|no Extractor field on the indexed chunk — extraction_method missing, identity unproven")
+'
 }
 
 _self_test() {
@@ -241,6 +305,24 @@ _self_test() {
         "$(_leg_log_is_substantive "$t/traceback-only.log")" "FAIL|contains an uncaught Python traceback"
     printf 'Stored: %s\n' "$(printf 'a%.0s' $(seq 1 64))" > "$t/real-content.log"
     _assert_eq "GREEN: a real, traceback-free log -> OK" "$(_leg_log_is_substantive "$t/real-content.log")" "OK"
+
+    echo "== self-test: _mineru_doctor_verdict (nexus-gqrg0 round 2, duplicated from release-sandbox.sh) =="
+    out=$(printf '✓ MinerU import\n✓ MinerU parse: parsed a synthesized one-page probe PDF\n' | _mineru_doctor_verdict)
+    _assert_eq "passing doctor output -> OK" "$out" "OK"
+    out=$(printf '✓ MinerU import\n✗ MinerU parse: TypeError: '"'"'PageChars'"'"' object is not iterable\n' | _mineru_doctor_verdict)
+    _assert_prefix "RED: real-parse PageChars TypeError -> FAIL naming it" "$out" "FAIL|"
+    out=$(printf 'unrelated doctor chatter\n' | _mineru_doctor_verdict)
+    _assert_prefix "RED: no MinerU line at all -> FAIL, never a silent pass" "$out" "FAIL|doctor output carries no MinerU line"
+
+    echo "== self-test: _new_chunk_ids + _extractor_identity_verdict (nexus-gqrg0 round 2) =="
+    printf '%s\n' "$(printf '0a%.0s' $(seq 32))" > "$t/before-ids"
+    printf '%s\n%s\n' "$(printf '0a%.0s' $(seq 32))" "$(printf 'ff%.0s' $(seq 32))" > "$t/after-ids"
+    new_id="$(_new_chunk_ids "$t/before-ids" "$t/after-ids")"
+    _assert_eq "set diff isolates only the step-added chunk" "$new_id" "$(printf 'ff%.0s' $(seq 32))"
+    out=$(printf 'ID: abc\nExtractor:  mineru\n' | _extractor_identity_verdict)
+    _assert_eq "mineru-extracted chunk -> OK" "$out" "OK"
+    out=$(printf 'ID: abc\nExtractor:  docling\n' | _extractor_identity_verdict)
+    _assert_prefix "RED: silent substitution (docling) -> FAIL naming it" "$out" "FAIL|indexed chunk carries extraction_method='docling'"
 
     echo "== self-test: bash -n on this script itself =="
     if bash -n "${BASH_SOURCE[0]}"; then
@@ -809,6 +891,119 @@ if [ -n "$WARNING_LINES" ]; then
     printf '%s\n' "$WARNING_LINES" | sed 's/^/    /'
 fi
 
+echo "── 8c/10 always-on resolver bound: pdftext/pypdfium2 (nexus-gqrg0 round 2, GH #1533) ──"
+# GH #1533 round 2: tests/test_install_source_wiring_pins.py proves the
+# LOCAL checkout's own uv.lock/wheel metadata carries the pdftext<0.7 bound
+# -- it does not prove a FRESH resolve (this journey's own install layer)
+# actually landed below the ceiling. No model weights needed, so this is
+# an always-on leg (part of the fixed leg count), not gated behind
+# NX_MVV_FORMULA_PDF_CHECK like the deep formula-index proof below. Runs
+# against $PROBE_PYTHON (the uv-tool venv in --published mode, the plain
+# venv in the local-wheel default) BEFORE leg 9 replaces the shim with a
+# generation -- see generation_install_probe.py's matching assertion
+# (pattern: its own av-absence check) for the SAME bound checked a second
+# time against the GENERATION's python once leg 9 creates it.
+RESOLVER_BOUND_OUT="$("$PROBE_PYTHON" -c '
+import sys
+from importlib.metadata import version
+from packaging.version import Version
+
+pdftext_v = Version(version("pdftext"))
+pypdfium2_v = Version(version("pypdfium2"))
+ok = pdftext_v < Version("0.7") and pypdfium2_v < Version("5")
+print(f"pdftext={pdftext_v} pypdfium2={pypdfium2_v} bound_ok={ok}")
+sys.exit(0 if ok else 1)
+' 2>&1)"
+RESOLVER_BOUND_RC=$?
+echo "  $RESOLVER_BOUND_OUT" | tee "$LOGS/resolver-bound.log" >/dev/null
+echo "  $RESOLVER_BOUND_OUT"
+if [ "$RESOLVER_BOUND_RC" -ne 0 ]; then
+    _fail "resolved pdftext/pypdfium2 above the GH #1533 bound in $PROBE_PYTHON -- $RESOLVER_BOUND_OUT"
+fi
+
+# ── formula-PDF index (opt-in, --published mode only; nexus-gqrg0 / GH #1533) ──
+# Not part of the fixed 10-leg count above (NX_MVV_FORMULA_PDF_CHECK=1 is an
+# explicit opt-in, never run by default) -- see the usage comment at the top
+# of this file for why it is gated instead of promoted into the numbered
+# journey. GH #1533: mineru's unbounded `pdftext>=0.6.3` let a fresh resolve
+# install pdftext 0.7.x, whose PageChars dropped __iter__ while mineru's own
+# span_pre_proc.py still iterates it as a list -- import succeeded, `nx
+# doctor --check-mineru` reported healthy, and every real formula-PDF parse
+# raised TypeError. The resolver bound (pyproject.toml's [project.dependencies]
+# entry plus its [tool.uv] override) and its lint pin cover the LOCAL wheel;
+# the leg above covers a fresh resolve's version identity; this block is the
+# one place that proves the PUBLISHED dependency resolution actually parses a
+# real formula PDF through MinerU and tags the result with its identity.
+#
+# Runs BEFORE leg 9 (nexus-gqrg0 review C, substantive-critic "Mechanics"):
+# leg 9's generation-install probe replaces the uv-owned symlink in
+# ~/.local/bin (shims.sh:147-155), so a formula block placed AFTER leg 9
+# would exercise the GENERATION's python, not the uv-tool layer this block
+# means to prove.
+FORMULA_PDF_CHECK_RAN=0
+if [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ]; then
+    if [ "$PUBLISHED_MODE" != 1 ]; then
+        echo "  (NX_MVV_FORMULA_PDF_CHECK is only meaningful with --published; ignored on the local-wheel layer)"
+    else
+        echo "── formula-PDF index via MinerU (opt-in, published bytes, uv-tool layer) ──"
+        FORMULA_PDF_CHECK_RAN=1
+        FIXTURE_PDF="$REPO_ROOT/tests/fixtures/bft-to-smr.pdf"
+        [ -f "$FIXTURE_PDF" ] || _fail "fixture missing: $FIXTURE_PDF (nexus-gqrg0 formula-pdf check)"
+        FORMULA_COLLECTION="distributed-systems"
+
+        # nexus-jy4hd's verdict parser (duplicated above, see that comment
+        # for why release-sandbox.sh is not sourced): `nx doctor
+        # --check-mineru`'s rc is not a reliable failure signal for this
+        # one check, and a blind `grep -q '✗'` over the whole doctor
+        # transcript is vacuous -- it says nothing about WHICH line
+        # failed, and a future check unrelated to MinerU that also prints
+        # ✗ would false-positive this one. The verdict function parses
+        # every MinerU-carrying line by name.
+        _nx doctor --check-mineru >"$LOGS/mineru-doctor.log" 2>&1
+        MINERU_DOCTOR_VERDICT="$(_mineru_doctor_verdict < "$LOGS/mineru-doctor.log")"
+        if [ "$MINERU_DOCTOR_VERDICT" != "OK" ]; then
+            cat "$LOGS/mineru-doctor.log" >&2
+            _fail "nx doctor --check-mineru: ${MINERU_DOCTOR_VERDICT#FAIL|} — see $LOGS/mineru-doctor.log (nexus-gqrg0 class)"
+        fi
+
+        # release-sandbox.sh's proven identity shape (its 3b/11 step):
+        # snapshot chunk ids before, index, set-diff to isolate ONLY the
+        # chunk THIS step added (the collection is chash-ordered, so a
+        # positional pick is the wrong document roughly half the time),
+        # then read that chunk back and assert its Extractor field is
+        # literally mineru -- belt-and-braces against a silent
+        # in-extractor fallback to docling/pymupdf.
+        FORMULA_IDS_DIR="$(mktemp -d "$WORK/formula-ids-XXXXXX")"
+        # `|| true` on both snapshots (release-sandbox.sh's own shape): an
+        # empty/first-use collection makes grep find zero matches (exit 1),
+        # which is a legitimate "before" state, not a script-ending error
+        # under this file's `set -e` -- the actual pass/fail signal is the
+        # SEPARATE set-diff + extractor-identity assert below, never these
+        # snapshot lines' own exit status.
+        _nx store list --collection "$FORMULA_COLLECTION" 2>/dev/null \
+            | grep -oE '\b[0-9a-f]{64}\b' > "$FORMULA_IDS_DIR/before" || true
+        if ! _nx index pdf "$FIXTURE_PDF" --extractor mineru --collection "$FORMULA_COLLECTION" \
+                >"$LOGS/index-formula-pdf.log" 2>&1; then
+            tail -20 "$LOGS/index-formula-pdf.log" >&2
+            _fail "nx index pdf (MinerU path, published bytes) exited non-zero — see $LOGS/index-formula-pdf.log (GH #1533 class)"
+        fi
+        _nx store list --collection "$FORMULA_COLLECTION" 2>/dev/null \
+            | grep -oE '\b[0-9a-f]{64}\b' > "$FORMULA_IDS_DIR/after" || true
+        NEW_FORMULA_IDS="$(_new_chunk_ids "$FORMULA_IDS_DIR/before" "$FORMULA_IDS_DIR/after" || true)"
+        FORMULA_CHUNK_ID="${NEW_FORMULA_IDS%%$'\n'*}"
+        if [ -n "$FORMULA_CHUNK_ID" ]; then
+            IDENT_VERDICT="$(_nx store get "$FORMULA_CHUNK_ID" --collection "$FORMULA_COLLECTION" 2>/dev/null | _extractor_identity_verdict)"
+        else
+            IDENT_VERDICT="FAIL|nx index pdf added no new chunk ids to $FORMULA_COLLECTION — nothing to verify extractor identity against"
+        fi
+        if [ "$IDENT_VERDICT" != "OK" ]; then
+            echo "$IDENT_VERDICT" >&2
+            _fail "extractor identity (mineru): ${IDENT_VERDICT#FAIL|} (GH #1533 class)"
+        fi
+        echo "  [ok] indexed chunk extraction_method=mineru (identity proven, published bytes, uv-tool layer)"
+    fi
+fi
+
 echo "── 9/10 generation install path on the virgin HOME (nexus-utpuw.19) ──"
 # This gate installs via `uv pip install` into a scrubbed venv and never
 # touches the tool layout, so it is unaffected by the generation change AND
@@ -851,11 +1046,23 @@ echo "── 10/10 non-vacuity ──"
 # despite a background-thread exception) read as fine. This calls
 # _leg_log_is_substantive instead, which adds the one thing `-s` cannot: no
 # unhandled Python traceback anywhere in the leg's own log.
-LEGS_TO_CHECK="mcp-entrypoints.log init.log store.log store-reput.log search-reput.log index.log doctor.log generation-install.log"
+LEGS_TO_CHECK="mcp-entrypoints.log init.log store.log store-reput.log search-reput.log index.log doctor.log resolver-bound.log generation-install.log"
 if [ "$PUBLISHED_MODE" = 1 ]; then
     LEGS_TO_CHECK="install.log $LEGS_TO_CHECK"
 else
     LEGS_TO_CHECK="build.log $LEGS_TO_CHECK"
+fi
+if [ "$FORMULA_PDF_CHECK_RAN" = 1 ]; then
+    # mineru-doctor.log is deliberately NOT re-checked here: its real
+    # assertion already ran and failed loud (_mineru_doctor_verdict, leg
+    # 8c's formula-index block above) -- re-running it through
+    # _leg_log_is_substantive's weaker non-empty/no-traceback test would
+    # be pure duplication, exactly the shape nexus-1ktd5 item C already
+    # replaced `test -s` for. index-formula-pdf.log is the one file that
+    # ISN'T independently re-verified elsewhere (the chunk-id set-diff and
+    # extractor-identity assertions read `nx store list`/`nx store get`
+    # output directly, never this log), so it stays.
+    LEGS_TO_CHECK="$LEGS_TO_CHECK index-formula-pdf.log"
 fi
 for f in $LEGS_TO_CHECK; do
     LEG_VERDICT="$(_leg_log_is_substantive "$LOGS/$f")"

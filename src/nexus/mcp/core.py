@@ -5744,6 +5744,298 @@ def plan_delete(plan_id: int) -> str:
         return _mcp_tool_error("plan_delete", e)
 
 
+
+
+# ── Tuple space tools (RDR-205 Phase 2 Step 2, bead nexus-em75s.10) ──────────
+# Eight MCP tools over nexus.db.t2.http_tuple_store.HttpTupleStore
+# (nexus-em75s.9). ``structured_output=False`` is declared explicitly on
+# EVERY one of the eight tools below, regardless of return-annotation
+# shape (nexus-em75s.12 review fix — this comment previously claimed it
+# was set only where the annotation is a union or a list, which the code
+# never did: ``tuple_out``/``tuple_ack``/``tuple_nack`` return a bare
+# ``str`` and ``tuple_registry``/``tuple_stats`` a bare ``dict``, and both
+# carry the same explicit ``structured_output=False``). The real rule is
+# the nexus-r90ao registration census (``tests/test_mcp_wire_shapes.py``):
+# every ``@mcp.tool()`` must declare ``structured_output=`` explicitly, so
+# a future signature edit to a union/list return can never silently
+# reintroduce FastMCP's auto-wrap with no test noticing — see
+# ``tuple_registry``'s and ``tuple_stats``'s own inline comments below,
+# and the ``search`` tool's docstring above, for the full nexus-6jlki/
+# nexus-r90ao auto-wrap rule this declares against. ``rd``/``in_`` cover
+# their own non-blocking probe case via ``timeout_s=0`` (the default):
+# there are no separate ``tuple_rdp``/``tuple_inp`` tools.
+
+
+def _tuple_row_to_dict(row: Any) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "subspace": row.subspace,
+        "template": row.template,
+        "keys": row.keys,
+        "dims": row.dims,
+        "body": row.body,
+        "claim_state": row.claim_state,
+        "claimant": row.claimant,
+        "lease_until": row.lease_until,
+        "attempts": row.attempts,
+        "consumed_at": row.consumed_at,
+        "consumed_by": row.consumed_by,
+        "expires_at": row.expires_at,
+        "created_at": row.created_at,
+    }
+
+
+def _tuple_census_to_dict(c: Any) -> dict[str, Any]:
+    return {
+        "subspace": c.subspace,
+        "total": c.total,
+        "available": c.available,
+        "claimed": c.claimed,
+        "dead": c.dead,
+        "consumed": c.consumed,
+        "expired_unpurged": c.expired_unpurged,
+        "oldest_created_at": c.oldest_created_at,
+        "newest_created_at": c.newest_created_at,
+    }
+
+
+@mcp.tool(
+    title="Write Tuple",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
+)
+def tuple_out(
+    subspace: str,
+    keys: dict[str, str],
+    dims: dict[str, str] | None = None,
+    body: str | None = None,
+    nonce: str | None = None,
+    ttl_seconds: int | None = None,
+) -> str:
+    """Write a tuple into the RDR-205 Linda tuple space (``out``).
+
+    Idempotent by construction: the tuple id is derived from the
+    template's ``id_from`` fields only, so a retry lands on the same
+    tuple. Returns the tuple id, lowercase hex.
+
+    Args:
+        subspace: The concrete subspace to write into (resolves to a
+            registered template — see ``tuple_registry``).
+        keys: The template's pinned key fields (required, non-empty).
+        dims: Optional dimension fields the template declares.
+        body: Optional tuple payload.
+        nonce: Optional caller-minted nonce (for templates whose
+            ``id_from`` includes it).
+        ttl_seconds: Optional explicit TTL, capped at the template's
+            retention ceiling (``TtlTooLong`` if it isn't).
+    """
+    try:
+        tuple_id = _t2_index_write(
+            lambda db: db.tuples.out(
+                subspace, keys, dims, body, nonce=nonce, ttl_seconds=ttl_seconds,
+            ),
+            op="tuple_out",
+        )
+        return tuple_id
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("tuple_out", e)
+
+
+@mcp.tool(
+    title="Read Tuples",
+    annotations={"readOnlyHint": True},
+    structured_output=False,
+)
+def tuple_rd(
+    subspace: str,
+    keys_pattern: dict[str, str] | None = None,
+    n: int = 1,
+    since_created_at: str = "",
+    since_id: str = "",
+    timeout_s: int = 0,
+) -> list[dict]:
+    """Non-destructive read from a subspace (``rd``).
+
+    A probe (never blocks) when ``timeout_s=0`` (the default); parks up
+    to ``timeout_s`` seconds (capped by the engine, CA 3) when nothing
+    matches immediately and ``timeout_s>0``. Matches on equality over
+    whatever subset of the pinned keys ``keys_pattern`` supplies; an
+    empty pattern reads the whole subspace. Returns dead-lettered rows
+    too (dead-lettering is a claim state, not an exclusion).
+
+    Args:
+        subspace: The concrete subspace to read.
+        keys_pattern: Optional key-equality filter (subset match).
+        n: Max rows to return.
+        since_created_at: Paired with ``since_id`` to resume a
+            ``(created_at, id)`` cursor; leave both empty to read from
+            the start.
+        since_id: See ``since_created_at``.
+        timeout_s: Seconds to park when nothing matches immediately;
+            ``0`` (default) never blocks.
+    """
+    since = (since_created_at, since_id) if since_created_at and since_id else None
+    try:
+        with _t2_ctx() as db:
+            rows = db.tuples.rd(
+                subspace, keys_pattern, n=n, since=since, timeout_s=timeout_s,
+            )
+        return [_tuple_row_to_dict(r) for r in rows]
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return [{"error": _mcp_tool_error("tuple_rd", e)}]
+
+
+@mcp.tool(
+    title="Claim Tuple",
+    annotations={"readOnlyHint": False, "destructiveHint": True},
+    structured_output=False,
+)
+def tuple_in(
+    subspace: str,
+    keys_pattern: dict[str, str],
+    claimant: str,
+    lease_s: int,
+    timeout_s: int = 0,
+) -> dict | None:
+    """Destructive (claiming) read from a subspace (``in``).
+
+    A probe (never blocks) when ``timeout_s=0`` (the default); parks up
+    to ``timeout_s`` seconds when nothing matches immediately and
+    ``timeout_s>0``. Unlike ``tuple_rd``, every key in ``keys_pattern``
+    must be pinned (no subset match) and dead-lettered rows are never
+    returned. Returns ``{"tuple": {...}, "claim_id": "..."}`` on a
+    claim, ``None`` on a probe miss. Ack or nack the claim with
+    ``tuple_ack``/``tuple_nack`` — the row stays claimed (and
+    unavailable to others) until then or until the lease lapses.
+
+    Args:
+        subspace: The concrete subspace to claim from.
+        keys_pattern: Every pinned key the template declares, exact match.
+        claimant: This caller's identity (mailbox/agent id).
+        lease_s: Claim lease length, capped at the template's
+            ``take.max_lease_seconds`` and the row's remaining TTL.
+        timeout_s: Seconds to park when nothing matches immediately;
+            ``0`` (default) never blocks.
+    """
+    try:
+        result = _t2_index_write(
+            lambda db: db.tuples.in_(
+                subspace, keys_pattern, claimant=claimant, lease_s=lease_s,
+                timeout_s=timeout_s,
+            ),
+            op="tuple_in",
+        )
+        if result is None:
+            return None
+        row, claim_id = result
+        return {"tuple": _tuple_row_to_dict(row), "claim_id": claim_id}
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return {"error": _mcp_tool_error("tuple_in", e)}
+
+
+@mcp.tool(
+    title="Ack Tuple Claim",
+    annotations={"readOnlyHint": False, "destructiveHint": True},
+    structured_output=False,
+)
+def tuple_ack(claim_id: str, claimant: str) -> str:
+    """Consume a claimed tuple (``ack``). The row is invisible to
+    ``tuple_rd``/``tuple_in`` after this.
+
+    Args:
+        claim_id: The claim id returned by ``tuple_in``.
+        claimant: Must match the identity that made the claim.
+    """
+    try:
+        _t2_index_write(
+            lambda db: db.tuples.ack(claim_id, claimant), op="tuple_ack",
+        )
+        return f"Acked claim {claim_id}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("tuple_ack", e)
+
+
+@mcp.tool(
+    title="Nack Tuple Claim",
+    annotations={"readOnlyHint": False, "destructiveHint": True},
+    structured_output=False,
+)
+def tuple_nack(claim_id: str, claimant: str) -> str:
+    """Release a claimed tuple back to available (``nack``). Counts an
+    attempt toward the template's ``max_attempts`` (dead-lettered at the
+    cap).
+
+    Args:
+        claim_id: The claim id returned by ``tuple_in``.
+        claimant: Must match the identity that made the claim.
+    """
+    try:
+        _t2_index_write(
+            lambda db: db.tuples.nack(claim_id, claimant), op="tuple_nack",
+        )
+        return f"Nacked claim {claim_id}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("tuple_nack", e)
+
+
+@mcp.tool(
+    title="Tuple Template Registry",
+    annotations={"readOnlyHint": True},
+    # nexus-r90ao registration census (tests/test_mcp_wire_shapes.py): every
+    # @mcp.tool() must declare structured_output= explicitly. A bare,
+    # unparameterized `-> dict` is never auto-wrapped by the pinned FastMCP
+    # today regardless of this value (the nexus-6jlki/nexus-r90ao rule this
+    # bead's own notes cite) -- declared anyway so a future signature edit
+    # can't silently reintroduce a wrap with no test noticing.
+    structured_output=False,
+)
+def tuple_registry() -> dict:
+    """The boot-loaded tuple-space template set: ``{digest, sources,
+    templates: [...]}`` (RDR-205). ``digest`` changes whenever a
+    template file changes; ``sources`` names the directories loaded."""
+    try:
+        with _t2_ctx() as db:
+            return db.tuples.registry()
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return {"error": _mcp_tool_error("tuple_registry", e)}
+
+
+@mcp.tool(
+    title="List Tuple Subspaces",
+    annotations={"readOnlyHint": True},
+    structured_output=False,
+)
+def tuple_list(prefix: str = "") -> list[dict]:
+    """Concrete tuple subspaces that exist, optionally filtered by
+    *prefix* (e.g. ``"agents.mailbox."``)."""
+    try:
+        with _t2_ctx() as db:
+            rows = db.tuples.subspace_list(prefix or None)
+        return [_tuple_census_to_dict(c) for c in rows]
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return [{"error": _mcp_tool_error("tuple_list", e)}]
+
+
+@mcp.tool(
+    title="Tuple Subspace Stats",
+    annotations={"readOnlyHint": True},
+    # See tuple_registry's comment above: declared explicitly to satisfy
+    # the nexus-r90ao registration census even though a bare `-> dict`
+    # return needs no suppression today.
+    structured_output=False,
+)
+def tuple_stats(subspace: str) -> dict:
+    """The exact-name census for one subspace: ``{subspace, total,
+    available, claimed, dead, consumed, expired_unpurged,
+    oldest_created_at, newest_created_at}``."""
+    try:
+        with _t2_ctx() as db:
+            c = db.tuples.subspace_stats(subspace)
+        return _tuple_census_to_dict(c)
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return {"error": _mcp_tool_error("tuple_stats", e)}
+
+
 # ── Demoted tools (plain functions, no @mcp.tool()) ──────────────────────────
 
 

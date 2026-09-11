@@ -1,0 +1,25 @@
+# RDR-205 v1 template: session ledger rows.
+#
+# Read-only: take.enabled is false, so ledger rows are never claimed. The
+# retention window (90 days) is what the census compares within.
+#
+# kind is pinned to {start, report} (RDR-205 §Technical Design "Registry"
+# ~844; nexus-em75s.36) via keys' mapping form -- a bare "agent_id:" entry
+# stays unconstrained, "kind:" carries a nested values list.
+name: ledger/<session_id>
+
+keys:
+  agent_id:
+  kind:
+    values: [start, report]
+
+dimensions:
+  agent_type:
+    type: string
+
+id_from: keys
+
+take:
+  enabled: false
+
+retention_seconds: 7776000

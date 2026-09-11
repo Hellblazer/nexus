@@ -118,7 +118,7 @@ def test_real_index_repo_command_shares_one_t2_httpx_client(
     expensive indexer internals mocked (the established convention in
     tests/test_index_cmd.py): BEFORE this wiring, index.py's two
     T2Database call sites (``_collections_without_topics`` +
-    ``run_collection_postprocessing``) would have built 8 httpx.Client()s
+    ``run_collection_postprocessing``) would have built 9 httpx.Client()s
     EACH = 16 total; AFTER, the index group's ONE shared client backs
     both. Table: T2Database constructions -> 2, T2 shared-client builds
     -> 1 (not 16)."""
@@ -202,8 +202,8 @@ def test_default_index_t2database_construction_outside_a_command_is_unchanged(
     # genuinely has zero topics, so it lands in the "without topics" set
     # via the normal (not fail-safe/exception) path.
     assert result == {"nonexistent-collection"}
-    assert len(client_tally) == 8, (
+    assert len(client_tally) == 9, (
         f"expected _collections_without_topics() called with no active "
-        f"Click context to build 8 independent httpx.Client()s (default, "
+        f"Click context to build 9 independent httpx.Client()s (default, "
         f"unwired behavior); got {len(client_tally)}"
     )

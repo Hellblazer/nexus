@@ -8,14 +8,14 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 | Server | Entry point | Tools | Purpose |
 |---|---|---|---|
-| `nexus` | `nx-mcp` | 39 | Storage tiers, retrieval, operators, orchestration, diagnostics |
+| `nexus` | `nx-mcp` | 46 | Storage tiers, retrieval, operators, orchestration, diagnostics |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`) or the `.mcpb` extension. No separate install.
 
 **Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started § Install](getting-started.md#install) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
-## `nexus` — retrieval + storage (37 tools)
+## `nexus` — retrieval + storage (46 tools)
 
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
@@ -60,6 +60,25 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 | `plan_search` | Retrieve cached plans by PostgreSQL full-text search (`ts_rank` relevance). Since 7.27.0 (nexus-vi8fp) an any-lexeme OR fallback fires when the default AND query returns nothing — reachable from this browsing tool only; `plan_match` structurally cannot reach it |
 | `plan_delete` | Delete a plan-library entry by id (cleanup counterpart to `plan_save`) |
 | `traverse` | Walk the catalog link graph from seed tumblers with typed link filters or a named purpose. Depth capped at 3. Returns `{tumblers, ids, collections}` for downstream retrieval |
+
+### Tuple space (T2-adjacent, RDR-205)
+
+`nexus.db.t2.http_tuple_store.HttpTupleStore` (`db.tuples`) over the engine's `/v1/tuples`. See [Tuple Space](tuple-space.md) for the full reference and [Tuple Space Walkthroughs](tuple-space-walkthroughs.md) for scenario diagrams.
+
+| Tool | Purpose |
+|---|---|
+| `tuple_out` | Write a tuple (`out`). Idempotent by construction — the id derives from the template's `id_from` fields only, so a retry lands on the same tuple |
+| `tuple_rd` | Non-destructive read (`rd`). A probe when `timeout_s=0` (default); parks up to `timeout_s` seconds (capped by the engine) when nothing matches. Returns dead-lettered rows too |
+| `tuple_in` | Destructive (claiming) read (`in`). Every key in `keys_pattern` must be pinned. Returns `{tuple, claim_id}` on a claim, `None` on a probe miss; ack or nack the claim afterward |
+| `tuple_ack` | Consume a claimed tuple (`ack`) |
+| `tuple_nack` | Release a claim back to available (`nack`); counts an attempt toward the template's `max_attempts` |
+| `tuple_registry` | The boot-loaded template set: `{digest, sources, templates}` |
+| `tuple_list` | Concrete subspaces that exist, optionally filtered by prefix |
+| `tuple_stats` | The census for one subspace |
+
+**Routing rule of thumb**: `tuple_rd`/`tuple_in` with `timeout_s=0` (the default) are the probe forms — never block. Pass `timeout_s>0` only when the caller intends to wait; a wait of minutes is a loop of parked calls (each capped at 25 s by default), never one long park. There are no separate probe-named tools (`tuple_rdp`/`tuple_inp`) — `timeout_s=0` covers that case on the same tool.
+
+**Failure modes**: the engine renders nine typed errors as `{"error": "<code>", "detail": "..."}`; the two most likely to surface from a tool call are `ParkCapExceeded` (429 — the per-claimant or global park cap is at capacity; back off and retry) and `TimeoutTooLong` (400 — `timeout_s` above the engine's cap). A 502/503/504 during an engine deploy is retried by the client transparently (`rd`/`out` freely, `in` with the same claimant); the deploy gap is a retry, not an error surfaced to the caller. See [Tuple Space § Errors](tuple-space.md#errors) for the full nine.
 
 ### Operators (LLM-backed, RDR-079)
 
@@ -162,6 +181,8 @@ The Python functions still exist in `src/nexus/mcp/core.py` and `src/nexus/mcp/c
 | Remember for next session | `nexus` | `memory_put` |
 | Share a hypothesis with a sibling agent | `nexus` | `scratch` |
 | Cache a query plan for reuse | `nexus` | `plan_save` |
+| Wait for a dispatched agent's report | `nexus` | `tuple_rd` on `ledger/<session_id>` |
+| Send a mid-turn message to an agent | `nexus` | `tuple_out` to `mailbox/<agent id>` |
 
 Content (chunks, documents, notes) is on `nexus`; metadata and relationships (entries, typed links, tumblers) are on `nexus-catalog`. `query` crosses the boundary — it uses catalog metadata to scope a content search.
 
@@ -213,3 +234,4 @@ The `nx_answer` / `nx_tidy` / `nx_plan_audit` / `nx_enrich_beads` / `operator_*`
 - [Document Catalog](catalog.md) — what the catalog is, link types, purposes, topic taxonomy
 - [Architecture § Module Map](architecture.md#module-map) — internal module layout
 - [CLI Reference — nx catalog](cli-reference.md#nx-catalog) — CLI equivalents for catalog tools
+- [Tuple Space](tuple-space.md) — the RDR-205 coordination substrate the `tuple_*` tools front

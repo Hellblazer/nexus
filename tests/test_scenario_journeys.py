@@ -58,12 +58,17 @@ import json
 import os
 import re
 import subprocess
+import sys
+import threading
+import time
+import uuid
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.db.t2.http_tuple_store import HttpTupleStore
 from tests._catalog_fixture_ops import active_reader, documents_by_file_path, documents_by_title
 from tests._engine_substrate import ensure_engine
 
@@ -506,4 +511,659 @@ def test_cross_corpus_search_routes_correctly(t2_service_env, tmp_path: Path) ->
     assert knowledge_seen and docs_seen, (
         f"combined --corpus {combined_corpus!r} did not route to both corpora: "
         f"{all_collections_seen}"
+    )
+
+
+# ── RDR-205 Phase 5: the mailbox consumer (bead nexus-em75s.25) ─────────────
+#
+# Eight journeys against the ``mailbox/<address>`` template (``service/src/
+# main/resources/tuples/templates/mailbox.yaml``): keys ``[to]``, dims
+# ``{from (required), kind, correlation_id, address_kind}``, ``id_from=
+# keys+nonce``, ``id_dims=[from]`` -- the tuple id is a hash of (tenant,
+# subspace, to, from, nonce), never of body or the other dims (``Tuple
+# Repository.computeId``). Every journey below drives ``nx tuple`` through
+# the CLI (cross-verb by construction: out/rd/in/ack/nack/stats), matching
+# this file's own binding constraint.
+
+
+def _tuple_uniq(label: str) -> str:
+    return f"{label}-{uuid.uuid4().hex[:10]}"
+
+
+def _tuple_last_json_line(output: str):
+    """Parse the LAST non-empty line of *output* as JSON -- a structlog
+    line can land on stdout ahead of the command's own JSON line."""
+    lines = [line for line in output.splitlines() if line.strip()]
+    return json.loads(lines[-1])
+
+
+@pytest.mark.scenario
+def test_mailbox_mid_turn_directive_is_drained_before_hand_back(t2_service_env) -> None:
+    """Journey 5: the mailbox skill's convention -- send by ``tuple out`` to
+    the agent's address, drain by ``tuple in`` BEFORE composing any
+    hand-back.
+
+    A directive lands mid-turn; the drain step finds and acks it before any
+    hand-back would be composed; afterwards the mailbox is empty by both
+    reads a caller might use -- ``rd`` never returns a consumed row and a
+    fresh ``in`` probe misses.
+    """
+    runner = CliRunner()
+    address = _tuple_uniq("agent")
+    nonce = _tuple_uniq("nonce")
+
+    out = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=orchestrator",
+        "--dim", "kind=directive", "--body", "check X before finishing",
+        "--nonce", nonce,
+    ])
+    assert out.exit_code == 0, out.output
+    directive_id = out.output.strip().splitlines()[-1]
+
+    # The drain, run BEFORE the agent composes its hand-back.
+    claim = runner.invoke(main, [
+        "tuple", "in", f"mailbox/{address}", "--pattern", f"to={address}",
+        "--claimant", address, "--lease-s", "30", "--json",
+    ])
+    assert claim.exit_code == 0, claim.output
+    payload = _tuple_last_json_line(claim.output)
+    assert payload["tuple"]["id"] == directive_id
+    assert payload["tuple"]["body"] == "check X before finishing"
+    assert payload["tuple"]["dims"] == {"from": "orchestrator", "kind": "directive"}
+
+    ack = runner.invoke(main, ["tuple", "ack", payload["claim_id"], "--claimant", address])
+    assert ack.exit_code == 0, ack.output
+
+    # Hand-back would be composed only now. The mailbox reads empty either
+    # way a caller looks.
+    rd = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
+    assert rd.exit_code == 0, rd.output
+    assert _tuple_last_json_line(rd.output) == [], "an acked row must never come back from rd"
+
+    probe = runner.invoke(main, [
+        "tuple", "in", f"mailbox/{address}", "--pattern", f"to={address}",
+        "--claimant", address, "--lease-s", "5",
+    ])
+    assert probe.exit_code == 1, probe.output
+
+
+@pytest.mark.scenario
+def test_mailbox_resent_message_lands_once_with_expires_at_unchanged(t2_service_env) -> None:
+    """Journey 6: the same sender resending the same nonce to one address
+    is ONE row -- the id is a hash of (to, from, nonce), so a resend is an
+    idempotent upsert that touches ``expires_at`` only (never body, per
+    ``TupleRepository.out``'s DO UPDATE clause), and under the default TTL
+    (== the template's retention) ``expires_at`` is already clamped to
+    ``created_at + retention`` and cannot move.
+    """
+    runner = CliRunner()
+    address = _tuple_uniq("agent")
+    nonce = _tuple_uniq("nonce")
+
+    first = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-a",
+        "--body", "v1", "--nonce", nonce,
+    ])
+    assert first.exit_code == 0, first.output
+    tuple_id = first.output.strip().splitlines()[-1]
+
+    rd1 = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
+    row1 = _tuple_last_json_line(rd1.output)[0]
+    assert row1["id"] == tuple_id
+
+    resend = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-a",
+        "--body", "v2-should-not-land", "--nonce", nonce,
+    ])
+    assert resend.exit_code == 0, resend.output
+    assert resend.output.strip().splitlines()[-1] == tuple_id, (
+        "a resend with the same nonce must land on the SAME tuple id"
+    )
+
+    rd2 = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
+    rows2 = _tuple_last_json_line(rd2.output)
+    assert len(rows2) == 1, f"a resend must be one row, not a second: {rows2}"
+    assert rows2[0]["id"] == tuple_id
+    assert rows2[0]["body"] == "v1", "a resend's DO UPDATE never touches body"
+    assert rows2[0]["expires_at"] == row1["expires_at"], "expires_at must not move on a resend"
+
+
+@pytest.mark.scenario
+def test_mailbox_two_different_nonces_to_one_address_are_two_rows(t2_service_env) -> None:
+    """Journey 7 (RDR-205 Test Plan): two mailbox messages to one address
+    with different sender-minted nonces are two independent rows -- the
+    nonce is part of the tuple's identity."""
+    runner = CliRunner()
+    address = _tuple_uniq("agent")
+
+    first = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-a",
+        "--body", "first", "--nonce", _tuple_uniq("nonce"),
+    ])
+    assert first.exit_code == 0, first.output
+    second = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-a",
+        "--body", "second", "--nonce", _tuple_uniq("nonce"),
+    ])
+    assert second.exit_code == 0, second.output
+    id1, id2 = first.output.strip().splitlines()[-1], second.output.strip().splitlines()[-1]
+    assert id1 != id2, "two different nonces must never collide onto one tuple id"
+
+    rd = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}",
+                              "-n", "10", "--json"])
+    assert rd.exit_code == 0, rd.output
+    rows = _tuple_last_json_line(rd.output)
+    assert {r["id"] for r in rows} == {id1, id2}, f"expected exactly two rows: {rows}"
+
+
+@pytest.mark.scenario
+def test_mailbox_two_senders_minting_the_same_nonce_are_two_rows(t2_service_env) -> None:
+    """Journey 8 (RDR-205 Test Plan): two SENDERS minting the same nonce to
+    one address are two rows -- ``from`` is an ``id_dims`` field, so the
+    sender is part of the tuple's identity and a nonce need only be unique
+    among ONE sender's own messages."""
+    runner = CliRunner()
+    address = _tuple_uniq("agent")
+    shared_nonce = _tuple_uniq("nonce")
+
+    from_a = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-a",
+        "--body", "from a", "--nonce", shared_nonce,
+    ])
+    assert from_a.exit_code == 0, from_a.output
+    from_b = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-b",
+        "--body", "from b", "--nonce", shared_nonce,
+    ])
+    assert from_b.exit_code == 0, from_b.output
+    id_a, id_b = from_a.output.strip().splitlines()[-1], from_b.output.strip().splitlines()[-1]
+    assert id_a != id_b, "the same nonce from two different senders must never collide"
+
+    rd = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}",
+                              "-n", "10", "--json"])
+    assert rd.exit_code == 0, rd.output
+    rows = _tuple_last_json_line(rd.output)
+    assert {r["id"] for r in rows} == {id_a, id_b}, f"expected exactly two rows: {rows}"
+
+
+@pytest.mark.scenario
+def test_mailbox_out_with_no_from_is_a_schema_violation(t2_service_env) -> None:
+    """Journey 9 (RDR-205 Test Plan): a mailbox ``out`` naming no ``from``
+    is a SchemaViolation -- ``from`` is the template's one required
+    dimension, and it is what keeps two senders' nonces from colliding."""
+    runner = CliRunner()
+    address = _tuple_uniq("agent")
+
+    out = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--body", "no sender named",
+        "--nonce", _tuple_uniq("nonce"),
+    ])
+    assert out.exit_code == 1, out.output
+    assert "SchemaViolation" in out.output, out.output
+
+    rd = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
+    assert rd.exit_code == 0, rd.output
+    assert _tuple_last_json_line(rd.output) == [], "a refused out() must write no row"
+
+
+@pytest.mark.scenario
+def test_mailbox_resend_every_day_for_a_week_never_extends_expires_at(t2_service_env) -> None:
+    """Journey 10 (RDR-205 Test Plan): a message resent every day for a
+    week never pushes ``expires_at`` past ``created_at`` plus the
+    template's 7-day retention.
+
+    No engine test-only clock seam exists for tuples (``TupleRepository``
+    stamps every column from the JVM's own ``OffsetDateTime.now()``), so
+    this asserts the invariant directly rather than fast-forwarding a real
+    week: under the default TTL (== retention), each resend's candidate
+    expiry is ``now() + retention``, always AFTER the original row's
+    ``created_at + retention`` ceiling (``now() > created_at`` for every
+    resend after the first), so ``LEAST(candidate, ceiling)`` picks the
+    fixed ceiling every time -- seven resends back-to-back exercises the
+    same clamp seven real weeks apart would. The purge-with-claim-history
+    leg of this Test Plan bullet is engine-sweep/admin-SQL territory with
+    no client-reachable trigger (Day 2 Operations table: "no client
+    operation reads the log in v1") and is out of scope here; Phase 3's
+    sweep beads (nexus-em75s.37/.38) own that half in Java.
+    """
+    runner = CliRunner()
+    address = _tuple_uniq("agent")
+    nonce = _tuple_uniq("nonce")
+
+    first = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-a",
+        "--body", "day 0", "--nonce", nonce,
+    ])
+    assert first.exit_code == 0, first.output
+    tuple_id = first.output.strip().splitlines()[-1]
+    rd0 = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
+    row0 = _tuple_last_json_line(rd0.output)[0]
+    ceiling_expires_at = row0["expires_at"]
+    # The ceiling is derived INDEPENDENTLY of what the engine wrote: the
+    # template's retention_seconds (mailbox.yaml, 604800) added to the
+    # row's own created_at. Asserting only self-consistency across resends
+    # would pass a regression in the ceiling calculation itself.
+    from datetime import datetime, timedelta
+    created_at = datetime.fromisoformat(row0["created_at"])
+    expected_ceiling = created_at + timedelta(seconds=604800)
+    assert datetime.fromisoformat(ceiling_expires_at) == expected_ceiling, (
+        f"expires_at {ceiling_expires_at!r} is not created_at + 7 days ({expected_ceiling.isoformat()!r})"
+    )
+
+    for day in range(1, 8):
+        resend = runner.invoke(main, [
+            "tuple", "out", f"mailbox/{address}",
+            "--key", f"to={address}", "--dim", "from=sender-a",
+            "--body", f"day {day}", "--nonce", nonce,
+        ])
+        assert resend.exit_code == 0, resend.output
+        assert resend.output.strip().splitlines()[-1] == tuple_id
+
+        rd = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
+        rows = _tuple_last_json_line(rd.output)
+        assert len(rows) == 1, f"day {day}: still one row, not {len(rows)}"
+        assert rows[0]["expires_at"] == ceiling_expires_at, (
+            f"day {day}: expires_at moved past created_at + retention: "
+            f"{rows[0]['expires_at']!r} != {ceiling_expires_at!r}"
+        )
+
+
+@pytest.mark.scenario
+def test_mailbox_nack_by_max_attempts_different_claimants_dead_letters(t2_service_env) -> None:
+    """Journey 11 (RDR-205 Test Plan): ``nack`` by ``max_attempts`` (3)
+    DIFFERENT claimants dead-letters the row either way -- parked out of
+    every future claimant's view, still readable by ``rd`` with
+    ``claim_state=dead``, and counted under ``dead`` by ``tuple stats``.
+    """
+    runner = CliRunner()
+    address = _tuple_uniq("agent")
+
+    out = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-a",
+        "--body", "keeps getting nacked", "--nonce", _tuple_uniq("nonce"),
+    ])
+    assert out.exit_code == 0, out.output
+
+    for i in range(3):
+        claimant = _tuple_uniq(f"claimant{i}")
+        claim = runner.invoke(main, [
+            "tuple", "in", f"mailbox/{address}", "--pattern", f"to={address}",
+            "--claimant", claimant, "--lease-s", "30", "--json",
+        ])
+        assert claim.exit_code == 0, f"claim #{i}: {claim.output}"
+        claim_id = _tuple_last_json_line(claim.output)["claim_id"]
+
+        nack = runner.invoke(main, ["tuple", "nack", claim_id, "--claimant", claimant])
+        assert nack.exit_code == 0, f"nack #{i}: {nack.output}"
+
+    # A fourth claimant finds nothing: the row is dead, not available.
+    probe = runner.invoke(main, [
+        "tuple", "in", f"mailbox/{address}", "--pattern", f"to={address}",
+        "--claimant", _tuple_uniq("claimant-late"), "--lease-s", "30",
+    ])
+    assert probe.exit_code == 1, probe.output
+
+    rd = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
+    rows = _tuple_last_json_line(rd.output)
+    assert len(rows) == 1
+    assert rows[0]["claim_state"] == "dead"
+    assert rows[0]["claimant"] is None
+
+    stats = runner.invoke(main, ["tuple", "stats", f"mailbox/{address}", "--json"])
+    assert stats.exit_code == 0, stats.output
+    census = _tuple_last_json_line(stats.output)
+    assert census["dead"] == 1, census
+    assert census["available"] == 0, census
+    assert census["claimed"] == 0, census
+
+
+@pytest.mark.scenario
+def test_mailbox_max_attempts_lapsed_leases_dead_letters(t2_service_env) -> None:
+    """Journey 12 (RDR-205 Test Plan): ``max_attempts`` (3) LAPSED leases
+    -- nobody ever nacks -- dead-letter the row exactly as explicit nacks
+    do: a claim that finds a lapsed prior lease releases it (an ``expire``
+    log row) and re-claims with ``attempts`` incremented; the claim that
+    brings ``attempts`` to ``max_attempts`` dead-letters the row IN THAT
+    SAME transaction and its own select re-runs, returning the probe
+    result (RDR-205 Test Plan: "the claim re-runs its select and returns
+    the next candidate or the probe result"). ``lease_s`` must be a
+    positive integer, so this sleeps past the 1s minimum lease three times
+    rather than controlling a clock -- no seam exists for this engine path
+    (see journey 10's docstring).
+    
+    Note: this journey sleeps past three 1-second leases (about 4.5 s
+    wall clock), the outlier against the file's ~1 s per-journey budget;
+    tuples have no engine-side clock seam, the same convention as
+    ``TupleRepositoryTest``'s ``Thread.sleep(1_500)``.
+    """
+    runner = CliRunner()
+    address = _tuple_uniq("agent")
+
+    out = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{address}",
+        "--key", f"to={address}", "--dim", "from=sender-a",
+        "--body", "keeps lapsing", "--nonce", _tuple_uniq("nonce"),
+    ])
+    assert out.exit_code == 0, out.output
+
+    # Three claims, each left to lapse rather than acked or nacked.
+    for i in range(3):
+        claim = runner.invoke(main, [
+            "tuple", "in", f"mailbox/{address}", "--pattern", f"to={address}",
+            "--claimant", _tuple_uniq(f"claimant{i}"), "--lease-s", "1",
+        ])
+        assert claim.exit_code == 0, f"claim #{i}: {claim.output}"
+        time.sleep(1.5)  # let the 1-second lease lapse (house convention: TupleRepositoryTest.java)
+
+    # The fourth claim attempt is the one that dead-letters: the first of
+    # the three loop claims takes the fresh row at attempts=0 (no prior
+    # lapsed lease to notice); the second and third each find the PREVIOUS
+    # lease lapsed and raise attempts by one on their way to re-claiming
+    # (0->1, then 1->2); this fourth call finds the third claim's lease
+    # lapsed too, raises attempts to 3 = max_attempts, dead-letters in that
+    # same transaction, and its own re-run select finds no other candidate.
+    dead_letter_claim = runner.invoke(main, [
+        "tuple", "in", f"mailbox/{address}", "--pattern", f"to={address}",
+        "--claimant", _tuple_uniq("claimant-final"), "--lease-s", "1",
+    ])
+    assert dead_letter_claim.exit_code == 1, dead_letter_claim.output
+
+    rd = runner.invoke(main, ["tuple", "rd", f"mailbox/{address}", "--pattern", f"to={address}", "--json"])
+    rows = _tuple_last_json_line(rd.output)
+    assert len(rows) == 1
+    assert rows[0]["claim_state"] == "dead"
+    assert rows[0]["claimant"] is None
+
+    stats = runner.invoke(main, ["tuple", "stats", f"mailbox/{address}", "--json"])
+    assert stats.exit_code == 0, stats.output
+    census = _tuple_last_json_line(stats.output)
+    assert census["dead"] == 1, census
+
+    # No further in returns it.
+    probe = runner.invoke(main, [
+        "tuple", "in", f"mailbox/{address}", "--pattern", f"to={address}",
+        "--claimant", _tuple_uniq("claimant-later"), "--lease-s", "5",
+    ])
+    assert probe.exit_code == 1, probe.output
+
+
+# ── RDR-205 Phase 6: cross-instance request and ack (bead nexus-em75s.29) ───
+#
+# Two sessions on one box, both minting against the ONE tenant t2_service_env
+# provisions -- the RDR's own "not a third consumer" clause: address_kind
+# `instance` reuses the mailbox/<address> template, addressed to a session
+# name instead of an agent id. Journey per docs/tuple-space-walkthroughs.md
+# § Cross-instance request and ack: A outs a request to B's mailbox and
+# parks an `in` on its OWN mailbox for the ack; B drains, acks by outing
+# back to A's address; A's parked `in` returns.
+
+
+def _parked_in_loop(
+    runner: CliRunner, address: str, *, claimant: str, lease_s: int,
+    per_call_timeout_s: int, overall_budget_s: float,
+) -> tuple[dict | None, int]:
+    """Mirror ``scripts/spikes/rdr-205-mvv/run1.py``'s
+    ``parked_rd_for_report``: loop ``tuple in --timeout-s <n>`` calls
+    within an overall budget rather than depending on one park call
+    outlasting it -- the orchestration skill's "a wait of minutes is a
+    LOOP of parked calls" contract, restated here for `in` instead of
+    `rd`. ``per_call_timeout_s`` stands in for the engine's real 25 s
+    per-call cap (CA 3) at a scale a unit test can afford; the shape of
+    the loop -- not the literal 25 -- is what this journey proves.
+    Returns ``(claim_payload_or_None, calls_made)``.
+    """
+    deadline = time.monotonic() + overall_budget_s
+    calls = 0
+    while time.monotonic() < deadline:
+        calls += 1
+        result = runner.invoke(main, [
+            "tuple", "in", f"mailbox/{address}", "--pattern", f"to={address}",
+            "--claimant", claimant, "--lease-s", str(lease_s),
+            "--timeout-s", str(per_call_timeout_s), "--json",
+        ])
+        if result.exit_code == 0:
+            return _tuple_last_json_line(result.output), calls
+    return None, calls
+
+
+@pytest.mark.scenario
+def test_cross_instance_request_and_ack_two_sessions_one_box(t2_service_env) -> None:
+    """Journey (RDR-205 Test Plan / Phase 6): A (session ``nexus-a6``-shaped)
+    sends a ``kind=request`` to B's (``conexus-58``-shaped) mailbox and
+    parks an `in` on its OWN mailbox for the ack, looping past a per-call
+    cap rather than depending on a single park to outlast B's work; B
+    drains the request, does its own bookkeeping, and acks by ``out``ing a
+    ``kind=ack`` tuple carrying the same ``correlation_id`` back to A's
+    mailbox; A's parked loop returns it.
+
+    A drives entirely through the ``nx tuple`` CLI (this file's own
+    cross-verb binding constraint); B runs off a background thread and
+    drives ``HttpTupleStore`` directly -- ``click.testing.CliRunner``
+    patches process-wide stdout around each invocation and is not safe
+    for two threads to call concurrently, and B's actions must genuinely
+    overlap A's parked wait for this journey to prove the loop rather
+    than a lucky single park.
+    """
+    runner = CliRunner()
+    a = _tuple_uniq("nexus-a")
+    b = _tuple_uniq("conexus-b")
+    correlation_id = _tuple_uniq("corr")
+
+    # A -> B: the request, address_kind instance (RDR-205 Phase 6 addressing).
+    out = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{b}",
+        "--key", f"to={b}", "--dim", f"from={a}",
+        "--dim", "kind=request", "--dim", f"correlation_id={correlation_id}",
+        "--dim", "address_kind=instance", "--body", "deploy and re-gate",
+        "--nonce", correlation_id,
+    ])
+    assert out.exit_code == 0, out.output
+    request_id = out.output.strip().splitlines()[-1]
+
+    # Before B has acted at all, a bare probe on A's own mailbox finds
+    # nothing -- no ack exists yet.
+    early_probe = runner.invoke(main, [
+        "tuple", "in", f"mailbox/{a}", "--pattern", f"to={a}",
+        "--claimant", a, "--lease-s", "30",
+    ])
+    assert early_probe.exit_code == 1, early_probe.output
+
+    # B's side, run off a background thread (its own HttpTupleStore, never
+    # the CliRunner A uses) so it lands WHILE A's parked loop below is
+    # already waiting -- proving the loop (not one park outlasting the
+    # cap) is what finds the ack.
+    b_result: dict[str, object] = {}
+
+    def _b_drains_and_acks() -> None:
+        b_store = HttpTupleStore()
+        time.sleep(1.5)
+        claimed = b_store.in_(
+            f"mailbox/{b}", {"to": b}, claimant=b, lease_s=60,
+        )
+        assert claimed is not None, "B must find the request A sent"
+        row, claim_id = claimed
+        assert row.id == request_id
+        assert row.dims["kind"] == "request"
+        assert row.dims["correlation_id"] == correlation_id
+        b_result["claim_id"] = claim_id
+
+        ack_id = b_store.out(
+            f"mailbox/{a}", {"to": a},
+            {"from": b, "kind": "ack", "correlation_id": correlation_id},
+            "done", nonce=f"ack-{correlation_id}",
+        )
+        b_result["ack_id"] = ack_id
+        b_store.ack(claim_id, b)
+
+    b_thread = threading.Thread(target=_b_drains_and_acks)
+    b_thread.start()
+
+    # A parks on its OWN mailbox for the ack, looping at a short per-call
+    # cap over an overall budget comfortably longer than B's delay.
+    found, calls = _parked_in_loop(
+        runner, a, claimant=a, lease_s=30, per_call_timeout_s=1, overall_budget_s=8,
+    )
+    b_thread.join(timeout=10)
+    assert not b_thread.is_alive(), "B's background thread did not finish within the test's budget"
+
+    assert found is not None, "A's parked loop must find B's ack within the overall budget"
+    assert calls >= 2, (
+        f"a single park call must not have outlasted B's work -- expected the loop to make "
+        f"more than one call, got {calls}"
+    )
+    assert found["tuple"]["dims"]["kind"] == "ack"
+    assert found["tuple"]["dims"]["from"] == b
+    assert found["tuple"]["dims"]["correlation_id"] == correlation_id
+    assert found["tuple"]["id"] == b_result["ack_id"]
+
+    a_ack = runner.invoke(main, ["tuple", "ack", found["claim_id"], "--claimant", a])
+    assert a_ack.exit_code == 0, a_ack.output
+
+    # B's own claim on the request tuple was acked too -- the request is
+    # fully consumed on both sides.
+    assert b_result.get("claim_id")
+    rd_b = runner.invoke(main, ["tuple", "rd", f"mailbox/{b}", "--pattern", f"to={b}", "--json"])
+    assert rd_b.exit_code == 0, rd_b.output
+    assert _tuple_last_json_line(rd_b.output) == [], "B's acked request row must never come back from rd"
+
+
+@pytest.mark.scenario
+def test_cross_instance_unacked_request_is_visible_to_the_sweep(t2_service_env) -> None:
+    """The nexus-w374z sweep's mailbox-scan half (nexus-em75s.28): a
+    ``kind=request`` tuple with no matching ``kind=ack`` at the requester's
+    own mailbox is exactly what ``check_inbound_relay_acks.find_unacked_
+    requests`` must flag. Exercised against REAL engine data via
+    ``HttpTupleStore`` in-process (never the installed ``nx`` binary from
+    a dev session) -- the same shape the sweep's ``fetch_tuple_list_json``/
+    ``fetch_tuple_rows_json`` IO boundary hands to that pure function.
+    """
+    import check_inbound_relay_acks as sweep  # noqa: PLC0415 — scripts/ is on pythonpath (pyproject.toml)
+
+    runner = CliRunner()
+    a = _tuple_uniq("nexus-a")
+    b = _tuple_uniq("conexus-b")
+    correlation_id = _tuple_uniq("corr")
+
+    out = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{b}",
+        "--key", f"to={b}", "--dim", f"from={a}",
+        "--dim", "kind=request", "--dim", f"correlation_id={correlation_id}",
+        "--dim", "address_kind=instance", "--body", "never acked",
+        "--nonce", correlation_id,
+    ])
+    assert out.exit_code == 0, out.output
+    request_id = out.output.strip().splitlines()[-1]
+
+    store = HttpTupleStore()
+    rows_by_subspace: dict[str, list[dict]] = {}
+    for census in store.subspace_list("mailbox/"):
+        rows = store.rd(census.subspace, n=300)
+        rows_by_subspace[census.subspace] = [
+            {"id": r.id, "dims": r.dims, "created_at": r.created_at} for r in rows
+        ]
+
+    # max_age_days=0: this journey proves the ack-matching wiring against
+    # a request written moments ago, not the nexus-em75s.30 Q4 grace-period
+    # gate (which defaults to 7 days and would otherwise treat this
+    # brand-new row as a legitimate in-flight handshake and skip it).
+    unacked = sweep.find_unacked_requests(rows_by_subspace, max_age_days=0)
+    matches = [f for f in unacked if f["id"] == request_id]
+    assert len(matches) == 1, f"expected the never-acked request among the sweep's findings: {unacked}"
+    assert matches[0]["subspace"] == f"mailbox/{b}"
+    assert matches[0]["from"] == a
+    assert matches[0]["correlation_id"] == correlation_id
+
+
+def _fake_nx_dir(tmp_path: Path) -> Path:
+    """A one-file ``nx`` shim on PATH that execs ``python -m nexus.cli`` --
+    same precedent as ``tests/hooks/test_subagent_stop_hook.py``'s
+    ``_fake_nx_dir``: the real ``nx`` subprocess-wiring test below must not
+    depend on whatever ``nx`` generation happens to be installed on the
+    box's real PATH (it can predate RDR-205 and lack the ``tuple``
+    subcommand entirely, or simply be a different tree than this one)."""
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir(exist_ok=True)
+    nx_path = bin_dir / "nx"
+    nx_path.write_text(f'#!/bin/sh\nexec "{sys.executable}" -m nexus.cli "$@"\n')
+    nx_path.chmod(0o755)
+    return bin_dir
+
+
+@pytest.mark.scenario
+def test_mailbox_sweep_real_nx_subprocess_finds_unacked_skips_acked(
+    t2_service_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """critique nexus-em75s.30 Q4: every other mailbox-scan test drives
+    ``check_inbound_relay_acks``'s IO boundary through monkeypatched
+    ``fetch_tuple_list_json``/``fetch_tuple_rows_json`` (unit tests) or
+    ``HttpTupleStore`` directly (the journey above) -- none exercise the
+    REAL ``subprocess.run(["nx", "tuple", ...])`` call the production
+    script actually makes. This journey does: ``scan_unacked_mailbox_
+    requests`` runs unpatched, so its ``nx tuple list --prefix``/``nx
+    tuple rd`` calls go through a real OS subprocess. ``subprocess.run``
+    inherits ``os.environ`` by default, and ``t2_service_env``'s
+    ``monkeypatch.setenv`` already pointed this test process at the real
+    engine + minted tenant, so the shimmed ``nx`` subprocess lands on the
+    exact same tenant this test writes to via ``CliRunner``.
+    """
+    import check_inbound_relay_acks as sweep  # noqa: PLC0415 — scripts/ is on pythonpath (pyproject.toml)
+
+    runner = CliRunner()
+    run_id = _tuple_uniq("run")
+    a = f"{run_id}-a"
+    b = f"{run_id}-b"
+    corr_unacked = _tuple_uniq("corr-unacked")
+    corr_acked = _tuple_uniq("corr-acked")
+
+    # An unacked request: A -> B, never answered.
+    out_unacked = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{b}",
+        "--key", f"to={b}", "--dim", f"from={a}",
+        "--dim", "kind=request", "--dim", f"correlation_id={corr_unacked}",
+        "--dim", "address_kind=instance", "--body", "never acked",
+        "--nonce", corr_unacked,
+    ])
+    assert out_unacked.exit_code == 0, out_unacked.output
+    unacked_request_id = out_unacked.output.strip().splitlines()[-1]
+
+    # An acked request: A -> B, and B's ack back to A's own mailbox.
+    out_acked = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{b}",
+        "--key", f"to={b}", "--dim", f"from={a}",
+        "--dim", "kind=request", "--dim", f"correlation_id={corr_acked}",
+        "--dim", "address_kind=instance", "--body", "will be acked",
+        "--nonce", corr_acked,
+    ])
+    assert out_acked.exit_code == 0, out_acked.output
+    ack = runner.invoke(main, [
+        "tuple", "out", f"mailbox/{a}",
+        "--key", f"to={a}", "--dim", f"from={b}",
+        "--dim", "kind=ack", "--dim", f"correlation_id={corr_acked}",
+        "--dim", "address_kind=instance", "--body", "done",
+        "--nonce", f"ack-{corr_acked}",
+    ])
+    assert ack.exit_code == 0, ack.output
+
+    shim_dir = _fake_nx_dir(tmp_path)
+    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ['PATH']}")
+
+    # max_age_days=0: both rows were written moments ago; this journey
+    # proves the real subprocess wiring, not the Q4 grace-period gate.
+    findings = sweep.scan_unacked_mailbox_requests(
+        mailbox_prefix=f"mailbox/{run_id}", max_age_days=0,
+    )
+    ids = {f["id"] for f in findings}
+    assert unacked_request_id in ids, f"the never-acked request must be found: {findings}"
+    assert not any(f["correlation_id"] == corr_acked for f in findings), (
+        f"the acked request must not be reported: {findings}"
     )

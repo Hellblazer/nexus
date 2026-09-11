@@ -151,9 +151,14 @@ def _default_lease(config_dir: Path) -> Any | None:
     import os  # noqa: PLC0415 — stdlib, branch-local
 
     from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.db import service_endpoint as _service_endpoint  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
-    return registry.discover(str(os.getuid()))
+    # nexus-jw44t: route through the shared discover-and-mark seam — this
+    # feeds the upgrade ladder's process-currency read, and a bare
+    # registry.discover() here left the evidence-gate flag unmarked
+    # (review of b70990c54, Q1).
+    return _service_endpoint.discover_storage_service_lease(registry, str(os.getuid()))
 
 
 def _default_provisioned(config_dir: Path) -> bool:

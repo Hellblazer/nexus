@@ -16,6 +16,7 @@ import dev.nexus.service.db.TelemetryRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.TokenCache;
 import dev.nexus.service.db.TokenStore;
+import dev.nexus.service.db.TupleRepository;
 import dev.nexus.service.http.AspectHandler;
 import dev.nexus.service.http.AuthFilter;
 import dev.nexus.service.http.CatalogHandler;
@@ -34,10 +35,15 @@ import dev.nexus.service.http.SessionTokenHandler;
 import dev.nexus.service.http.TaxonomyHandler;
 import dev.nexus.service.http.TelemetryHandler;
 import dev.nexus.service.http.TokenAdminHandler;
+import dev.nexus.service.http.TupleHandler;
 import dev.nexus.service.http.VectorHandler;
 import dev.nexus.service.http.WhoamiHandler;
+import dev.nexus.service.tuples.TemplateRegistry;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -51,6 +57,8 @@ import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+
+import static dev.nexus.service.jooq.nexus.Tables.TUPLE_TENANTS;
 
 /**
  * RDR-152 skeleton service.
@@ -74,11 +82,58 @@ public final class NexusService {
 
     private static final Logger log = LoggerFactory.getLogger(NexusService.class);
 
-    /** How often to run the per-default-tenant TTL sweep (crash-safety backstop). */
-    private static final long SWEEP_INTERVAL_HOURS = 6L;
+    /**
+     * How often to run the per-default-tenant TTL sweep (crash-safety backstop).
+     *
+     * <p>Public (nexus-em75s.3): the RDR-205 tuple-template registry's boot check
+     * (a template's {@code retention_seconds} must be exceeded by the claim log's
+     * TTL setting by strictly more than one sweep interval) needs this value from
+     * {@code dev.nexus.service.tuples}, a different package — widened rather than
+     * mirrored so the two stay one source of truth (see AGENTS.md's
+     * {@code REQUIRED_ENGINE_VERSION} precedent for the same "widen, don't mirror"
+     * rule).
+     */
+    public static final long SWEEP_INTERVAL_HOURS = 6L;
 
     /** Age threshold: scratch rows older than this are eligible for TTL sweep. */
     private static final long SWEEP_TTL_HOURS = 24L;
+
+    /**
+     * RDR-205 Phase 1 Step 5 (bead nexus-em75s.5): rows per BATCH the tuple sweep
+     * moves in one committed transaction ("a few hundred" — RDR-205 §Technical
+     * Design "Sweep"; one long transaction across many rows would defeat
+     * autovacuum). Applies to every one of the sweep's three arms.
+     */
+    public static final String TUPLE_SWEEP_BATCH_SIZE_ENV = "NX_TUPLE_SWEEP_BATCH_SIZE";
+    public static final int DEFAULT_TUPLE_SWEEP_BATCH_SIZE = 300;
+
+    /**
+     * RDR-205 Phase 1 Step 5: cap on BATCHES the tuple sweep issues for ONE
+     * tenant in ONE run, summed across its three arms (release, purge-tuples,
+     * purge-log). A tenant that hits this cap keeps its OLD {@code
+     * last_swept_at} stamp — so it sorts first again next run — and the task
+     * moves on to the NEXT tenant in {@code tuple_tenants} order: this bound
+     * protects OTHER tenants' forward progress within one run. Distinct from
+     * {@value #TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS_ENV} below, which bounds
+     * the WHOLE run's wall-clock duration and is checked ONLY at tenant
+     * boundaries, before starting the next tenant — never mid-tenant. A
+     * tenant already underway always finishes cleanly or hits this cap
+     * first; only THEN, at the next tenant boundary, can the wall-clock
+     * budget stop the run.
+     */
+    public static final String TUPLE_SWEEP_MAX_BATCHES_PER_TENANT_ENV = "NX_TUPLE_SWEEP_MAX_BATCHES_PER_TENANT";
+    public static final int DEFAULT_TUPLE_SWEEP_MAX_BATCHES_PER_TENANT = 50;
+
+    /**
+     * RDR-205 Phase 1 Step 5: wall-clock ceiling for ONE ENTIRE tuple-sweep run,
+     * across every tenant. Deliberately well under {@link #SWEEP_INTERVAL_HOURS}
+     * (6h): the tuple sweep shares {@link #sweepScheduler}'s single thread with
+     * the T1 crash-safety sweep ({@link #runScheduledSweep}), so this budget
+     * exists specifically so a large backlog cannot starve that sweep's own
+     * turn in the same cycle.
+     */
+    public static final String TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS_ENV = "NX_TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS";
+    public static final long DEFAULT_TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS = 120L;
 
     /**
      * How far past {@code expires_at} a {@code scope=data} service token must be
@@ -108,6 +163,15 @@ public final class NexusService {
 
     private final HttpServer server;
     private final TenantScope tenantScope;
+    /**
+     * RDR-205 Phase 1 Step 5 (bead nexus-em75s.5): the tuple sweep's tenant
+     * enumeration reads {@code nexus.tuple_tenants} directly via a plain
+     * DataSource-backed {@link DSLContext} — that table carries no RLS (its own
+     * changeset's rationale), and enumeration runs BEFORE any tenant is chosen,
+     * so it deliberately does NOT go through {@link TenantScope} (mirrors
+     * {@code TokenStore}'s identical carve-out for {@code service_tokens}).
+     */
+    private final DataSource dataSource;
     private final ScheduledExecutorService sweepScheduler;
     private final TokenStore tokenStore;
     /** Held as a field, not a constructor local, so {@link #runScheduledSweep}
@@ -152,6 +216,14 @@ public final class NexusService {
      * and catalogRepo above.
      */
     private final PlanRepository planRepo;
+
+    /**
+     * RDR-205 (bead nexus-em75s.4): null when this instance was constructed
+     * without a {@link TemplateRegistry} (every narrower constructor overload
+     * below) — {@code /v1/tuples} is then simply not registered (404), and
+     * {@link #stop()} skips its shutdown signal.
+     */
+    private final TupleRepository tupleRepo;
 
     /**
      * Convenience constructor: no vector backend (original signature for existing tests).
@@ -315,7 +387,31 @@ public final class NexusService {
                         PgVectorRepository pgVectorRepository,
                         dev.nexus.service.vectors.Reranker reranker,
                         java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier) throws IOException {
+        this(port, token, dataSource, docEmbedderRouter, pgVectorRepository, reranker,
+                localEmbedActivitySupplier, null);
+    }
+
+    /**
+     * Full constructor, additionally wired for RDR-205's Linda tuple space
+     * (bead nexus-em75s.4).
+     *
+     * @param tupleTemplateRegistry the boot-loaded, boot-checked template
+     *        registry ({@code TemplateRegistry.loadAtBoot}, called from
+     *        {@code Main.java} BEFORE this constructor is ever reached — a
+     *        breach refuses to start the process there, never here). May be
+     *        null: {@code /v1/tuples} is then simply not registered (404),
+     *        not a 503 stub — unlike the optional embed/vector backends
+     *        above, a null registry here means the feature was never
+     *        loaded, not that it degraded.
+     */
+    public NexusService(int port, String token, DataSource dataSource,
+                        EmbedderRouter docEmbedderRouter,
+                        PgVectorRepository pgVectorRepository,
+                        dev.nexus.service.vectors.Reranker reranker,
+                        java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier,
+                        TemplateRegistry tupleTemplateRegistry) throws IOException {
         this.tenantScope = new TenantScope(dataSource);
+        this.dataSource = dataSource;
 
         // Token lifecycle (RDR-152 bead nexus-gmiaf.32.2): resolve bearer→tenant
         // server-side against the service_tokens registry (RLS-off, read pre-context
@@ -482,6 +578,18 @@ public final class NexusService {
         log.info("event=vector_endpoints_registered has_embed_router={} has_pgvector={} has_reranker={}",
                 docEmbedderRouter != null, pgVectorRepository != null, reranker != null);
 
+        // /v1/tuples/* — RDR-205 Linda tuple space (bead nexus-em75s.4). Registered
+        // only when a boot-checked TemplateRegistry was supplied (see the constructor
+        // javadoc above) — a null registry means the feature was never loaded, so the
+        // route is simply absent (404) rather than a 503 stub.
+        if (tupleTemplateRegistry != null) {
+            this.tupleRepo = TupleRepository.fromEnv(tenantScope, tupleTemplateRegistry);
+            var tuplesCtx = server.createContext("/v1/tuples", new TupleHandler(tupleRepo));
+            tuplesCtx.getFilters().addAll(authFilter);
+        } else {
+            this.tupleRepo = null;
+        }
+
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
 
         // TTL sweep: crash-safety backstop for sessions that never called session-close.
@@ -506,6 +614,27 @@ public final class NexusService {
             },
             SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_HOURS, TimeUnit.HOURS
         );
+
+        // RDR-205 Phase 1 Step 5 (bead nexus-em75s.5): a SECOND scheduled task on
+        // the SAME sweepScheduler, at the SAME cadence, SEPARATE from
+        // runScheduledSweep above — that method builds its token-derived tenant
+        // set once before its arms; this task's tenant set comes from
+        // nexus.tuple_tenants instead (§Technical Design "Sweep"). Only scheduled
+        // when this instance was actually wired with a TemplateRegistry — a null
+        // tupleRepo mirrors /v1/tuples's own null-registry posture (the feature
+        // was never loaded, not that it degraded).
+        if (this.tupleRepo != null) {
+            this.sweepScheduler.scheduleAtFixedRate(
+                () -> {
+                    try {
+                        runScheduledTupleSweep(OffsetDateTime.now(ZoneOffset.UTC));
+                    } catch (Exception ex) {
+                        log.warn("event=tuple_scheduled_sweep_failed error={}", ex.getMessage(), ex);
+                    }
+                },
+                SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_HOURS, TimeUnit.HOURS
+            );
+        }
     }
 
     /** Start the HTTP server (non-blocking). */
@@ -723,6 +852,448 @@ public final class NexusService {
     /** Per-arm deletion counts from one {@link #runScheduledSweep} cycle. */
     record SweepCounts(int tenants, int scratch, int sessionTokens, int dataTokens) { }
 
+    // ── tuple sweep (RDR-205 Phase 1 Step 5, bead nexus-em75s.5) ────────────────
+
+    /** Testable, pure resolution — {@value #TUPLE_SWEEP_BATCH_SIZE_ENV}. */
+    static int resolveTupleSweepBatchSize() {
+        return resolveTupleSweepBatchSize(System.getenv(TUPLE_SWEEP_BATCH_SIZE_ENV));
+    }
+
+    static int resolveTupleSweepBatchSize(String envValue) {
+        return parsePositiveInt(envValue, DEFAULT_TUPLE_SWEEP_BATCH_SIZE, TUPLE_SWEEP_BATCH_SIZE_ENV);
+    }
+
+    /** Testable, pure resolution — {@value #TUPLE_SWEEP_MAX_BATCHES_PER_TENANT_ENV}. */
+    static int resolveTupleSweepMaxBatchesPerTenant() {
+        return resolveTupleSweepMaxBatchesPerTenant(System.getenv(TUPLE_SWEEP_MAX_BATCHES_PER_TENANT_ENV));
+    }
+
+    static int resolveTupleSweepMaxBatchesPerTenant(String envValue) {
+        return parsePositiveInt(envValue, DEFAULT_TUPLE_SWEEP_MAX_BATCHES_PER_TENANT,
+                TUPLE_SWEEP_MAX_BATCHES_PER_TENANT_ENV);
+    }
+
+    /** Testable, pure resolution — {@value #TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS_ENV}. */
+    static long resolveTupleSweepWallClockBudgetSeconds() {
+        return resolveTupleSweepWallClockBudgetSeconds(System.getenv(TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS_ENV));
+    }
+
+    static long resolveTupleSweepWallClockBudgetSeconds(String envValue) {
+        return parsePositiveLong(envValue, DEFAULT_TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS,
+                TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS_ENV);
+    }
+
+    private static int parsePositiveInt(String envValue, int defaultValue, String envName) {
+        if (envValue == null || envValue.isBlank()) {
+            return defaultValue;
+        }
+        int v;
+        try {
+            v = Integer.parseInt(envValue.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(envName + " must be a positive integer (got '" + envValue + "')");
+        }
+        if (v <= 0) {
+            throw new IllegalArgumentException(envName + " must be positive (got " + v + ")");
+        }
+        return v;
+    }
+
+    private static long parsePositiveLong(String envValue, long defaultValue, String envName) {
+        if (envValue == null || envValue.isBlank()) {
+            return defaultValue;
+        }
+        long v;
+        try {
+            v = Long.parseLong(envValue.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(envName + " must be a positive integer (got '" + envValue + "')");
+        }
+        if (v <= 0) {
+            throw new IllegalArgumentException(envName + " must be positive (got " + v + ")");
+        }
+        return v;
+    }
+
+    /** One {@code nexus.tuple_tenants} row's sweep-order key. */
+    record TupleTenantCursor(String tenantId, OffsetDateTime lastSweptAt) { }
+
+    /**
+     * Enumerate every tenant from the non-RLS {@code nexus.tuple_tenants} table,
+     * least-recently-swept first ({@code last_swept_at} ASC NULLS FIRST — a
+     * never-swept tenant before any swept one), {@code tenant_id} as the
+     * tie-break — RDR-205 §Technical Design "Sweep". Bounded by {@code
+     * statementTimeout} on THIS statement too (the doctrine {@link
+     * #runScheduledSweep}'s own comment states for the token-loop enumeration:
+     * bounding one of three arms leaves the cycle unbounded — here, bounding
+     * the writes but not the enumeration would do the same). A plain
+     * DataSource-backed {@link DSLContext}, not routed through {@link
+     * TenantScope}: {@code tuple_tenants} carries no RLS (its own changeset's
+     * rationale — it names tenants but holds no tenant-owned data of its own),
+     * and this enumeration runs BEFORE any tenant is chosen — the same carve-out
+     * {@code TokenStore#listKnownTenants} takes for {@code service_tokens}.
+     */
+    private List<TupleTenantCursor> listTupleSweepTenants(Duration statementTimeout) {
+        return DSL.using(dataSource, SQLDialect.POSTGRES).transactionResult(cfg -> {
+            DSLContext tx = DSL.using(cfg);
+            SweepBounds.applyStatementTimeout(tx, statementTimeout);
+            return tx.select(TUPLE_TENANTS.TENANT_ID, TUPLE_TENANTS.LAST_SWEPT_AT)
+                    .from(TUPLE_TENANTS)
+                    .orderBy(TUPLE_TENANTS.LAST_SWEPT_AT.asc().nullsFirst(), TUPLE_TENANTS.TENANT_ID.asc())
+                    .fetch(r -> new TupleTenantCursor(
+                            r.get(TUPLE_TENANTS.TENANT_ID), r.get(TUPLE_TENANTS.LAST_SWEPT_AT)));
+        });
+    }
+
+    /**
+     * Stamp {@code tuple_tenants.last_swept_at = now} for a tenant whose sweep
+     * finished CLEANLY this run — the ONLY time this is called (a cut-short
+     * tenant keeps its old stamp, per RDR-205 §Technical Design "Sweep").
+     */
+    private void stampTupleTenantSwept(String tenant, OffsetDateTime now, Duration statementTimeout) {
+        DSL.using(dataSource, SQLDialect.POSTGRES).transaction(cfg -> {
+            DSLContext tx = DSL.using(cfg);
+            SweepBounds.applyStatementTimeout(tx, statementTimeout);
+            tx.update(TUPLE_TENANTS)
+                    .set(TUPLE_TENANTS.LAST_SWEPT_AT, now)
+                    .where(TUPLE_TENANTS.TENANT_ID.eq(tenant))
+                    .execute();
+        });
+    }
+
+    /**
+     * Why a {@link #runScheduledTupleSweep} run finished with unswept work remaining
+     * (RDR-205 Phase 1 review, bead nexus-em75s.7, replacing the prior plain {@code
+     * boolean budgetExhausted}): {@code NONE} when every tenant this run reached
+     * completed all three arms; {@code TENANT_CAP} when a tenant's own {@code
+     * maxBatchesPerTenant} was reached (self-limiting — the run moves on to the next
+     * tenant in the SAME run, never starves the rest); {@code TENANT_ERROR} when a
+     * tenant's own arms threw; {@code WALL_CLOCK} when the run's {@code
+     * wallClockBudget} was exhausted BEFORE starting the next tenant — the wall clock
+     * is checked ONLY at that tenant boundary, never mid-tenant, so a tenant already
+     * underway always finishes cleanly or hits its own {@code TENANT_CAP} first; this
+     * is the one cause that stops the WHOLE run outright (see
+     * {@link #runScheduledTupleSweep(OffsetDateTime, Duration, int, int, Duration)}).
+     * Declared in ascending severity ({@link Enum#ordinal()} order) so a run touching
+     * more than one incomplete tenant reports the worst cause it reached — the enum
+     * constant order below IS that severity order, checked via {@code ordinal()} at
+     * every incompleteness site, so reordering these constants changes precedence.
+     */
+    enum TupleSweepIncompleteCause { NONE, TENANT_CAP, TENANT_ERROR, WALL_CLOCK }
+
+    /**
+     * One counted outcome record for the tuple sweep's scheduled run, in the
+     * RDR-204 ghost sweep's convention (its RECORD, not its trigger — see
+     * {@code CatalogRepository.GhostSweepResult}). {@code scanned} is the
+     * release arm's candidate count ({@code == released + deadLettered}, same
+     * shape as the ghost sweep's own {@code scanned == } the sum of its
+     * dispositions); {@code oldestLastSweptAt} reports the TRUE oldest {@code
+     * last_swept_at} across {@code nexus.tuple_tenants} after the run (RDR-205 Phase 1
+     * review, bead nexus-em75s.7, Sam's ruling — a tenant is stamped ONLY on a clean
+     * finish; see {@code stampTupleTenantSwept} below): {@code now} when every tenant
+     * reached this run finished cleanly and was freshly stamped (nothing older
+     * remains); the FIRST cut-short tenant's ORIGINAL, unchanged stamp — {@code null}
+     * when that tenant had never been swept before — when the run leaves one behind;
+     * or {@code null} outright when {@code nexus.tuple_tenants} has no rows at all
+     * (nothing has ever called {@code out}).
+     *
+     * <p>{@code purgeExamined} / {@code logPurgeExamined} (RDR-205 Phase 1 follow-on,
+     * bead nexus-em75s.38, review finding M9): the purge-tuples and purge-log arms'
+     * own candidate-SELECT row counts ({@link
+     * dev.nexus.service.db.TupleRepository.PurgeBatchResult#examined}), independent
+     * of {@code purged} / {@code logRowsPurged} (those arms' delete-affected-row
+     * counts). {@code scanned} was already this shape for the release arm — {@link
+     * dev.nexus.service.db.TupleRepository.ReleaseBatchResult#scanned} is the
+     * release-arm SELECT's own row count, captured before either disposition is
+     * decided, not derived by summing {@code released + deadLettered} after the
+     * fact; it always EQUALS that sum only because the release arm's per-row logic
+     * has no third outcome, an invariant of that arm's control flow, not a
+     * definitional identity of the field. Before this fix, the purge arms had no
+     * counterpart at all: {@code purged}/{@code logRowsPurged} were the ONLY signal
+     * for those two arms, and both are delete-affected-row counts — so a purge
+     * arm whose SELECT predicate silently matched nothing (a broken predicate, a
+     * wrong tenant scope, a dropped index) was reported identically to a genuinely
+     * idle table, in both cases zero.
+     *
+     * <p><b>Reading an all-zero run</b> (documented here, not asserted in code — this
+     * record cannot see {@code nexus.tuple_tenants} on its own): a run where {@code
+     * scanned}, {@code purgeExamined}, and {@code logPurgeExamined} are ALL zero
+     * across every tenant visited is the ordinary healthy-idle state, and every
+     * tenant reached is freshly stamped {@code oldestLastSweptAt == now} to prove it
+     * (per the paragraph above). If a caller instead finds {@code
+     * nexus.tuple_tenants} carrying rows whose {@code last_swept_at} is OLD despite
+     * a report of all three examined counts at zero for the run cycle that should
+     * have reached them, that combination — stale stamps alongside a report that
+     * found nothing to examine — is the broken-arm signal this fix exists to make
+     * visible: either the tenant enumeration itself is wrong, or an arm never
+     * reached its own SELECT.
+     */
+    record TupleSweepRunResult(
+            int tenantsVisited, OffsetDateTime oldestLastSweptAt,
+            int scanned, int released, int deadLettered,
+            int purged, int purgeExamined, int logRowsPurged, int logPurgeExamined,
+            TupleSweepIncompleteCause incompleteCause) { }
+
+    /**
+     * One cycle of the tuple sweep's scheduled task (RDR-205 Phase 1 Step 5,
+     * bead nexus-em75s.5) — a SECOND scheduled task on {@link #sweepScheduler}
+     * at {@link #SWEEP_INTERVAL_HOURS}, separate from {@link
+     * #runScheduledSweep} because that method builds its token-derived tenant
+     * set once before its arms. Returns an all-zero, {@code tenantsVisited=0}
+     * result when this instance was constructed without a {@link
+     * TemplateRegistry} ({@code tupleRepo} is then null — mirrors {@code
+     * /v1/tuples}'s own null-registry posture).
+     */
+    TupleSweepRunResult runScheduledTupleSweep(OffsetDateTime now) {
+        return runScheduledTupleSweep(now, SweepBounds.STATEMENT_TIMEOUT,
+                resolveTupleSweepBatchSize(), resolveTupleSweepMaxBatchesPerTenant(),
+                Duration.ofSeconds(resolveTupleSweepWallClockBudgetSeconds()));
+    }
+
+    /**
+     * RDR-205 Phase 1 follow-on (bead nexus-em75s.34): this tenant's total
+     * per-visit batch cap ({@code maxBatchesPerTenant}), split into three
+     * roughly-equal PER-ARM shares — release (arm index 0), purge-tuples (arm
+     * index 1), purge-log (arm index 2) — so no single arm can spend the WHOLE
+     * per-tenant budget and starve the other two.
+     *
+     * <p>THE BUG THIS CLOSES: before this split, all three arms in {@link
+     * #runScheduledTupleSweep(OffsetDateTime, Duration, int, int, Duration)}
+     * shared ONE counter and ONE cap check, gated on a single {@code complete}
+     * flag. A tenant whose release-arm backlog alone exceeded {@code
+     * maxBatchesPerTenant} would exhaust the shared cap inside arm 1's own
+     * {@code while} loop; arms 2 and 3's loops were guarded on that same {@code
+     * complete} flag, so their loop bodies never executed even once for that
+     * tenant THIS visit — a release-heavy tenant could starve its own purge
+     * arms indefinitely, run after run, even though its purge backlogs were
+     * small enough to drain trivially on their own.
+     *
+     * <p>THE RULE (documented here because it is a real design choice, not the
+     * only defensible one): {@code maxBatchesPerTenant} STAYS THE TOTAL across
+     * all three arms — the meaning {@value #TUPLE_SWEEP_MAX_BATCHES_PER_TENANT_ENV}'s
+     * own javadoc already documents ("summed across its three arms") and that a
+     * deployer may already have tuned against real per-visit DB load — rather
+     * than becoming a PER-ARM cap, which would silently TRIPLE a tenant's
+     * worst-case batch (and therefore row-lock/statement) spend per visit with
+     * no change to the env var's value. The three shares this method returns
+     * always sum to exactly {@code maxBatchesPerTenant}; nothing here grows the
+     * ceiling a deployer already tuned, so an operator watching per-visit load
+     * against that ceiling sees no discontinuity from this fix.
+     *
+     * <p>The split is even with the remainder (0, 1, or 2 leftover batches)
+     * going to the earlier arms first — arbitrary but deterministic, and
+     * irrelevant once {@code maxBatchesPerTenant} is large enough that ±1 batch
+     * does not matter (the production default is 50; every value used in this
+     * file's own tests is 3 or larger). Below 3, at least one arm's share is
+     * 0 — that arm gets no batches at all this visit, an unavoidable
+     * consequence of splitting a cap smaller than the arm count.
+     */
+    static int tupleSweepArmBatchShare(int maxBatchesPerTenant, int armIndex) {
+        int share = maxBatchesPerTenant / 3;
+        int remainder = maxBatchesPerTenant % 3;
+        return share + (armIndex < remainder ? 1 : 0);
+    }
+
+    /**
+     * As {@link #runScheduledTupleSweep(OffsetDateTime)}, with every tunable
+     * injected — production passes the real settings; tests pass small ones so
+     * the budget scenarios (RDR-205 §Test Plan) are fast assertions rather than
+     * million-row ones.
+     *
+     * <p>TWO BOUNDS, because this task shares {@link #sweepScheduler}'s single
+     * thread with the T1 crash-safety sweep and would otherwise starve it: (1)
+     * {@code statementTimeout}, applied to EVERY statement this task issues,
+     * including {@link #listTupleSweepTenants}'s own enumeration; (2) this
+     * task's own budget — {@code maxBatchesPerTenant} caps batches spent on ONE
+     * tenant before moving to the NEXT tenant in the SAME run (that tenant keeps
+     * its old stamp, per RDR-205 §Technical Design "Sweep" — a cut-short tenant
+     * is stamped only on a clean finish — and sorts first again next run); {@code
+     * wallClockBudget} caps the WHOLE run and is checked ONLY at a tenant
+     * boundary, before starting the next tenant — NEVER mid-tenant. A tenant
+     * already underway always finishes cleanly or hits {@code maxBatchesPerTenant}
+     * first; only then, at the next boundary, can the wall clock stop the task
+     * outright. Neither bound is ever checked mid-batch: every batch call is one
+     * committed transaction, so the task always stops AT a batch boundary,
+     * never inside one.
+     *
+     * <p>PER-ARM SHARES (RDR-205 Phase 1 follow-on, bead nexus-em75s.34): {@code
+     * maxBatchesPerTenant} is split three ways via {@link
+     * #tupleSweepArmBatchShare} — release, purge-tuples, purge-log each get their
+     * OWN counter checked against their OWN share, so a tenant with a large
+     * release-arm backlog can no longer exhaust the whole per-tenant cap on arm 1
+     * alone and leave arms 2/3 unrun this visit (see that method's javadoc for the
+     * full rationale and the split rule).
+     */
+    TupleSweepRunResult runScheduledTupleSweep(OffsetDateTime now, Duration statementTimeout,
+                                                int batchSize, int maxBatchesPerTenant,
+                                                Duration wallClockBudget) {
+        if (tupleRepo == null) {
+            return new TupleSweepRunResult(0, null, 0, 0, 0, 0, 0, 0, 0, TupleSweepIncompleteCause.NONE);
+        }
+        long deadlineNanos = System.nanoTime() + wallClockBudget.toNanos();
+        List<TupleTenantCursor> tenants = listTupleSweepTenants(statementTimeout);
+
+        int tenantsVisited = 0;
+        int scanned = 0;
+        int released = 0;
+        int deadLettered = 0;
+        int purged = 0;
+        int purgeExamined = 0;
+        int logRowsPurged = 0;
+        int logPurgeExamined = 0;
+        TupleSweepIncompleteCause cause = TupleSweepIncompleteCause.NONE;
+        OffsetDateTime oldestRemaining = null;
+        boolean oldestRemainingSet = false;
+
+        for (TupleTenantCursor cursor : tenants) {
+            if (System.nanoTime() >= deadlineNanos) {
+                // Wall clock exhausted: never START a new tenant — the task stops at
+                // THIS tenant boundary, and ONLY here (the three arms below carry no
+                // wall-clock check of their own, per RDR-205 §Technical Design "Sweep":
+                // a tenant already underway always finishes cleanly or hits its own
+                // maxBatchesPerTenant cap first). Zero progress was spent on this
+                // tenant, so its pre-run stamp is still accurate. Guarded on
+                // !oldestRemainingSet: tenants are visited least-recently-swept first,
+                // so an EARLIER tenant left unstamped this run (TENANT_CAP or
+                // TENANT_ERROR) already holds the true oldest remaining stamp — this
+                // cursor's own (later) stamp must not overwrite it.
+                cause = TupleSweepIncompleteCause.WALL_CLOCK;
+                if (!oldestRemainingSet) {
+                    oldestRemaining = cursor.lastSweptAt();
+                    oldestRemainingSet = true;
+                }
+                break;
+            }
+            String tenant = cursor.tenantId();
+            boolean complete = true;
+            TupleSweepIncompleteCause tenantCause = TupleSweepIncompleteCause.NONE;
+
+            try {
+                // nexus-em75s.34: each arm below gets its OWN counter checked against
+                // its OWN share of maxBatchesPerTenant (see tupleSweepArmBatchShare's
+                // javadoc for the split rule and the starvation this fixes) — an arm
+                // hitting its own share no longer gates whether the NEXT arm's loop
+                // even runs. Every arm's loop still runs unconditionally (not gated on
+                // an earlier arm's outcome); `complete`/`tenantCause` only record
+                // whether ANY arm was cut short, for the tenant-level stamping decision
+                // below.
+
+                // Arm 1: release lapsed claims nobody re-took. No wall-clock check here
+                // or in arms 2/3 below — maxBatchesPerTenant (split into per-arm shares)
+                // is the only bound WITHIN a tenant; the wall clock is checked only at
+                // the tenant boundary above.
+                int releaseShare = tupleSweepArmBatchShare(maxBatchesPerTenant, 0);
+                int releaseBatches = 0;
+                boolean releaseDrained = false;
+                while (!releaseDrained) {
+                    if (releaseBatches >= releaseShare) {
+                        complete = false;
+                        tenantCause = TupleSweepIncompleteCause.TENANT_CAP;
+                        break;
+                    }
+                    TupleRepository.ReleaseBatchResult r =
+                            tupleRepo.releaseLapsedClaimsBatch(tenant, batchSize, statementTimeout);
+                    releaseBatches++;
+                    scanned += r.scanned();
+                    released += r.released();
+                    deadLettered += r.deadLettered();
+                    if (r.scanned() < batchSize) {
+                        releaseDrained = true; // drained
+                    }
+                }
+                // Arm 2: purge expired / consumed-past-retention tuples. Runs
+                // regardless of whether arm 1 above hit its own share.
+                int purgeShare = tupleSweepArmBatchShare(maxBatchesPerTenant, 1);
+                int purgeBatches = 0;
+                boolean purgeDrained = false;
+                while (!purgeDrained) {
+                    if (purgeBatches >= purgeShare) {
+                        complete = false;
+                        tenantCause = TupleSweepIncompleteCause.TENANT_CAP;
+                        break;
+                    }
+                    TupleRepository.PurgeBatchResult r2 =
+                            tupleRepo.purgeExpiredTuplesBatch(tenant, batchSize, statementTimeout);
+                    purgeBatches++;
+                    purged += r2.purged();
+                    purgeExamined += r2.examined();
+                    if (r2.examined() < batchSize) {
+                        purgeDrained = true;
+                    }
+                }
+                // Arm 3: purge claim-log rows past their own (longer) TTL. Runs
+                // regardless of whether arms 1/2 above hit their own share.
+                int logPurgeShare = tupleSweepArmBatchShare(maxBatchesPerTenant, 2);
+                int logPurgeBatches = 0;
+                boolean logPurgeDrained = false;
+                while (!logPurgeDrained) {
+                    if (logPurgeBatches >= logPurgeShare) {
+                        complete = false;
+                        tenantCause = TupleSweepIncompleteCause.TENANT_CAP;
+                        break;
+                    }
+                    TupleRepository.PurgeBatchResult r3 =
+                            tupleRepo.purgeOldClaimLogBatch(tenant, batchSize, statementTimeout);
+                    logPurgeBatches++;
+                    logRowsPurged += r3.purged();
+                    logPurgeExamined += r3.examined();
+                    if (r3.examined() < batchSize) {
+                        logPurgeDrained = true;
+                    }
+                }
+            } catch (Exception ex) {
+                // One tenant's failure must not starve the rest (same doctrine as
+                // runScheduledSweep's per-tenant catch above) — never stops the whole run.
+                complete = false;
+                tenantCause = TupleSweepIncompleteCause.TENANT_ERROR;
+                log.warn("event=tuple_sweep_tenant_failed tenant={} error={}", tenant, ex.getMessage(), ex);
+            }
+
+            tenantsVisited++;
+            // RDR-205 Phase 1 review, Sam's ruling (nexus-em75s.7, superseding the prior
+            // "stamp on any progress" fix): stamp ONLY on a clean finish, per RDR-205
+            // §Technical Design "Sweep" verbatim — a tenant cut short (TENANT_CAP or
+            // TENANT_ERROR) keeps its OLD stamp and therefore sorts first again next
+            // run. This is safe against starvation WITHOUT stamping partial progress,
+            // because TENANT_CAP and TENANT_ERROR never stop the whole run (only
+            // WALL_CLOCK does, and only at the NEXT tenant boundary, never mid-tenant):
+            // a tenant that keeps hitting its own cap still yields the run to every
+            // OTHER tenant within the SAME run, so the rest are reached; the arms are
+            // also idempotent and cumulative, so the cut-short tenant's own backlog
+            // still shrinks run over run even while unstamped, and completes within a
+            // bounded number of runs.
+            if (complete) {
+                stampTupleTenantSwept(tenant, now, statementTimeout);
+            } else if (!oldestRemainingSet) {
+                // Cut short (cap or error): its pre-run stamp is still accurate and, by
+                // visitation order (least-recently-swept first), is the oldest remaining
+                // stamp after the run — the FIRST such tenant encountered, so a later
+                // cut-short tenant here must never overwrite it.
+                oldestRemaining = cursor.lastSweptAt();
+                oldestRemainingSet = true;
+            }
+            if (!complete && tenantCause.ordinal() > cause.ordinal()) {
+                cause = tenantCause;
+            }
+        }
+
+        if (!oldestRemainingSet) {
+            // Every tenant reached this run finished cleanly and was freshly stamped:
+            // "oldest last_swept_at after the run" is trivially `now`, or null if there
+            // is no tuple_tenants row to report at all.
+            oldestRemaining = tenants.isEmpty() ? null : now;
+        }
+
+        log.info("event=tuple_sweep_run tenants_visited={} oldest_last_swept_at={} scanned={} released={} "
+                + "dead_lettered={} purged={} purge_examined={} log_rows_purged={} log_purge_examined={} "
+                + "incomplete_cause={}",
+            tenantsVisited, oldestRemaining, scanned, released, deadLettered, purged, purgeExamined,
+            logRowsPurged, logPurgeExamined, cause);
+
+        return new TupleSweepRunResult(tenantsVisited, oldestRemaining, scanned, released, deadLettered,
+                purged, purgeExamined, logRowsPurged, logPurgeExamined, cause);
+    }
+
     /**
      * nexus-4tosp: consecutive cycles whose data-token arm failed for every
      * tenant. Zero whenever any tenant last succeeded.
@@ -764,6 +1335,12 @@ public final class NexusService {
      *  executor immediately. */
     public void stop() {
         sweepScheduler.shutdownNow();
+        // RDR-205 (bead nexus-em75s.4): signal every parked rd/in BEFORE the HTTP
+        // server stops, so they return the probe result instead of riding out
+        // their budget past process exit.
+        if (tupleRepo != null) {
+            tupleRepo.shutdown();
+        }
         catalogRepo.close();
         server.stop(0);
         log.info("event=service_stopped");

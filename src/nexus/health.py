@@ -2,6 +2,7 @@
 """Health check data model and runner for nx doctor / nx console."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -1408,9 +1409,59 @@ _MCP_INITIALIZE_REQUEST = (
 
 # nexus-l2ku5 critique round 2: local subprocess handshake, not a network
 # call — parity with this file's other probes (e.g. MinerU's 2.0s HTTP
-# timeout). Two entry points probed serially, so a worst case of both
-# hanging is 2 * 8s = 16s, not the 30s the prior 15.0 implied.
+# timeout). Measured local round trips: 0.6s warm, 0.77s with every
+# bytecode cache cleared (a cold-venv proxy) on this dev box — this
+# constant already carries roughly 10x margin over that baseline.
 _MCP_PROBE_TIMEOUT_S = 8.0
+
+# nexus-jw44t (the v0.1.114 acquire-gate follow-up): the fixed 8s budget
+# above timed out for nx-mcp in 2 of 3 runs inside a cold-venv Docker
+# rehearsal container under load (box load average ~7.8) while nx-mcp-catalog
+# passed alongside it in the SAME run — i.e. the process was genuinely still
+# starting, not hung, and a fixed budget cannot distinguish "slow under load"
+# from "never going to answer" without either guessing a bigger number (which
+# just moves the flake to a busier box) or actually checking. Once the base
+# ``timeout`` elapses WITHOUT the process having exited or crashed, the probe
+# keeps polling up to ``timeout * _MCP_PROBE_ALIVE_EXTENSION_FACTOR`` before
+# giving up — a crashed/exited process is unaffected (it fails on the very
+# first poll, exactly as before: nexus-l2ku5's fail-loud contract is
+# unchanged for that case) and never pays the extension.
+#
+# 4.0 is now sized from an evidence-carrying measurement, not a round
+# number (the review of the first jw44t commit, T2
+# nexus/review-nexus-jw44t-and-mcp-probe-1fc784da7-2026-09-11 Q3, is what
+# flagged the prior version as ungrounded). Measured directly on a dev
+# box (16 cores), same ``.venv/bin/nx-mcp`` initialize handshake this
+# probe drives:
+#   * warm (bytecode cached):                          0.686s
+#   * cold (every .pyc under .venv/ and src/ cleared,
+#     ambient load average ~15 from unrelated sessions): 1.014s
+#   * cold + 4 synthetic CPU-bound python loops added on
+#     top of that ambient load (1-min load average
+#     20.1 -> 28.9 across the window, i.e. roughly
+#     1.3-1.8x per core on this 16-core box), 3 trials: 2.414s / 2.013s / 1.615s
+# The worst of those three (2.414s) is itself well under the base 8s
+# budget alone — a bare-metal reproduction of "busy box" does not by
+# itself explain the acquire gate's actual >=8s timeouts. The gap is
+# most plausibly the Docker rehearsal container's OWN overhead on top of
+# raw CPU contention (cgroup CPU-share throttling, a cold image's
+# not-yet-page-cached layers, possible cross-arch emulation) — none of
+# which a same-host, no-container benchmark can reproduce. Rather than
+# guess that container tax directly, 4x is kept as a wide multiplier
+# layered on the base budget's OWN already-measured ~10x margin over the
+# unloaded-cold baseline: even a further 2-3x container tax on top of
+# the worst measured 2.414s (roughly 5-7s) still lands under the bare
+# 8s, and the 32s extended cap leaves comfortable room past that for
+# whatever container-specific slowdown this measurement could not
+# capture, while staying a bounded, finite wait (2 entry points * 32s =
+# 64s worst case) rather than an open-ended one.
+_MCP_PROBE_ALIVE_EXTENSION_FACTOR = 4.0
+
+#: Poll granularity while the process is confirmed alive (nexus-jw44t).
+#: Capped at 2.0s so the extension loop notices a late answer promptly
+#: without spinning; never larger than the caller's own ``timeout`` so a
+#: short test-supplied budget (e.g. ``timeout=0.2``) still polls finely.
+_MCP_PROBE_POLL_INTERVAL_S = 2.0
 
 # Bound both line COUNT and per-line LENGTH — a crashing binary controls
 # its own stderr and could emit one arbitrarily long line (no newlines) to
@@ -1438,37 +1489,85 @@ def _probe_mcp_server(
     this probe (nexus-l2ku5).
 
     LOAD-BEARING ASSUMPTION: the MCP stdio server's read loop exits on
-    stdin EOF. ``subprocess.run(input=...)`` writes the one request then
-    closes stdin, which is what lets a healthy server finish this
-    request/response and exit on its own within *timeout* instead of
-    idling as a long-lived process — the same shape as a real MCP client
-    session, just closed after one turn.
+    stdin EOF. Writing the one request then closing stdin is what lets a
+    healthy server finish this request/response and exit on its own
+    within *timeout* instead of idling as a long-lived process — the same
+    shape as a real MCP client session, just closed after one turn.
+
+    ALIVE-VS-HUNG DISTINCTION (nexus-jw44t): a plain fixed-timeout wait
+    cannot tell a process that is still starting up (slow cold import
+    under load) from one that will never answer (crashed, deadlocked). A
+    crash exits almost immediately regardless of load — Python's own
+    import-time failures are microseconds, not seconds — so this polls in
+    ``timeout``-sized (capped) increments via the documented "catch
+    ``TimeoutExpired`` and retry ``communicate()``" idiom: an exited
+    process is caught and reported on the very FIRST poll (unchanged
+    fail-fast contract), while a process that is still alive and simply
+    slow gets up to ``timeout * _MCP_PROBE_ALIVE_EXTENSION_FACTOR`` before
+    the probe gives up and reports it as genuinely hung.
     """
     try:
-        proc = subprocess.run(  # noqa: S603 — binary_path resolved via shutil.which, not attacker input
+        proc = subprocess.Popen(  # noqa: S603 — binary_path resolved via shutil.which, not attacker input
             [binary_path],
-            input=_MCP_INITIALIZE_REQUEST,
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             errors="replace",  # non-UTF8 crash output (e.g. a mangled traceback) must not raise UnicodeDecodeError out of a health check
-            timeout=timeout,
-            check=False,
         )
-    except subprocess.TimeoutExpired as exc:
-        stderr_excerpt = _first_lines(
-            exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", "replace"),
-            3,
-        )
-        detail = f"timed out after {timeout:.0f}s waiting for initialize response"
-        if stderr_excerpt:
-            detail += f" — stderr: {stderr_excerpt}"
-        return False, detail
     except OSError as exc:
         return False, f"failed to spawn {binary_path}: {exc}"
-    except Exception as exc:  # noqa: BLE001 — any other spawn/communicate failure must still report, not crash `nx doctor`
+    except Exception as exc:  # noqa: BLE001 — any other spawn failure must still report, not crash `nx doctor`
         return False, f"probe error: {exc!r}"
 
-    stderr_excerpt = _first_lines(proc.stderr or "", 3)
+    try:
+        proc.stdin.write(_MCP_INITIALIZE_REQUEST)
+    except (BrokenPipeError, OSError):
+        pass  # a binary that crashes before reading stdin closes it first; the exit-code check below reports the real failure
+    finally:
+        with contextlib.suppress(OSError):
+            proc.stdin.close()
+        # Popen.communicate() flushes/closes ``self.stdin`` itself on its
+        # FIRST call when the attribute is still set — a ValueError ("I/O
+        # operation on closed file") since we already closed it above.
+        # Clearing the attribute (not the underlying fd — already closed)
+        # tells communicate() there is nothing left for it to write.
+        proc.stdin = None
+
+    poll_interval = min(timeout, _MCP_PROBE_POLL_INTERVAL_S)
+    max_wait = timeout * _MCP_PROBE_ALIVE_EXTENSION_FACTOR
+    deadline = time.monotonic() + max_wait
+    stdout_text = ""
+    stderr_text = ""
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Exceeded the extended cap while the process was STILL
+                # ALIVE at every prior poll (an exited/crashed process is
+                # caught below on its first poll and never reaches here) —
+                # a genuine hang, not a slow-but-working cold start.
+                proc.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    stdout_text, stderr_text = proc.communicate(timeout=5.0)
+                stderr_excerpt = _first_lines(stderr_text, 3)
+                detail = (
+                    f"timed out after {max_wait:.0f}s waiting for initialize "
+                    "response (process stayed alive the whole time — a genuine "
+                    "hang, not a crash)"
+                )
+                if stderr_excerpt:
+                    detail += f" — stderr: {stderr_excerpt}"
+                return False, detail
+            try:
+                stdout_text, stderr_text = proc.communicate(timeout=min(poll_interval, remaining))
+                break  # process finished — answered or crashed; checked below
+            except subprocess.TimeoutExpired:
+                continue  # still alive — poll again, no data lost (documented communicate() retry idiom)
+    except OSError as exc:
+        return False, f"probe error: {exc!r}"
+
+    stderr_excerpt = _first_lines(stderr_text or "", 3)
 
     if proc.returncode != 0:
         detail = f"exited {proc.returncode}"
@@ -1477,7 +1576,7 @@ def _probe_mcp_server(
         return False, detail
 
     response: dict | None = None
-    for line in (proc.stdout or "").splitlines():
+    for line in (stdout_text or "").splitlines():
         line = line.strip()
         if not line:
             continue
@@ -3238,6 +3337,12 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.topic_assignments",
     "nexus.topic_links",
     "nexus.topics",
+    # nexus.tuples and nexus.tuple_claim_log: RDR-205 Phase 1 (nexus-em75s.2),
+    # tuples-001-baseline.xml, ENABLE + FORCE + tenant_isolation on both;
+    # nexus.tuple_tenants is deliberately NOT here (no RLS, it names tenants
+    # and holds no tenant data).
+    "nexus.tuple_claim_log",
+    "nexus.tuples",
     "t1.scratch",
 )
 
@@ -4760,6 +4865,575 @@ def _check_stranded_install() -> list[HealthResult]:
             "Then upgrade back to this version",
         ],
     )]
+
+
+
+
+# ── RDR-205 Phase 2 Step 2 (bead nexus-em75s.10): tuple-space doctor rows ────
+#
+# ``/v1/tuples`` (RDR-205 Phase 1, nexus-em75s.2/.4/.5) shipped on
+# ``engine-service-v0.1.114`` (Phase 3, nexus-em75s.14), deployed and
+# cloud-gated before the paired client release (conexus 7.41.0). A client
+# on an OLDER pinned engine (below v0.1.114) still finds the route
+# absent, so all three rows below still resolve their severity through the SAME
+# route_predates_floor idiom ``_check_manifest_null_collection`` uses
+# (health.py, RDR-204-era: "the pin at the time this route was added")
+# rather than an unconditional WARN, for the identical reason: an
+# unconditional WARN here would fail ``tests/e2e/fresh-install-mvv.sh`` on
+# every virgin box and name no action a user can take.
+#
+# The anchor now equals ``REQUIRED_ENGINE_VERSION`` (audit round 2
+# residual, nexus-em75s.10 bead notes) because Phase 3's tag is the exact
+# tag this release pins — see the hazard note below for what stays true
+# when a future engine tag moves ``REQUIRED_ENGINE_VERSION`` again without
+# touching this route.
+#
+# THE REAL HAZARD (nexus-em75s.12 review fix — the prior wording here
+# claimed this constant marks "the pin at the time this route was
+# added", which reads as though the route already shipped on a released
+# engine; it had not, at the time that comment was written): this
+# constant is truthful ONLY as long as it equals the tag that ACTUALLY
+# carries ``/v1/tuples`` — not left frozen at whatever
+# ``REQUIRED_ENGINE_VERSION`` happened to be when a given comment was
+# written. Phase 3 has now cut that tag: ``engine-service-v0.1.114``
+# (nexus-em75s.14), the route's first shipping engine, tagged on
+# a2801dfc9 and deployed/cloud-gated GREEN before the paired client
+# release (conexus 7.41.0) bumps ``REQUIRED_ENGINE_VERSION`` to the same
+# value in the same commit — the bump discipline AGENTS.md's
+# paired-release choreography already requires for
+# ``REQUIRED_ENGINE_VERSION`` itself, applied here because this constant
+# names the SAME tag. ``tests/test_health_tuple_doctor_rows.py``'s
+# ``test_tuple_route_first_engine_version_pin`` fails loudly if this ever
+# drifts below ``REQUIRED_ENGINE_VERSION`` or above the newest published
+# ``engine-service-v*`` tag this repo knows about.
+_TUPLE_ROUTE_FIRST_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 114)
+
+#: Doctor heuristic, not derived from any per-template TTL: an unclaimed
+#: tuple sitting in a claimable subspace for longer than this is reported
+#: as an actionable finding (a stuck producer/consumer), not routine
+#: traffic. Independent of the RDR's per-table autovacuum tuning.
+_TUPLE_STALE_UNCLAIMED_AGE_S: int = 3600  # 1 hour
+
+#: Doctor heuristic for the dead-tuple ratio (n_dead_tup / (n_live_tup +
+#: n_dead_tup)) on ``nexus.tuples`` / ``nexus.tuple_claim_log``. The RDR's
+#: ``autovacuum_vacuum_scale_factor = 0.01`` is the AUTOVACUUM trigger
+#: setting on those tables, not this row's report threshold — the two are
+#: independent numbers answering different questions (when does autovacuum
+#: run vs. when should a human look).
+_TUPLE_DEAD_RATIO_WARN: float = 0.20
+
+#: NexusService.SWEEP_INTERVAL_HOURS is 6h; NexusService.java:154's own
+#: comment treats 3x that (18h) as the slack budget before a single
+#: transient miss is worth reporting. Matched here rather than re-deriving
+#: a separate number.
+_TUPLE_SWEEP_STALE_AGE_S: int = 18 * 3600
+
+
+def _tuple_route_predates_floor() -> bool:
+    from nexus.engine_version import REQUIRED_ENGINE_VERSION  # noqa: PLC0415 — deferred; stdlib-only leaf, cheap either way
+    # Strictly below: a client pinned AT the first-serving tag has the
+    # route, so a 404 there is loud. (Was <= while the constant was a
+    # placeholder equal to the pre-route floor; with the constant now the
+    # real first-serving tag, equality means served. Docs-chain review
+    # 2026-09-11.)
+    return REQUIRED_ENGINE_VERSION < _TUPLE_ROUTE_FIRST_ENGINE_VERSION
+
+
+def _parse_tuple_timestamp(value: str | None) -> datetime | None:
+    """Best-effort ISO-8601 parse for a tuple row's ``created_at`` /
+    ``last_swept_at`` string. ``None`` on any parse failure or missing
+    value — callers MUST treat that as "cannot verify recency", never as
+    "recent enough" (RDR-129 B4: honest degradation, not a false clean)."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
+
+
+def _fmt_age(seconds: float) -> str:
+    if seconds < 120:
+        return f"{seconds:.0f}s"
+    if seconds < 7200:
+        return f"{seconds / 60:.0f}m"
+    return f"{seconds / 3600:.1f}h"
+
+
+def _template_take_enabled(templates: list[dict], subspace: str) -> bool:
+    """Resolve *subspace* against the ``registry()`` wire's ``templates``
+    list and return the matching template's ``take.enabled`` (nexus-em75s.12
+    review fix). Mirrors ``TemplateRegistry.resolve()``'s literal-before-
+    pattern rule (``service/src/main/java/dev/nexus/service/tuples/
+    TemplateRegistry.java``): a literal template name is checked before
+    any parameterised one, and a ``<param>`` segment matches anything in
+    the corresponding position. Defaults to ``True`` (assume claimable,
+    keep checking) when nothing resolves or a template carries no ``take``
+    block -- an unmatched subspace must never be silently skipped.
+    """
+    segments = subspace.split("/")
+
+    def _matches(name: str) -> bool:
+        t_segments = name.split("/")
+        if len(t_segments) != len(segments):
+            return False
+        return all(
+            (ts.startswith("<") and ts.endswith(">")) or ts == ss
+            for ts, ss in zip(t_segments, segments)
+        )
+
+    literal = [t for t in templates if "<" not in t.get("name", "")]
+    patterned = [t for t in templates if "<" in t.get("name", "")]
+    for t in literal:
+        if t.get("name", "") == subspace:
+            return bool(t.get("take", {}).get("enabled", True))
+    for t in patterned:
+        if _matches(t.get("name", "")):
+            return bool(t.get("take", {}).get("enabled", True))
+    return True
+
+
+_TUPLE_UNCLAIMED_LABEL = "tuples.oldest_unclaimed"
+
+
+def _check_tuple_unclaimed_age() -> list[HealthResult]:
+    """RDR-205 doctor row 1 (nexus-em75s.10): the oldest UNCLAIMED tuple's
+    age, per subspace, over CLAIMABLE rows only (live, unclaimed, not
+    dead-lettered) — reads exclusively through
+    ``nexus.db.t2.http_tuple_store.HttpTupleStore`` (``subspace_list`` +
+    ``rd``), never a second HTTP client.
+
+    ``rd`` returns dead-lettered and claimed rows too (dead-lettering is a
+    claim state, not an exclusion, RDR-205 §Contradiction Check) — the
+    ``claim_state is None`` filter below is what actually narrows to
+    "claimable". Reads at most ``QUOTAS.MAX_QUERY_RESULTS`` rows per
+    subspace (a single page); a subspace with more live rows than that
+    whose oldest unclaimed tuple falls outside the first page is a known,
+    documented limitation of a census check, not a silent miss (nothing
+    here claims exhaustive coverage past one page).
+
+    Two review fixes (nexus-em75s.12): a subspace whose resolved template
+    has ``take.enabled: false`` (e.g. ``ledger/<session_id>`` — read-only
+    by design, rows are never claimed) is skipped outright, since
+    "oldest unclaimed" carries no signal there; and a subspace whose
+    census ``oldest_created_at`` (spans ALL rows, not just unclaimed) is
+    already younger than the staleness threshold skips the per-subspace
+    ``rd(n=300)`` fetch, since nothing in it could possibly be stale.
+    """
+    label = _TUPLE_UNCLAIMED_LABEL
+    route_predates_floor = _tuple_route_predates_floor()
+
+    import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    try:
+        from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred: CLI startup cost
+        store = HttpTupleStore()
+    except Exception as exc:  # noqa: BLE001 — best-effort: engine/config unreachable, must not crash `nx doctor`
+        _log.debug("doctor_tuple_unclaimed_age_connect_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable ({type(exc).__name__}: {exc})",
+        )]
+
+    try:
+        subspaces = store.subspace_list()
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            if route_predates_floor:
+                return [HealthResult(
+                    label=label, ok=True,
+                    detail=(
+                        "informational — this engine predates GET "
+                        "/v1/tuples/subspace_list "
+                        f"(REQUIRED_ENGINE_VERSION pins a floor at or below "
+                        f"{_TUPLE_ROUTE_FIRST_ENGINE_VERSION}, before the "
+                        "route shipped on any released engine-service tag). "
+                        "This is EXPECTED, not a defect."
+                    ),
+                )]
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail=(
+                    "UNKNOWN — the engine floor should carry GET "
+                    "/v1/tuples/subspace_list but the route 404s. "
+                    "Investigate the engine install; this is no longer the "
+                    "expected pre-route-floor gap."
+                ),
+            )]
+        _log.debug("doctor_tuple_unclaimed_age_list_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable ({type(exc).__name__}: {exc})",
+        )]
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_tuple_unclaimed_age_list_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable ({type(exc).__name__}: {exc})",
+        )]
+
+    if not subspaces:
+        return [HealthResult(label=label, ok=True, detail="no subspaces")]
+
+    try:
+        templates = store.registry().get("templates") or []
+    except Exception as exc:  # noqa: BLE001 — best-effort: a registry fetch failure must not sink this row; fall back to checking every subspace
+        _log.debug("doctor_tuple_unclaimed_age_registry_failed", error=str(exc))
+        templates = []
+
+    stale: list[str] = []
+    reported: list[str] = []
+    for census in subspaces:
+        if census.available <= 0:
+            continue
+        if not _template_take_enabled(templates, census.subspace):
+            # Read-only template (take.enabled: false, e.g. ledger/<session_id>):
+            # rows are never claimed by design, so "oldest unclaimed" carries
+            # no signal here (nexus-em75s.12 review fix).
+            continue
+        census_oldest_dt = _parse_tuple_timestamp(census.oldest_created_at)
+        if census_oldest_dt is not None:
+            census_age_s = (datetime.now(UTC) - census_oldest_dt).total_seconds()
+            if census_age_s < _TUPLE_STALE_UNCLAIMED_AGE_S:
+                # oldest_created_at spans ALL rows in the subspace (live,
+                # claimed, dead, consumed) -- if even that overall oldest
+                # row is younger than the staleness threshold, no row here,
+                # unclaimed included, can possibly be older. Skip the
+                # per-subspace rd(n=300) fetch entirely (nexus-em75s.12
+                # review fix).
+                reported.append(f"{census.subspace}={_fmt_age(census_age_s)}")
+                continue
+        try:
+            rows = store.rd(census.subspace, None, n=300)
+        except Exception as exc:  # noqa: BLE001 — best-effort per-subspace; one bad subspace must not sink the whole row
+            _log.debug(
+                "doctor_tuple_unclaimed_age_rd_failed",
+                subspace=census.subspace, error=str(exc),
+            )
+            continue
+        unclaimed = [r for r in rows if r.claim_state is None]
+        if not unclaimed:
+            continue
+        ages = [
+            (r, _parse_tuple_timestamp(r.created_at))
+            for r in unclaimed
+        ]
+        dated = [(r, dt) for r, dt in ages if dt is not None]
+        if not dated:
+            continue
+        oldest_row, oldest_dt = min(dated, key=lambda pair: pair[1])
+        age_s = (datetime.now(UTC) - oldest_dt).total_seconds()
+        reported.append(f"{census.subspace}={_fmt_age(age_s)}")
+        if age_s > _TUPLE_STALE_UNCLAIMED_AGE_S:
+            stale.append(f"{census.subspace} ({_fmt_age(age_s)} old, id={oldest_row.id[:12]})")
+
+    if stale:
+        return [HealthResult(
+            label=label, ok=False,
+            detail=(
+                f"{len(stale)} subspace(s) with an unclaimed tuple older "
+                f"than {_fmt_age(_TUPLE_STALE_UNCLAIMED_AGE_S)}: "
+                + "; ".join(stale)
+            ),
+            fix_suggestions=[
+                "Check for a stuck or absent consumer on the named "
+                "subspace(s): nx tuple rd <subspace>",
+            ],
+        )]
+    return [HealthResult(label=label, ok=True, detail="; ".join(reported) or "none")]
+
+
+_TUPLE_BLOAT_LABEL = "tuples.dead_tuple_ratio"
+
+
+def _check_tuple_table_bloat(
+    creds_path: Path | None = None,
+    psql_bin: Path | None = None,
+    psql_runner=None,  # injectable for unit tests
+) -> list[HealthResult]:
+    """RDR-205 doctor row 2 (nexus-em75s.10): dead-tuple ratio and last
+    autovacuum on ``nexus.tuples`` / ``nexus.tuple_claim_log``.
+
+    A genuinely PG-catalog fact (``pg_stat_user_tables``), not something
+    ``HttpTupleStore``'s ten RDR-205 operations expose or should — reads
+    the SAME local-only ``pg_credentials`` admin-psql path
+    ``_check_migration_state``/``_check_rls_present`` already use for
+    structural PG facts (LOCAL-ONLY by design, nexus-y3wuu; managed
+    deployments run this server-side and this check skips here). The
+    query targets ``pg_stat_user_tables`` directly (a system view, always
+    queryable) rather than the two tables themselves, so an engine whose
+    Liquibase changesets predate ``tuples-001-baseline.xml`` reports zero
+    rows instead of erroring — that absence is the ``route_predates_floor``
+    signal for this row, gated the same way as row 1.
+    """
+    label = _TUPLE_BLOAT_LABEL
+    route_predates_floor = _tuple_route_predates_floor()
+
+    if creds_path is None:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred to avoid circular import
+        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+
+    if not creds_path.exists():
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+        detail = _MANAGED_DEPLOYMENT_SKIP_DETAIL if not is_local_mode() else _LOCAL_MODE_NOT_CONFIGURED_DETAIL
+        return [HealthResult(label=label, ok=False, warn=True, detail=detail)]
+
+    from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import
+        _read_credentials,
+        discover_pg_binaries,
+        PgBinaryNotFoundError,
+    )
+
+    creds = _read_credentials(creds_path)
+    host = "127.0.0.1"
+    try:
+        port = int(creds.get("PG_PORT", 0))
+    except ValueError:
+        port = 0
+    if port <= 0:
+        return [HealthResult(label=label, ok=False, warn=True, detail="pg_credentials missing PG_PORT; cannot connect")]
+
+    db_url = creds.get("NX_DB_ADMIN_URL", "")
+    dbname = "nexus"
+    if "/" in db_url:
+        dbname = db_url.rstrip("/").rsplit("/", 1)[-1] or "nexus"
+    user = creds.get("NX_DB_ADMIN_USER", "nexus_admin")
+    password = creds.get("NX_DB_ADMIN_PASS", "")
+
+    if psql_bin is None:
+        try:
+            psql_bin = discover_pg_binaries().psql
+        except PgBinaryNotFoundError as exc:
+            return [HealthResult(label=label, ok=False, warn=True, detail=f"psql binary not found: {exc}")]
+
+    sql = (
+        "SELECT relname, n_live_tup, n_dead_tup, last_autovacuum, last_autoanalyze "
+        "FROM pg_stat_user_tables "
+        "WHERE schemaname = 'nexus' AND relname IN ('tuples', 'tuple_claim_log') "
+        "ORDER BY relname;"
+    )
+    proc = _run_psql(psql_bin, host, port, dbname, user, password, sql, psql_runner=psql_runner)
+    if proc.returncode != 0:
+        stderr_snip = (proc.stderr or "").strip()[:300]
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable (psql exit {proc.returncode}): {stderr_snip}",
+        )]
+
+    lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+    if not lines:
+        if route_predates_floor:
+            return [HealthResult(
+                label=label, ok=True,
+                detail=(
+                    "informational — this engine predates the "
+                    "nexus.tuples / nexus.tuple_claim_log tables "
+                    f"(REQUIRED_ENGINE_VERSION pins a floor at or below "
+                    f"{_TUPLE_ROUTE_FIRST_ENGINE_VERSION}). This is "
+                    "EXPECTED, not a defect."
+                ),
+            )]
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                "UNKNOWN — the engine floor should carry the tuple-space "
+                "tables but pg_stat_user_tables reports none. Investigate "
+                "the engine install; this is no longer the expected "
+                "pre-route-floor gap."
+            ),
+        )]
+
+    worst_ratio = 0.0
+    worst_table = ""
+    details: list[str] = []
+    for line in lines:
+        parts = line.split("|")
+        if len(parts) != 5:
+            continue
+        relname, live_s, dead_s, last_vac, last_analyze = parts
+        try:
+            live = int(live_s) if live_s else 0
+            dead = int(dead_s) if dead_s else 0
+        except ValueError:
+            continue
+        total = live + dead
+        ratio = (dead / total) if total > 0 else 0.0
+        if ratio > worst_ratio:
+            worst_ratio, worst_table = ratio, relname
+        details.append(
+            f"{relname}: dead_ratio={ratio:.2%} live={live} dead={dead} "
+            f"last_autovacuum={last_vac or 'never'}"
+        )
+
+    if worst_ratio > _TUPLE_DEAD_RATIO_WARN:
+        return [HealthResult(
+            label=label, ok=False,
+            detail=(
+                f"{worst_table} dead-tuple ratio {worst_ratio:.2%} exceeds "
+                f"{_TUPLE_DEAD_RATIO_WARN:.0%}: " + "; ".join(details)
+            ),
+            fix_suggestions=[f"VACUUM ANALYZE nexus.{worst_table};"],
+        )]
+    return [HealthResult(label=label, ok=True, detail="; ".join(details) or "none")]
+
+
+_TUPLE_SWEEP_LABEL = "tuples.sweep_freshness"
+
+
+def _check_tuple_sweep_freshness(
+    creds_path: Path | None = None,
+    psql_bin: Path | None = None,
+    psql_runner=None,  # injectable for unit tests
+) -> list[HealthResult]:
+    """RDR-205 doctor row 3 (nexus-em75s.10): age of the last tuple sweep.
+
+    Reads ``nexus.tuple_tenants.last_swept_at`` via the same local-only
+    admin-psql path as row 2. The sweep's per-run "was the budget
+    exhausted" cause (``TupleSweepIncompleteCause``,
+    ``NexusService.java``) is a STRUCTURED LOG LINE
+    (``event=tuple_sweep_run ... incomplete_cause=...``), not a persisted
+    row this or any client can read back — ``nx doctor`` cannot see it,
+    and this row says so rather than fabricating a verdict. What IS
+    persisted and checked here is sweep RECENCY: the failure this row
+    detects (RDR-205 §Phase 1 Step 5: "a run that scanned nothing at all,
+    or a run that did not happen") shows up as a stale ``last_swept_at``
+    regardless of which cause produced it.
+    """
+    label = _TUPLE_SWEEP_LABEL
+    route_predates_floor = _tuple_route_predates_floor()
+
+    if creds_path is None:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred to avoid circular import
+        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+
+    if not creds_path.exists():
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+        detail = _MANAGED_DEPLOYMENT_SKIP_DETAIL if not is_local_mode() else _LOCAL_MODE_NOT_CONFIGURED_DETAIL
+        return [HealthResult(label=label, ok=False, warn=True, detail=detail)]
+
+    from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import
+        _read_credentials,
+        discover_pg_binaries,
+        PgBinaryNotFoundError,
+    )
+
+    creds = _read_credentials(creds_path)
+    host = "127.0.0.1"
+    try:
+        port = int(creds.get("PG_PORT", 0))
+    except ValueError:
+        port = 0
+    if port <= 0:
+        return [HealthResult(label=label, ok=False, warn=True, detail="pg_credentials missing PG_PORT; cannot connect")]
+
+    db_url = creds.get("NX_DB_ADMIN_URL", "")
+    dbname = "nexus"
+    if "/" in db_url:
+        dbname = db_url.rstrip("/").rsplit("/", 1)[-1] or "nexus"
+    user = creds.get("NX_DB_ADMIN_USER", "nexus_admin")
+    password = creds.get("NX_DB_ADMIN_PASS", "")
+
+    if psql_bin is None:
+        try:
+            psql_bin = discover_pg_binaries().psql
+        except PgBinaryNotFoundError as exc:
+            return [HealthResult(label=label, ok=False, warn=True, detail=f"psql binary not found: {exc}")]
+
+    exists_sql = "SELECT (to_regclass('nexus.tuple_tenants') IS NOT NULL);"
+    proc = _run_psql(psql_bin, host, port, dbname, user, password, exists_sql, psql_runner=psql_runner)
+    if proc.returncode != 0:
+        stderr_snip = (proc.stderr or "").strip()[:300]
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable (psql exit {proc.returncode}): {stderr_snip}",
+        )]
+    table_exists = proc.stdout.strip() == "t"
+    if not table_exists:
+        if route_predates_floor:
+            return [HealthResult(
+                label=label, ok=True,
+                detail=(
+                    "informational — this engine predates nexus.tuple_tenants "
+                    f"(REQUIRED_ENGINE_VERSION pins a floor at or below "
+                    f"{_TUPLE_ROUTE_FIRST_ENGINE_VERSION}). This is "
+                    "EXPECTED, not a defect."
+                ),
+            )]
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                "UNKNOWN — the engine floor should carry nexus.tuple_tenants "
+                "but it does not exist. Investigate the engine install; "
+                "this is no longer the expected pre-route-floor gap."
+            ),
+        )]
+
+    sweep_sql = (
+        "SELECT COUNT(*), "
+        "COUNT(*) FILTER (WHERE last_swept_at IS NULL), "
+        "MAX(last_swept_at) "
+        "FROM nexus.tuple_tenants;"
+    )
+    proc = _run_psql(psql_bin, host, port, dbname, user, password, sweep_sql, psql_runner=psql_runner)
+    if proc.returncode != 0:
+        stderr_snip = (proc.stderr or "").strip()[:300]
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable (psql exit {proc.returncode}): {stderr_snip}",
+        )]
+    parts = proc.stdout.strip().split("|")
+    if len(parts) != 3:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"unexpected sweep-freshness query output: {proc.stdout!r}",
+        )]
+    total_s, never_s, most_recent_s = parts
+    try:
+        total = int(total_s) if total_s else 0
+        never_swept = int(never_s) if never_s else 0
+    except ValueError:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"unparseable sweep-freshness counts: {proc.stdout!r}",
+        )]
+
+    if total == 0:
+        return [HealthResult(label=label, ok=True, detail="no tuple tenants recorded yet")]
+
+    most_recent = _parse_tuple_timestamp(most_recent_s or None)
+    if most_recent is None:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=(
+                f"{total} tenant(s), none swept yet (normal within the "
+                "first sweep interval after startup or first tuple "
+                "activity). Budget-exhaustion state is not persisted by "
+                "the engine (only logged); this row measures sweep "
+                "recency only."
+            ),
+        )]
+
+    age_s = (datetime.now(UTC) - most_recent).total_seconds()
+    detail = (
+        f"{total} tenant(s), {never_swept} never swept, most recent sweep "
+        f"{_fmt_age(age_s)} ago. Budget-exhaustion state is not persisted "
+        "by the engine (only logged); this row measures sweep recency only."
+    )
+    if age_s > _TUPLE_SWEEP_STALE_AGE_S:
+        return [HealthResult(
+            label=label, ok=False,
+            detail=(
+                f"last tuple sweep was {_fmt_age(age_s)} ago, over the "
+                f"{_fmt_age(_TUPLE_SWEEP_STALE_AGE_S)} slack budget: {detail}"
+            ),
+            fix_suggestions=["Check the engine process is up and its sweep scheduler is running."],
+        )]
+    return [HealthResult(label=label, ok=True, detail=detail)]
 
 
 def _check_pending_rungs() -> list[HealthResult]:
@@ -6785,6 +7459,12 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     results.extend(_check_service_autostart_drift())
     results.extend(_check_migration_state())
     results.extend(_check_rls_present())
+    # RDR-205 Phase 2 Step 2 (bead nexus-em75s.10): the Linda tuple space's
+    # three doctor rows. All three degrade internally (route_predates_floor
+    # gate; managed/local-not-configured skip on the two psql-backed rows).
+    results.extend(_check_tuple_unclaimed_age())
+    results.extend(_check_tuple_table_bloat())
+    results.extend(_check_tuple_sweep_freshness())
     # RDR-185 P0.4: read-only pending-rungs surface (degrades internally).
     results.extend(_check_pending_rungs())
 

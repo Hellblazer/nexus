@@ -1,0 +1,42 @@
+# RDR-205 Phase 3 Step 3 (bead nexus-em75s.16) — TEST-ONLY template.
+#
+# Loaded exclusively via NX_TUPLE_TEMPLATE_DIR; never shipped in engine
+# resources (service/src/main/resources/tuples/templates/ ships only
+# ledger.yaml and mailbox.yaml — RDR-205 names "the two v1 templates and
+# no third"). This file is the RDR-110 ten-worker work-stealing harness's
+# subspace shape, parameterised by <lane> so both MVV run 2 legs (the
+# audit-shape drain and the bloat leg) share one template:
+#
+#   spike/mvv-run2/queue  — the ten-worker audit-shape leg
+#   spike/mvv-run2/bloat  — the million-cycle bloat leg
+#
+# Work-stealing shape: every row written into a lane carries the SAME
+# `keys` value ({queue: work}). RDR-205 Technical Design's claim
+# statement matches on full pinned-key equality (KEYS.eq(pattern)), so a
+# claimant's in()/inp() with pattern {queue: work} is a candidate against
+# EVERY unclaimed row in the lane, and `ORDER BY created_at LIMIT 1 FOR
+# NO KEY UPDATE SKIP LOCKED` picks one — the actual work-stealing
+# mechanism, not a client-side partition. Uniqueness comes from the
+# nonce (id_from keys+nonce), one per work item, so N out() calls with N
+# distinct nonces produce N distinct tuples despite the shared keys.
+name: spike/mvv-run2/<lane>
+
+keys:
+  - queue
+
+dimensions:
+  seq:
+    type: string
+
+id_from: keys+nonce
+
+take:
+  enabled: true
+  # The bloat leg (spike/mvv-run2/bloat) reuses a small fixed row pool via
+  # claim+nack cycles as its "reopen" analog (the client API has no direct
+  # unconsume/reopen primitive) -- max_attempts is set high enough that a
+  # million nack cycles spread over ~1,000 rows never dead-letters one.
+  max_attempts: 5000000
+  max_lease_seconds: 120
+
+retention_seconds: 3600

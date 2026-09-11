@@ -33,9 +33,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * nexus-4pz86 (conexus RDR-001): prove the engine works correctly through a REAL
  * transaction-mode PgBouncer with the server-connection pool capped at one, AND that
- * tenant context does not bleed across the reused server backend. This is the production
- * topology (Crunchy Standard fronts PostgreSQL with PgBouncer); the engine-side analog of
- * the conexus GucLeakTripwire.
+ * tenant context does not bleed across the reused server backend. This is a topology
+ * the engine supports but does not deploy (production connects to Postgres directly,
+ * RDR-205 CA 7); the engine-side analog of the conexus GucLeakTripwire.
  *
  * <p>Complements {@link TenantPoolingIsolationTest} (which proves the leak property
  * deterministically via a 1-connection HikariCP pool, no external pooler). This class

@@ -51,7 +51,7 @@ def _instrument_httpx_clients(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 
 
 class TestT2DatabaseSharedClientFanout:
-    def test_default_construction_builds_eight_httpx_clients(
+    def test_default_construction_builds_nine_httpx_clients(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """BEFORE: the shape every existing ``T2Database(path)`` call site
@@ -69,9 +69,9 @@ class TestT2DatabaseSharedClientFanout:
 
         db = T2Database(tmp_path / "t2.db")
         try:
-            assert len(tally) == 8, (
+            assert len(tally) == 9, (
                 f"expected T2Database(path) with no client= to construct "
-                f"exactly 8 httpx.Client()s (one per domain store); got "
+                f"exactly 9 httpx.Client()s (one per domain store); got "
                 f"{len(tally)}"
             )
         finally:

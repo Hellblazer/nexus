@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Install Nexus: persistent memory and semantic search for Claude, fully local, in about ten minutes.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
+<title>Installing Nexus</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#EEF1F4; --paper:#FFFFFF; --ink:#1B2430; --ink-2:#4A5666; --ink-3:#7A8697;
+  --line:#D5DBE3; --brass:#A87A22; --brass-soft:#F3EAD3; --blue:#24466B; --blue-soft:#E1E9F3;
+  --ok:#2E7D4F; --warn:#9A6A12; --code-bg:#1B2430; --code-fg:#E9EDF2; --code-cmt:#8A97A8;
+  --radius:6px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+    --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+    --ok:#6CC58F; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+  --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+  --ok:#6CC58F; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+}
+*{box-sizing:border-box}
+/* Code blocks scroll sideways inside their column. A grid or flex child defaults to min-width:auto, which lets a long <pre> line widen the track and the page; min-width:0 on every wrapper between the track and the <pre> stops that. */
+.wrap,.wrap>*,main,.step,.cmd,.tbl,.further,.callout,.lesson{min-width:0}
+pre{max-width:100%}
+
+html{margin:0}body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;font-size:16px;line-height:1.55;padding-inline:clamp(16px,4vw,40px);padding-block:40px 80px;}
+.wrap{max-width:820px;margin:0 auto}
+h1,h2,h3{font-family:"Source Serif 4",Georgia,"Times New Roman",serif;font-weight:600;line-height:1.15;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,5vw,48px);letter-spacing:-.01em}
+h2{font-size:26px;margin-top:56px;padding-top:20px;border-top:1px solid var(--line)}
+h3{font-size:19px;margin-top:28px}
+p{margin:12px 0;max-width:66ch}
+.lede{font-size:19px;color:var(--ink-2);max-width:60ch}
+.dome{float:right;width:min(280px,40%);height:auto;margin:4px 0 12px 24px;border-radius:var(--radius)}
+@media (max-width:560px){.dome{float:none;display:block;width:100%;max-width:320px;margin:16px auto}}
+h2{clear:both}
+.topnav{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:14px}
+.topnav .links{display:flex;gap:16px;flex-wrap:wrap}
+.topnav a{font-size:14px;font-weight:500;text-decoration:none}
+h2{scroll-margin-top:16px}
+.topnav a:hover{text-decoration:underline}
+.eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--brass);font-weight:600;margin-bottom:14px}
+a{color:var(--blue)}
+code{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em;background:var(--blue-soft);padding:1px 5px;border-radius:4px}
+kbd{font-family:"IBM Plex Mono",monospace;font-size:.9em;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 5px}
+
+/* choosers */
+.choose{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 8px}
+.choose button{font:inherit;font-size:15px;font-weight:500;padding:9px 16px;border-radius:999px;border:1px solid var(--line);background:var(--paper);color:var(--ink-2);cursor:pointer}
+.choose button[aria-pressed="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.choose button:focus-visible{outline:2px solid var(--brass);outline-offset:2px}
+.choose-label{font-size:13px;color:var(--ink-3);margin-top:20px}
+.oswrap{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.oswrap .choose{margin:0}
+.who{color:var(--ink-2);font-size:15px;margin-top:6px}
+
+/* steps */
+ol.steps{list-style:none;counter-reset:s;padding:0;margin:24px 0 0;display:grid;gap:22px}
+ol.steps>li{counter-increment:s;display:grid;grid-template-columns:44px minmax(0,1fr);gap:14px}
+ol.steps>li::before{content:counter(s);font-family:"Source Serif 4",Georgia,serif;font-size:26px;font-weight:600;color:var(--brass);line-height:1.1;padding-top:2px}
+.step h3{margin-top:0}
+.step p{margin:6px 0 10px}
+pre{margin:0;background:var(--code-bg);color:var(--code-fg);border-radius:var(--radius);padding:14px 16px;font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:14px;line-height:1.6;overflow-x:auto;position:relative}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;padding-right:76px}
+pre .c{color:var(--code-cmt)}
+.cmd{position:relative}
+.copy{position:absolute;top:8px;right:8px;font:inherit;font-size:12px;font-weight:500;padding:4px 9px;border-radius:4px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:var(--code-fg);cursor:pointer}
+.copy:hover{background:rgba(255,255,255,.14)}
+.copy:focus-visible{outline:2px solid var(--brass)}
+.note{font-size:14px;color:var(--ink-2);margin-top:8px}
+.ph{color:var(--brass);font-style:italic}
+pre .ph{color:#E0B24C}
+.expect{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;margin:18px 0}
+.expect div{background:var(--paper);padding:12px 14px}
+.expect b{display:block;font-family:"Source Serif 4",Georgia,serif;font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}
+.expect span{font-size:13px;color:var(--ink-2)}
+.callout{border-left:3px solid var(--brass);background:var(--brass-soft);padding:12px 16px;border-radius:0 var(--radius) var(--radius) 0;margin:18px 0;font-size:15px}
+.callout.ok{border-color:var(--ok);background:var(--blue-soft)}
+.callout.must{border-left-width:5px;border-color:var(--warn);font-size:16px}
+.callout.must .eyebrow{color:var(--warn);margin-bottom:4px}
+tr.must td{background:var(--brass-soft)}
+tr.must td:first-child{border-left:3px solid var(--warn)}
+.callout p{margin:4px 0}
+.hidden{display:none!important}
+
+/* prereq table */
+table{border-collapse:collapse;width:100%;font-size:15px;margin:14px 0}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+td:first-child{font-weight:500;white-space:nowrap}
+.tbl{overflow-x:auto}
+
+/* troubleshooting */
+details{border-top:1px solid var(--line);padding:12px 0}
+details:last-of-type{border-bottom:1px solid var(--line)}
+summary{cursor:pointer;font-weight:500;list-style:none;display:flex;justify-content:space-between;gap:12px}
+summary::after{content:"+";color:var(--brass);font-family:"IBM Plex Mono",monospace}
+details[open] summary::after{content:"–"}
+details p{margin:8px 0 4px;font-size:15px}
+.footer{margin-top:60px;font-size:13px;color:var(--ink-3)}
+@media (prefers-reduced-motion:no-preference){.copy{transition:background .15s}}
+@media (max-width:480px){ol.steps>li{grid-template-columns:32px minmax(0,1fr)}ol.steps>li::before{font-size:22px}}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<div class="topnav"><span class="eyebrow" style="margin:0">Nexus · conexus 7.x</span><span class="links"><a href="#update">Update</a><a href="#uninstall">Uninstall</a><a href="#problems">Problems</a><a href="getting-started.html">Getting started →</a><a href="rdr.html">RDRs →</a><a href="research.html">Research →</a></span></div>
+<h1>Installing Nexus</h1>
+<img class="dome" src="assets/a-stately-pleasure-dome.png" alt="A brass-ribbed crystal dome on a hilltop at dusk" width="1024" height="571">
+<p class="lede">Nexus gives Claude a permanent memory and search by meaning. It runs on your computer. You need no API key, no account, and no separate database install. The install takes about ten minutes.</p>
+
+<p class="choose-label">How do you use Claude?</p>
+<div class="choose" role="group" aria-label="Surface">
+  <button data-surface="code" aria-pressed="true">Claude Code (terminal)</button>
+  <button data-surface="cli" aria-pressed="false">Just the nx CLI</button>
+  <button data-surface="desktop" aria-pressed="false">Claude Desktop only</button>
+</div>
+<p class="who" data-for="code">You run <code>claude</code> in a terminal. You install the <code>nx</code> command and a plugin. The plugin adds 48 tools, 13 agents, and 43 skills to Claude Code. <strong>The plugin needs Node.js.</strong></p>
+<p class="who hidden" data-for="cli">You want to index and search from the terminal only. You can add the Claude plugin later.</p>
+<p class="who hidden" data-for="desktop">You use the Claude Desktop app and you do not have Claude Code. You install Nexus as an extension with one click.</p>
+
+<div class="oswrap" style="margin-top:14px">
+  <span class="choose-label" style="margin:0">Operating system</span>
+  <div class="choose" role="group" aria-label="Operating system">
+    <button data-os="mac" aria-pressed="true">macOS</button>
+    <button data-os="linux" aria-pressed="false">Linux</button>
+  </div>
+</div>
+
+<h2 id="before">Before you start</h2>
+<div class="tbl"><table>
+<tr><th>Need</th><th>Why</th><th>Check</th></tr>
+<tr><td>Python 3.12 or 3.13</td><td>Python 3.14 does not work yet. If needed, uv downloads Python 3.13 for you.</td><td><code>python3 --version</code></td></tr>
+<tr><td>uv</td><td>Installs and runs the <code>nx</code> command.</td><td><code>uv --version</code></td></tr>
+<tr><td>git</td><td>Nexus reads git information when it indexes a repository.</td><td><code>git --version</code></td></tr>
+<tr data-for="code" class="must"><td>Node.js (with npm)</td><td><strong>Required for the plugin.</strong> The plugin starts one of its servers with <code>npx</code>. Without Node.js there is no error message. The plugin installs, but its tools never appear.</td><td><code>node --version</code><br><code>npm --version</code></td></tr>
+<tr><td>~600 MB download, a few minutes</td><td>The first run downloads the service program, a database, and the search model.</td><td>—</td></tr>
+</table></div>
+
+<p>If uv or Node.js is not installed, install them first:</p>
+<div class="cmd" data-os-block="mac"><pre><span class="c"># macOS</span>
+brew install uv<span data-for="code">
+brew install node</span></pre><button class="copy">Copy</button></div>
+<div class="cmd hidden" data-os-block="linux"><pre><span class="c"># Linux</span>
+curl -LsSf https://astral.sh/uv/install.sh | sh<span data-for="code">
+<span class="c"># Node.js (required for the plugin): distro package, or</span>
+curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - &amp;&amp; sudo apt-get install -y nodejs</span></pre><button class="copy">Copy</button></div>
+<p class="note">If <code>python3 --version</code> shows 3.14, run <code>uv python install 3.13</code> one time. uv then uses 3.13 automatically.</p>
+
+<!-- ===== Claude Code + CLI path ===== -->
+<section data-for="code cli">
+<h2>Install</h2>
+<div class="callout must" data-for="code">
+  <div class="eyebrow">Before step 1</div>
+  <p><strong>Install Node.js now.</strong> The plugin starts one of its servers with <code>npx</code>. If <code>node</code> and <code>npm</code> are not installed, step 4 reports success, but the tools never appear. There is no error message.</p>
+  <p>Check with <code>node --version</code> and <code>npm --version</code> before you continue.</p>
+</div>
+<p>Run the steps in this order. You can run each step more than once without harm.</p>
+<ol class="steps">
+<li><div class="step">
+  <h3>Install the <code>nx</code> command</h3>
+  <p>The first command installs <code>nx</code>. The second command moves it to the layout that Nexus manages. This removes one package that causes conflicts. On Linux, it also replaces a 4.5 GB GPU package with a smaller CPU package.</p>
+  <div class="cmd"><pre>uv tool install conexus
+nx self install</pre><button class="copy">Copy</button></div>
+  <p class="note">If the terminal cannot find <code>nx</code> after this, add <code>~/.local/bin</code> to your PATH. Then open a new terminal.</p>
+</div></li>
+<li><div class="step">
+  <h3>Set up the storage service</h3>
+  <p>This command downloads the service program, the database, and the search model. It starts the service. Then it asks if the service should start at login. Answer yes.</p>
+  <div class="cmd"><pre>nx init</pre><button class="copy">Copy</button></div>
+  <div class="expect">
+    <div><b>~600 MB</b><span>downloaded, first run only</span></div>
+    <div><b>2–5 min</b><span>on a normal connection</span></div>
+    <div><b>0</b><span>settings to change</span></div>
+  </div>
+  <p class="note">To answer yes automatically: <code>nx init --yes</code>. To not start at login: <code>nx init --no-autostart</code>.</p>
+</div></li>
+<li><div class="step">
+  <h3>Check the install</h3>
+  <div class="cmd"><pre>nx doctor</pre><button class="copy">Copy</button></div>
+  <p class="note">Every line must show <span style="color:var(--ok);font-weight:600">✓</span>. One line may say "credentials not set". This is normal for a local install. It is not a problem.</p>
+</div></li>
+<li data-for="code"><div class="step">
+  <h3>Add the Claude Code plugin</h3>
+  <p><strong>First, check Node.js:</strong> <code>node --version</code> must print a version number. If it does not, install Node.js and return here. The plugin cannot start without it.</p>
+  <p>Then start <code>claude</code>. Type these two commands inside Claude Code, not in the terminal:</p>
+  <div class="cmd"><pre>/plugin marketplace add Hellblazer/nexus
+/plugin install conexus@nexus-plugins</pre><button class="copy">Copy</button></div>
+  <p class="note">Then run <code>/conexus:nx-preflight</code>. It checks that everything the plugin needs is present. The plugin uses the <code>nx</code> command from step 1. This is why step 1 must come first.</p>
+</div></li>
+<li><div class="step">
+  <h3>Index a repository and search it</h3>
+  <div class="cmd"><pre>cd your-project
+nx index repo .
+nx search "how does retry work"</pre><button class="copy">Copy</button></div>
+  <p class="note">If you index the same repository again, Nexus skips files that did not change. For a large repository, add <code>--monitor</code> to see the progress for each file.</p>
+</div></li>
+</ol>
+
+<div class="callout ok"><p><strong>The install is complete.</strong> Search runs on your computer. After indexing, Nexus finds topics automatically. <code>nx taxonomy status</code> shows them.</p><p>Next: <a href="getting-started.html"><strong>Getting started</strong></a>. Eleven lessons, all done inside Claude Code.</p></div>
+</section>
+
+<!-- ===== Desktop path ===== -->
+<section class="hidden" data-for="desktop">
+<h2>Install</h2>
+<ol class="steps">
+<li><div class="step">
+  <h3>Install uv</h3>
+  <p>When you install uv this way, Claude Desktop finds it. You do not need to change your PATH.</p>
+  <div class="cmd" data-os-block="mac"><pre>brew install uv</pre><button class="copy">Copy</button></div>
+  <div class="cmd hidden" data-os-block="linux"><pre>curl -LsSf https://astral.sh/uv/install.sh | sh</pre><button class="copy">Copy</button></div>
+</div></li>
+<li><div class="step">
+  <h3>Set up the storage service</h3>
+  <p>The extension does not start the service itself. Run these commands one time in a terminal:</p>
+  <div class="cmd"><pre>uv tool install conexus
+nx self install
+nx init
+nx doctor</pre><button class="copy">Copy</button></div>
+  <p class="note">The first run downloads about 600 MB and takes a few minutes. Every line of <code>nx doctor</code> must show ✓.</p>
+</div></li>
+<li><div class="step">
+  <h3>Add the extension</h3>
+  <p>Download <code>conexus.mcpb</code> from the <a href="https://github.com/Hellblazer/nexus/releases/latest">latest release</a>. Double-click the file. Claude Desktop adds it under Settings → Connectors with the name "Conexus". The first start takes about 20 seconds.</p>
+</div></li>
+</ol>
+<div class="callout"><p>Next: <a href="getting-started.html"><strong>Getting started</strong></a>. If you already use the conexus plugin in Claude Code, do not install the extension. Claude Desktop already sees the plugin's tools. With both, you get two copies with different names.</p></div>
+</section>
+
+<h2 id="update">Update Nexus</h2>
+<p>Two commands. Always run both:</p>
+<div class="cmd"><pre>nx self install   <span class="c"># install the new version next to the current one</span>
+nx upgrade        <span class="c"># update the service, the data, and the plugins</span></pre><button class="copy">Copy</button></div>
+<div class="callout"><p><strong>Do not</strong> update with <code>uv tool install conexus</code> or with <code>--force</code>. That command removes the local search model, and search then returns nothing. If this happened, <code>nx self install</code> repairs it.</p></div>
+<p class="note">If you update the plugin with <code>/plugin update</code> in Claude Code, the next session runs both commands for you.</p>
+
+<h2 id="uninstall">Remove Nexus completely</h2>
+<p>Four steps, in this order. The first one is optional. Nothing here touches a managed cloud tenant. It removes only what is on this computer.</p>
+<ol class="steps">
+<li><div class="step">
+  <h3>Optional: keep a copy of your knowledge</h3>
+  <p>The knowledge store can be exported to a file and imported into a later install. Memory and scratch cannot be exported.</p>
+  <div class="cmd"><pre>nx store export --all -o <span class="ph">&lt;A-DIRECTORY-TO-KEEP&gt;</span>   <span class="c"># one .nxexp file per collection</span></pre><button class="copy" type="button">Copy</button></div>
+  <p class="note">Later, <code>nx store import <span class="ph">&lt;FILE&gt;</span>.nxexp</code> restores a collection into a new install.</p>
+</div></li>
+<li><div class="step">
+  <h3>Remove the Claude integration</h3>
+  <p data-for="code cli">In Claude Code:</p>
+  <div class="cmd" data-for="code cli"><pre>/plugin uninstall conexus@nexus-plugins</pre><button class="copy" type="button">Copy</button></div>
+  <p data-for="desktop">In Claude Desktop: Settings → Connectors → Desktop → Conexus → Uninstall. This removes the extension only. The service and the data stay. Steps 3 and 4 remove them.</p>
+  <p class="note">If you use both Claude Code and Claude Desktop, do both.</p>
+</div></li>
+<li><div class="step">
+  <h3>Stop the service and delete the data</h3>
+  <p>The first command only shows what would be removed. The second command does it.</p>
+  <div class="cmd"><pre>nx uninstall                          <span class="c"># preview, changes nothing</span>
+nx uninstall --yes --remove-data      <span class="c"># stop the service, remove autostart, delete notes, plans, catalog and the database</span></pre><button class="copy" type="button">Copy</button></div>
+  <p class="note">Without <code>--remove-data</code>, the service stops and autostart is removed, but your data stays in <code>~/.config/nexus</code>. Use that form if you plan to install again later.</p>
+</div></li>
+<li><div class="step">
+  <h3>Remove the program</h3>
+  <p><code>nx uninstall</code> does not remove <code>nx</code> itself, the downloaded search model, or older versions kept side by side. Remove them by hand:</p>
+  <div class="cmd"><pre>uv tool uninstall conexus 2&gt;/dev/null      <span class="c"># the uv install, if one exists</span>
+rm -rf ~/.local/share/nexus                <span class="c"># program versions, search model cache</span>
+rm -f ~/.local/bin/nx ~/.local/bin/nx-mcp ~/.local/bin/nx-mcp-catalog ~/.local/bin/nx-session-end-launcher</pre><button class="copy" type="button">Copy</button></div>
+</div></li>
+</ol>
+<h3>Check</h3>
+<div class="cmd" data-os-block="mac"><pre>which nx                        <span class="c"># must print nothing</span>
+launchctl list | grep -i nexus  <span class="c"># must print nothing</span>
+ls ~/.config/nexus              <span class="c"># must not exist</span></pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd hidden" data-os-block="linux"><pre>which nx                                          <span class="c"># must print nothing</span>
+systemctl --user list-unit-files | grep -i nexus  <span class="c"># must print nothing</span>
+ls ~/.config/nexus                                <span class="c"># must not exist</span></pre><button class="copy" type="button">Copy</button></div>
+<p class="note">Old installs from before mid-2026 may also have a directory <code>~/.local/share/nexus/chroma</code> or a <code>com.nexus.t2</code> unit. The commands above remove both.</p>
+
+<h2 id="problems">Problems</h2>
+<details><summary>nx: command not found</summary><p>Add <code>~/.local/bin</code> to your PATH. Then open a new terminal. If PATH is already correct, run <code>nx self install</code>. If <code>nx</code> was never installed, run <code>uv tool install conexus</code>.</p></details>
+<details><summary>Crash on startup, or an import error mentioning voyageai or Pydantic v1</summary><p>Nexus runs on Python 3.14, which does not work. Run these three commands in order: <code>uv python install 3.13</code>, then <code>uv tool install conexus --force --python 3.13</code>, then <code>nx self install</code>.</p></details>
+<details><summary>nx doctor says credentials not set</summary><p>This is normal for a local install. Only the cloud service needs a token.</p></details>
+<details><summary>nx search returns nothing</summary><p>Run <code>nx doctor</code>. If the index was interrupted, run <code>nx index repo .</code> again. It continues where it stopped. If you updated with <code>uv tool install</code>, see "Update Nexus" above.</p></details>
+<details><summary>Plugin installed but its tools never appear</summary><p>There are two common causes. The <code>nx</code> command is not installed, or Node.js is not installed. Run <code>/conexus:nx-preflight</code>. It tells you which one.</p></details>
+<details><summary>Nothing above helps</summary><p>Use the <a href="https://gist.github.com/Hellblazer/08f0a615e3d73e47d8062bce4829b611">recovery runbook</a>. Paste it as the first message of a Claude Code session. Claude then checks the install step by step. It asks you before it changes any data.</p></details>
+
+<h2 id="what">What you installed</h2>
+<p>One service on your computer. It contains a database (Postgres 17 with pgvector) and three stores: scratch for one session, memory for project facts, and knowledge for everything you index. The search model also runs on your computer, so your data does not leave it. One time per day, Nexus sends one anonymous message with six values: install id, version, mode, operating system, CPU type, and Python version. <code>nx telemetry off</code> stops this.</p>
+<p>More: <a href="getting-started.html">Getting started</a> · <a href="rdr.html">Working with RDRs</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md">CLI reference</a></p>
+
+<p class="footer">Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a> README and docs. The commands match the current conexus release. This page is <a href="https://github.com/Hellblazer/nexus/blob/main/web/index.html">web/index.html</a> in the repo. Corrections are welcome.</p>
+</div>
+
+<script>
+(function(){
+  var state={surface:"code",os:"mac"};
+  try{var s=JSON.parse(localStorage.getItem("nx-guide")||"{}");if(s.surface)state.surface=s.surface;if(s.os)state.os=s.os;}catch(e){}
+  function save(){try{localStorage.setItem("nx-guide",JSON.stringify(state));}catch(e){}}
+  function apply(){
+    document.querySelectorAll("[data-for]").forEach(function(el){
+      var list=el.getAttribute("data-for").split(" ");
+      el.classList.toggle("hidden",list.indexOf(state.surface)<0);
+    });
+    document.querySelectorAll("[data-os-block]").forEach(function(el){
+      el.classList.toggle("hidden",el.getAttribute("data-os-block")!==state.os);
+    });
+    document.querySelectorAll("[data-surface]").forEach(function(b){b.setAttribute("aria-pressed",String(b.getAttribute("data-surface")===state.surface));});
+    document.querySelectorAll("[data-os]").forEach(function(b){b.setAttribute("aria-pressed",String(b.getAttribute("data-os")===state.os));});
+  }
+  document.querySelectorAll("[data-surface]").forEach(function(b){b.addEventListener("click",function(){state.surface=b.getAttribute("data-surface");save();apply();});});
+  document.querySelectorAll("[data-os]").forEach(function(b){b.addEventListener("click",function(){state.os=b.getAttribute("data-os");save();apply();});});
+  document.querySelectorAll(".copy").forEach(function(btn){
+    btn.addEventListener("click",function(){
+      var pre=btn.parentElement.querySelector("pre");
+      var text=Array.prototype.filter.call(pre.childNodes,function(n){
+        return !(n.nodeType===1&&n.classList.contains("hidden"));
+      }).map(function(n){return n.textContent;}).join("");
+      text=text.split("\n").map(function(l){return l.replace(/\s*#.*$/,"");}).filter(function(l){return l.trim();}).join("\n");
+      function done(){btn.textContent="Copied";setTimeout(function(){btn.textContent="Copy";},1400);}function fail(){btn.textContent="Select and copy";setTimeout(function(){btn.textContent="Copy";},2200);}
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(done,fail);}else{fail();}
+    });
+  });
+  apply();
+})();
+</script>
+</body>
+</html>

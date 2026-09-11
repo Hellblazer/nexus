@@ -53,6 +53,17 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 #      the search threshold gate and dimension-orphan tooling key on.
 #   D  real-client read path: list_collections + one search round-trip
 #      through the edge returns without error (auth + /v1/* proxy intact).
+#   F  RDR-205 tuple-space CA 3 through the edge (bead nexus-em75s.15):
+#      (i) a park at the engine's default 25 s cap on an empty probe
+#      subspace returns the probe result (never a 504) -- the constraint
+#      CA 3 depends on; (ii) timeout_s=31 (above the cap) is asserted
+#      against whatever the edge/engine ACTUALLY does -- read the result
+#      rather than assume it, since the engine's synchronous
+#      TimeoutTooLong (400) rejection and a genuine edge 504 are both
+#      valid evidence for "a >25 s park cannot succeed end to end"; (iii)
+#      registry() reports sources == ["resources"] exactly, so a stray
+#      NX_TUPLE_TEMPLATE_DIR in production is a red gate, not a silent
+#      second template source.
 #
 # Applicability: requires a CLOUD-mode box (service_url is a non-loopback
 # https endpoint). On a local-mode box this gate REFUSES (exit 2) rather
@@ -82,13 +93,14 @@ _fail() { echo "CLOUD CLIENT-PATH GATE FAILED: $*" >&2; exit 1; }
 # side — a heredoc that dies mid-leg still counts as a leg that failed to
 # complete, never a leg that quietly did not run.
 #
-# EXPECTED_LEGS=4 (dated 2026-08-31): [A] /version, [B] /health
+# EXPECTED_LEGS=5 (dated 2026-09-10): [A] /version, [B] /health
 # authenticated, [C+D] client probe heredoc (one shell-side entry for the
 # combined python leg), [E] T2 write body carrying shell-substitution text
-# (nexus-cmzib WAF passthrough). Editing the battery means updating this
-# constant in the same diff.
+# (nexus-cmzib WAF passthrough), [F] RDR-205 tuple-space CA 3 through the
+# edge (nexus-em75s.15). Editing the battery means updating this constant
+# in the same diff.
 LEGS_RAN=0
-EXPECTED_LEGS=4
+EXPECTED_LEGS=5
 _leg_enter() { LEGS_RAN=$((LEGS_RAN + 1)); echo "[$1] $2"; }
 
 SERVICE_URL="$(uv run python - <<'PY'
@@ -247,6 +259,128 @@ finally:
         store.delete("nexus_gate_probes", title)
     except Exception:  # noqa: BLE001 — best-effort cleanup; ttl=1 reaps leftovers
         pass
+PY
+
+# ── Leg F: RDR-205 tuple-space CA 3 through the edge (nexus-em75s.15) ────
+# Both calls below are non-mutating (`rd` passes mutates=False; `registry`
+# is a GET) so neither routes through the nexus-a2qhz production-write
+# guard -- nothing is written, nothing needs to be taken back.
+#
+# CA 3 (docs/rdr/rdr-205-linda-tuple-space-over-postgres.md): the control
+# plane times out a response that has not started within 30 s, so
+# timeout_s is capped at 25 s engine-side. Read against the ENGINE source
+# (service/src/main/java/dev/nexus/service/db/TupleRepository.java
+# validateTimeout): a timeout_s above the cap is rejected SYNCHRONOUSLY
+# with a 400 TimeoutTooLong error before the request ever parks -- there
+# is no server-side clamp to 25 s. That is the observed contract this
+# leg pins: a client cannot make the engine park past the cap through
+# this route, so a genuine edge 504 for an over-cap tuple park is
+# structurally unreachable, not merely avoided by convention. The probe
+# still checks for an actual 504 rather than assuming the 400, in case
+# the engine's behavior has changed since.
+_leg_enter F "RDR-205 tuple-space CA 3 (park cap, over-cap rejection, registry sources)"
+uv run python - <<'PY' || _leg_fail "F: tuple-space CA 3 probe failed (see above)"
+import sys
+import time
+import uuid
+import httpx
+from nexus.db.t2.http_tuple_store import HttpTupleStore, TimeoutTooLongError
+
+bad = False
+store = HttpTupleStore()
+addr = f"ccpg-probe-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+subspace = f"mailbox/{addr}"
+pattern = {"to": addr}
+
+# [F1] a park at the 25 s cap on a subspace with nothing in it returns the
+# probe result (empty) without raising -- no 504, no typed error.
+t0 = time.monotonic()
+try:
+    rows = store.rd(subspace, pattern, timeout_s=25)
+    elapsed = time.monotonic() - t0
+    if rows != []:
+        print(f"  VIOLATION [F1]: expected an empty result on a fresh probe "
+              f"subspace, got {rows!r}", file=sys.stderr)
+        bad = True
+    elif elapsed < 20:
+        print(f"  VIOLATION [F1]: returned in {elapsed:.1f}s, well under the "
+              "25s cap -- this did not exercise an actual park", file=sys.stderr)
+        bad = True
+    else:
+        print(f"  ok [F1]: 25s park on an empty subspace returned the probe "
+              f"result (empty) in {elapsed:.1f}s, no 504")
+except Exception as exc:
+    elapsed = time.monotonic() - t0
+    print(f"  VIOLATION [F1]: 25s park raised after {elapsed:.1f}s instead of "
+          f"returning the probe result: {exc!r}", file=sys.stderr)
+    bad = True
+
+# [F2] timeout_s=31 (above the 25s cap) -- assert the OBSERVED contract,
+# not an assumed one: a fast synchronous TimeoutTooLong rejection, an
+# actual edge 504, or (if the engine ever changes to clamp) a bounded
+# non-error response are all read here rather than presumed.
+t0 = time.monotonic()
+try:
+    rows = store.rd(subspace, pattern, timeout_s=31)
+    elapsed = time.monotonic() - t0
+    if elapsed >= 28:
+        print(f"  VIOLATION [F2]: an unrejected timeout_s=31 request took "
+              f"{elapsed:.1f}s -- indistinguishable from a park that would "
+              "reach the edge's 30s window", file=sys.stderr)
+        bad = True
+    else:
+        print(f"  ok [F2]: engine accepted timeout_s=31 without error in "
+              f"{elapsed:.1f}s (rows={rows!r}) -- apparently clamped below "
+              "the edge's 30s window; the >25s case still could not reach it")
+except TimeoutTooLongError as exc:
+    elapsed = time.monotonic() - t0
+    if elapsed >= 10:
+        print(f"  VIOLATION [F2]: TimeoutTooLong took {elapsed:.1f}s to "
+              "arrive -- not the fast synchronous rejection the cap's "
+              "justification depends on", file=sys.stderr)
+        bad = True
+    else:
+        print(f"  ok [F2]: timeout_s=31 (> 25s cap) rejected SYNCHRONOUSLY "
+              f"as TimeoutTooLong in {elapsed:.1f}s ({exc}) -- the engine "
+              "refuses the request before ever parking, so a >25s park can "
+              "never reach the edge's 30s window through this route; this "
+              "is the contract that justifies the cap, not an edge 504")
+except httpx.HTTPStatusError as exc:
+    elapsed = time.monotonic() - t0
+    status = exc.response.status_code
+    if status == 504:
+        print(f"  ok [F2]: timeout_s=31 (> 25s cap) hit the edge's 504 "
+              f"after {elapsed:.1f}s -- the control-plane cutoff CA 3 "
+              "names, pinned directly")
+    else:
+        print(f"  VIOLATION [F2]: timeout_s=31 request failed with "
+              f"unexpected HTTP {status} after {elapsed:.1f}s: {exc}",
+              file=sys.stderr)
+        bad = True
+except Exception as exc:
+    elapsed = time.monotonic() - t0
+    print(f"  VIOLATION [F2]: timeout_s=31 request failed unexpectedly "
+          f"after {elapsed:.1f}s: {exc!r}", file=sys.stderr)
+    bad = True
+
+# [F3] registry() reports the resources source ONLY -- an
+# NX_TUPLE_TEMPLATE_DIR set in production would append a second entry
+# and must fail this leg, not pass silently.
+try:
+    reg = store.registry()
+    sources = reg.get("sources")
+    if sources != ["resources"]:
+        print(f"  VIOLATION [F3]: registry() sources={sources!r}, expected "
+              "exactly ['resources'] -- a second entry means "
+              "NX_TUPLE_TEMPLATE_DIR is set in production", file=sys.stderr)
+        bad = True
+    else:
+        print(f"  ok [F3]: registry() sources={sources!r} (resources only)")
+except Exception as exc:
+    print(f"  VIOLATION [F3]: registry() call failed: {exc!r}", file=sys.stderr)
+    bad = True
+
+sys.exit(1 if bad else 0)
 PY
 
 if [ "$LEGS_RAN" -ne "$EXPECTED_LEGS" ]; then
