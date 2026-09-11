@@ -645,5 +645,5 @@ with execution still owed to Phase 1 Step 2.
 
 - 2026-09-11: Gate round 1 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `c10889d15`; critique `nexus_rdr/206-gate-critique-2026-09-11`.
 - 2026-09-11: Gate round 2 — PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `325e6cced`; critique `nexus_rdr/206-gate-critique-2026-09-11b`.
-- 2026-09-11: Post-accept amendment — Phase 1 re-derived in dependency order (compare-and-swap first, then factor and compose, then renew, then pins, then the engine-direct MVV); the earlier order was cyclic. Step references, Scope Verification, and the engine pin updated. Fix check on this change recorded under `nexus_rdr/206-fix-check-26a760617`.
+- 2026-09-11: Post-accept amendment — Phase 1 re-derived in dependency order (compare-and-swap first, then factor and compose, then renew, then pins, then the engine-direct MVV); the earlier order was cyclic. Step references, Scope Verification, and the engine pin updated. Fix check on this change recorded in T2 as `nexus_rdr/206-fix-check-<tip>`, where `<tip>` is the RDR file's commit after this amendment.
 
