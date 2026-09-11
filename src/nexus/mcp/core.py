@@ -929,15 +929,22 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
         )
     except Exception as exc:  # noqa: BLE001 — a re-lease failure must not crash the watcher; the marker is REINSTATED (not left claimed-and-orphaned) so a transient failure retries next tick
         # nexus-abyi9 (conexus-7hx5): consecutive-failure backoff. A 401
-        # is very likely a persistent credential problem (a bad/mismatched
-        # service token presented where a data token belongs), not a
-        # transient blip -- retry it no faster than the cap from the very
-        # FIRST failure, rather than climbing the escalating ladder other
-        # error classes (a momentary network blip, an unreachable engine)
-        # get a chance to recover within.
+        # is usually a persistent credential problem (a bad/mismatched
+        # service token presented where a data token belongs), but a
+        # token rotation mid-flight also 401s once, and a /clear handoff
+        # stalled for the full cap on that would leave writes under the
+        # old session id for five minutes (critique-w5gma-abyi9
+        # 2026-09-11). So a 401 skips the free first retry and starts one
+        # rung up the same ladder (10 s), reaching the cap on its sixth
+        # consecutive failure; other error classes (a momentary network
+        # blip, an unreachable engine) climb from the bottom.
         _T1_HANDOFF_CONSECUTIVE_FAILURES += 1
         if _is_unauthorized_mint_failure(exc):
-            delay = _T1_HANDOFF_BACKOFF_CAP_S
+            delay = min(
+                _T1_HANDOFF_BACKOFF_BASE_S
+                * (2 ** _T1_HANDOFF_CONSECUTIVE_FAILURES),
+                _T1_HANDOFF_BACKOFF_CAP_S,
+            )
         else:
             delay = min(
                 _T1_HANDOFF_BACKOFF_BASE_S

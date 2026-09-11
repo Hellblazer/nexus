@@ -582,7 +582,7 @@ async def test_second_consecutive_failure_defers_the_next_mint_attempt(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_401_failure_jumps_straight_to_the_cap(monkeypatch) -> None:
+async def test_401_failure_starts_one_rung_up_and_reaches_the_cap(monkeypatch) -> None:
     """A 401 must not be retried faster than the cap even on its FIRST
     failure -- no escalating ladder for a credential rejection."""
     from nexus.db import t1 as t1_mod
@@ -603,10 +603,10 @@ async def test_401_failure_jumps_straight_to_the_cap(monkeypatch) -> None:
     log = MagicMock()
     await core._t1_handoff_tick(_MCP_PID, log)  # one 401 failure
 
-    assert log.warning.call_args.kwargs["next_attempt_in_s"] == core._T1_HANDOFF_BACKOFF_CAP_S
+    assert log.warning.call_args.kwargs["next_attempt_in_s"] == core._T1_HANDOFF_BACKOFF_BASE_S * 2
 
     # Well short of the cap: no re-attempt yet.
-    clock.advance(core._T1_HANDOFF_BACKOFF_CAP_S - 1.0)
+    clock.advance(core._T1_HANDOFF_BACKOFF_BASE_S * 2 - 1.0)
     await core._t1_handoff_tick(_MCP_PID, log)
     assert log.warning.call_count == 1  # no second attempt logged
 
