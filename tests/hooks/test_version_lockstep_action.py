@@ -439,6 +439,73 @@ class TestLoudLog:
         assert mod._log_max_bytes() == mod._DEFAULT_LOG_MAX_BYTES
 
 
+class TestRefDriftRemedyLogging:
+    """nexus-konsk fix round 2: a ref-drift FAILURE outcome carries a
+    ``remedy=`` field; success / no-drift-confirmed outcomes do not.
+    Dispatch is now bounded to once per distinct drift (the HOOK's job,
+    see ``tests/hooks/test_version_lockstep_hook.py::
+    TestRefDriftBoundedRetry``), so in practice this line fires at most
+    once per drift rather than once per session."""
+
+    class _FakeCompleted:
+        def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def test_subprocess_raise_logs_remedy(self, mod, log, monkeypatch) -> None:
+        def boom(*a, **k):
+            raise OSError("nx not found")
+
+        monkeypatch.setattr(mod.subprocess, "run", boom)
+        mod._run_nx_upgrade_for_ref_drift(timeout=5)
+        text = log.read_text()
+        assert "outcome=nx_upgrade_raised" in text
+        assert "remedy=" in text
+
+    def test_nonzero_exit_logs_remedy(self, mod, log, monkeypatch) -> None:
+        monkeypatch.setattr(
+            mod.subprocess, "run",
+            lambda *a, **k: self._FakeCompleted(returncode=1, stderr="boom"),
+        )
+        mod._run_nx_upgrade_for_ref_drift(timeout=5)
+        text = log.read_text()
+        assert "outcome=nx_upgrade_exit_nonzero" in text
+        assert "remedy=" in text
+
+    def test_reinstall_failed_text_logs_remedy(self, mod, log, monkeypatch) -> None:
+        monkeypatch.setattr(
+            mod.subprocess, "run",
+            lambda *a, **k: self._FakeCompleted(returncode=0, stdout="reinstall failed for conexus"),
+        )
+        mod._run_nx_upgrade_for_ref_drift(timeout=5)
+        text = log.read_text()
+        assert "outcome=ref_check_failed" in text
+        assert "remedy=" in text
+
+    def test_success_does_not_log_remedy(self, mod, log, monkeypatch) -> None:
+        monkeypatch.setattr(
+            mod.subprocess, "run",
+            lambda *a, **k: self._FakeCompleted(
+                returncode=0, stdout="picked up a plugin-only release for conexus",
+            ),
+        )
+        mod._run_nx_upgrade_for_ref_drift(timeout=5)
+        text = log.read_text()
+        assert "outcome=ref_moved" in text
+        assert "remedy=" not in text
+
+    def test_no_drift_confirmed_does_not_log_remedy(self, mod, log, monkeypatch) -> None:
+        monkeypatch.setattr(
+            mod.subprocess, "run",
+            lambda *a, **k: self._FakeCompleted(returncode=0, stdout="nothing to do"),
+        )
+        mod._run_nx_upgrade_for_ref_drift(timeout=5)
+        text = log.read_text()
+        assert "outcome=ran_no_drift_confirmed" in text
+        assert "remedy=" not in text
+
+
 class TestVersionParsing:
     def test_installed_nx_version_parses_cli_output(self, mod, monkeypatch) -> None:
         def fake_run(args, **k):

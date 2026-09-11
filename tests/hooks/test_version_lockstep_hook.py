@@ -505,6 +505,7 @@ class TestRefDriftOrchestration:
         known = _write_known_marketplaces(tmp_path, "nexus-plugins", repo)
         monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(registry))
         monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(known))
+        monkeypatch.setenv("NX_LOCKSTEP_REF_DRIFT_MARKER", str(tmp_path / "ref-drift-marker"))
         monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)  # no version-mismatch path
         dispatched: list[str] = []
         monkeypatch.setattr(mod, "dispatch_ref_drift_action", lambda: dispatched.append("fired"))
@@ -520,6 +521,7 @@ class TestRefDriftOrchestration:
     def test_no_drift_is_silent_and_no_dispatch(self, mod, tmp_path: Path, monkeypatch, capsys) -> None:
         monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(tmp_path / "absent-registry.json"))
         monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(tmp_path / "absent-known.json"))
+        monkeypatch.setenv("NX_LOCKSTEP_REF_DRIFT_MARKER", str(tmp_path / "ref-drift-marker"))
         monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
         dispatched: list[str] = []
         monkeypatch.setattr(mod, "dispatch_ref_drift_action", lambda: dispatched.append("fired"))
@@ -539,6 +541,7 @@ class TestRefDriftOrchestration:
         known = _write_known_marketplaces(tmp_path, "nexus-plugins", repo)
         monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(registry))
         monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(known))
+        monkeypatch.setenv("NX_LOCKSTEP_REF_DRIFT_MARKER", str(tmp_path / "ref-drift-marker"))
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))  # plugin.json version 9.9.9
         marker = tmp_path / "marker"
         marker.write_text("1.0.0")  # stale -> version-mismatch path also fires
@@ -604,6 +607,207 @@ class TestDispatchRefDriftActionIsNonBlocking:
         flat = " ".join(map(str, calls["args"])) if isinstance(calls["args"], (list, tuple)) else str(calls["args"])
         assert mod._REF_DRIFT_SENTINEL in flat
         assert "version_lockstep_action.py" in flat
+
+
+def _clock(readings: list[float]):
+    """A fake ``time.monotonic`` returning *readings* in order, then
+    pinned at the last value once exhausted."""
+    it = iter(readings)
+
+    def fn() -> float:
+        try:
+            return next(it)
+        except StopIteration:
+            return readings[-1]
+
+    return fn
+
+
+class TestRefDriftMarker:
+    """nexus-konsk fix round 2: the per-plugin ref-drift attempt marker
+    mirrors ``marker_path``/``read_marker``'s shape and override
+    convention."""
+
+    def test_marker_path_honors_env_override(self, mod, tmp_path, monkeypatch) -> None:
+        target = tmp_path / "ref-drift-marker"
+        monkeypatch.setenv("NX_LOCKSTEP_REF_DRIFT_MARKER", str(target))
+        assert mod.ref_drift_marker_path() == target
+
+    def test_default_ref_drift_marker_location(self, mod, monkeypatch) -> None:
+        monkeypatch.delenv("NX_LOCKSTEP_REF_DRIFT_MARKER", raising=False)
+        p = mod.ref_drift_marker_path()
+        assert p.name == "ref_drift_lockstep_marker"
+        assert p.parent.name == "nexus"
+        assert ".config" in str(p)
+
+    def test_read_missing_marker_returns_empty(self, mod, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("NX_LOCKSTEP_REF_DRIFT_MARKER", str(tmp_path / "absent"))
+        assert mod.read_ref_drift_marker() == {}
+
+    def test_read_malformed_marker_returns_empty(self, mod, tmp_path, monkeypatch) -> None:
+        p = tmp_path / "ref-drift-marker"
+        p.write_text("not json")
+        monkeypatch.setenv("NX_LOCKSTEP_REF_DRIFT_MARKER", str(p))
+        assert mod.read_ref_drift_marker() == {}
+
+    def test_write_then_read_round_trips(self, mod, tmp_path, monkeypatch) -> None:
+        target = tmp_path / "nested" / "ref-drift-marker"
+        monkeypatch.setenv("NX_LOCKSTEP_REF_DRIFT_MARKER", str(target))
+        mod.write_ref_drift_marker({"conexus@nexus-plugins": "a" * 40})
+        assert mod.read_ref_drift_marker() == {"conexus@nexus-plugins": "a" * 40}
+
+    def test_write_merges_rather_than_replaces(self, mod, tmp_path, monkeypatch) -> None:
+        target = tmp_path / "ref-drift-marker"
+        monkeypatch.setenv("NX_LOCKSTEP_REF_DRIFT_MARKER", str(target))
+        mod.write_ref_drift_marker({"conexus@nexus-plugins": "a" * 40})
+        mod.write_ref_drift_marker({"sn@nexus-plugins": "b" * 40})
+        assert mod.read_ref_drift_marker() == {
+            "conexus@nexus-plugins": "a" * 40,
+            "sn@nexus-plugins": "b" * 40,
+        }
+
+
+class TestRefDriftBoundedRetry:
+    """``main``'s marker-gated dispatch: a persistently-failing reinstall
+    fires `nx upgrade` at most once per distinct (plugin, target sha)
+    drift, never every SessionStart (nexus-konsk fix round 2)."""
+
+    def _setup(self, tmp_path: Path, monkeypatch) -> tuple[Path, str, str]:
+        repo, sha_before, sha_after = _make_marketplace_clone(tmp_path)
+        registry = _write_registry(tmp_path, "conexus@nexus-plugins", sha_before)
+        known = _write_known_marketplaces(tmp_path, "nexus-plugins", repo)
+        monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(registry))
+        monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(known))
+        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+        marker = tmp_path / "ref-drift-marker"
+        monkeypatch.setenv("NX_LOCKSTEP_REF_DRIFT_MARKER", str(marker))
+        return repo, sha_before, sha_after
+
+    def test_same_drift_is_dispatched_once_then_skipped(
+        self, mod, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        self._setup(tmp_path, monkeypatch)
+        dispatched: list[str] = []
+        monkeypatch.setattr(mod, "dispatch_ref_drift_action", lambda: dispatched.append("fired"))
+
+        mod.main()  # session 1: the reinstall keeps failing in reality
+        assert dispatched == ["fired"]
+        assert capsys.readouterr().out.strip() != ""
+
+        dispatched.clear()
+        mod.main()  # session 2: the SAME drift, still unresolved
+
+        assert dispatched == [], "must not redispatch the identical drift every session"
+        assert capsys.readouterr().out.strip() == ""
+
+    def test_a_further_ref_move_dispatches_again(
+        self, mod, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        repo, _sha_before, _sha_after = self._setup(tmp_path, monkeypatch)
+        dispatched: list[str] = []
+        monkeypatch.setattr(mod, "dispatch_ref_drift_action", lambda: dispatched.append("fired"))
+
+        mod.main()
+        assert dispatched == ["fired"]
+        capsys.readouterr()
+
+        # A second, later plugin-only cut moves the ref again.
+        (repo / ".claude-plugin" / "marketplace.json").write_text(json.dumps({"plugins": [
+            {"name": "conexus", "version": "9.9.9",
+             "source": {"source": "git-subdir", "url": "https://example.invalid/x.git",
+                        "path": "conexus", "ref": "plugin-v9.9.9-2"}}]}))
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "second plugin-only cut")
+        _git(repo, "tag", "-a", "plugin-v9.9.9-2", "-m", "plugin-v9.9.9-2")
+
+        dispatched.clear()
+        mod.main()
+
+        assert dispatched == ["fired"], "a genuinely new drift must still dispatch"
+        assert capsys.readouterr().out.strip() != ""
+
+    def test_marker_not_written_when_there_is_no_drift(
+        self, mod, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(tmp_path / "absent-registry.json"))
+        monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(tmp_path / "absent-known.json"))
+        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+        marker = tmp_path / "ref-drift-marker"
+        monkeypatch.setenv("NX_LOCKSTEP_REF_DRIFT_MARKER", str(marker))
+
+        mod.main()
+
+        assert not marker.exists()
+
+
+class TestRefDriftGitBudget:
+    """nexus-konsk fix round 2: ``detect_ref_drift``'s ``git rev-parse``
+    calls share ONE 2s wall-clock budget, not 2s per plugin -- a fixed
+    fake clock (no real sleeping) drives every test here."""
+
+    def _wire_two_plugins(self, mod, monkeypatch, resolve_fn) -> None:
+        monkeypatch.setattr(mod, "_our_plugin_shas", lambda: {
+            "aaa@mp": ("mp", "a" * 40),
+            "bbb@mp": ("mp", "b" * 40),
+        })
+        monkeypatch.setattr(mod, "_marketplace_install_location", lambda name: Path("/fake"))
+        monkeypatch.setattr(mod, "_pinned_ref_for_plugin", lambda short, loc: "some-ref")
+        monkeypatch.setattr(mod, "_resolve_ref_sha", resolve_fn)
+
+    def test_shared_budget_stops_before_a_second_plugins_git_call(
+        self, mod, monkeypatch
+    ) -> None:
+        resolve_calls: list[tuple[str, float]] = []
+
+        def fake_resolve(install_location, ref, timeout):
+            resolve_calls.append((ref, timeout))
+            return "c" * 40  # a resolved, drifted sha
+
+        self._wire_two_plugins(mod, monkeypatch, fake_resolve)
+        monkeypatch.setattr(mod.time, "monotonic", _clock([0.0, 0.0, 3.0]))
+
+        drift = mod.detect_ref_drift()
+
+        assert len(resolve_calls) == 1, (
+            "the second plugin's git call must be skipped once the shared budget is spent"
+        )
+        assert drift == [("aaa@mp", "a" * 40, "c" * 40)]
+
+    def test_budget_exceeded_is_a_named_debug_skip_not_a_raise(
+        self, mod, monkeypatch, capsys
+    ) -> None:
+        self._wire_two_plugins(mod, monkeypatch, lambda *a, **k: "c" * 40)
+        monkeypatch.setattr(mod.time, "monotonic", _clock([0.0, 0.0, 3.0]))
+        monkeypatch.setattr(mod, "DEBUG", True)
+
+        drift = mod.detect_ref_drift()  # must not raise
+
+        err = capsys.readouterr().err
+        assert "budget" in err.lower()
+        assert "bbb@mp" in err
+        assert drift == [("aaa@mp", "a" * 40, "c" * 40)]
+
+    def test_remaining_budget_not_full_constant_is_passed_to_resolve(
+        self, mod, monkeypatch
+    ) -> None:
+        """The second still-in-budget plugin gets whatever budget is
+        LEFT, never the full ``_GIT_TIMEOUT_S`` again -- proving the
+        budget is genuinely shared, not reset per plugin."""
+        timeouts: list[float] = []
+
+        def fake_resolve(install_location, ref, timeout):
+            timeouts.append(timeout)
+            return None
+
+        self._wire_two_plugins(mod, monkeypatch, fake_resolve)
+        monkeypatch.setattr(mod.time, "monotonic", _clock([0.0, 0.5, 1.5]))
+
+        mod.detect_ref_drift()
+
+        assert len(timeouts) == 2
+        assert timeouts[0] == pytest.approx(mod._GIT_TIMEOUT_S - 0.5)
+        assert timeouts[1] == pytest.approx(mod._GIT_TIMEOUT_S - 1.5)
+        assert timeouts[1] < timeouts[0]
 
 
 class TestRunsUnderBareInterpreter:

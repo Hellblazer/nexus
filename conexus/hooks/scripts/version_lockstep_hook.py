@@ -31,6 +31,40 @@ treatment as a version mismatch: one nudge line naming the drift, plus a
 detached dispatch -- see ``detect_ref_drift`` and
 ``dispatch_ref_drift_action``.
 
+nexus-konsk (fix round 2, 2026-09-11): two follow-on fixes.
+
+(1) The ref-drift dispatch now converges the way the version-mismatch
+path does: ``write_ref_drift_marker`` records, per plugin, the target
+sha of the last-DISPATCHED drift (mirrors ``write_marker``'s shape and
+override convention, but keyed per plugin and written on every dispatch
+ATTEMPT rather than on confirmed success only -- see its docstring for
+why). ``main`` compares each detected drift against this marker before
+dispatching: a plugin whose target sha already matches the marker's
+recorded attempt is NOT re-dispatched -- the underlying reinstall may
+still be failing every session for a persistent reason (network,
+permissions, a `claude` CLI error), but this hook fires `nx upgrade`
+for that EXACT drift at most once, not on every SessionStart. The
+schedule this bounds retries to is real events, not a wall-clock
+interval: a further genuine ref move (a new plugin-only cut) changes
+the target sha and is a fresh, distinct drift the marker has never
+seen, so it dispatches again -- no new interval constant is introduced.
+A confirmed SUCCESS needs no separate convergence signal: a real
+reinstall updates ``installed_plugins.json``'s own ``gitCommitSha``, so
+the next session's ``detect_ref_drift`` already reports no drift for
+that plugin on its own (identical convergence shape to the CLI-version
+path's ``nx --version`` reflecting reality). The action's own
+``ref_drift_upgrade_result`` log line (version_lockstep_action.py)
+carries a ``remedy=`` field on every failure outcome -- since dispatch
+now fires at most once per distinct drift, that log line is itself
+"logged once with the remedy", not repeated every session.
+
+(2) ``detect_ref_drift``'s ``git rev-parse`` calls now share ONE 2s
+wall-clock budget across every plugin checked, not 2s per plugin --
+see ``_GIT_TIMEOUT_S``'s updated docstring. A budget miss skips the
+remaining plugin(s) for that session (a named, debug-logged skip, not
+a raise, not a partial/garbled result) and detection simply reports
+whatever it resolved before the budget ran out.
+
 Stdlib-only: this runs under whichever interpreter ``_run_python_hook.sh``
 resolves. Since nexus-4ti7e that is the installed generation's python when
 one exists, but a ``uv tool install conexus`` deployment or a box with no
@@ -56,6 +90,7 @@ if sys.version_info < (3, 12):
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 DEBUG = os.environ.get("NX_HOOK_DEBUG", "0") == "1"
@@ -77,11 +112,20 @@ PLUGINS: tuple[str, ...] = ("conexus", "sn")
 #: isolates both at once.
 _REGISTRY_ENV = "NX_PLUGIN_REGISTRY"
 _MARKETPLACES_ENV = "NX_PLUGIN_MARKETPLACES"
-#: Bound per ``git rev-parse`` call -- plain local-clone plumbing, no
-#: network, measured well under 50ms typical for a one-or-two-plugin
-#: check. This is a defensive cap against a pathological hang, not the
-#: expected cost; the whole hook still has to fit inside hooks.json's 5s
-#: SessionStart timeout for this matcher.
+#: nexus-konsk fix round 2: a SHARED wall-clock budget for ALL
+#: ``git rev-parse`` calls inside one ``detect_ref_drift()`` run, not a
+#: per-call timeout -- with N plugins each getting its own 2s, the
+#: worst case grew linearly with the plugin count (measured 4s for
+#: today's 2 plugins, T2 nexus/fix-check-nexus-konsk-followup-2026-09-11
+#: item 7) and would eventually exceed hooks.json's 5s SessionStart
+#: budget on a third plugin. ``detect_ref_drift`` computes one deadline
+#: at ``time.monotonic() + _GIT_TIMEOUT_S`` and passes the REMAINING
+#: time to each ``_resolve_ref_sha`` call; once the budget is spent the
+#: rest of the plugins are skipped for this session (a named,
+#: debug-logged skip -- never a raise, never a stall past the budget).
+#: Plain local-clone plumbing, no network -- measured well under 50ms
+#: typical for a one-or-two-plugin check, so this is a defensive cap
+#: against a pathological hang, not the expected cost.
 _GIT_TIMEOUT_S = 2
 #: The sentinel ``dispatch_ref_drift_action`` passes instead of a CLI
 #: version -- ``version_lockstep_action.py`` carries the identical
@@ -282,14 +326,16 @@ def _pinned_ref_for_plugin(plugin_short: str, install_location: Path) -> str | N
     return None
 
 
-def _resolve_ref_sha(install_location: Path, ref: str) -> str | None:
+def _resolve_ref_sha(install_location: Path, ref: str, timeout: float) -> str | None:
     """The commit *ref* resolves to inside the local clone -- plain git
     plumbing, no network. ``None`` on any failure (unresolvable ref, git
-    absent, timeout)."""
+    absent, timeout). *timeout* is the caller's REMAINING share of the
+    shared ``_GIT_TIMEOUT_S`` budget (nexus-konsk fix round 2), never
+    the full constant -- see ``detect_ref_drift``."""
     try:
         proc = subprocess.run(
             ["git", "-C", str(install_location), "rev-parse", f"{ref}^{{commit}}"],
-            capture_output=True, text=True, timeout=_GIT_TIMEOUT_S,
+            capture_output=True, text=True, timeout=timeout,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         debug(f"ref resolve failed for {ref} in {install_location}: {exc}")
@@ -319,9 +365,18 @@ def detect_ref_drift() -> list[tuple[str, str, str]]:
     ``nx upgrade`` this dispatches): a false negative here just means the
     next session (or a manual ``nx upgrade``) catches it instead -- never
     an incorrect action.
+
+    SHARED budget (nexus-konsk fix round 2): every ``git rev-parse`` call
+    this function makes draws from ONE ``_GIT_TIMEOUT_S``-second deadline,
+    not one per plugin -- see ``_GIT_TIMEOUT_S``'s docstring. Once the
+    deadline passes, the remaining plugin(s) are skipped (one debug line,
+    not one per plugin) and whatever was already resolved is returned;
+    this never raises and never runs past the budget.
     """
     drift: list[tuple[str, str, str]] = []
     locations: dict[str, Path | None] = {}
+    deadline = time.monotonic() + _GIT_TIMEOUT_S
+    budget_exhausted = False
     for plugin_id, (marketplace_name, sha) in sorted(_our_plugin_shas().items()):
         if marketplace_name not in locations:
             locations[marketplace_name] = _marketplace_install_location(marketplace_name)
@@ -332,7 +387,16 @@ def detect_ref_drift() -> list[tuple[str, str, str]]:
         ref = _pinned_ref_for_plugin(plugin_short, install_location)
         if ref is None:
             continue
-        target_sha = _resolve_ref_sha(install_location, ref)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if not budget_exhausted:
+                debug(
+                    f"ref-drift git budget ({_GIT_TIMEOUT_S}s total) exhausted this "
+                    f"session; skipping remaining plugin(s) starting at {plugin_id}"
+                )
+                budget_exhausted = True
+            continue
+        target_sha = _resolve_ref_sha(install_location, ref, timeout=remaining)
         if target_sha is None or target_sha == sha:
             continue
         drift.append((plugin_id, sha, target_sha))
@@ -370,6 +434,65 @@ def _combined_context(target_version: str, drift: list[tuple[str, str, str]]) ->
         f"session. No action needed now."
     )
     return _wrap_context(msg)
+
+
+#: nexus-konsk fix round 2: env override for the ref-drift attempt
+#: marker's location, same override convention as ``NX_LOCKSTEP_MARKER``.
+_REF_DRIFT_MARKER_ENV = "NX_LOCKSTEP_REF_DRIFT_MARKER"
+
+
+def ref_drift_marker_path() -> Path:
+    """Per-user marker recording, per plugin id, the target sha of the
+    LAST ref-drift dispatch attempted for that plugin (nexus-konsk fix
+    round 2). Mirrors ``marker_path()``'s shape and override convention
+    -- lives beside the CLI-version marker under ``~/.config/nexus/`` so
+    it too survives ``/plugin update``. ``NX_LOCKSTEP_REF_DRIFT_MARKER``
+    overrides the location for tests."""
+    override = os.environ.get(_REF_DRIFT_MARKER_ENV, "").strip()
+    if override:
+        return Path(override)
+    return Path.home() / ".config" / "nexus" / "ref_drift_lockstep_marker"
+
+
+def read_ref_drift_marker() -> dict[str, str]:
+    """``{"<plugin_id>": "<last target sha attempted>", ...}``. Missing,
+    unreadable, or malformed -> ``{}`` -- refuse-not-guess, the same
+    posture every other reader in this file takes."""
+    try:
+        data = json.loads(ref_drift_marker_path().read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def write_ref_drift_marker(entries: dict[str, str]) -> None:
+    """Merge *entries* (``{plugin_id: target_sha}``) into the on-disk
+    ref-drift marker and persist.
+
+    Unlike ``write_marker`` (written by the ACTION, on CONFIRMED success
+    only), this is written by the HOOK, at DISPATCH time, regardless of
+    the eventual outcome -- the hook fires the action as a detached
+    fire-and-forget process and never learns whether it succeeds (CA-4),
+    and the whole point is to stop firing a fresh attempt every session
+    while a persistent failure keeps the underlying drift unresolved. A
+    genuine success needs no confirmation write here: a real reinstall
+    updates ``installed_plugins.json``'s own ``gitCommitSha``, so the
+    next session's ``detect_ref_drift`` already reports no drift for
+    that plugin on its own -- this marker only matters for bounding
+    retries of a drift that is STILL present.
+
+    Best-effort: an unwritable config dir must never break the hook
+    (same posture as every other write in this file)."""
+    try:
+        current = read_ref_drift_marker()
+        current.update(entries)
+        path = ref_drift_marker_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(current, sort_keys=True))
+    except OSError as exc:
+        debug(f"failed to write ref-drift marker: {exc}")
 
 
 def dispatch_ref_drift_action() -> None:
@@ -426,15 +549,25 @@ def main() -> None:
         # never assumes the version-mismatch path alone would have caught
         # a same-version ref drift on a DIFFERENT plugin.
         drift = detect_ref_drift()
-        if drift:
+        # nexus-konsk fix round 2: bound re-dispatch to once per DISTINCT
+        # drift (plugin_id, target_sha) -- a plugin whose target sha
+        # already matches the ref-drift marker's recorded attempt was
+        # already dispatched for this EXACT drift; skip it rather than
+        # firing a fresh `nx upgrade` every session while a persistent
+        # failure keeps it unresolved. See write_ref_drift_marker's
+        # docstring for the full rationale.
+        ref_marker = read_ref_drift_marker()
+        pending = [(pid, was, now) for pid, was, now in drift if ref_marker.get(pid) != now]
+        if pending:
             dispatch_ref_drift_action()
+            write_ref_drift_marker({pid: now for pid, _was, now in pending})
 
-        if version_mismatch and drift:
-            print(_combined_context(plugin_version, drift))  # type: ignore[arg-type]
+        if version_mismatch and pending:
+            print(_combined_context(plugin_version, pending))  # type: ignore[arg-type]
         elif version_mismatch:
             print(build_context(plugin_version))  # type: ignore[arg-type]
-        elif drift:
-            print(build_ref_drift_context(drift))
+        elif pending:
+            print(build_ref_drift_context(pending))
     except Exception as exc:  # noqa: BLE001 - hook must never raise
         debug(f"swallowed unexpected error: {exc}")
 

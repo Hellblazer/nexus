@@ -37,6 +37,15 @@ uninstalls+reinstalls on a genuine mismatch) actually lives. See
 ``_run_nx_upgrade_for_ref_drift`` and ``main``'s ``ref_drift_only``
 branch.
 
+nexus-konsk (fix round 2, 2026-09-11): the hook now dispatches this
+sentinel branch AT MOST ONCE per distinct (plugin, target sha) drift --
+see ``version_lockstep_hook.write_ref_drift_marker``'s docstring. As a
+direct consequence, every ``log_event("ref_drift_upgrade_result", ...)``
+call below now fires at most once for a given drift rather than once
+per session while it keeps failing, so the ``remedy=`` field each
+failure outcome now carries is genuinely "logged once with the remedy",
+not repeated noise.
+
 Stdlib-only (bare interpreter via ``_run_python_hook.sh``; the conexus
 package is not importable here). No structlog under bare interp -> the
 NX_HOOK_DEBUG stderr convention.
@@ -82,6 +91,15 @@ _NX_UPGRADE_TIMEOUT = _env_int("NX_LOCKSTEP_NX_TIMEOUT", 120)
 #: ``tests/hooks/test_version_lockstep_hook.py::
 #: TestRefDriftSentinelMatchesAction`` pins the two together.
 _REF_DRIFT_SENTINEL = "__ref_drift__"
+#: nexus-konsk fix round 2: the remedy text logged alongside every
+#: ref-drift FAILURE outcome. The hook now dispatches at most once per
+#: distinct drift (see this module's own docstring above), so this line
+#: appears at most once for a given drift rather than once per session.
+_REF_DRIFT_REMEDY = (
+    "run `nx upgrade` manually once the blocker (network, permissions, "
+    "or a `claude` CLI error) is resolved -- a further genuine ref move "
+    "will also re-dispatch automatically"
+)
 # Matches a leading dotted-numeric core (X.Y.Z) plus an optional separated
 # suffix. Nexus ships plain X.Y.Z release tags to users, so a bare
 # pre-release like "5.7.0a1" (no separator before the suffix) is out of
@@ -326,12 +344,18 @@ def _run_nx_upgrade_for_ref_drift(timeout: int) -> None:
         )
     except (subprocess.SubprocessError, OSError) as exc:
         debug(f"nx upgrade raised for ref-drift reinstall: {exc}")
-        log_event("ref_drift_upgrade_result", outcome="nx_upgrade_raised", error=str(exc)[:200])
+        log_event(
+            "ref_drift_upgrade_result", outcome="nx_upgrade_raised",
+            error=str(exc)[:200], remedy=_REF_DRIFT_REMEDY,
+        )
         return
     text = (result.stdout or "") + (result.stderr or "")
     if result.returncode != 0:
         debug(f"nx upgrade exited {result.returncode} for ref-drift reinstall")
-        log_event("ref_drift_upgrade_result", outcome="nx_upgrade_exit_nonzero", rc=str(result.returncode))
+        log_event(
+            "ref_drift_upgrade_result", outcome="nx_upgrade_exit_nonzero",
+            rc=str(result.returncode), remedy=_REF_DRIFT_REMEDY,
+        )
         return
     # Text markers from nexus.plugin_lockstep.render's own case statement
     # (`ref_moved` / `ref_check_failed`) -- best-effort parse of what `nx
@@ -339,7 +363,10 @@ def _run_nx_upgrade_for_ref_drift(timeout: int) -> None:
     if "picked up a plugin-only release" in text:
         log_event("ref_drift_upgrade_result", outcome="ref_moved")
     elif "reinstall failed" in text:
-        log_event("ref_drift_upgrade_result", outcome="ref_check_failed")
+        log_event(
+            "ref_drift_upgrade_result", outcome="ref_check_failed",
+            remedy=_REF_DRIFT_REMEDY,
+        )
     else:
         log_event("ref_drift_upgrade_result", outcome="ran_no_drift_confirmed")
 
