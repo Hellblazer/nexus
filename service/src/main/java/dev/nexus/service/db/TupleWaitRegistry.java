@@ -81,6 +81,17 @@ final class TupleWaitRegistry {
      * because the 1-second timer elapsed" and catch a {@code signalAll} that
      * silently widens to every group instead of the one it was called for. No-op by
      * default; never assigned outside test code.
+     *
+     * <p>RDR-205 P1 follow-on (nexus-em75s.40, fix-check M-minor): invoked from
+     * inside {@link #signalAll}'s {@code g.lock} critical section, immediately
+     * after the generation bump and {@code condition.signalAll()} — guarded the
+     * same way {@link TupleRepository
+     * #TEST_ONLY_CLAIM_SELECT_TO_UPDATE_DELAY} runs inside its own surrounding
+     * transaction, rather than after the commit/unlock. Before this fix the hook
+     * fired AFTER {@code g.lock.unlock()}, so a test asserting on the hook's
+     * side effect (a counter, say) raced the lock's own release with no
+     * happens-before relationship between the two beyond this field's own
+     * {@code volatile} read.
      */
     static volatile BiConsumer<String, String> TEST_ONLY_SIGNAL_HOOK = (tenant, subspace) -> { };
 
@@ -154,10 +165,12 @@ final class TupleWaitRegistry {
             g.generation++;
             g.lastActivityNanos = now();
             g.condition.signalAll();
+            // nexus-em75s.40: invoked UNDER the lock, right after the generation
+            // bump/signal -- see the field's own javadoc for why.
+            TEST_ONLY_SIGNAL_HOOK.accept(tenant, subspace);
         } finally {
             g.lock.unlock();
         }
-        TEST_ONLY_SIGNAL_HOOK.accept(tenant, subspace);
     }
 
     /**

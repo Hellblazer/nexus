@@ -116,8 +116,12 @@ public final class TupleRepository {
      * un-instrumented black-box test cannot tell apart from correct behaviour. The
      * wake tests pinning this live in {@code dev.nexus.service} (a different package
      * from {@link TupleWaitRegistry}'s package-private hook field), hence this public
-     * cross-package installer. Pass {@code null} to restore the no-op default. Never
-     * call this outside test code.
+     * cross-package installer -- the field itself stays package-private, matching
+     * {@link #TEST_ONLY_CLAIM_SELECT_TO_UPDATE_DELAY}'s shape; only the installer
+     * needs the wider (public) visibility, for the cross-package reach this field's
+     * own package cannot avoid. Pass {@code null} to restore the no-op default.
+     * Never call this outside test code. The installed hook now runs UNDER {@code
+     * signalAll}'s own lock (nexus-em75s.40) -- see the field's javadoc.
      */
     public static void setTestOnlySignalHook(java.util.function.BiConsumer<String, String> hookOrNull) {
         TupleWaitRegistry.TEST_ONLY_SIGNAL_HOOK = hookOrNull == null ? (tenant, subspace) -> { } : hookOrNull;
