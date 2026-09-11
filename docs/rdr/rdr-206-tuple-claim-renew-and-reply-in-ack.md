@@ -623,3 +623,4 @@ design avoids. Critical Assumption 2 moves from Unverified to Documented,
 with execution still owed to Phase 1 Step 1.
 
 - 2026-09-11: Gate round 1 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `c10889d15`; critique `nexus_rdr/206-gate-critique-2026-09-11`.
+- 2026-09-11: Gate round 2 — PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `325e6cced`; critique `nexus_rdr/206-gate-critique-2026-09-11b`.
