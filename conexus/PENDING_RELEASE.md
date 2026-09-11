@@ -32,6 +32,10 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.41.1)
 
+- `conexus/skills/mailbox/SKILL.md`: the send line says the nonce is
+  REQUIRED for `mailbox/<address>` (id_from keys+nonce), refused as a
+  SchemaViolation without it, and never echoed on the read wire.
+  bead: nexus-e00lh
 - `conexus/skills/phase-review-gate/SKILL.md`: nexus-w5gma — the
   Limitations section now names all three phase-structure layouts the
   gate's parser recognises, including the new `### Phase N` / `#### Step
