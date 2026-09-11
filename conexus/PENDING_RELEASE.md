@@ -84,3 +84,17 @@ mechanize, it matters enough to ship.
   `SPACE_FALLBACK\treason=nx tuple list exceeded <N>s` and returns rather
   than hanging the live orchestrator session that calls it directly.
   bead: nexus-zn9op
+
+- `conexus/hooks/scripts/version_lockstep_hook.py` `conexus/hooks/scripts/version_lockstep_action.py`:
+  nexus-konsk (P0, follow-up round) — the SessionStart hook now ALSO
+  detects a same-version plugin-only ref drift (RDR-197) with no
+  network (reads `installed_plugins.json`'s `gitCommitSha`, resolves the
+  local marketplace clone's pinned `source.ref` via plain `git
+  rev-parse`) and dispatches the SAME detached-action machinery as a
+  CLI version mismatch, routed by a sentinel straight to `nx upgrade`.
+  Until this ships, a plugin-only cut still reaches an install ONLY via
+  a manual `nx upgrade` or a later, unrelated client release — exactly
+  the gap this change closes automatically. Revises RDR-197's original
+  Critical Assumption 2 ("the lockstep hook stays silent on a
+  plugin-cut install").
+  bead: nexus-konsk

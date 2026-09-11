@@ -247,11 +247,25 @@ class TestDispatchIsNonBlocking:
 
 
 class TestPluginChannelInstallSilence:
-    """RDR-197 P1e (nexus-a2wmi.5): pins RDR Critical Assumption 2 -- a
-    plugin-channel cut (``plugin-vX.Y.Z-n``) moves marketplace.json's
-    ``source.ref`` only. It never touches plugin.json's ``version`` field,
-    which is the only thing this hook reads to decide whether to nudge +
-    dispatch an upgrade. A plugin cut must therefore leave the hook silent.
+    """RDR-197 P1e (nexus-a2wmi.5) pinned Critical Assumption 2 as
+    originally stated: a plugin-channel cut (``plugin-vX.Y.Z-n``) moves
+    marketplace.json's ``source.ref`` only, never plugin.json's
+    ``version`` field, so the VERSION comparison below must stay silent
+    on a plugin cut. That half is still true and still pinned here.
+
+    CA-2 ITSELF IS REVISED by nexus-konsk (P0, 2026-09-11; see RDR-197's
+    Revision History and Critical Assumptions section): "the lockstep
+    hook stays silent on a plugin-cut install" was the actual defect a
+    same-version cut (``plugin-v7.41.0-1``) shipped to nobody through,
+    measured for real. The hook now ALSO runs the independent, no-network
+    ``detect_ref_drift`` check (below, and see
+    ``TestRefDriftDetection`` / ``TestRefDriftOrchestration``), which DOES
+    read ``known_marketplaces.json`` and a local clone's
+    ``marketplace.json`` -- deliberately, not a regression. The two
+    fixtures in THIS class carry no registry/marketplace data at all, so
+    ``detect_ref_drift`` finds nothing and the silence they assert is real
+    but incidental to their own fixture shape, not evidence CA-2's
+    original form still holds.
     """
 
     @pytest.fixture()
@@ -337,28 +351,259 @@ class TestPluginChannelInstallSilence:
         assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
         assert dispatched == ["7.15.0"]
 
-    def test_hook_never_reads_source_ref(self) -> None:
-        """Step 5: loud pin. If the hook ever starts reading marketplace.json
-        or a source.ref field, this must break here -- not in a user's
-        session -- naming the bead and RDR that froze the contract.
 
-        A source-text scan (rather than a behavioral seam) is the least
-        brittle option available: the hook is a small, stdlib-only script
-        with a stable, narrow contract (plugin.json's ``version`` field
-        plus the marker file, see the module docstring), and none of these
-        tokens has any legitimate reason to appear in it. A behavioral pin
-        would require inventing a marketplace.json-reading seam the hook
-        does not have today, which is more code to maintain than three
-        forbidden substrings and no more resistant to the regression this
-        guards against.
-        """
-        text = SCRIPT.read_text()
-        for needle in ("source.ref", "source_ref", "marketplace.json"):
-            assert needle not in text, (
-                f"version_lockstep_hook.py must never read {needle!r} -- "
-                f"the hook keys off plugin.json's version field only "
-                f"(nexus-a2wmi.5, RDR-197 CA-2: a plugin cut must stay silent)"
-            )
+# ---------------------------------------------------------------------------
+# nexus-konsk: the hook's own no-network ref-drift check.
+# ---------------------------------------------------------------------------
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+
+def _git_out(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _make_marketplace_clone(tmp_path: Path, plugin_name: str = "conexus") -> tuple[Path, str, str]:
+    """A real local git repo standing in for an already-cloned
+    marketplace (mirrors ``tests/test_plugin_lockstep.py``'s
+    ``marketplace`` fixture): a client-tag pin (``v9.9.9``, resolving to
+    ``sha_before``), then a same-version anchored plugin-only cut
+    (``plugin-v9.9.9-1``, resolving to ``sha_after``) on the same
+    branch -- the RDR-197 channel shape verbatim, version never moves,
+    the ref does."""
+    repo = tmp_path / "mp-src"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test")
+    cp_dir = repo / ".claude-plugin"
+    cp_dir.mkdir()
+
+    def write_marketplace(ref: str) -> None:
+        (cp_dir / "marketplace.json").write_text(json.dumps({"plugins": [
+            {"name": plugin_name, "version": "9.9.9",
+             "source": {"source": "git-subdir", "url": "https://example.invalid/x.git",
+                        "path": plugin_name, "ref": ref}}]}))
+
+    write_marketplace("v9.9.9")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    _git(repo, "tag", "-a", "v9.9.9", "-m", "v9.9.9")
+    sha_before = _git_out(repo, "rev-parse", "HEAD")
+
+    write_marketplace("plugin-v9.9.9-1")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "plugin-only cut")
+    _git(repo, "tag", "-a", "plugin-v9.9.9-1", "-m", "plugin-v9.9.9-1")
+    sha_after = _git_out(repo, "rev-parse", "HEAD")
+    return repo, sha_before, sha_after
+
+
+def _write_registry(tmp_path: Path, plugin_id: str, sha: str | None) -> Path:
+    p = tmp_path / "installed_plugins.json"
+    entry: dict = {"version": "9.9.9", "scope": "user"}
+    if sha is not None:
+        entry["gitCommitSha"] = sha
+    p.write_text(json.dumps({"version": 2, "plugins": {plugin_id: [entry]}}))
+    return p
+
+
+def _write_known_marketplaces(tmp_path: Path, marketplace_name: str, install_location: Path) -> Path:
+    p = tmp_path / "known_marketplaces.json"
+    p.write_text(json.dumps({marketplace_name: {"installLocation": str(install_location)}}))
+    return p
+
+
+class TestRefDriftDetection:
+    """``detect_ref_drift`` -- mirrors
+    ``nexus.plugin_lockstep._check_ref_drift``'s contract but reads
+    files already on disk (no ``claude plugin marketplace update``
+    fetch)."""
+
+    def test_detects_a_moved_ref(self, mod, tmp_path: Path, monkeypatch) -> None:
+        repo, sha_before, sha_after = _make_marketplace_clone(tmp_path)
+        registry = _write_registry(tmp_path, "conexus@nexus-plugins", sha_before)
+        known = _write_known_marketplaces(tmp_path, "nexus-plugins", repo)
+        monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(registry))
+        monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(known))
+
+        assert mod.detect_ref_drift() == [("conexus@nexus-plugins", sha_before, sha_after)]
+
+    def test_no_drift_when_sha_already_matches(self, mod, tmp_path: Path, monkeypatch) -> None:
+        repo, _sha_before, sha_after = _make_marketplace_clone(tmp_path)
+        registry = _write_registry(tmp_path, "conexus@nexus-plugins", sha_after)
+        known = _write_known_marketplaces(tmp_path, "nexus-plugins", repo)
+        monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(registry))
+        monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(known))
+
+        assert mod.detect_ref_drift() == []
+
+    def test_missing_registry_is_silent(self, mod, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(tmp_path / "absent-registry.json"))
+        monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(tmp_path / "absent-known.json"))
+
+        assert mod.detect_ref_drift() == []
+
+    def test_no_git_commit_sha_field_is_silent(self, mod, tmp_path: Path, monkeypatch) -> None:
+        """A registry shape/entry carrying no ``gitCommitSha`` is
+        "cannot tell", never treated as a drift."""
+        registry = _write_registry(tmp_path, "conexus@nexus-plugins", None)
+        monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(registry))
+        monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(tmp_path / "absent-known.json"))
+
+        assert mod.detect_ref_drift() == []
+
+    def test_missing_known_marketplaces_entry_refuses_not_guesses(
+        self, mod, tmp_path: Path, monkeypatch
+    ) -> None:
+        registry = _write_registry(tmp_path, "conexus@nexus-plugins", "d" * 40)
+        monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(registry))
+        monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(tmp_path / "absent-known.json"))
+
+        assert mod.detect_ref_drift() == []
+
+    def test_unresolvable_ref_refuses_not_guesses(self, mod, tmp_path: Path, monkeypatch) -> None:
+        """The registry names a plugin/marketplace pair with real clone
+        data, but the marketplace.json's own pinned ref does not exist
+        in that clone (a stale/mismatched fixture): skip silently rather
+        than raise or invent a sha."""
+        repo, sha_before, _sha_after = _make_marketplace_clone(tmp_path)
+        # Point the clone's marketplace.json at a ref that was never tagged.
+        (repo / ".claude-plugin" / "marketplace.json").write_text(json.dumps({"plugins": [
+            {"name": "conexus", "version": "9.9.9",
+             "source": {"source": "git-subdir", "url": "https://example.invalid/x.git",
+                        "path": "conexus", "ref": "v0.0.0-does-not-exist"}}]}))
+        registry = _write_registry(tmp_path, "conexus@nexus-plugins", sha_before)
+        known = _write_known_marketplaces(tmp_path, "nexus-plugins", repo)
+        monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(registry))
+        monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(known))
+
+        assert mod.detect_ref_drift() == []
+
+    def test_other_plugins_registry_entries_are_ignored(self, mod, tmp_path: Path, monkeypatch) -> None:
+        p = tmp_path / "installed_plugins.json"
+        p.write_text(json.dumps({"version": 2, "plugins": {
+            "beads@beads-marketplace": [{"version": "1.2.3", "gitCommitSha": "e" * 40}],
+        }}))
+        monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(p))
+        monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(tmp_path / "absent-known.json"))
+
+        assert mod.detect_ref_drift() == []
+
+
+class TestRefDriftOrchestration:
+    """``main``'s ref-drift branch: nudge + dispatch on a real detected
+    drift, and the "one clear line naming the drift" contract."""
+
+    def test_main_nudges_and_dispatches_on_drift(
+        self, mod, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        repo, sha_before, sha_after = _make_marketplace_clone(tmp_path)
+        registry = _write_registry(tmp_path, "conexus@nexus-plugins", sha_before)
+        known = _write_known_marketplaces(tmp_path, "nexus-plugins", repo)
+        monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(registry))
+        monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(known))
+        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)  # no version-mismatch path
+        dispatched: list[str] = []
+        monkeypatch.setattr(mod, "dispatch_ref_drift_action", lambda: dispatched.append("fired"))
+
+        mod.main()
+
+        payload = json.loads(capsys.readouterr().out)
+        msg = payload["hookSpecificOutput"]["additionalContext"]
+        assert "conexus@nexus-plugins" in msg
+        assert sha_before[:7] in msg and sha_after[:7] in msg
+        assert dispatched == ["fired"]
+
+    def test_no_drift_is_silent_and_no_dispatch(self, mod, tmp_path: Path, monkeypatch, capsys) -> None:
+        monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(tmp_path / "absent-registry.json"))
+        monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(tmp_path / "absent-known.json"))
+        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+        dispatched: list[str] = []
+        monkeypatch.setattr(mod, "dispatch_ref_drift_action", lambda: dispatched.append("fired"))
+
+        mod.main()
+
+        assert capsys.readouterr().out.strip() == ""
+        assert dispatched == []
+
+    def test_version_mismatch_and_ref_drift_together_fold_into_one_payload(
+        self, mod, plugin_root: Path, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Both paths firing in the same session must still print exactly
+        ONE JSON line (two would leave the second unparsed)."""
+        repo, sha_before, sha_after = _make_marketplace_clone(tmp_path)
+        registry = _write_registry(tmp_path, "conexus@nexus-plugins", sha_before)
+        known = _write_known_marketplaces(tmp_path, "nexus-plugins", repo)
+        monkeypatch.setenv("NX_PLUGIN_REGISTRY", str(registry))
+        monkeypatch.setenv("NX_PLUGIN_MARKETPLACES", str(known))
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))  # plugin.json version 9.9.9
+        marker = tmp_path / "marker"
+        marker.write_text("1.0.0")  # stale -> version-mismatch path also fires
+        monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(marker))
+        version_dispatched: list[str] = []
+        ref_dispatched: list[str] = []
+        monkeypatch.setattr(mod, "dispatch_action", lambda v: version_dispatched.append(v))
+        monkeypatch.setattr(mod, "dispatch_ref_drift_action", lambda: ref_dispatched.append("fired"))
+
+        mod.main()
+
+        out = capsys.readouterr().out
+        assert out.count("\n") <= 1  # exactly one printed line (plus trailing newline)
+        payload = json.loads(out)
+        msg = payload["hookSpecificOutput"]["additionalContext"]
+        assert "9.9.9" in msg
+        assert "conexus@nexus-plugins" in msg
+        assert version_dispatched == ["9.9.9"]
+        assert ref_dispatched == ["fired"]
+
+
+class TestRefDriftSentinelMatchesAction:
+    """The literal ``dispatch_ref_drift_action`` passes as the "target
+    version" argv must equal ``version_lockstep_action.py``'s own
+    ``_REF_DRIFT_SENTINEL`` -- the two bare stdlib scripts cannot import
+    each other (see the hook's module docstring), so this is the only
+    thing standing between a silent drift-forever bug (the action would
+    try to parse the sentinel as a real version and do nothing useful)."""
+
+    def test_sentinel_literal_matches_the_action_script(self, mod) -> None:
+        action_script = SCRIPT.parent / "version_lockstep_action.py"
+        spec = importlib.util.spec_from_file_location("version_lockstep_action", action_script)
+        assert spec and spec.loader
+        action_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(action_mod)
+
+        assert mod._REF_DRIFT_SENTINEL == action_mod._REF_DRIFT_SENTINEL
+
+
+class TestDispatchRefDriftActionIsNonBlocking:
+    def test_dispatch_returns_immediately_and_carries_the_sentinel(self, mod, monkeypatch) -> None:
+        calls: dict[str, object] = {}
+
+        class FakePopen:
+            def __init__(self, *a, **k):
+                calls["args"] = a[0] if a else k.get("args")
+                calls["started"] = True
+                calls["start_new_session"] = k.get("start_new_session")
+                calls["stdout"] = k.get("stdout")
+                calls["stderr"] = k.get("stderr")
+                calls["stdin"] = k.get("stdin")
+
+            def wait(self, *a, **k):  # pragma: no cover - must not be called
+                calls["waited"] = True
+
+        monkeypatch.setattr(mod.subprocess, "Popen", FakePopen)
+        mod.dispatch_ref_drift_action()
+
+        assert calls.get("started") is True
+        assert "waited" not in calls
+        assert calls.get("start_new_session") is True
+        assert calls.get("stdout") is mod.subprocess.DEVNULL
+        flat = " ".join(map(str, calls["args"])) if isinstance(calls["args"], (list, tuple)) else str(calls["args"])
+        assert mod._REF_DRIFT_SENTINEL in flat
+        assert "version_lockstep_action.py" in flat
 
 
 class TestRunsUnderBareInterpreter:

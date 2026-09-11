@@ -187,11 +187,20 @@ the first draft (both corrected below, at their sources).
   **Status**: Verified (R3 gate, 2026-08-30). **Evidence**:
   `tests/test_plugin_channel.py` allowlist proof + hatch-sync assertion
   (beads nexus-a2wmi.1/.2), green through the real cut's battery.
-- [x] The lockstep hook stays silent on a plugin-cut install.
-  **Status**: Verified (R3 gate, 2026-08-30). **Evidence**:
-  `tests/hooks/test_version_lockstep_hook.py::
-  test_plugin_cut_with_unchanged_version_is_silent` (bead nexus-a2wmi.5),
-  green through the real cut's battery.
+- [x] ~~The lockstep hook stays silent on a plugin-cut install.~~
+  **REVISED 2026-09-11 (nexus-konsk, P0)**: this assumption was the
+  actual defect. Verified true as originally stated (R3 gate,
+  2026-08-30, `test_plugin_cut_with_unchanged_version_is_silent`), but
+  "stays silent" meant a same-version anchored cut had NO automatic
+  delivery path at all -- `plugin-v7.41.0-1` shipped to nobody this way
+  (measured; see Validation). CA-2 is now: **the lockstep hook detects a
+  same-version ref drift with no network and dispatches a reinstall,
+  the same treatment as a version mismatch.** **Status**: Verified.
+  **Evidence**: `tests/hooks/test_version_lockstep_hook.py::
+  TestRefDriftDetection` / `TestRefDriftOrchestration` (the fixture the
+  old test used still passes -- it carries no registry/marketplace data,
+  so the new check correctly finds nothing to report; the new classes
+  add real drift fixtures a2wmi.5 never had).
 - [x] The atomic-split precondition is checkable from ledger entries.
   **Status**: Verified (R3 gate, 2026-08-30). **Evidence**:
   `tests/test_cut_plugin_release.py` split-check tests + T2 [23419]; the
@@ -409,23 +418,54 @@ the atomic-split check refuses a deliberately-straddling test entry. After
 the next real client release: parity tests green, window logic correct,
 `git log` shows the spike commit in main's history.
 
-MEASURED 2026-09-11 (nexus-konsk, P0), the gap this section had recorded
-since 2026-08-30 finally exercised for real: `plugin-v7.41.0-1` tagged on
-`01eb1c6a6`, the verify-only workflow green, marketplace clones refreshed
-(`/plugin update` + `/reload-plugins`). The cut did NOT reach installs.
-Claude Code keys both the plugin CACHE directory
-(`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>`) and
-`installed_plugins.json`'s own `version` field on the client `version`
-string alone, never on `source.ref`; a same-version anchored cut moves
-the marketplace's pinned ref but leaves that key unchanged, so `claude
-plugin update` reports "already at the latest version" and reinstalls
-nothing (confirmed against the CLI's own docs by nexus-semdv, filed
-2026-09-08, three days before this fired for real). A live dispatch on
-the stale install logged the pre-fix behaviour; `tests/e2e/
-post-publish-dispatch-check.sh` failed with `space_start_match=0`. Two
-hours lost; the immediate mitigation was a same-content client hotfix
-(conexus 7.41.1, wheel unchanged, version bumped so the cache key moves)
-per AGENTS.md's ordinary release path — never the channel itself.
+THREE real cuts to date; the delivery gap this section records fired, or
+would have fired, on every one of them -- the channel's very first
+production use never had a working automatic delivery path until the
+fix below:
+
+- **`plugin-v7.24.0-1`** (2026-08-30, the first real cut, nexus-a2wmi.12):
+  the "sandboxed `/plugin update` picks up the anchored tag within one
+  refresh" validation item was recorded as an unexercised GAP, not
+  evidenced -- the anchored window closed when `v7.24.1` (an ordinary
+  client release) reset the pins a few hours later, before anyone
+  verified delivery against the real CLI. Remediation: `conexus 7.24.1`
+  (ordinary client release) carried the same content by construction,
+  superseding the gap before it was noticed.
+- **`plugin-v7.36.1-1`** (2026-09-08, the second real cut, nexus-4ti7e):
+  delivery measured directly by nexus-semdv (filed 2026-09-08): neither
+  `nx upgrade` nor `claude plugin update` adopts an anchored cut, both
+  keyed on the marketplace `version` field the cut never moves; only
+  `claude plugin marketplace update` + a re-run `claude plugin install
+  <plugin>@<marketplace>` (Claude Code >= 2.1.232) or an explicit
+  uninstall+install follows the ref. Sam ran the reinstall by hand on
+  the one box that needed it. Remediation: `conexus 7.37.0` (the next
+  ordinary client release) returned the marketplace pin to the client
+  form and reached every other install through the pre-existing
+  version-mismatch path.
+- **`plugin-v7.41.0-1`** (2026-09-11, MEASURED for real, nexus-konsk
+  P0): tagged on `01eb1c6a6`, the verify-only workflow green,
+  marketplace clones refreshed (`/plugin update` + `/reload-plugins`).
+  The cut did NOT reach installs. Claude Code keys both the plugin CACHE
+  directory (`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>`)
+  and `installed_plugins.json`'s own `version` field on the client
+  `version` string alone, never on `source.ref`; a same-version anchored
+  cut moves the marketplace's pinned ref but leaves that key unchanged,
+  so `claude plugin update` reports "already at the latest version" and
+  reinstalls nothing. A live dispatch on the stale install logged the
+  pre-fix behaviour; `tests/e2e/post-publish-dispatch-check.sh` failed
+  with `space_start_match=0`. Two hours lost; the immediate mitigation
+  was a same-content client hotfix (`conexus 7.41.1`, wheel unchanged,
+  version bumped so the cache key moves) per AGENTS.md's ordinary
+  release path -- never the channel itself.
+
+Pattern across all three: every one of the channel's first three cuts
+depended on a LATER, UNRELATED client release to actually reach
+installs -- never once on its own declared delivery mechanism (`/plugin
+update` picking up the anchored ref, which this RDR's Validation section
+claimed at draft time and never verified before the first real cut).
+That is the structural defect nexus-konsk's fix (below) closes: the
+channel now carries its own automatic delivery path instead of quietly
+riding the next wheel release.
 
 FIXED the same day by extending `nexus.plugin_lockstep.converge_plugins`
 (the `nx upgrade` plugin step, RDR-143's other direction): a plugin whose
@@ -449,6 +489,67 @@ CLI — confirmed RED on the pre-fix code (no pickup, the version-only
 comparison reports the plugin already in lockstep) and PASSED after.
 See `src/nexus/plugin_lockstep.py`'s module docstring for the full
 contract; `tests/test_plugin_lockstep.py` pins every branch.
+
+STILL NOT AUTOMATIC after that same-day fix, found by critique
+[25316] the same day: `converge_plugins` is reachable only from a human
+typing `nx upgrade` or from the RDR-143 detached action, and that action
+is dispatched ONLY by `version_lockstep_hook.py`'s own version-mismatch
+check (`plugin.json`'s `version` field against a marker) -- exactly the
+field a same-version cut never moves by design. So the fix above closed
+the "does uninstall+install actually work" question but not "what
+triggers it automatically" -- a same-version cut still reached nobody
+without a manual `nx upgrade` or a later, unrelated client release, the
+identical pattern all three cuts above already show. FIXED by extending
+`version_lockstep_hook.py` itself (same day): the SessionStart hook now
+ALSO runs a no-network ref-drift probe (`detect_ref_drift`) alongside
+its existing version check -- reads `installed_plugins.json`'s
+`gitCommitSha` for each installed conexus/sn entry, resolves the local
+marketplace clone's pinned `source.ref` via plain `git rev-parse
+<ref>^{commit}` (no `claude plugin marketplace update` fetch, so a
+not-yet-refreshed clone is a false negative, never a false positive),
+and on a mismatch dispatches the SAME detached-action machinery as the
+version-mismatch path (a sentinel target routes
+`version_lockstep_action.py` straight to `nx upgrade`, skipping the
+CLI-binary-upgrade steps that make no sense for a same-version cut).
+Measured cost: ~13-14ms of git-plumbing overhead over the hook's
+pre-fix baseline (~28ms wall-clock including interpreter start; ~42ms
+worst case with two plugins both drifted), comfortably inside
+`hooks.json`'s 5s SessionStart budget for this matcher and the "well
+under 200ms" target. This REVISES RDR-197's original Critical Assumption
+2 ("the lockstep hook stays silent on a plugin-cut install") -- see
+Critical Assumptions above.
+
+Post-fix delivery path and timescale, end to end: a plugin-only cut
+lands on main -> the next `claude plugin marketplace update` (autoUpdate,
+or a periodic Claude Code refresh, or this hook's own
+`_refresh_marketplace` call inside `nx upgrade`) pulls the new commit
+into the user's local marketplace clone -> the NEXT SessionStart on that
+box runs this hook's `detect_ref_drift`, sees the clone's pin no longer
+matches the registry's `gitCommitSha`, and dispatches -> the detached
+action runs `nx upgrade`, whose own plugin-lockstep step re-refreshes
+the marketplace over the network, re-confirms the drift, and does the
+uninstall+install dance. Total: one SessionStart after the marketplace
+clone catches up (typically the very next session, since Claude Code
+refreshes marketplaces routinely), with the actual reinstall completing
+in the detached action's own budget (uninstall ~15s + install up to
+~45s, RDR-143 CA-4 next-session-effect, not within-session) -- no
+`nx upgrade` typed by a human and no dependency on a later wheel
+release, closing the gap the three cuts above each hit.
+
+Blast radius (nexus-konsk critique [25316], SIGNIFICANT finding): this
+fix makes the uninstall+install pair -- previously reachable only from a
+deliberate, foreground `nx upgrade` -- reachable AUTOMATICALLY from a
+background SessionStart dispatch, against a plugin whose hooks/MCP
+servers may be loaded in the CURRENT live session. RDR-143's CA-4
+already accepted the identical next-session-effect shape for its own
+binary-upgrade path ("the new CLI takes effect on the next session, not
+the current one" -- RDR-143 § Decision): a detached action completes
+AFTER the session has already started against the old tree, so this is
+that same accepted shape, not a new hazard class. Consistent with that
+precedent, both the hook's ref-drift nudge and `nx upgrade`'s own
+`render()` output (`src/nexus/plugin_lockstep.py`) print "restart the
+session (or run /mcp)" on a successful ref move -- the same instruction
+RDR-143's own nudge has printed since 2026-06-02.
 
 Option (b) considered and rejected: having the cut bump the plugin
 `version` field to an anchored form (e.g. `7.41.0+1`) so the CLI's own
@@ -483,6 +584,28 @@ Not yet run. Gate after Sam's review of this draft.
 
 ## Revision History
 
+- 2026-09-11 (nexus-konsk, P0, follow-up round): a same-day critique
+  ([25316]) found the first round's fix left delivery still not
+  automatic -- `converge_plugins` is reachable only from a human `nx
+  upgrade` or the RDR-143 detached action, and that action dispatches
+  only from `version_lockstep_hook.py`'s version-mismatch check, keyed
+  on `plugin.json`'s `version` field, which a same-version cut never
+  moves. FIXED by extending the SessionStart hook itself with a
+  no-network `detect_ref_drift` probe that dispatches the same detached
+  machinery on a mismatch (sentinel-routed straight to `nx upgrade`,
+  skipping the CLI-binary-upgrade steps). Retires RDR-197's original
+  Critical Assumption 2 ("the lockstep hook stays silent on a plugin-cut
+  install") in favor of its revised form (see Critical Assumptions).
+  Validation section expanded to name all three real cuts to date
+  (`plugin-v7.24.0-1`, `plugin-v7.36.1-1`, `plugin-v7.41.0-1`) and each
+  one's remediation -- every one reached installs only via a LATER,
+  UNRELATED client release, never its own declared delivery mechanism,
+  until this fix. `tests/hooks/test_version_lockstep_hook.py::
+  TestRefDriftDetection` / `TestRefDriftOrchestration` (red-first against
+  a real temp git clone with annotated tags) and
+  `tests/test_cut_plugin_release.py`'s new assertion on the cut script's
+  printed post-cut instructions (a gap the review round also flagged: no
+  test had asserted that text before).
 - 2026-09-11 (nexus-konsk, P0): the GAP this file recorded on 2026-08-30
   ("sandboxed `/plugin update` picks up the anchored tag within one
   refresh" never directly exercised) fired for real on `plugin-v7.41.0-1`

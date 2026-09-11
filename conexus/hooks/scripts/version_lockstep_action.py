@@ -25,6 +25,18 @@ Flow:
      the marker iff it now equals the target. Any failure leaves the
      marker stale so the next session re-nudges and retries.
 
+nexus-konsk (P0, 2026-09-11): a FIFTH entry point, gated by the sentinel
+target ``_REF_DRIFT_SENTINEL`` (``version_lockstep_hook.detect_ref_drift``
+dispatches it, never a real version string). Bypasses steps 2-4 above --
+a same-version plugin-only cut (RDR-197) moves no CLI version, so there
+is nothing to compare or write a marker for -- and runs ONLY ``nx
+upgrade`` (still behind gate 1's editable/generation check), which is
+where ``nexus.plugin_lockstep.converge_plugins``'s ref-drift step
+(refreshes the marketplace over the network, re-confirms, then
+uninstalls+reinstalls on a genuine mismatch) actually lives. See
+``_run_nx_upgrade_for_ref_drift`` and ``main``'s ``ref_drift_only``
+branch.
+
 Stdlib-only (bare interpreter via ``_run_python_hook.sh``; the conexus
 package is not importable here). No structlog under bare interp -> the
 NX_HOOK_DEBUG stderr convention.
@@ -63,6 +75,13 @@ def _env_int(name: str, default: int) -> int:
 # harmless, but bound it. nx upgrade is migration-only and fast.
 _UV_TIMEOUT = _env_int("NX_LOCKSTEP_UV_TIMEOUT", 300)
 _NX_UPGRADE_TIMEOUT = _env_int("NX_LOCKSTEP_NX_TIMEOUT", 120)
+#: nexus-konsk: the sentinel ``version_lockstep_hook.py`` passes as the
+#: "target version" argv for a ref-drift-only dispatch. Same literal
+#: under the same name in both files (the hook cannot import this module
+#: -- both are bare stdlib scripts, see the hook's own module docstring);
+#: ``tests/hooks/test_version_lockstep_hook.py::
+#: TestRefDriftSentinelMatchesAction`` pins the two together.
+_REF_DRIFT_SENTINEL = "__ref_drift__"
 # Matches a leading dotted-numeric core (X.Y.Z) plus an optional separated
 # suffix. Nexus ships plain X.Y.Z release tags to users, so a bare
 # pre-release like "5.7.0a1" (no separator before the suffix) is out of
@@ -292,6 +311,39 @@ def write_marker(version: str) -> None:
     debug(f"wrote marker {path} = {version}")
 
 
+def _run_nx_upgrade_for_ref_drift(timeout: int) -> None:
+    """The nexus-konsk ref-drift-only branch's sole action: run
+    ``nx upgrade`` and log what its own plugin-lockstep step reported
+    (``nexus.plugin_lockstep.render``'s own text), never a hard
+    success/failure signal back to the caller -- ``nx upgrade``'s own
+    philosophy is that a failed plugin reinstall never fails ``nx
+    upgrade`` itself (the reason is printed instead), so this is a
+    durable record of the outcome, not a gate. No CLI binary upgrade and
+    no marker write: ref drift is not a CLI-version fact."""
+    try:
+        result = subprocess.run(
+            ["nx", "upgrade"], capture_output=True, text=True, timeout=timeout,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        debug(f"nx upgrade raised for ref-drift reinstall: {exc}")
+        log_event("ref_drift_upgrade_result", outcome="nx_upgrade_raised", error=str(exc)[:200])
+        return
+    text = (result.stdout or "") + (result.stderr or "")
+    if result.returncode != 0:
+        debug(f"nx upgrade exited {result.returncode} for ref-drift reinstall")
+        log_event("ref_drift_upgrade_result", outcome="nx_upgrade_exit_nonzero", rc=str(result.returncode))
+        return
+    # Text markers from nexus.plugin_lockstep.render's own case statement
+    # (`ref_moved` / `ref_check_failed`) -- best-effort parse of what `nx
+    # upgrade` printed, not a second source of truth.
+    if "picked up a plugin-only release" in text:
+        log_event("ref_drift_upgrade_result", outcome="ref_moved")
+    elif "reinstall failed" in text:
+        log_event("ref_drift_upgrade_result", outcome="ref_check_failed")
+    else:
+        log_event("ref_drift_upgrade_result", outcome="ran_no_drift_confirmed")
+
+
 def main(argv: list[str]) -> None:
     """Perform the gated, ordered, confirmed upgrade. Always fail-safe."""
     try:
@@ -299,6 +351,7 @@ def main(argv: list[str]) -> None:
             debug("no target version argument; nothing to do")
             return
         target = argv[1].strip()
+        ref_drift_only = target == _REF_DRIFT_SENTINEL
 
         # 1. Editable gate first: never touch a dev/editable tree.
         # GATE 1, nexus-utpuw.15. This used to be `uv_receipt_present()` alone,
@@ -313,6 +366,28 @@ def main(argv: list[str]) -> None:
         generation = generation_install_present()
         if not generation and not uv_receipt_present():
             debug("no generation layout and no uv-tool receipt (dev tree); skipping")
+            return
+
+        if ref_drift_only:
+            # nexus-konsk: a same-version plugin-only cut (RDR-197) needs
+            # only the plugin-lockstep step inside `nx upgrade`
+            # (nexus.plugin_lockstep.converge_plugins's ref-drift check,
+            # which refreshes the marketplace over the network and
+            # re-confirms before acting) -- never a CLI binary upgrade,
+            # since the wheel version is unchanged by construction. Skip
+            # gates 2-4 below (all keyed on a CLI version target) entirely.
+            #
+            # Blast radius: RDR-143 CA-4 accepted that a detached action
+            # completes AFTER the current session has already started
+            # against the old tree, so this delivers on the NEXT session,
+            # not this one -- see dispatch_ref_drift_action's docstring in
+            # version_lockstep_hook.py for the full citation. No marker
+            # write here: the marker records a confirmed CLI version, and
+            # this step moves the plugin, not the CLI (same reasoning as
+            # nx upgrade's own plugin-lockstep step, which never writes it
+            # either -- see plugin_lockstep.py's module docstring).
+            log_event("ref_drift_upgrade_started")
+            _run_nx_upgrade_for_ref_drift(_NX_UPGRADE_TIMEOUT)
             return
 
         # 2. No-op fast path: CLI already at or above target -> record
