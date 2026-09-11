@@ -45,7 +45,7 @@ h2{font-size:27px}
 h3{font-size:18px;margin-top:26px}
 p{margin:12px 0;max-width:68ch}
 .lede{font-size:18px;color:var(--ink-2);max-width:62ch}
-.topnav{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:12px}
+.topnav{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:12px}
 .topnav a{font-size:14px;font-weight:500;text-decoration:none}
 .topnav a:hover{text-decoration:underline}
 .eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--brass);font-weight:600;margin-bottom:12px}
@@ -423,18 +423,18 @@ ol.plain li,ul.plain li{margin:3px 0}
 <figure class="fig"><svg viewBox="0 0 680 275" role="img" aria-label="The RDR cycle. A conversation becomes a draft. Research grows it in cycles. You read and react, sometimes with a critic. A gate checks it within a budget. You accept and the plan follows. Sessions build it, each with a continuation, each phase with a review. You close it. It is indexed into knowledge, where the next RDR finds it."><defs><marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor" stroke="none"/></marker><marker id="a4-y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--brass)" stroke="none"/></marker></defs>
 <rect class="box" x="10" y="20" width="120" height="46" rx="6"/><text x="70" y="40" text-anchor="middle" font-weight="600">conversation</text><text x="70" y="56" text-anchor="middle" class="lbl">problem, options</text>
 <rect class="box" x="160" y="20" width="120" height="46" rx="6"/><text x="220" y="40" text-anchor="middle" font-weight="600">draft</text><text x="220" y="56" text-anchor="middle" class="lbl">rdr-create</text>
-<rect class="box" x="310" y="20" width="120" height="46" rx="6"/><text x="370" y="40" text-anchor="middle" font-weight="600">research</text><text x="370" y="56" text-anchor="middle" class="lbl">agent · findings · tags</text>
+<rect class="box" x="310" y="20" width="120" height="46" rx="6"/><text x="370" y="40" text-anchor="middle" font-weight="600">research</text><text x="370" y="56" text-anchor="middle" class="lbl">agent, findings</text>
 <rect class="box" x="460" y="20" width="120" height="46" rx="6"/><text x="520" y="40" text-anchor="middle" font-weight="600">read, react</text><text x="520" y="56" text-anchor="middle" class="lbl">rendering · critic</text>
 <line x1="130" y1="43" x2="158" y2="43" marker-end="url(#a4)"/><line x1="280" y1="43" x2="308" y2="43" marker-end="url(#a4)"/><line x1="430" y1="43" x2="458" y2="43" marker-end="url(#a4)"/>
 <path d="M520 66 C520 90, 370 90, 370 66" marker-end="url(#a4)"/><text x="445" y="92" text-anchor="middle" class="lbl">next cycle, 3 to 6 times</text>
-<rect class="you" x="460" y="115" width="120" height="46" rx="6"/><text x="520" y="135" text-anchor="middle" font-weight="600">gate · accept</text><text x="520" y="151" text-anchor="middle" class="lbl">budget · you decide</text>
+<rect class="you" x="460" y="115" width="120" height="46" rx="6"/><text x="520" y="135" text-anchor="middle" font-weight="600">gate · accept</text><text x="520" y="151" text-anchor="middle" class="lbl">budget, your call</text>
 <path d="M580 43 L610 43 L610 138 L582 138" marker-end="url(#a4-y)" class="you-edge"/>
-<rect class="box" x="310" y="115" width="120" height="46" rx="6"/><text x="370" y="135" text-anchor="middle" font-weight="600">plan</text><text x="370" y="151" text-anchor="middle" class="lbl">tasks by phase, audited</text>
+<rect class="box" x="310" y="115" width="120" height="46" rx="6"/><text x="370" y="135" text-anchor="middle" font-weight="600">plan</text><text x="370" y="151" text-anchor="middle" class="lbl">phases, audited</text>
 <line x1="460" y1="138" x2="432" y2="138" marker-end="url(#a4)"/>
-<rect class="box" x="160" y="115" width="120" height="46" rx="6"/><text x="220" y="135" text-anchor="middle" font-weight="600">build</text><text x="220" y="151" text-anchor="middle" class="lbl">sessions · phase reviews</text>
+<rect class="box" x="160" y="115" width="120" height="46" rx="6"/><text x="220" y="135" text-anchor="middle" font-weight="600">build</text><text x="220" y="151" text-anchor="middle" class="lbl">sessions, reviews</text>
 <line x1="310" y1="138" x2="282" y2="138" marker-end="url(#a4)"/>
-<path d="M250 161 C250 190, 190 190, 190 163" marker-end="url(#a4)" class="dash"/><text x="300" y="192" text-anchor="middle" class="lbl">each session ends with a continuation</text>
-<rect class="you" x="10" y="115" width="120" height="46" rx="6"/><text x="70" y="135" text-anchor="middle" font-weight="600">close</text><text x="70" y="151" text-anchor="middle" class="lbl">tasks settled · you decide</text>
+<path d="M250 161 C250 190, 190 190, 190 163" marker-end="url(#a4)" class="dash"/><text x="320" y="196" text-anchor="middle" class="lbl">each session ends with a continuation</text>
+<rect class="you" x="10" y="115" width="120" height="46" rx="6"/><text x="70" y="135" text-anchor="middle" font-weight="600">close</text><text x="70" y="151" text-anchor="middle" class="lbl">tasks settled</text>
 <line x1="160" y1="138" x2="132" y2="138" marker-end="url(#a4-y)" class="you-edge"/>
 <rect class="box" x="10" y="225" width="160" height="36" rx="6"/><text x="90" y="248" text-anchor="middle" font-weight="600">knowledge store</text>
 <line x1="70" y1="161" x2="70" y2="223" marker-end="url(#a4)"/><text x="78" y="196" class="lbl">indexed</text>
