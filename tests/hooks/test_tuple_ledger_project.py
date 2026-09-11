@@ -356,6 +356,114 @@ def test_resolves_host_port_from_storage_service_lease(tmp_path: Path, mock_engi
     assert engine.auth_headers[0] == "Bearer via-lease"
 
 
+def test_local_supervisor_with_no_data_token_lease_falls_back_to_its_own_token(
+    tmp_path: Path, mock_engine
+) -> None:
+    """nexus-g2lln: the exact dead-on-every-local-install shape proven by
+    the 7.41.0 shakeout (T2
+    ``nexus/shakeout-7.41.0-projector-local-install-proof-2026-09-11``) --
+    a local supervisor lease, NO data-token lease at all (the default
+    local install has no ``mint_token`` configured, so no client ever
+    writes one). Must fall back to the storage lease's own ``endpoint.
+    token`` field -- the same static credential the real local client
+    presents on this box -- and post successfully, no SKIP."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(engine.base_url)
+    _write_storage_lease(config_dir, host=parsed.hostname, port=parsed.port)
+    lease_path = config_dir / f"storage_service_addr.{os.getuid()}"
+    os.chmod(lease_path, 0o600)
+    # No data-token lease written at all.
+
+    proc = _run("start", tmp_path=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+    assert engine.auth_headers[0] == "Bearer static-mint-locked"
+    log = _log_path(tmp_path / "state")
+    assert not log.exists() or "SKIP" not in log.read_text()
+
+
+def test_local_supervisor_with_stale_data_token_lease_falls_back_to_its_own_token(
+    tmp_path: Path, mock_engine
+) -> None:
+    """A data-token lease exists but is past the near-expiry threshold --
+    treated as absent, exactly like the existing near-expiry pin -- and
+    the local supervisor endpoint still falls back to its own token."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(engine.base_url)
+    _write_storage_lease(config_dir, host=parsed.hostname, port=parsed.port)
+    os.chmod(config_dir / f"storage_service_addr.{os.getuid()}", 0o600)
+    _write_data_token_lease(
+        config_dir, base_url=engine.base_url, token="stale-data-token",
+        ttl_seconds=3600.0, remaining_s=100.0,  # well within the 20% near-expiry band
+    )
+
+    proc = _run("start", tmp_path=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+    assert engine.auth_headers[0] == "Bearer static-mint-locked"
+
+
+def test_local_supervisor_token_refused_when_lease_file_is_group_or_world_readable(
+    tmp_path: Path, mock_engine
+) -> None:
+    """nexus-g2lln: the fallback token authorizes real engine writes, so a
+    lease file another local account could read must never be trusted as
+    its source -- SKIP, and the reason names the permission problem."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(engine.base_url)
+    _write_storage_lease(config_dir, host=parsed.hostname, port=parsed.port)
+    lease_path = config_dir / f"storage_service_addr.{os.getuid()}"
+    os.chmod(lease_path, 0o644)  # group/other-readable -- must be refused
+
+    proc = _run("start", tmp_path=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert engine.requests == []
+    log = _log_path(tmp_path / "state")
+    content = log.read_text()
+    assert "SKIP kind=start" in content
+    assert "group/other-accessible" in content
+
+
+def test_managed_endpoint_never_falls_back_to_a_local_lease_token(
+    tmp_path: Path, mock_engine
+) -> None:
+    """nexus-em75s.12's guarantee must survive nexus-g2lln's fallback: a
+    MANAGED endpoint (``service_url`` resolved) with no fresh data-token
+    lease must SKIP even when a live, owner-only local supervisor lease
+    with a usable token happens to also exist on the same box (e.g. a
+    dev box running both a local supervisor and pointed at a managed
+    service_url for testing) -- the local static token is never an
+    acceptable substitute for a managed-endpoint bearer."""
+    engine = mock_engine(status=200)
+    managed_engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(engine.base_url)
+    _write_storage_lease(config_dir, host=parsed.hostname, port=parsed.port)
+    os.chmod(config_dir / f"storage_service_addr.{os.getuid()}", 0o600)
+    # No data-token lease for the managed endpoint.
+
+    proc = _run(
+        "start", tmp_path=tmp_path, env_overrides={"NX_SERVICE_URL": managed_engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert engine.requests == []
+    assert managed_engine.requests == []
+    log = _log_path(tmp_path / "state")
+    assert "SKIP kind=start" in log.read_text()
+    assert "no fresh data-token lease" in log.read_text()
+
+
 def test_cloud_mode_persisted_service_url_resolves_with_no_env_and_no_lease(
     tmp_path: Path, mock_engine
 ) -> None:

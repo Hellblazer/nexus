@@ -19,12 +19,29 @@ reads the client library's own cross-process caches --
 ``nexus.daemon.service_registry.ServiceRegistry``) and
 ``data_token_lease.<digest>`` (the bearer, written by
 ``nexus.db.data_token.DataTokenManager._write_lease``) -- and PRESENTS
-what it finds. It never calls ``/v1/data-tokens/mint``, never falls back
-to a static/mint-locked ``service_token`` (unlike
-``conexus/hooks/scripts/routing/_lib.py``'s ``_resolve_endpoint``, which
-DOES fall back -- this is deliberately narrower: a wrong-scoped static
-token would 401 silently on a fire-and-forget write with no reader, so a
-missing or near-expiry data-token lease is a SKIP, not a fallback).
+what it finds. It never calls ``/v1/data-tokens/mint``, and it never puts
+a bearer on a spawned process's argv.
+
+BEARER PRECEDENCE (nexus-g2lln): a fresh data-token lease is always tried
+first. On a MANAGED endpoint (``service_url`` resolved from env or
+``config.yml`` -- ``_resolve_base_url``'s first two legs) that is the
+ONLY accepted credential: a missing/near-expiry data-token lease is a
+SKIP, never a fallback (a wrong-scoped static token would 401 silently on
+a fire-and-forget write with no reader). On a LOCAL SUPERVISOR endpoint
+-- one this script resolved by literally reading the
+``storage_service_addr.<uid>`` lease file for host/port, the last leg of
+``_resolve_base_url`` -- a missing/near-expiry data-token lease falls
+back to that SAME lease record's own ``endpoint.token`` field, exactly
+the credential the real local ``nx``/MCP client itself presents on this
+box when no ``mint_token`` is configured (``nexus.db.data_token``'s
+documented "falls through to its existing static-``service_token``
+resolution unchanged" contract; a default local install has no
+``mint_token``, so this is the ONLY credential such an install ever
+produces -- proven dead without this fallback, T2
+``nexus/shakeout-7.41.0-projector-local-install-proof-2026-09-11``).
+That fallback token is refused (SKIP, reason named) if the lease file is
+not owner-only (group/other read/write/execute bits set) -- this project
+never trusts a same-box bearer off a file another local user could read.
 
 Stdlib-only mirror of ``nexus.db.data_token``'s lease-file format and
 ``nexus.db.service_endpoint.resolve_service_endpoint``'s FULL endpoint
@@ -61,6 +78,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import sys
 import time
 import urllib.parse
@@ -250,9 +268,9 @@ def _read_persisted_service_url(config_dir: Path) -> str:
     return found
 
 
-def _resolve_base_url(config_dir: Path) -> str:
+def _resolve_base_url(config_dir: Path) -> tuple[str, bool]:
     """``(service_url [env|persisted] -> NX_SERVICE_HOST/PORT env -> local
-    lease) -> base_url``, or raise :class:`_Skip`.
+    lease) -> (base_url, is_local_supervisor)``, or raise :class:`_Skip`.
 
     Mirrors ``nexus.db.service_endpoint.resolve_service_endpoint``'s
     precedence (nexus-0zsmg): the managed-cloud ``service_url`` leg -- env
@@ -265,17 +283,24 @@ def _resolve_base_url(config_dir: Path) -> str:
     common shape after ``nx init`` writes credentials to config.yml and the
     session never exports them) always fell through to 'no service
     endpoint resolvable' even though every other HTTP client on the same
-    box resolves the managed endpoint fine. Host/port only here -- never
-    touches the bearer (the data-token lease selection in
-    :func:`_read_data_token_lease` is unaffected and already generalizes to
-    any resolved ``base_url``, local or managed, since it keys on the
-    resolved host).
+    box resolves the managed endpoint fine.
+
+    ``is_local_supervisor`` is True ONLY for the last leg -- the endpoint
+    was resolved by literally reading the ``storage_service_addr.<uid>``
+    lease file (nexus-g2lln). It is False for every other leg, the
+    ``NX_SERVICE_HOST``/``NX_SERVICE_PORT`` env override included: that
+    leg names a host/port without ever reading a lease record, so there is
+    no lease-scoped token this script can responsibly call "the
+    supervisor's own" -- callers use this flag to gate whether a missing
+    data-token lease may fall back to the storage lease's static token
+    (:func:`_read_local_supervisor_token`), never to affect host/port
+    resolution itself.
     """
     url = os.environ.get("NX_SERVICE_URL", "").strip().rstrip("/")
     if not url:
         url = _read_persisted_service_url(config_dir).strip().rstrip("/")
     if url:
-        return url
+        return url, False
 
     port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
     if port_str:
@@ -284,11 +309,11 @@ def _resolve_base_url(config_dir: Path) -> str:
         except ValueError as exc:
             raise _Skip(f"NX_SERVICE_PORT is not an integer: {port_str!r}") from exc
         host = os.environ.get("NX_SERVICE_HOST", "").strip() or "127.0.0.1"
-        return f"http://{host}:{port}"
+        return f"http://{host}:{port}", False
 
     lease = _read_storage_service_lease(config_dir)
     if lease is not None:
-        return f"http://{lease['host']}:{lease['port']}"
+        return f"http://{lease['host']}:{lease['port']}", True
 
     lease_path = config_dir / f"{_STORAGE_SERVICE_TIER}_addr.{os.getuid()}"
     raise _Skip(
@@ -296,6 +321,62 @@ def _resolve_base_url(config_dir: Path) -> str:
         f"config.yml service_url, no NX_SERVICE_PORT, and no live local "
         f"supervisor lease at {lease_path}"
     )
+
+
+def _read_local_supervisor_token(config_dir: Path) -> str:
+    """The LOCAL SUPERVISOR's own static token, straight off the SAME
+    ``storage_service_addr.<uid>`` lease record :func:`_resolve_base_url`
+    just used for host/port -- or raise :class:`_Skip` naming why.
+
+    This is the credential a default local install's OWN client presents
+    on this box when no ``mint_token`` is configured
+    (``nexus.db.data_token.DataTokenManager.bearer_for``'s documented
+    "falls through to its existing static-``service_token`` resolution
+    unchanged" contract) -- never a mint, never a fabricated bearer, just
+    the same static token the supervisor already published for every
+    local client to use. Proven load-bearing 2026-09-11 (T2
+    ``nexus/shakeout-7.41.0-projector-local-install-proof-2026-09-11``): a
+    default local install never writes a data-token lease at all, so
+    without this fallback the ledger projector is permanently dead on
+    every such install.
+
+    Refuses (never trusts) a lease file that is not owner-only: the token
+    it carries authorizes real engine writes, and a group/other-readable
+    lease file means some other local account could have read it too.
+    Also refuses a stale, malformed, or blank-token record -- the same
+    liveness checks :func:`_read_storage_service_lease` already applies,
+    re-verified here rather than threaded through as a parameter so this
+    function is a complete, independent audit trail for the one
+    credential-bearing read in the whole script.
+    """
+    path = config_dir / f"{_STORAGE_SERVICE_TIER}_addr.{os.getuid()}"
+    try:
+        st_result = path.stat()
+    except OSError as exc:
+        raise _Skip(f"local supervisor lease unavailable: cannot stat {path}: {exc}") from exc
+    mode = stat.S_IMODE(st_result.st_mode)
+    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise _Skip(
+            f"local supervisor lease {path} is group/other-accessible "
+            f"(mode {oct(mode)}); refusing to use its token as a bearer"
+        )
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise _Skip(f"local supervisor lease {path} unreadable/malformed: {exc}") from exc
+    try:
+        if str(data.get("status", "live")) != "live":
+            raise _Skip(f"local supervisor lease {path} is not live")
+        heartbeat_epoch = float(data["heartbeat_epoch"])
+        ttl = float(data["ttl"])
+        token = str(data["endpoint"].get("token", "") or "")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise _Skip(f"local supervisor lease {path} malformed: {exc}") from exc
+    if (time.time() - heartbeat_epoch) >= ttl:
+        raise _Skip(f"local supervisor lease {path} is stale (past ttl)")
+    if not token:
+        raise _Skip(f"local supervisor lease {path} carries no token")
+    return token
 
 
 def _read_data_token_lease(
@@ -433,8 +514,16 @@ def main(argv: list[str]) -> int:
 
     config_dir = _default_config_dir()
     try:
-        base_url = _resolve_base_url(config_dir)
-        token = _read_data_token_lease(config_dir, base_url)
+        base_url, is_local_supervisor = _resolve_base_url(config_dir)
+        try:
+            token = _read_data_token_lease(config_dir, base_url)
+        except _Skip as data_token_skip:
+            if not is_local_supervisor:
+                raise
+            try:
+                token = _read_local_supervisor_token(config_dir)
+            except _Skip as local_skip:
+                raise _Skip(f"{data_token_skip}; {local_skip}") from local_skip
         body = {
             "subspace": f"ledger/{session_id}",
             "keys": {"agent_id": agent_id, "kind": kind},

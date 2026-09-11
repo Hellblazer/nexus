@@ -45,3 +45,16 @@ mechanize, it matters enough to ship.
   ``agent_type`` dimension is not ``required: true``) — ``session_id`` +
   ``agent_id`` stay mandatory for both kinds.
   bead: nexus-0zsmg
+  Also nexus-g2lln: the endpoint-resolution fix above did not make the
+  projector live on a LOCAL install — a default local install has no
+  ``mint_token`` configured, so it never writes a data-token lease at
+  all, and the projector accepted only that one bearer. Now, on a LOCAL
+  SUPERVISOR endpoint specifically (the last leg above — the storage
+  lease file resolved host/port), a missing/near-expiry data-token lease
+  falls back to that SAME lease record's own ``endpoint.token`` field —
+  the static credential the real local client already presents on this
+  box when unminted. Refused if the lease file is not owner-only
+  (group/other read/write/execute bits set). A MANAGED endpoint
+  (``service_url`` resolved) never gets this fallback — the data-token
+  lease stays the only accepted credential there, unchanged.
+  bead: nexus-g2lln
