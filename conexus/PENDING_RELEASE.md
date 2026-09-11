@@ -32,4 +32,16 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.41.0)
 
-(none)
+- `conexus/hooks/scripts/tuple_ledger_project.py`: nexus-0zsmg — endpoint
+  resolution now mirrors ``nexus.db.service_endpoint.resolve_service_endpoint``'s
+  FULL precedence, not just the local-supervisor leg: ``NX_SERVICE_URL`` env,
+  then the persisted ``config.yml`` ``credentials.service_url`` (``nx config
+  set service_url``), then ``NX_SERVICE_HOST``/``NX_SERVICE_PORT`` env, then
+  the local lease. Before this fix a cloud-mode box with no
+  ``NX_SERVICE_URL`` exported (an all-persisted-config install — the common
+  shape after ``nx init``) skipped every ledger projection. Also: the
+  ``report`` kind now tolerates a missing ``agent_type`` (the SubagentStop
+  payload does not reliably carry it; the ``ledger.yaml`` template's
+  ``agent_type`` dimension is not ``required: true``) — ``session_id`` +
+  ``agent_id`` stay mandatory for both kinds.
+  bead: nexus-0zsmg

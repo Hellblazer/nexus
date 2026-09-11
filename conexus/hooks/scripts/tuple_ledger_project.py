@@ -27,7 +27,12 @@ token would 401 silently on a fire-and-forget write with no reader, so a
 missing or near-expiry data-token lease is a SKIP, not a fallback).
 
 Stdlib-only mirror of ``nexus.db.data_token``'s lease-file format and
-``nexus.db.service_endpoint``'s local-supervisor discovery leg -- this
+``nexus.db.service_endpoint.resolve_service_endpoint``'s FULL endpoint
+precedence -- the managed-cloud ``service_url`` leg (env, then the
+persisted ``config.yml`` credential) AND the local-supervisor discovery
+leg, not local-only (nexus-0zsmg: a cloud-mode box with no
+``NX_SERVICE_URL`` exported and no local supervisor skipped every
+projection, since the pre-fix mirror covered only the local leg) -- this
 script cannot import ``nexus`` (bare ``python3``, same constraint as
 ``t2_prefix_scan.py`` / ``routing/_lib.py``, nexus-vg6d4).
 
@@ -197,10 +202,78 @@ def _read_storage_service_lease(config_dir: Path) -> dict[str, Any] | None:
     return {"host": host, "port": port}
 
 
+def _read_persisted_service_url(config_dir: Path) -> str:
+    """Narrow, stdlib-only mirror of ``nexus.config.get_credential``'s
+    ``config.yml`` leg for exactly the ``credentials.service_url`` key
+    (nexus-0zsmg).
+
+    This script cannot import ``nexus`` or PyYAML (module docstring), so
+    this is deliberately NOT a YAML parser -- it recognizes only the one
+    flat shape ``nexus.config.set_config_value`` ever writes::
+
+        credentials:
+          service_url: <value>
+
+    at a fixed 2-space indent under a zero-indent ``credentials:`` block.
+    Anything else (flow mapping, different indent, multi-document, an
+    embedded-colon value) is simply not recognized and this returns ``""``
+    -- the caller then falls through to the next resolution leg exactly as
+    if the credential were absent, never mis-resolves a base URL from a
+    misparse. Mirrors ``yaml.safe_load``'s last-key-wins semantics for a
+    duplicate key by scanning the whole block and keeping the LAST match.
+    A quoted value (single or double) has its matching outer quotes
+    stripped; no other YAML escaping is honored.
+    """
+    try:
+        text = (config_dir / "config.yml").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    in_credentials = False
+    found = ""
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        stripped = line.strip()
+        if indent == 0:
+            in_credentials = stripped == "credentials:"
+            continue
+        if not in_credentials or indent != 2:
+            continue
+        if not stripped.startswith("service_url:"):
+            continue
+        _, _, raw_val = stripped.partition(":")
+        val = raw_val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        found = val
+    return found
+
+
 def _resolve_base_url(config_dir: Path) -> str:
-    """``(env|lease) -> base_url``, or raise :class:`_Skip`. Host/port
-    only -- never touches the bearer."""
+    """``(service_url [env|persisted] -> NX_SERVICE_HOST/PORT env -> local
+    lease) -> base_url``, or raise :class:`_Skip`.
+
+    Mirrors ``nexus.db.service_endpoint.resolve_service_endpoint``'s
+    precedence (nexus-0zsmg): the managed-cloud ``service_url`` leg -- env
+    ``NX_SERVICE_URL`` first, then the persisted ``config.yml`` credential
+    a user set with ``nx config set service_url`` (RDR-166 nexus-v3p0x) --
+    is checked BEFORE the local-supervisor legs, exactly like the real HTTP
+    storage clients. Before this fix this function only ever checked the
+    env half of ``service_url``, so a cloud-mode box with no
+    ``NX_SERVICE_URL`` exported (an all-persisted-config install -- the
+    common shape after ``nx init`` writes credentials to config.yml and the
+    session never exports them) always fell through to 'no service
+    endpoint resolvable' even though every other HTTP client on the same
+    box resolves the managed endpoint fine. Host/port only here -- never
+    touches the bearer (the data-token lease selection in
+    :func:`_read_data_token_lease` is unaffected and already generalizes to
+    any resolved ``base_url``, local or managed, since it keys on the
+    resolved host).
+    """
     url = os.environ.get("NX_SERVICE_URL", "").strip().rstrip("/")
+    if not url:
+        url = _read_persisted_service_url(config_dir).strip().rstrip("/")
     if url:
         return url
 
@@ -219,8 +292,9 @@ def _resolve_base_url(config_dir: Path) -> str:
 
     lease_path = config_dir / f"{_STORAGE_SERVICE_TIER}_addr.{os.getuid()}"
     raise _Skip(
-        f"no service endpoint resolvable: no NX_SERVICE_URL, no "
-        f"NX_SERVICE_PORT, and no live local supervisor lease at {lease_path}"
+        f"no service endpoint resolvable: no NX_SERVICE_URL, no persisted "
+        f"config.yml service_url, no NX_SERVICE_PORT, and no live local "
+        f"supervisor lease at {lease_path}"
     )
 
 
@@ -340,7 +414,20 @@ def main(argv: list[str]) -> int:
     raw_payload = sys.stdin.read()
     session_id, agent_id, agent_type = _extract_fields(raw_payload)
 
-    if not (session_id and agent_id and agent_type):
+    # kind=="report" tolerates a missing agent_type (nexus-0zsmg): the
+    # harness's SubagentStop payload does not reliably carry it the way
+    # SubagentStart's does (SubagentStart's agent_type is the dispatch's
+    # own subagent_type, injected verbatim -- see
+    # agent-dispatch-expect.sh's header), and the ledger.yaml template's
+    # agent_type dimension is declared WITHOUT `required: true`
+    # (service/src/main/resources/tuples/templates/ledger.yaml), so the
+    # engine accepts a blank dimension value (TupleRepository.out only
+    # rejects a blank REQUIRED dimension). session_id + agent_id stay
+    # mandatory for both kinds -- they key the tuple id and the log path.
+    required_fields = (
+        (session_id, agent_id) if kind == "report" else (session_id, agent_id, agent_type)
+    )
+    if not all(required_fields):
         _log_skip(session_id, f"SKIP kind={kind} incomplete payload fields")
         return 0
 
