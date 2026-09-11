@@ -337,7 +337,12 @@ Every step below is **required**. Missing any one of them has caused problems in
    gates (rehearsal, era-hop, guided) which all start from a populated
    install — the 2026-07-21 fresh-box defect class was invisible to every
    one of them. Must end `FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL,
-   release-battery layer)`.
+   release-battery layer)`. Leg 8d/10 (nexus-cbo4a) additionally drives the
+   real SubagentStart/SubagentStop tuple-ledger-projector hook wrappers
+   against this virgin install, and `tests/e2e/cloud-client-path-gate.sh`'s
+   leg G does the same against a live cloud config — together the only
+   pre-tag proof that `conexus/hooks/scripts/tuple_ledger_project.py`
+   actually lands a tuple on both install classes (nexus-g2lln / nexus-0zsmg).
 
    This is the LOCAL WHEEL layer: it builds and installs the tree under
    test, so it proves the release candidate works, but it resolves
