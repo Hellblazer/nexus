@@ -111,12 +111,14 @@ made the two limits the only open items in the tuple space.
 
 ### Investigation
 
-Read in full: `TupleRepository.ack`, `nack`, `releaseOrDeadLetter`, the claim
-statement's lease clamp, `liveClaimRow`; `TupleHandler.handleAck`/`handleNack`;
-`tuples-001-baseline.xml` for the claim-log column definitions; the mailbox
-template; `HttpTupleStore.ack`/`nack`; the mailbox skill's drain and
-dead-letter rules; RDR-205 §Prior art and §Alternatives; `docs/tuple-space.md`
-§Claims, leases, nack and dead letter.
+Three research passes on 2026-09-11, recorded in T2 under
+`nexus_rdr/206-research-1` (engine), `-2` (client, MCP, CLI, skills, docs,
+release plumbing), and `-3` (prior art: JavaSpaces, Que, Solid Queue, Oban,
+pgmq, Graphile Worker, SQS). Every finding below cites its record. Before
+the passes, the draft was written from a direct reading of
+`TupleRepository.ack`, `nack`, `releaseOrDeadLetter`, the claim statement's
+lease clamp, `liveClaimRow`, `TupleHandler`, `tuples-001-baseline.xml`, the
+mailbox template, `HttpTupleStore`, the mailbox skill, and RDR-205 §Prior art.
 
 #### Dependency Source Verification
 
@@ -125,7 +127,11 @@ dead-letter rules; RDR-205 §Prior art and §Alternatives; `docs/tuple-space.md`
 | `TupleRepository` (engine) | Yes | `ack` resolves the live claim row by `claim_id`, checks `claimant`, sets `consumed_at`/`consumed_by`, logs `ack`; one `withTenant` transaction. `out` validates against the template and calls `waitRegistry.signalAll` after commit. Both are reusable inside one transaction. |
 | `tuples-001-baseline.xml` | Yes | `tuple_claim_log.transition` is `TEXT NOT NULL` with no CHECK; a new transition value needs no changeset. |
 | `mailbox.yaml` | Yes | `max_lease_seconds: 900`, `max_attempts: 3`, `retention_seconds: 604800`. A renew must respect the first and the row's `expires_at`. |
-| `HttpTupleStore` | Yes | `ack(claim_id, claimant)` posts `/ack`; adding optional fields is a body extension, not a new route. |
+| `HttpTupleStore` | Yes | `ack(claim_id, claimant)` posts `/ack`; adding optional fields is a body extension, not a new route. All four errors renew raises already exist as client classes; `_raise_typed` re-raises an unknown route's 404 as a bare `httpx.HTTPStatusError` (research-2 §1). |
+| `TenantScope.withTenant` | Yes | Opens its own connection and commits per call; no overload takes a caller's `DSLContext`, so `out`'s body must be factored into a `DSLContext`-parameterised helper before `ack` can compose it (research-1 §1). |
+| `TupleHandler` | Yes | Body helpers take any `Map<String,Object>`, so a nested `reply` object parses with the same code `handleOut` uses; `/renew` is one switch case; all nine typed errors and statuses already cover both operations (research-1 §3). |
+| Engine and client tests | Yes | All engine tuple tests run on Testcontainers Postgres; client tests use `t2_service_env`; the MCP tool names are pinned in `tests/test_mcp_package.py` (two lists) and `tests/test_mcp_tuple_tools.py` (research-1 §4, research-2 §2, §6). |
+| JavaSpaces, SQS, pgmq, Que, Solid Queue, Oban, Graphile | Yes (specs and source) | Renew is relative-duration and fails on an expired lease in JavaSpaces (`UnknownLeaseException`) and SQS (`MessageNotInflight`); pgmq's `set_vt` is unconditional and resurrects; every system with renewal caps it at an absolute deadline (research-3). |
 
 ### Key Discoveries
 
@@ -145,8 +151,45 @@ dead-letter rules; RDR-205 §Prior art and §Alternatives; `docs/tuple-space.md`
 - **Documented**: the waiter signal fires after the transaction commits. A
   reply written inside the ack transaction must signal the requester's mailbox
   waiters after that commit, from the same place `out` does today.
+- **Documented** (research-1 §1): `withTenant` cannot nest and takes no
+  caller context. `out`'s body touches only `ctx`, so a private
+  `writeOut(DSLContext, ...)` helper called by both `out` and `ackWithReply`
+  is a mechanical refactor. The reply's waiters are signalled after the
+  composed `withTenant` returns, as `out` does at line 280, and only when a
+  reply was written. RLS is a plain tenant equality, there are no triggers,
+  and the only unique index is the primary key, so nothing objects to the
+  request update and the reply insert sharing a transaction.
+- **Documented** (research-1 §2): the claim-time clamp is a pure function of
+  `(now, lease_s, expires_at)` and factors into a shared static helper. The
+  sweep's release arm and the claim statement's lapsed branch both compare
+  the live `lease_until` column against `now()`, so a renewed row stops
+  matching them with no other change.
+- **Documented** (research-1 §3, research-2 §1): no new typed error is needed
+  on either side. `renew` raises `ClaimNotFound`, `ClaimOwnership`,
+  `LeaseTooLong`, `SchemaViolation`; a bad reply raises `SchemaViolation`
+  from `validateOut`. `tests/test_tuple_error_table_pin.py` is a floor of
+  nine and stays green.
+- **Documented** (research-2 §2, §3): three test files pin the MCP tool names
+  and must change together; the comment block above the tools says "Eight
+  MCP tools". The CLI convention is repeatable `KEY=VALUE` flags parsed by
+  `_parse_kv_pairs`, and no JSON-blob input exists, which decides the
+  `nx tuple ack --reply-*` shape.
+- **Documented** (research-2 §1): the RDR's reply object omitted
+  `ttl_seconds`, which `out` accepts. The reply forwards it as optional, so a
+  reply can carry a shorter life than its template's retention.
+- **Documented** (research-3): JavaSpaces renews by relative duration and
+  throws `UnknownLeaseException` on an expired lease; SQS returns
+  `MessageNotInflight`; pgmq's `set_vt` has no ownership or visibility guard
+  and is the one surveyed renew that resurrects a lapsed claim. Every
+  surveyed system with renewal bounds it at an absolute deadline. This RDR's
+  design already matches the two systems that fail loud and avoids pgmq's
+  gap by construction, through `liveClaimRow`.
 - **Assumed**: no v1 consumer needs a lease longer than the template cap even
   with renewal; renewal changes who decides when work is long, not the cap.
+- **Assumed** (research-2 §5): no renew-specific first-engine-version
+  constant is needed beside `_TUPLE_ROUTE_FIRST_ENGINE_VERSION`, because
+  renew extends a shipped route family and an old engine's 404 already
+  fails loud. Revisit only if a doctor row targets renew.
 
 ### Critical Assumptions
 
@@ -155,8 +198,9 @@ dead-letter rules; RDR-205 §Prior art and §Alternatives; `docs/tuple-space.md`
   `liveClaimRow` — **Method**: Source Search
 - [ ] Writing a reply tuple and consuming the request in one
   `withTenant` transaction is expressible with the existing `out` and `ack`
-  bodies — **Status**: Unverified until the spike in Phase 1 Step 1 —
-  **Method**: Spike
+  bodies — **Status**: Documented by reading (research-1 §1: the bodies
+  compose once `out`'s is factored onto a caller `DSLContext`); execution
+  not yet run, which is Phase 1 Step 1 — **Method**: Source Search, then Spike
 - [ ] Adding optional fields to the `/ack` body and one new `/renew` route
   is `[additive]` in both directions (old client ignores them, new client
   against an old engine gets 404 on `/renew` and a plain ack on `/ack`) —
@@ -177,8 +221,9 @@ Add two operations to the primitive and nothing else.
    another claimant), `LeaseTooLong` (above the template cap), `SchemaViolation`
    (`lease_s` at or below zero).
 2. `ack(claim_id, claimant, reply=None)`: as today, plus an optional reply
-   object `{subspace, keys, dims, body, nonce}` that the engine writes with the
-   same validation as `out`, in the same transaction that consumes the claim.
+   object `{subspace, keys, dims, body, nonce, ttl_seconds}` (the same fields
+   `out` accepts) that the engine writes with the same validation as `out`,
+   in the same transaction that consumes the claim.
    On any validation failure of the reply, nothing is written and the request
    stays claimed, so the responder can correct and retry. Waiters on the reply's
    subspace are signalled after commit.
@@ -199,10 +244,15 @@ public OffsetDateTime renew(String tenant, String claimId, String claimant, long
     // expires_at), truncated to micros -> update LEASE_UNTIL -> insertClaimLog(renew)
     // -> return leaseUntil
 
+private byte[] writeOut(DSLContext ctx, String tenant, String subspace, ..., String nonce, Long ttlSeconds)
+    // out's existing body (validateOut, computeId, upsert, maintainTenant) moved onto a
+    // caller-supplied ctx; out itself becomes withTenant(tenant, ctx -> writeOut(ctx, ...))
+    // followed by signalAll, unchanged in behaviour (research-1 §1).
+
 public byte[] ackWithReply(String tenant, String claimId, String claimant, ReplySpec replyOrNull)
-    // withTenant: the existing ack body, then, if replyOrNull != null, the existing
-    // out body against the reply's subspace/template in the SAME ctx; the reply's
-    // waiters are signalled after commit exactly as out does. Returns the reply id
+    // withTenant: the existing ack body, then, if replyOrNull != null, writeOut(ctx, ...)
+    // against the reply's subspace/template in the SAME ctx. After withTenant returns,
+    // signalAll(tenant, replySubspace) only if a reply was written. Returns the reply id
     // or null.
 ```
 
@@ -215,15 +265,27 @@ constants; no DDL.
 
 Client (`HttpTupleStore`): `renew(claim_id, claimant, lease_s) -> datetime`;
 `ack(claim_id, claimant, reply: ReplySpec | None = None) -> str | None`.
-MCP: `tuple_renew`; `tuple_ack` gains an optional `reply` argument. CLI:
-`nx tuple renew`; `nx tuple ack --reply-subspace/--reply-key/...` or a JSON
-`--reply` argument, whichever the existing verb conventions favour.
+MCP: `tuple_renew`; `tuple_ack` gains an optional `reply` argument; the
+three name pins and the "Eight MCP tools" comment change together. CLI:
+`nx tuple renew --claim-id --claimant --lease-s`; `nx tuple ack` gains
+`--reply-subspace`, repeatable `--reply-key KEY=VALUE` and
+`--reply-dim KEY=VALUE`, `--reply-body`, `--reply-nonce`, and
+`--reply-ttl-seconds`, parsed by the existing `_parse_kv_pairs`. No JSON
+blob: the CLI has no JSON input today and this keeps parity with `out`
+(research-2 §3). `docs/cli-reference.md` § `nx tuple` gains the verb and the
+flags.
 
 Skills: `conexus/skills/mailbox/SKILL.md` gains the renew rule (renew at half
 the lease when a task is still running) and the reply-in-ack rule (a request
 that needs an answer is answered through `ack`, never by a separate `out`
-followed by `ack`). The page and `docs/tuple-space.md` §Prior art drop the two
-"accepted for v1" rows.
+followed by `ack`), and its cross-instance line that acks "by `tuple_out`
+back to your address" migrates to `tuple_ack(reply=...)`. The mailbox skill
+is plugin surface and needs a `conexus/PENDING_RELEASE.md` entry; the
+orchestration skill is unchanged (research-2 §4). Docs: `docs/tuple-space.md`
+gains the `renew` signature and row, the `ack` reply field, and the error
+notes, and its §Prior art drops the two "accepted for v1" rows; the
+walkthroughs' cross-instance sequence and the site page's appendix
+paragraph on the two limits change with it.
 
 ### Existing Infrastructure Audit
 
@@ -331,11 +393,14 @@ sequences are one test each.
 
 ### Phase 1: Engine
 
-#### Step 1: Spike the composed transaction
+#### Step 1: Factor `out` onto a caller context, then compose
 
-Write `ackWithReply` as the existing `ack` body followed by the existing `out`
-body in one `withTenant`, with the signal after commit. Pin: reply visible and
-request consumed in the same read, or neither.
+Move `out`'s body into `writeOut(DSLContext, ...)` with `out` unchanged in
+behaviour (its existing tests pin that). Then write `ackWithReply` as the
+existing `ack` body followed by `writeOut` in one `withTenant`, signalling the
+reply subspace after the call returns. Pin: reply visible and request
+consumed in the same read, or neither; a reader parked on the reply subspace
+wakes after the commit.
 
 #### Step 2: `renew`
 
@@ -387,7 +452,15 @@ None.
 - **Scenario**: ack with reply retried after lost response — **Verify**: second
   call `ClaimNotFound`, exactly one reply row.
 - **Scenario**: old client against new engine and new client against old engine
-  — **Verify**: plain ack unchanged; `/renew` 404 surfaces as a loud typed error.
+  — **Verify**: plain ack unchanged; `/renew` 404 surfaces as a bare
+  `httpx.HTTPStatusError`, never a silent no-op.
+- **Scenario**: `out` after the refactor — **Verify**: every existing
+  `TupleRepositoryTest` case for `out` passes unchanged.
+- **Scenario**: sweep with a renewed live claim — **Verify**: the release arm
+  does not touch it; `subspace_stats` counts it under `claimed`.
+- **Scenario**: MCP tool census — **Verify**: the two name lists in
+  `tests/test_mcp_package.py` and `tests/test_mcp_tuple_tools.py` include
+  `tuple_renew` and the module comment names nine tools.
 
 ## Validation
 
@@ -445,6 +518,15 @@ Two operations, one RDR. Trim at the gate if any section restates RDR-205.
 
 ## References
 
+- T2 `nexus_rdr/206-research-1`, `-2`, `-3` (2026-09-11), the three research
+  records this section cites.
+- Jini Lease Specification §LE.2.2, §LE.2.3 and the JavaSpaces Specification
+  (river.apache.org/release-doc/current/specs/html/lease-spec.html, js-spec.html).
+- Amazon SQS API reference, ChangeMessageVisibility (MessageNotInflight, 12 h cap).
+- pgmq `set_vt` source (github.com/pgmq/pgmq); Que README; Solid Queue README
+  and process-failure notes; Oban job lifecycle docs; Graphile Worker admin functions.
+- Gray and Cheriton, "Leases: an efficient fault-tolerant mechanism for
+  distributed file cache consistency", SOSP 1989.
 - RDR-205 §Prior art (JavaSpaces comparison) and §Alternatives.
 - `docs/tuple-space.md` §Claims, leases, nack and dead letter.
 - `service/src/main/java/dev/nexus/service/db/TupleRepository.java`,
@@ -460,3 +542,17 @@ Two operations, one RDR. Trim at the gate if any section restates RDR-205.
 Drafted on Sam's instruction after the tuple-space page rebuild left these
 two limits as the only open items. Not yet researched beyond source reading;
 the transaction-composition spike is the first implementation step.
+
+### 2026-09-11 — Research pass (three parallel records, T2 `nexus_rdr/206-research-1` to `-3`)
+
+Engine, client, and prior-art passes. Design changes from the findings:
+`out`'s body is factored onto a caller `DSLContext` before composition
+(`withTenant` cannot nest); the reply object carries `ttl_seconds`; the CLI
+reply shape is repeatable `--reply-*` flags, not a JSON blob; the mailbox
+skill's cross-instance ack line migrates to `tuple_ack(reply=...)`; the MCP
+name pins in three test files are named in the plan. Prior art confirms
+relative-duration renew that fails on a lapsed claim (JavaSpaces, SQS) and
+records pgmq's unconditional `set_vt` as the resurrection anti-pattern this
+design avoids. Critical Assumption 2 moves from Unverified to Documented,
+with execution still owed to Phase 1 Step 1.
+
