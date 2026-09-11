@@ -11,7 +11,6 @@ endpoint-resolution and two-arm freshness-assert design notes.
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import os
 import sys
@@ -30,6 +29,9 @@ if sys.version_info < (3, 12):
         f"  Install: brew install python@3.13 (macOS) | apt install python3.12 (Ubuntu) | uv python install 3.12\n"
     )
     sys.exit(1)
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _endpoint_resolve as _ep  # noqa: E402 -- must follow the sys.path insert
 
 #: nexus-h33x8.5 fix-pass (VERIFICATION 1, combined SessionStart byte
 #: budget): tightened from 15/5/8/120 to 8/3/5/70. The per-namespace
@@ -96,7 +98,6 @@ _STORAGE_SERVICE_TIER = "storage_service"
 #: (stdlib-only, cannot import ``nexus``, must never mint — a mint has no
 #: fallback by design) borrows it when fresh and falls back otherwise.
 _DATA_TOKEN_LEASE_PREFIX = "data_token_lease."
-_DATA_TOKEN_LEASE_FORMAT_VERSION = 1
 
 #: Engine timestamp format: UTC second-precision ISO
 #: (MemoryHandler.recordToMap / MemoryRepository.UTC_SECOND on the Java side).
@@ -120,166 +121,43 @@ class _Unreachable(Exception):
 
 
 def _default_config_dir() -> Path:
-    """Stdlib-only mirror of ``nexus.config.nexus_config_dir``.
-
-    Honours ``NEXUS_CONFIG_DIR`` / ``NX_CONFIG_DIR`` env overrides for
-    parity with the test sandbox and the release-sandbox harness, then
-    falls back to the canonical ``~/.config/nexus``. Kept in sync with the
-    resolver in ``src/nexus/config.py``; if that resolver ever grows
-    additional precedence rules, mirror them here.
-    """
-    config_dir = (
-        os.environ.get("NEXUS_CONFIG_DIR")
-        or os.environ.get("NX_CONFIG_DIR")
-    )
-    if config_dir:
-        return Path(config_dir)
-    return Path.home() / ".config" / "nexus"
+    """Stdlib-only mirror of ``nexus.config.nexus_config_dir``. Delegates
+    to the shared sibling module (nexus-aginu)."""
+    return _ep.default_config_dir()
 
 
 def _read_lease(config_dir: Path) -> dict[str, Any] | None:
-    """Best-effort read of the local supervisor's ServiceRegistry lease.
+    """Best-effort read of the local supervisor's ServiceRegistry lease:
+    ``{"host", "port", "token"}``, or ``None``.
 
-    Stdlib mirror of ``nexus.db.service_endpoint.discover_lease``'s
-    local-supervisor leg (the ONE discovery mechanism every other T2/T3
-    client routes through) — this hook cannot import
-    ``nexus.daemon.service_registry`` (nexus-vg6d4), so it parses the same
-    on-disk JSON lease record directly:
-    ``<config_dir>/storage_service_addr.<uid>``, written by
-    ``ServiceRegistry.publish``/``heartbeat``
-    (``src/nexus/daemon/service_registry.py``). Any failure — missing file,
-    unreadable, malformed JSON, non-``live`` status, or a heartbeat older
-    than its TTL — resolves to ``None``; the caller falls back to env vars
-    or fails loud via :class:`_Unreachable`. Never raises.
+    Delegates the raw read to the shared sibling module's
+    :func:`_endpoint_resolve.read_storage_service_lease` (nexus-aginu),
+    then applies THIS caller's own additional requirement -- a blank
+    token is treated the same as no lease at all, since this function's
+    return value is used directly as a credential source (unlike
+    ``tuple_ledger_project.py``, which reads host/port here and the
+    owner-only-gated token separately).
     """
-    path = config_dir / f"{_STORAGE_SERVICE_TIER}_addr.{os.getuid()}"
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError, ValueError):
+    lease = _ep.read_storage_service_lease(config_dir)
+    if lease is None or not lease.get("token"):
         return None
-    try:
-        if str(data.get("status", "live")) != "live":
-            return None
-        heartbeat_epoch = float(data["heartbeat_epoch"])
-        ttl = float(data["ttl"])
-        endpoint = data["endpoint"]
-        host = str(endpoint.get("host", "127.0.0.1"))
-        port = int(endpoint.get("port", 0))
-        token = str(endpoint.get("token", ""))
-    except (KeyError, TypeError, ValueError):
-        return None
-    if port <= 0 or not token:
-        return None
-    if (time.time() - heartbeat_epoch) >= ttl:
-        return None
-    return {"host": host, "port": port, "token": token}
+    return lease
 
 
 def _read_data_token_lease(config_dir: Path, base_url: str) -> str | None:
     """Best-effort read of the client's cached DATA token for *base_url*
-    (nexus-znvjd) — the freshest unexpired lease whose digest matches
-    ``(host[:port], its own tenant)``, or ``None``.
-
-    Stdlib mirror of ``DataTokenManager._read_lease``: same format-version
-    check, same digest rule (``sha256(host\x00tenant)``, host =
-    ``urlsplit(base_url).netloc``), same fail-safe stance — absent,
-    unreadable, malformed, wrong digest, or expired all resolve to ``None``
-    and the caller keeps today's static-token path. The tenant is read
-    from each lease's own ``tenant`` field (the caller-passed tenant the
-    client keyed on; NOT ``mint_tenant``, which is a mint-request
-    override), so the hook derives nothing from config. Never mints, never
-    raises.
-    """
-    host = urllib.parse.urlsplit(base_url).netloc or base_url
-    now = time.time()
-    best_token, best_expiry = "", 0.0
-    try:
-        candidates = sorted(config_dir.glob(f"{_DATA_TOKEN_LEASE_PREFIX}*"))
-    except OSError:
-        return None
-    for path in candidates:
-        try:
-            data = json.loads(path.read_text())
-            if data.get("format_version") != _DATA_TOKEN_LEASE_FORMAT_VERSION:
-                continue
-            tenant = str(data["tenant"])
-            digest = hashlib.sha256(f"{host}\x00{tenant}".encode("utf-8")).hexdigest()
-            if data.get("base_url_digest") != digest:
-                continue
-            token = str(data["token"])
-            expires_at = float(data["expires_at"])
-        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
-            continue
-        if token and expires_at > now and expires_at > best_expiry:
-            best_token, best_expiry = token, expires_at
-    return best_token or None
+    (nexus-znvjd), tenant-scoped to ``"default"`` (nexus-em75s.12 /
+    nexus-aginu -- every ``Http*Store`` in this repo is constructed with
+    the default tenant). Delegates to the shared sibling module."""
+    return _ep.read_data_token_lease(config_dir, base_url)
 
 
 def _read_config_yml_credentials(config_dir: Path) -> dict[str, str]:
-    """Bounded, stdlib-only extraction of ``service_url``/``service_token``
-    from the persisted ``config.yml`` (nexus-sdtsx).
-
-    NOT a general YAML parser — this hook cannot import ``nexus`` (nor a
-    third-party YAML library) per nexus-vg6d4. It is a line-oriented scan
-    restricted to exactly the two keys this hook needs, under a top-level
-    ``credentials:`` block, matching the EXACT shape
-    ``nexus.config.set_credential`` writes (``yaml.dump({"credentials":
-    {...}}, default_flow_style=False)`` — two-space indented ``key: value``
-    lines, no flow-style ``{...}``). ``nx config set service_url``/
-    ``service_token`` is the canonical managed-cloud onboarding path
-    (docs/managed-onboarding.md) and the ONLY credential source a Desktop
-    ``.mcpb`` install has (docs/desktop-deployment.md: the .mcpb reads
-    config.yml, never inherits shell env) — without this, T2 injection was
-    permanently absent for that entire population, catch-all-warned as if
-    it were the local-mode "supervisor not started" case.
-
-    PyYAML's default representer only quotes a plain scalar when it must
-    (leading indicator chars, ``": "``, etc.); a URL (``https://host:port``)
-    or a bearer token (alnum/``-``/``_``/``.``) round-trips as an
-    unquoted plain scalar — confirmed against the real writer. A value that
-    PyYAML DID quote (single or double, no embedded escapes) is unwrapped
-    here too. Anything this narrow scanner does not recognize — a
-    hand-edited flow-style file, an escaped quote, a value spanning
-    multiple lines — is silently skipped (returns without that key), never
-    guessed: the caller's normal env/lease fallback and eventual
-    ``_Unreachable`` take over exactly as if the key were absent, so this
-    function can only WIDEN coverage, never produce a wrong answer.
-
-    Returns ``{}`` (no keys) when the file is absent, unreadable, or has no
-    ``credentials:`` block.
-    """
-    path = config_dir / "config.yml"
-    try:
-        text = path.read_text()
-    except OSError:
-        return {}
-
-    result: dict[str, str] = {}
-    in_credentials = False
-    cred_indent = 0
-    for line in text.splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        indent = len(line) - len(line.lstrip(" "))
-        stripped = line.strip()
-        if not in_credentials:
-            if stripped == "credentials:":
-                in_credentials = True
-                cred_indent = indent
-            continue
-        if indent <= cred_indent:
-            # Dedented back out of the credentials block — done scanning.
-            break
-        for key in ("service_url", "service_token"):
-            prefix = f"{key}:"
-            if not stripped.startswith(prefix):
-                continue
-            value = stripped[len(prefix):].strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-                value = value[1:-1]
-            if value:
-                result[key] = value
-    return result
+    """``service_url``/``service_token`` from the persisted ``config.yml``
+    (nexus-sdtsx). Delegates to the shared sibling module (nexus-aginu),
+    which also strips a trailing inline ``# comment`` -- real YAML does,
+    and the pre-consolidation copy of this function did not."""
+    return _ep.read_config_yml_credentials(config_dir)
 
 
 def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:

@@ -39,3 +39,22 @@ mechanize, it matters enough to ship.
   placement, RDR-205/RDR-204's actual shape), which the prior text did
   not mention at all.
   bead: nexus-w5gma
+- `conexus/hooks/scripts/_endpoint_resolve.py` `conexus/hooks/scripts/tuple_ledger_project.py` `conexus/hooks/scripts/t2_prefix_scan.py` `conexus/hooks/scripts/routing/_lib.py`:
+  nexus-aginu — new shared stdlib-only endpoint/credential resolver.
+  ``t2_prefix_scan.py``, ``routing/_lib.py``, and ``tuple_ledger_project.py``
+  each carried an independent hand-rolled mirror of
+  ``nexus.db.service_endpoint.resolve_service_endpoint``'s precedence — a
+  drift between those copies is exactly how nexus-0zsmg happened. All three
+  now import ``_endpoint_resolve.py`` for config-dir resolution, lease
+  reads, ``config.yml`` credential parsing, data-token-lease matching, and
+  the base-URL precedence; their private copies are deleted. Two fixes ride
+  along: the ``config.yml`` scanner now strips a trailing inline
+  ``# comment`` (real YAML does; the old mirrors did not), and the
+  ``NX_SERVICE_HOST``/``PORT`` env leg now fills a missing HOST from a live
+  local supervisor lease before defaulting to ``127.0.0.1`` (matching
+  ``resolve_service_config``'s per-field lease merge). Also: a SubagentStop
+  ``report`` payload with no ``agent_id`` (the harness firing a stop for
+  something this ledger has no tracked agent for — measured at ~250
+  occurrences per session) now projects nothing, silently, instead of
+  logging an identical non-actionable line every time.
+  bead: nexus-aginu

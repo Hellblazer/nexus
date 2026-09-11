@@ -620,6 +620,51 @@ def test_incomplete_payload_skips_without_calling_the_engine(tmp_path: Path, moc
     assert engine.requests == []
 
 
+def test_report_kind_with_no_agent_id_logs_nothing(tmp_path: Path, mock_engine) -> None:
+    """nexus-aginu: SubagentStop fires for stops this ledger has no
+    tracked agent for (measured live on this box at ~250 occurrences per
+    session, every one with a present, valid session_id). Nothing is
+    ever lost by this -- the real agent's own report, when one exists,
+    is keyed on ITS OWN agent_id and lands as a separate invocation --
+    so this case must project NOTHING, including no diagnostic log
+    line: at that volume a repeated, non-actionable line is pure noise,
+    unlike every other incomplete-payload case, which keeps its line."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    proc = _run(
+        "report",
+        tmp_path=tmp_path,
+        stdin=json.dumps({"session_id": SESSION_ID}),  # valid session_id, no agent_id
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert engine.requests == []
+    log = _log_path(tmp_path / "state")
+    assert not log.exists(), f"expected no log line for a report with no agent_id, got: {log.read_text()}"
+
+
+def test_start_kind_with_no_agent_id_still_logs(tmp_path: Path, mock_engine) -> None:
+    """Regression guard: the report-only no-agent_id silence above must
+    not spread to the start path -- a start payload missing agent_id
+    still SKIPs WITH a logged reason, exactly as before."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    proc = _run(
+        "start",
+        tmp_path=tmp_path,
+        stdin=json.dumps({"session_id": SESSION_ID}),  # no agent_id
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert engine.requests == []
+    log = _log_path(tmp_path / "state")
+    assert "SKIP kind=start" in log.read_text()
+
+
 def test_never_mints_never_imports_nexus_package() -> None:
     """Stdlib-only, like t2_prefix_scan.py / routing/_lib.py. The only
     route this module ever posts to is ``_ROUTE`` -- pinned to
