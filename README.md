@@ -16,6 +16,7 @@ Three pages, in order:
 - [**Install**](https://hellblazer.github.io/nexus/) — set up Nexus for how you use Claude: Claude Desktop, Claude Code, or Claude Cowork.
 - [**Getting started**](https://hellblazer.github.io/nexus/getting-started.html) — learn the tooling, eleven lessons done inside Claude Code.
 - [**Working with RDRs**](https://hellblazer.github.io/nexus/rdr.html) — record a decision with an RDR, eight lessons on the practised cycle.
+- [**Research with Nexus**](https://hellblazer.github.io/nexus/research.html) — how the store grounds answers, and what it does for each step of research work.
 
 ## Prerequisites
 
@@ -73,6 +74,21 @@ The full deployment story across all three surfaces is [docs/desktop-deployment.
 6. [Accept, and the plan follows](https://hellblazer.github.io/nexus/rdr.html#l6)
 7. [Build it, across many sessions](https://hellblazer.github.io/nexus/rdr.html#l7)
 8. [Close it, and what remains](https://hellblazer.github.io/nexus/rdr.html#l8)
+
+[Research with Nexus](https://hellblazer.github.io/nexus/research.html) — what the store does for each step of research work:
+
+1. [What the system does](https://hellblazer.github.io/nexus/research.html#p0)
+2. [Grounding](https://hellblazer.github.io/nexus/research.html#pg)
+3. [Curating](https://hellblazer.github.io/nexus/research.html#p1)
+4. [Reading](https://hellblazer.github.io/nexus/research.html#p2)
+5. [Chronicling](https://hellblazer.github.io/nexus/research.html#p3)
+6. [Coupling](https://hellblazer.github.io/nexus/research.html#p6)
+7. [Asking and analyzing](https://hellblazer.github.io/nexus/research.html#p4)
+8. [Synthesizing and extracting](https://hellblazer.github.io/nexus/research.html#p5)
+9. [Verifying](https://hellblazer.github.io/nexus/research.html#p7)
+10. [Rendering](https://hellblazer.github.io/nexus/research.html#p8)
+11. [Where it ends up](https://hellblazer.github.io/nexus/research.html#p9)
+12. [Appendix: topics, aspects, sections, projections](https://hellblazer.github.io/nexus/research.html#p6b)
 
 ## Updating
 

@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Research with Nexus: how a curated retrieval store grounds answers, and what it does for curating, reading, chronicling, coupling, asking, synthesizing, verifying, and rendering.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
+<title>Research with Nexus</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#EEF1F4; --paper:#FFFFFF; --ink:#1B2430; --ink-2:#4A5666; --ink-3:#7A8697;
+  --line:#D5DBE3; --brass:#A87A22; --brass-soft:#F3EAD3; --blue:#24466B; --blue-soft:#E1E9F3;
+  --ok:#2E7D4F; --ok-soft:#E3F1E8; --warn:#9A6A12; --code-bg:#1B2430; --code-fg:#E9EDF2; --code-cmt:#8A97A8;
+  --t1:#B96E2B; --t2:#24466B; --t3:#2E7D4F;
+  --radius:6px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+    --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+    --ok:#6CC58F; --ok-soft:#1B2E22; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+    --t1:#E0955A; --t2:#8FB4DD; --t3:#6CC58F;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+  --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+  --ok:#6CC58F; --ok-soft:#1B2E22; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+  --t1:#E0955A; --t2:#8FB4DD; --t3:#6CC58F;
+}
+*{box-sizing:border-box}
+/* Code blocks scroll sideways inside their column. A grid or flex child defaults to min-width:auto, which lets a long <pre> line widen the track and the page; min-width:0 on every wrapper between the track and the <pre> stops that. */
+.wrap,.wrap>*,main,.step,.cmd,.tbl,.further,.callout,.lesson{min-width:0}
+pre{max-width:100%}
+
+html{margin:0}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;font-size:16px;line-height:1.55;padding-inline:clamp(16px,4vw,40px);padding-block:40px 80px;}
+.wrap{max-width:1040px;margin:0 auto;display:grid;grid-template-columns:220px minmax(0,1fr);gap:48px;align-items:start}
+@media (max-width:820px){.wrap{grid-template-columns:1fr;gap:24px}.rail{position:static!important}}
+h1,h2,h3{font-family:"Source Serif 4",Georgia,"Times New Roman",serif;font-weight:600;line-height:1.15;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,5vw,46px);letter-spacing:-.01em}
+h2{font-size:27px}
+h3{font-size:18px;margin-top:26px}
+p{margin:12px 0;max-width:68ch}
+.lede{font-size:18px;color:var(--ink-2);max-width:62ch}
+.topnav{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:12px}
+.topnav a{font-size:14px;font-weight:500;text-decoration:none}
+.topnav a:hover{text-decoration:underline}
+.eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--brass);font-weight:600;margin-bottom:12px}
+a{color:var(--blue)}
+code{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em;background:var(--blue-soft);padding:1px 5px;border-radius:4px}
+.hidden{display:none!important}
+
+/* rail */
+.rail{position:sticky;top:24px}
+.rail .eyebrow{margin-bottom:8px}
+.rail ol{list-style:none;padding:0;margin:0;display:grid;gap:2px}
+.rail a{display:block;padding:7px 8px;border-radius:4px;color:var(--ink-2);text-decoration:none;font-size:14px;line-height:1.35}
+.rail a:hover{background:var(--paper)}
+.rail .meta{font-size:12px;color:var(--ink-3);margin-top:14px;line-height:1.5}
+
+/* lessons */
+.lesson{padding:36px 0 8px;border-top:1px solid var(--line);scroll-margin-top:16px}
+.lesson:first-of-type{border-top:0;padding-top:8px}
+.lhead{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.lnum{font-family:"Source Serif 4",Georgia,serif;font-size:30px;font-weight:600;color:var(--brass);line-height:1}
+.ltime{font-size:13px;color:var(--ink-3);margin-left:auto}
+.why{border-left:3px solid var(--brass);padding:2px 0 2px 14px;color:var(--ink-2);margin:16px 0 10px;max-width:66ch}
+pre{margin:0;background:var(--code-bg);color:var(--code-fg);border-radius:var(--radius);padding:14px 16px;font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:14px;line-height:1.6;overflow-x:auto}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;padding-right:76px}
+pre .c{color:var(--code-cmt)}
+.cmd{position:relative;margin:12px 0}
+.copy{position:absolute;top:8px;right:8px;font:inherit;font-size:12px;font-weight:500;padding:4px 9px;border-radius:4px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:var(--code-fg);cursor:pointer}
+.copy:hover{background:rgba(255,255,255,.14)}
+.copy:focus-visible{outline:2px solid var(--brass)}
+.see{margin:10px 0 4px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+pre.out{background:var(--paper);color:var(--ink-2);border:1px dashed var(--line);font-size:13px}
+pre.out b{color:var(--ink);font-weight:500}
+.note{font-size:14px;color:var(--ink-2);margin:8px 0;max-width:68ch}
+.callout{border-left:3px solid var(--brass);background:var(--brass-soft);padding:12px 16px;border-radius:0 var(--radius) var(--radius) 0;margin:18px 0;font-size:15px;max-width:68ch}
+.callout p{margin:4px 0}
+.callout.rule{border-color:var(--blue);background:var(--blue-soft)}
+
+.ph{color:var(--brass);font-style:italic}
+pre .ph{color:#E0B24C}
+
+
+/* figures */
+figure.fig{margin:18px 0;max-width:68ch}
+figure.fig svg{width:100%;height:auto;display:block;color:var(--ink)}
+figure.fig figcaption{font-size:13px;color:var(--ink-3);margin-top:6px}
+figure.fig text{font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:12.5px;fill:currentColor}
+figure.fig .sm{font-size:10.5px;fill:var(--ink-3);letter-spacing:.05em;text-transform:uppercase}
+figure.fig .lbl{font-size:11px;fill:var(--ink-2)}
+figure.fig rect.box{fill:var(--paper);stroke:currentColor;stroke-width:1}
+figure.fig rect.you{fill:var(--brass-soft);stroke:var(--brass);stroke-width:1.2}
+figure.fig line,figure.fig path{stroke:currentColor;stroke-width:1.2;fill:none}
+figure.fig .you-edge{stroke:var(--brass)}
+figure.fig .dash{stroke-dasharray:4 3}
+
+/* investigate further */
+.further{margin:22px 0 6px;border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:0 var(--radius) var(--radius) 0;background:var(--paper);padding:12px 16px;max-width:68ch}
+.further h4{margin:0 0 6px;font-family:"Source Serif 4",Georgia,serif;font-size:16px;font-weight:600;color:var(--blue)}
+.further ul{margin:0;padding-left:20px;font-size:15px;color:var(--ink-2)}
+.further li{margin:4px 0}
+
+/* tier diagram */
+.tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px 0;max-width:68ch}
+@media (max-width:560px){.tiers{grid-template-columns:1fr}}
+.tier{background:var(--paper);border:1px solid var(--line);border-top:4px solid var(--tc);border-radius:var(--radius);padding:12px 14px}
+.tier b{font-family:"Source Serif 4",Georgia,serif;font-size:20px;font-weight:600;color:var(--tc);display:block}
+.tier small{display:block;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:6px}
+.tier p{font-size:14px;margin:4px 0;color:var(--ink-2)}
+.tier code{font-size:.85em}
+.arrowrow{font-size:13px;color:var(--ink-3);margin:-6px 0 14px;max-width:68ch}
+
+/* entry table */
+table{border-collapse:collapse;width:100%;font-size:15px;margin:14px 0;max-width:68ch}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+.tbl{overflow-x:auto}
+.gloss-wrap{margin:22px 0 8px;max-width:68ch}
+details.gloss{border:1px solid var(--line);border-radius:var(--radius);background:var(--paper);margin:6px 0}
+details.gloss summary{cursor:pointer;padding:10px 14px;font-weight:500;list-style:none;display:flex;justify-content:space-between}
+details.gloss summary::after{content:"+";color:var(--brass);font-family:"IBM Plex Mono",monospace}
+details.gloss[open] summary::after{content:"–"}
+details.gloss table{margin:0;font-size:14px}
+details.gloss td:first-child{font-weight:500;white-space:nowrap;width:9em}
+details.gloss tr:last-child td{border-bottom:0}
+ol.plain,ul.plain{margin:6px 0 10px;padding-left:22px;max-width:66ch}
+ol.plain li,ul.plain li{margin:3px 0}
+.finish{border:1px solid var(--line);background:var(--paper);border-radius:var(--radius);padding:18px 20px;margin-top:40px;max-width:68ch}
+.finish h2{font-size:24px}
+.footer{margin-top:60px;font-size:13px;color:var(--ink-3)}
+@media (prefers-reduced-motion:reduce){.copy{transition:none}}
+</style>
+<style>
+.case{border:1px solid var(--line);border-left:3px solid var(--brass);border-radius:0 var(--radius) var(--radius) 0;background:var(--paper);padding:12px 16px;margin:18px 0;max-width:68ch;font-size:15px}
+.case h4{margin:0 0 6px;font-family:"Source Serif 4",Georgia,serif;font-size:16px;font-weight:600;color:var(--brass)}
+.case p{margin:6px 0}
+.lesson .lnum{display:none}
+.further .ttl{margin:0 0 6px;font-family:"Source Serif 4",Georgia,serif;font-size:16px;font-weight:600;color:var(--blue)}
+.case .ttl{margin:0 0 6px;font-family:"Source Serif 4",Georgia,serif;font-size:16px;font-weight:600;color:var(--brass)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<nav class="rail" aria-label="Practices">
+  <div class="eyebrow">Research with Nexus</div>
+  <ol id="toc">
+    <li><a href="#p0">What the system does</a></li>
+    <li><a href="#pg">Grounding</a></li>
+    <li><a href="#p1">Curating</a></li>
+    <li><a href="#p2">Reading</a></li>
+    <li><a href="#p3">Chronicling</a></li>
+    <li><a href="#p6">Coupling</a></li>
+    <li><a href="#p4">Asking and analyzing</a></li>
+    <li><a href="#p5">Synthesizing and extracting</a></li>
+    <li><a href="#p7">Verifying</a></li>
+    <li><a href="#p8">Rendering</a></li>
+    <li><a href="#p9">Where it ends up</a></li>
+    <li><a href="#p6b">Appendix: topics, aspects, sections, projections</a></li>
+  </ol>
+  <div class="meta"><a href="getting-started.html">← Getting started</a><br><a href="rdr.html">← Working with RDRs</a><br><a href="./">← Install guide</a></div>
+</nav>
+
+<main>
+<div class="topnav"><span class="eyebrow" style="margin:0">Nexus · research</span><a href="rdr.html">← Working with RDRs</a></div>
+<h1>Research with Nexus</h1>
+<p class="lede">Nexus is a curated retrieval store. Retrieval-augmented generation (RAG) means that Claude reads from a store of documents before it answers. Curated means that what is in the store was chosen, described, and linked, not collected automatically. The store holds the papers you read, the code you write, the design records (RDRs) that connect the two, and the reports, briefings, and documentation you produce from them, so a finding from a paper, the decision it led to, the code that implements the decision, and the report that explains it are in one place and linked. The store keeps its contents when a Claude session ends, so the reading, notes and findings of one session are available to every later session. Research is the main use of Nexus.</p>
+<p class="lede">The store is more than text chunks. Every document is registered in a catalog, and the catalog holds typed links between documents (cites, implements, supersedes, relates), which form a knowledge graph. Every collection has a topic map, found by clustering and named. Papers can carry structured fields: problem, method, datasets, baselines, result. For a question that needs many documents, <code>nx_answer</code> plans several steps over these structures and returns one answer with sources. The sections on <a href="#p4">asking</a> and <a href="#p6">coupling</a>, and the <a href="#p6b">appendix</a>, describe each of these. <a href="#pg">Grounding</a> describes what the store does for the truth of an answer.</p>
+<p class="lede">Research has the same steps it always had: collect sources, read them, keep notes, ask questions about the material, combine the findings, connect them, check them, and write the result. This page describes what Nexus does for each of these steps.</p>
+<p class="note">Words in <span class="ph">&lt;ORANGE CAPITALS IN ANGLE BRACKETS&gt;</span> are placeholders. The prompts are examples. Your own words work. Read <a href="getting-started.html">Getting started</a> first. This page uses these ideas from it: the three stores, the catalog, continuations, and renderings.</p>
+
+<!-- ============ 0 ============ -->
+<section class="lesson" id="p0">
+<div class="lhead"><h2>What the system does</h2><span class="ltime">5 min · reading only</span></div>
+<p class="why">The practices happen in the order that the work needs. The table gives one sentence for each. The sections below give the details.</p>
+
+<div class="tbl"><table>
+<tr><th>Practice</th><th>What Nexus does for it</th></tr>
+<tr><td><a href="#p1">Curating</a></td><td>Extracts the text, cuts it into chunks, embeds them, and registers the source in the catalog. Enrichment adds the DOI, the authors, and citation links. Collections group sources by subject.</td></tr>
+<tr><td><a href="#p2">Reading</a></td><td>Two agents read at the same time: one reads the full text, one reads about the field around it. Both write to memory, with a source for every claim.</td></tr>
+<tr><td><a href="#p3">Chronicling</a></td><td>Each piece of work is stored while it happens: as a document in the knowledge store, as a memory entry, or as a catalog link.</td></tr>
+<tr><td><a href="#p6">Coupling</a></td><td>Typed links between documents. Many are created automatically. The important ones you add. The links can be followed, and they affect ranking.</td></tr>
+<tr><td><a href="#p4">Asking and analyzing</a></td><td>A question that needs many documents runs as a saved plan over a collection: search, extract, compare, and one answer with sources.</td></tr>
+<tr><td><a href="#p5">Synthesizing and extracting</a></td><td>Agents write mappings and proposals from the store, the code, and the RDRs. Structured fields from many documents are extracted into one table.</td></tr>
+<tr><td><a href="#p7">Verifying</a></td><td>A critic agent with access to the code and documents checks a plan. A second critic recomputes a result from its raw data.</td></tr>
+<tr><td><a href="#p8">Rendering</a></td><td>One document for a reader, written from the current content of the stores: a report, a briefing, a precis, system documentation, or a test design. Your changes go back to the stores. Ask again later and the document is current.</td></tr>
+</table></div>
+
+<p>Three rules apply in every practice.</p>
+<ul class="plain">
+<li><strong>Everything is written down and linked.</strong> A reading, a mapping, a synthesis, a critique, a result, a report: each becomes a document in the knowledge store, registered in the catalog, linked to its source and to the work before it.</li>
+<li><strong>Agents read and check. You choose the direction.</strong> The research agent reads and collects. The critic agent checks claims against the code and the earlier decisions. You decide what to look at next and when to stop.</li>
+<li><strong>Every result is checked.</strong> A critic checks each synthesis. Each experiment is checked against its own raw data. When a tool reports "nothing found", the thing it counted is checked directly.</li>
+</ul>
+</section>
+
+<!-- ============ grounding ============ -->
+<section class="lesson" id="pg">
+<div class="lhead"><h2>Grounding</h2><span class="ltime">5 min · reading only</span></div>
+<p class="why">A grounded answer is one that rests on a document you can open. Without a store, Claude answers from what it learned in training, and it can produce a confident sentence with no source behind it. With Nexus, Claude reads from the store before it answers, and each claim in the answer points at the chunk, the document, or the memory entry it came from.</p>
+
+<p>Grounding in Nexus works at four levels.</p>
+<ul class="plain">
+<li><strong>The answer is limited to the store.</strong> Retrieval runs before generation. A question about a paper that is not in the store gets "not found", not an invented summary. This is why <a href="#p1">curating</a> comes first: the store can only ground what it holds.</li>
+<li><strong>Every source is addressable.</strong> A chunk has a content hash, a document has a catalog entry, a memory entry has a project and a title. A citation in an answer names one of these, and you can open it. <code>nx doc cite "<span class="ph">&lt;A CLAIM&gt;</span>"</code> finds the chunk that grounds a sentence and returns a link to it, or reports that nothing in the collection does.</li>
+<li><strong>Claims carry their evidence.</strong> A reading marks each claim with a source or with "could not verify". An analytical answer from <code>nx_answer</code> returns a source for each claim. A check across several documents returns, for each document, whether it supports or contradicts the claim, with the passage.</li>
+<li><strong>The evidence is checked, not only cited.</strong> A citation can point at a passage that does not say what the answer says. The critic reads the cited artifact and the claim together (<a href="#p7">Verifying</a>). A recompute goes past the report to the raw data.</li>
+</ul>
+
+<p>What grounding does not do: it does not make a source true. A paper in the store can be wrong. Grounding tells you where a claim came from, so that you can judge the source. The second reading in <a href="#p2">Reading</a>, which looks outside the paper, is how the source itself is judged.</p>
+
+<div class="see">You might say</div>
+<div class="cmd"><pre>For each claim in that answer, show me the passage it came from. Mark any claim that has no passage.</pre><button class="copy" type="button">Copy</button></div>
+<p>Claude opens each cited chunk and quotes it under the claim. A claim with no passage is the one to question first.</p>
+</section>
+
+<!-- ============ 1 ============ -->
+<section class="lesson" id="p1">
+<div class="lhead"><h2>Curating</h2><span class="ltime">10 min</span></div>
+<p class="why">Collecting sources and keeping them in order. In Nexus this means: the text is extracted, cut into chunks, embedded, and registered in the catalog together with what is known about it. With enrichment on, the system also finds related documents in the store before anyone reads the source.</p>
+
+<h3>A paper</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Index <span class="ph">&lt;PATH-TO-THE-PDF&gt;</span> into the <span class="ph">&lt;SUBJECT&gt;</span> collection, with bibliographic enrichment, and show me what it links to.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>Claude runs <code>nx index pdf</code> with <code>--enrich</code>. The text extractor is chosen from the content: a paper with many formulas goes to a different extractor automatically. A scanned paper needs the OCR extractor named with <code>--extractor mineru</code>. Enrichment looks the paper up by title and adds the DOI, the authors, the venue, and the citation count to the catalog entry. If the paper cites other papers that are already in the store, <code>cites</code> links are created. When the paper arrives through DEVONthink and you pass <code>--link-semantic</code>, documents with similar content also get <code>relates</code> links.</p>
+<p class="note">On macOS with DEVONthink, <code>nx dt capture</code> takes a URL or a DOI, stores the PDF in DEVONthink, and indexes it, in one step. Papers that are already in DEVONthink can be indexed by selection, by group, or by tag. The catalog keeps the DEVONthink identity, so the same paper is never indexed twice.</p>
+
+<h3>Collections are subjects</h3>
+<p>Papers go into collections named for the subject, not for the project or the date: <code>distributed-systems</code>, <code>semantic-operators</code>, <code>agent-memory</code>, <code>interpretability</code>. Later questions are limited to a subject collection. The question "What do the semantic-operator papers say about batching" can be answered because those papers are in one collection.</p>
+
+<h3>Watch it go in</h3>
+<p>Indexing has several stages, and each stage writes to the log. Ask Claude to read the log instead of waiting for the summary line. If a paper was indexed with no aspects, or if the citation lookup returned nothing, that is a fact about the pipeline, not about the paper. If you find it now, it costs one minute.</p>
+
+<div class="case"><p class="ttl">From the record</p><p>A six-page position paper on ingest-time compilation for retrieval was indexed with enrichment on. Reading the log while it ran found three defects in the indexing pipeline that the summary line did not show. The catalog entry received a DOI, an OpenAlex identifier, and <code>relates</code> links to similar papers from the DEVONthink path. After a first reading, links were added by hand to the parts of the codebase that the paper was about.</p></div>
+
+<div class="further"><p class="ttl">Investigate further</p><ul>
+<li>Ask Claude: <em>"Show the catalog entry for <span class="ph">&lt;THE PAPER&gt;</span>, with its links."</em></li>
+<li><code>nx index pdf --help</code>: the extractor choice, <code>--enrich</code>, <code>--dir</code> for a folder of papers.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/repo-indexing.md">Repo indexing</a> and <a href="https://github.com/Hellblazer/nexus/blob/main/docs/catalog.md">Document catalog</a>.</li>
+</ul></div>
+</section>
+
+<!-- ============ 2 ============ -->
+<section class="lesson" id="p2">
+<div class="lhead"><h2>Reading</h2><span class="ltime">15 min</span></div>
+<p class="why">Search results are not reading. A paper's chunks and a summary can give the impression that you have read it, and they hide what kind of document it is. A six-page position paper whose protocol is in an unpublished second paper looks like a full study when you see only its chunks. The method that works is two readings by two agents at the same time.</p>
+
+<div class="see">You might say</div>
+<div class="cmd"><pre>Two agents on <span class="ph">&lt;THE PAPER&gt;</span>, at the same time. One reads the full text and reconstructs the paper: claims, method, numbers, and what the paper does not say. The other researches everything outside the paper: the authors, independent evaluations, earlier work, and the opinion of the field. Both write to memory.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>Two agents start. The first reads the full text and writes a technical reconstruction: what is claimed, with what evidence, and what is missing. The second is the research agent, working outward: authors, venue, independent evaluations, the literature around the paper. It marks every claim with a source or with "could not verify". Both write memory entries. Read the two entries together. Where they disagree, you have your first finding.</p>
+
+<p>Read the full source before you design anything on it. Everything built on a reading inherits the errors of that reading. A reading that says "the protocol is in a second paper that is not published" changes what can be tested later. Search results do not contain that sentence.</p>
+
+<div class="case"><p class="ttl">From the record</p><p>A vendor's technical report claimed a false-positive rate of one in twenty-four thousand. The first agent recorded the claim, the evaluation set, and the tables for other languages, which showed much worse numbers outside English. The second agent found three things. No third party had evaluated the new version. The strongest independent study had a sample far too small to confirm a rate that low. The vendor was not present on the one leaderboard that a vendor does not run. Every line in both entries has a source or the words "could not verify".</p></div>
+
+<div class="further"><p class="ttl">Investigate further</p><ul>
+<li>Ask Claude, after the two readings: <em>"Where do the two readings disagree, and which one has the source?"</em></li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/agents/deep-research-synthesizer.md">The research agent</a>: its steps, and why it checks the catalog before it searches.</li>
+</ul></div>
+</section>
+
+<!-- ============ 3 ============ -->
+<section class="lesson" id="p3">
+<div class="lhead"><h2>Chronicling</h2><span class="ltime">10 min</span></div>
+<p class="why">Keeping the record while you work: what was read, what was found, what was decided, and when. This practice carries the work from one session to the next. When a conversation ends, its contents are gone. What was written to the stores remains. Every other practice on this page produces something that belongs in the record. The system keeps three kinds of record, and Claude writes to them as it works.</p>
+
+<div class="tbl"><table>
+<tr><th>What</th><th>Where</th><th>Written by</th></tr>
+<tr><td>A reading, a mapping, a synthesis, a critique, a result, a report</td><td>The knowledge store, as a document, registered in the catalog and linked to its source</td><td>The agent that produced it, when its work ends</td></tr>
+<tr><td>A decision, a finding, the state of the work</td><td>Memory, by project and title</td><td>Claude, as it works, and at the end of a session</td></tr>
+<tr><td>A connection between two documents</td><td>The catalog, as a typed link</td><td>Indexing and enrichment, automatically. Claude or you, by hand</td></tr>
+</table></div>
+
+<p>You do not keep this record yourself. You check that it is kept. At the end of a piece of work, ask: <em>"What did you write to the stores today, and what does it link to?"</em> If the answer is "nothing", the work exists only in this conversation, and the next session starts without it.</p>
+
+<p>Write after each piece of work, not once a day. It takes a few minutes each time. The test is simple: a person who was not present can follow the links from the source through everything that was done with it.</p>
+
+<div class="case"><p class="ttl">From the record</p><p>The catalog entry of one paper, after one day of work, held these things.</p><ul class="plain"><li>The bibliographic fields from enrichment.</li><li>Outgoing <code>relates</code> links to similar papers, added by the DEVONthink path at index time.</li><li>Outgoing links to the code and the RDRs it concerns, added during reading.</li><li>Incoming <code>cites</code> links from the documents written that day: a mapping, a synthesis, a critique, a verdict, and an experiment result.</li><li><code>comments</code> links from the documents that took a position on it.</li></ul><p>From the catalog entry alone, a reader can find every document written about the paper that day.</p></div>
+</section>
+
+<!-- ============ 6 ============ -->
+<section class="lesson" id="p6">
+<div class="lhead"><h2>Coupling</h2><span class="ltime">10 min</span></div>
+<p class="why">Connecting things that belong together: a paper to the code that implements its idea, a finding to the decision it changed, a design to the paper it came from. The catalog stores these as typed links. Most are created automatically. The links with the most meaning are the ones you add.</p>
+
+<div class="see">You might say</div>
+<div class="cmd"><pre>Link <span class="ph">&lt;THE PAPER OR DESIGN DOCUMENT&gt;</span> to <span class="ph">&lt;THE MODULE THAT IMPLEMENTS IT&gt;</span> with an "implements" link.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>A tool call named <code>link</code> on the <code>nexus-catalog</code> server, with the two documents and the link type. From then on, a question about the design finds the code, and a question about the code finds the design. Ask <em>"What implements <span class="ph">&lt;THE DESIGN DOCUMENT&gt;</span>?"</em> and Claude follows the link.</p>
+
+<h3>Following links</h3>
+<p>A research result names documents. Each one is a place to continue: <em>"Open <span class="ph">&lt;ONE DOCUMENT&gt;</span> and tell me what else in the store is related to it."</em> Claude uses the catalog tools <code>show</code> and <code>links</code>, and a search for similar chunks. It tells you which documents link to this one and which are similar. Then ask about one of those. In this way you move through a store without knowing the names of its documents.</p>
+
+<h3>Link types</h3>
+<p><code>cites</code>, <code>implements</code>, <code>supersedes</code>, <code>relates</code>, <code>comments</code>, <code>quotes</code>, <code>formalizes</code>. Enrichment adds <code>cites</code> from a paper's bibliography. Indexing an RDR adds <code>relates</code> from its frontmatter to its parent and related RDRs, and the DEVONthink path adds <code>relates</code> between similar documents when asked. <code>implements</code> is added by hand or by the developer agent when code realizes a design. Every link records who created it. A search can therefore prefer links made by hand or by bibliographic enrichment over links made by heuristics. The full table is in <a href="https://github.com/Hellblazer/nexus/blob/main/docs/catalog.md#link-types">Link types</a>.</p>
+
+<h3>The link graph</h3>
+<p>A link has a type, a direction, and a creator. Together the links form a graph that you can follow: from a paper to the documents that cite it, from an RDR to the code that implements it, from a design to the design that replaced it.</p>
+<ul class="plain">
+<li><strong>Follow it from a document.</strong> <em>"What links to <span class="ph">&lt;DOCUMENT&gt;</span>, and what does it link to?"</em> Claude uses the catalog's <code>links</code> tool. From the terminal: <code>nx catalog links "<span class="ph">&lt;TITLE&gt;</span>"</code>.</li>
+<li><strong>Follow it for several steps.</strong> <em>"Start from <span class="ph">&lt;THE PAPER&gt;</span>, follow cites links for two steps, and list what you reach."</em> Claude uses the <code>traverse</code> tool with a depth. The <code>query</code> tool can do the same during a search, with <code>follow_links</code>, so the results include documents that were reached through the graph.</li>
+<li><strong>It affects ranking.</strong> The <code>query</code> tool ranks a document higher when the document has an outgoing <code>implements</code> link. <code>relates</code> and <code>cites</code> links count half as much. The plain <code>search</code> tool does not use links. When you want the graph to affect the results, ask for a document-level query.</li>
+</ul>
+<p class="note">Two kinds of link are less reliable. <code>implements-heuristic</code> links were generated by matching parts of file paths with RDR titles. The generator is now off. The existing links remain, but ranking gives them no weight. Links created from an LLM suggestion are marked as such and are advisory only. When the answer matters, ask Claude to filter by creator: <em>"Only links made by hand or by bibliographic enrichment."</em></p>
+
+<div class="further"><p class="ttl">Investigate further</p><ul>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/catalog.md#link-types">Link types</a>: what each means and who creates it.</li>
+<li>Ask Claude: <em>"Which papers in the store are cited by the most documents?"</em> Those are the papers the project has used most.</li>
+</ul></div>
+</section>
+
+<!-- ============ 4 ============ -->
+<section class="lesson" id="p4">
+<div class="lhead"><h2>Asking and analyzing</h2><span class="ltime">15 min</span></div>
+<p class="why">Asking questions about the material. With one source, the question is "what does this say". With several sources on one subject, the questions change: how do they differ on this point, which of them does our code follow, what does the literature recommend that we do not do. These questions need several searches, extraction from each result, and a comparison.</p>
+
+<div class="see">You might say</div>
+<div class="cmd"><pre>/conexus:query Compare how <span class="ph">&lt;PAPER A&gt;</span> and <span class="ph">&lt;PAPER B&gt;</span> handle <span class="ph">&lt;THE POINT&gt;</span>, and say which approach our code takes.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What Claude does</div>
+<p>The skill compares the question with a library of saved retrieval plans. If a plan fits, it runs: search the named collections, extract the relevant passages, compare them, and write one answer with the sources. If no plan fits, Claude writes a plan, runs it, and saves it. The next similar question uses the saved plan.</p>
+<div class="see">What you see</div>
+<p>A tool call named <code>nx_answer</code>, then the answer, with a source for each claim. This takes longer than a search: one to five minutes for a comparison across two collections is normal. If the answer surprises you, ask: <em>"Which plan did that use, and what did each step return?"</em></p>
+
+<p>Limit the question to one collection. "What do the semantic-operator papers say about batching" runs over the papers in that one collection. "What does the literature say about batching" runs over everything, takes longer, and mixes subjects.</p>
+
+<div class="case"><p class="ttl">From the record</p><p>The saved plans of one project include these questions.</p><ul class="plain"><li>How the distributed-systems papers handle membership changes.</li><li>What the semantic-operator papers say about batching to reduce model calls.</li><li>A comparison of two membership protocols by how they detect failure.</li><li>A comparison of the time index of one memory system with that of another.</li><li>Which vocabulary a vision paper introduces.</li></ul><p>Each was asked once as a new question, and saved.</p></div>
+
+<div class="further"><p class="ttl">Investigate further</p><ul>
+<li>Ask Claude: <em>"List the saved retrieval plans for this project."</em></li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md">Querying guide</a> and <a href="https://github.com/Hellblazer/nexus/blob/main/docs/plan-centric-retrieval.md">Plan-centric retrieval</a>.</li>
+</ul></div>
+</section>
+
+<!-- ============ 5 ============ -->
+<section class="lesson" id="p5">
+<div class="lhead"><h2>Synthesizing and extracting</h2><span class="ltime">15 min</span></div>
+<p class="why">Combining findings into a statement of what they mean for you. Two forms are common. A mapping says where a source touches your own system. A synthesis turns a mapping into proposals. Extraction is the mechanical step under both: taking the claims, numbers, and definitions out of the text in a form that can be compared.</p>
+
+<h3>A mapping</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Map <span class="ph">&lt;THE PAPER&gt;</span> onto our system. For each claim: does it apply to us, which module or decision does it touch, and does it agree with what we decided. Link the paper to those modules and RDRs in the catalog.</pre><button class="copy" type="button">Copy</button></div>
+<p>Claude reads the reconstruction, searches the code and the RDRs for each claim, and writes the mapping to the knowledge store, with links from the paper to the code it concerns and to the RDRs it touches. A mapping usually finds three kinds of result. Our module already does this. Our RDR rejected this, for a reason. This applies and nothing does it. Only the third kind leads to a proposal. The first two are still worth the links.</p>
+
+<h3>A synthesis</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Write proposals from the mapping of <span class="ph">&lt;THE PAPER&gt;</span>. Give the agent the mapping, the linked RDRs, the code paths, and a web check. Every proposal states what it changes, the result that would show it is wrong, and a cost. Include a do-nothing option.</pre><button class="copy" type="button">Copy</button></div>
+<p>The research agent runs with that instruction and produces three to six proposals, each with the result that would show it is wrong (its falsifier) and its cost, plus the do-nothing case. The document goes to the knowledge store with a <code>cites</code> link to the paper. A proposal with no way to be wrong is an opinion. The falsifier is what makes the next experiment clear.</p>
+
+<h3>Extraction, on its own</h3>
+<p>When the question is about one kind of fact across many documents, ask for the extraction directly: <em>"From every paper in <span class="ph">&lt;COLLECTION&gt;</span>, extract the dataset, the baseline, and the reported metric, as a table."</em> Claude uses the extraction and comparison operators over the collection and returns the table with a source for each row. On collections that have structured aspects (see the <a href="#p6b">appendix</a>), this is faster.</p>
+
+<div class="case"><p class="ttl">From the record</p><p>A paper that argued for one unified database layer under retrieval systems was mapped onto a system that had just completed that migration. The mapping found that two of the paper's three failure modes were already closed, that the third matched an open task, and that the paper's remedy was the architecture the system already had. The result was a proposal document that marks the paper as a confirmation, linked to the paper and to the RDR it confirms, with the status "unresolved draft" and a decision pending.</p></div>
+
+<div class="further"><p class="ttl">Investigate further</p><ul>
+<li>Ask Claude, of any proposal: <em>"What result would make this wrong, and how much would it cost to get that result?"</em></li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/research-synthesis/SKILL.md">The research synthesis skill</a>.</li>
+</ul></div>
+</section>
+
+<!-- ============ 7 ============ -->
+<section class="lesson" id="p7">
+<div class="lhead"><h2>Verifying</h2><span class="ltime">30 min</span></div>
+<p class="why">Checking that a claim is true before you act on it. Two forms are common here, and they are the two with the most value: a critique of a plan by a second reader who has access to the code and documents, and a measurement whose result is recomputed from the raw data instead of read from the report.</p>
+
+<h3>Critique, with the artifacts</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Have the critic read the synthesis on <span class="ph">&lt;THE PAPER&gt;</span> with access to the code, the schema changelogs, and the RDRs. For each proposal: survives, survives with amendment, or dies, with the artifact that decides it.</pre><button class="copy" type="button">Copy</button></div>
+<p>The critic agent runs (<code>/conexus:substantive-critique</code>) with a list of paths to check. It returns a verdict for each proposal, with the evidence: a changelog line, an RDR section, a function. Claude writes a verdict document that reduces the synthesis and the critique to what survives, and links it to both.</p>
+<p>Proposals fail for reasons like these. A changelog shows that a table has no document identity. The alternatives section of an RDR shows that an idea was rejected, not adopted. A field contains a paraphrase, not a quote. None of this is in any paper, and semantic search over prose does not find it. Tell the critic which files to read.</p>
+
+<h3>Measurement</h3>
+<p>When a surviving proposal has a falsifier that can be measured, measure it. The rules that make the result reliable are the test rules of the codebase, applied to a measurement. Before you spend anything, write one paragraph and ask Claude to check the run against it. The paragraph names these things.</p><ul class="plain"><li>The arms of the experiment and the one variable that differs between them.</li><li>The known confounding factors and what fixes each one.</li><li>The metric and the statistic.</li><li>The budget.</li><li>The result that would falsify the hypothesis.</li><li>The number of cases in which the treatment can have an effect at all.</li></ul>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Build the harness for <span class="ph">&lt;THE EXPERIMENT&gt;</span>. Fix the random seed and the model identifiers. Retrieve once per question and cache the result. Save, for each trial, the exact text each arm received, the structured flags, and the cost of every model call. Report McNemar, Wilson intervals, and a cluster-robust paired difference.</pre><button class="copy" type="button">Copy</button></div>
+<p>A harness that produces only a summary table cannot be audited. A harness that keeps the input text, the reader's flags, and every cost can answer, later, why any trial failed.</p>
+
+<h3>Recompute</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Methodology critique of <span class="ph">&lt;THE EXPERIMENT&gt;</span>. Give the critic the raw trial data, not the report. Recompute every number. Classify every outcome as correct, wrong, or no answer. Check that the generated data follows its own generation rules. Validate the grader on a sample labelled by a person.</pre><button class="copy" type="button">Copy</button></div>
+<p>A report that says "the treated arm mostly answered wrongly" and a raw log that shows forty-five non-answers among fifty-six failures are two different findings. Only the recompute finds the second.</p>
+
+<p>A synthesis alone produces a plausible plan with false assumptions. An experiment alone produces a correct number with a wrong explanation. The critique of the plan and the recompute of the result are what make both usable.</p>
+
+<div class="case"><p class="ttl">From the record</p><p>One synthesis produced five proposals. The critic, given the changelog directory, the alternatives section of one RDR, and the field definitions of the extractor, rejected three as factually wrong about the system, amended one, and found one thing the synthesis had missed. The surviving proposal was tested with a fixed seed and paired counts. The methodology critic, working from the raw trials, still found defects in the report and in the harness. The effect was large enough to survive them.</p></div>
+
+<div class="further"><p class="ttl">Investigate further</p><ul>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/agents/substantive-critic.md">The critic agent</a>: its verdict vocabulary and what it is told to check.</li>
+<li>Ask Claude, before any run: <em>"Write the pre-registration paragraph. Do not run anything until I have read it."</em></li>
+</ul></div>
+</section>
+
+<!-- ============ 8 ============ -->
+<section class="lesson" id="p8">
+<div class="lhead"><h2>Rendering</h2><span class="ltime">10 min</span></div>
+<p class="why">Writing the result. Not from nothing: the material is already in the stores, linked, put there by sessions that may be weeks apart. A rendering is one document, written from the current content of those stores, for a reader: a report on a question, a briefing for people who did not follow the work, a precis of a paper, the documentation of a system, or the design of a test. If you change it, the changes go back to the stores. If you ask again later, in another session, the document includes what happened since.</p>
+
+<div class="see">You might say</div>
+<div class="cmd"><pre>Render everything we did with <span class="ph">&lt;THE PAPER&gt;</span> as one document: what the paper claimed, what applied to us, what we proposed, what the critic removed and why, what the experiment showed, and what is still open.</pre><button class="copy" type="button">Copy</button></div>
+<p>Claude follows the links and writes the document from the current content. System documentation and a design document for a new component are produced in the same way: rendered from the research, the design records, and the code, and kept current in the same way (<a href="getting-started.html#l8">Getting started, lesson 8</a>).</p>
+
+<h3>When the space is open</h3>
+<p>Sometimes there is an idea and no paper. Then the rendering comes first. A brainstorm produces the possible directions, a landscape synthesis places the idea among the systems that exist, and a short document says in which order to read them. All three go into the store as exploration. Each has a decision line: adopted, parked, or scrapped, and by whom. An exploration with no decision line is a question that waits for you.</p>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Brainstorm the design space around <span class="ph">&lt;THE IDEA&gt;</span>: related designs, what we could merge into existing parts, what would be new. Then write where it sits among systems that do similar things. Write both as documents and index them.</pre><button class="copy" type="button">Copy</button></div>
+
+<div class="case"><p class="ttl">From the record</p><p>A design document for a workflow engine went through this process. The architect agent returned twelve directions, among them merging one of its new stores into a store that already existed. The research agent placed the design among four neighbouring families of systems and found the area it occupies empty. A third document listed the reading order. All three are in the store as exploration, each with the owner named as the person who decides.</p></div>
+</section>
+
+<!-- ============ 9 ============ -->
+<section class="lesson" id="p9">
+<div class="lhead"><h2>Where it ends up</h2><span class="ltime">5 min</span></div>
+<p class="why">Research work ends in a document for a reader, in a decision, or in a lesson. Which form is usually your decision. All of them are kept in the stores, so the conclusion of this session is the starting point of a later session.</p>
+
+<div class="tbl"><table>
+<tr><th>Outcome</th><th>Form</th><th>When</th></tr>
+<tr><td>A report or a briefing</td><td>A rendering for a named reader: what was asked, what the sources say, what was checked, and what is still open</td><td>Someone who did not follow the work needs its current state, or a question has an answer worth keeping.</td></tr>
+<tr><td>An analysis or a precis</td><td>One condensed document per source or per question, with the claims, the numbers, and the sources, linked to the material it condenses</td><td>The material is large, and later readers will need the short form more often than the long one.</td></tr>
+<tr><td>System documentation</td><td>A rendering from the code, the design records, and the reading, re-rendered when any of them change</td><td>A part of the system is used or changed by people who did not build it.</td></tr>
+<tr><td>A test design</td><td>The pre-registration paragraph and the harness plan from <a href="#p7">Verifying</a>: arms, confounding factors, metric, budget, falsifier</td><td>A claim can be measured, and the measurement costs enough to be planned first.</td></tr>
+<tr><td>A decision to build</td><td>An RDR (<a href="rdr.html">Working with RDRs</a>), whose research section is the mapping, synthesis, and verdict already written</td><td>A proposal survived the critique, and the test that could have shown it wrong did not.</td></tr>
+<tr><td>A confirmed decision</td><td>A proposal or mapping document, marked with its disposition, linked to the paper and to the RDR it confirms</td><td>The source agrees with what was already decided. The next reader finds that agreement.</td></tr>
+<tr><td>A parked exploration</td><td>The brainstorm and synthesis documents, marked as exploration, with a disposition and an owner</td><td>The idea is sound, and there is no reason to build it now.</td></tr>
+<tr><td>A lesson about method</td><td>A memory entry, or a findings document in a methods collection</td><td>The work itself taught something: a harness rule, a reading rule, a check that should have run earlier.</td></tr>
+</table></div>
+
+<div class="case"><p class="ttl">From the record</p><p>For one subject, one project's store holds a precis of each paper, a briefing written for a team that had not followed the reading, the documentation of the part of the system the papers concern, a test design for the one claim that could be measured, and the design record that the measurement justified. All of them were rendered from the same readings and links. A question on the subject today finds the papers and every document written from them together.</p></div>
+
+<div class="further"><p class="ttl">Investigate further</p><ul>
+<li>Ask Claude: <em>"Which explorations have no decision line?"</em> Those are questions that wait for you.</li>
+</ul></div>
+</section>
+
+<!-- ============ appendix ============ -->
+<section class="lesson" id="p6b">
+<div class="lhead"><h2>Appendix: topics, aspects, sections, projections</h2><span class="ltime">reference</span></div>
+<p class="why">Four kinds of structure that the store builds over a corpus, used by the practices above. This section says where each comes from and how to use it.</p>
+<h3>Topics and the taxonomy</h3>
+<p>After a collection is indexed, Nexus clusters the chunk embeddings and finds topics. Each topic gets a label from its most typical terms, and a readable name when the <code>claude</code> command is available. Every document is assigned to its nearest topic, and new documents are assigned when they arrive. The result is a topic map for each collection. It is kept in memory-tier tables, and you can inspect it and correct it.</p>
+<ul class="plain">
+<li><strong>See it.</strong> <em>"Show the topic map for <span class="ph">&lt;COLLECTION&gt;</span>."</em> From the terminal: <code>nx taxonomy status</code>, <code>nx taxonomy list</code>, <code>nx taxonomy show <span class="ph">&lt;ID&gt;</span></code>.</li>
+<li><strong>Correct it.</strong> Rename, merge, assign, or split a topic. <code>nx taxonomy review</code> goes through every topic and asks what to do. In conversation, <em>"Rename topic <span class="ph">&lt;X&gt;</span> to <span class="ph">&lt;Y&gt;</span>"</em> or <em>"assign <span class="ph">&lt;DOCUMENT&gt;</span> to <span class="ph">&lt;TOPIC&gt;</span>"</em> also works.</li>
+<li><strong>Find the hubs.</strong> <code>nx taxonomy hubs</code> lists topics that appear in many collections. Sometimes they are the central ideas of a project. Sometimes they are generic words that need a new name.</li>
+<li><strong>It affects search.</strong> Results that share a topic with the best match are ranked closer to it, and results are grouped by topic when most of them have one. In Claude Code, a search can be limited to one topic: the <code>search</code> tool has a <code>topic</code> argument, and <code>search_topic_scoped</code> does only that. The terminal command has no topic option. There, use <code>--corpus</code> to limit the search to a collection.</li>
+<li><strong>Topics link to each other.</strong> <code>nx taxonomy links</code> shows relationships between topics, derived from the document link graph. A result in one topic is ranked a little closer to results in a linked topic.</li>
+</ul>
+
+<h3>Aspects</h3>
+<p>For scientific papers, Nexus can extract a fixed set of structured fields from the text, at index time or later: the problem the paper addresses, the proposed method, the datasets, the baselines, the main result, and an open field for anything else useful. These fields are stored per document, with a confidence value.</p>
+<ul class="plain">
+<li><strong>Extract them.</strong> <em>"Extract aspects for every paper in <span class="ph">&lt;COLLECTION&gt;</span>."</em> Claude runs <code>nx enrich aspects</code>. A background worker processes a queue, so a large collection takes some time. <code>nx doctor --check-aspect-queue</code> shows the queue.</li>
+<li><strong>Use them.</strong> Questions such as "which papers used dataset X", "group the papers by baseline", or "the most common method in the collection" run against the aspect table directly, instead of reading every paper again. The filter, group-by and aggregate operators use this fast path when aspects exist, and read the text when they do not.</li>
+<li><strong>Limit a search by them.</strong> The <code>search_aspect_scoped</code> tool applies an aspect condition in the same query as the vector search. A strict filter therefore does not lose results, unlike "search first, filter after", which can. This tool sees only documents whose aspect row is linked to a catalog entry. For notes stored by title instead of by file, that link is often missing. For those, the filter operator is the safer choice.</li>
+</ul>
+
+<h3>Sections</h3>
+<p>Every chunk has a section label. For prose from Markdown: abstract, introduction, methods, results, discussion, conclusion, references, and others. For code: class, method, or empty for module-level content, and <code>imports</code> for a chunk that contains only import lines. The label can be used as a filter. <code>nx search "<span class="ph">&lt;QUESTION&gt;</span>" --where section_type!=references</code> removes bibliography chunks from a prose search. <code>--where section_type!=imports</code> removes import blocks from a code search. Nothing applies the references filter by default. The analytical query drops import-only chunks on its own while it collects evidence, and nothing else.</p>
+
+<h3>Projections</h3>
+<p>A projection applies the topic map of one collection to another collection. For example, the topics found in a documentation collection are projected onto the code collection of the same repository, so that a code chunk can be found under the topic names of the documentation. The command <code>nx taxonomy audit</code> reports how well a projection fits.</p>
+
+<div class="further"><p class="ttl">Investigate further</p><ul>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/catalog.md#link-types">Link types</a>, <a href="https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md#link-aware-scoring">Link-aware scoring</a>, and <a href="https://github.com/Hellblazer/nexus/blob/main/docs/catalog.md#topic-taxonomy">Topic taxonomy</a>.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md#section-type-metadata-filtering">Section-type filtering</a> and the <code>nx enrich aspects</code> family in the <a href="https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md">CLI reference</a>.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/exploration/taxonomy-projection-tuning.md">Taxonomy projection tuning</a>: what projections are and how they were tuned.</li>
+<li>Ask Claude: <em>"Which topics in <span class="ph">&lt;COLLECTION&gt;</span> have the most documents, and which have the fewest?"</em> The labels of the small topics are the ones most often wrong.</li>
+</ul></div>
+</section>
+
+<div class="finish">
+<h2>Complete</h2>
+<p>Research work with Nexus ends in a document for a reader (a report, a briefing, a precis, documentation, a test design), in a decision (a design record, a confirmation, a parked exploration), or in a lesson about method. All of them are in the stores when the session ends, and the next session, this week or next year, starts from them.</p>
+<p>Reference: <a href="https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md">Querying guide</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/plan-centric-retrieval.md">Plan-centric retrieval</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/catalog.md">Document catalog</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/README.md">Plugin README</a></p>
+</div>
+
+<p class="footer">Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a> docs, the agent and skill definitions of the plugin, and the catalog and knowledge store of one project. The cases are sequences of work from that store, described in general terms.</p>
+</main>
+</div>
+
+<script>
+(function(){
+  document.querySelectorAll(".copy").forEach(function(btn){
+    btn.addEventListener("click",function(){
+      var pre=btn.parentElement.querySelector("pre");
+      var text=pre.textContent.split("\n").map(function(l){return l.replace(/\s+#.*$/,"");}).filter(function(l){return l.trim();}).join("\n");
+      function ok(){btn.textContent="Copied";setTimeout(function(){btn.textContent="Copy";},1400);}
+      function fail(){btn.textContent="Select and copy";setTimeout(function(){btn.textContent="Copy";},2200);}
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(ok,fail);}else{fail();}
+    });
+  });
+})();
+</script>
+</body>
+</html>
