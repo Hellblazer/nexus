@@ -76,7 +76,7 @@ if [[ -z "$SID" ]]; then
 fi
 
 if ! command -v nx >/dev/null 2>&1; then
-    _prereq_fail "no nx on PATH -- install/activate the plugin's nx CLI before running this check"
+    _prereq_fail "PATH has no nx -- install/activate the plugin's nx CLI before running this check"
 fi
 
 TSV_FILE=""

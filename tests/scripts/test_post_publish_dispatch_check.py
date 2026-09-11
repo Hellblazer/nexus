@@ -158,7 +158,7 @@ class TestPrerequisiteAbsent:
         env["PATH"] = "/usr/bin:/bin"
         proc = _run(SID, env)
         assert proc.returncode == 2, proc.stdout + proc.stderr
-        assert "no nx on PATH" in proc.stderr
+        assert "PATH has no nx" in proc.stderr
 
     def test_no_ledger_file_for_session(self, tmp_path) -> None:
         env = _base_env(tmp_path)

@@ -414,6 +414,24 @@ PY
 # (b24eb57c0), so this leg is expected GREEN here; it would have FAILED on
 # v7.41.0 (see the counter-proof this bead's hand-back runs separately
 # with the v7.41.0 projector swapped in via a temp dir).
+# Read the subspace through the client library, never the `nx` binary: an
+# `nx` invocation stamps last_seen_version into the operator's real
+# ~/.config/nexus (tests/test_e2e_gates_isolate_home.py), and this gate has
+# no sandbox HOME by design (leg G must use the box's real cloud config).
+# Prints total=N, start=0|1, report=0|1 for the given session and agent.
+_hook_read() {
+    HOOK_READ_SID="$1" HOOK_READ_AGENT="$2" uv run python - <<'PY' 2>/dev/null || printf 'total=0\nstart=0\nreport=0\n'
+import os
+from nexus.db.t2.http_tuple_store import HttpTupleStore
+sid = os.environ["HOOK_READ_SID"]; agent = os.environ["HOOK_READ_AGENT"]
+store = HttpTupleStore()
+sub = f"ledger/{sid}"
+print(f"total={store.subspace_stats(sub).total}")
+for kind in ("start", "report"):
+    rows = store.rd(sub, keys_pattern={"agent_id": agent, "kind": kind}, n=5)
+    print(f"{kind}={1 if rows else 0}")
+PY
+}
 _leg_enter G "ledger tuple projector hook drive (SubagentStart/SubagentStop, nexus-g2lln)"
 HOOK_SID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 HOOK_AGENT="cloudgate-hook-probe"
@@ -431,8 +449,8 @@ HOOK_DEADLINE=$(( $(date +%s) + 30 ))
 HOOK_TOTAL=0
 HOOK_STATS=""
 while :; do
-    HOOK_STATS="$(nx tuple stats "ledger/$HOOK_SID" 2>/dev/null || true)"
-    HOOK_TOTAL="$(printf '%s\n' "$HOOK_STATS" | sed -n 's/^total: //p')"
+    HOOK_STATS="$(_hook_read "$HOOK_SID" "$HOOK_AGENT")"
+    HOOK_TOTAL="$(printf '%s\n' "$HOOK_STATS" | sed -n 's/^total=//p')"
     [ -n "$HOOK_TOTAL" ] || HOOK_TOTAL=0
     if [ "$HOOK_TOTAL" -ge 2 ] 2>/dev/null; then
         break
@@ -449,8 +467,9 @@ while :; do
     sleep 1
 done
 
-HOOK_START_ROWS="$(nx tuple rd "ledger/$HOOK_SID" --pattern kind=start -n 5 2>&1 || true)"
-HOOK_REPORT_ROWS="$(nx tuple rd "ledger/$HOOK_SID" --pattern kind=report -n 5 2>&1 || true)"
+HOOK_STATS="$(_hook_read "$HOOK_SID" "$HOOK_AGENT")"
+HOOK_START_ROWS="$(printf '%s\n' "$HOOK_STATS" | sed -n 's/^start=//p')"
+HOOK_REPORT_ROWS="$(printf '%s\n' "$HOOK_STATS" | sed -n 's/^report=//p')"
 HOOK_LOG_CONTENT=""
 [ -f "$HOOK_LOG" ] && HOOK_LOG_CONTENT="$(cat "$HOOK_LOG")"
 
@@ -458,14 +477,8 @@ HOOK_FAIL=""
 if ! [ "$HOOK_TOTAL" -ge 2 ] 2>/dev/null; then
     HOOK_FAIL="ledger/$HOOK_SID total=$HOOK_TOTAL (want >=2) after 30s"
 fi
-case "$HOOK_START_ROWS" in
-    *"'agent_id': '$HOOK_AGENT'"*) : ;;
-    *) HOOK_FAIL="${HOOK_FAIL:+$HOOK_FAIL; }no kind=start row for agent_id=$HOOK_AGENT" ;;
-esac
-case "$HOOK_REPORT_ROWS" in
-    *"'agent_id': '$HOOK_AGENT'"*) : ;;
-    *) HOOK_FAIL="${HOOK_FAIL:+$HOOK_FAIL; }no kind=report row for agent_id=$HOOK_AGENT" ;;
-esac
+[ "$HOOK_START_ROWS" = "1" ] || HOOK_FAIL="${HOOK_FAIL:+$HOOK_FAIL; }no kind=start row for agent_id=$HOOK_AGENT"
+[ "$HOOK_REPORT_ROWS" = "1" ] || HOOK_FAIL="${HOOK_FAIL:+$HOOK_FAIL; }no kind=report row for agent_id=$HOOK_AGENT"
 case "$HOOK_LOG_CONTENT" in
     *SKIP*) HOOK_FAIL="${HOOK_FAIL:+$HOOK_FAIL; }projection log carries a SKIP line" ;;
 esac

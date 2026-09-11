@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [7.41.1] - 2026-09-11
 
+Paired engine: engine-service-v0.1.114 (unchanged from 7.41.0; `REQUIRED_ENGINE_VERSION` stays (0, 1, 114)).
+
 ### Fixed
 
 - The agent ledger projection hook never wrote to the tuple space on any installed box: on a managed-service (cloud) install it resolved no engine endpoint, and on a local install it presented only a data-token lease that local installs never hold. The projector now resolves the endpoint the way the client does and, on a local supervisor, presents the supervisor lease's own token; a report projection tolerates a missing agent_type (nexus-0zsmg, nexus-g2lln). The plugin-only cut plugin-v7.41.0-1 carried the same fix but a same-version tag move does not refresh an installed plugin (nexus-konsk); this release moves the version so installs pick it up.
