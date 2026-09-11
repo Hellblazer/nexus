@@ -70,3 +70,16 @@ mechanize, it matters enough to ship.
   wait for a named agent's report with a parked `tuple_rd` on
   `ledger/<session_id>` (looping at the 25 s cap) instead of polling.
   bead: nexus-em75s.20
+- `conexus/hooks/scripts/expectations.sh`: RDR-205 Phase 4.1 —
+  `expectations_census` gains a space-backed read path: `nx tuple list
+  --prefix ledger/` enumerates ledger subspaces, reports a session's
+  ledger tuples present (with an age comparison against the TSV's own
+  newest row), absent-and-younger-than-the-90-day-retention as
+  `SPACE_NEVER_RAN`, absent-and-older as `SPACE_OUTSIDE_WINDOW`, and
+  falls back to the TSV alone with a named `SPACE_FALLBACK` reason when
+  the engine is unreachable. A `nx tuple list` call that succeeds with
+  zero subspaces at all is `SPACE_BLINDSPOT`, never silently read as
+  every session being outside the window. Never changes the function's
+  own exit code — the space lines are additional report lines, not a
+  new verdict.
+  bead: nexus-em75s.19

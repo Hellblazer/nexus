@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -1256,10 +1257,19 @@ class TestUndeclaredExitCodes:
         assert "no-such-session-ever" in proc.stderr
 
 
-def _run_census(tmp_path: Path, session_id: str = SESSION) -> subprocess.CompletedProcess[str]:
+def _run_census(
+    tmp_path: Path,
+    session_id: str = SESSION,
+    env_overrides: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Source the reference lib directly and invoke expectations_census,
-    propagating its own exit code as the subprocess's returncode."""
-    env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "state")}
+    propagating its own exit code as the subprocess's returncode.
+
+    ``env_overrides`` (nexus-em75s.19) merges on top of the base env —
+    used by the space-backed tests below to prepend a fake ``nx`` onto
+    PATH and/or thread NX_SERVICE_URL/TOKEN through to the subprocess.
+    """
+    env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "state"), **(env_overrides or {})}
     script = (
         f'source "{REFERENCE_EXPECTATIONS}"; '
         f'expectations_census "{session_id}"; rc=$?; echo "RC=$rc"; exit $rc'
@@ -1267,6 +1277,19 @@ def _run_census(tmp_path: Path, session_id: str = SESSION) -> subprocess.Complet
     return subprocess.run(
         ["bash", "-c", script], capture_output=True, text=True, timeout=30, env=env
     )
+
+
+def _fake_nx_dir(tmp_path: Path) -> Path:
+    """A one-file ``nx`` shim on PATH that execs ``python -m nexus.cli`` —
+    the space-backed census tests below must not depend on whatever ``nx``
+    generation happens to be installed on the box's real PATH (measured:
+    it can predate RDR-205 and lack the ``tuple`` subcommand entirely)."""
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir(exist_ok=True)
+    nx_path = bin_dir / "nx"
+    nx_path.write_text(f'#!/bin/sh\nexec "{sys.executable}" -m nexus.cli "$@"\n')
+    nx_path.chmod(0o755)
+    return bin_dir
 
 
 class TestNamedBackgroundDispatchAt2_1_251:
@@ -1425,6 +1448,177 @@ class TestNamedBackgroundDispatchAt2_1_251:
         ), proc.stdout
         assert "AGENT\ta0000ghostid00000\t-\tBLOCKED_UNRESOLVED\tno-start" in proc.stdout
         assert "no_start=1" in proc.stdout
+
+
+class TestCensusSpaceBacked:
+    """RDR-205 Phase 4.1 (bead nexus-em75s.19): expectations_census's
+    space-backed read path. The engine-substrate tests each mint their OWN
+    fresh tenant via the ``t2_service_env`` fixture, so a session absent
+    from that tenant's ``ledger/`` prefix means exactly what the test says
+    it means -- no cross-test tuple leakage to account for."""
+
+    SID = "space-sess"
+    AGENT = "space-agent-1"
+    TYPE = "general-purpose"
+
+    def _write_ledger_row(
+        self, tmp_path: Path, sid: str, ts: str = "2026-09-01T00:00:00Z"
+    ) -> Path:
+        f = _expectations_file(tmp_path, sid)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a") as fh:
+            fh.write(f"{ts}\tSTART\t{self.AGENT}\t{self.TYPE}\n")
+        return f
+
+    def _tuple_out(
+        self, fake_bin: Path, subspace: str, *, agent_id: str, kind: str, agent_type: str
+    ) -> None:
+        # nexus.db.t2's ProductionWriteGuard refuses a write from a dev
+        # checkout by default (guard_production_write) -- this decoy write
+        # targets the t2_service_env fixture's throwaway test tenant, never
+        # production, so it opts in with a named reason.
+        env = {
+            **os.environ,
+            "NX_ALLOW_PROD_WRITE": (
+                "test fixture seeding the t2_service_env throwaway tuple-"
+                "space test tenant, never production (nexus-em75s.19)"
+            ),
+        }
+        proc = subprocess.run(
+            [
+                str(fake_bin / "nx"), "tuple", "out", subspace,
+                "--key", f"agent_id={agent_id}", "--key", f"kind={kind}",
+                "--dim", f"agent_type={agent_type}",
+            ],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    def _path_env(self, fake_bin: Path) -> dict[str, str]:
+        return {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+    def test_no_nx_binary_names_a_fallback_reason(self, tmp_path: Path) -> None:
+        """No ``nx`` on PATH at all: SPACE_FALLBACK names it, and the
+        pre-existing TSV rc is unaffected -- 'the rc taxonomy holds' means
+        this extension never overrides the file-only verdict."""
+        _expect_row(tmp_path, name=self.TYPE, mode="background", session_id=self.SID)
+        self._write_ledger_row(tmp_path, self.SID)
+        f = _expectations_file(tmp_path, self.SID)
+        with f.open("a") as fh:
+            fh.write(f"2026-09-01T00:00:05Z\tREPORTED\t{self.AGENT}\t{self.TYPE}\n")
+        proc = _run_census(tmp_path, self.SID, env_overrides={"PATH": "/usr/bin:/bin"})
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "SPACE_FALLBACK\treason=no nx binary on PATH" in proc.stdout
+        assert "BLINDSPOT\tchecked=1 recognized=1 unrecognized=0" in proc.stdout
+
+    def test_engine_unreachable_names_the_real_failure(self, tmp_path: Path) -> None:
+        """``nx`` present, engine not: the reason names the actual
+        resolution failure, not a placeholder string.
+
+        The suite's autouse ``_pin_t2_substrate`` fixture wires a live
+        engine's NX_SERVICE_URL/TOKEN into EVERY test by default (conftest,
+        "route every test to the session's T2 substrate") -- this test
+        must explicitly blank those out (an empty string is treated as
+        absent, same as unset, by the resolver's own ``.strip()`` check)
+        AND redirect NEXUS_CONFIG_DIR away from any real supervisor lease,
+        or the ambient engine wired in by that fixture answers the call
+        and there is nothing left to be unreachable."""
+        fake_bin = _fake_nx_dir(tmp_path)
+        self._write_ledger_row(tmp_path, self.SID)
+        proc = _run_census(
+            tmp_path, self.SID,
+            env_overrides={
+                **self._path_env(fake_bin),
+                "NEXUS_CONFIG_DIR": str(tmp_path / "cfg-empty"),
+                "NX_SERVICE_URL": "", "NX_SERVICE_HOST": "",
+                "NX_SERVICE_PORT": "", "NX_SERVICE_TOKEN": "",
+            },
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "SPACE_FALLBACK\treason=nx tuple list --prefix ledger/ failed" in proc.stdout
+        assert "ServiceEndpointUnresolvableError" in proc.stdout
+
+    def test_present_reports_age_against_the_tsv(
+        self, tmp_path: Path, t2_service_env: str,
+    ) -> None:
+        """A subspace present in the space, matching the TSV row for row
+        within the retention window, is reported present with an age
+        comparison -- never a fallback or a blind spot."""
+        fake_bin = _fake_nx_dir(tmp_path)
+        sid = self.SID
+        self._write_ledger_row(tmp_path, sid)
+        self._tuple_out(
+            fake_bin, f"ledger/{sid}", agent_id=self.AGENT, kind="start", agent_type=self.TYPE,
+        )
+        proc = _run_census(tmp_path, sid, env_overrides=self._path_env(fake_bin))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert f"SPACE_PRESENT\tsubspace=ledger/{sid} total=1" in proc.stdout
+        assert "SPACE_AGE\t" in proc.stdout
+        assert "SPACE_FALLBACK" not in proc.stdout
+        assert "SPACE_BLINDSPOT" not in proc.stdout
+        assert "SPACE_NEVER_RAN" not in proc.stdout
+        assert "SPACE_OUTSIDE_WINDOW" not in proc.stdout
+
+    def test_absent_within_retention_is_never_ran(
+        self, tmp_path: Path, t2_service_env: str,
+    ) -> None:
+        """Absent from the space, session younger than the 90-day
+        retention: the projection should still be visible and is not --
+        reported as never having run, not as merely outside the window."""
+        fake_bin = _fake_nx_dir(tmp_path)
+        sid = "space-never-ran-sess"
+        self._write_ledger_row(tmp_path, sid)
+        # A decoy under a DIFFERENT session keeps `ledger/` non-empty, so
+        # the absence of OUR subspace is a genuine finding, not the
+        # zero-subspaces blind spot covered separately below.
+        self._tuple_out(
+            fake_bin, "ledger/space-decoy-sess-a",
+            agent_id="decoy-a", kind="start", agent_type=self.TYPE,
+        )
+        proc = _run_census(tmp_path, sid, env_overrides=self._path_env(fake_bin))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert f"SPACE_NEVER_RAN\tsubspace=ledger/{sid}" in proc.stdout
+        assert "SPACE_OUTSIDE_WINDOW" not in proc.stdout
+        assert "SPACE_BLINDSPOT" not in proc.stdout
+
+    def test_absent_past_retention_is_outside_the_window(
+        self, tmp_path: Path, t2_service_env: str,
+    ) -> None:
+        """Absent from the space, session OLDER than the 90-day retention:
+        the engine's own sweep would have purged it on schedule regardless
+        of whether the projection ever ran, so absence proves nothing --
+        reported as outside the window, never as a missing projection."""
+        fake_bin = _fake_nx_dir(tmp_path)
+        sid = "space-old-sess"
+        f = self._write_ledger_row(tmp_path, sid)
+        past = time.time() - (100 * 24 * 3600)
+        os.utime(f, (past, past))
+        self._tuple_out(
+            fake_bin, "ledger/space-decoy-sess-b",
+            agent_id="decoy-b", kind="start", agent_type=self.TYPE,
+        )
+        proc = _run_census(tmp_path, sid, env_overrides=self._path_env(fake_bin))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert f"SPACE_OUTSIDE_WINDOW\tsubspace=ledger/{sid}" in proc.stdout
+        assert "SPACE_NEVER_RAN" not in proc.stdout
+        assert "SPACE_BLINDSPOT" not in proc.stdout
+
+    def test_zero_subspaces_is_a_blindspot_not_a_pass(
+        self, tmp_path: Path, t2_service_env: str,
+    ) -> None:
+        """A fresh tenant with literally nothing under `ledger/` must not
+        be silently read as 'every session outside the window' or 'every
+        session never ran' -- the vacuity guard (nexus-em75s.19: 'a census
+        that walked zero sessions is a BLINDSPOT, not a pass'), modelled on
+        expectations_undeclared's own BLINDSPOT rule for the same reason."""
+        fake_bin = _fake_nx_dir(tmp_path)
+        sid = self.SID
+        self._write_ledger_row(tmp_path, sid)
+        proc = _run_census(tmp_path, sid, env_overrides=self._path_env(fake_bin))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "SPACE_BLINDSPOT\treason=" in proc.stdout
+        assert "SPACE_NEVER_RAN" not in proc.stdout
+        assert "SPACE_OUTSIDE_WINDOW" not in proc.stdout
 
 
 class TestPluginWiring:

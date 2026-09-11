@@ -1001,6 +1001,153 @@ expectations_undeclared() {
     return $?
 }
 
+# ── RDR-205 Phase 4.1 (bead nexus-em75s.19): the space-backed census read ──
+#
+# The ledger/<session_id> tuple template (service/src/main/resources/tuples/
+# templates/ledger.yaml) retains its rows for 90 days; the TSV ledger file
+# this whole module is built on is durable forever (subject only to
+# expectations_sweep's 7-day file reap, which is an orthogonal knob — see
+# that function's header). A session older than the template's retention
+# can legitimately have NO ledger subspace even though its projection ran
+# and worked perfectly: the engine's own sweep purged the rows on schedule.
+# The comparison below is therefore bounded to this window, not open-ended.
+_EXPECTATIONS_LEDGER_RETENTION_S=$((90 * 24 * 3600))
+
+# _expectations_file_age_s <file> — seconds since <file>'s mtime, echoed on
+# stdout, or nothing (rc 1) on any stat failure. Two `stat` invocations
+# (BSD flavor first, GNU second) rather than branching on `uname` — same
+# portable-without-probing posture as expectations_sweep's `find -mtime`.
+# File mtime, not a row timestamp, is deliberately the age signal used
+# below: it is a knob a test can set directly (`touch -t`), it advances
+# only on a real append (matching the file's own "last known activity"),
+# and it needs no awk pass over rows a caller may not have.
+_expectations_file_age_s() {
+    local file="$1" mtime now
+    [[ -e "$file" ]] || return 1
+    mtime="$(stat -f %m "$file" 2>/dev/null)" || mtime="$(stat -c %Y "$file" 2>/dev/null)" || return 1
+    [[ "$mtime" =~ ^[0-9]+$ ]] || return 1
+    now="$(date +%s)"
+    printf '%s\n' "$((now - mtime))"
+}
+
+# _expectations_census_space <session_id> <tsv_file> — the space-backed
+# half of expectations_census, called only after the TSV-file report above
+# has already run. Prints ADDITIONAL lines; NEVER changes the caller's own
+# exit code (expectations_census's header already establishes "the census
+# is the REPORT, not the verdict" for the TSV side — this extension keeps
+# that contract for the space side too, so a box where the engine happens
+# to be reachable does not silently start returning a different number
+# than one where it is not).
+#
+# Fails open on every axis, each with its OWN named reason on stdout, never
+# a silent skip: no `nx` on PATH, a non-zero `nx tuple list` exit (engine
+# down, endpoint unresolvable, tenant/token trouble), or unparseable JSON
+# all print exactly one SPACE_FALLBACK line and return — the caller sees
+# only the classic TSV-only census beyond that point, i.e. exactly what a
+# box with no tuple space at all has always produced.
+#
+# VACUITY (bead nexus-em75s.19: "a census that walked zero sessions is a
+# BLINDSPOT, not a pass" — the same doctrine expectations_undeclared's rc=1
+# already applies to the TSV side, cited here as the model, not reused as
+# the same numeric slot): `nx tuple list --prefix ledger/` succeeding with
+# a LITERALLY EMPTY result is not evidence this session's projection never
+# ran — it is evidence the walk examined no ledger subspace AT ALL, which
+# could equally mean an empty freshly-minted tenant, a template registry
+# that never loaded ledger.yaml, or a broken query. Printing SPACE_NEVER_RAN
+# in that case would misreport every single session on the engine as a
+# broken projection; SPACE_BLINDSPOT says plainly that nothing was walked.
+_expectations_census_space() {
+    local sid="$1" file="$2"
+    local target="ledger/${sid}"
+
+    if ! command -v nx &>/dev/null; then
+        printf 'SPACE_FALLBACK\treason=no nx binary on PATH\n'
+        return 0
+    fi
+
+    local combined rc
+    combined="$(nx tuple list --prefix "ledger/" --json 2>&1)"
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+        printf 'SPACE_FALLBACK\treason=nx tuple list --prefix ledger/ failed (rc=%d): %s\n' \
+            "$rc" "${combined:-no output}"
+        return 0
+    fi
+
+    # The TSV's own newest row — append-only, so the LAST line is
+    # chronologically last by construction (every other reader in this
+    # file relies on the same ordering guarantee; see e.g.
+    # expectations_last_terminal's row-position walk).
+    local tsv_newest
+    tsv_newest="$(tail -n 1 "$file" 2>/dev/null | cut -f1)"
+    local age
+    age="$(_expectations_file_age_s "$file")" || age=""
+
+    python3 -c '
+import datetime
+import json
+import sys
+
+target, tsv_newest, age_raw, retention = sys.argv[1:5]
+
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    print("SPACE_FALLBACK\treason=unparseable JSON from nx tuple list")
+    sys.exit(0)
+if not isinstance(rows, list):
+    print("SPACE_FALLBACK\treason=nx tuple list --json did not return an array")
+    sys.exit(0)
+
+if not rows:
+    print(
+        "SPACE_BLINDSPOT\treason=subspace_list returned zero subspaces under "
+        "ledger/ - the space walk examined nothing"
+    )
+    sys.exit(0)
+
+found = next(
+    (r for r in rows if isinstance(r, dict) and r.get("subspace") == target),
+    None,
+)
+
+
+def _parse(ts: str):
+    if not ts:
+        return None
+    s = ts.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+if found is not None:
+    total = found.get("total", 0)
+    newest = found.get("newest_created_at") or ""
+    print(f"SPACE_PRESENT\tsubspace={target} total={total}")
+    a, b = _parse(newest), _parse(tsv_newest)
+    drift = f"{(b - a).total_seconds():.0f}" if a is not None and b is not None else "unknown"
+    space_disp = newest if newest else "-"
+    tsv_disp = tsv_newest if tsv_newest else "-"
+    print(f"SPACE_AGE\tspace_newest={space_disp} tsv_newest={tsv_disp} drift_seconds={drift}")
+else:
+    try:
+        age = int(age_raw)
+    except ValueError:
+        age = None
+    retention_s = int(retention)
+    age_disp = age if age is not None else "unknown"
+    if age is not None and age < retention_s:
+        print(f"SPACE_NEVER_RAN\tsubspace={target} age_seconds={age_disp}")
+    else:
+        print(f"SPACE_OUTSIDE_WINDOW\tsubspace={target} age_seconds={age_disp}")
+' "$target" "$tsv_newest" "$age" "$_EXPECTATIONS_LEDGER_RETENTION_S" <<<"$combined"
+    return 0
+}
+
 # expectations_census <session_id> — the scripted census (nexus-hybv1: the
 # hand-count method under-reported a real BLOCKED as 0 on bfbfa2fe and
 # over-reported resolved blocks as failures on b819e8f3; .19 and every
@@ -1048,6 +1195,33 @@ expectations_undeclared() {
 # surface can see into — EXPECT rows present and ZERO STARTs walked — and
 # 0 otherwise. It never exits 2; the rc=2 deficit contract belongs to
 # expectations_undeclared alone, so a caller reading both gets one answer.
+#
+# SPACE-BACKED LINES (RDR-205 Phase 4.1, bead nexus-em75s.19), printed
+# AFTER every line above and NEVER affecting this function's exit code
+# (see _expectations_census_space's header — same "report, not verdict"
+# rule as the TSV side):
+#   SPACE_PRESENT   subspace=ledger/<sid> total=N        — the space still
+#       holds this session's ledger tuples.
+#   SPACE_AGE       space_newest=<ts> tsv_newest=<ts> drift_seconds=N —
+#       printed alongside SPACE_PRESENT; a growing drift is a stalled
+#       projection, reported as a number for the caller to threshold, not
+#       pre-judged here.
+#   SPACE_NEVER_RAN subspace=ledger/<sid> age_seconds=N   — no ledger
+#       subspace, and this session is younger than the ledger template's
+#       90-day retention: the projection should still be visible and is
+#       not.
+#   SPACE_OUTSIDE_WINDOW subspace=ledger/<sid> age_seconds=N — no ledger
+#       subspace, but this session predates the retention window, so
+#       absence proves nothing either way (the engine's own sweep purges
+#       on schedule).
+#   SPACE_BLINDSPOT reason=...   — `nx tuple list --prefix ledger/`
+#       succeeded but returned NO subspaces at all; the space walk
+#       examined nothing, so neither NEVER_RAN nor OUTSIDE_WINDOW can be
+#       claimed for ANY session (see _expectations_census_space's header).
+#   SPACE_FALLBACK  reason=...   — the space could not be consulted at all
+#       (no `nx` on PATH, the engine unreachable, unparseable output); the
+#       named reason is the fallback's whole point — the TSV lines above
+#       are the complete census on this path, exactly as they always were.
 expectations_census() {
     local sid="$1"
     [[ -n "$sid" ]] || return 0
@@ -1158,7 +1332,9 @@ expectations_census() {
             if (checked == 0 && rows["EXPECT"] > 0) exit 1
         }
     ' "$file" 2>/dev/null
-    return $?
+    local rc=$?
+    _expectations_census_space "$sid" "$file"
+    return $rc
 }
 
 # expectations_last_terminal <session_id> <agent_id> — echo the LAST
