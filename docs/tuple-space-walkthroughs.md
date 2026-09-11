@@ -184,7 +184,7 @@ Every six hours the existing sweep scheduler runs a second task. It enumerates t
 <svg viewBox="0 0 760 210" role="img" aria-label="The sweep visits tenants in last_swept_at order, stamps a tenant only when its sweep finishes, and a tenant cut short by the budget keeps its old stamp so it is first next run.">
   <defs><marker id="tuple-sweep-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
   <g font-family="monospace" font-size="12" fill="currentColor" stroke="currentColor">
-    <text x="20" y="28" font-weight="700" font-size="13" stroke="none">Run N (budget: 40 batches per tenant, 90 s wall clock)</text>
+    <text x="20" y="28" font-weight="700" font-size="13" stroke="none">Run N (budget: 50 batches per tenant, 120 s wall clock)</text>
     <rect x="20" y="44" width="150" height="46" rx="4" fill="none"/>
     <text x="95" y="63" text-anchor="middle" stroke="none">tenant c</text>
     <text x="95" y="80" text-anchor="middle" stroke="none" font-size="11">last_swept_at NULL</text>

@@ -4932,7 +4932,12 @@ _TUPLE_SWEEP_STALE_AGE_S: int = 18 * 3600
 
 def _tuple_route_predates_floor() -> bool:
     from nexus.engine_version import REQUIRED_ENGINE_VERSION  # noqa: PLC0415 — deferred; stdlib-only leaf, cheap either way
-    return REQUIRED_ENGINE_VERSION <= _TUPLE_ROUTE_FIRST_ENGINE_VERSION
+    # Strictly below: a client pinned AT the first-serving tag has the
+    # route, so a 404 there is loud. (Was <= while the constant was a
+    # placeholder equal to the pre-route floor; with the constant now the
+    # real first-serving tag, equality means served. Docs-chain review
+    # 2026-09-11.)
+    return REQUIRED_ENGINE_VERSION < _TUPLE_ROUTE_FIRST_ENGINE_VERSION
 
 
 def _parse_tuple_timestamp(value: str | None) -> datetime | None:

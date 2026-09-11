@@ -85,16 +85,15 @@ def _run_unclaimed(monkeypatch, store) -> h.HealthResult:
 
 
 class TestCheckTupleUnclaimedAgeFloorGate:
-    def test_route_missing_at_or_below_floor_is_informational(self, monkeypatch) -> None:
+    def test_route_missing_at_floor_is_loud_warn(self, monkeypatch) -> None:
         monkeypatch.setattr(ev, "REQUIRED_ENGINE_VERSION", h._TUPLE_ROUTE_FIRST_ENGINE_VERSION)
         exc = httpx.HTTPStatusError(
             "404", request=httpx.Request("POST", "http://x"),
             response=httpx.Response(404, request=httpx.Request("POST", "http://x")),
         )
         r = _run_unclaimed(monkeypatch, _FakeTupleStore(list_exc=exc))
-        assert r.ok is True
-        assert r.warn is not True
-        assert "informational" in r.detail
+        assert r.ok is False and r.warn is True
+        assert "UNKNOWN" in r.detail
 
     def test_route_missing_below_floor_is_informational(self, monkeypatch) -> None:
         below = tuple(list(h._TUPLE_ROUTE_FIRST_ENGINE_VERSION[:-1]) + [h._TUPLE_ROUTE_FIRST_ENGINE_VERSION[-1] - 1])
@@ -296,7 +295,7 @@ class TestCheckTupleTableBloat:
         assert r.ok is False and r.warn is True
         assert "server-side" in r.detail
 
-    def test_tables_absent_at_or_below_floor_is_informational(self, tmp_path, monkeypatch) -> None:
+    def test_tables_absent_at_floor_is_loud_warn(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setattr(ev, "REQUIRED_ENGINE_VERSION", h._TUPLE_ROUTE_FIRST_ENGINE_VERSION)
         creds = _make_creds_file(tmp_path)
 
@@ -306,8 +305,8 @@ class TestCheckTupleTableBloat:
         r = h._check_tuple_table_bloat(
             creds_path=creds, psql_bin=Path("/fake/psql"), psql_runner=_psql_runner(responder),
         )[0]
-        assert r.ok is True
-        assert "informational" in r.detail
+        assert r.ok is False and r.warn is True
+        assert "UNKNOWN" in r.detail
 
     def test_tables_absent_above_floor_is_loud_warn(self, tmp_path, monkeypatch) -> None:
         above = tuple(list(h._TUPLE_ROUTE_FIRST_ENGINE_VERSION[:-1]) + [h._TUPLE_ROUTE_FIRST_ENGINE_VERSION[-1] + 1])
@@ -374,7 +373,7 @@ class TestCheckTupleSweepFreshness:
         assert r.ok is False and r.warn is True
         assert "pg_credentials absent" in r.detail
 
-    def test_table_absent_at_or_below_floor_is_informational(self, tmp_path, monkeypatch) -> None:
+    def test_table_absent_at_floor_is_loud_warn(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setattr(ev, "REQUIRED_ENGINE_VERSION", h._TUPLE_ROUTE_FIRST_ENGINE_VERSION)
         creds = _make_creds_file(tmp_path)
 
@@ -384,8 +383,8 @@ class TestCheckTupleSweepFreshness:
         r = h._check_tuple_sweep_freshness(
             creds_path=creds, psql_bin=Path("/fake/psql"), psql_runner=_psql_runner(responder),
         )[0]
-        assert r.ok is True
-        assert "informational" in r.detail
+        assert r.ok is False and r.warn is True
+        assert "UNKNOWN" in r.detail
 
     def test_table_absent_above_floor_is_loud_warn(self, tmp_path, monkeypatch) -> None:
         above = tuple(list(h._TUPLE_ROUTE_FIRST_ENGINE_VERSION[:-1]) + [h._TUPLE_ROUTE_FIRST_ENGINE_VERSION[-1] + 1])
