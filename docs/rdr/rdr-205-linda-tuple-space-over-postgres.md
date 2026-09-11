@@ -1384,6 +1384,15 @@ None. Postgres, pgvector, jOOQ and Liquibase are in place.
 
 - **Scenario**: `out` with a schema breach — **Verify**: `SchemaViolation`
   names field and reason; no row written.
+- **Scenario**: any operation on a subspace whose address segment is not
+  `[A-Za-z0-9][A-Za-z0-9._-]*` (`mailbox/`, `mailbox/bad name!`) —
+  **Verify**: `UnknownSubspace`; `subspace_stats` on an unknown name is
+  that error, never a zero census. (Added 2026-09-11 at close: found by
+  the 7.41.0 shakeout, not in the original plan.)
+- **Scenario**: `computeId` over two key sets that concatenate to the same
+  bytes (a NUL-delimited, length-prefixed digest) — **Verify**: distinct
+  ids; the pin calls the production function with a NUL-bearing input.
+  (Added 2026-09-11 at close; the earlier pin used `_` and was vacuous.)
 - **Scenario**: two ledger starts with different `agent_id` — **Verify**:
   two rows; the same start twice — **Verify**: one row.
 - **Scenario**: two mailbox messages to one address with different
