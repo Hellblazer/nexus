@@ -209,6 +209,7 @@ class RawSqlGateTest {
         + "|\\.fetch\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.fetchOne\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.fetchAny\\(\\s*(\"|sql|SQL|new StringBuilder)"
+        + "|\\.fetchValue\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.resultQuery\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.prepareStatement\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.where\\(\\s*(\"|sql|SQL|new StringBuilder)"
@@ -884,8 +885,6 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/CatalogDeleteCollectionCascadeTest.java", 14),
         Map.entry("dev/nexus/service/CatalogDocumentCascadeTest.java", 11),
         Map.entry("dev/nexus/service/CatalogEngineDefects70Test.java", 5),
-        // nexus-cbo4a parked-batch landing 2026-09-11: 8 -> 1 (the DROP INDEX kept raw; jOOQ DropIndexImpl cannot schema-qualify)
-        Map.entry("dev/nexus/service/Catalog016SourceUriUniqueTest.java", 1),
         Map.entry("dev/nexus/service/CatalogFtsFilenameSearchTest.java", 3),
         Map.entry("dev/nexus/service/CatalogGcAuditProducersTest.java", 8),
         Map.entry("dev/nexus/service/CatalogHandlerManifestEnvelopeTest.java", 1),
@@ -1394,7 +1393,7 @@ class RawSqlGateTest {
     // TupleSweepIndexPlanShapeTest.java entry above).
     // RDR-205 P1 follow-on (bead nexus-f1pbh): 1134 -> 1135 (+1,
     // GrantsNexusDiagViewAccessIntegrationTest.java's nexusDiagCanSelectTupleTables).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 915;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 914;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

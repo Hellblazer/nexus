@@ -841,6 +841,19 @@ public final class PgContainerHelper {
     }
 
     /**
+     * {@code DROP INDEX <schema>.<index>} (nexus-cbo4a batch 13) via
+     * {@code nexus_test.drop_index(regclass)} (db.changelog-test-objects.xml).
+     * jOOQ's own {@code dropIndex} never schema-qualifies the index name on
+     * POSTGRES, so it would resolve through the session search_path; the
+     * qualified {@link Name} is rendered into the function's regclass argument
+     * instead, so PostgreSQL resolves the identity itself.
+     */
+    public static void dropIndex(Connection conn, Name qualifiedIndex) throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        Routines.dropIndex(ctx.configuration(), ctx.render(qualifiedIndex));
+    }
+
+    /**
      * {@code ALTER TABLE .. ADD CONSTRAINT .. FOREIGN KEY (tenant_id, col2, col3)
      * REFERENCES .. (tenant_id, refCol2, refCol3) extraClause NOT VALID} (nexus-cbo4a
      * batch 11) -- the THREE-column composite-FK sibling of {@link #addFkNotValid},

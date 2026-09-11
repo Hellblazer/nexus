@@ -446,12 +446,7 @@ class Catalog016SourceUriUniqueTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            // Kept raw by decision (nexus-cbo4a): jOOQ 3.20's DropIndexImpl renders the
-            // index name with qualify(false) unconditionally, so dropIndex(DSL.name("nexus",
-            // ...)) emits DROP INDEX "ux_..." and fails with "does not exist" — no typed form
-            // can produce the schema-qualified statement this test needs. One ratchet site.
-            su.createStatement().execute(
-                "DROP INDEX nexus.ux_catalog_documents_live_source_uri");
+            PgContainerHelper.dropIndex(su, DSL.name("nexus", "ux_catalog_documents_live_source_uri"));
             try {
                 runDedupAndAssert(su, dedupSql);
             } catch (Exception primary) {
