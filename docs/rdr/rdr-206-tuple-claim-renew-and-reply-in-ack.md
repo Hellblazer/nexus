@@ -69,7 +69,7 @@ mailbox, coordination, orchestration.
 
 | Prior RDR | Relationship | What it means for this one |
 | --- | --- | --- |
-| RDR-205 (closed 2026-09-11) | Origin | It built the primitive and named both of this RDR's operations as "candidates for a later version, not scheduled and not designed here" (§Prior art). Its rationale for deferring them was scope: "no v1 consumer holds a mailbox claim across work longer than 900 seconds" and "the window is bounded by the lease and visible in the claim log." Both rationales still hold today and are the reason this RDR is small: the operations are additions, not repairs. Its scope clause ("a consumer not named here needs its own RDR") is why this is an RDR and not a follow-on bead: both changes alter the primitive's contract. |
+| RDR-205 (closed 2026-09-11) | Origin | It built the primitive and named both of this RDR's operations as "candidates for a later version, not scheduled and not designed here" (§Prior art). Its rationale for deferring them was scope: "that no v1 consumer holds a mailbox claim across work longer than the template's `max_lease_seconds` of 900" and "the window is bounded by the lease and visible in the claim log." Both rationales still hold today and are the reason this RDR is small: the operations are additions, not repairs. Its scope clause ("a consumer not named here needs its own RDR") is why this is an RDR and not a follow-on bead: both changes alter the primitive's contract. |
 | RDR-184 (closed) | Precedent | Diagnosed the report-never-arrives and directive-lands-late failures that RDR-205's two consumers fix. The reply-duplication window in Gap 2 is the same class, a delivery that the sender cannot tell apart from a lost one, one level up. |
 | RDR-110 (abandoned) | Origin of the vocabulary | Its design kernel (registered schemas, lease plus ack/nack, append-only claim log) is what RDR-205 carried forward and what this RDR extends. It had no renew either. |
 
@@ -147,13 +147,20 @@ mailbox template, `HttpTupleStore`, the mailbox skill, and RDR-205 §Prior art.
 - **Documented** (research-4): a retried `ack` with reply after a lost
   response fails at the ack step, before the reply write runs, because
   `liveClaimRow` returns nothing once `consumed_at` is set. Because the ack
-  and the reply write share one transaction, the order of the two calls inside
-  it is immaterial: either both commit or neither does, and Phase 1 Step 2 pins
-  that atomicity. The reply's identity is made stable as well: the engine
-  sets the reply's nonce to the request's tuple id in hex. `computeId` digests the template
-  keys, the `id_dims` (`from` for the mailbox), and the nonce, so one request
-  can produce one reply row per responder however many times the write runs,
-  and two replies to two requests never collide.
+  and the reply write share one transaction (`TenantScope.stampAndRun` runs
+  the work on one connection, commits once on return, and rolls back on any
+  exception), the order of the two calls inside it is immaterial: either both
+  commit or neither does, and Phase 1 Step 2 pins that atomicity. The reply's
+  identity is made stable as well: the engine sets the reply's nonce to the
+  request's tuple id in hex. `computeId` folds the nonce into the id only in
+  its `KEYS_NONCE` branch; the `KEYS` branch ignores it. So for a reply target
+  whose template is `keys+nonce` (the mailbox), one request produces one reply
+  row per responder however many times the write runs, and two replies to two
+  requests never collide. For a `keys`-only target (the RDR-184 ledger) the
+  nonce gives no collision freedom and a second reply would land on the first
+  row, so the engine refuses a reply into a `keys`-only subspace with
+  `SchemaViolation` (Sam's decision, 2026-09-11, T2
+  `nexus_rdr/206-decision-s1-reply-target-error`).
 - **Documented**: the waiter signal fires after the transaction commits. A
   reply written inside the ack transaction must signal the requester's mailbox
   waiters after that commit, from the same place `out` does today.
@@ -178,8 +185,9 @@ mailbox template, `HttpTupleStore`, the mailbox skill, and RDR-205 §Prior art.
   `ttl_seconds` exceeds the reply template's retention, and `SchemaViolation`
   for a bad key, dimension, nonce, or non-positive TTL.
   `tests/test_tuple_error_table_pin.py` is a floor of nine and stays green.
-- **Documented** (research-2 §2, §3): three test files pin the MCP tool names
-  and must change together; the comment block above the tools says "Eight
+- **Documented** (research-2 §2, §3): three pin sites in two files
+  (`tests/test_mcp_package.py` twice, `tests/test_mcp_tuple_tools.py` once)
+  pin the MCP tool names and must change together; the comment block above the tools says "Eight
   MCP tools". The CLI convention is repeatable `KEY=VALUE` flags parsed by
   `_parse_kv_pairs`, and no JSON-blob input exists, which decides the
   `nx tuple ack --reply-*` shape.
@@ -225,7 +233,10 @@ mailbox template, `HttpTupleStore`, the mailbox skill, and RDR-205 §Prior art.
 
 ### Approach
 
-Add two operations to the primitive and nothing else.
+Add two operations to the primitive, and one condition to two shipped
+operations: `ack` and `nack` gain a compare-and-swap on the claim row, so a
+stale ack or nack fails `ClaimNotFound` instead of writing over a row the
+sweep released or another claimant now holds.
 
 1. `renew(claim_id, claimant, lease_s)`: extend a live claim held by this
    claimant. New `lease_until` is `now + lease_s`, capped at the template's
@@ -240,7 +251,13 @@ Add two operations to the primitive and nothing else.
    `out`, in the same transaction that consumes the claim. The engine sets the
    reply's `nonce` itself to the request's tuple id in hex; no client, tool,
    or CLI flag carries a reply nonce, and a `nonce` key in the reply object is
-   a `SchemaViolation`.
+   a `SchemaViolation`, raised by `TupleHandler`'s reply-object parsing before
+   dispatch (`validateOut` checks only for a missing nonce, and the handler's
+   body helpers drop unknown keys, so this is a new branch). The reply's
+   subspace must resolve to a `keys+nonce` template; a `keys`-only target is a
+   `SchemaViolation` as well, raised in the same place, because `computeId`
+   ignores the nonce for that shape and a second reply would overwrite the
+   first.
    On any validation failure of the reply (`UnknownSubspace`, `TtlTooLong`,
    or `SchemaViolation`, the same three `out` raises), nothing is written and
    the request stays claimed, so the responder can correct and retry. Waiters on the reply's
@@ -319,16 +336,17 @@ paragraph on the two limits change with it.
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| `renew` | `TupleRepository.ack`/`nack` (claim resolution, ownership check) | Extend: same `liveClaimRow` path, new update and log row; the update is a compare-and-swap on `claim_state` and `claim_id` with the row count checked |
+| `renew` | `TupleRepository.ack`/`nack` (claim resolution, ownership check) | Extend: same `liveClaimRow` path, new update and log row; the update is a compare-and-swap on `claim_state`, `claim_id`, and `consumed_at IS NULL` with the row count checked |
 | compare-and-swap on `ack` and `nack` | `TupleRepository.ack`, `releaseOrDeadLetter` (update by id only, research-4) | Extend: add the same `claim_state`/`claim_id`/`consumed_at` conditions and row-count check, so a stale ack or nack fails `ClaimNotFound` instead of writing over a row the sweep released or another claimant now holds |
-| reply-in-ack | `TupleRepository.out` and `.ack` | Extend: compose the two bodies in one transaction; no new validation code |
+| reply-in-ack | `TupleRepository.out` and `.ack` | Extend: compose the two bodies in one transaction; two new validation branches in `TupleHandler`'s reply parsing (a stray `nonce` key, a reply target whose template is not `keys+nonce`), both `SchemaViolation` |
 | `/renew` route | `TupleHandler` route switch | Extend: one case |
 | client/MCP/CLI | `HttpTupleStore`, `tuple_*` tools, `nx tuple` | Extend: one method, one tool, one verb, one optional argument |
 
 ### Decision Rationale
 
 Two operations, both composed from code that already exists in one
-transaction each, with no schema change. The alternative of leaving both
+transaction each, plus a compare-and-swap condition on the shipped `ack` and
+`nack` updates, with no schema change. The alternative of leaving both
 limits in place holds only while no consumer runs long or needs a reply, and
 the failure when that stops being true is silent in both cases (a lost claim,
 a duplicate reply), which is the class of failure RDR-184 and RDR-205 exist to
@@ -392,11 +410,11 @@ may have abandoned.
   **Mitigation**: the error names the reply field, nothing is written, and the
   claim is still live to retry; documented in the skill.
 - **Risk**: a retried `ack` with reply after a lost response.
-  **Mitigation**: the ack step runs first and fails `ClaimNotFound` on a
-  consumed claim, so the reply write is never reached on a retry; the
-  responder reads that as "already consumed". The reply's nonce is the
-  request's tuple id, so even a write that did run would land on the same
-  row.
+  **Mitigation**: the retry fails `ClaimNotFound`, because `liveClaimRow`
+  excludes a consumed claim, and the ack and the reply write share one
+  transaction, so the first call left either both or neither; the responder
+  reads that as "already consumed". The reply's nonce is the request's tuple
+  id, so even a write that did run would land on the same row.
 
 ### Failure Modes
 
@@ -469,7 +487,9 @@ executes Critical Assumption 2.
 
 Repository method with the compare-and-swap of Step 1, handler route, typed
 errors, `renew` transition, the lease clamp extracted from `claimOnce` into
-one shared helper, `attempts` untouched. Tests for clamp to `expires_at`, cap
+one shared helper, `attempts` untouched: a renew is not an attempt, by
+decision, because an attempt counts a delivery that a reader gave back, and a
+renew is the reader keeping it. Tests for clamp to `expires_at`, cap
 by template, lapsed-claim refusal, ownership, and the race with the sweep's
 release between the read and the update.
 
@@ -495,7 +515,9 @@ naming the engine tag from Phase 3.
 
 ### Phase 3: Engine release and pairing
 
-Cut on the engine's own cadence (the tag is Sam's decision). The client
+Cut on the engine's own cadence (the tag is Sam's decision), any time after
+Phase 1 gates and before the client release, which is why Phase 2's
+wire-ledger entry can name the tag. The client
 release that bumps `REQUIRED_ENGINE_VERSION` moves the ledger entry to
 `## Shipped`. All-additive, so the engine deploys before the client tag.
 
@@ -538,6 +560,10 @@ None.
   reply roll back together (atomicity, not order).
 - **Scenario**: ack with a reply object that carries a `nonce` key — **Verify**:
   `SchemaViolation`, request still claimed.
+- **Scenario**: ack with a reply routed to a `keys`-only subspace — **Verify**:
+  `SchemaViolation`, request still claimed, no reply row.
+- **Scenario**: renew on a claim — **Verify**: `attempts` unchanged before and
+  after.
 - **Scenario**: old client against new engine and new client against old engine
   — **Verify**: plain ack unchanged; `/renew` 404 surfaces as a bare
   `httpx.HTTPStatusError`, never a silent no-op.
@@ -601,7 +627,7 @@ The MVV is Phase 1 Step 5, engine-direct, before the phase closes, and its clien
 
 ### Proportionality
 
-Two operations, one RDR. Trim at the gate if any section restates RDR-205.
+Two operations and one condition on two shipped ones, one RDR. Trim at the gate if any section restates RDR-205.
 
 ## References
 
@@ -647,3 +673,4 @@ with execution still owed to Phase 1 Step 2.
 - 2026-09-11: Gate round 2 — PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `325e6cced`; critique `nexus_rdr/206-gate-critique-2026-09-11b`.
 - 2026-09-11: Post-accept amendment — Phase 1 re-derived in dependency order (compare-and-swap first, then factor and compose, then renew, then pins, then the engine-direct MVV); the earlier order was cyclic. Step references, Scope Verification, and the engine pin updated. Fix check on this change recorded in T2 as `nexus_rdr/206-fix-check-<tip>`, where `<tip>` is the RDR file's commit after this amendment.
 - 2026-09-11: Post-accept amendment — the call-order claim removed: the ack and the reply write share one transaction, so their order inside it is immaterial and is no longer pinned; the atomicity pin stays. Fix check on this change recorded in T2 as `nexus_rdr/206-fix-check-<tip>`, where `<tip>` is the RDR file's commit after this amendment.
+- 2026-09-11: Post-accept amendment (bead nexus-h61dl.1) — the four Significants and the Minors gate round 2 left open, at every site: a reply target must be a `keys+nonce` template, otherwise `SchemaViolation` (T2 `nexus_rdr/206-decision-s1-reply-target-error`); the stray-`nonce`-key and target-shape checks are named as two new branches in `TupleHandler`'s reply parsing and the audit row says so; the framing sentences name the compare-and-swap on `ack`/`nack`; the renew audit row carries `consumed_at IS NULL`; a renew is not an attempt, by decision, with its scenario; the Phase 3 tag window; the RDR-205 quote verbatim; three pin sites in two files; the Risks mitigation and the Key Discoveries citation say atomicity from `TenantScope.stampAndRun`, not order. Fix check on this change recorded in T2 as `nexus_rdr/206-fix-check-<tip>`.
