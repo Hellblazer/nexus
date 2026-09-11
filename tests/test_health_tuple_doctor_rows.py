@@ -539,21 +539,18 @@ def test_all_three_rows_are_registered_in_run_health_checks() -> None:
 
 
 def test_tuple_route_first_engine_version_pin() -> None:
-    """``_TUPLE_ROUTE_FIRST_ENGINE_VERSION`` must never sit BELOW
-    ``REQUIRED_ENGINE_VERSION`` (that would claim the tuple route ships
-    in an engine no local install can even reach any more) and must
-    never sit ABOVE the newest published ``engine-service-v*`` tag this
-    repo's git history knows about (that would name a tag that does not
-    exist yet). Both directions drift the moment either side moves
-    without the other -- this is the mechanical half of the comment
-    above the constant's definition in ``src/nexus/health.py``.
+    """``_TUPLE_ROUTE_FIRST_ENGINE_VERSION`` must never sit ABOVE the newest
+    published ``engine-service-v*`` tag this repo's git history knows about
+    (that would name a tag that does not exist yet). This is the mechanical
+    half of the comment above the constant's definition in
+    ``src/nexus/health.py``.
     """
-    assert h._TUPLE_ROUTE_FIRST_ENGINE_VERSION >= ev.REQUIRED_ENGINE_VERSION, (
-        f"_TUPLE_ROUTE_FIRST_ENGINE_VERSION {h._TUPLE_ROUTE_FIRST_ENGINE_VERSION} is BELOW "
-        f"REQUIRED_ENGINE_VERSION {ev.REQUIRED_ENGINE_VERSION} -- the tuple route cannot "
-        "predate a floor no local install can even reach any more; fix the constant in "
-        "src/nexus/health.py."
-    )
+    # No lower bound against REQUIRED_ENGINE_VERSION: the constant names the
+    # engine that FIRST carried the route (engine-service-v0.1.114) and stays
+    # truthful as the floor moves past it (7.42.0 pinned v0.1.115). Below the
+    # floor it means every reachable engine has the route and the doctor's
+    # informational-skip branch is dead by construction, which is the intended
+    # end state, not drift.
 
     import check_engine_release_floor as gate
 

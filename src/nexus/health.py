@@ -4904,8 +4904,10 @@ def _check_stranded_install() -> list[HealthResult]:
 # ``REQUIRED_ENGINE_VERSION`` itself, applied here because this constant
 # names the SAME tag. ``tests/test_health_tuple_doctor_rows.py``'s
 # ``test_tuple_route_first_engine_version_pin`` fails loudly if this ever
-# drifts below ``REQUIRED_ENGINE_VERSION`` or above the newest published
-# ``engine-service-v*`` tag this repo knows about.
+# drifts above the newest published ``engine-service-v*`` tag this repo
+# knows about; it may sit below ``REQUIRED_ENGINE_VERSION`` once the floor
+# moves past it (7.42.0 pinned v0.1.115), which means every reachable engine
+# carries the route and the skip branch below is dead by construction.
 _TUPLE_ROUTE_FIRST_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 114)
 
 #: Doctor heuristic, not derived from any per-template TTL: an unclaimed
