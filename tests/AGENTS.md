@@ -6,6 +6,20 @@ Test-suite conventions for AI coding agents. `CLAUDE.md` is not a symlink here; 
 
 Default local dev loop: `uv run pytest -n auto`. `pytest-xdist` is a `dev`-group dependency, opt-in via `-n` — it is deliberately NOT baked into `addopts`, so CI's `pytest-split` duration-balanced sharding (matrix parallelism across runners, see `.github/workflows/ci.yml`) is untouched; `-n auto` is a second, independent, local-only lever. Serial fallback (`uv run pytest`, no `-n`) remains available for debugging output-interleaving or fixture-isolation issues that parallel workers can mask.
 
+**`-n` is capped to this machine's shared-memory headroom** (nexus-6qp25,
+`tests/_xdist_cap.py`). Every worker is a separate process, and
+`_engine_substrate.ensure_engine` boots once per process, so N workers means N
+Postgres clusters, each holding one segment against `kern.sysv.shmmni`. The
+budget is machine-wide: a concurrent gate, a peer session's suite, or a
+cluster orphaned by a battery killed mid-run all spend from the same pool.
+When it runs out `initdb` dies with `shmget: No space left on device` and
+EVERY substrate-backed test errors at setup — thousands of setup errors that
+look like a catastrophic regression and are contention. Measured on a 16-core
+box: one cluster is one 56-byte segment, the full suite at `-n 16` peaks at 20
+of 32 and passes, so the cap does nothing on a quiet machine and binds only
+when something else has already taken the budget. `NX_XDIST_NO_CAP=1` opts
+out. Diagnose with `ipcs -m` before suspecting the code.
+
 `-m lint` selects the O(repo) meta-tests (AST/regex scans of `src/nexus`, `conexus/` agent-skill-command markdown, RDR frontmatter, marker-selection coverage itself) that the default `addopts` (`-m 'not integration and not slow and not lint'`) excludes from the hot loop — they only change when repo *structure* changes, not application behavior, and run once in CI's dedicated `pytest (lint markers)` job rather than once per shard. Run them explicitly with `uv run pytest -m lint` when touching `conexus/`, RDR frontmatter, or a storage-boundary/hook-registration invariant those files pin.
 
 ## Scenario journey layer (test-suite-compression P2, 2026-08-05)

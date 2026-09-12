@@ -11,9 +11,23 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 ```bash
 uv sync                                  # install deps
 scripts/reinstall-tool.sh                # install nx CLI locally (preserves extras)
-uv run pytest -n auto                    # full unit suite, ~2min parallel (no API keys needed)
+uv run pytest -n auto                    # full unit suite, ~13min parallel (no API keys needed; auto-capped, see below)
 uv run pytest                            # serial fallback (~14min; debugging only)
 uv run pytest -m lint                    # O(repo) meta-tests (out of hot loop, PR-gated in CI)
+```
+
+`-n auto` is capped automatically to what this machine's SysV shared-memory
+budget can support (nexus-6qp25). Each worker boots its own Postgres
+substrate, each substrate holds one segment against `kern.sysv.shmmni`, and
+that budget is shared with every other cluster on the box — a running gate, a
+peer's suite, a cluster orphaned by a killed battery. Past the limit `initdb`
+fails and every substrate-backed test errors at SETUP, so the run reports
+thousands of setup errors that read as catastrophic breakage rather than as
+resource contention. The cap binds only when headroom is genuinely low and
+prints the reason when it does; `NX_XDIST_NO_CAP=1` opts out. If you see that
+wall of setup errors anyway, look at `ipcs -m` before you look at the diff.
+
+```bash
 uv run pytest -m integration             # E2E (requires .env from .env.example)
 uv sync && scripts/reinstall-tool.sh && nx --version    # after edits
 ```
