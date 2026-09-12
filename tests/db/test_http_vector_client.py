@@ -3073,19 +3073,19 @@ class TestResolveContent:
             captured["body"] = body
             return {
                 "content": "chunk text from pgvector",
-                "source_uri": "chroma://knowledge__nexus__voyage-context-3__v1/abc123",
+                "source_uri": "chroma://knowledge__nexus__bge-768__v1/abc123",
                 "retention": "reference-only",
             }
 
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
 
         result = client.resolve_content(
-            collection="knowledge__nexus__voyage-context-3__v1",
+            collection="knowledge__nexus__bge-768__v1",
             chash="a" * 64,
         )
 
         assert captured["body"] == {
-            "collection": "knowledge__nexus__voyage-context-3__v1",
+            "collection": "knowledge__nexus__bge-768__v1",
             "chash": "a" * 64,
         }
         assert result["retention"] == "reference-only"
