@@ -69,12 +69,13 @@ timeout could fire on its own.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any, NoReturn
 
 import httpx
 import structlog
 
-from nexus.db.t2.records import SubspaceCensus, TupleRow
+from nexus.db.t2.records import ReplySpec, SubspaceCensus, TupleRow
 
 # nexus-em75s.9: construction, credential/endpoint refresh-on-401, and the
 # HTTP transport itself (_post/_get) are inherited wholesale from
@@ -488,14 +489,73 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
     # ── ack / nack ────────────────────────────────────────────────────────
 
-    def ack(self, claim_id: str, claimant: str) -> None:
+    def ack(
+        self, claim_id: str, claimant: str, reply: ReplySpec | None = None,
+    ) -> str | None:
         """Consume the claimed row; the row is invisible to ``rd``/``in_``
-        after this."""
+        after this. Returns the reply's tuple id when *reply* was written,
+        else ``None``.
+
+        Additive (RDR-206): before this, ``ack`` posted ``/ack`` and
+        discarded the response, so every existing caller keeps seeing
+        ``None`` and every existing request keeps its exact wire shape.
+
+        With *reply*, the engine writes it as it consumes the request, in
+        one transaction, and sets the reply's nonce to ``hex(request tuple
+        id)`` -- see :class:`~nexus.db.t2.records.ReplySpec` for why the
+        spec carries no nonce of its own. A reply whose target cannot be
+        resolved (``UnknownSubspace``) or resolves to a keys-only template
+        (``SchemaViolation``) is refused BEFORE the transaction opens, so
+        the request is left still claimed and still ackable by the same
+        claimant -- a refused reply is not a half-consumed request.
+
+        The 8 KB pre-send guard measures the SERIALISED request, so a reply
+        body can push an ack over a cap a bare ack could never reach; that
+        raises :class:`RequestTooLargeError` before anything is sent.
+        """
         if not claim_id:
             raise ValueError("claim_id must not be empty")
         if not claimant:
             raise ValueError("claimant must not be empty")
-        self._post("/ack", {"claim_id": claim_id, "claimant": claimant})
+        payload: dict[str, Any] = {"claim_id": claim_id, "claimant": claimant}
+        if reply is not None:
+            payload["reply"] = reply.to_payload()
+        r = self._post("/ack", payload)
+        return (r or {}).get("reply_id")
+
+    def renew(self, claim_id: str, claimant: str, lease_s: int) -> datetime:
+        """Extend a live claim's lease. Returns the engine's new
+        ``lease_until`` as an aware :class:`~datetime.datetime`.
+
+        RETURNS WHAT THE ENGINE SAID; never recomputes it. Two ceilings
+        apply and they are different rules: a *lease_s* above the
+        template's ``max_lease_seconds`` is REFUSED with
+        :class:`LeaseTooLongError`, while a duration inside that cap is
+        silently CLIPPED to the tuple's own expiry (the engine applies
+        ``least(candidate, expires_at)`` in SQL against the live row). So
+        the returned instant can be EARLIER than ``now + lease_s``, and a
+        client that computed it locally would look like a harmless
+        optimisation while disagreeing with the engine in exactly the
+        window RDR-206 Phase 1's whole-phase review was about.
+
+        Never touches ``attempts``, and is refused on a lapsed claim
+        (:class:`ClaimNotFoundError`) rather than resurrecting it.
+
+        Against an engine predating ``/renew`` the unknown route's 404
+        carries no ``error`` field, so it surfaces as a bare
+        ``httpx.HTTPStatusError`` -- loud by design. A silent no-op here
+        would let a caller believe its lease was extended while the claim
+        lapses underneath it.
+        """
+        if not claim_id:
+            raise ValueError("claim_id must not be empty")
+        if not claimant:
+            raise ValueError("claimant must not be empty")
+        r = self._post(
+            "/renew",
+            {"claim_id": claim_id, "claimant": claimant, "lease_s": lease_s},
+        )
+        return datetime.fromisoformat(r["lease_until"])
 
     def nack(self, claim_id: str, claimant: str) -> None:
         """Release the claim; counts an attempt toward the template's

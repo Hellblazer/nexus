@@ -151,6 +151,59 @@ class TupleRow:
 
 
 @dataclass(frozen=True)
+class ReplySpec:
+    """The reply an ``ack`` writes as it consumes the request (RDR-206).
+
+    Carries exactly what ``HttpTupleStore.out`` accepts, MINUS the nonce.
+    The engine sets the reply's nonce itself, to ``hex(request tuple id)``,
+    and REFUSES a caller-supplied one with ``SchemaViolation`` rather than
+    ignoring it -- so there is deliberately no field for it here, and
+    ``ReplySpec(..., nonce=...)`` is a ``TypeError`` in the caller's own
+    frame instead of a round trip that comes back refused. Accepting and
+    stripping a nonce would make the client the only layer that tolerates
+    one, which is the divergence the engine's refusal exists to prevent.
+
+    Frozen: a reply spec is a value handed to ``ack``, and mutating it
+    after construction has no meaning once it has been serialised.
+
+    The reply's target must resolve to a ``keys+nonce`` template. A
+    keys-only target (the ledger) is refused with ``SchemaViolation``, and
+    an unregistered subspace with ``UnknownSubspace`` -- both BEFORE the
+    ack's transaction opens, so a refused reply leaves the request still
+    claimed and still ackable, never half-consumed.
+
+    This shape is mirrored by the MCP tool and the CLI; change it in all
+    three or in none.
+    """
+
+    subspace: str
+    keys: dict[str, str]
+    dims: dict[str, str] | None = None
+    body: str | None = None
+    ttl_seconds: int | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        """Serialise for the ``reply`` field of an ack request.
+
+        Mirrors ``HttpTupleStore.out``'s payload construction field for
+        field, because the engine treats a reply object AS an out: a falsy
+        ``dims`` is omitted, while ``body`` is included whenever it is not
+        ``None`` (an empty body is meaningful and is sent). The
+        correspondence is pinned by a test rather than by this sentence --
+        the two are separate pieces of code with nothing else tying them
+        together.
+        """
+        payload: dict[str, Any] = {"subspace": self.subspace, "keys": self.keys or {}}
+        if self.dims:
+            payload["dims"] = self.dims
+        if self.body is not None:
+            payload["body"] = self.body
+        if self.ttl_seconds is not None:
+            payload["ttl_seconds"] = self.ttl_seconds
+        return payload
+
+
+@dataclass(frozen=True)
 class SubspaceCensus:
     """One subspace's row-count breakdown, as rendered by
     ``TupleHandler.renderCensus`` (``subspace_list`` / ``subspace_stats``).

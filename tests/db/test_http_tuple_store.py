@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
 
 import httpx
@@ -40,6 +41,7 @@ from nexus.db.t2.http_tuple_store import (
     HttpTupleStore,
     LeaseTooLongError,
     ParkCapExceededError,
+    ReplySpec,
     RequestTooLargeError,
     SchemaViolationError,
     TakeDisabledError,
@@ -568,3 +570,307 @@ class TestTypedErrorMapping:
             _raise_typed(unknown)
         with pytest.raises(ClaimNotFoundError):
             _raise_typed(not_found)
+
+
+# ── renew (nexus-h61dl.8, RDR-206 Phase 2) ───────────────────────────────
+
+
+class TestRenew:
+    """``renew`` extends a live claim's lease without touching attempts.
+
+    TWO CEILINGS, TWO BEHAVIOURS, and they do not collapse into one rule
+    (confirmed against TupleRepository by the engine author, 2026-09-12):
+    a requested duration ABOVE the template's ``max_lease_seconds`` is
+    REFUSED with ``LeaseTooLong``, while a duration inside that cap on a
+    tuple whose own expiry is nearer is silently CLIPPED to the expiry
+    (``DSL.least(candidate, TUPLES.EXPIRES_AT)``). A test that treats them
+    as one ceiling passes for the wrong reason. The RDR said "capped at"
+    in prose and ``LeaseTooLong`` in the same item's error list; the
+    prose was amended, but the ambiguity is why these are separate tests.
+    """
+
+    def _claimed(self, store: HttpTupleStore, lease_s: int = 30):
+        addr = _uniq("addr")
+        store.out(
+            f"mailbox/{addr}", {"to": addr}, {"from": "sender-a"}, "hi",
+            nonce=_uniq("nonce"),
+        )
+        row, claim_id = store.in_(
+            f"mailbox/{addr}", {"to": addr}, claimant="c1", lease_s=lease_s,
+        )
+        return addr, row, claim_id
+
+    def test_renew_moves_the_lease_forward(self, t2_service_env) -> None:
+        store = HttpTupleStore()
+        _addr, row, claim_id = self._claimed(store, lease_s=30)
+        before = datetime.fromisoformat(row.lease_until)
+
+        after = store.renew(claim_id, "c1", 300)
+
+        assert isinstance(after, datetime)
+        assert after.tzinfo is not None, (
+            "an aware datetime, or a naive one silently mis-compares against "
+            "the engine's UTC (the nexus-rph82 JVM-local-vs-GMT class)"
+        )
+        assert after > before
+
+    def test_renew_returns_the_engines_lease_until_not_a_local_computation(
+        self, t2_service_env,
+    ) -> None:
+        """The grant is clipped in SQL against the LIVE row, so ``lease_until``
+        can come back EARLIER than ``now + lease_s``. Recomputing it
+        client-side would look like a harmless local optimisation and would
+        disagree with the engine in exactly the window RDR-206 Phase 1's
+        whole-phase finding was about, so the client surfaces what the engine
+        said. Driven with a tuple whose TTL is shorter than the lease asked
+        for: the clip is observable only because the two differ."""
+        store = HttpTupleStore()
+        addr = _uniq("addr")
+        store.out(
+            f"mailbox/{addr}", {"to": addr}, {"from": "sender-a"}, "hi",
+            nonce=_uniq("nonce"), ttl_seconds=60,
+        )
+        _row, claim_id = store.in_(
+            f"mailbox/{addr}", {"to": addr}, claimant="c1", lease_s=30,
+        )
+        asked_for = 600
+        before = datetime.now(timezone.utc)
+        granted = store.renew(claim_id, "c1", asked_for)
+        delta_s = (granted - before).total_seconds()
+
+        # NOT `granted < before + asked_for`: the client's clock is read
+        # AFTER the engine's, so that comparison holds even when nothing was
+        # clipped, and the test would pass with the clip deleted. Bound it
+        # against the TUPLE's 60 s ttl instead, well clear of the 600 s that
+        # an unclipped grant would return. Measured 2026-09-12: 60.0 s.
+        assert delta_s <= 120, (
+            f"expected the grant clipped to the tuple's ~60 s expiry, got "
+            f"{delta_s:.1f}s -- an unclipped engine returns ~{asked_for}s and "
+            "a client that recomputed now+lease_s would report the same wrong "
+            "instant"
+        )
+        assert delta_s > 0, "a renew that grants nothing is not a renew"
+
+    def test_renew_by_the_wrong_claimant_is_claim_ownership(self, t2_service_env) -> None:
+        store = HttpTupleStore()
+        _addr, _row, claim_id = self._claimed(store)
+        with pytest.raises(ClaimOwnershipError) as exc_info:
+            store.renew(claim_id, "someone-else", 60)
+        assert exc_info.value.code == "ClaimOwnership"
+
+    def test_renew_of_an_unknown_claim_is_claim_not_found(self, t2_service_env) -> None:
+        store = HttpTupleStore()
+        self._claimed(store)
+        with pytest.raises(ClaimNotFoundError) as exc_info:
+            store.renew(uuid.uuid4().hex, "c1", 60)
+        assert exc_info.value.code == "ClaimNotFound"
+
+    def test_renew_above_max_lease_seconds_is_refused_not_capped(
+        self, t2_service_env,
+    ) -> None:
+        """The FIRST ceiling. Compared against ``max_lease_seconds`` alone,
+        with no remaining-TTL term, and it REFUSES."""
+        store = HttpTupleStore()
+        _addr, _row, claim_id = self._claimed(store)
+        with pytest.raises(LeaseTooLongError) as exc_info:
+            store.renew(claim_id, "c1", 900 + 1)
+        assert exc_info.value.code == "LeaseTooLong"
+
+    def test_renew_rejects_empty_arguments_before_sending(self, t2_service_env) -> None:
+        store = HttpTupleStore()
+        for bad in ({"claim_id": "", "claimant": "c1"}, {"claim_id": "x", "claimant": ""}):
+            with pytest.raises(ValueError):
+                store.renew(bad["claim_id"], bad["claimant"], 60)
+
+
+class TestRenewAgainstAnOldEngine:
+    def test_unknown_route_404_stays_a_bare_http_error(self, monkeypatch) -> None:
+        """An engine predating ``/renew`` answers 404 with no ``error`` field.
+        That must surface as a bare ``httpx.HTTPStatusError`` -- loud, and
+        never a silent no-op that would let a caller believe its lease was
+        extended while the claim quietly lapses underneath it."""
+        store = HttpTupleStore()
+
+        def _404(*_a, **_k):
+            request = httpx.Request("POST", "http://engine/v1/tuples/renew")
+            response = httpx.Response(404, text="Not Found", request=request)
+            raise httpx.HTTPStatusError("404", request=request, response=response)
+
+        monkeypatch.setattr(refreshable.RefreshableHttpStoreMixin, "_post", _404)
+        with pytest.raises(httpx.HTTPStatusError):
+            store.renew("claim-1", "c1", 60)
+
+
+# ── ack with a reply (nexus-h61dl.8) ─────────────────────────────────────
+
+
+class TestReplySpec:
+    """The shape is mirrored by the MCP tool and the CLI, so it is pinned
+    here rather than left to whichever call site is written next."""
+
+    def test_a_caller_supplied_nonce_is_refused_at_construction(self) -> None:
+        """The engine REFUSES a nonce in the reply object rather than
+        ignoring it -- it sets the nonce itself to hex(request tuple id).
+        A frozen dataclass with no such field refuses it one layer earlier
+        and without a round trip. Accepting-and-stripping would make the
+        client the only layer that tolerates a nonce, which is the exact
+        divergence the engine's refusal exists to prevent."""
+        with pytest.raises(TypeError):
+            ReplySpec(subspace="mailbox/a", keys={"to": "a"}, nonce="deadbeef")
+
+    def test_payload_omits_absent_optionals(self) -> None:
+        spec = ReplySpec(subspace="mailbox/a", keys={"to": "a"})
+        assert spec.to_payload() == {"subspace": "mailbox/a", "keys": {"to": "a"}}
+
+    def test_payload_carries_every_field_when_present(self) -> None:
+        spec = ReplySpec(
+            subspace="mailbox/a", keys={"to": "a"}, dims={"from": "b"},
+            body="hi", ttl_seconds=60,
+        )
+        assert spec.to_payload() == {
+            "subspace": "mailbox/a", "keys": {"to": "a"},
+            "dims": {"from": "b"}, "body": "hi", "ttl_seconds": 60,
+        }
+
+    def test_an_empty_body_is_sent_and_empty_dims_are_omitted(self) -> None:
+        """The out()-correspondence edge. ``out`` distinguishes ``body=None``
+        (omit) from ``body=""`` (send -- an empty body is meaningful), and
+        drops a falsy ``dims``. Writing ``if body:`` here instead of
+        ``if body is not None:`` silently diverges from ``out`` for exactly
+        one input, which is the kind of difference nobody notices."""
+        spec = ReplySpec(subspace="mailbox/a", keys={"to": "a"}, dims={}, body="")
+        payload = spec.to_payload()
+        assert payload["body"] == ""
+        assert "dims" not in payload
+
+    def test_the_payload_matches_what_out_would_send_for_the_same_arguments(
+        self, monkeypatch,
+    ) -> None:
+        """The invariant is held by two separate pieces of code -- ``out``'s
+        inline payload construction and ``ReplySpec.to_payload`` -- with
+        nothing tying them together, so it is asserted rather than trusted.
+        The engine treats a reply object AS an out; a divergence here is a
+        reply that cannot be written for arguments ``out`` accepts."""
+        captured: dict[str, object] = {}
+
+        def _capture(_self, path, payload, **_kw):
+            captured["path"] = path
+            captured["payload"] = payload
+            return {"id": "0" * 64}
+
+        monkeypatch.setattr(HttpTupleStore, "_post", _capture)
+        store = HttpTupleStore()
+        store.out("mailbox/a", {"to": "a"}, {"from": "b"}, "hi", ttl_seconds=60)
+
+        out_payload = dict(captured["payload"])
+        out_payload.pop("nonce", None)
+        assert out_payload == ReplySpec(
+            subspace="mailbox/a", keys={"to": "a"}, dims={"from": "b"},
+            body="hi", ttl_seconds=60,
+        ).to_payload()
+
+
+class TestAckWithReply:
+    def _request_claimed_by(self, store: HttpTupleStore, reply_addr: str):
+        addr = _uniq("addr")
+        store.out(
+            f"mailbox/{addr}", {"to": addr}, {"from": reply_addr}, "request",
+            nonce=_uniq("nonce"),
+        )
+        _row, claim_id = store.in_(
+            f"mailbox/{addr}", {"to": addr}, claimant="worker", lease_s=60,
+        )
+        return addr, claim_id
+
+    def test_plain_ack_still_returns_none(self, t2_service_env) -> None:
+        """The additive half: every existing caller posts /ack and discards
+        the response, and must keep seeing exactly what it saw."""
+        store = HttpTupleStore()
+        _addr, claim_id = self._request_claimed_by(store, _uniq("replyto"))
+        assert store.ack(claim_id, "worker") is None
+
+    def test_ack_with_a_reply_returns_the_reply_id(self, t2_service_env) -> None:
+        store = HttpTupleStore()
+        reply_addr = _uniq("replyto")
+        _addr, claim_id = self._request_claimed_by(store, reply_addr)
+
+        reply_id = store.ack(
+            claim_id, "worker",
+            reply=ReplySpec(
+                subspace=f"mailbox/{reply_addr}", keys={"to": reply_addr},
+                dims={"from": "worker"}, body="done",
+            ),
+        )
+
+        assert isinstance(reply_id, str) and len(reply_id) == 64
+        int(reply_id, 16)
+
+        rows = store.rd(f"mailbox/{reply_addr}", {"to": reply_addr})
+        assert [r.body for r in rows] == ["done"]
+        assert rows[0].id == reply_id
+
+    def test_a_reply_to_an_unresolvable_subspace_leaves_the_request_claimed(
+        self, t2_service_env,
+    ) -> None:
+        """The refusal happens BEFORE the ack's transaction opens, so it is
+        not a rollback -- the request is still claimed and still ackable by
+        the same claimant. Mirrors the engine's own assertion in
+        TupleAckWithReplyTest; without it a caller could reasonably assume a
+        failed ack consumed the row anyway."""
+        store = HttpTupleStore()
+        _addr, claim_id = self._request_claimed_by(store, _uniq("replyto"))
+
+        with pytest.raises(UnknownSubspaceError):
+            store.ack(
+                claim_id, "worker",
+                reply=ReplySpec(subspace=_uniq("bogus/nowhere"), keys={"to": "x"}),
+            )
+
+        assert store.ack(claim_id, "worker") is None, (
+            "the claim did not survive a refused reply"
+        )
+
+    def test_a_reply_to_a_keys_only_template_is_a_schema_violation(
+        self, t2_service_env,
+    ) -> None:
+        """A reply target must resolve to a keys+nonce template; the ledger
+        is keys-only, so it is refused rather than silently given a nonce."""
+        store = HttpTupleStore()
+        session = _uniq("sess")
+        store.out(f"ledger/{session}", {"agent_id": "a1", "kind": "start"}, None, None)
+        _addr, claim_id = self._request_claimed_by(store, _uniq("replyto"))
+
+        with pytest.raises(SchemaViolationError):
+            store.ack(
+                claim_id, "worker",
+                reply=ReplySpec(
+                    subspace=f"ledger/{session}",
+                    keys={"agent_id": "a1", "kind": "done"},
+                ),
+            )
+
+    def test_an_oversized_reply_body_trips_the_guard_before_sending(
+        self, monkeypatch,
+    ) -> None:
+        """The 8 KB guard measures the SERIALISED request, so a reply body
+        pushes an ack over a cap a bare ack could never reach. Asserts
+        nothing was sent, not merely that it raised -- a guard that fires
+        after the write has already left is not a guard."""
+        sent: list[str] = []
+
+        def _record(_self, path, *_a, **_kw):
+            sent.append(path)
+            return {}
+
+        monkeypatch.setattr(refreshable.RefreshableHttpStoreMixin, "_post", _record)
+        store = HttpTupleStore()
+
+        with pytest.raises(RequestTooLargeError):
+            store.ack(
+                "claim-1", "worker",
+                reply=ReplySpec(
+                    subspace="mailbox/a", keys={"to": "a"},
+                    body="x" * (_MAX_REQUEST_BODY_BYTES + 1),
+                ),
+            )
+        assert sent == [], "the oversized ack reached the transport"
