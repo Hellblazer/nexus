@@ -44,17 +44,40 @@ import java.time.Duration;
 public final class TestHttp {
 
     /**
-     * Per-request read timeout. Generous relative to real engine work — the
-     * slowest legitimate handler call in this suite is comfortably under a
-     * second against a warm in-process service — and small relative to the
-     * wedges it replaces, which ran to 28 and 100 minutes. The point is
-     * bounding an unbounded wait, not measuring latency, so it is deliberately
-     * far above anything that could flake on a loaded box.
+     * Per-request read timeout: a bound on a HANG, not on performance.
+     *
+     * <p>Sized deliberately far above any legitimate call. The slowest real
+     * handler in this suite is comfortably under a second against a warm
+     * in-process service, and the wedges this replaces ran to 28 and 100
+     * minutes, so anywhere between one and ten minutes converts the same
+     * unbounded wait into the same bounded failure. Given that, the number
+     * should be chosen to minimise FALSE positives rather than to catch a hang
+     * quickly — nothing is gained by failing at 60s instead of 300s, and a box
+     * running sixteen workers beside a gate can make an in-process round trip
+     * take far longer than a quiet one.
+     *
+     * <p>That matters because of what a false positive looks like here: a red
+     * naming an HTTP timeout, which reads as a product defect and is actually
+     * contention. Three probes in this repo's Python suite fired exactly that
+     * way on 2026-09-12, each on a wall-clock number, each pointing away from
+     * the real cause (nexus-61vos). A wall-clock bound on a shared box is
+     * load-sensitive by construction; the only safe use is one where the
+     * threshold is far outside the legitimate range, which is why this is not
+     * tuned tight.
+     *
+     * <p>If it ever DOES fire, read it as "this call did not return in five
+     * minutes" and suspect contention before suspecting the handler.
      */
-    public static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(60);
+    public static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(300);
 
-    /** Connect timeout. A local in-process service either accepts promptly or is not there. */
-    public static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
+    /**
+     * Connect timeout. Same reasoning as {@link #REQUEST_TIMEOUT}: a local
+     * in-process service either accepts or is not there, so the legitimate
+     * value is milliseconds and anything above a few seconds is already
+     * diagnostic. Set generously anyway, because the cost of being wrong in
+     * the tight direction is a false red blamed on the engine.
+     */
+    public static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(60);
 
     private TestHttp() {
     }
