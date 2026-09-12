@@ -379,3 +379,76 @@ class TestTupleWatch:
         pings = [line for line in res.output.splitlines() if "nx-tuple-watch:" in line]
         assert len(pings) == 1
         assert tid in pings[0]
+
+    def test_probe_failure_reported_once_then_recovery_once(self, t2_service_env, tmp_path) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        addr = _uniq("addr")
+
+        class _Flaky:
+            """Fails the first three probes with the same error, then delegates."""
+
+            def __init__(self, inner, failures: int) -> None:
+                self.inner, self.left = inner, failures
+
+            def rd(self, *a, **kw):
+                if self.left > 0:
+                    self.left -= 1
+                    raise RuntimeError("engine unreachable")
+                return self.inner.rd(*a, **kw)
+
+        lines, reports, clock = [], [], _Clock()
+        stats = _run(_Flaky(store, 3), cfg, sd, addr, clock, 5, lines, reports)
+        assert stats.probe_errors == 3
+        assert stats.cycles == 5
+        assert lines == []
+        failed = [r for r in reports if "probe failed" in r]
+        recovered = [r for r in reports if "probe recovered" in r]
+        assert len(failed) == 1 and "engine unreachable" in failed[0]
+        assert len(recovered) == 1
+
+    def test_sustained_flood_collapses_to_one_line_per_cycle(self, t2_service_env, tmp_path) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        addr = _uniq("addr")
+        per_cycle = 3
+
+        class _Flooding:
+            """Three fresh tuples land before every probe: a sustained flood."""
+
+            def __init__(self, inner) -> None:
+                self.inner, self.cycle = inner, 0
+
+            def rd(self, *a, **kw):
+                for i in range(per_cycle):
+                    _out(self.inner, addr, sender=f"c{self.cycle}s{i}")
+                self.cycle += 1
+                return self.inner.rd(*a, **kw)
+
+        lines, reports, clock = [], [], _Clock()
+        stats = _run(_Flooding(store), cfg, sd, addr, clock, 4, lines, reports)
+        # budget_lines=8 per 20 s: cycles 1 and 2 ping per tuple (6 lines), cycles 3
+        # and 4 each collapse to one budget line -> 8 lines for 12 tuples.
+        assert len(lines) == 8, lines
+        assert sum("ping budget reached" in line for line in lines) == 2
+        assert "3 new mail" in lines[-1]
+        assert stats.pinged == 12 and stats.budget_coalesced == 6
+        # every tuple was recorded as pinged: a further cycle inside the window is silent
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert len(lines) == 8
+
+    def test_state_save_failure_on_one_address_does_not_stop_the_other(self, t2_service_env, tmp_path) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        bad, good = _uniq("bad"), _uniq("good")
+        tid = _out(store, good, sender="alice")
+        # make the bad address's state path unwritable: a FILE where its parent dir must be
+        (sd / "tuple-watch").mkdir()
+        p = state_path(sd, bad)
+        p.mkdir()  # a directory where the state file should be: write fails, load treats as empty
+        lines, reports, clock = [], [], _Clock()
+        stats = run_watch(
+            store, [bad, good], config=cfg, state_dir=sd, iterations=2,
+            emit=lines.append, report=reports.append, now=clock.now, sleep=lambda _s: None,
+        )
+        assert stats.cycles == 2
+        assert stats.probe_errors == 2
+        assert [line for line in lines if tid in line] and len(lines) == 1
+        assert sum("probe failed" in r and bad in r for r in reports) == 1

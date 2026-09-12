@@ -14,10 +14,16 @@ much as what is.
 - Emits only on a hit. An empty probe prints nothing.
 - Emits one ping line per newly seen live tuple, capped per cycle (a burst
   beyond the cap is one coalesced line, and every burst row still counts as
-  pinged because the drain is address-wide). A tuple is not re-pinged for
+  pinged because the drain is address-wide), and capped again by a rolling
+  budget of ``budget_lines`` stdout lines per ``budget_window_s`` across
+  cycles and addresses: a batch the budget cannot afford collapses to one
+  coalesced line, so a sustained flood costs one line per cycle, never more. A tuple is not re-pinged for
   ``reemit_after_s``; after that a row still present re-pings, which is what
   heals a dropped notification. ``max_emits`` per tuple, then silent and
   counted, so a row nobody drains cannot burn the Monitor's auto-stop budget.
+- Reports a probe failure on stderr once per distinct error per address, and
+  once more when the probe recovers; a failure that persists is silent in
+  between (MM-1.2 owns the preflight and the wider failure visibility).
 - Never claims, never acks. The ping carries address, sender, kind,
   correlation id and tuple id, never the body; the id is for correlation and
   dedup only, because the mailbox template pins only ``to`` and a claim is
@@ -35,6 +41,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,6 +63,8 @@ class WatchConfig:
     max_emits: int = 3
     probe_n: int = 300
     max_lines_per_cycle: int = 5
+    budget_window_s: float = 20.0
+    budget_lines: int = 8
 
 
 @dataclass
@@ -66,6 +75,7 @@ class WatchStats:
     suppressed: int = 0
     dead_seen: int = 0
     probe_errors: int = 0
+    budget_coalesced: int = 0
 
 
 @dataclass
@@ -134,6 +144,47 @@ def _coalesced_line(address: str, extra: int) -> str:
     )
 
 
+def _budget_line(address: str, count: int) -> str:
+    return (
+        f"{PING_PREFIX} {count} new mail at mailbox/{address} (ping budget reached, not"
+        f" listed); one address-wide drain collects all of it."
+    )
+
+
+class _Emitter:
+    """stdout gate: one Monitor notification per line, bounded by a rolling budget."""
+
+    def __init__(self, config: WatchConfig, emit: Callable[[str], None]) -> None:
+        self._config = config
+        self._emit = emit
+        self._recent: deque[float] = deque()
+
+    def _afford(self, t: float, lines: int) -> bool:
+        window_start = t - self._config.budget_window_s
+        while self._recent and self._recent[0] < window_start:
+            self._recent.popleft()
+        return len(self._recent) + lines <= self._config.budget_lines
+
+    def emit_batch(self, address: str, rows: list[Any], t: float, stats: WatchStats) -> None:
+        cap = self._config.max_lines_per_cycle
+        head, tail = rows[:cap], rows[cap:]
+        wanted = len(head) + (1 if tail else 0)
+        if not self._afford(t, wanted):
+            # The single coalesced line is always affordable: a flood costs one
+            # line per cycle, and the drain is address-wide anyway.
+            self._emit(_budget_line(address, len(rows)))
+            self._recent.append(t)
+            stats.budget_coalesced += len(rows)
+            return
+        for row in head:
+            self._emit(ping_line(address, row))
+            self._recent.append(t)
+        if tail:
+            self._emit(_coalesced_line(address, len(tail)))
+            self._recent.append(t)
+            stats.coalesced += len(tail)
+
+
 def _probe_once(
     store: Any,
     address: str,
@@ -141,7 +192,7 @@ def _probe_once(
     *,
     config: WatchConfig,
     t: float,
-    emit: Callable[[str], None],
+    emitter: _Emitter,
     report: Callable[[str], None],
     stats: WatchStats,
 ) -> None:
@@ -176,13 +227,7 @@ def _probe_once(
     st.dead_reported.intersection_update(present)
 
     if new_rows:
-        head = new_rows[: config.max_lines_per_cycle]
-        tail = new_rows[config.max_lines_per_cycle:]
-        for row in head:
-            emit(ping_line(address, row))
-        if tail:
-            emit(_coalesced_line(address, len(tail)))
-            stats.coalesced += len(tail)
+        emitter.emit_batch(address, new_rows, t, stats)
         for row in new_rows:
             prev = st.seen.get(row.id)
             st.seen[row.id] = _Seen(last_emit=t, count=(prev.count + 1) if prev else 1)
@@ -208,21 +253,33 @@ def run_watch(
     if not addrs:
         raise ValueError("at least one address is required")
     stats = WatchStats()
+    emitter = _Emitter(config, emit)
+    failing: dict[str, str] = {}  # address -> the error text last reported
     while iterations <= 0 or stats.cycles < iterations:
         t = now()
         for address in addrs:
             path = state_path(state_dir, address)
-            st = _load_state(path)
             try:
+                st = _load_state(path)
                 _probe_once(
-                    store, address, st, config=config, t=t, emit=emit, report=report, stats=stats,
+                    store, address, st, config=config, t=t, emitter=emitter, report=report,
+                    stats=stats,
                 )
+                _save_state(path, st)
             except Exception as e:  # noqa: BLE001 — a probe failure is reported, not fatal
                 stats.probe_errors += 1
-                _log.warning("tuple_watch_probe_failed", address=address, error=str(e))
-                report(f"{PING_PREFIX} probe failed for mailbox/{address}: {type(e).__name__}: {e}")
+                text = f"{type(e).__name__}: {e}"
+                _log.warning("tuple_watch_probe_failed", address=address, error=text)
+                if failing.get(address) != text:
+                    failing[address] = text
+                    report(
+                        f"{PING_PREFIX} probe failed for mailbox/{address}: {text}"
+                        f" (reported once; silent until it changes or recovers)",
+                    )
                 continue
-            _save_state(path, st)
+            if address in failing:
+                del failing[address]
+                report(f"{PING_PREFIX} probe recovered for mailbox/{address}")
         stats.cycles += 1
         if iterations <= 0 or stats.cycles < iterations:
             sleep(config.interval_s)
