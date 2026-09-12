@@ -25,8 +25,13 @@ Paired with engine-service-v0.1.116.
   no `source_uri`, or is reference-only; 422 for an unregistered scheme or a
   malformed URI; 502 when a fetch genuinely fails; 503 with no repository.
 - **`nx tuple watch`** — a ping-then-pull mailbox watcher over the RDR-205
-  tuple space, with preflight, per-address locking, once-only failure
-  reporting and a rolling emit budget.
+  tuple space. Watches one or more addresses in a single process; with no
+  positional address it watches the current session's own mailboxes, and
+  warns when the instance name is missing rather than silently watching
+  only part of what you asked for. `--instance NAME` names the instance
+  explicitly. Preflights each address before watching, locks per address,
+  reports a given failure once rather than every tick, and holds emission
+  to a rolling budget.
 
 ### Fixed
 - A reference-only row's null content no longer crashes `search` and
