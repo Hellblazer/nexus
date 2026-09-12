@@ -917,18 +917,47 @@ public final class TupleRepository {
             // TEST-ONLY (nexus-h61dl.2): see ack.
             TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY.run();
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-            OffsetDateTime leaseUntil = clampedLeaseUntil(now, leaseSeconds, row.getExpiresAt());
+            OffsetDateTime candidate = now.plusSeconds(leaseSeconds)
+                    .truncatedTo(java.time.temporal.ChronoUnit.MICROS);
 
             // RDR-206 Phase 1 Step 1's compare-and-swap: liveClaimRow read without a
             // lock, so the sweep's release arm or a re-take may have moved the row.
             // ATTEMPTS is deliberately absent from this .set() list.
-            int updated = ctx.update(TUPLES)
-                    .set(TUPLES.LEASE_UNTIL, leaseUntil)
+            //
+            // The ceiling is applied HERE, in SQL, against the row as it stands at
+            // UPDATE time -- not in Java against the expires_at that liveClaimRow read
+            // (nexus-h61dl.6 phase review). liveClaimRow does not lock, and `out`'s
+            // refire path rewrites EXPIRES_AT on any refire of the same tuple with no
+            // claim-state gate, so a refire landing in that window would shrink the
+            // tuple's expiry under a lease computed from the older, larger value. The
+            // result would be lease_until > expires_at: a claim outliving its tuple,
+            // which is the invariant RDR-205 states and which this operation's own
+            // mitigation for "a holder renews forever" depends on. It is not a
+            // bookkeeping slip either, because purgeExpiredTuplesBatch deletes purely on
+            // expires_at <= now() with no claim-state filter, so the row would be hard
+            // deleted under a holder that had just been told its lease was extended.
+            //
+            // TUPLES.EXPIRES_AT binds to the live row exactly as TUPLES.CREATED_AT does
+            // in writeOut's own refire clamp, so the read-to-update window closes
+            // without a lock and without turning a benign refire into a failed renew.
+            // claimOnce keeps the Java-side helper because it reads under
+            // forNoKeyUpdate + skipLocked, where a concurrent refire blocks instead of
+            // racing; renew is the first caller to want this clamp against an UNLOCKED
+            // read, which is why the two express one rule in two places. See
+            // clampedLeaseUntil.
+            var stored = ctx.update(TUPLES)
+                    .set(TUPLES.LEASE_UNTIL, DSL.least(DSL.val(candidate), TUPLES.EXPIRES_AT))
                     .where(liveClaimCondition(row.getId(), claimId))
-                    .execute();
-            if (updated == 0) {
+                    .returningResult(TUPLES.LEASE_UNTIL)
+                    .fetchOne();
+            if (stored == null) {
                 throw new ClaimNotFoundException(claimId);
             }
+            // Returned from the row rather than from the candidate: after a SQL-side
+            // clamp the caller must be told what was actually stored, and this is also
+            // what makes the microsecond-precision pin an assertion about the database
+            // rather than about a value this method never wrote.
+            OffsetDateTime leaseUntil = stored.value1();
             insertClaimLog(ctx, tenant, row.getSubspace(), row.getTemplate(), row.getId(),
                     claimId, claimant, TRANSITION_RENEW, now);
             return leaseUntil;
@@ -1003,10 +1032,16 @@ public final class TupleRepository {
      * The deadline a lease may run to: {@code now + leaseSeconds}, never past the
      * tuple's own {@code expiresAt}, at microsecond precision.
      *
-     * <p>Shared by the claim statement and {@link #renew} (RDR-206 Phase 1 Step 3) so
-     * the two cannot drift. The one that drifted would hand out a lease running past a
-     * row the sweep is entitled to purge, which is the invariant RDR-205 states as a
-     * claim never outliving its tuple.
+     * <p>Used by the claim statement, which reads its row under
+     * {@code forNoKeyUpdate} + {@code skipLocked}: the lock holds {@code expiresAt}
+     * still between that read and the update, so computing the clamp in Java here is
+     * safe. {@link #renew} applies the SAME RULE but in SQL, against the live row at
+     * UPDATE time, because {@code liveClaimRow} does NOT lock and a concurrent refire
+     * could otherwise shrink the expiry under a lease computed from the stale value
+     * (nexus-h61dl.6 phase review). One rule, two expressions, and the reason they
+     * differ is the locking, not an oversight -- change one and change the other. The
+     * rule: never hand out a lease running past a row the sweep is entitled to purge,
+     * which is RDR-205's "a claim never outlives its tuple".
      *
      * <p>Truncation is not cosmetic (RDR-205 follow-on, nexus-mvfm9): Postgres
      * TIMESTAMPTZ is microsecond-precision, while the JVM clock under

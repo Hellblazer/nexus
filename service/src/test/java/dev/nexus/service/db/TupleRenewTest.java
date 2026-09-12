@@ -489,4 +489,66 @@ class TupleRenewTest {
                 .containsExactly("claim", "renew", "ack");
     }
 
+
+    // ── the read-to-update window against a concurrent refire ────────────────
+
+    /**
+     * A refire landing between renew's unlocked read and its update must not leave the
+     * lease running past the tuple's NEW expiry.
+     *
+     * <p>Found by the whole-phase review (nexus-h61dl.6) and reachable by no per-step
+     * review, because it is the intersection of two steps: Step 1 made ack/nack/renew
+     * compare-and-swap instead of locking, and Step 3 had renew reuse a clamp helper
+     * written for {@code claimOnce}, which reads under {@code forNoKeyUpdate} +
+     * {@code skipLocked}. Under that lock a concurrent refire blocks. Renew is the first
+     * caller to want the clamp against an UNLOCKED read, so it was the first place the
+     * stale-ceiling window could open.
+     *
+     * <p>Why it is not merely untidy: {@code out}'s refire rewrites {@code expires_at}
+     * with no claim-state gate, and {@code purgeExpiredTuplesBatch} deletes purely on
+     * {@code expires_at <= now()} with no claim-state filter. So a lease written past a
+     * shrunken expiry is a row that can be HARD DELETED under a holder that was just
+     * told its lease was extended — and "a claim never outlives its tuple" is the
+     * invariant renew's own mitigation for "a holder renews forever" rests on.
+     *
+     * <p>The race is built deterministically rather than raced: the read-to-update seam
+     * fires exactly in the window, and the hook refires the tuple with a short ttl,
+     * shrinking its expiry while renew holds a stale copy of the old one.
+     */
+    @Test
+    void aRefireInsideTheWindowCannotLeaveTheLeasePastTheNewExpiry() {
+        String tenant = "tuple-renew-refire-" + UUID.randomUUID();
+        String to = "agent-refire-" + UUID.randomUUID();
+        String subspace = "mailbox/" + to;
+        String nonce = "nonce-refire";
+        // A long life first, so the lease renew asks for would fit inside it.
+        byte[] id = repo.out(tenant, subspace, Map.of("to", to), Map.of("from", "sender"),
+                "body", nonce, 3600L);
+        var claim = repo.inp(tenant, subspace, Map.of("to", to), "worker-1", 60);
+        assertThat(claim).isPresent();
+
+        AtomicInteger hookRuns = new AtomicInteger();
+        TupleRepository.TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY = () -> {
+            TupleRepository.TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY = () -> { };
+            hookRuns.incrementAndGet();
+            // Same id (same keys + nonce), so this is a REFIRE of the very row being
+            // renewed, and out's refire path rewrites expires_at without looking at
+            // claim state.
+            repo.out(tenant, subspace, Map.of("to", to), Map.of("from", "sender"),
+                    "body", nonce, 30L);
+        };
+
+        OffsetDateTime returned = repo.renew(tenant, claim.get().claimId(), "worker-1", 900);
+
+        assertThat(hookRuns.get()).as("the refire really did land inside the window").isEqualTo(1);
+        var after = rawRow(id);
+        OffsetDateTime expiresAt = after.value2();
+        assertThat(after.value1())
+                .as("the stored lease must not outlive the tuple's expiry as it stands "
+                    + "AFTER the refire, not as renew read it before")
+                .isBeforeOrEqualTo(expiresAt);
+        assertThat(returned)
+                .as("and the caller is told what was actually stored, not the candidate")
+                .isEqualTo(after.value1());
+    }
 }
