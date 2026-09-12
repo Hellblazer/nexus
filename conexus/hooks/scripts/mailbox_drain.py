@@ -355,8 +355,27 @@ class _Out:
         print(text, flush=True)  # noqa: T201
 
 
+def _dims_of(row: dict[str, Any]) -> dict[str, Any]:
+    """A row's dims, or an empty mapping when the engine sent something else.
+
+    ``row.get("dims") or {}`` looks like it covers this and does not: it rescues
+    None and {}, but a non-dict TRUTHY value (a string, a list) sails through and
+    the next ``.get`` raises AttributeError. One such row used to poison its own
+    address permanently — the per-address guard caught the crash, so the process
+    and every other mailbox survived, but that address never drained again and
+    nothing queued behind the bad row was ever delivered. Found by the
+    test-validator at the nexus-6konb.8 close gate.
+
+    Degrading to "?" for one malformed row is right where refusing is not: this
+    hook is the CONSUMER OF RECORD and the floor under delivery, so a row it
+    cannot pretty-print must still not stop the mail behind it.
+    """
+    dims = row.get("dims")
+    return dims if isinstance(dims, dict) else {}
+
+
 def _render_live(address: str, row: dict[str, Any]) -> str:
-    dims = row.get("dims") or {}
+    dims = _dims_of(row)
     sender = dims.get("from", "?")
     kind = dims.get("kind") or "note"
     corr = dims.get("correlation_id") or "-"
@@ -370,7 +389,7 @@ def _render_live(address: str, row: dict[str, Any]) -> str:
 
 
 def _render_dead(address: str, row: dict[str, Any]) -> str:
-    dims = row.get("dims") or {}
+    dims = _dims_of(row)
     return (
         f"- UNDELIVERABLE at mailbox/{address} tuple_id={row.get('id', '?')} "
         f"from={dims.get('from', '?')} attempts={row.get('attempts', '?')}: this row is "

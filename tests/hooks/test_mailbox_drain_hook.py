@@ -641,6 +641,34 @@ class TestPartialFailureNeverLosesDeliveredMail:
             "an unexpected failure on the first address abandoned the second"
         )
 
+    def test_a_poison_row_does_not_stop_the_mail_behind_it(self, tmp_path, engine) -> None:
+        """A row whose ``dims`` is not a dict must not silence its own address.
+
+        Found by the test-validator at this bead's close gate, reproduced live: both
+        renderers called ``dims.get(...)`` on whatever the engine sent, and
+        ``row.get("dims") or {}`` rescues None and {} but not a truthy non-dict. The
+        per-address guard caught the resulting AttributeError, so the process and every
+        other mailbox survived — but that address never drained again, and a live row
+        sitting behind the poison row went undelivered across every subsequent prompt.
+
+        Blocked rather than lost, since rendering happens before the ack. Still fatal to
+        the floor this hook exists to be, which is why it is fixed here rather than
+        deferred: the epic exists to close exactly this class.
+        """
+        eng = engine()
+        poison = _row("poison1", body="unreadable")
+        poison["dims"] = "not-a-dict"
+        eng.rows = [poison, _row("good1", body="behind the poison row")]
+        _wired(tmp_path, eng)
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0, res.stderr
+        assert "Traceback" not in res.stderr
+        assert "behind the poison row" in res.stdout, (
+            "a row with malformed dims blocked the deliverable row queued behind it"
+        )
+
     def test_a_500_on_ack_keeps_the_pending_record_because_the_outcome_is_unknown(
         self, tmp_path, engine,
     ) -> None:
@@ -664,6 +692,17 @@ class TestPartialFailureNeverLosesDeliveredMail:
         _wired(tmp_path, eng)
 
         res = _run(tmp_path=tmp_path)
+
+        # PRECONDITION, not the assertion under test (nexus-mzt40): twice in one
+        # full-suite run this hook produced empty stdout AND empty stderr at exit 0,
+        # which is the signature of an EMPTY MAILBOX, not of the status handling below.
+        # Asserting on stderr first reported "expected SKIP, got ''", which names the
+        # wrong thing. If the hook never reached this mock, say so.
+        assert eng.calls, (
+            f"the hook never reached the mock engine, so this test never exercised "
+            f"status handling at all. rc={res.returncode} "
+            f"stdout={res.stdout!r} stderr={res.stderr!r}"
+        )
 
         assert res.returncode == 0
         assert "SKIP" in res.stderr and "500" in res.stderr, (
@@ -689,6 +728,17 @@ class TestPartialFailureNeverLosesDeliveredMail:
         _wired(tmp_path, eng)
 
         res = _run(tmp_path=tmp_path)
+
+        # PRECONDITION, not the assertion under test (nexus-mzt40): twice in one
+        # full-suite run this hook produced empty stdout AND empty stderr at exit 0,
+        # which is the signature of an EMPTY MAILBOX, not of the status handling below.
+        # Asserting on stderr first reported "expected SKIP, got ''", which names the
+        # wrong thing. If the hook never reached this mock, say so.
+        assert eng.calls, (
+            f"the hook never reached the mock engine, so this test never exercised "
+            f"status handling at all. rc={res.returncode} "
+            f"stdout={res.stdout!r} stderr={res.stderr!r}"
+        )
 
         assert res.returncode == 0
         assert "SKIP" in res.stderr and "401" in res.stderr, (
