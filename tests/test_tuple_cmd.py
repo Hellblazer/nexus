@@ -20,6 +20,7 @@ from nexus.db.t2.http_tuple_store import HttpTupleStore, ParkCapExceededError
 from nexus.tuple_watch import (
     WatchConfig,
     acquire_watch_locks,
+    lock_path,
     preflight,
     resolve_watch_addresses,
     run_watch,
@@ -819,6 +820,19 @@ class TestWatchAddressResolution:
     def test_an_instance_equal_to_the_session_id_collapses_to_one_address(self) -> None:
         r = resolve_watch_addresses((), instance="same", session_id="same")
         assert r.addresses == ["same"]
+        assert r.notices == []  # neither mailbox is unwatched, so there is nothing to warn about
+
+    def test_explicit_addresses_suppress_the_instance_too(self) -> None:
+        """The precedence MM-3.1's arming relies on: what it names is what is watched.
+
+        An --instance that leaked into the explicit branch would silently widen the
+        watch beyond the caller's list, and take a second lock nobody asked for.
+        """
+        r = resolve_watch_addresses(("only-this",), instance="nexus-19",
+                                    session_id="session-xyz")
+        assert r.addresses == ["only-this"]
+        assert r.notices == []
+        assert r.error == ""
 
 
 class TestWatchTwoAddresses:
@@ -870,8 +884,11 @@ class TestWatchTwoAddresses:
             emit=lines.append, report=reports.append, now=clock.now, sleep=lambda _s: None,
         )
         assert len(lines) == 1
-        assert state_path(sd, a).is_file()
-        assert not state_path(sd, b).is_file() or "seen" in state_path(sd, b).read_text()
+        # a's state records the pinged id; b's records nothing, because b is empty
+        a_seen = json.loads(state_path(sd, a).read_text(encoding="utf-8"))["seen"]
+        b_seen = json.loads(state_path(sd, b).read_text(encoding="utf-8"))["seen"]
+        assert len(a_seen) == 1
+        assert b_seen == {}
         # mail arriving at the OTHER address is new, not shadowed by the first one's state
         _out(store, b, sender="bob")
         clock.advance(cfg.interval_s)
@@ -982,3 +999,45 @@ class TestWatchTwoAddressesCli:
         skips = [line for line in res.output.splitlines() if "SKIP" in line]
         assert len(skips) == 1, res.output
         assert not [line for line in res.output.splitlines() if "new mail" in line]
+
+    def test_cli_explicit_address_wins_over_both_defaults(self, t2_service_env, tmp_path,
+                                                          monkeypatch) -> None:
+        store, _cfg, sd = _watch_env(tmp_path)
+        named, inst, sess = _uniq("named"), _uniq("inst"), _uniq("sess")
+        monkeypatch.setenv("NX_SESSION_ID", sess)
+        id_named = _out(store, named, sender="wanted")
+        _out(store, inst, sender="not-asked-for")
+        _out(store, sess, sender="not-asked-for-either")
+        res = _invoke([
+            "watch", named, "--instance", inst, "--iterations", "1", "--interval", "0",
+            "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        pings = [line for line in res.output.splitlines() if "new mail" in line]
+        assert len(pings) == 1, res.output
+        assert id_named in pings[0]
+        assert inst not in res.output and sess not in res.output
+        # and only the named address was locked
+        assert lock_path(sd, named).is_file()
+        assert not lock_path(sd, inst).exists()
+
+    def test_cli_instance_equal_to_the_session_id_watches_once(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """End to end for the collapse: without dedup the second lock on the same
+        address would refuse the watcher's own first lock and nothing would be
+        watched at all."""
+        store, _cfg, sd = _watch_env(tmp_path)
+        same = _uniq("same")
+        monkeypatch.setenv("NX_SESSION_ID", same)
+        tid = _out(store, same, sender="alice")
+        res = _invoke([
+            "watch", "--instance", same, "--iterations", "1", "--interval", "0",
+            "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        assert "already watched by" not in res.output
+        pings = [line for line in res.output.splitlines() if "new mail" in line]
+        assert len(pings) == 1, res.output
+        assert tid in pings[0]
+        assert not [line for line in res.output.splitlines() if "WARNING" in line]
