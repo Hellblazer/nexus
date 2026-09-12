@@ -42,9 +42,26 @@ same trace at 0.5s, 1s and 2s returns a peak of 16 in all three cases: the
 coarse sampler misses dips, not peaks, so it understates nothing that matters
 to a budget. The first hypothesis -- that the release battery was LIVE rather
 than merely leaked during the failing run, and that its concurrently-running
-legs each provision Postgres -- remains unmeasured, and is now the only
-surviving candidate. Measuring it means sampling while the battery actually
-runs.
+legs each provision Postgres -- was measured the same day and is eliminated
+too. Sampling at 54ms across a real four-leg battery (lsg, shakedown, mvv,
+pkgup at the default max-parallel 4), run from a worktree pinned to a fixed
+sha, a LIVE battery PEAKS AT 6 segments -- and only briefly: 83 of 34,143
+samples in the gate group sat at 5 or more, about a quarter of one percent of
+the window, with 3 the commonest value. Subsampling that same trace at 0.5s,
+1s and 2s returns 6 every time, so no burst hides here either. Four legs
+costing six also says a leg is not uniformly one cluster: at least two hold a
+second one transiently.
+
+So the originating failure is STILL UNEXPLAINED, with both candidates now
+eliminated rather than merely unexamined. 16 workers, plus 4 orphaned
+clusters, plus a live battery at its peak, is 26 against a ceiling of 32.
+
+What the numbers do change is the MARGIN, and that is the part worth carrying.
+"About 21 of 32, comfortable" described a quiet box. A box carrying a battery
+and some orphans sits at 26 with six to spare, and any further consumer -- a
+peer's suite, a second gate -- crosses it. That is the case this guard exists
+for, and it is why DEFAULT_RESERVE is 8: a live battery's measured peak of 6
+fits inside it with room.
 """
 
 from __future__ import annotations
