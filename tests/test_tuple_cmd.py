@@ -418,6 +418,7 @@ class TestTupleWatch:
                 self.inner, self.cycle = inner, 0
 
             def rd(self, *a, **kw):
+                clock.advance(cfg.interval_s)  # the clock moves between probes, as in life
                 for i in range(per_cycle):
                     _out(self.inner, addr, sender=f"c{self.cycle}s{i}")
                 self.cycle += 1
@@ -434,6 +435,14 @@ class TestTupleWatch:
         # every tuple was recorded as pinged: a further cycle inside the window is silent
         _run(store, cfg, sd, addr, clock, 1, lines, reports)
         assert len(lines) == 8
+        # the budget is a window, not a lifetime cap: once it slides past the earlier
+        # emissions, a new batch pings per tuple again (a non-expiring cap would coalesce)
+        clock.advance(cfg.budget_window_s + 1)
+        for i in range(per_cycle):
+            _out(store, addr, sender=f"late{i}")
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert len(lines) == 11
+        assert not any("ping budget reached" in line for line in lines[8:])
 
     def test_state_save_failure_on_one_address_does_not_stop_the_other(self, t2_service_env, tmp_path) -> None:
         store, cfg, sd = _watch_env(tmp_path)

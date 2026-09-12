@@ -275,8 +275,9 @@ def tuple_watch_cmd(
 
     Built to be a Claude Code Monitor source: prints nothing on an empty probe,
     never claims, never prints a body. Re-pings a still-present tuple after
-    --reemit-after, at most --max-emits times. Dead-lettered rows and probe
-    failures go to stderr, once."""
+    --reemit-after, at most --max-emits times. Dead-lettered rows go to stderr
+    once per row; a probe failure once per distinct error, plus one line on
+    recovery."""
     from nexus import config as _config  # noqa: PLC0415 — deferred: CLI startup cost
     from nexus.tuple_watch import WatchConfig, run_watch  # noqa: PLC0415 — deferred: CLI startup cost
 
