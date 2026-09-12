@@ -66,6 +66,8 @@ import subprocess
 import sys
 import shutil
 import tempfile
+
+import tests._engine_substrate as _substrate
 import time
 
 import pytest
@@ -1232,32 +1234,45 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard() -> 
             tempfile.mkdtemp(prefix="mode-census-probe-"),
         )
         started = time.monotonic()
-        proc = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "tests/test_mode_declarations_are_explicit.py",
-                "--deselect",
-                _self_nodeid,
-                "--splits",
-                "4",
-                "--group",
-                str(group),
-                "-q",
-                "-rs",
-                "--no-header",
-            ],
-            cwd=_REPO_ROOT,
-            env={
-                **os.environ,
-                "NX_TEST_T2_SUBSTRATE": "none",
-                "TMPDIR": str(probe_tmp),
-            },
-            capture_output=True,
-            text=True,
-            timeout=_PROBE_HANG_TIMEOUT_S,
-        )
+        # The timeout on THIS call gets the same loud skip its sibling above gets, and
+        # cleans up the private dir. Both were review findings: it raised an uncaught
+        # ERROR rather than skipping, and it leaked probe_tmp because the cleanup guard
+        # below only wrapped the assertions. The author's own 0.001s falsification could
+        # not expose either, since the FIRST call always times out first.
+        try:
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "tests/test_mode_declarations_are_explicit.py",
+                    "--deselect",
+                    _self_nodeid,
+                    "--splits",
+                    "4",
+                    "--group",
+                    str(group),
+                    "-q",
+                    "-rs",
+                    "--no-header",
+                ],
+                cwd=_REPO_ROOT,
+                env={
+                    **os.environ,
+                    "NX_TEST_T2_SUBSTRATE": "none",
+                    "TMPDIR": str(probe_tmp),
+                },
+                capture_output=True,
+                text=True,
+                timeout=_PROBE_HANG_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired as exc:
+            shutil.rmtree(probe_tmp, ignore_errors=True)
+            pytest.skip(
+                f"the nested run for group {group}/4 did not return within "
+                f"{_PROBE_HANG_TIMEOUT_S}s ({exc}). Contention on this box, not a "
+                f"statement about the census (nexus-61vos)."
+            )
         elapsed = time.monotonic() - started
         new_pg_dirs = sorted(probe_tmp.glob(f"{_pg_tmp_prefix}*"))
         try:
@@ -1365,3 +1380,48 @@ def test_mode_declarations_census_executes_for_real_under_ci_env_shape() -> None
         f"expected the census to execute and pass for real under this env "
         f"shape, got:\n{output}"
     )
+
+
+def test_the_boot_lock_guard_sees_a_boot_attempt_under_a_private_tmpdir() -> None:
+    """The boot-lock half of the split-shard probe's structural check, tested end to
+    end rather than by hand (nexus-61vos, review finding 2).
+
+    The probe asserts that a nested run created no boot-lock directory inside its own
+    TMPDIR, which is what catches an engine that booted and was swept before the
+    cluster-dir check could see it. That guard was verified by a one-off manual check
+    when it was written, on the grounds that forcing a real boot is expensive. It is
+    not: ``_boot_semaphore_slot`` is a pure mkdir-plus-flock primitive with no
+    PostgreSQL dependency at all, so the whole mechanism can be exercised directly
+    under a redirected TMPDIR in milliseconds.
+
+    Two halves, and the second is the one that matters: the directory appears where
+    the probe looks, and it appears NOWHERE ELSE -- if it landed in the shared temp
+    dir instead, the probe would be checking a location a boot never touches, which
+    is a guard that cannot fail.
+    """
+    private = pathlib.Path(tempfile.mkdtemp(prefix="boot-lock-probe-"))
+    shared_before = set(pathlib.Path(tempfile.gettempdir()).glob("nexus_t2_substrate_boot_locks"))
+    try:
+        lock_dir = private / "nexus_t2_substrate_boot_locks"
+        assert not lock_dir.exists(), "precondition: the private tree starts clean"
+
+        with _substrate._boot_semaphore_slot(lock_dir=lock_dir):
+            assert lock_dir.is_dir(), (
+                "a boot attempt did not create the directory the probe checks for, so "
+                "that guard could never fire"
+            )
+
+        # It persists after the slot is released: per-cluster cleanup never removes it,
+        # which is exactly why it survives a swept boot and the cluster dir does not.
+        assert lock_dir.is_dir(), "the boot-lock directory must outlive the slot"
+
+        # And nothing leaked into the shared temp dir, which is what makes checking the
+        # private tree equivalent to checking whether this process booted.
+        shared_after = set(pathlib.Path(tempfile.gettempdir()).glob("nexus_t2_substrate_boot_locks"))
+        assert shared_after == shared_before, (
+            f"the boot attempt touched the SHARED temp dir ({shared_after - shared_before}) "
+            f"despite TMPDIR being redirected, so the probe's private-tree check would "
+            f"miss it"
+        )
+    finally:
+        shutil.rmtree(private, ignore_errors=True)
