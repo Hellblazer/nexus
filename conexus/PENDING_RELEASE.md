@@ -30,6 +30,18 @@ mechanize, it matters enough to ship.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.42.0)
+## Awaiting the next release or plugin cut (pinned: v7.43.0)
 
-(none)
+- `conexus/hooks/hooks.json` — gains a `UserPromptSubmit` block, an event this
+  file has never carried. It runs the mailbox drain hook below on every prompt.
+  Until a release or plugin cut advances the pin, no running session fires it,
+  so RDR-205 mailbox mail is still delivered only by an explicit `nx tuple rd`
+  or by a `nx tuple watch` ping that a model chose to act on. Bead
+  nexus-6konb.7 (MM-2.2).
+- `conexus/hooks/scripts/mailbox_drain.py` — new. The deterministic consumer of
+  record for RDR-205 mailbox delivery: a zero-timeout `rd` on this session's
+  addresses, then `in` + `ack` per row, then render as injected context. The
+  Phase 1 watcher pings and never claims; this claims and consumes. Inert until
+  the pin advances, and the floor the epic's design rests on does not exist
+  until it is live — a session today loses mail the watcher pinged but nobody
+  drained. Bead nexus-6konb.7 (MM-2.2).

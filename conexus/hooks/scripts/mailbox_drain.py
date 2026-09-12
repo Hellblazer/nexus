@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""UserPromptSubmit hook: drain this session's RDR-205 mailboxes and inject
+what it finds (bead nexus-6konb.7, MM-2.2; design bead nexus-73vnw).
+
+THE CONSUMER OF RECORD. Epic nexus-6konb delivers mailbox push in two
+disjoint halves and this is the deterministic one. ``nx tuple watch``
+(Phase 1) PINGS: it probes with a zero-timeout ``rd``, emits one line
+naming the address, sender and tuple id, carries no body, and NEVER
+claims. This hook CLAIMS, ACKS and RENDERS. They are never two renderers
+of one row -- the watcher tells a session that mail exists, this hook is
+what delivers and consumes it.
+
+That split is what makes a lost ping harmless for live mail: the row sits
+in the mailbox for its full retention window and this hook drains it at
+the receiver's next prompt whether or not any watcher was ever armed.
+Arming a Monitor is a request a model can decline or forget; this hook
+fires on every prompt. So the watcher buys LATENCY and this hook is the
+FLOOR.
+
+WHERE THE FLOOR DOES NOT REACH, stated here because a reader of the
+paragraph above would otherwise assume it is universal:
+
+* A DEAD-LETTERED row is unclaimable by construction, so claim-and-ack
+  cannot be its dedup and this hook cannot consume it. It is still
+  surfaced ONCE, from a local seen-file, because the alternative is that
+  a session with no watcher armed never learns the message existed at
+  all. Purging it is a human act; this hook only says it is there.
+* An INSTANCE-NAME address (the ``ListAgents`` row, e.g. ``nexus-19``) is
+  drained only once something has REGISTERED it, because it exists in no
+  environment variable anywhere -- MM-1.3 established that, which is why
+  ``nx tuple watch`` takes it as an explicit ``--instance`` literal. The
+  registry is ``<config>/tuple-watch/addresses``, one address per line;
+  arming writes to it, and so can a human. Until an address is in there,
+  mail sent to it has no floor. The session id needs no registration: it
+  arrives in this hook's own payload.
+
+CONTRACT WITH THE PROMPT. stdout is injected context, so an empty mailbox
+prints NOTHING and costs an idle prompt nothing. Every failure -- an
+unresolvable endpoint, a slow engine, a malformed payload -- prints one
+``SKIP`` line on stderr and exits 0. This hook must never block a prompt
+and must never turn a transport problem into injected noise.
+
+ORDER, and why it is not rd-then-render. A row is rendered only after its
+``ack`` has succeeded: ``rd`` to see what is there, then ``in`` to claim,
+then ``ack`` to consume, then render. Rendering anything ``rd`` merely
+saw would tell the session it received mail that a peer claimed in the
+meantime, or that is still sitting claimed-but-unconsumed and will return
+to the mailbox when the lease lapses. That is the same read-then-write
+hazard RDR-206 Step 1 closed inside the engine, appearing here between
+two HTTP calls where no transaction can close it -- so the fix is to
+trust only what ``ack`` confirmed.
+
+Stdlib only, no ``nexus`` import, endpoint through the shared
+``_endpoint_resolve`` sibling (nexus-aginu): the same constraints the
+``tuple_ledger_project.py`` hook runs under, for the same reason -- a
+hook runs on boxes where the client package may be mid-upgrade.
+"""
+from __future__ import annotations
+
+import json
+import sys
+import threading
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _endpoint_resolve as _ep  # noqa: E402
+
+#: Whole-call wall-clock bound per HTTP call. A prompt is waiting on this
+#: hook, so the ceiling is tight: a healthy engine answers a zero-timeout
+#: probe in milliseconds, and anything slower is not worth a prompt's
+#: latency. Enforced on the WHOLE call rather than passed to urlopen,
+#: whose own timeout is per-socket-operation and is reset by every recv
+#: -- an engine trickling bytes would otherwise hold the prompt open far
+#: past this (the nexus-em75s.42 finding, same fix as the sibling hook).
+_CALL_TIMEOUT_S = 3.0
+
+#: Bound on the whole drain, across every address and every row. Past
+#: this the hook stops and injects what it has already consumed: a row
+#: already acked must still be rendered, or it is lost.
+_TOTAL_BUDGET_S = 8.0
+
+#: Rows fetched per probe. The engine caps a read at 300; a prompt-time
+#: drain wants far less, since anything beyond a handful is a backlog the
+#: reader cannot absorb in one turn anyway and the rest keeps for the
+#: next prompt.
+_PROBE_N = 20
+
+#: Live rows consumed per prompt, for the same reason.
+_MAX_DELIVER = 10
+
+_TENANT = _ep.DEFAULT_TENANT
+_SAFE_ADDRESS_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-."
+)
+
+
+class _Skip(Exception):
+    """Any resolution or transport failure. Caught once in main(), printed as
+    one SKIP line on stderr, exit 0. A hook that cannot reach the engine is
+    not an error the prompt should ever see."""
+
+
+def _log_skip(reason: str) -> None:
+    print(f"[mailbox-drain] SKIP: {reason}", file=sys.stderr)  # noqa: T201 — stderr is this hook's only diagnostic surface
+
+
+def _valid_address(address: str) -> bool:
+    """Path-safe and subspace-safe. An address becomes both a subspace name on
+    the wire and a filename in the seen-store, so a traversal-bearing or
+    otherwise odd one is dropped rather than sanitised -- silently repairing a
+    bad address would drain the wrong mailbox."""
+    return bool(address) and len(address) <= 128 and all(
+        c in _SAFE_ADDRESS_CHARS for c in address
+    )
+
+
+def _config_dir() -> Path:
+    return _ep.default_config_dir()
+
+
+def _registry_path(config_dir: Path) -> Path:
+    return config_dir / "tuple-watch" / "addresses"
+
+
+def _seen_path(config_dir: Path, address: str) -> Path:
+    return config_dir / "tuple-watch" / f"{address}.drained.json"
+
+
+def _read_registry(config_dir: Path) -> list[str]:
+    """Addresses registered by arming or by hand, one per line. Blank lines and
+    ``#`` comments are ignored; anything unsafe is dropped. A missing or
+    unreadable file is simply an empty registry -- never a failure, since the
+    session-id address does not depend on it."""
+    try:
+        raw = _registry_path(config_dir).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return []
+    out: list[str] = []
+    for line in raw.splitlines():
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        if _valid_address(entry):
+            out.append(entry)
+    return out
+
+
+def _read_seen(config_dir: Path, address: str) -> set[str]:
+    try:
+        data = json.loads(_seen_path(config_dir, address).read_text(encoding="utf-8"))
+        return {str(x) for x in data.get("dead_surfaced", [])}
+    except (OSError, ValueError, AttributeError):
+        return set()
+
+
+def _write_seen(config_dir: Path, address: str, dead_surfaced: set[str]) -> None:
+    """Best-effort. Losing this file re-surfaces a dead row once more, which is
+    noise; failing the drain over it would lose live mail, which is worse."""
+    path = _seen_path(config_dir, address)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps({"dead_surfaced": sorted(dead_surfaced)}), encoding="utf-8",
+        )
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def _post(base_url: str, token: str, route: str, body: dict[str, Any],
+          *, is_local: bool) -> dict[str, Any] | None:
+    """POST and return the decoded body, or None when the engine answered a
+    non-2xx. Raises :class:`_Skip` on a transport failure. Bounds the whole
+    call, not each socket operation."""
+    payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
+    url = f"{base_url}{route}"
+    req = urllib.request.Request(
+        url, data=payload, method="POST",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    outcome: dict[str, Any] = {}
+
+    def _do() -> None:
+        try:
+            handlers: list[urllib.request.BaseHandler] = []
+            if is_local:
+                handlers.append(urllib.request.ProxyHandler({}))
+            opener = urllib.request.build_opener(*handlers)
+            with opener.open(req, timeout=_CALL_TIMEOUT_S) as resp:  # noqa: S310 — fixed engine URL
+                outcome["body"] = json.loads(resp.read().decode("utf-8") or "{}")
+        except urllib.error.HTTPError:
+            outcome["body"] = None
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_do, daemon=True)
+    thread.start()
+    thread.join(timeout=_CALL_TIMEOUT_S)
+    if thread.is_alive():
+        raise _Skip(f"{route} exceeded the {_CALL_TIMEOUT_S}s deadline; the prompt is not waiting for it")
+    if "error" in outcome:
+        raise _Skip(f"transport failure on {route}: {outcome['error']}")
+    return outcome.get("body")
+
+
+def _render_live(address: str, row: dict[str, Any]) -> str:
+    dims = row.get("dims") or {}
+    sender = dims.get("from", "?")
+    kind = dims.get("kind") or "note"
+    corr = dims.get("correlation_id") or "-"
+    body = row.get("body")
+    body_text = body if body else "(no body)"
+    return (
+        f"- from={sender} kind={kind} correlation_id={corr} "
+        f"address=mailbox/{address} tuple_id={row.get('id', '?')}\n"
+        f"  {body_text}"
+    )
+
+
+def _render_dead(address: str, row: dict[str, Any]) -> str:
+    dims = row.get("dims") or {}
+    return (
+        f"- UNDELIVERABLE at mailbox/{address} tuple_id={row.get('id', '?')} "
+        f"from={dims.get('from', '?')} attempts={row.get('attempts', '?')}: this row is "
+        f"dead-lettered and can never be claimed, so nothing will deliver it. "
+        f"Reported once. Purge it with `nx tuple stats mailbox/{address}` and the "
+        f"engine's sweep, or ask the sender to resend."
+    )
+
+
+def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
+                   config_dir: Path, deadline: float) -> list[str]:
+    """Probe one address, consume what it can, and return rendered blocks."""
+    import time  # noqa: PLC0415 — deferred: only this path needs a clock
+
+    probe = _post(base_url, token, "/v1/tuples/rd", {
+        "subspace": f"mailbox/{address}",
+        "keys_pattern": {"to": address},
+        "n": _PROBE_N,
+    }, is_local=is_local)
+    rows = (probe or {}).get("tuples") or []
+    if not rows:
+        return []
+
+    blocks: list[str] = []
+
+    dead_rows = [r for r in rows if r.get("claim_state") == "dead"]
+    if dead_rows:
+        seen = _read_seen(config_dir, address)
+        fresh = [r for r in dead_rows if str(r.get("id")) not in seen]
+        for row in fresh:
+            blocks.append(_render_dead(address, row))
+            seen.add(str(row.get("id")))
+        if fresh:
+            # Keep only ids still present, so the file cannot grow forever.
+            present = {str(r.get("id")) for r in dead_rows}
+            _write_seen(config_dir, address, seen & present)
+
+    live_count = sum(1 for r in rows if r.get("claim_state") != "dead")
+    for _ in range(min(live_count, _MAX_DELIVER)):
+        if time.monotonic() >= deadline:
+            break
+        claim = _post(base_url, token, "/v1/tuples/in", {
+            "subspace": f"mailbox/{address}",
+            "keys_pattern": {"to": address},
+            "claimant": f"mailbox-drain-{address}",
+            "lease_s": 30,
+        }, is_local=is_local)
+        if not claim or not claim.get("claim_id"):
+            break  # a peer took it between rd and in, or the queue emptied
+        acked = _post(base_url, token, "/v1/tuples/ack", {
+            "claim_id": claim["claim_id"],
+            "claimant": f"mailbox-drain-{address}",
+        }, is_local=is_local)
+        if acked is None:
+            # Claimed but not consumed: the lease lapses and the row returns.
+            # Rendering it now would deliver it twice.
+            break
+        row = claim.get("tuple") or {}
+        blocks.append(_render_live(address, row))
+    return blocks
+
+
+def main() -> int:
+    import time  # noqa: PLC0415 — deferred: only main needs a clock
+
+    try:
+        raw = sys.stdin.read()
+    except (OSError, ValueError):
+        raw = ""
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except (json.JSONDecodeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    session_id = str(payload.get("session_id") or "").strip()
+
+    config_dir = _config_dir()
+    addresses: list[str] = []
+    if _valid_address(session_id):
+        addresses.append(session_id)
+    addresses.extend(_read_registry(config_dir))
+    # First-occurrence dedup: a registry naming this session's own id must not
+    # make the hook drain it twice and render the same row in two blocks.
+    addresses = list(dict.fromkeys(addresses))
+    if not addresses:
+        _log_skip("no address to drain: the payload carried no usable session id "
+                  "and the address registry is empty")
+        return 0
+
+    try:
+        base_url, token, is_local = _ep.resolve_endpoint_and_token(
+            config_dir, tenant=_TENANT,
+        )
+    except _ep.EndpointUnresolvable as exc:
+        _log_skip(f"no reachable tuple space: {exc}")
+        return 0
+
+    deadline = time.monotonic() + _TOTAL_BUDGET_S
+    blocks: list[str] = []
+    try:
+        for address in addresses:
+            if time.monotonic() >= deadline:
+                _log_skip(f"drain budget of {_TOTAL_BUDGET_S}s spent before reaching "
+                          f"mailbox/{address}; it keeps until the next prompt")
+                break
+            blocks.extend(_drain_address(
+                base_url, token, address, is_local=is_local,
+                config_dir=config_dir, deadline=deadline,
+            ))
+    except _Skip as exc:
+        # Anything already acked is already consumed and MUST still be
+        # rendered, or it is lost: the engine will never hand it back.
+        _log_skip(str(exc))
+
+    if blocks:
+        # stdout IS the product: a UserPromptSubmit hook's stdout becomes the
+        # injected context. These are not diagnostics.
+        print("## Mailbox (RDR-205): delivered at this prompt\n")  # noqa: T201
+        print("\n".join(blocks))  # noqa: T201
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
