@@ -367,15 +367,21 @@ class TestTupleWatch:
 
         lines, reports, clock = [], [], _Clock()
         stats = _run(store, cfg, sd, addr, clock, 1, lines, reports)
-        assert len(lines) == 1
-        assert fresh_id in lines[0]
-        assert dead_id not in lines[0]
+        pings = [line for line in lines if "new mail" in line]
+        assert len(pings) == 1
+        assert fresh_id in pings[0]
+        assert dead_id not in pings[0]
         assert stats.dead_seen == 1
-        assert any(dead_id in r for r in reports)
-        # the dead row is reported once, not once per cycle
+        # The watcher never saw this row alive, so its death is news of mail that will
+        # never be delivered: it belongs on the stream the Monitor reads, not stderr.
+        dead_lines = [line for line in lines if dead_id in line]
+        assert len(dead_lines) == 1
+        assert "never be claimed" in dead_lines[0]
+        assert not [r for r in reports if dead_id in r]
+        # reported once, not once per cycle (the re-emit window has not elapsed)
         clock.advance(cfg.interval_s)
         _run(store, cfg, sd, addr, clock, 2, lines, reports)
-        assert sum(dead_id in r for r in reports) == 1
+        assert sum(dead_id in line for line in lines) == 1
 
     def test_cli_wiring_emits_ping_and_exits_zero(self, t2_service_env, tmp_path) -> None:
         store, _cfg, sd = _watch_env(tmp_path)
@@ -414,9 +420,13 @@ class TestTupleWatch:
         # visibility rule exists to kill. Recovery stays on stderr. No PING is emitted.
         assert not [line for line in lines if "new mail" in line]
         failed = [line for line in lines if "probe failed" in line]
-        recovered = [r for r in reports if "probe recovered" in r]
+        recovered = [line for line in lines if "probe recovered" in line]
         assert len(failed) == 1 and "engine unreachable" in failed[0]
+        # the recovery line shares the outage line's stream: the outage line claims a
+        # CONTINUING condition, so a reader who cannot see the end of it is left
+        # inferring recovery from silence
         assert len(recovered) == 1
+        assert not [r for r in reports if "probe recovered" in r]
 
     def test_sustained_flood_collapses_to_one_line_per_cycle(self, t2_service_env, tmp_path) -> None:
         store, cfg, sd = _watch_env(tmp_path)
@@ -486,15 +496,9 @@ class _Boom(Exception):
 
 class TestTupleWatchPreflight:
     def test_unreachable_engine_reports_one_skip_line_and_never_loops(self, tmp_path) -> None:
-        probes = []
-
         class _Down:
             def registry(self):
                 raise _Boom("connection refused")
-
-            def rd(self, *a, **kw):
-                probes.append(1)
-                return []
 
         lines, reports = [], []
         result = preflight(_Down(), ["addr-a"], config=WatchConfig(), emit=lines.append)
@@ -503,7 +507,6 @@ class TestTupleWatchPreflight:
         assert len(lines) == 1
         assert "SKIP" in lines[0]
         assert "connection refused" in lines[0]
-        assert probes == []
 
     def test_unreadable_mailbox_is_a_skip_naming_the_address(self, tmp_path) -> None:
         """The PER-ADDRESS branch: the registry answers, the mailbox does not."""
@@ -637,8 +640,10 @@ class TestTupleWatchLock:
     ) -> None:
         addr = _uniq("addr")
         monkeypatch.setenv("NX_SESSION_ID", "session-one")
-        first = acquire_watch_locks([addr], state_dir=tmp_path)
+        held_lines: list[str] = []
+        first = acquire_watch_locks([addr], state_dir=tmp_path, emit=held_lines.append)
         assert first.ok is True
+        assert held_lines == []
         try:
             # A DIFFERENT session id: a per-session lock would let this through,
             # which is exactly the /clear case the machine-wide scope exists for.
@@ -654,8 +659,10 @@ class TestTupleWatchLock:
 
     def test_lock_released_by_a_dead_holder_is_acquired_not_refused(self, tmp_path) -> None:
         addr = _uniq("addr")
-        first = acquire_watch_locks([addr], state_dir=tmp_path)
+        held_lines: list[str] = []
+        first = acquire_watch_locks([addr], state_dir=tmp_path, emit=held_lines.append)
         assert first.ok is True
+        assert held_lines == []
         first.release()  # what a dying process's OS-released flock leaves behind
         lines = []
         second = acquire_watch_locks([addr], state_dir=tmp_path, emit=lines.append)
@@ -675,21 +682,21 @@ class TestTupleWatchLock:
 
     def test_refusing_one_address_releases_the_ones_already_taken(self, tmp_path) -> None:
         free, taken = _uniq("free"), _uniq("taken")
-        holder = acquire_watch_locks([taken], state_dir=tmp_path)
+        holder = acquire_watch_locks([taken], state_dir=tmp_path, emit=lambda _s: None)
         assert holder.ok is True
         try:
             second = acquire_watch_locks([free, taken], state_dir=tmp_path, emit=lambda _s: None)
             assert second.ok is False
             assert second.refused_address == taken
             # the partial acquisition must not linger: a third watcher gets `free`
-            third = acquire_watch_locks([free], state_dir=tmp_path)
+            third = acquire_watch_locks([free], state_dir=tmp_path, emit=lambda _s: None)
             assert third.ok is True
             third.release()
         finally:
             holder.release()
 
 
-class TestTupleWatchAddressResolution:
+class TestWatchAddressIsNeverReResolved:
     def test_the_watched_address_never_re_resolves_mid_run(self, t2_service_env, tmp_path,
                                                            monkeypatch) -> None:
         store, cfg, sd = _watch_env(tmp_path)
@@ -743,7 +750,7 @@ class TestTupleWatchCliGuards:
         addr = _uniq("addr")
         _out(store, addr, sender="alice")
         monkeypatch.setenv("NX_SESSION_ID", "holder-session")
-        holder = acquire_watch_locks([addr], state_dir=sd)
+        holder = acquire_watch_locks([addr], state_dir=sd, emit=lambda _s: None)
         assert holder.ok is True
         try:
             monkeypatch.setenv("NX_SESSION_ID", "second-session")
@@ -854,7 +861,12 @@ class TestWatchTwoAddresses:
             _Recording(store), [a, b], config=cfg, state_dir=sd, iterations=3,
             emit=lines.append, report=reports.append, now=clock.now, sleep=lambda _s: None,
         )
-        assert probed == [f"mailbox/{a}", f"mailbox/{b}"] * 3
+        # both every cycle, and the order rotates so a flood on one cannot starve the other
+        assert len(probed) == 6
+        assert set(probed[0:2]) == set(probed[2:4]) == set(probed[4:6]) == {
+            f"mailbox/{a}", f"mailbox/{b}",
+        }
+        assert probed[0] == probed[4] != probed[2]
 
     def test_a_hit_on_either_address_names_which_one_it_arrived_at(
         self, t2_service_env, tmp_path,
@@ -1041,3 +1053,146 @@ class TestWatchTwoAddressesCli:
         assert len(pings) == 1, res.output
         assert tid in pings[0]
         assert not [line for line in res.output.splitlines() if "WARNING" in line]
+
+
+# ── Phase 1 review fixes (MM-1.4, nexus-6konb.5) ──────────────────────────
+
+
+class TestDeadLetterReachesTheWatchedStream:
+    """The critical the phase review found: a row dead-lettered before the watcher
+    ever saw it alive is mail that will never be delivered, and the session had
+    heard nothing about it. It must reach stdout and it must heal like a live row."""
+
+    def _dead_row(self, store, addr):
+        sub = f"mailbox/{addr}"
+        tid = _out(store, addr, sender="poison")
+        for _ in range(3):  # mailbox.yaml max_attempts=3
+            claimant = _uniq("c")
+            claimed = store.in_(sub, {"to": addr}, claimant=claimant, lease_s=30)
+            assert claimed is not None
+            store.nack(claimed[1], claimant)
+        return tid
+
+    def test_first_sight_dead_goes_to_stdout_not_stderr(self, t2_service_env, tmp_path) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        addr = _uniq("addr")
+        dead_id = self._dead_row(store, addr)
+        lines, reports, clock = [], [], _Clock()
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert [line for line in lines if dead_id in line]
+        assert not [r for r in reports if dead_id in r]
+
+    def test_a_lost_first_sight_notice_heals_on_the_re_emit_window(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        """Unlike every other notice this module emits, the old dead-letter report had
+        no retry: one stderr line, a write-once set, and nothing if it was missed."""
+        store, cfg, sd = _watch_env(tmp_path)
+        addr = _uniq("addr")
+        dead_id = self._dead_row(store, addr)
+        lines, reports, clock = [], [], _Clock()
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert len([line for line in lines if dead_id in line]) == 1
+        clock.advance(cfg.reemit_after_s + 1)
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert len([line for line in lines if dead_id in line]) == 2
+        # and it is capped like a live row rather than repeating forever
+        for _ in range(4):
+            clock.advance(cfg.reemit_after_s + 1)
+            _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert len([line for line in lines if dead_id in line]) == cfg.max_emits
+
+    def test_a_row_pinged_while_alive_reports_its_death_on_stderr(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        """The other half of the rule: the session already knows this message exists,
+        so its death is a status update, not news of mail it never heard about."""
+        store, cfg, sd = _watch_env(tmp_path)
+        addr = _uniq("addr")
+        sub = f"mailbox/{addr}"
+        tid = _out(store, addr, sender="alice")
+        lines, reports, clock = [], [], _Clock()
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert len([line for line in lines if tid in line]) == 1  # pinged while alive
+        for _ in range(3):
+            claimant = _uniq("c")
+            claimed = store.in_(sub, {"to": addr}, claimant=claimant, lease_s=30)
+            assert claimed is not None
+            store.nack(claimed[1], claimant)
+        clock.advance(cfg.interval_s)
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert len([line for line in lines if tid in line]) == 1  # no new stdout line
+        assert [r for r in reports if tid in r and "never be claimed" in r]
+
+
+class TestWatchFairnessAcrossAddresses:
+    """The phase review raised starvation of the second address under a sustained
+    asymmetric flood. It does not occur under the current constants, and this pins
+    the invariant that prevents it rather than the rotation that merely insures it:
+    one address can take at most max_lines_per_cycle + 1 of budget_lines, so the
+    other always has room, and once the window saturates both coalesce equally."""
+
+    def test_a_sustained_flood_on_one_address_never_starves_the_other_of_detail(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        loud, quiet = _uniq("loud"), _uniq("quiet")
+        lines, reports, clock = [], [], _Clock()
+
+        class _Flooding:
+            def __init__(self, inner) -> None:
+                self.inner = inner
+
+            def rd(self, subspace, *args, **kw):
+                if subspace == f"mailbox/{loud}":
+                    for i in range(8):
+                        _out(self.inner, loud, sender=f"loud{i}")
+                else:
+                    _out(self.inner, quiet, sender="quiet-sender")
+                return self.inner.rd(subspace, *args, **kw)
+
+        # The window must actually clear between cycles, or every address coalesces and
+        # the test proves nothing about fairness between them.
+        run_watch(
+            _Flooding(store), [loud, quiet], config=cfg, state_dir=sd, iterations=4,
+            emit=lines.append, report=reports.append, now=clock.now,
+            sleep=lambda _s: clock.advance(cfg.budget_window_s + 1),
+        )
+        # Detail means a NAMED SENDER: the coalesced budget line carries the address too,
+        # so matching on the address alone is satisfied by the starvation being tested for.
+        named = [line for line in lines if "from=quiet-sender" in line]
+        assert len(named) >= 2, (
+            f"the quiet address was named in detail on only {len(named)} cycles; "
+            f"one address must never be able to consume the whole budget"
+        )
+
+    def test_one_address_cannot_consume_the_whole_shared_budget(self) -> None:
+        """The arithmetic the test above depends on, pinned directly so a change to
+        either constant fails here and names the reason."""
+        cfg = WatchConfig()
+        most_one_address_can_take = cfg.max_lines_per_cycle + 1  # head lines + coalesced tail
+        assert most_one_address_can_take < cfg.budget_lines, (
+            "one address can now take the entire emit budget in a single cycle, so a "
+            "sustained flood on it would leave every other address permanently coalesced"
+        )
+
+
+class TestWatcherExitAlwaysSpeaks:
+    def test_an_unexpected_failure_says_so_on_stdout_before_exiting(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """A watcher that dies silently is the most complete form of the thing the
+        stream rule exists to prevent, and the shared CLI error helper writes to
+        stderr."""
+        def _explode(*_a, **_kw):
+            raise RuntimeError("resolver blew up")
+
+        monkeypatch.setattr("nexus.tuple_watch.preflight", _explode)
+        res = _invoke([
+            "watch", _uniq("addr"), "--iterations", "1", "--interval", "0",
+            "--state-dir", str(tmp_path),
+        ])
+        assert res.exit_code == 1
+        stdout_lines = [line for line in res.output.splitlines() if "the watcher is exiting" in line]
+        assert len(stdout_lines) == 1, res.output
+        assert "resolver blew up" in stdout_lines[0]

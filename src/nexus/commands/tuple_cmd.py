@@ -56,7 +56,7 @@ def _print_tuple_error(e: Exception) -> None:
 
 @click.group(name="tuple")
 def tuple_group() -> None:
-    """RDR-205 Linda tuple space: out / rd / in / ack / nack / templates / list / stats."""
+    """RDR-205 Linda tuple space: out / rd / in / ack / nack / templates / list / stats / watch."""
 
 
 @tuple_group.command(name="out")
@@ -276,9 +276,13 @@ def tuple_watch_cmd(
 ) -> None:
     """Watch mailbox/ADDRESS... and print one ping line per newly arrived tuple.
 
-    With no ADDRESS, watches this session's own two mailboxes: the session id,
-    resolved from this process's environment, and the instance name given by
-    --instance. Both are probed by this one process, never by two Monitors.
+    An explicit ADDRESS wins outright: it suppresses every default and watches
+    exactly what you named. With no ADDRESS, watches the session id, read from
+    this process's own environment, and adds the instance mailbox only when
+    --instance supplies that name, since it is in no environment variable. So the
+    no-flag default is ONE mailbox and it says so; omitting --instance warns
+    rather than silently halving the watch. When both are watched, this one
+    process probes them, never two Monitors.
 
     Built to be a Claude Code Monitor source: prints nothing on an empty probe,
     never claims, never prints a body. Re-pings a still-present tuple after
@@ -289,6 +293,7 @@ def tuple_watch_cmd(
     from nexus import config as _config  # noqa: PLC0415 — deferred: CLI startup cost
     from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred
     from nexus.tuple_watch import (  # noqa: PLC0415 — deferred: CLI startup cost
+        PING_PREFIX,
         WatchConfig,
         acquire_watch_locks,
         preflight,
@@ -316,13 +321,21 @@ def tuple_watch_cmd(
         click.echo(notice)
     watched = resolved.addresses
 
-    store = _store()
-    if not preflight(store, watched, config=cfg, emit=click.echo).ok:
-        return
-    locks = acquire_watch_locks(watched, state_dir=sd, emit=click.echo)
-    if not locks.ok:
-        return
+    # EVERY path out of this command says so on stdout before it goes. The shared
+    # one-shot-command error helper writes to stderr, which is right for `nx tuple rd`
+    # and wrong here: this command's whole contract is that a session watching stdout
+    # learns when mail is not being delivered, and the watcher dying is the most
+    # complete form of that. So the setup calls are inside the guard too -- a bug in
+    # preflight or the lock acquisition itself would otherwise reach Click's default
+    # handler as a bare traceback on stderr, with no stdout line at all.
+    locks = None
     try:
+        store = _store()
+        if not preflight(store, watched, config=cfg, emit=click.echo).ok:
+            return
+        locks = acquire_watch_locks(watched, state_dir=sd, emit=click.echo)
+        if not locks.ok:
+            return
         run_watch(
             store, watched, config=cfg, state_dir=sd,
             iterations=iterations, emit=click.echo, report=report,
@@ -330,10 +343,15 @@ def tuple_watch_cmd(
     except KeyboardInterrupt:
         return
     except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
+        click.echo(
+            f"{PING_PREFIX} the watcher is exiting and no mailbox is being watched:"
+            f" {type(e).__name__}: {e}",
+        )
         _print_tuple_error(e)
         raise SystemExit(1) from e
     finally:
-        locks.release()
+        if locks is not None:
+            locks.release()
 
 
 def _row_dict(row: Any) -> dict[str, Any]:

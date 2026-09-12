@@ -37,11 +37,14 @@ much as what is.
   and a recovery line on stderr. Silence is not success: an engine that dies
   mid-run says so. The rate limit is what keeps a sustained outage under the
   measured auto-stop budget.
-  Dead-letter notices and the recovery line stay on stderr: they are
-  informational, not an outage, so nothing is lost if the Monitor does not watch
-  that stream. Whether it does is still unmeasured, and deliberately does not
-  matter for any line that reports the watcher is not delivering mail -- every
-  one of those is on stdout.
+  A dead-lettered row the watcher NEVER saw alive goes to stdout and is healed by
+  the same re-emit window as a live row: it is mail that will never be delivered
+  and the session has heard nothing about it, which is the strongest form of the
+  thing this stream rule protects. A row that was pinged while alive and later
+  died stays on stderr, because its death is a status update on a message the
+  session already knows about. Whether the Monitor merges stderr is still
+  unmeasured, and deliberately does not matter: every line saying the watcher is
+  not delivering something is on stdout.
 - Holds one flock per watched address (:func:`acquire_watch_locks`), scoped
   machine-wide by ADDRESS, not by session: a ``/clear`` changes the session id,
   so a per-session lock would miss the double-arm it exists to catch. A second
@@ -120,6 +123,17 @@ class _Seen:
 class _AddressState:
     seen: dict[str, _Seen] = field(default_factory=dict)
     dead_reported: set[str] = field(default_factory=set)
+
+
+def _unique_addresses(addresses: Iterable[str]) -> list[str]:
+    """First-occurrence-order dedup, shared by every address-taking entry point.
+
+    A repeated address must collapse to one everywhere: ``acquire_watch_locks`` would
+    otherwise take its own lock and then refuse itself on the second pass, and the
+    probe loop would emit two pings for one row. Four independent copies of this
+    one-liner across three beads was three chances for one of them to drift.
+    """
+    return [a for a in dict.fromkeys(addresses) if a]
 
 
 def state_path(state_dir: Path, address: str) -> Path:
@@ -252,7 +266,7 @@ def resolve_watch_addresses(
     instance is added when given, and its ABSENCE is said out loud rather than
     silently halving the watch. Nothing to watch at all is a SKIP, not a warning.
     """
-    explicit_list = [a for a in dict.fromkeys(explicit) if a]
+    explicit_list = _unique_addresses(explicit)
     if explicit_list:
         return ResolvedAddresses(addresses=explicit_list)
 
@@ -262,7 +276,7 @@ def resolve_watch_addresses(
         addresses.append(session_id)
     if instance:
         addresses.append(instance)
-    addresses = list(dict.fromkeys(addresses))
+    addresses = _unique_addresses(addresses)
 
     if not addresses:
         return ResolvedAddresses(
@@ -343,7 +357,7 @@ def preflight(
         )
         return PreflightResult(ok=False, detail=detail)
 
-    for address in dict.fromkeys(addresses):
+    for address in _unique_addresses(addresses):
         subspace = f"mailbox/{address}"
         try:
             census = store.subspace_stats(subspace)
@@ -395,7 +409,7 @@ def acquire_watch_locks(
     addresses: Iterable[str],
     *,
     state_dir: Path,
-    emit: Callable[[str], None] = lambda _s: None,
+    emit: Callable[[str], None],
 ) -> WatchLocks:
     """Take one exclusive advisory lock per address, machine-wide.
 
@@ -411,9 +425,7 @@ def acquire_watch_locks(
 
     locks = WatchLocks(ok=True)
     session_id = resolve_active_session_id() or "unknown-session"
-    # Deduplicated, as run_watch's own address list is: a repeated address would
-    # otherwise take its own lock and then refuse itself on the second pass.
-    for address in dict.fromkeys(addresses):
+    for address in _unique_addresses(addresses):
         path = lock_path(state_dir, address)
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = path.open("a+", encoding="utf-8")
@@ -461,10 +473,33 @@ def _probe_once(
             if row.id not in st.dead_reported:
                 st.dead_reported.add(row.id)
                 stats.dead_seen += 1
-                report(
-                    f"{PING_PREFIX} dead-lettered row at mailbox/{address} tuple_id={row.id}"
-                    f" (attempts={row.attempts}); not deliverable, reported once.",
+                line = (
+                    f"{PING_PREFIX} dead-lettered mail at mailbox/{address} tuple_id={row.id}"
+                    f" (attempts={row.attempts}); it can never be claimed, so it will not be"
+                    f" delivered."
                 )
+                if row.id in st.seen:
+                    # Already pinged while it was alive: the session knows this message
+                    # exists, so its death is a status update, not news of lost mail.
+                    report(line)
+                else:
+                    # NEVER seen alive -- the watcher's first sight of it is already dead.
+                    # This is undeliverable mail the session has heard nothing about, which
+                    # is the strongest form of "the watcher is not delivering something",
+                    # so it goes to the stream the Monitor reads. Recorded in `seen` as an
+                    # emission so the re-emit window heals a lost notice exactly as it does
+                    # for a live row, rather than this being the one report with no retry.
+                    emitter.emit_error(line, t)
+                    st.seen[row.id] = _Seen(last_emit=t, count=1)
+            elif (seen := st.seen.get(row.id)) is not None and seen.count < config.max_emits \
+                    and t - seen.last_emit >= config.reemit_after_s:
+                # Heal a dropped dead-letter notice on the same window and cap as a live row.
+                emitter.emit_error(
+                    f"{PING_PREFIX} dead-lettered mail still at mailbox/{address}"
+                    f" tuple_id={row.id}; it can never be claimed.",
+                    t,
+                )
+                st.seen[row.id] = _Seen(last_emit=t, count=seen.count + 1)
             present.add(row.id)
             continue
         present.add(row.id)
@@ -506,7 +541,7 @@ def run_watch(
     """Probe every address once per ``config.interval_s``; ``iterations=0``
     runs until interrupted. State is reloaded from disk on every cycle so a
     deleted file re-pings and never crashes the loop."""
-    addrs = list(dict.fromkeys(addresses))
+    addrs = _unique_addresses(addresses)
     if not addrs:
         raise ValueError("at least one address is required")
     stats = WatchStats()
@@ -514,7 +549,16 @@ def run_watch(
     failing: dict[str, tuple[str, float]] = {}  # address -> (error text, last reported at)
     while iterations <= 0 or stats.cycles < iterations:
         t = now()
-        for address in addrs:
+        # Rotate which address goes first each cycle. This does NOT fix an observed
+        # starvation: with the current constants one address can take at most
+        # max_lines_per_cycle + 1 = 6 of the 8-line budget, so the second always has room
+        # for a detailed ping when the window is clear, and when the window is saturated
+        # both addresses take the one-line coalesced path equally. What rotation removes
+        # is the latent dependence on that arithmetic -- raise max_lines_per_cycle or
+        # lower budget_lines and a fixed order would let the head address eat the budget
+        # every cycle, leaving the tail permanently coalesced. Cheap insurance, not a fix.
+        offset = stats.cycles % len(addrs)
+        for address in addrs[offset:] + addrs[:offset]:
             path = state_path(state_dir, address)
             try:
                 st = _load_state(path)
@@ -554,7 +598,12 @@ def run_watch(
                 continue
             if address in failing:
                 del failing[address]
-                report(f"{PING_PREFIX} probe recovered for mailbox/{address}")
+                # Pairs with the outage line, which is on stdout and says "No mail can be
+                # seen while this lasts". Splitting the two halves of one state transition
+                # across streams would leave a session that cannot see stderr watching the
+                # failure arrive and never learning it ended -- recovery by inference from
+                # silence, which is the inference this module exists to make unnecessary.
+                emitter.emit_error(f"{PING_PREFIX} probe recovered for mailbox/{address}", t)
         stats.cycles += 1
         if iterations <= 0 or stats.cycles < iterations:
             sleep(config.interval_s)
