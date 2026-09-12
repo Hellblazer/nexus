@@ -660,6 +660,16 @@ class TestTupleWatchLock:
         assert second.ok is True
         assert lines == []
         second.release()
+    def test_a_repeated_address_does_not_refuse_itself(self, tmp_path) -> None:
+        addr = _uniq("addr")
+        lines = []
+        locks = acquire_watch_locks([addr, addr], state_dir=tmp_path, emit=lines.append)
+        try:
+            assert locks.ok is True, lines
+            assert lines == []
+            assert len(locks.holders) == 1
+        finally:
+            locks.release()
 
     def test_refusing_one_address_releases_the_ones_already_taken(self, tmp_path) -> None:
         free, taken = _uniq("free"), _uniq("taken")
@@ -705,18 +715,6 @@ class TestTupleWatchAddressResolution:
         )
         assert len(lines) == 1
         assert tid in lines[0]
-
-
-    def test_a_repeated_address_does_not_refuse_itself(self, tmp_path) -> None:
-        addr = _uniq("addr")
-        lines = []
-        locks = acquire_watch_locks([addr, addr], state_dir=tmp_path, emit=lines.append)
-        try:
-            assert locks.ok is True, lines
-            assert lines == []
-            assert len(locks.holders) == 1
-        finally:
-            locks.release()
 
 
 class TestTupleWatchCliGuards:
