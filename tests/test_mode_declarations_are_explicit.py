@@ -1144,6 +1144,15 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard() -> 
     # engine boot is documented elsewhere in this repo as ~10s minimum for
     # the JAR+PG combination alone; collecting and running one small file
     # with no engine involved measured well under 4s locally).
+    #: A bound on a HANG, not on performance. Every wall-clock number in this
+    #: probe has now bitten once: the shared-tmp set difference, the
+    #: elapsed<8.0 assertion, and a 60s subprocess timeout, all of them firing
+    #: because something else on this shared box was busy (nexus-61vos). This
+    #: one stays because a nested pytest that never returns must not hang the
+    #: suite, but it is far above any load the box realistically produces, and
+    #: if it DOES fire the probe skips loudly rather than failing, because a
+    #: timeout proves nothing whatever about the census's skip semantics.
+    _PROBE_HANG_TIMEOUT_S = 300
     _pg_tmp_prefix = "nexus_t2_substrate_pg_"
     _census_nodeid = (
         "tests/test_mode_declarations_are_explicit.py"
@@ -1181,13 +1190,28 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard() -> 
             cwd=_REPO_ROOT,
             capture_output=True,
             text=True,
-            timeout=60,
+            # Generous, and a HANG bound rather than a performance assertion.
+            # It was 60s and that fired under a full suite at -n 4 on a loaded
+            # box, turning contention into a red that named the census
+            # (nexus-61vos). Collection of this file imports the whole test
+            # package; on a busy machine that is slow, not broken.
+            timeout=_PROBE_HANG_TIMEOUT_S,
         )
         return _census_nodeid in probe.stdout
 
     found_shard = False
     for group in range(1, 5):
-        if not _group_contains_census(group):
+        try:
+            in_this_group = _group_contains_census(group)
+        except subprocess.TimeoutExpired as exc:
+            pytest.skip(
+                f"could not run the collection probe for group {group}/4 within "
+                f"{_PROBE_HANG_TIMEOUT_S}s ({exc}). That is contention on this "
+                f"box, not a statement about the census -- skipping loudly "
+                f"rather than reporting a red that names the wrong cause "
+                f"(nexus-61vos).",
+            )
+        if not in_this_group:
             continue  # census landed in a different group -- fine
         found_shard = True
 
@@ -1232,7 +1256,7 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard() -> 
             },
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=_PROBE_HANG_TIMEOUT_S,
         )
         elapsed = time.monotonic() - started
         new_pg_dirs = sorted(probe_tmp.glob(f"{_pg_tmp_prefix}*"))
