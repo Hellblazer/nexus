@@ -1016,11 +1016,15 @@ public final class TupleRepository {
      * and is at that precision, so truncating it again is a no-op rather than a second
      * source of truth.
      *
-     * <p>The template's {@code max_lease_seconds} is deliberately NOT an input. It is
-     * enforced by REJECTION ({@link LeaseTooLongException}) before any clamping, so a
-     * caller asking for too long is told, not quietly given less. Folding it in here as
-     * a third term of the minimum would give the same instant and silently swallow that
-     * error.
+     * <p>PRECONDITION, and it is the caller's: {@code leaseSeconds} must already have
+     * been checked against the template's {@code max_lease_seconds}. This method does
+     * NOT enforce the cap, and its postcondition holds only for a caller that did.
+     * The cap is deliberately not a third term of the minimum here, because clamping to
+     * it would hand a caller who asked for too long a shorter lease instead of the
+     * {@link LeaseTooLongException} it has coming; the error is the point. Both callers
+     * today reject first, but that is a fact about them rather than a guarantee of this
+     * helper, so a third caller that skipped the check would exceed the cap with nothing
+     * to catch it (nexus-h61dl.4 review, substantive-critic significant 2).
      */
     private static OffsetDateTime clampedLeaseUntil(OffsetDateTime now, long leaseSeconds,
                                                     OffsetDateTime expiresAt) {

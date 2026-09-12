@@ -320,4 +320,39 @@ class TupleRenewTest {
                 .as("the sweep's expire row, and NO renew row after it")
                 .containsExactly("claim", "expire");
     }
+
+    /**
+     * The OTHER way the row can move under a renew, and the one term of
+     * {@link TupleRepository#liveClaimCondition} nothing exercised until now
+     * (nexus-h61dl.4 review, substantive-critic significant 1): the holder's own ack
+     * lands in the window, so the row is still {@code claimed} under the same
+     * {@code claim_id} and only {@code consumed_at} has changed.
+     *
+     * <p>The sweep-race case above cannot reach this. It moves {@code claim_state} and
+     * {@code claim_id}, so it would still fail with a predicate carrying no
+     * {@code consumed_at IS NULL} term. Here those two are untouched and that term is
+     * the only thing standing between this renew and extending the lease on a tuple
+     * that has already been consumed.
+     *
+     * <p>The seam is disarmed inside its own hook before the nested ack, which shares
+     * it — otherwise the ack re-enters the window and recurses.
+     */
+    @Test
+    void renew_ackLandedBetweenReadAndUpdate_claimNotFound_noRenewLogRow() {
+        Seeded s = outAndClaim("consumed", "worker-1");
+        AtomicInteger hookRuns = new AtomicInteger();
+        TupleRepository.TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY = () -> {
+            TupleRepository.TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY = () -> { };
+            hookRuns.incrementAndGet();
+            repo.ack(s.tenant(), s.claimId(), "worker-1");
+        };
+
+        assertThatExceptionOfType(ClaimNotFoundException.class)
+                .isThrownBy(() -> repo.renew(s.tenant(), s.claimId(), "worker-1", 600));
+
+        assertThat(hookRuns.get()).as("the race window opened exactly once").isEqualTo(1);
+        assertThat(transitionsFor(s.tenant(), s.id()))
+                .as("the ack consumed it; no renew row may follow")
+                .containsExactly("claim", "ack");
+    }
 }
