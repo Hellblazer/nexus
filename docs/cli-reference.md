@@ -3685,6 +3685,24 @@ The census for one subspace: `total`, `available`, `claimed`, `dead`, `consumed`
 |------|-------------|
 | `--json` | Output as JSON |
 
+### nx tuple watch
+
+```
+nx tuple watch ADDRESS... [--interval SECONDS] [--reemit-after SECONDS] [--max-emits N] [--iterations N] [--state-dir PATH]
+```
+
+A ping-then-pull mailbox watcher, built to be the source of a Claude Code Monitor: every stdout line it prints is one notification that wakes the watching session. It probes `mailbox/ADDRESS` once per `--interval` with a zero-timeout `rd` (no park slot held), fetching many rows and filtering on `claim_state`, so a dead-lettered row at the head of the address cannot hide newer mail. It never claims, never acks, and never prints a body.
+
+An empty probe prints nothing. A newly seen tuple prints one line carrying the address, sender, kind, correlation id and tuple id, plus the drain instruction; the tuple id is for correlation only, because a mailbox claim is address-wide. At most five such lines per cycle, then one coalesced line naming the rest. A tuple still present after `--reemit-after` is pinged again, up to `--max-emits` times, then it goes silent and is counted. Dead-lettered rows and probe failures go to stderr, once. The seen-set is a JSON file per address under `<state-dir>/tuple-watch/`; losing it re-pings and never loses a message.
+
+| Flag | Description |
+|------|-------------|
+| `--interval SECONDS` | Seconds between probes (default 3) |
+| `--reemit-after SECONDS` | Seconds before a still-present tuple is pinged again (default 600) |
+| `--max-emits N` | Pings per tuple before it goes silent (default 3) |
+| `--iterations N` | Probe cycles to run; 0 (default) runs until interrupted |
+| `--state-dir PATH` | Where the seen-set lives (default: the nexus config dir) |
+
 ## nx service
 
 Storage-service administration.

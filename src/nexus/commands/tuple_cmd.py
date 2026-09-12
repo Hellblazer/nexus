@@ -12,6 +12,8 @@ Subcommands:
   templates  -- the boot-loaded template registry (digest, sources, templates).
   list       -- concrete subspaces that exist.
   stats      -- the census for one subspace.
+  watch      -- ping-then-pull mailbox watcher for a Claude Code Monitor
+                (bead nexus-6konb.2; loop in ``nexus.tuple_watch``).
 
 Every subcommand calls through ``nexus.db.t2.http_tuple_store.HttpTupleStore``
 (RDR-205 Phase 2 Step 1, nexus-em75s.9) — none of them talks HTTP itself.
@@ -19,6 +21,7 @@ Every subcommand calls through ``nexus.db.t2.http_tuple_store.HttpTupleStore``
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import click
@@ -250,6 +253,44 @@ def tuple_stats_cmd(subspace: str, json_out: bool) -> None:
 
 
 # ── rendering helpers ────────────────────────────────────────────────────────
+
+
+@tuple_group.command(name="watch")
+@click.argument("addresses", nargs=-1, required=True)
+@click.option("--interval", "interval_s", type=float, default=3.0, show_default=True,
+              help="Seconds between probes.")
+@click.option("--reemit-after", "reemit_after_s", type=float, default=600.0, show_default=True,
+              help="Seconds before a still-present tuple is pinged again.")
+@click.option("--max-emits", "max_emits", type=int, default=3, show_default=True,
+              help="Pings per tuple before it goes silent.")
+@click.option("--iterations", type=int, default=0, show_default=True,
+              help="Probe cycles to run; 0 runs until interrupted.")
+@click.option("--state-dir", "state_dir", type=click.Path(path_type=Path), default=None,
+              help="Where the seen-set lives (default: the nexus config dir).")
+def tuple_watch_cmd(
+    addresses: tuple[str, ...], interval_s: float, reemit_after_s: float,
+    max_emits: int, iterations: int, state_dir: Path | None,
+) -> None:
+    """Watch mailbox/ADDRESS... and print one ping line per newly arrived tuple.
+
+    Built to be a Claude Code Monitor source: prints nothing on an empty probe,
+    never claims, never prints a body. Re-pings a still-present tuple after
+    --reemit-after, at most --max-emits times. Dead-lettered rows and probe
+    failures go to stderr, once."""
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus.tuple_watch import WatchConfig, run_watch  # noqa: PLC0415 — deferred: CLI startup cost
+
+    cfg = WatchConfig(interval_s=interval_s, reemit_after_s=reemit_after_s, max_emits=max_emits)
+    try:
+        run_watch(
+            _store(), addresses, config=cfg, state_dir=state_dir or nexus_config_dir(),
+            iterations=iterations, emit=click.echo, report=lambda s: click.echo(s, err=True),
+        )
+    except KeyboardInterrupt:
+        return
+    except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
+        _print_tuple_error(e)
+        raise SystemExit(1) from e
 
 
 def _row_dict(row: Any) -> dict[str, Any]:
