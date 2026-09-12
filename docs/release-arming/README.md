@@ -158,8 +158,23 @@ inference from the silence of older entries: the 16 entries below it carry no
 token at all, and giving them one would mean retroactively adjudicating the
 additivity of pairings nobody can now check.
 
-The gate emits `ARMED`, `NOT-ARMED` or `NOT-REQUIRED` on every paired release.
-Emitting nothing is itself a failure.
+The gate emits `ARMED`, `NOT-ARMED` or `NOT-REQUIRED` wherever it runs, and
+emitting nothing is itself a failure.
+
+It does not run everywhere. `--paired-deploy-auto`, which `release.yml` runs
+at tag push, probes the cloud first and takes a pin-currency-only path when
+the cloud already meets the floor — skipping the whole battery, ledger check
+included, so no arming verdict is printed on that branch. The attended
+`--paired-deploy` run at release Step 0 is the arming check; the tag-push run
+is not a second one.
+
+That is a ruling, not an oversight (`nexus-jv9h3`, 2026-09-12). The two-mode
+asymmetry is deliberate and documented in
+`docs/tables/release-choreography.toml`, and the safety property survives it:
+the meets-floor branch fires only once the cloud is at or above the new floor,
+which means the deploy has already happened, and arming is a claim about a
+deploy that has not. What the branch costs is the audit trail, not the
+protection.
 
 ## Retention
 

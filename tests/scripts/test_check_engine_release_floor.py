@@ -2427,11 +2427,16 @@ def test_paired_battery_refuses_a_non_additive_pairing_with_no_attestation(
 def test_battery_returning_zero_always_emitted_an_arming_verdict(
     capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
 ) -> None:
-    """"Emitting nothing is itself a failure" (the settled contract), made
-    mechanical: arming runs LAST in the battery, so every accepting paired
-    release has printed one of the three verdicts. A future edit that moves
-    the arming step above a check that can short-circuit past it, or drops
-    it, fails here."""
+    """"Emitting nothing is itself a failure" (the settled contract), for
+    every release that RUNS the battery: arming is last, so an accepting
+    battery has always printed one of the three verdicts. A future edit that
+    moves the arming step above a check that can short-circuit past it, or
+    drops it, fails here.
+
+    Scope, so this test is not read as proving more than it does: it says
+    nothing about whether the battery is CALLED. The auto-paired meets-floor
+    branch skips it entirely -- see
+    test_auto_paired_meets_floor_emits_no_arming_verdict_by_design."""
     for entry, ack, armed in (
         (_ADDITIVE_ENTRY, None, False),
         (_NOT_ADDITIVE_ENTRY, ["nexus-notad"], True),
@@ -2743,3 +2748,52 @@ def test_unshipped_half_still_fires_when_the_tag_is_not_yet_known(tmp_path) -> N
     parsed = gate._wire_ledger.parse_ledger(ledger)
     assert parsed.unshipped["feedface1"].engine_tag == "TBD (next engine-service cut)"
     assert gate.arming_required(parsed, _ARMING_PINNED_TAG) is True
+
+
+def test_auto_paired_meets_floor_emits_no_arming_verdict_by_design(
+    capsys: pytest.CaptureFixture[str], tmp_path
+) -> None:
+    """DELIBERATE-BEHAVIOR PIN (nexus-jv9h3, ruled 2026-09-12) -- do not
+    "fix" this without a conscious decision.
+
+    `--paired-deploy-auto` probes the cloud FIRST and, when the cloud already
+    meets the floor, takes the bare pin-currency path without calling
+    `_run_paired_precondition_battery` at all. So neither the wire-contract
+    ledger check nor `check_release_arming` runs, and the tag-push invocation
+    `release.yml` actually uses prints NONE of ARMED / NOT-ARMED /
+    NOT-REQUIRED. That is narrower than the arming contract's own words.
+
+    It is accepted rather than closed, for two reasons recorded here so the
+    next reader does not re-derive them. The two-mode asymmetry is deliberate
+    and documented (docs/tables/release-choreography.toml: the unattended
+    path trusts the cloud probe because no human is present to interpret a
+    dirty ledger, and the table says in terms not to unify the modes). And
+    the safety property survives: this branch fires only once the cloud is at
+    or above the new floor, which means the deploy already happened, while
+    arming is a claim about a deploy that has not. What is lost is the audit
+    trail, not the protection.
+
+    The ledger here carries a NON-ADDITIVE unshipped entry -- the state that
+    would make arming REQUIRED and refuse, had the battery run at all. That
+    is what makes this a pin on the skip rather than on an empty ledger.
+    """
+    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger), \
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
+         patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())), \
+         patch.object(gate, "resolve_managed_endpoint", return_value=(_TEST_URL, None)):
+        rc = gate.check_floor(url=_TEST_URL, paired_deploy_auto=True,
+                              newest=REQUIRED_ENGINE_VERSION)
+    out = capsys.readouterr()
+    text = out.out + out.err
+    assert rc == 0, text
+    for verdict in _ARMING_VERDICTS:
+        assert verdict not in text, (
+            f"{verdict!r} appeared on the auto-paired meets-floor branch; if the "
+            "battery now runs there, nexus-jv9h3 was decided the other way and "
+            "this pin plus the prose in docs/release-arming/README.md, the "
+            "release skill and AGENTS.md must all move together"
+        )
+    assert "PAIRED DEPLOY BLOCKED" not in text, (
+        "the ledger check did not run either; that is the same skip"
+    )

@@ -424,9 +424,9 @@ branch applies:
   the arming check; the tag-push run is not a second one. The gate
   derives from the wire ledger whether arming is required and reads
   conexus's attestation at
-  `docs/release-arming/engine-service-vX.Y.Z.json`. It prints `ARMED`,
-  `NOT-ARMED` or `NOT-REQUIRED` on every paired release and refuses on a
-  missing, wrong-tag, undated, future-dated or >72h-old attestation.
+  `docs/release-arming/engine-service-vX.Y.Z.json`. Wherever it runs it
+  prints `ARMED`, `NOT-ARMED` or `NOT-REQUIRED`, and refuses on a missing,
+  wrong-tag, undated, future-dated or >72h-old attestation.
   conexus writes it; nexus only reads it, so this is not the releaser-side
   self-attestation the project deleted once. The live image digest and SSM
   parameter version are conexus's to check AT THE FLIP — at tag time they

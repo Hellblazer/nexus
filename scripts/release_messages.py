@@ -243,7 +243,9 @@ RELEASE_MESSAGES: dict[str, str] = {
     # The paired-release battery's LAST step. "ARMED / NOT-ARMED /
     # NOT-REQUIRED on every paired release, with emitting nothing itself a
     # failure" is the settled contract, so every leaf below names which of
-    # the three it is in its first words.
+    # the three it is in its first words. The contract is met wherever the
+    # battery RUNS; --paired-deploy-auto's meets-floor branch does not run
+    # it, a known and accepted gap (nexus-jv9h3).
     "check_release_arming::arming_not_required": (
         "release arming NOT-REQUIRED for [tag]: in [ledger_path], no "
         "unshipped entry and no shipped entry naming this pairing is "

@@ -988,9 +988,19 @@ def _run_paired_precondition_battery(
     Arming runs LAST on purpose: it looks up an attestation BY the pairing
     tag, so it wants a tag the preceding step has already proven well-formed,
     published, exactly at the floor, newest and fresh -- otherwise a bad tag
-    reports as NOT-ARMED. Last position is also what makes the contract's
-    "emit a verdict on every paired release" claim mechanical: a battery that
-    returns 0 has always emitted an arming row.
+    reports as NOT-ARMED. Last position also means a battery that returns 0
+    has always emitted an arming row.
+
+    That is NOT the same as the contract's "a verdict on EVERY paired
+    release", and the difference is recorded rather than papered over
+    (bead nexus-jv9h3, ruled 2026-09-12: leave the behaviour, keep the prose
+    honest). :func:`_check_floor_auto_paired` probes the cloud FIRST and
+    takes a pin-currency-only path when the cloud already meets the floor --
+    it never calls this battery at all, so no arming row is emitted on that
+    branch. ``release.yml``'s tag-push step runs exactly that mode. The
+    safety property survives (the branch fires only once the cloud is at or
+    above the new floor, i.e. the deploy already happened, and arming is a
+    claim about a deploy that has not); the audit guarantee does not.
 
     Returns 0 when all three pass; the first failing check's own named-reason
     exit code otherwise.

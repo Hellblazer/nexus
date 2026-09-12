@@ -473,6 +473,12 @@ emit = { exit_code = "0", message_key = "tracker_recorded" }
 # emitting nothing itself a failure", which is why requirement=not_required
 # is a real emitting row rather than a silent early return.
 #
+# The contract binds wherever the battery RUNS. It does not bind on
+# check_floor_auto_paired's meets-floor branch, which skips the battery
+# entirely and so emits none of these rows -- accepted by ruling, not
+# oversight (nexus-jv9h3, 2026-09-12), and pinned by
+# test_auto_paired_meets_floor_emits_no_arming_verdict_by_design.
+#
 # tag_match is its own dimension rather than folded into attestation on
 # purpose: the second of the two mandated negative controls is "an
 # attestation for a DIFFERENT tag refuses", which exists to catch a
