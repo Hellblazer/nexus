@@ -41,6 +41,7 @@ from nexus.db.t2.http_tuple_store import (
     HttpTupleStore,
     LeaseTooLongError,
     ParkCapExceededError,
+    ReplyNotWrittenError,
     ReplySpec,
     RequestTooLargeError,
     SchemaViolationError,
@@ -874,3 +875,91 @@ class TestAckWithReply:
                 ),
             )
         assert sent == [], "the oversized ack reached the transport"
+
+
+class TestAckReplyAgainstAnOldEngine:
+    """nexus-u7blf. engine-service-v0.1.116's handleAck reads the body as a
+    map with FAIL_ON_UNKNOWN_PROPERTIES false, ignores ``reply``, consumes
+    the request and answers ``{"acked":true}`` with no ``reply_id`` key at
+    all. Before the guard, ``ack(reply=...)`` returned ``None`` there — the
+    same value a plain ack returns — with the request gone and no reply
+    written, so the caller could not tell a lost reply from a success.
+
+    The discriminator is exact and needs no version probe: the RDR-206
+    engine ALWAYS emits ``reply_id`` on /ack (null on a plain ack, hex when
+    a reply was written — TupleHandler.handleAck), and v0.1.116 never emits
+    it. Reachability is low (the release pins the engine identity), but the
+    failure mode is silent data loss, which is the class this project
+    refuses regardless of reachability.
+    """
+
+    @staticmethod
+    def _engine_answering(monkeypatch, body: dict[str, object]) -> list[dict]:
+        sent: list[dict] = []
+
+        def _post(_self, path, payload, **_kw):
+            sent.append({"path": path, "payload": payload})
+            return body
+
+        monkeypatch.setattr(refreshable.RefreshableHttpStoreMixin, "_post", _post)
+        return sent
+
+    def test_old_engine_dropping_a_reply_raises_and_says_the_request_is_gone(
+        self, monkeypatch,
+    ) -> None:
+        self._engine_answering(monkeypatch, {"acked": True})
+        store = HttpTupleStore()
+
+        with pytest.raises(ReplyNotWrittenError) as exc_info:
+            store.ack(
+                "claim-1", "worker",
+                reply=ReplySpec(subspace="mailbox/a", keys={"to": "a"}),
+            )
+
+        message = str(exc_info.value)
+        assert "consumed" in message.lower(), (
+            "the message must say the request WAS consumed, or a caller "
+            "reasonably retries the ack and gets ClaimNotFound instead: "
+            f"{message}"
+        )
+
+    def test_a_plain_ack_against_the_same_old_engine_stays_silent(
+        self, monkeypatch,
+    ) -> None:
+        """Nothing was lost, so nothing is raised. A guard that fired here
+        would break every existing caller against an older engine."""
+        self._engine_answering(monkeypatch, {"acked": True})
+        store = HttpTupleStore()
+        assert store.ack("claim-1", "worker") is None
+
+    def test_a_new_engine_returning_null_with_a_reply_sent_also_raises(
+        self, monkeypatch,
+    ) -> None:
+        """Would be an engine defect rather than a version skew, but the
+        caller's exposure is identical — request consumed, no reply — so it
+        is caught by the same guard rather than by a key-presence test that
+        would wave the null through."""
+        self._engine_answering(monkeypatch, {"acked": True, "reply_id": None})
+        store = HttpTupleStore()
+        with pytest.raises(ReplyNotWrittenError):
+            store.ack(
+                "claim-1", "worker",
+                reply=ReplySpec(subspace="mailbox/a", keys={"to": "a"}),
+            )
+
+    def test_a_plain_ack_against_the_rdr206_engine_returns_none_not_an_error(
+        self, monkeypatch,
+    ) -> None:
+        """The RDR-206 engine sends reply_id: null on a plain ack. That is
+        the normal path and must stay quiet."""
+        self._engine_answering(monkeypatch, {"acked": True, "reply_id": None})
+        store = HttpTupleStore()
+        assert store.ack("claim-1", "worker") is None
+
+    def test_the_happy_path_is_untouched(self, monkeypatch) -> None:
+        self._engine_answering(monkeypatch, {"acked": True, "reply_id": "ab" * 32})
+        store = HttpTupleStore()
+        assert store.ack(
+            "claim-1", "worker",
+            reply=ReplySpec(subspace="mailbox/a", keys={"to": "a"}),
+        ) == "ab" * 32

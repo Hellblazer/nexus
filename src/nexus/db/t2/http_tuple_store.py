@@ -190,6 +190,36 @@ _ERROR_CLASSES_BY_CODE: dict[str, type[TupleError]] = {
 }
 
 
+class ReplyNotWrittenError(RuntimeError):
+    """An ``ack`` carrying a reply was answered by an engine that wrote no
+    reply, and the request has already been consumed (nexus-u7blf).
+
+    DELIBERATELY NOT a :class:`TupleError`. That hierarchy is the engine's
+    own refusal codes, and a caller wrapping tuple work in
+    ``except TupleError`` is handling refusals it can retry or report. This
+    is not that: the request is GONE and the reply was never written, so a
+    retried ack answers ``ClaimNotFound``. Escaping a broad
+    ``except TupleError`` is the point — being swallowed by generic
+    tuple-error handling is how this becomes silent again one layer up.
+    Same placement as :class:`RequestTooLargeError`, the module's other
+    client-detected condition.
+
+    The discriminator needs no version probe. The RDR-206 engine ALWAYS
+    emits ``reply_id`` on ``/ack`` — null on a plain ack, hex when a reply
+    was written (``TupleHandler.handleAck``) — while
+    ``engine-service-v0.1.116`` reads the body as a map with
+    ``FAIL_ON_UNKNOWN_PROPERTIES`` false, ignores ``reply`` entirely,
+    consumes the request and answers ``{"acked":true}``. So a falsy
+    ``reply_id`` after a reply was sent means no reply exists, whether the
+    key is absent (old engine) or null (a new engine's own defect).
+
+    Reachability is low: the paired release bumps
+    ``REQUIRED_ENGINE_VERSION`` to the RDR-206 engine, so a released client
+    does not meet an older one. A hand-mixed install does. Silent data loss
+    is refused on its shape, not on its odds.
+    """
+
+
 class RequestTooLargeError(ValueError):
     """The serialised request body exceeds the edge WAF's 8 KB cap
     (RDR-205 §Technical Environment) — refused before sending."""
@@ -520,8 +550,20 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         payload: dict[str, Any] = {"claim_id": claim_id, "claimant": claimant}
         if reply is not None:
             payload["reply"] = reply.to_payload()
-        r = self._post("/ack", payload)
-        return (r or {}).get("reply_id")
+        r = self._post("/ack", payload) or {}
+        reply_id = r.get("reply_id")
+        if reply is not None and not reply_id:
+            raise ReplyNotWrittenError(
+                "the engine acked without writing the reply: the request "
+                f"claimed by {claimant!r} HAS BEEN CONSUMED and the reply to "
+                f"{reply.subspace!r} was NOT written. Do not retry the ack — "
+                "the claim is gone and a retry answers ClaimNotFound. The "
+                "engine predates RDR-206 ack-with-reply (it returned no "
+                "reply_id); re-send the reply with out() if it still "
+                "matters, or converge the engine to the version this client "
+                "requires."
+            )
+        return reply_id
 
     def renew(self, claim_id: str, claimant: str, lease_s: int) -> datetime:
         """Extend a live claim's lease. Returns the engine's new
