@@ -210,6 +210,29 @@ jobs:
         working-directory: service
         run: ./mvnw -q test -Dnexus.test.forks=1
 
+      # nexus-yuogq: the @Tag("integration") group is EXCLUDED from the step
+      # above (service/pom.xml sets test.excluded.groups=integration) and, until
+      # 2026-09-12, ran in no default suite, no release battery and no schedule.
+      # Three fixtures rotted there undetected: two carried the RDR-204
+      # unregistered-collection defect and were found only because a bead named
+      # them by hand, and a third still errored at SETUP afterwards with 12
+      # tests dark. They are the SQL-function-versus-app-stitch parity tests --
+      # the cross-check between the combined-query functions and the repository
+      # path, which is precisely the surface an engine release changes. A parity
+      # suite that never runs is worse than none, because its existence gets
+      # cited as coverage. ~3 minutes for 25 tests, measured locally.
+      - name: Run Java integration group (SQL-vs-stitch parity fixtures)
+        working-directory: service
+        run: ./mvnw -q test -Dtest.excluded.groups= -Dgroups=integration -Dnexus.test.forks=1
+
+      # Non-vacuity for the step above: it fails loud on a red test, but a
+      # selector that stops matching exits 0 having run NOTHING, which is the
+      # silent shape that hid the three fixtures. Derives the expected classes
+      # from the source tag rather than a hardcoded list, so it stays correct as
+      # classes come and go. Same reasoning as assert_rehearsal_ran.py below.
+      - name: Assert every integration-tagged class actually executed
+        run: python3 scripts/assert_integration_group_ran.py service
+
       # nexus-c3rer: the old-to-HEAD upgrade rehearsal skips (JUnit
       # Assumptions.abort) when the old engine tag is unavailable — a skip
       # that Maven treats as success and the Actions UI shows green. This
