@@ -32,6 +32,11 @@ much as what is.
   and a recovery line on stderr. Silence is not success: an engine that dies
   mid-run says so. The rate limit is what keeps a sustained outage under the
   measured auto-stop budget.
+  Dead-letter notices and the recovery line stay on stderr: they are
+  informational, not an outage, so nothing is lost if the Monitor does not watch
+  that stream. Whether it does is still unmeasured, and deliberately does not
+  matter for any line that reports the watcher is not delivering mail -- every
+  one of those is on stdout.
 - Holds one flock per watched address (:func:`acquire_watch_locks`), scoped
   machine-wide by ADDRESS, not by session: a ``/clear`` changes the session id,
   so a per-session lock would miss the double-arm it exists to catch. A second
@@ -243,7 +248,6 @@ def preflight(
     *,
     config: WatchConfig,
     emit: Callable[[str], None],
-    report: Callable[[str], None],
 ) -> PreflightResult:
     """One bounded probe of the engine before the loop starts.
 
@@ -265,7 +269,7 @@ def preflight(
         )
         return PreflightResult(ok=False, detail=detail)
 
-    for address in addresses:
+    for address in dict.fromkeys(addresses):
         subspace = f"mailbox/{address}"
         try:
             census = store.subspace_stats(subspace)
@@ -333,7 +337,9 @@ def acquire_watch_locks(
 
     locks = WatchLocks(ok=True)
     session_id = resolve_active_session_id() or "unknown-session"
-    for address in addresses:
+    # Deduplicated, as run_watch's own address list is: a repeated address would
+    # otherwise take its own lock and then refuse itself on the second pass.
+    for address in dict.fromkeys(addresses):
         path = lock_path(state_dir, address)
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = path.open("a+", encoding="utf-8")
@@ -449,7 +455,11 @@ def run_watch(
                 _log.warning("tuple_watch_probe_failed", address=address, error=text)
                 prior = failing.get(address)
                 # A CHANGED error is news and reports at once (a blip becoming an auth
-                # failure is a different problem); the SAME error re-reports only once
+                # failure is a different problem). The comparison is on the rendered
+                # text, not the exception type, deliberately: two failures of the same
+                # type with different detail (a 502 then a 401, both HTTPStatusError)
+                # are different problems and the second must not be swallowed.
+                # The SAME error re-reports only once
                 # per window, so a sustained outage costs one line per window rather
                 # than one per cycle -- silence would hide the outage, a line per cycle
                 # would trip the measured auto-stop.

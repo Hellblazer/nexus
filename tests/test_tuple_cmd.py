@@ -495,23 +495,32 @@ class TestTupleWatchPreflight:
                 return []
 
         lines, reports = [], []
-        result = preflight(_Down(), ["addr-a"], config=WatchConfig(), emit=lines.append,
-                           report=reports.append)
+        result = preflight(_Down(), ["addr-a"], config=WatchConfig(), emit=lines.append)
         assert result.ok is False
+        assert "connection refused" in result.detail
         assert len(lines) == 1
         assert "SKIP" in lines[0]
         assert "connection refused" in lines[0]
         assert probes == []
 
-    def test_unknown_subspace_at_preflight_is_a_skip_naming_the_address(self, t2_service_env, tmp_path) -> None:
-        store, _cfg, _sd = _watch_env(tmp_path)
-        lines, reports = [], []
-        result = preflight(store, ["no-template-here"], config=WatchConfig(),
-                           emit=lines.append, report=reports.append)
-        # mailbox/<anything> is a registered template, so a plain address passes;
-        # this pins that the per-address stats call is actually made and reported.
-        assert result.ok is True
-        assert lines == []
+    def test_unreadable_mailbox_is_a_skip_naming_the_address(self, tmp_path) -> None:
+        """The PER-ADDRESS branch: the registry answers, the mailbox does not."""
+
+        class _HalfUp:
+            def registry(self):
+                return {"digest": "d", "templates": []}
+
+            def subspace_stats(self, subspace):
+                raise _Boom(f"404 no such subspace {subspace}")
+
+        lines = []
+        result = preflight(_HalfUp(), ["addr-a", "addr-b"], config=WatchConfig(),
+                           emit=lines.append)
+        assert result.ok is False
+        assert "404" in result.detail
+        assert len(lines) == 1  # the FIRST address stops it; no line per address
+        assert "SKIP" in lines[0]
+        assert "mailbox/addr-a" in lines[0]
 
     def test_dead_backlog_near_the_probe_cap_warns_with_the_count(self, tmp_path) -> None:
         class _Census:
@@ -526,7 +535,7 @@ class TestTupleWatchPreflight:
 
         lines, reports = [], []
         result = preflight(_Loaded(), ["addr-a"], config=WatchConfig(probe_n=10),
-                           emit=lines.append, report=reports.append)
+                           emit=lines.append)
         assert result.ok is True
         warn = [line for line in lines if "dead" in line]
         assert len(warn) == 1
@@ -535,8 +544,7 @@ class TestTupleWatchPreflight:
     def test_healthy_engine_preflights_clean_and_silent(self, t2_service_env, tmp_path) -> None:
         store, cfg, _sd = _watch_env(tmp_path)
         lines, reports = [], []
-        result = preflight(store, [_uniq("addr")], config=cfg, emit=lines.append,
-                           report=reports.append)
+        result = preflight(store, [_uniq("addr")], config=cfg, emit=lines.append)
         assert result.ok is True
         assert lines == []
 
@@ -660,6 +668,7 @@ class TestTupleWatchLock:
         try:
             second = acquire_watch_locks([free, taken], state_dir=tmp_path, emit=lambda _s: None)
             assert second.ok is False
+            assert second.refused_address == taken
             # the partial acquisition must not linger: a third watcher gets `free`
             third = acquire_watch_locks([free], state_dir=tmp_path)
             assert third.ok is True
@@ -696,3 +705,73 @@ class TestTupleWatchAddressResolution:
         )
         assert len(lines) == 1
         assert tid in lines[0]
+
+
+    def test_a_repeated_address_does_not_refuse_itself(self, tmp_path) -> None:
+        addr = _uniq("addr")
+        lines = []
+        locks = acquire_watch_locks([addr, addr], state_dir=tmp_path, emit=lines.append)
+        try:
+            assert locks.ok is True, lines
+            assert lines == []
+            assert len(locks.holders) == 1
+        finally:
+            locks.release()
+
+
+class TestTupleWatchCliGuards:
+    """The three guards through the real command, not the raw functions."""
+
+    def test_cli_skips_with_one_line_when_the_engine_is_unreachable(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        monkeypatch.setenv("NX_SERVICE_PORT", "1")  # nothing listens on port 1
+        monkeypatch.setenv("NX_SERVICE_URL", "http://127.0.0.1:1")
+        res = _invoke([
+            "watch", _uniq("addr"), "--iterations", "3", "--interval", "0",
+            "--state-dir", str(tmp_path),
+        ])
+        assert res.exit_code == 0, res.output
+        skips = [line for line in res.output.splitlines() if "SKIP" in line]
+        assert len(skips) == 1, res.output
+        assert not [line for line in res.output.splitlines() if "new mail" in line]
+
+    def test_cli_refuses_when_another_watcher_holds_the_address(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        store, _cfg, sd = _watch_env(tmp_path)
+        addr = _uniq("addr")
+        _out(store, addr, sender="alice")
+        monkeypatch.setenv("NX_SESSION_ID", "holder-session")
+        holder = acquire_watch_locks([addr], state_dir=sd)
+        assert holder.ok is True
+        try:
+            monkeypatch.setenv("NX_SESSION_ID", "second-session")
+            res = _invoke([
+                "watch", addr, "--iterations", "2", "--interval", "0", "--state-dir", str(sd),
+            ])
+            assert res.exit_code == 0, res.output
+            refusals = [line for line in res.output.splitlines() if "already watched by" in line]
+            assert len(refusals) == 1, res.output
+            assert "holder-session" in refusals[0]
+            # and it did NOT ping, even though real mail is sitting there
+            assert not [line for line in res.output.splitlines() if "new mail" in line]
+        finally:
+            holder.release()
+
+    def test_cli_releases_its_lock_on_exit_so_the_next_watcher_starts(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        store, _cfg, sd = _watch_env(tmp_path)
+        addr = _uniq("addr")
+        _out(store, addr, sender="alice")
+        first = _invoke([
+            "watch", addr, "--iterations", "1", "--interval", "0", "--state-dir", str(sd),
+        ])
+        assert first.exit_code == 0, first.output
+        assert len([line for line in first.output.splitlines() if "new mail" in line]) == 1
+        after = acquire_watch_locks([addr], state_dir=sd, emit=lambda _s: None)
+        try:
+            assert after.ok is True, "the finished watcher must not leave its lock held"
+        finally:
+            after.release()

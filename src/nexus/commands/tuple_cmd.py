@@ -298,7 +298,7 @@ def tuple_watch_cmd(
     # peer session's SessionStart, so a re-resolve is either a no-op or a spurious exit.
     # A moved address is handled by this process dying with its session and the next
     # SessionStart re-arming (MM-3.1/MM-3.2), backed by the lock below.
-    if not preflight(store, addresses, config=cfg, emit=click.echo, report=report).ok:
+    if not preflight(store, addresses, config=cfg, emit=click.echo).ok:
         return
     locks = acquire_watch_locks(addresses, state_dir=sd, emit=click.echo)
     if not locks.ok:
