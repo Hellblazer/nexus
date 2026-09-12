@@ -56,11 +56,13 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional, Protocol
+from typing import Any, Callable, Iterator, Mapping, Optional, Protocol, TypeVar
 
 import structlog
 
 _log = structlog.get_logger(__name__)
+
+_T = TypeVar("_T")
 
 # RF-1: substrate defaults reuse the RDR-140 T2 lifecycle constants.
 DEFAULT_HEARTBEAT_INTERVAL: float = 1.0
@@ -208,6 +210,10 @@ class ServiceRegistry:
         self._heartbeat_interval = heartbeat_interval
         self._monotonic = monotonic
         self._sleep = sleep
+        # nexus-wo6sc: per-tick stamp sub-phase timings, replaced (never
+        # accumulated) on every heartbeat. See ``last_heartbeat_phases``.
+        self._last_heartbeat_phases: dict[str, float] = {}
+        self._last_heartbeat_total: float = 0.0
 
     # -- paths --------------------------------------------------------------
 
@@ -224,6 +230,47 @@ class ServiceRegistry:
         """Seconds a heartbeat may wait for the election flock (nexus-59bah)."""
         return self._ttl * HEARTBEAT_ELECTION_BUDGET_FRACTION
 
+    @property
+    def last_heartbeat_phases(self) -> Mapping[str, float]:
+        """Sub-phase seconds for the most recent :meth:`heartbeat` (nexus-wo6sc).
+
+        Keys are syscall groups inside the stamp: ``elect_open`` (mkdir +
+        opening the lock file), ``elect_flock`` (waiting for the election
+        lock), ``read`` (reading the current record), and ``write_open`` /
+        ``write_body`` / ``write_replace`` (the atomic write's three parts).
+        Replaced wholesale each tick, so a reading is this tick's, never a
+        running total.
+        """
+        return dict(self._last_heartbeat_phases)
+
+    @property
+    def last_heartbeat_unaccounted(self) -> float:
+        """Seconds the last heartbeat spent inside NO timed syscall group.
+
+        This is the discriminator the 2026-09-12 incident needed and did not
+        have. Wall clock around the stamp as a whole cannot tell a blocked
+        syscall from a thread that lost the CPU -- both show the same elapsed
+        time and both show near-zero process CPU. Split out, they separate:
+        a filesystem stall lands in one syscall sub-phase, while descheduling
+        lands here, because a thread that is not running is not inside any
+        call. Never negative (a clock that went backwards reads as 0.0).
+        """
+        return max(0.0, self._last_heartbeat_total - sum(self._last_heartbeat_phases.values()))
+
+    def _timed(self, phases: Optional[dict[str, float]], name: str, fn: Callable[[], _T]) -> _T:
+        """Run *fn*, charging its wall-clock seconds to ``phases[name]``.
+
+        ``phases=None`` is the uninstrumented path (publish, relinquish, reap):
+        those are not on the heartbeat hot loop and pay nothing for this.
+        """
+        if phases is None:
+            return fn()
+        t0 = self._monotonic()
+        try:
+            return fn()
+        finally:
+            phases[name] = phases.get(name, 0.0) + (self._monotonic() - t0)
+
     def _record_path(self, scope_key: str) -> Path:
         return self._dir / f"{self._tier}_addr.{scope_key}"
 
@@ -236,7 +283,13 @@ class ServiceRegistry:
     # -- election -----------------------------------------------------------
 
     @contextlib.contextmanager
-    def _elect(self, scope_key: str, *, budget: Optional[float] = None) -> Iterator[None]:
+    def _elect(
+        self,
+        scope_key: str,
+        *,
+        budget: Optional[float] = None,
+        phases: Optional[dict[str, float]] = None,
+    ) -> Iterator[None]:
         """Hold the per-scope election flock for a read-modify-write.
 
         ``budget=None`` (publish, relinquish, reap, shutdown marker): blocking
@@ -251,14 +304,22 @@ class ServiceRegistry:
         skipped stamp is cheap and a blocked tick is not: the 2026-09-06
         skew window had a live supervisor wedged in one tick past the TTL.
         """
-        self._ensure_dir()
-        path = self._election_path(scope_key)
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT, 0o600)
+        def _open() -> int:
+            self._ensure_dir()
+            path = self._election_path(scope_key)
+            return os.open(str(path), os.O_WRONLY | os.O_CREAT, 0o600)
+
+        # nexus-wo6sc: the mkdir + open are filesystem calls too, and they sit
+        # INSIDE the stamp but OUTSIDE the election budget -- an fs stall lands
+        # here just as readily as in the write, so they get their own phase.
+        fd = self._timed(phases, "elect_open", _open)
         try:
             if budget is None:
-                fcntl.flock(fd, fcntl.LOCK_EX)
+                self._timed(phases, "elect_flock", lambda: fcntl.flock(fd, fcntl.LOCK_EX))
             else:
-                self._flock_within(fd, scope_key, budget)
+                self._timed(
+                    phases, "elect_flock", lambda: self._flock_within(fd, scope_key, budget)
+                )
             yield
         finally:
             try:
@@ -297,17 +358,26 @@ class ServiceRegistry:
             )
             return None
 
-    def _write_record_atomic(self, record: LeaseRecord) -> None:
+    def _write_record_atomic(
+        self, record: LeaseRecord, phases: Optional[dict[str, float]] = None
+    ) -> None:
         self._ensure_dir()
         path = self._record_path(record.scope_key)
         tmp = path.with_suffix(path.suffix + f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
-        fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        fd = self._timed(
+            phases,
+            "write_open",
+            lambda: os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600),
+        )
         try:
-            try:
-                os.write(fd, record.to_json().encode("utf-8"))
-            finally:
-                os.close(fd)
-            os.replace(str(tmp), str(path))
+            def _body() -> None:
+                try:
+                    os.write(fd, record.to_json().encode("utf-8"))
+                finally:
+                    os.close(fd)
+
+            self._timed(phases, "write_body", _body)
+            self._timed(phases, "write_replace", lambda: os.replace(str(tmp), str(path)))
         except BaseException:
             with contextlib.suppress(OSError):
                 tmp.unlink()
@@ -377,9 +447,40 @@ class ServiceRegistry:
         itself (``_read_record`` / ``_write_record_atomic``) stays unbounded
         by decision: a filesystem stall long enough to age the lease out is
         reported by the tier's missed-TTL log, not masked here.
+
+        nexus-wo6sc (2026-09-12) narrowed that "by elimination" reasoning with
+        a measurement, and it did not land where nexus-59bah expected. Two
+        ticks blew a 15 s TTL at 19.098 s and 31.622 s with ZERO
+        ``service_supervisor_heartbeat_election_busy`` events in the run, so
+        the flock was free and at most one budget's worth of that time was
+        election. What remains is unbounded, but which unbounded thing is not
+        yet known: the write here is ~464 bytes with no fsync, microseconds of
+        real work, so a filesystem stall is no more plausible on its face than
+        the supervisor simply losing the CPU under a 4-wide battery. Wall
+        clock cannot separate the two -- a blocked syscall and an unscheduled
+        thread show the same elapsed time and the same near-zero process CPU.
+        Hence the sub-phase timings (``last_heartbeat_phases``) and the
+        ``last_heartbeat_unaccounted`` term: a stalled syscall is charged to
+        its own phase, while time inside no call at all can only be
+        descheduling. Do not re-narrow this to one cause until a tick with
+        sub-phases in it has been captured in the wild.
         """
-        with self._elect(record.scope_key, budget=self.heartbeat_election_budget):
-            current = self._read_record(record.scope_key)
+        phases: dict[str, float] = {}
+        self._last_heartbeat_phases = phases
+        self._last_heartbeat_total = 0.0
+        started = self._monotonic()
+        try:
+            return self._heartbeat_locked(record, phases)
+        finally:
+            self._last_heartbeat_total = self._monotonic() - started
+
+    def _heartbeat_locked(
+        self, record: LeaseRecord, phases: dict[str, float]
+    ) -> LeaseRecord:
+        with self._elect(
+            record.scope_key, budget=self.heartbeat_election_budget, phases=phases
+        ):
+            current = self._timed(phases, "read", lambda: self._read_record(record.scope_key))
             if current is not None:
                 if current.generation > record.generation:
                     raise StaleOwnerError(
@@ -415,7 +516,7 @@ class ServiceRegistry:
                 payload=dict(record.payload),
                 status=status,
             )
-            self._write_record_atomic(refreshed)
+            self._write_record_atomic(refreshed, phases)
             return refreshed
 
     def discover(self, scope_key: str) -> Optional[LeaseRecord]:
@@ -605,6 +706,18 @@ class ServiceSupervisor:
                 budget_s=self._registry.heartbeat_election_budget,
                 error=str(exc),
             )
+
+    @property
+    def last_heartbeat_phases(self) -> Mapping[str, float]:
+        """The registry's stamp sub-phase seconds for the last tick
+        (nexus-wo6sc). Exposed here so a tier's timing wrapper can fold them
+        into its own log line without reaching into the registry."""
+        return self._registry.last_heartbeat_phases
+
+    @property
+    def last_heartbeat_unaccounted(self) -> float:
+        """Seconds the last stamp spent inside no timed syscall (nexus-wo6sc)."""
+        return self._registry.last_heartbeat_unaccounted
 
     def cycle_to_current(
         self,

@@ -113,9 +113,18 @@ def test_heartbeat_gives_up_within_budget_when_election_is_held(
     with pytest.raises(ElectionBusyError):
         registry.heartbeat(rec)
     waited = mono.now - before
-    assert waited <= registry.heartbeat_election_budget + mono.step, \
-        "the tick must return inside its budget, never block to the TTL"
-    assert waited < registry._ttl
+    # nexus-wo6sc: assert the WAIT, not total clock advance. This fake
+    # monotonic advances by ``step`` on every read, so any instrumentation
+    # that reads the clock inflates ``mono.now - before`` without changing a
+    # single thing about the budget. ``elect_flock`` is the quantity the
+    # budget actually governs.
+    # The two-step slack is the measuring instrument itself: ``_timed`` reads
+    # this clock once before the wait and once after, and each read advances
+    # it by ``step``. On a real monotonic those two reads are nanoseconds.
+    assert registry.last_heartbeat_phases["elect_flock"] <= (
+        registry.heartbeat_election_budget + 2 * mono.step
+    ), "the tick must return inside its budget, never block to the TTL"
+    assert waited < registry._ttl, "and it must never block out to the TTL"
     assert mono.sleeps, "a busy election is polled with LOCK_NB, not spun hot"
     assert registry._read_record("42").heartbeat_epoch == 1000.0, "nothing written"
 

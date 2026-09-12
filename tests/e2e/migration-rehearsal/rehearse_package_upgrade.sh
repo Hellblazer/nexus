@@ -54,6 +54,17 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$*"; }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAILS=$((FAILS+1)); }
 note() { printf '       %s\n' "$*"; }
 
+# nexus-wo6sc: attribution for the failure shape where the supervisor is
+# alive and its own heartbeat missed the lease TTL, so every client reads
+# "endpoint not resolvable". Shared with
+# tests/scripts/test_heartbeat_stall_note.py, which drives this same
+# function against fixture logs (RED and GREEN both pinned).
+# shellcheck source=./lib/heartbeat_stall_note.sh disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/heartbeat_stall_note.sh"
+
+# Emit the stall note, if any, indented like the rest of the gate's evidence.
+_stall_note() { heartbeat_stall_note | sed 's/^/       /'; }
+
 # Evidence dump for the convergence leg. `nx daemon restart-stale` drives the
 # stop/start cycle INSIDE the product, so when it reports "still running the
 # old engine" the harness log otherwise shows only the verdict. This prints
@@ -242,6 +253,7 @@ elif [ "$SKEW_PUT_RC" != 0 ]; then
   if printf '%s' "$SKEW_PUT" | grep -qiE "converg|engine"; then
     ok "skew-window T1 put failed LOUD, naming convergence/engine (rc=$SKEW_PUT_RC): $SKEW_PUT"
   else
+    _stall_note
     bad "skew-window T1 put failed (rc=$SKEW_PUT_RC) with no convergence/engine-naming message — opaque, not legible: $SKEW_PUT"
   fi
 elif [ -z "$SKEW_PUT" ]; then
@@ -259,6 +271,7 @@ else
       if printf '%s' "$SKEW_GET" | grep -qiE "converg|engine"; then
         ok "skew-window T1 get failed LOUD, naming convergence/engine (rc=$SKEW_GET_RC): $SKEW_GET"
       else
+        _stall_note
         bad "skew-window T1 get failed (rc=$SKEW_GET_RC) with no convergence/engine-naming message — opaque, not legible: $SKEW_GET"
       fi
     elif ! printf '%s' "$SKEW_GET" | grep -q "$SKEW_MARKER"; then
