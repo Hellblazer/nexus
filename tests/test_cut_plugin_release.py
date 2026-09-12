@@ -833,3 +833,77 @@ class TestAtomicSplit:
         for entry in entries:
             bead = attribute_entry(entry)  # raises = the test fails, by name
             assert bead.startswith("nexus-")
+
+
+class TestBatterySubstrateEnv:
+    """Each battery step declares whether it needs the engine (nexus-ps1gx).
+
+    On 2026-09-08 the plugin-v7.36.1-1 cut ran from a fresh clone with no
+    engine jar. Its lint step errored 1216 substrate-backed tests at SETUP and
+    the cut refused, leaving a half-created branch behind — not on any finding,
+    just on an absent jar the lint bucket does not need. The container
+    rehearsal passed the identical step because its environment already sets
+    ``NX_TEST_T2_SUBSTRATE=none``, exactly as ``plugin-release.yml`` does, so
+    the rehearsal could not reproduce the refusal. That is why it survived to
+    bite a real cut.
+
+    The interesting half is the negative: exactly one step provisions its own
+    service, and disabling the substrate for it would leave it running while
+    proving less than it claims. So this pins the SPLIT, not the presence of a
+    flag.
+    """
+
+    def test_pytest_legs_are_marked_substrate_free(self) -> None:
+        import cut_plugin_release as mod
+
+        pytest_legs = [
+            (cmd, needs) for cmd, needs in mod._BATTERY if cmd[:2] == ["uv", "run"]
+        ]
+        assert pytest_legs, "no pytest legs found — the battery shape changed"
+        for cmd, needs_substrate in pytest_legs:
+            assert not needs_substrate, (
+                f"{' '.join(cmd)} is marked as needing the engine substrate. The lint "
+                f"bucket and these unit legs do not, and marking them so reintroduces "
+                f"the 1216-setup-error refusal on a clone with no jar (nexus-ps1gx)."
+            )
+
+    def test_the_sandbox_leg_keeps_the_ambient_substrate(self) -> None:
+        import cut_plugin_release as mod
+
+        sandbox = [
+            (cmd, needs) for cmd, needs in mod._BATTERY if "release-sandbox.sh" in cmd[0]
+        ]
+        assert len(sandbox) == 1, "expected exactly one sandbox leg in the battery"
+        assert sandbox[0][1] is True, (
+            "release-sandbox.sh smoke provisions its own service; forcing "
+            "NX_TEST_T2_SUBSTRATE=none there would leave the step running while it "
+            "proves less than it claims (nexus-ps1gx)"
+        )
+
+    def test_substrate_free_legs_actually_receive_the_env(self, monkeypatch) -> None:
+        """The marking has to reach subprocess.run, not just sit in a table."""
+        import cut_plugin_release as mod
+
+        seen: list[tuple[list[str], str | None]] = []
+
+        class _OK:
+            returncode = 0
+
+        def fake_run(command, cwd=None, text=None, env=None):
+            value = None if env is None else env.get("NX_TEST_T2_SUBSTRATE")
+            seen.append((command, value))
+            return _OK()
+
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        mod._run_real_battery(pathlib.Path("."))
+
+        assert len(seen) == len(mod._BATTERY)
+        for (command, value), (_cmd, needs_substrate) in zip(seen, mod._BATTERY):
+            if needs_substrate:
+                assert value is None, (
+                    f"{' '.join(command)} must inherit the ambient environment"
+                )
+            else:
+                assert value == "none", (
+                    f"{' '.join(command)} did not receive NX_TEST_T2_SUBSTRATE=none"
+                )
