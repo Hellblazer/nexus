@@ -328,9 +328,19 @@ public final class VersionHandler implements HttpHandler {
      * which is why this is sound as an EXCLUSION predicate (drop a sample below
      * the threshold) and unsound as an admission one (a sample above it may
      * still be the first traffic since the restart). A consumer that needs the
-     * stronger property wants work done since start — queries served, or blocks
-     * read — not elapsed time. That field does not exist yet, and this one does
-     * not pretend to be it.
+     * stronger property must measure the work itself. Do NOT add a
+     * work-since-start counter here on that reasoning: the one consumer that
+     * needed it found it could sample the index's own
+     * {@code idx_blks_read}/{@code idx_blks_hit} across the measured window
+     * directly, which is a direct measurement rather than an engine-reported
+     * proxy for one, and it was declined on that basis (2026-09-12).
+     *
+     * <p>One trap worth naming, because it survived several review rounds
+     * before it was caught: a rule that EXCLUDES on low uptime and lets
+     * everything else fall through ADMITS on high uptime by default. The
+     * unsound branch is an absence, not a statement, so there is nothing to
+     * point at when reading the rule. "What does this admit by default" is a
+     * different question from "what does this exclude".
      */
     static void appendProcessUptimeFields(StringBuilder body, long startMillis, long nowMillis) {
         body.append(",\"process_uptime_seconds\":").append(uptimeSeconds(startMillis, nowMillis));
