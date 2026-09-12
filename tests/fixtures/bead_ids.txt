@@ -615,6 +615,7 @@ nexus-3l6gz.1
 nexus-3l7k
 nexus-3lbhb
 nexus-3lbhb.1
+nexus-3lc5s
 nexus-3lswy
 nexus-3lu23
 nexus-3m01p
@@ -4999,6 +5000,7 @@ nexus-rehf
 nexus-remh4
 nexus-reskd
 nexus-rewgw
+nexus-rf5kx
 nexus-rfa8c
 nexus-rftfs
 nexus-rfvyy
@@ -5523,6 +5525,7 @@ nexus-u4qxk
 nexus-u5dln
 nexus-u5dln.1
 nexus-u6d6
+nexus-u7blf
 nexus-u7ek
 nexus-u7r0
 nexus-u88vu
@@ -5755,6 +5758,7 @@ nexus-vikxn
 nexus-vj81r
 nexus-vj81r.1
 nexus-vk57q
+nexus-vkpr3
 nexus-vl8lk
 nexus-vl8lk.1
 nexus-vlabc
@@ -5939,6 +5943,7 @@ nexus-wnlit
 nexus-wnost
 nexus-wnp3c
 nexus-wnpet
+nexus-wo6sc
 nexus-wowg
 nexus-wp94t
 nexus-wp9s
