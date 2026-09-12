@@ -30,6 +30,8 @@ import java.util.Properties;
  *  "release_version":"0.1.6",
  *  "build_ref":"a1b2c3d+1690000000-4242",
  *  "nx_answer_steps_supported":true,
+ *  "process_uptime_seconds":420,
+ *  "process_start_time":"2026-09-12T09:00:00Z",
  *  "nx_answer_run_complete_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
@@ -302,6 +304,33 @@ public final class VersionHandler implements HttpHandler {
      * {@code /version} field, they stay invisible to cloud clients until the
      * public edge allowlists them (the {@code nx_answer_steps_supported}
      * precedent, nexus-04sff) — that relay is paired work, not an engine defect.
+     *
+     * <p><b>THE ANCHOR IS HANDLER CONSTRUCTION, NOT PROCESS START, AND THAT IS
+     * DELIBERATE.</b> {@code SchemaMigrator.migrate()} runs before this service is
+     * built ({@code Main.java:108}), so this clock starts AFTER the migration —
+     * which is the event that evicts the cache. For the PREDICATE that is the
+     * better anchor, not a worse one: uptime zero lands exactly at the
+     * cache-cold moment, whereas {@code RuntimeMXBean#getStartTime} would add
+     * the migration's own duration and report a warmer engine than exists,
+     * reproducing the over-admission this field is meant to stop. The obvious
+     * "fix" of switching to true process start is therefore a REGRESSION here;
+     * this paragraph exists so that it is not made silently. The cost falls on
+     * the CORRELATION field: {@code process_start_time} is offset from container
+     * start by the migration's duration, which varies with the size of the
+     * changeset walk, so treat it as accurate to within a migration rather than
+     * to the second when lining it up against a deploy timestamp.
+     *
+     * <p><b>UPTIME IS NECESSARY, NOT SUFFICIENT, FOR A WARM CACHE.</b> Measured
+     * 2026-09-12: cache recovery after an eviction is WORK-driven, not
+     * time-driven. On an idle estate the index served zero blocks for tens of
+     * minutes and warmed only when real traffic arrived, so a HIGH uptime does
+     * not imply a warm cache. Low uptime does reliably imply a recent restart,
+     * which is why this is sound as an EXCLUSION predicate (drop a sample below
+     * the threshold) and unsound as an admission one (a sample above it may
+     * still be the first traffic since the restart). A consumer that needs the
+     * stronger property wants work done since start — queries served, or blocks
+     * read — not elapsed time. That field does not exist yet, and this one does
+     * not pretend to be it.
      */
     static void appendProcessUptimeFields(StringBuilder body, long startMillis, long nowMillis) {
         body.append(",\"process_uptime_seconds\":").append(uptimeSeconds(startMillis, nowMillis));
