@@ -231,6 +231,125 @@ class TupleHandlerWiringTest {
         return http.send(req, HttpResponse.BodyHandlers.ofString());
     }
 
+    // ── RDR-206 Phase 1 Step 2: the ack route's optional reply object ────────
+
+    /** out + in against a fresh mailbox address, returning the claim id. */
+    private String outAndClaim(String to, String claimant) throws Exception {
+        assertThat(post(withRegistry, "/v1/tuples/out", Map.of(
+                "subspace", "mailbox/" + to,
+                "keys", Map.of("to", to),
+                "dims", Map.of("from", "asker"),
+                "body", "the request",
+                "nonce", "nonce-" + to)).statusCode()).isEqualTo(200);
+        var inResp = post(withRegistry, "/v1/tuples/in", Map.of(
+                "subspace", "mailbox/" + to,
+                "keys_pattern", Map.of("to", to),
+                "claimant", claimant,
+                "lease_s", 60));
+        assertThat(inResp.statusCode()).isEqualTo(200);
+        return (String) mapper.readValue(inResp.body(), MAP_T).get("claim_id");
+    }
+
+    @Test
+    void ack_withNoReply_returnsANullReplyId() throws Exception {
+        String to = "ack-noreply-addr";
+        String claimId = outAndClaim(to, "ack-noreply-claimant");
+
+        var resp = post(withRegistry, "/v1/tuples/ack", Map.of(
+                "claim_id", claimId, "claimant", "ack-noreply-claimant"));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var json = mapper.readValue(resp.body(), MAP_T);
+        assertThat(json.get("acked")).isEqualTo(Boolean.TRUE);
+        assertThat(json).as("reply_id is present and null, never absent").containsKey("reply_id");
+        assertThat(json.get("reply_id")).isNull();
+    }
+
+    @Test
+    void ack_withAReply_writesItAndReturnsItsHexId() throws Exception {
+        String to = "ack-reply-addr";
+        String asker = "ack-reply-asker";
+        String claimId = outAndClaim(to, "ack-reply-claimant");
+
+        var resp = post(withRegistry, "/v1/tuples/ack", Map.of(
+                "claim_id", claimId,
+                "claimant", "ack-reply-claimant",
+                "reply", Map.of(
+                        "subspace", "mailbox/" + asker,
+                        "keys", Map.of("to", asker),
+                        "dims", Map.of("from", "answerer"),
+                        "body", "the answer")));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var json = mapper.readValue(resp.body(), MAP_T);
+        assertThat(json.get("acked")).isEqualTo(Boolean.TRUE);
+        String replyId = (String) json.get("reply_id");
+        assertThat(replyId).as("a 64-char lowercase hex id, the same shape out returns")
+                .isNotNull().hasSize(64).matches("[0-9a-f]{64}");
+
+        var rdResp = post(withRegistry, "/v1/tuples/rd", Map.of(
+                "subspace", "mailbox/" + asker,
+                "keys_pattern", Map.of("to", asker)));
+        var tuples = (java.util.List<Map<String, Object>>) mapper.readValue(rdResp.body(), MAP_T)
+                .get("tuples");
+        assertThat(tuples).hasSize(1);
+        assertThat(tuples.get(0).get("body")).isEqualTo("the answer");
+        assertThat(tuples.get(0).get("id")).isEqualTo(replyId);
+    }
+
+    @Test
+    void ack_withAReplyCarryingANonce_isRefusedAndLeavesTheRequestClaimed() throws Exception {
+        String to = "ack-nonce-addr";
+        String asker = "ack-nonce-asker";
+        String claimId = outAndClaim(to, "ack-nonce-claimant");
+
+        // The engine sets a reply's nonce to the id of the request it answers. A caller
+        // supplying one is refused rather than ignored: silently dropping it would leave
+        // the caller believing it had chosen the reply's identity. validateOut cannot
+        // catch this -- it checks for a nonce that is MISSING -- and this is the only
+        // layer where "absent" and "explicitly supplied" are still distinguishable.
+        var resp = post(withRegistry, "/v1/tuples/ack", Map.of(
+                "claim_id", claimId,
+                "claimant", "ack-nonce-claimant",
+                "reply", Map.of(
+                        "subspace", "mailbox/" + asker,
+                        "keys", Map.of("to", asker),
+                        "dims", Map.of("from", "answerer"),
+                        "body", "mine",
+                        "nonce", "i-picked-this")));
+        assertThat(resp.statusCode()).as("SchemaViolation maps to 400").isEqualTo(400);
+        assertThat(resp.body()).contains("reply.nonce");
+
+        // The request must still be there and STILL CLAIMED, i.e. not consumed. Read
+        // through rd rather than the census, because rd shows the row's own claim state
+        // and an ack that had gone through would have removed the row from this read
+        // entirely (a consumed row is invisible to rd).
+        var requestResp = post(withRegistry, "/v1/tuples/rd", Map.of(
+                "subspace", "mailbox/" + to,
+                "keys_pattern", Map.of("to", to)));
+        var requestRows = (java.util.List<Map<String, Object>>) mapper
+                .readValue(requestResp.body(), MAP_T).get("tuples");
+        assertThat(requestRows).as("a refused reply must not have consumed the request")
+                .hasSize(1);
+        assertThat(requestRows.get(0).get("claim_state")).isEqualTo("claimed");
+
+        var rdResp = post(withRegistry, "/v1/tuples/rd", Map.of(
+                "subspace", "mailbox/" + asker,
+                "keys_pattern", Map.of("to", asker)));
+        assertThat((java.util.List<?>) mapper.readValue(rdResp.body(), MAP_T).get("tuples"))
+                .as("no reply row").isEmpty();
+    }
+
+    @Test
+    void ack_withANonObjectReply_isRefused() throws Exception {
+        String to = "ack-badreply-addr";
+        String claimId = outAndClaim(to, "ack-badreply-claimant");
+
+        var resp = post(withRegistry, "/v1/tuples/ack", Map.of(
+                "claim_id", claimId, "claimant", "ack-badreply-claimant",
+                "reply", "not an object"));
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("reply");
+    }
+
     private HttpResponse<String> post(NexusService svc, String path, Object body) throws Exception {
         var req = HttpRequest.newBuilder()
                 .uri(URI.create("http://127.0.0.1:" + svc.getPort() + path))

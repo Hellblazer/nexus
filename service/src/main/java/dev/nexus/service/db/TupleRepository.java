@@ -236,13 +236,31 @@ public final class TupleRepository {
 
     // ── out ──────────────────────────────────────────────────────────────────
 
-    /** {@code out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> id}. */
-    public byte[] out(String tenant, String subspace, Map<String, String> keys, Map<String, String> dims,
-                       String body, String nonce, Long ttlSecondsOrNull) {
+    /**
+     * Everything {@code out} derives and validates BEFORE any transaction opens: the
+     * resolved template, the normalised keys and dims, the ttl bounds, and the JSONB and
+     * interval conversions. The tuple id is NOT here, because {@code ackWithReply} cannot
+     * compute a reply's id until the request it consumed hands back the nonce.
+     *
+     * <p>The split is load-bearing rather than cosmetic (RDR-206 Phase 1 Step 2). Every
+     * way a reply can be refused must leave the request STILL CLAIMED, and if validation
+     * ran inside the transaction that guarantee would rest on the rollback restoring the
+     * claim rather than on the ack never having started. Those look identical in an
+     * end-state assertion and differ the moment someone splits the transaction or moves
+     * the signal, so the refusals happen out here where they cannot consume anything.
+     */
+    private record PreparedOut(TemplateSchema template, String subspace,
+                               Map<String, String> keys, Map<String, String> dims,
+                               JSONB keysJsonb, JSONB dimsJsonb,
+                               DayToSecond ttlInterval, DayToSecond retentionInterval) {
+    }
+
+    private PreparedOut prepareOut(String subspace, Map<String, String> keys,
+                                   Map<String, String> dims, Long ttlSecondsOrNull) {
         TemplateSchema t = resolveOrThrow(subspace);
         Map<String, String> keysSafe = keys == null ? Map.of() : keys;
         Map<String, String> dimsSafe = dims == null ? Map.of() : dims;
-        validateOut(t, keysSafe, dimsSafe, nonce);
+        validateOutShape(t, keysSafe, dimsSafe);
 
         if (ttlSecondsOrNull != null && ttlSecondsOrNull <= 0) {
             throw new SchemaViolationException("ttl_seconds", "must be positive");
@@ -251,45 +269,56 @@ public final class TupleRepository {
         if (ttlSeconds > t.retentionSeconds()) {
             throw new TtlTooLongException(ttlSeconds, t.retentionSeconds(), t.name());
         }
-
-        byte[] id = computeId(tenant, subspace, t, keysSafe, dimsSafe, nonce, body);
-        JSONB keysJsonb = toJsonb(keysSafe);
         JSONB dimsJsonb = dimsSafe.isEmpty() ? null : toJsonb(dimsSafe);
-        DayToSecond ttlInterval = interval(ttlSeconds);
-        DayToSecond retentionInterval = interval(t.retentionSeconds());
+        return new PreparedOut(t, subspace, keysSafe, dimsSafe, toJsonb(keysSafe), dimsJsonb,
+                interval(ttlSeconds), interval(t.retentionSeconds()));
+    }
 
-        byte[] result = tenantScope.withTenant(tenant, ctx -> {
-            Field<OffsetDateTime> candidateExpiry = DSL.currentOffsetDateTime().add(ttlInterval);
-            // Refire clamp (RDR-205 §Technical Design "out"): never past the ORIGINAL
-            // row's created_at plus the template's retention — TUPLES.CREATED_AT here
-            // binds to the pre-existing target row, exactly as AspectRepository's
-            // insertOrUpdateExtractionQueue mixes EXCLUDED.* with a plain column
-            // reference for the OLD value in the same DO UPDATE clause.
-            Field<OffsetDateTime> ceiling = TUPLES.CREATED_AT.add(retentionInterval);
+    /**
+     * The upsert and the tenant bookkeeping, against a caller's {@code ctx} so it can
+     * share a transaction with {@code consumeClaim}. Takes no responsibility for
+     * signalling: {@code signalAll} must run AFTER the transaction commits, so it stays
+     * with the callers.
+     */
+    private byte[] writeOut(DSLContext ctx, String tenant, PreparedOut p, String body, byte[] id) {
+        Field<OffsetDateTime> candidateExpiry = DSL.currentOffsetDateTime().add(p.ttlInterval());
+        // Refire clamp (RDR-205 §Technical Design "out"): never past the ORIGINAL
+        // row's created_at plus the template's retention -- TUPLES.CREATED_AT here
+        // binds to the pre-existing target row, exactly as AspectRepository's
+        // insertOrUpdateExtractionQueue mixes EXCLUDED.* with a plain column
+        // reference for the OLD value in the same DO UPDATE clause.
+        Field<OffsetDateTime> ceiling = TUPLES.CREATED_AT.add(p.retentionInterval());
+        Field<JSONB> dimsField = p.dimsJsonb() == null
+                ? DSL.castNull(org.jooq.impl.SQLDataType.JSONB)
+                : DSL.val(p.dimsJsonb());
+        ctx.insertInto(TUPLES,
+                        TUPLES.ID, TUPLES.TENANT_ID, TUPLES.SUBSPACE, TUPLES.TEMPLATE,
+                        TUPLES.KEYS, TUPLES.DIMS, TUPLES.BODY,
+                        TUPLES.ATTEMPTS, TUPLES.EXPIRES_AT, TUPLES.CREATED_AT)
+                .values(DSL.val(id), DSL.val(tenant), DSL.val(p.subspace()), DSL.val(p.template().name()),
+                        DSL.val(p.keysJsonb()), dimsField, DSL.val(body),
+                        DSL.val(0), DSL.currentOffsetDateTime().add(p.ttlInterval()),
+                        DSL.currentOffsetDateTime())
+                .onConflict(TUPLES.ID)
+                .doUpdate()
+                // A refire touches expires_at ONLY -- never body, claim state or
+                // consumed state (every other column is simply absent from this
+                // DO UPDATE's .set() list, so Postgres leaves it untouched).
+                .set(TUPLES.EXPIRES_AT, DSL.least(candidateExpiry, ceiling))
+                .execute();
+        maintainTenant(ctx, tenant);
+        return id;
+    }
 
-            Field<JSONB> dimsField = dimsJsonb == null
-                    ? DSL.castNull(org.jooq.impl.SQLDataType.JSONB)
-                    : DSL.val(dimsJsonb);
-            ctx.insertInto(TUPLES,
-                            TUPLES.ID, TUPLES.TENANT_ID, TUPLES.SUBSPACE, TUPLES.TEMPLATE,
-                            TUPLES.KEYS, TUPLES.DIMS, TUPLES.BODY,
-                            TUPLES.ATTEMPTS, TUPLES.EXPIRES_AT, TUPLES.CREATED_AT)
-                    .values(DSL.val(id), DSL.val(tenant), DSL.val(subspace), DSL.val(t.name()),
-                            DSL.val(keysJsonb), dimsField, DSL.val(body),
-                            DSL.val(0), DSL.currentOffsetDateTime().add(ttlInterval), DSL.currentOffsetDateTime())
-                    .onConflict(TUPLES.ID)
-                    .doUpdate()
-                    // A refire touches expires_at ONLY — never body, claim state or
-                    // consumed state (every other column is simply absent from this
-                    // DO UPDATE's .set() list, so Postgres leaves it untouched).
-                    .set(TUPLES.EXPIRES_AT, DSL.least(candidateExpiry, ceiling))
-                    .execute();
-
-            maintainTenant(ctx, tenant);
-            return id;
-        });
-
-        // Signal AFTER the transaction lambda returns (the commit) — never from inside it.
+    /** {@code out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> id}. */
+    public byte[] out(String tenant, String subspace, Map<String, String> keys, Map<String, String> dims,
+                       String body, String nonce, Long ttlSecondsOrNull) {
+        PreparedOut prepared = prepareOut(subspace, keys, dims, ttlSecondsOrNull);
+        validateNonce(prepared.template(), nonce);
+        byte[] id = computeId(tenant, prepared.subspace(), prepared.template(),
+                prepared.keys(), prepared.dims(), nonce, body);
+        byte[] result = tenantScope.withTenant(tenant, ctx -> writeOut(ctx, tenant, prepared, body, id));
+        // Signal AFTER the transaction lambda returns (the commit) -- never from inside it.
         waitRegistry.signalAll(tenant, subspace);
         return result;
     }
@@ -311,7 +340,13 @@ public final class TupleRepository {
                 .execute();
     }
 
-    private void validateOut(TemplateSchema t, Map<String, String> keys, Map<String, String> dims, String nonce) {
+    /**
+     * The shape half of {@code out}'s validation: keys, dims and their allowed values.
+     * Split from the nonce check (RDR-206 Phase 1 Step 2) because {@code ackWithReply}
+     * must validate a reply's shape BEFORE consuming the request, while the reply's nonce
+     * does not exist until the request has been consumed and handed back its id.
+     */
+    private void validateOutShape(TemplateSchema t, Map<String, String> keys, Map<String, String> dims) {
         TreeSet<String> unknownKeys = new TreeSet<>(keys.keySet());
         unknownKeys.removeAll(t.keys());
         if (!unknownKeys.isEmpty()) {
@@ -343,6 +378,10 @@ public final class TupleRepository {
                 throw new SchemaViolationException(name, "value '" + v + "' not in " + d.values());
             }
         }
+    }
+
+    /** The nonce half of {@code out}'s validation. See {@link #validateOutShape}. */
+    private void validateNonce(TemplateSchema t, String nonce) {
         if (t.idFrom() == TemplateSchema.IdFrom.KEYS_NONCE && (nonce == null || nonce.isBlank())) {
             throw new SchemaViolationException("nonce", "required for id_from=keys+nonce");
         }
@@ -678,38 +717,105 @@ public final class TupleRepository {
 
     // ── ack / nack ───────────────────────────────────────────────────────────
 
+    /**
+     * Consume a claimed row inside a caller's transaction and return the row consumed.
+     *
+     * <p>Extracted from {@code ack} (RDR-206 Phase 1 Step 2) so {@code ackWithReply} can
+     * run it and {@code writeOut} in ONE transaction. It carries the compare-and-swap
+     * from nexus-h61dl.2, which is why {@code ackWithReply} could not have shipped before
+     * this extraction: a reply written beside a consume that lost a race would be a reply
+     * to a request someone else now holds.
+     */
+    private TuplesRecord consumeClaim(DSLContext ctx, String tenant, String claimId, String claimant) {
+        TuplesRecord row = liveClaimRow(ctx, tenant, claimId);
+        if (row == null) {
+            throw new ClaimNotFoundException(claimId);
+        }
+        if (!row.getClaimant().equals(claimant)) {
+            throw new ClaimOwnershipException(claimId, claimant);
+        }
+        // TEST-ONLY (nexus-h61dl.2): widens the read-to-update race window under
+        // test; a no-op Runnable on every production path.
+        TEST_ONLY_ACK_NACK_READ_TO_UPDATE_DELAY.run();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        // RDR-206 Phase 1 Step 1: compare-and-swap. liveClaimRow read without a
+        // lock, so the sweep's release arm (or a re-take after a lapse) may have
+        // moved the row since; matching on the claim's identity, not the id alone,
+        // makes a stale ack fail ClaimNotFound instead of consuming a row this
+        // claimant no longer holds. The log row is written only after a one-row
+        // update.
+        int updated = ctx.update(TUPLES)
+                .set(TUPLES.CONSUMED_AT, now)
+                .set(TUPLES.CONSUMED_BY, claimant)
+                .where(liveClaimCondition(row.getId(), claimId))
+                .execute();
+        if (updated == 0) {
+            throw new ClaimNotFoundException(claimId);
+        }
+        insertClaimLog(ctx, tenant, row.getSubspace(), row.getTemplate(), row.getId(),
+                claimId, claimant, TRANSITION_ACK, now);
+        return row;
+    }
+
     /** {@code ack(claim_id, claimant)}. */
     public void ack(String tenant, String claimId, String claimant) {
-        tenantScope.withTenant(tenant, ctx -> {
-            TuplesRecord row = liveClaimRow(ctx, tenant, claimId);
-            if (row == null) {
-                throw new ClaimNotFoundException(claimId);
-            }
-            if (!row.getClaimant().equals(claimant)) {
-                throw new ClaimOwnershipException(claimId, claimant);
-            }
-            // TEST-ONLY (nexus-h61dl.2): widens the read-to-update race window under
-            // test; a no-op Runnable on every production path.
-            TEST_ONLY_ACK_NACK_READ_TO_UPDATE_DELAY.run();
-            OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-            // RDR-206 Phase 1 Step 1: compare-and-swap. liveClaimRow read without a
-            // lock, so the sweep's release arm (or a re-take after a lapse) may have
-            // moved the row since; matching on the claim's identity, not the id alone,
-            // makes a stale ack fail ClaimNotFound instead of consuming a row this
-            // claimant no longer holds. The log row is written only after a one-row
-            // update.
-            int updated = ctx.update(TUPLES)
-                    .set(TUPLES.CONSUMED_AT, now)
-                    .set(TUPLES.CONSUMED_BY, claimant)
-                    .where(liveClaimCondition(row.getId(), claimId))
-                    .execute();
-            if (updated == 0) {
-                throw new ClaimNotFoundException(claimId);
-            }
-            insertClaimLog(ctx, tenant, row.getSubspace(), row.getTemplate(), row.getId(),
-                    claimId, claimant, TRANSITION_ACK, now);
+        tenantScope.withTenant(tenant, ctx -> consumeClaim(ctx, tenant, claimId, claimant));
+    }
+
+    /**
+     * A reply to write in the same transaction that consumes the request. The nonce is
+     * deliberately absent: the engine sets it to {@code hex(consumed row id)} and no
+     * caller, tool or flag may supply one (RDR-206, Sam's decision 2026-09-11).
+     */
+    public record ReplySpec(String subspace, Map<String, String> keys, Map<String, String> dims,
+                            String body, Long ttlSeconds) {
+    }
+
+    /**
+     * {@code ack(claim_id, claimant, reply=...)} — consume the request and write the reply
+     * in ONE transaction, returning the reply's id, or null when there was no reply.
+     *
+     * <p>A reader therefore sees the request consumed and the reply present, or neither.
+     * Ordering inside the transaction is immaterial and deliberately unpinned (RDR-206
+     * amendment 1c8f109da): only atomicity is a contract.
+     *
+     * <p>Every refusal happens BEFORE the transaction opens, so the request is still
+     * claimed and no reply row exists. That is a stronger guarantee than a rollback would
+     * give, because a rollback produces the same end state while depending on the ack
+     * having started; see {@link #prepareOut}.
+     *
+     * <p>The reply's target template MUST be {@code id_from: keys+nonce}. A {@code keys}
+     * template ignores the nonce in {@code computeId}, so two replies to the same keys
+     * would collide on one id and {@code out}'s refire clamp would silently discard the
+     * second one's body -- exactly the class of silent loss this RDR exists to close, so
+     * it is refused rather than documented.
+     */
+    public byte[] ackWithReply(String tenant, String claimId, String claimant, ReplySpec reply) {
+        if (reply == null) {
+            ack(tenant, claimId, claimant);
             return null;
+        }
+        PreparedOut prepared = prepareOut(reply.subspace(), reply.keys(), reply.dims(),
+                reply.ttlSeconds());
+        if (prepared.template().idFrom() != TemplateSchema.IdFrom.KEYS_NONCE) {
+            throw new SchemaViolationException("reply.subspace",
+                    "reply target template '" + prepared.template().name() + "' is id_from="
+                    + prepared.template().idFrom().wire() + "; a reply target must be "
+                    + "id_from=keys+nonce, because the engine identifies a reply by the "
+                    + "request it answers and a keys-only template would collapse two "
+                    + "replies onto one id");
+        }
+        byte[] replyId = tenantScope.withTenant(tenant, ctx -> {
+            TuplesRecord consumed = consumeClaim(ctx, tenant, claimId, claimant);
+            String nonce = HexFormat.of().formatHex(consumed.getId());
+            byte[] id = computeId(tenant, prepared.subspace(), prepared.template(),
+                    prepared.keys(), prepared.dims(), nonce, reply.body());
+            return writeOut(ctx, tenant, prepared, reply.body(), id);
         });
+        // Signal AFTER the commit, and only for the reply's subspace: a parked reader
+        // there must not be woken by a transaction that rolled back.
+        waitRegistry.signalAll(tenant, reply.subspace());
+        return replyId;
     }
 
     /** {@code nack(claim_id, claimant)} — releases the claim; counts an attempt. */

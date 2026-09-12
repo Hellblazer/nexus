@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
+import dev.nexus.service.db.SchemaViolationException;
 import dev.nexus.service.db.TupleException;
 import dev.nexus.service.db.TupleRepository;
 import dev.nexus.service.tuples.TemplateRegistry;
@@ -225,8 +226,50 @@ public final class TupleHandler implements HttpHandler {
             return;
         }
         Map<String, Object> body = readBody(ex);
-        repo.ack(tenant, requireString(body, "claim_id"), requireString(body, "claimant"));
-        HttpUtil.send(ex, 200, "{\"acked\":true}");
+        String claimId = requireString(body, "claim_id");
+        String claimant = requireString(body, "claimant");
+        TupleRepository.ReplySpec reply = parseReply(body.get("reply"));
+        byte[] replyId = repo.ackWithReply(tenant, claimId, claimant, reply);
+        HttpUtil.send(ex, 200, "{\"acked\":true,\"reply_id\":"
+                + (replyId == null ? "null" : HttpUtil.jsonString(HEX.formatHex(replyId)))
+                + "}");
+    }
+
+    /**
+     * The optional {@code reply} object on {@code POST /v1/tuples/ack}: the fields
+     * {@code out} accepts, MINUS the nonce (RDR-206 Phase 1 Step 2).
+     *
+     * <p>A {@code nonce} key here is REFUSED rather than ignored. The engine sets a
+     * reply's nonce to {@code hex(consumed request id)} so a retried ack lands on the
+     * same reply row, and no caller, tool or flag carries one (Sam's decision
+     * 2026-09-11). Silently dropping a supplied nonce would leave a caller believing it
+     * had chosen the reply's identity, which is exactly the kind of ignored input that
+     * only surfaces as a mystery much later. {@code validateOut} cannot catch this: it
+     * checks for a nonce that is MISSING, and nothing there rejects an extra one. This
+     * is also the only layer where "absent" and "explicitly supplied" are still
+     * distinguishable, since the repository is handed a record that has no nonce field
+     * at all.
+     */
+    @SuppressWarnings("unchecked")
+    private TupleRepository.ReplySpec parseReply(Object raw) {
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Map)) {
+            throw new SchemaViolationException("reply", "must be an object");
+        }
+        Map<String, Object> r = (Map<String, Object>) raw;
+        if (r.containsKey("nonce")) {
+            throw new SchemaViolationException("reply.nonce",
+                    "must not be supplied: the engine sets a reply's nonce to the id of the "
+                    + "request it answers, so a retried ack lands on the same reply row");
+        }
+        return new TupleRepository.ReplySpec(
+                requireString(r, "subspace"),
+                stringMap((Map<String, Object>) r.get("keys")),
+                stringMap((Map<String, Object>) r.get("dims")),
+                (String) r.get("body"),
+                numberOrNull(r.get("ttl_seconds")));
     }
 
     private void handleNack(HttpExchange ex, String tenant, String method) throws IOException {
