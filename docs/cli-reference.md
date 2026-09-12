@@ -3704,7 +3704,11 @@ An empty probe prints nothing. A newly seen tuple prints one line carrying the a
 | `--instance NAME` | This session's instance-name mailbox (the `ListAgents` row, e.g. `nexus-19`) |
 | `--state-dir PATH` | Where the seen-set lives (default: the nexus config dir) |
 
-With no `ADDRESS`, it watches this session's own two mailboxes. The session id comes from this process's own environment, which a freshly spawned watcher reads correctly. The instance name exists in no environment variable at all, so it has to be passed with `--instance` at arm time. One process probes both and they share one emit budget, because a second Monitor for the second address would double the ping rate against a throttle counted per monitor. Omitting `--instance` prints one warning naming what is not being watched, rather than halving the watch in silence. Giving an explicit `ADDRESS` suppresses both defaults and watches exactly what you named.
+An explicit `ADDRESS` wins outright: it suppresses every default, watches exactly what you named, and takes no other lock.
+
+With no `ADDRESS`, it watches the session id, which it reads from this process's own environment. It watches the instance mailbox as well only when `--instance` supplies the name, because that name exists in no environment variable at all and can only be passed at arm time. So the no-flag default is one mailbox, not two, and omitting `--instance` prints one warning saying the instance mailbox is unwatched, rather than silently halving the watch. If the session id does not resolve but `--instance` does, it watches that one alone and warns about the other. If neither resolves there is nothing to watch, which is a `SKIP` and no watch at all, not a warning.
+
+When it does watch both, one process probes them and they share a single emit budget, because a second Monitor for the second address would double the ping rate against a throttle counted per monitor.
 
 Before the loop starts it preflights the engine with one registry call and one census per address. If the tuple space is unreachable or the mailbox is unreadable it prints one `SKIP` line on stdout and exits without watching, because an engine below the floor that answers every call with a 404 is otherwise indistinguishable from an empty mailbox. A dead-lettered backlog approaching the probe cap warns, since past the cap dead rows hide fresh mail again.
 
