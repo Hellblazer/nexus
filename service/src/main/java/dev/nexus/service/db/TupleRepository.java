@@ -108,6 +108,18 @@ public final class TupleRepository {
     static volatile Runnable TEST_ONLY_CLAIM_SELECT_TO_UPDATE_DELAY = () -> { };
 
     /**
+     * TEST-ONLY seam (RDR-206 Phase 1 Step 1, bead nexus-h61dl.2): invoked inside
+     * {@link #ack}'s and {@link #nack}'s transaction between {@link #liveClaimRow}'s
+     * unlocked read and the compare-and-swap {@code UPDATE}, so a test can release
+     * the row in that window (lapse the lease, run the sweep's release arm) and
+     * assert the stale update matches zero rows and raises {@link
+     * ClaimNotFoundException} with no claim-log row. Same shape and rules as {@link
+     * #TEST_ONLY_CLAIM_SELECT_TO_UPDATE_DELAY}: a no-op by default, package-private,
+     * never assigned outside test code, not a production delay mechanism.
+     */
+    static volatile Runnable TEST_ONLY_ACK_NACK_READ_TO_UPDATE_DELAY = () -> { };
+
+    /**
      * TEST-ONLY (RDR-205 bead nexus-em75s.7, the wake-test mutation pins): installs a
      * hook invoked once per {@code (tenant, subspace)} group {@link TupleWaitRegistry
      * #signalAll} actually delivers a signal to, so a test can count SIGNAL-DRIVEN
@@ -199,9 +211,10 @@ public final class TupleRepository {
 
     /**
      * RDR-205 Phase 1 Step 5 (bead nexus-em75s.5): one BATCH of the sweep's release
-     * arm — always {@code scanned == released + deadLettered}, mirroring the RDR-204
-     * ghost sweep's {@code GhostSweepResult} shape ({@code scanned} == the sum of its
-     * three dispositions).
+     * arm — {@code scanned == released + deadLettered} for every row whose
+     * compare-and-swap matched (RDR-206 Step 1; under the batch's row lock that is
+     * every selected row), mirroring the RDR-204 ghost sweep's {@code GhostSweepResult}
+     * shape ({@code scanned} == the sum of its dispositions).
      */
     public record ReleaseBatchResult(int scanned, int released, int deadLettered) {
     }
@@ -675,12 +688,24 @@ public final class TupleRepository {
             if (!row.getClaimant().equals(claimant)) {
                 throw new ClaimOwnershipException(claimId, claimant);
             }
+            // TEST-ONLY (nexus-h61dl.2): widens the read-to-update race window under
+            // test; a no-op Runnable on every production path.
+            TEST_ONLY_ACK_NACK_READ_TO_UPDATE_DELAY.run();
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-            ctx.update(TUPLES)
+            // RDR-206 Phase 1 Step 1: compare-and-swap. liveClaimRow read without a
+            // lock, so the sweep's release arm (or a re-take after a lapse) may have
+            // moved the row since; matching on the claim's identity, not the id alone,
+            // makes a stale ack fail ClaimNotFound instead of consuming a row this
+            // claimant no longer holds. The log row is written only after a one-row
+            // update.
+            int updated = ctx.update(TUPLES)
                     .set(TUPLES.CONSUMED_AT, now)
                     .set(TUPLES.CONSUMED_BY, claimant)
-                    .where(TUPLES.ID.eq(row.getId()))
+                    .where(liveClaimCondition(row.getId(), claimId))
                     .execute();
+            if (updated == 0) {
+                throw new ClaimNotFoundException(claimId);
+            }
             insertClaimLog(ctx, tenant, row.getSubspace(), row.getTemplate(), row.getId(),
                     claimId, claimant, TRANSITION_ACK, now);
             return null;
@@ -700,12 +725,32 @@ public final class TupleRepository {
             TemplateSchema t = resolveOrThrow(row.getSubspace());
             long maxAttempts = t.take().maxAttempts() == null ? Long.MAX_VALUE : t.take().maxAttempts();
             int attempts = row.getAttempts() + 1;
+            // TEST-ONLY (nexus-h61dl.2): see ack.
+            TEST_ONLY_ACK_NACK_READ_TO_UPDATE_DELAY.run();
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
-            releaseOrDeadLetter(ctx, tenant, row.getSubspace(), row.getTemplate(), row.getId(),
-                    claimId, claimant, TRANSITION_NACK, now, attempts, maxAttempts);
+            ReleaseOutcome outcome = releaseOrDeadLetter(ctx, tenant, row.getSubspace(), row.getTemplate(),
+                    row.getId(), claimId, claimant, TRANSITION_NACK, now, attempts, maxAttempts);
+            if (outcome == ReleaseOutcome.NOT_LIVE) {
+                // The compare-and-swap matched nothing: the sweep or a re-take moved the
+                // row between liveClaimRow's read and this update (RDR-206 Step 1).
+                throw new ClaimNotFoundException(claimId);
+            }
             return null;
         });
+    }
+
+    /** Disposition of one {@link #releaseOrDeadLetter} call. */
+    enum ReleaseOutcome {
+        /** Released back to available; one {@code releaseTransition} log row. */
+        RELEASED,
+        /** Dead-lettered at {@code max_attempts}; {@code releaseTransition} then {@code dead} log rows. */
+        DEAD_LETTERED,
+        /**
+         * The compare-and-swap matched zero rows: the row is no longer claimed under
+         * this {@code claimId} (RDR-206 Phase 1 Step 1). Nothing written, no log row.
+         */
+        NOT_LIVE
     }
 
     /**
@@ -720,34 +765,50 @@ public final class TupleRepository {
      * written only on dead-letter, is always {@code dead} — matching {@link #claimOnce}'s
      * own dead-letter branch exactly.
      *
-     * @return true iff this row was dead-lettered (attempts reached max_attempts)
+     * <p>RDR-206 Phase 1 Step 1 (bead nexus-h61dl.2): the update is a compare-and-swap
+     * on the claim's identity ({@link #liveClaimCondition}), its affected-row count is
+     * checked, and the log rows are written only after a one-row update. On zero rows
+     * the outcome is {@link ReleaseOutcome#NOT_LIVE} and nothing is written; the caller
+     * decides what that means ({@link #nack} raises {@link ClaimNotFoundException}, the
+     * sweep logs and continues, because it holds the row lock and one exception would
+     * abort its whole batch).
      */
-    private boolean releaseOrDeadLetter(DSLContext ctx, String tenant, String subspace, String template,
-                                          byte[] tupleId, String claimId, String claimant,
-                                          String releaseTransition, OffsetDateTime now,
-                                          int attempts, long maxAttempts) {
-        insertClaimLog(ctx, tenant, subspace, template, tupleId, claimId, claimant, releaseTransition, now);
-        if (attempts >= maxAttempts) {
-            ctx.update(TUPLES)
-                    .set(TUPLES.CLAIM_STATE, CLAIM_STATE_DEAD)
-                    .set(TUPLES.CLAIMANT, (String) null)
-                    .set(TUPLES.CLAIM_ID, (String) null)
-                    .set(TUPLES.LEASE_UNTIL, (OffsetDateTime) null)
-                    .set(TUPLES.ATTEMPTS, attempts)
-                    .where(TUPLES.ID.eq(tupleId))
-                    .execute();
-            insertClaimLog(ctx, tenant, subspace, template, tupleId, null, null, TRANSITION_DEAD, now);
-            return true;
-        }
-        ctx.update(TUPLES)
-                .set(TUPLES.CLAIM_STATE, (String) null)
+    private ReleaseOutcome releaseOrDeadLetter(DSLContext ctx, String tenant, String subspace, String template,
+                                               byte[] tupleId, String claimId, String claimant,
+                                               String releaseTransition, OffsetDateTime now,
+                                               int attempts, long maxAttempts) {
+        boolean dead = attempts >= maxAttempts;
+        int updated = ctx.update(TUPLES)
+                .set(TUPLES.CLAIM_STATE, dead ? CLAIM_STATE_DEAD : null)
                 .set(TUPLES.CLAIMANT, (String) null)
                 .set(TUPLES.CLAIM_ID, (String) null)
                 .set(TUPLES.LEASE_UNTIL, (OffsetDateTime) null)
                 .set(TUPLES.ATTEMPTS, attempts)
-                .where(TUPLES.ID.eq(tupleId))
+                .where(liveClaimCondition(tupleId, claimId))
                 .execute();
-        return false;
+        if (updated == 0) {
+            return ReleaseOutcome.NOT_LIVE;
+        }
+        insertClaimLog(ctx, tenant, subspace, template, tupleId, claimId, claimant, releaseTransition, now);
+        if (dead) {
+            insertClaimLog(ctx, tenant, subspace, template, tupleId, null, null, TRANSITION_DEAD, now);
+            return ReleaseOutcome.DEAD_LETTERED;
+        }
+        return ReleaseOutcome.RELEASED;
+    }
+
+    /**
+     * The compare-and-swap predicate every update of a live claim uses (RDR-206 Phase 1
+     * Step 1): the row must still be claimed under exactly this {@code claimId} and not
+     * consumed. A row the sweep released, another claimant re-took, or an earlier ack
+     * consumed fails to match, so the update touches zero rows instead of writing over
+     * state this caller no longer owns.
+     */
+    private static Condition liveClaimCondition(byte[] tupleId, String claimId) {
+        return TUPLES.ID.eq(tupleId)
+                .and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED))
+                .and(TUPLES.CLAIM_ID.eq(claimId))
+                .and(TUPLES.CONSUMED_AT.isNull());
     }
 
     // ── sweep (RDR-205 Phase 1 Step 5, bead nexus-em75s.5) ──────────────────────
@@ -770,7 +831,9 @@ public final class TupleRepository {
      * statement the sweep issues — bounding only the writes would leave the
      * enumeration itself unbounded).
      *
-     * @return {@code scanned} always equals {@code released + deadLettered}
+     * @return {@code scanned} equals {@code released + deadLettered} for every row the
+     *         compare-and-swap matched, which under the batch's row lock is every row it
+     *         selected; a row it did not match is logged and counted in neither
      */
     public ReleaseBatchResult releaseLapsedClaimsBatch(String tenant, int batchSize, Duration statementTimeout) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -797,13 +860,22 @@ public final class TupleRepository {
                 long maxAttempts = (t == null || t.take().maxAttempts() == null)
                         ? Long.MAX_VALUE : t.take().maxAttempts();
                 int attempts = row.getAttempts() + 1;
-                boolean dead = releaseOrDeadLetter(ctx, tenant, row.getSubspace(), row.getTemplate(), row.getId(),
-                        row.getClaimId(), row.getClaimant(), TRANSITION_EXPIRE, now,
+                ReleaseOutcome outcome = releaseOrDeadLetter(ctx, tenant, row.getSubspace(), row.getTemplate(),
+                        row.getId(), row.getClaimId(), row.getClaimant(), TRANSITION_EXPIRE, now,
                         attempts, maxAttempts);
-                if (dead) {
-                    deadLettered++;
-                } else {
-                    released++;
+                switch (outcome) {
+                    case DEAD_LETTERED -> deadLettered++;
+                    case RELEASED -> released++;
+                    case NOT_LIVE -> {
+                        // Defence in depth (RDR-206 Phase 1 Step 1): this row was selected
+                        // FOR NO KEY UPDATE above, so no other transaction can have moved
+                        // it and the compare-and-swap always matches today. If it ever
+                        // does not, log and continue, exactly as the unresolved-subspace
+                        // case above does: a raise here would abort the whole batch
+                        // transaction and every row already released in it.
+                        log.warn("event=tuple_sweep_release_not_live tenant={} subspace={} tuple_id={} claim_id={}",
+                                tenant, row.getSubspace(), HexFormat.of().formatHex(row.getId()), row.getClaimId());
+                    }
                 }
             }
             return new ReleaseBatchResult(rows.size(), released, deadLettered);

@@ -2288,7 +2288,11 @@ def _search_render(
             )
             dist = f"{r.distance:.4f}"
             label = title or source or r.id
-            snippet = r.content[:200].replace("\n", " ")
+            # RDR-169 Phase B fix round 1 (reference-only chunks, content=None):
+            # coerced to "" at the SearchResult boundary (search_engine.py), but
+            # guarded again here too (defense-in-depth -- this render code should
+            # never assume upstream never regresses).
+            snippet = (r.content or "")[:200].replace("\n", " ")
             flag = " [CONTRADICTS ANOTHER RESULT]" if r.metadata.get("_contradiction_flag") else ""
             note = annotation_line(r.metadata)
             note_line = f"\n  {note}" if note else ""
@@ -3028,7 +3032,13 @@ def search_metadata_scoped(
                 # contents inline so plan steps can summarize directly via
                 # $stepN.contents WITHOUT store_get_many hydration (which is
                 # chash-keyed and would miss these document tumblers).
-                "contents": [r.get("content", "") for r in rows],
+                # RDR-169 Gap 2 remainder (bead nexus-4k1vz): (x or "") not
+                # x.get(..., "") -- the default only fires when the key is
+                # ABSENT, and a reference-only row's "content" key is
+                # PRESENT with value None (vectors-016-combined-query-
+                # retention.xml), which .get(k, "") would pass through as
+                # a literal None rather than coercing to "".
+                "contents": [(r.get("content") or "") for r in rows],
                 # matched-chunk chash per row — the repoint wires this into the
                 # structured chunk_text_hash (RDR-086 chash-citations).
                 "chashes": [r.get("chash", "") for r in rows],
@@ -3037,7 +3047,7 @@ def search_metadata_scoped(
             return "No documents found."
         return _cap_text_result("\n\n".join(
             f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
-            f"\n{r.get('content', '')}"
+            f"\n{r.get('content') or ''}"
             for r in rows
         ), "search_metadata_scoped")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
@@ -3102,13 +3112,16 @@ def search_topic_scoped(
                 "collections": [r.get("collection", "") for r in merged],
                 # contents inline so plan steps summarize via $stepN.contents
                 # without hydration (topic ids are chunk chashes).
-                "contents": [r.get("content", "") for r in merged],
+                # RDR-169 Gap 2 remainder (bead nexus-4k1vz): (x or "") not
+                # x.get(..., "") -- see the metadata-scoped tool's identical
+                # comment above.
+                "contents": [(r.get("content") or "") for r in merged],
             }
         if not merged:
             return f"No chunks found for topic {topic!r}."
         return _cap_text_result("\n\n".join(
             f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
-            f"\n{r.get('content', '')}"
+            f"\n{r.get('content') or ''}"
             for r in merged
         ), "search_topic_scoped")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
@@ -3232,7 +3245,13 @@ def search_graph_hop(
                 "collections": [r.get("collection", "") for r in rows],
                 # contents inline so plan steps summarize via $stepN.contents WITHOUT
                 # store_get_many hydration (which is chash-keyed and would miss tumblers).
-                "contents": [r.get("content", "") for r in rows],
+                # RDR-169 Gap 2 remainder (bead nexus-4k1vz): (x or "") not
+                # x.get(..., "") -- the default only fires when the key is
+                # ABSENT, and a reference-only row's "content" key is
+                # PRESENT with value None (vectors-016-combined-query-
+                # retention.xml), which .get(k, "") would pass through as
+                # a literal None rather than coercing to "".
+                "contents": [(r.get("content") or "") for r in rows],
                 # the matched chunk's chash per row — rzqto wires this into the
                 # structured chunk_text_hash (RDR-086 chash-citations).
                 "chashes": [r.get("chash", "") for r in rows],
@@ -3241,7 +3260,7 @@ def search_graph_hop(
             return "No documents found."
         return _cap_text_result("\n\n".join(
             f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
-            f"\n{r.get('content', '')}"
+            f"\n{r.get('content') or ''}"
             for r in rows
         ), "search_graph_hop")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
@@ -3389,14 +3408,20 @@ def search_aspect_scoped(
                 "tumblers": ids,
                 "distances": _reported_distances(rows),
                 "collections": [r.get("collection", "") for r in rows],
-                "contents": [r.get("content", "") for r in rows],
+                # RDR-169 Gap 2 remainder (bead nexus-4k1vz): (x or "") not
+                # x.get(..., "") -- the default only fires when the key is
+                # ABSENT, and a reference-only row's "content" key is
+                # PRESENT with value None (vectors-016-combined-query-
+                # retention.xml), which .get(k, "") would pass through as
+                # a literal None rather than coercing to "".
+                "contents": [(r.get("content") or "") for r in rows],
                 "chashes": [r.get("chash", "") for r in rows],
             }
         if not rows:
             return "No documents found."
         return _cap_text_result("\n\n".join(
             f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
-            f"\n{r.get('content', '')}"
+            f"\n{r.get('content') or ''}"
             for r in rows
         ), "search_aspect_scoped")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
@@ -4017,7 +4042,8 @@ def query(
                     # raw distance. ``distance`` above stays the winning
                     # chunk's raw vector distance for display.
                     "hybrid_score": r.hybrid_score,
-                    "snippet": r.content[:300].replace("\n", " "),
+                    # RDR-169 Phase B fix round 1: see the sibling guard above.
+                    "snippet": (r.content or "")[:300].replace("\n", " "),
                     "bib_year": meta.get("bib_year", ""),
                     "bib_authors": meta.get("bib_authors", ""),
                     "bib_citation_count": meta.get("bib_citation_count", ""),
@@ -4057,7 +4083,8 @@ def query(
                 # Better matching chunk — update snippet
                 docs[doc_key]["distance"] = r.distance
                 docs[doc_key]["hybrid_score"] = r.hybrid_score
-                docs[doc_key]["snippet"] = r.content[:300].replace("\n", " ")
+                # RDR-169 Phase B fix round 1: see the sibling guard above.
+                docs[doc_key]["snippet"] = (r.content or "")[:300].replace("\n", " ")
 
         # Sort by best match hybrid_score (), limit
         all_docs = sorted(docs.values(), key=lambda d: d["hybrid_score"], reverse=True)

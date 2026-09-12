@@ -62,7 +62,19 @@ public final class DimTables {
         Field<String> chash,
         Field<String> chunkText,
         Field<Vector> embedding,
-        Field<JSONB> metadata
+        Field<JSONB> metadata,
+        // RDR-169 Phase B (bead nexus-zw2em, vectors-014-retention.xml):
+        // TEXT NOT NULL DEFAULT 'full' CHECK (retention IN
+        // ('reference-only','full')). A runtime field lookup via
+        // t.field("retention", ...) below, the SAME idiom every other
+        // ChunkTable column uses (chunkText/embedding/metadata) -- not a
+        // static reference into codegen's Tables.CHUNKS.RETENTION. It
+        // replaces the ad-hoc DSL.field(DSL.name("retention"), ...)
+        // placeholder PgVectorRepository#referenceOnlyInsertQuery carried
+        // before the column existed in the migrated schema jOOQ codegen
+        // ran against -- a misspelled column name here still fails only
+        // at runtime, exactly like every other field in this record.
+        Field<String> retention
     ) {
         @SuppressWarnings("unchecked")
         static ChunkTable of(Table<?> t, int dim) {
@@ -76,7 +88,8 @@ public final class DimTables {
                 dev.nexus.service.db.ChashHex.hex(t, "chash"),
                 t.field("chunk_text", String.class),
                 (Field<Vector>) t.field(embeddingColumn(dim)),
-                t.field("metadata", JSONB.class));
+                t.field("metadata", JSONB.class),
+                t.field("retention", String.class));
         }
     }
 

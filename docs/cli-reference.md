@@ -3685,6 +3685,37 @@ The census for one subspace: `total`, `available`, `claimed`, `dead`, `consumed`
 |------|-------------|
 | `--json` | Output as JSON |
 
+### nx tuple watch
+
+```
+nx tuple watch [ADDRESS...] [--instance NAME] [--interval SECONDS] [--reemit-after SECONDS] [--max-emits N] [--iterations N] [--state-dir PATH]
+```
+
+A ping-then-pull mailbox watcher, built to be the source of a Claude Code Monitor: every stdout line it prints is one notification that wakes the watching session. It probes `mailbox/ADDRESS` once per `--interval` with a zero-timeout `rd` (no park slot held), fetching many rows and filtering on `claim_state`, so a dead-lettered row at the head of the address cannot hide newer mail. It never claims, never acks, and never prints a body.
+
+An empty probe prints nothing. A newly seen tuple prints one line carrying the address, sender, kind, correlation id and tuple id, plus the drain instruction; the tuple id is for correlation only, because a mailbox claim is address-wide. At most five such lines per cycle, then one coalesced line naming the rest. A tuple still present after `--reemit-after` is pinged again, up to `--max-emits` times, then it goes silent and is counted. Dead-lettered rows go to stderr once per row; a probe failure goes to stderr once per distinct error, with one more line when the probe recovers. The seen-set is a JSON file per address under `<state-dir>/tuple-watch/`; losing it re-pings and never loses a message.
+
+| Flag | Description |
+|------|-------------|
+| `--interval SECONDS` | Seconds between probes (default 3) |
+| `--reemit-after SECONDS` | Seconds before a still-present tuple is pinged again (default 600) |
+| `--max-emits N` | Pings per tuple before it goes silent (default 3) |
+| `--iterations N` | Probe cycles to run; 0 (default) runs until interrupted |
+| `--instance NAME` | This session's instance-name mailbox (the `ListAgents` row, e.g. `nexus-19`) |
+| `--state-dir PATH` | Where the seen-set lives (default: the nexus config dir) |
+
+An explicit `ADDRESS` wins outright: it suppresses every default, watches exactly what you named, and takes no other lock.
+
+With no `ADDRESS`, it watches the session id, which it reads from this process's own environment. It watches the instance mailbox as well only when `--instance` supplies the name, because that name exists in no environment variable at all and can only be passed at arm time. So the no-flag default is one mailbox, not two, and omitting `--instance` prints one warning saying the instance mailbox is unwatched, rather than silently halving the watch. If the session id does not resolve but `--instance` does, it watches that one alone and warns about the other. If neither resolves there is nothing to watch, which is a `SKIP` and no watch at all, not a warning.
+
+When it does watch both, one process probes them and they share a single emit budget, because a second Monitor for the second address would double the ping rate against a throttle counted per monitor.
+
+Before the loop starts it preflights the engine with one registry call and one census per address. If the tuple space is unreachable or the mailbox is unreadable it prints one `SKIP` line on stdout and exits without watching, because an engine below the floor that answers every call with a 404 is otherwise indistinguishable from an empty mailbox. A dead-lettered backlog approaching the probe cap warns, since past the cap dead rows hide fresh mail again.
+
+While the loop runs, a failed probe prints one line on stdout rather than going quiet: silence and an empty mailbox look identical. That line repeats at most once per five minutes for the same error, so a sustained outage cannot trip the Monitor's auto-stop, and a changed error (a transport blip becoming an auth failure) reports immediately.
+
+One watcher per address, machine-wide, enforced by a lock file next to the seen-set. A second watcher on an address someone else already holds prints one line naming the holder's process and session and exits, so a re-arm after `/clear` or `/compact` cannot double every ping. The lock is an advisory `flock`, so a holder that dies releases it and the next watcher acquires rather than refusing. Addresses are resolved once at startup and never re-resolved.
+
 ## nx service
 
 Storage-service administration.

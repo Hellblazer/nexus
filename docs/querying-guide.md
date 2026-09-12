@@ -171,7 +171,7 @@ Several mechanisms run automatically across all interfaces.
 
 ### Topic-aware ranking
 
-> **Note:** Topic *discovery*, *rebuild*, and per-document *assignment* run on the nexus-service backend — `nx taxonomy discover` and `nx index repo` work normally (nexus-7ydks). `nx taxonomy split` / `project` and the cross-collection projection pass are still being ported and refuse cleanly on the service.
+> **Note:** The whole taxonomy runs on the nexus-service backend: discovery, rebuild, per-document assignment, `nx taxonomy split`, `nx taxonomy project`, and the cross-collection projection pass (the service-backend refusal on split and project was removed at nexus-i711w). The projection pass inside `discover` is skipped, with a message, only when the vector service itself is degraded.
 
 After `nx index repo` (or `nx taxonomy discover --all`), topics are clustered via HDBSCAN with Claude-Haiku auto-labels. Topic-aware ranking then works three ways:
 

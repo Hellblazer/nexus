@@ -447,7 +447,28 @@ from __future__ import annotations
 #: recall@20 12/12, hybrid p95 1753ms/bound 2646, search p95 781ms/bound
 #: 969), cloud-client-path-gate green including the new tuple-space leg.
 #: Local-mode installs get the tuple-space route ONLY through this pin.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 115)
+#: ->(0,1,116) 2026-09-12: paired with conexus 7.43.0 (RDR-169 reference-only
+#: chunks). The engine delta over v0.1.115 is additive only: two NEW routes
+#: (`POST /v1/vectors/upsert-reference-only`, `POST /v1/vectors/resolve`) and
+#: a `retention` output column appended to all 21 search + combined-query
+#: functions. No existing route, request field or response field changed
+#: shape, so an older client never sees the new field. (The engine also maps
+#: every search row BY NAME rather than positionally, which is what keeps a
+#: Postgres backend orphaned by a container swap from reading the re-created
+#: functions wrongly -- the only cross-version concurrency this deployment
+#: actually has, since the swap removes the old container before the new one
+#: migrates and binds.) Five Liquibase changesets (vectors-014-1,
+#: vectors-014-2, vectors-015-1, vectors-016-1, vectors-016-2), so the PITR
+#: fork walk WAS run against production: 445->450, delta 5 exact, zero rows
+#: moved (chunks 439,851 before and after), pg_relation_size identical, the
+#: biconditional CHECK convalidated. The biconditional was deliberately split
+#: into ADD CONSTRAINT ... NOT VALID plus a guarded VALIDATE so the walk never
+#: took ACCESS EXCLUSIVE for a full scan of 440k rows. All three wire-ledger
+#: entries (nexus-zw2em, nexus-4k1vz, nexus-aphki) lead with [additive], so
+#: the engine was tagged, deployed and cloud-gated BEFORE this client tag
+#: (nexus-1emxn choreography (a)). Local-mode installs get the reference-only
+#: retention model and the resolve route ONLY through this pin.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 116)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

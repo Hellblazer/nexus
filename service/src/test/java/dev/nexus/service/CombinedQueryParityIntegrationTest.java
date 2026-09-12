@@ -155,6 +155,18 @@ class CombinedQueryParityIntegrationTest {
         docs.add(new CqDoc(TOMB_TUMBLER, sha256Hex("cq-tomb"), queries.get(0),
             "paper", "ada", false, true));
 
+        // RDR-204 Phase 1 (nexus-ft04v.7): PgVectorRepository's stub-insert is retired —
+        // upsertChunks now requires COLL to already be registered (CollectionRegistry
+        // .requireRegistered), or it fails loud with UnregisteredCollectionException.
+        // Pre-existing gap this fixture never picked up when that landed; closed here
+        // (RDR-169 Gap 2 remainder, bead nexus-4k1vz) so this gate — one of the three
+        // named in the bead's own required run command — is green rather than
+        // perpetually red on an unrelated, already-fixed-elsewhere defect.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL);
+        }
+
         // Load chunks via the repo (real ONNX embeddings; chash = our 32-char id).
         pgRepo.upsertChunks(TENANT, COLL,
             docs.stream().map(CqDoc::chash).toList(),

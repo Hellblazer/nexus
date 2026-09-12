@@ -334,6 +334,69 @@ class TestSearchAspectScopedTool:
         assert t3.aspect_calls == []
 
 
+class TestReferenceOnlyRowContentCoercion:
+    """RDR-169 Gap 2 remainder (bead nexus-4k1vz): a reference-only row's ``content``
+    key is PRESENT with value ``None`` (vectors-016-combined-query-retention.xml gave
+    all four combined-query functions the same retention column
+    ``vectors-015-retention-search-return.xml`` gave plain/hybrid search; the client's
+    row is a plain dict from the HTTP client, not a coerced ``SearchResult``). A
+    ``row.get("content", "")`` default only fires when the KEY is absent — it passes a
+    present-but-None value straight through, which would surface a literal ``None`` in
+    both the structured ``contents`` array and the text-render join. Falsifies that a
+    None-content row renders as ``""`` in both output modes, for all four tools.
+    """
+
+    def test_metadata_scoped_null_content_coerces_to_empty_string(self, monkeypatch):
+        rows = [{"id": "1.2.3", "content": None, "distance": 0.1, "collection": "c1",
+                 "chash": "a" * 32}]
+        t3 = _FakeServiceT3(meta_rows=rows)
+        _wire(monkeypatch, t3, ["c1"])
+
+        structured = core.search_metadata_scoped("q", corpus="knowledge", structured=True)
+        assert structured["contents"] == [""]
+
+        text = core.search_metadata_scoped("q", corpus="knowledge", structured=False)
+        assert "None" not in text
+
+    def test_topic_scoped_null_content_coerces_to_empty_string(self, monkeypatch):
+        rows = {"c1": [{"id": "h1", "content": None, "distance": 0.1, "collection": "c1"}]}
+        t3 = _FakeServiceT3(topic_rows_by_col=rows)
+        _wire(monkeypatch, t3, ["c1"])
+
+        structured = core.search_topic_scoped("q", "Vector Search", corpus="knowledge",
+                                               structured=True)
+        assert structured["contents"] == [""]
+
+        text = core.search_topic_scoped("q", "Vector Search", corpus="knowledge",
+                                        structured=False)
+        assert "None" not in text
+
+    def test_graph_hop_null_content_coerces_to_empty_string(self, monkeypatch):
+        rows = [{"id": "1.2.3", "content": None, "distance": 0.1, "collection": "c1",
+                 "chash": "a" * 32}]
+        t3 = _FakeServiceT3(graph_rows=rows)
+        _wire(monkeypatch, t3, ["c1"])
+
+        structured = core.search_graph_hop("q", ["1.2.0"], corpus="knowledge",
+                                           structured=True)
+        assert structured["contents"] == [""]
+
+        text = core.search_graph_hop("q", ["1.2.0"], corpus="knowledge", structured=False)
+        assert "None" not in text
+
+    def test_aspect_scoped_null_content_coerces_to_empty_string(self, monkeypatch):
+        rows = [{"id": "1.2.3", "content": None, "distance": 0.1, "collection": "c1",
+                 "chash": "a" * 32}]
+        t3 = _FakeServiceT3(aspect_rows=rows)
+        _wire(monkeypatch, t3, ["c1"])
+
+        structured = core.search_aspect_scoped("q", corpus="knowledge", structured=True)
+        assert structured["contents"] == [""]
+
+        text = core.search_aspect_scoped("q", corpus="knowledge", structured=False)
+        assert "None" not in text
+
+
 class TestPlanRunnerRegistration:
     def test_tools_registered_as_retrieval(self):
         from nexus.plans.runner import _RETRIEVAL_TOOLS

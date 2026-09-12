@@ -166,6 +166,18 @@ class GraphHopParityIntegrationTest {
         // deleted_at set; text == queries.get(0) so it would top-rank if the guard missed.
         docs.add(new GhDoc(TOMB_TUMBLER, sha256Hex("gh-tomb"), queries.get(0), true));
 
+        // RDR-204 Phase 1 (nexus-ft04v.7): PgVectorRepository's stub-insert is retired —
+        // upsertChunks now requires COLL to already be registered (CollectionRegistry
+        // .requireRegistered), or it fails loud with UnregisteredCollectionException.
+        // Pre-existing gap this fixture never picked up when that landed; closed here
+        // (RDR-169 Gap 2 remainder, bead nexus-4k1vz) so this gate — one of the three
+        // named in the bead's own required run command — is green rather than
+        // perpetually red on an unrelated, already-fixed-elsewhere defect.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL);
+        }
+
         pgRepo.upsertChunks(TENANT, COLL,
             docs.stream().map(GhDoc::chash).toList(),
             docs.stream().map(GhDoc::text).toList(),
@@ -247,6 +259,12 @@ class GraphHopParityIntegrationTest {
             branchTumblers.add(n);
             chashes.add(sha256Hex("bchash-" + n));
             texts.add(B_PROBE + " " + n.replace("-", ""));
+        }
+        // RDR-204 Phase 1 (nexus-ft04v.7): see the identical comment on COLL's own
+        // registration above — COLL2 needs the same pre-registration.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL2);
         }
         pgRepo.upsertChunks(TENANT, COLL2, chashes, texts,
             texts.stream().map(t -> Map.<String, Object>of()).toList());

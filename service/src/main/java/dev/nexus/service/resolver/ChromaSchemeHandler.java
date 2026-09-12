@@ -20,9 +20,9 @@ import java.net.URI;
  * <p>Example: {@code chroma://knowledge__nexus__bge-base-en-v15-768__v1/abc123ef}
  *
  * <p>Resolution fetches the {@code chunk_text} column for the
- * {@code (tenant, collection, chash)} triple from the
- * {@code nexus.chunks_<dim>} table via the injected {@link ChunkTextFetcher}.
- * In production wire as:
+ * {@code (tenant, collection, chash)} triple from the unified
+ * {@code nexus.chunks} table (RDR-191 Phase 4) via the injected
+ * {@link ChunkTextFetcher}. In production wire as:
  *
  * <pre>  new ChromaSchemeHandler(pgVectorRepository::fetchChunkText)</pre>
  *
@@ -30,8 +30,12 @@ import java.net.URI;
  * stamps {@code nexus.tenant} before touching the table, so cross-tenant rows
  * are invisible.
  *
- * <p>Phase A: the handler is registered and unit-tested here.  Live /v1
- * reference-only serving that calls this handler is Phase B (bead nexus-dtnpu).
+ * <p>Wired live (bead nexus-aphki): {@link dev.nexus.service.NexusService}'s
+ * constructor registers this handler for {@code chroma://} whenever a
+ * {@code PgVectorRepository} is present, backed by {@code
+ * pgVectorRepository::fetchChunkText}, and injects the registry into {@link
+ * dev.nexus.service.http.ResolveHandler} at {@code POST /v1/vectors/resolve}
+ * (see {@link UriSchemeResolverRegistry}'s class javadoc for the full wiring).
  */
 public final class ChromaSchemeHandler implements UriSchemeHandler {
 
@@ -67,9 +71,12 @@ public final class ChromaSchemeHandler implements UriSchemeHandler {
      *
      * <p>Returns {@link ResolveResult#error} (never throws) when the URI is
      * malformed, the chunk is missing, or {@code chunk_text} is NULL (reference-only
-     * chunk — by design, reference-only chunks have no stored text; Phase B must
-     * branch on {@code errorReason() == "reference_only"} to distinguish this from
-     * a URI error).
+     * chunk — by design, reference-only chunks have no stored text). {@link
+     * dev.nexus.service.http.ResolveHandler} branches on {@code errorReason()} to
+     * pick the HTTP status: {@code "reference_only"} maps to 404 (the server has
+     * no bytes to serve; the caller resolves elsewhere — never a 502, since this
+     * is not a resolver failure), while this handler's own URI-shape errors
+     * ({@code "unreachable"} / {@code "malformed"}) map to 422.
      */
     @Override
     public ResolveResult resolve(String uri, String tenant) {
@@ -113,7 +120,10 @@ public final class ChromaSchemeHandler implements UriSchemeHandler {
         String text = fetcher.fetch(tenant, collection, chash);
         if (text == null) {
             // NULL chunk_text = reference-only retention (RDR-169 G1) or missing row.
-            // Phase B MUST branch on this reason token to decide 404 vs. client-redirect.
+            // ResolveHandler branches on this reason token to 404 (never 502): the
+            // requested source_uri points at content the server has no bytes for,
+            // and the caller resolves it elsewhere — see
+            // ResolveHandler#resolveAndRespond (RDR-169 G3, bead nexus-aphki).
             return ResolveResult.error("reference_only",
                     "chunk (" + collection + ", " + chash + ") has no stored text "
                     + "(reference-only retention or missing row) — resolve client-side");

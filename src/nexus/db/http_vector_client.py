@@ -2755,6 +2755,19 @@ class HttpVectorClient:
         populate ``source_uri`` on each row (RDR-169 G5, bead nexus-jkv85).
         Default False — omits the field so default callers pay zero JOIN cost.
 
+        RDR-169 Phase B (bead nexus-zw2em): a row may carry ``content: null``
+        (a reference-only chunk, RDR-169 G1) and a ``retention`` key
+        (``"full"`` or ``"reference-only"``). This method passes rows
+        through verbatim — no field validation, no coercion — so both are
+        already tolerated here by construction; the None-coercion that
+        matters happens one layer up, at ``search_engine.py``'s
+        ``SearchResult`` construction (the actual crash boundary a bare
+        ``r["content"]`` or ``r.content[...]`` would hit). Only a plain
+        vector search (this method, ``structured=False``) can surface such
+        a row; the engine's ``hybrid_search`` route excludes it via its
+        FTS/trigram gate (chunk_tsv/word_similarity are both NULL/false
+        for NULL content).
+
         RDR-188 (bead nexus-9o6y2.8): ``rerank=True`` requests the server's
         fused rerank stage. The response becomes an object envelope
         ``{"results": [...], "rerank_degraded": ..., ...}``; scored rows carry
@@ -3158,6 +3171,70 @@ class HttpVectorClient:
             return result.get("deleted", 0) > 0
         except VectorServiceError:
             return False
+
+    def resolve_content(
+        self,
+        *,
+        source_uri: str | None = None,
+        collection: str | None = None,
+        chash: str | None = None,
+    ) -> dict:
+        """POST /v1/vectors/resolve (RDR-169 G3, bead nexus-aphki).
+
+        Resolves a server-reachable URI (``chroma://`` pgvector chunk reassembly,
+        ``https://`` fetch) to its text content, or — given ``collection`` +
+        ``chash`` instead — looks up that chunk's ``metadata.source_uri`` through
+        the engine's existing metadata read and resolves THAT URI. Exactly one of
+        ``source_uri`` or the ``(collection, chash)`` pair is required.
+
+        A client-side scheme (``file://``, ``obsidian://``,
+        ``x-devonthink-item://``, ``nx-scratch://``) is never resolved here — a
+        managed engine cannot reach a tenant's local machine. Those stay the
+        Python bridge's job (``nexus.aspect_readers``); passing one of their URIs
+        raises :class:`VectorServiceError` with ``code=422``.
+
+        Returns ``{"content": ..., "source_uri": ..., "retention": ...}`` —
+        ``retention`` (``"full"`` or ``"reference-only"``) is present only for
+        the ``(collection, chash)`` form, naming the retention of the row looked
+        up, not of whatever its ``source_uri`` resolves to.
+
+        Raises :class:`VectorServiceError` (``.code`` carries the HTTP status)
+        on:
+
+        - 404 — no such chash, the chunk carries no ``metadata.source_uri``,
+          OR the resolved target itself is a reference-only chunk with no
+          stored text (the server has no bytes to serve; resolve it
+          elsewhere). This last case shares ``code=404`` with the other two
+          but is distinguishable in the message text: the engine's body is
+          ``{"error": "reference_only", "detail": ..., "source_uri": ...}``,
+          and ``_post``'s existing generic HTTPError mapping (the same path
+          that already surfaces a 422's ``detail`` field verbatim, RDR-195
+          nexus-kmtlp.11) embeds the body's ``error`` token as the first
+          words after ``"HTTP 404: "`` — no new exception type or attribute,
+          the reason is IN the raised exception's message, same as every
+          other structured error body this client already surfaces.
+        - 422 — an unregistered scheme (``file://``/``obsidian://``/etc., or
+          a genuinely unknown scheme), OR the resolved handler reports a
+          caller-shaped URI problem (a malformed ``chroma://`` URI, a
+          non-``https://`` URI misrouted).
+        - 502 — the resolver hit a genuine fetch/resolver failure (a
+          dangling reference, a non-2xx or empty HTTP response).
+        - 503 — the ``(collection, chash)`` form with no pgvector repository
+          wired.
+        """
+        if source_uri is not None:
+            if collection is not None or chash is not None:
+                raise ValueError(
+                    "resolve_content: pass source_uri OR (collection, chash), not both"
+                )
+            body: dict = {"source_uri": source_uri}
+        elif collection is not None and chash is not None:
+            body = {"collection": collection, "chash": chash}
+        else:
+            raise ValueError(
+                "resolve_content: source_uri, or both collection and chash, is required"
+            )
+        return _post("/v1/vectors/resolve", body, tenant=self._tenant)
 
     def collection_stats(self) -> list[dict]:
         """Per-collection live statistics via ``GET /v1/vectors/stats``.

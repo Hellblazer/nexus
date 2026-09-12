@@ -11,16 +11,16 @@ import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 
 /**
- * Phase-A SQL-shape test for
- * {@link PgVectorRepository#referenceOnlyInsertQuery} (RDR-169 G4,
- * nexus-xvb6b; DSL form since nexus-xtmtf).
+ * SQL-shape test for {@link PgVectorRepository#referenceOnlyInsertQuery}
+ * (RDR-169 G4, nexus-xvb6b; DSL form since nexus-xtmtf; {@code retention} is
+ * the GENERATED jOOQ field since RDR-169 Phase B, bead nexus-zw2em).
  *
  * <p>In the same package as {@link PgVectorRepository} so it can access the
  * package-private builder. Pure unit test — no DB, no Testcontainers: renders
  * the jOOQ query against the POSTGRES dialect and asserts the SQL fragment is
  * correctly formed (NULL chunk_text, retention column present, chunk_text
- * absent from DO UPDATE) without executing it against the live schema (the
- * {@code retention} column does not exist until Phase B / nexus-dtnpu).
+ * absent from DO UPDATE). The live-schema, real-write proof of the same shape
+ * lives in {@code dev.nexus.service.ReferenceOnlyChunkUpsertTest}.
  */
 class ReferenceOnlySqlShapeTest {
 
