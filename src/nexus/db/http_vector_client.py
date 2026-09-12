@@ -3172,6 +3172,52 @@ class HttpVectorClient:
         except VectorServiceError:
             return False
 
+    def resolve_content(
+        self,
+        *,
+        source_uri: str | None = None,
+        collection: str | None = None,
+        chash: str | None = None,
+    ) -> dict:
+        """POST /v1/vectors/resolve (RDR-169 G3, bead nexus-aphki).
+
+        Resolves a server-reachable URI (``chroma://`` pgvector chunk reassembly,
+        ``https://`` fetch) to its text content, or — given ``collection`` +
+        ``chash`` instead — looks up that chunk's ``metadata.source_uri`` through
+        the engine's existing metadata read and resolves THAT URI. Exactly one of
+        ``source_uri`` or the ``(collection, chash)`` pair is required.
+
+        A client-side scheme (``file://``, ``obsidian://``,
+        ``x-devonthink-item://``, ``nx-scratch://``) is never resolved here — a
+        managed engine cannot reach a tenant's local machine. Those stay the
+        Python bridge's job (``nexus.aspect_readers``); passing one of their URIs
+        raises :class:`VectorServiceError` with ``code=422``.
+
+        Returns ``{"content": ..., "source_uri": ..., "retention": ...}`` —
+        ``retention`` (``"full"`` or ``"reference-only"``) is present only for
+        the ``(collection, chash)`` form, naming the retention of the row looked
+        up, not of whatever its ``source_uri`` resolves to.
+
+        Raises :class:`VectorServiceError` (``.code`` carries the HTTP status)
+        on 404 (no such chash, or the chunk carries no ``metadata.source_uri``),
+        422 (unregistered scheme — ``.code == 422``), 502 (the resolver could not
+        reach the URI — a dangling reference or a missing chroma row), or 503
+        (the ``(collection, chash)`` form with no pgvector repository wired).
+        """
+        if source_uri is not None:
+            if collection is not None or chash is not None:
+                raise ValueError(
+                    "resolve_content: pass source_uri OR (collection, chash), not both"
+                )
+            body: dict = {"source_uri": source_uri}
+        elif collection is not None and chash is not None:
+            body = {"collection": collection, "chash": chash}
+        else:
+            raise ValueError(
+                "resolve_content: source_uri, or both collection and chash, is required"
+            )
+        return _post("/v1/vectors/resolve", body, tenant=self._tenant)
+
     def collection_stats(self) -> list[dict]:
         """Per-collection live statistics via ``GET /v1/vectors/stats``.
 

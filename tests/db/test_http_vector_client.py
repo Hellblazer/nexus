@@ -3031,3 +3031,125 @@ class TestSingleCollectionUnregistered422IsActionable:
         assert "is not registered" in msg
         assert "register it first" in msg
         assert excinfo.value.code == 422
+
+
+class TestResolveContent:
+    """RDR-169 G3 (bead nexus-aphki): ``HttpVectorClient.resolve_content`` —
+    POST /v1/vectors/resolve, both request forms, and the four non-2xx
+    status codes the engine handler can return."""
+
+    def test_source_uri_form_200_returns_content(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = HttpVectorClient()
+        captured: dict = {}
+
+        def fake_post(path, body, **kw):
+            captured["path"] = path
+            captured["body"] = body
+            return {"content": "fetched html", "source_uri": "https://example.com/doc"}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+
+        result = client.resolve_content(source_uri="https://example.com/doc")
+
+        assert captured["path"] == "/v1/vectors/resolve"
+        assert captured["body"] == {"source_uri": "https://example.com/doc"}
+        assert result == {"content": "fetched html", "source_uri": "https://example.com/doc"}
+        # source_uri form: no row, so no retention field.
+        assert "retention" not in result
+
+    def test_chash_form_200_returns_content_and_retention(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = HttpVectorClient()
+        captured: dict = {}
+
+        def fake_post(path, body, **kw):
+            captured["path"] = path
+            captured["body"] = body
+            return {
+                "content": "chunk text from pgvector",
+                "source_uri": "chroma://knowledge__nexus__voyage-context-3__v1/abc123",
+                "retention": "reference-only",
+            }
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+
+        result = client.resolve_content(
+            collection="knowledge__nexus__voyage-context-3__v1",
+            chash="a" * 64,
+        )
+
+        assert captured["body"] == {
+            "collection": "knowledge__nexus__voyage-context-3__v1",
+            "chash": "a" * 64,
+        }
+        assert result["retention"] == "reference-only"
+        assert result["content"] == "chunk text from pgvector"
+
+    def test_both_forms_given_raises_value_error_before_any_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = HttpVectorClient()
+
+        def fail_post(*a, **k):
+            raise AssertionError("must not call _post when both forms are given")
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fail_post)
+
+        with pytest.raises(ValueError, match="OR"):
+            client.resolve_content(
+                source_uri="https://example.com/doc",
+                collection="col",
+                chash="a" * 64,
+            )
+
+    def test_neither_form_given_raises_value_error(self) -> None:
+        client = HttpVectorClient()
+        with pytest.raises(ValueError, match="required"):
+            client.resolve_content()
+
+    def test_404_chash_not_found_raises_vector_service_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = HttpVectorClient()
+
+        def raise_404(path, body, **kw):
+            raise VectorServiceError("POST /v1/vectors/resolve → HTTP 404: not found", code=404)
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", raise_404)
+
+        with pytest.raises(VectorServiceError) as excinfo:
+            client.resolve_content(collection="col", chash="a" * 64)
+        assert excinfo.value.code == 404
+
+    def test_422_unregistered_scheme_raises_vector_service_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = HttpVectorClient()
+
+        def raise_422(path, body, **kw):
+            raise VectorServiceError(
+                "POST /v1/vectors/resolve → HTTP 422: no handler registered for scheme 'file'",
+                code=422,
+            )
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", raise_422)
+
+        with pytest.raises(VectorServiceError) as excinfo:
+            client.resolve_content(source_uri="file:///etc/passwd")
+        assert excinfo.value.code == 422
+        assert "file" in str(excinfo.value)
+
+    def test_502_dangling_reference_raises_vector_service_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = HttpVectorClient()
+
+        def raise_502(path, body, **kw):
+            raise VectorServiceError(
+                "POST /v1/vectors/resolve → HTTP 502: unreachable", code=502
+            )
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", raise_502)
+
+        with pytest.raises(VectorServiceError) as excinfo:
+            client.resolve_content(source_uri="https://example.com/gone")
+        assert excinfo.value.code == 502
