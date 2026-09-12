@@ -391,14 +391,26 @@ class TupleRenewTest {
                 Map.of("from", "sender-renew"), "kept", "nonce-kept", null);
         byte[] goneId = repo.out(tenant, "mailbox/" + goneTo, Map.of("to", goneTo),
                 Map.of("from", "sender-renew"), "released", "nonce-released", null);
-        var keptClaim = repo.inp(tenant, "mailbox/" + keptTo, Map.of("to", keptTo), "worker-1", 1);
-        var goneClaim = repo.inp(tenant, "mailbox/" + goneTo, Map.of("to", goneTo), "worker-2", 1);
+        var keptClaim = repo.inp(tenant, "mailbox/" + keptTo, Map.of("to", keptTo), "worker-1", 3);
+        var goneClaim = repo.inp(tenant, "mailbox/" + goneTo, Map.of("to", goneTo), "worker-2", 3);
         assertThat(keptClaim).isPresent();
         assertThat(goneClaim).isPresent();
+        int attemptsBefore = rawRow(keptId).value3();
 
-        // Renewed while still live; its sibling is left to lapse.
-        repo.renew(tenant, keptClaim.get().claimId(), "worker-1", 600);
-        Thread.sleep(1500);   // the one-second leases are now past, both of them
+        // Renewed while still live; its sibling is left to lapse. The three-second
+        // lease is slack for THIS step, not a performance claim: if a loaded box burns
+        // it between the claim above and the renew below, the renew is refused as a
+        // lapsed claim and the run says so instead of reporting a sweep result it never
+        // reached. That direction was missing from the first version's safety argument.
+        try {
+            repo.renew(tenant, keptClaim.get().claimId(), "worker-1", 600);
+        } catch (ClaimNotFoundException e) {
+            org.junit.jupiter.api.Assumptions.abort(
+                    "the claim lapsed between in and renew, so this box could not hold a "
+                    + "3s lease across two calls. Contention, not a statement about the "
+                    + "sweep (nexus-h61dl.5).");
+        }
+        Thread.sleep(3500);   // both three-second leases are now past
 
         TupleRepository.ReleaseBatchResult batch = repo.releaseLapsedClaimsBatch(tenant, 300, null);
 
@@ -416,25 +428,46 @@ class TupleRenewTest {
                 .containsExactly("claim", "renew");
         assertThat(transitionsFor(tenant, goneId))
                 .as("the control's own expire row").containsExactly("claim", "expire");
+        // Honest about its own reach: the sweep SKIPPED this row rather than evaluating
+        // its release arm against it, so this cannot show the arm leaving ATTEMPTS
+        // alone — the arm never ran here. It fails only if the RENEW spends an attempt,
+        // which renewDoesNotCountAnAttempt already pins directly. Kept as a free net at
+        // the sweep boundary, not counted as new coverage. The test it replaced claimed
+        // to be that coverage and was vacuous for exactly this reason.
+        assertThat(rawRow(keptId).value3())
+                .as("no attempt was spent anywhere in this sequence")
+                .isEqualTo(attemptsBefore);
     }
 
     /**
-     * The census counts a renewed claim as {@code claimed} — not available, not dead.
-     * A renew moves {@code lease_until} and nothing else, so nothing about how the row
-     * is counted may move with it.
+     * A renew changes NOTHING the census can see.
+     *
+     * <p>Stated as an equality across the renew, not as "a renewed claim counts as
+     * claimed". The first version asserted the latter and could not fail: {@code
+     * computeCensus} filters on {@code consumed_at}, {@code expires_at} and {@code
+     * claim_state} and never reads {@code lease_until}, so deleting the renew left every
+     * assertion identical — it proved that a claimed row counts as claimed. Both
+     * reviewers of nexus-h61dl.5 caught it independently.
+     *
+     * <p>Comparing the whole record before and against after is what can fail: the
+     * moment a renew touches any column the census DOES read, the two stop being equal.
+     * The explicit counts stay underneath so the test still says what shape it expects
+     * rather than only that nothing moved.
      */
     @Test
-    void theCensusCountsARenewedClaimAsClaimed() {
+    void aRenewChangesNothingTheCensusCanSee() {
         Seeded s = outAndClaim("census", "worker-1");
+        var before = repo.subspaceStats(s.tenant(), s.subspace());
 
         repo.renew(s.tenant(), s.claimId(), "worker-1", 600);
 
-        var census = repo.subspaceStats(s.tenant(), s.subspace());
-        assertThat(census.claimed()).as("still claimed").isEqualTo(1);
-        assertThat(census.available()).as("not handed back").isZero();
-        assertThat(census.dead()).as("not dead-lettered").isZero();
-        assertThat(census.consumed()).as("not consumed").isZero();
-        assertThat(census.total()).isEqualTo(1);
+        var after = repo.subspaceStats(s.tenant(), s.subspace());
+        assertThat(after).as("the census is byte-identical across a renew").isEqualTo(before);
+        assertThat(after.claimed()).as("and the shape it should have had all along").isEqualTo(1);
+        assertThat(after.available()).isZero();
+        assertThat(after.dead()).isZero();
+        assertThat(after.consumed()).isZero();
+        assertThat(after.total()).isEqualTo(1);
     }
 
     /**
@@ -456,25 +489,4 @@ class TupleRenewTest {
                 .containsExactly("claim", "renew", "ack");
     }
 
-    /**
-     * Attempts survive a renew AND the sweep pass that follows it.
-     *
-     * <p>{@code renewDoesNotCountAnAttempt} above already pins the repository call in
-     * isolation (Step 3). This is the Step 4 half the bead asks for and deliberately
-     * not a copy of it: the question here is whether a renewed row that a sweep has
-     * since walked past still carries its original attempt count, since the sweep's
-     * release arm is the other writer of that column.
-     */
-    @Test
-    void attemptsSurviveARenewAndTheSweepThatWalksPastIt() {
-        Seeded s = outAndClaim("attempts-sweep", "worker-1");
-        int before = rawRow(s.id()).value3();
-
-        repo.renew(s.tenant(), s.claimId(), "worker-1", 600);
-        TupleRepository.ReleaseBatchResult batch = repo.releaseLapsedClaimsBatch(s.tenant(), 300, null);
-
-        assertThat(batch.released()).as("the sweep found nothing lapsed to release").isZero();
-        assertThat(rawRow(s.id()).value3())
-                .as("neither the renew nor the sweep spent an attempt").isEqualTo(before);
-    }
 }
