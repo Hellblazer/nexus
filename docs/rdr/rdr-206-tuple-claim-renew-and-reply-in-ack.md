@@ -295,13 +295,33 @@ private TuplesRecord consumeClaim(DSLContext ctx, String tenant, String claimId,
     // so ackWithReply cannot ship without the compare-and-swap.
 
 public byte[] ackWithReply(String tenant, String claimId, String claimant, ReplySpec replyOrNull)
-    // withTenant: consumeClaim FIRST (a consumed or foreign claim fails here and nothing
-    // else runs), then, if replyOrNull != null, resolveOrThrow(reply subspace) and
-    // SchemaViolation unless the template's id_from is KEYS_NONCE, then writeOut(ctx, ...)
-    // against that template in the SAME ctx, with nonce = hex(consumed row's id), set here
-    // and never taken from the caller (a nonce key in the reply object was already refused
-    // by the handler). After withTenant returns, signalAll(tenant, replySubspace)
-    // only if a reply was written. Returns the reply id or null.
+    // AMENDED to match what shipped (nexus-h61dl.3/.4 review). This block previously
+    // put resolveOrThrow and the id_from check INSIDE withTenant, after consumeClaim.
+    // The shipped order is the reverse and is stronger, so the document moved rather
+    // than the code: EVERY way the reply can be refused runs BEFORE the transaction
+    // opens, so a refused reply leaves the request still claimed because the ack never
+    // STARTED, not because a rollback restored it. Those two end states are identical
+    // in an assertion and come apart the moment someone splits the transaction or moves
+    // the signal.
+    //
+    // So: if replyOrNull != null, prepareOut(reply subspace/keys/dims/ttl) — which
+    // resolves the template and validates shape and ttl bounds — then SchemaViolation
+    // unless the template's id_from is KEYS_NONCE. Both BEFORE withTenant. Then
+    // withTenant: consumeClaim (a consumed or foreign claim fails here), then
+    // writeOut(ctx, ...) in the SAME ctx, with nonce = hex(consumed row's id), set by
+    // the engine and never taken from the caller (a nonce key in the reply object was
+    // already refused by the handler). After withTenant returns,
+    // signalAll(tenant, replySubspace) only if a reply was written. Returns the reply id
+    // or null.
+    //
+    // The order is observable on exactly one input: a STALE claim and an INVALID reply
+    // together, where the shipped code raises SchemaViolation and the order described
+    // here before would have raised ClaimNotFound. Pinned by
+    // TupleAckWithReplyTest#whenBothTheClaimIsStaleAndTheReplyIsInvalid_theReplyIsRefusedFirst,
+    // written when this amendment landed, because neither neighbouring test supplies
+    // both violations at once — the same blind spot that hid the out() validation-order
+    // swap at Step 2. Reverting to the old order fails that test AND
+    // aRefusedReplyNeverOpensTheTransaction.
 ```
 
 Routes (`TupleHandler`): `POST /v1/tuples/renew` with body

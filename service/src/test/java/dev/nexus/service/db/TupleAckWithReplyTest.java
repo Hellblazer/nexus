@@ -435,4 +435,45 @@ class TupleAckWithReplyTest {
                         .as("the NONCE is the rejected field, not the ttl")
                         .isEqualTo("nonce"));
     }
+
+    // ── which refusal wins when a call violates both at once ─────────────────
+
+    /**
+     * A STALE claim AND an INVALID reply in one call. The reply is refused first, so
+     * the caller sees SchemaViolation and never learns the claim was also gone.
+     *
+     * <p>Pinned because it is the one input where the shipped order is observable, and
+     * because RDR-206's Technical Design pseudocode described the OTHER order --
+     * consumeClaim first, then the reply checks, both inside the transaction -- which
+     * would raise ClaimNotFound here instead. That block is marked Illustrative and the
+     * shipped order is the stronger one (a refused reply never starts the ack at all,
+     * rather than relying on rollback), so the RDR is being corrected to match rather
+     * than the code changed to match it.
+     *
+     * <p>This is the same shape as the {@code out} finding both reviewers raised at
+     * Step 2: an ordering only observable when two violations arrive together, and
+     * therefore invisible to every test that supplies one at a time. The two neighbours
+     * here each supply one -- {@code aStaleClaimIsRefusedBeforeAnyReplyIsWritten} pairs
+     * a stale claim with a VALID reply, {@code anInvalidReplyRefusesAndLeavesTheRequestClaimed}
+     * pairs an invalid reply with a LIVE claim -- so neither can see it.
+     */
+    @Test
+    void whenBothTheClaimIsStaleAndTheReplyIsInvalid_theReplyIsRefusedFirst() {
+        String asker = addr("asker");
+        String answerer = addr("answerer");
+        String claimId = requestAndClaim(answerer, "worker-1");
+        repo.ack(TENANT, claimId, "worker-1");   // the claim is now consumed
+
+        var bad = new TupleRepository.ReplySpec(
+                "mailbox/" + asker, Map.of("to", asker, "nope", "x"),
+                Map.of("from", "answerer"), "body", null);
+
+        assertThatExceptionOfType(SchemaViolationException.class)
+                .as("the reply is validated before the transaction opens, so it wins over "
+                    + "the stale claim that would otherwise raise ClaimNotFound")
+                .isThrownBy(() -> repo.ackWithReply(TENANT, claimId, "worker-1", bad))
+                .satisfies(e -> assertThat(e.field()).isEqualTo("nope"));
+
+        assertThat(rowCount("mailbox/" + asker)).as("no reply row").isEqualTo(0);
+    }
 }
