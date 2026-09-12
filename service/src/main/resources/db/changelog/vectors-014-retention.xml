@@ -153,6 +153,9 @@ ALTER TABLE nexus.chunks
     </changeSet>
 
     <changeSet id="vectors-014-2" author="nexus-zw2em">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="1">SELECT COUNT(*) FROM pg_constraint WHERE conname = 'chunks_content_retention_consistent'</sqlCheck>
+        </preConditions>
         <comment>
             Validates chunks_content_retention_consistent (added NOT VALID by
             vectors-014-1) against the existing rows. ALTER TABLE ... VALIDATE
@@ -163,6 +166,9 @@ ALTER TABLE nexus.chunks
             hit (conexus deploy-side directive, unreleased: without this
             split, ADD CONSTRAINT alone was measured to full-scan
             nexus.chunks (~440k rows in production) under ACCESS EXCLUSIVE).
+            Guarded by a whole-changeset precondition (nexus-boz39 shape, the
+            catalog-013-2 precedent): marks ran once instead of hard-erroring
+            on a box where the constraint does not exist.
         </comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.chunks
