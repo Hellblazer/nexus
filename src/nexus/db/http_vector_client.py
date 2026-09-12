@@ -3199,10 +3199,28 @@ class HttpVectorClient:
         up, not of whatever its ``source_uri`` resolves to.
 
         Raises :class:`VectorServiceError` (``.code`` carries the HTTP status)
-        on 404 (no such chash, or the chunk carries no ``metadata.source_uri``),
-        422 (unregistered scheme — ``.code == 422``), 502 (the resolver could not
-        reach the URI — a dangling reference or a missing chroma row), or 503
-        (the ``(collection, chash)`` form with no pgvector repository wired).
+        on:
+
+        - 404 — no such chash, the chunk carries no ``metadata.source_uri``,
+          OR the resolved target itself is a reference-only chunk with no
+          stored text (the server has no bytes to serve; resolve it
+          elsewhere). This last case shares ``code=404`` with the other two
+          but is distinguishable in the message text: the engine's body is
+          ``{"error": "reference_only", "detail": ..., "source_uri": ...}``,
+          and ``_post``'s existing generic HTTPError mapping (the same path
+          that already surfaces a 422's ``detail`` field verbatim, RDR-195
+          nexus-kmtlp.11) embeds the body's ``error`` token as the first
+          words after ``"HTTP 404: "`` — no new exception type or attribute,
+          the reason is IN the raised exception's message, same as every
+          other structured error body this client already surfaces.
+        - 422 — an unregistered scheme (``file://``/``obsidian://``/etc., or
+          a genuinely unknown scheme), OR the resolved handler reports a
+          caller-shaped URI problem (a malformed ``chroma://`` URI, a
+          non-``https://`` URI misrouted).
+        - 502 — the resolver hit a genuine fetch/resolver failure (a
+          dangling reference, a non-2xx or empty HTTP response).
+        - 503 — the ``(collection, chash)`` form with no pgvector repository
+          wired.
         """
         if source_uri is not None:
             if collection is not None or chash is not None:

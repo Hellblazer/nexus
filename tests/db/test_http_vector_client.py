@@ -3035,8 +3035,15 @@ class TestSingleCollectionUnregistered422IsActionable:
 
 class TestResolveContent:
     """RDR-169 G3 (bead nexus-aphki): ``HttpVectorClient.resolve_content`` —
-    POST /v1/vectors/resolve, both request forms, and the four non-2xx
-    status codes the engine handler can return."""
+    POST /v1/vectors/resolve, both request forms, and all four non-2xx
+    status codes the engine handler can return (404, 422, 502, 503), plus
+    the reference_only 404 sub-case (fix round 1, T2
+    critique-nexus-aphki-rdr169-gap3-resolve-2026-09-11): it shares
+    code=404 with a plain chash-not-found, distinguished only in the
+    raised exception's message text (the engine body's ``error`` token is
+    embedded verbatim by ``_post``'s existing generic HTTPError mapping —
+    no new exception type or attribute, same convention as the 422
+    TOO_MANY_TOKENS ``detail`` fields already surfaced there)."""
 
     def test_source_uri_form_200_returns_content(self, monkeypatch: pytest.MonkeyPatch) -> None:
         client = HttpVectorClient()
@@ -3138,14 +3145,19 @@ class TestResolveContent:
         assert excinfo.value.code == 422
         assert "file" in str(excinfo.value)
 
-    def test_502_dangling_reference_raises_vector_service_error(
+    def test_502_resolver_failure_raises_vector_service_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         client = HttpVectorClient()
 
         def raise_502(path, body, **kw):
+            # "empty" (a 200-with-blank-body https fetch) is the one reason token
+            # the engine actually maps to 502 post-fix-round-1 -- "unreachable" and
+            # "malformed" moved to 422 (RDR-169 G3 fix round 1, T2
+            # critique-nexus-aphki-rdr169-gap3-resolve-2026-09-11 Critical).
             raise VectorServiceError(
-                "POST /v1/vectors/resolve → HTTP 502: unreachable", code=502
+                "POST /v1/vectors/resolve → HTTP 502: empty — empty body at "
+                "'https://example.com/gone' (HTTP 200)", code=502
             )
 
         monkeypatch.setattr("nexus.db.http_vector_client._post", raise_502)
@@ -3153,3 +3165,58 @@ class TestResolveContent:
         with pytest.raises(VectorServiceError) as excinfo:
             client.resolve_content(source_uri="https://example.com/gone")
         assert excinfo.value.code == 502
+
+    def test_503_no_pgvector_repository_raises_vector_service_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = HttpVectorClient()
+
+        def raise_503(path, body, **kw):
+            raise VectorServiceError(
+                "POST /v1/vectors/resolve → HTTP 503: resolve by (collection, chash) "
+                "requires a pgvector repository", code=503
+            )
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", raise_503)
+
+        with pytest.raises(VectorServiceError) as excinfo:
+            client.resolve_content(collection="col", chash="a" * 64)
+        assert excinfo.value.code == 503
+
+    def test_404_reference_only_is_distinguishable_from_chash_not_found(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both share code=404; the reason token in the raised message is the
+        only thing telling them apart (see the class docstring)."""
+        client = HttpVectorClient()
+
+        def raise_reference_only_404(path, body, **kw):
+            raise VectorServiceError(
+                "POST /v1/vectors/resolve → HTTP 404: reference_only — chunk "
+                "(col, abc123) has no stored text (reference-only retention "
+                "or missing row) — resolve client-side",
+                code=404,
+            )
+
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post", raise_reference_only_404
+        )
+
+        with pytest.raises(VectorServiceError) as excinfo:
+            client.resolve_content(source_uri="chroma://col/abc123")
+        assert excinfo.value.code == 404
+        assert "reference_only" in str(excinfo.value)
+
+        def raise_plain_404(path, body, **kw):
+            raise VectorServiceError(
+                "POST /v1/vectors/resolve → HTTP 404: no chunk found for "
+                "collection='col' chash='deadbeef'",
+                code=404,
+            )
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", raise_plain_404)
+
+        with pytest.raises(VectorServiceError) as excinfo2:
+            client.resolve_content(collection="col", chash="deadbeef")
+        assert excinfo2.value.code == 404
+        assert "reference_only" not in str(excinfo2.value)
