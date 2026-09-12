@@ -92,12 +92,34 @@ def _transcript(tmp_path: Path, *, with_sendmessage: bool) -> Path:
     return p
 
 
+#: Default subprocess budget for one hook invocation. Ordinary invocations
+#: finish in well under a second; this bounds a HANG, not performance.
+_HOOK_TIMEOUT = 30
+
+#: Budget for the clamp test, which is a different shape of work: it shadows
+#: sleep with a no-op so the hook's 600-try lock loop runs its full iteration
+#: count, spawning ~600 processes. That is wall-clock-per-spawn, and on a box
+#: running the unit suite beside a sandbox gate it exceeded the 30s default and
+#: failed as TimeoutExpired — a red naming a lock ceiling when the cause was
+#: contention (nexus-eij2r, observed on the 7.39.0 battery; alone it passes in
+#: under 14s).
+#:
+#: Sized against FALSE POSITIVES rather than tuned just above the observed
+#: worst case, which is the move that defers a flake instead of fixing it. 600
+#: spawns at a contended few-tens-of-milliseconds each is the real range, so
+#: 300s sits far outside it while still bounding a genuine hang. Raising the
+#: DEFAULT instead would have weakened the budget for every other hook test
+#: here, none of which spawns anything.
+_HOOK_TIMEOUT_MANY_SPAWNS = 300
+
+
 def _run_hook(
     stdin: str,
     tmp_path: Path,
     *,
     mode: str | None,
     extra_env: dict[str, str] | None = None,
+    timeout: int = _HOOK_TIMEOUT,
 ) -> subprocess.CompletedProcess[str]:
     env = {
         **os.environ,
@@ -113,7 +135,7 @@ def _run_hook(
         input=stdin,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=timeout,
         env=env,
     )
 
@@ -910,6 +932,9 @@ class TestBlockMode:
                 "NX_EXPECT_LOCK_TRIES": "999999",
                 "PATH": f"{fake_bin}:{os.environ['PATH']}",
             },
+            # ~600 process spawns, so this leg needs a budget sized to spawn
+            # count rather than the default hang bound (nexus-eij2r).
+            timeout=_HOOK_TIMEOUT_MANY_SPAWNS,
         )
 
         assert proc.returncode == 0, proc.stderr
