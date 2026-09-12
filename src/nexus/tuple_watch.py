@@ -21,6 +21,11 @@ much as what is.
   ``reemit_after_s``; after that a row still present re-pings, which is what
   heals a dropped notification. ``max_emits`` per tuple, then silent and
   counted, so a row nobody drains cannot burn the Monitor's auto-stop budget.
+- Watches every address given to it in ONE process, probing each once per cycle
+  and sharing one emit budget across them (:func:`resolve_watch_addresses`
+  decides the list once at startup). A session has two mailboxes -- its session
+  id and its instance name -- and a second Monitor for the second address would
+  double the ping rate against a throttle that is counted per monitor.
 - Preflights before the loop (:func:`preflight`): one bounded registry call
   plus one census per address. A below-floor or unreachable engine 404s or
   refuses every call forever and is otherwise indistinguishable from an empty
@@ -212,6 +217,75 @@ class _Emitter:
             self._emit(_coalesced_line(address, len(tail)))
             self._recent.append(t)
             stats.coalesced += len(tail)
+
+
+@dataclass(frozen=True)
+class ResolvedAddresses:
+    """What one watcher process should watch, decided once at startup."""
+
+    addresses: list[str]
+    notices: list[str] = field(default_factory=list)
+    error: str = ""
+
+
+def resolve_watch_addresses(
+    explicit: Iterable[str],
+    *,
+    instance: str = "",
+    session_id: str | None = None,
+) -> ResolvedAddresses:
+    """Decide the address list for one watcher, ONCE, before the loop.
+
+    A session has two mailboxes and they are reached differently. The SESSION ID
+    is in this process's own environment, so a freshly spawned watcher resolves
+    it correctly (``CLAUDE_CODE_SESSION_ID`` is right at spawn; it only goes
+    stale in a long-lived process, which this is not). The INSTANCE NAME -- the
+    ``ListAgents`` row, e.g. ``nexus-19`` -- exists in no environment variable
+    anywhere, so it can only arrive as a literal at arm time.
+
+    One process watches both. Two Monitors would not: the auto-stop budget is
+    per monitor and a second one doubles the ping rate against one throttle.
+
+    Explicit positional addresses win outright and suppress every default, which
+    is what the SessionStart arming (MM-3.1) passes and what leaves the existing
+    literal-address callers unchanged. Otherwise the session id is watched, the
+    instance is added when given, and its ABSENCE is said out loud rather than
+    silently halving the watch. Nothing to watch at all is a SKIP, not a warning.
+    """
+    explicit_list = [a for a in dict.fromkeys(explicit) if a]
+    if explicit_list:
+        return ResolvedAddresses(addresses=explicit_list)
+
+    addresses: list[str] = []
+    notices: list[str] = []
+    if session_id:
+        addresses.append(session_id)
+    if instance:
+        addresses.append(instance)
+    addresses = list(dict.fromkeys(addresses))
+
+    if not addresses:
+        return ResolvedAddresses(
+            addresses=[],
+            error=(
+                f"{PING_PREFIX} SKIP: no mailbox to watch -- no address was given, no"
+                f" session id resolved, and --instance was not set, so nothing is being"
+                f" watched. Pass an address, or --instance <name>."
+            ),
+        )
+    if not instance:
+        notices.append(
+            f"{PING_PREFIX} WARNING: watching only the session-id mailbox. The"
+            f" instance-name mailbox is NOT watched, and mail sent to this instance by"
+            f" name will not be pinged, because --instance was not given (the instance"
+            f" name is in no environment variable; it has to be passed at arm time).",
+        )
+    if not session_id:
+        notices.append(
+            f"{PING_PREFIX} WARNING: watching only the instance-name mailbox. No session"
+            f" id resolved, so mail addressed to this session's id will not be pinged.",
+        )
+    return ResolvedAddresses(addresses=addresses, notices=notices)
 
 
 def _error_note(e: BaseException) -> str:

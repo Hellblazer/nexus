@@ -3688,7 +3688,7 @@ The census for one subspace: `total`, `available`, `claimed`, `dead`, `consumed`
 ### nx tuple watch
 
 ```
-nx tuple watch ADDRESS... [--interval SECONDS] [--reemit-after SECONDS] [--max-emits N] [--iterations N] [--state-dir PATH]
+nx tuple watch [ADDRESS...] [--instance NAME] [--interval SECONDS] [--reemit-after SECONDS] [--max-emits N] [--iterations N] [--state-dir PATH]
 ```
 
 A ping-then-pull mailbox watcher, built to be the source of a Claude Code Monitor: every stdout line it prints is one notification that wakes the watching session. It probes `mailbox/ADDRESS` once per `--interval` with a zero-timeout `rd` (no park slot held), fetching many rows and filtering on `claim_state`, so a dead-lettered row at the head of the address cannot hide newer mail. It never claims, never acks, and never prints a body.
@@ -3701,7 +3701,10 @@ An empty probe prints nothing. A newly seen tuple prints one line carrying the a
 | `--reemit-after SECONDS` | Seconds before a still-present tuple is pinged again (default 600) |
 | `--max-emits N` | Pings per tuple before it goes silent (default 3) |
 | `--iterations N` | Probe cycles to run; 0 (default) runs until interrupted |
+| `--instance NAME` | This session's instance-name mailbox (the `ListAgents` row, e.g. `nexus-19`) |
 | `--state-dir PATH` | Where the seen-set lives (default: the nexus config dir) |
+
+With no `ADDRESS`, it watches this session's own two mailboxes. The session id comes from this process's own environment, which a freshly spawned watcher reads correctly. The instance name exists in no environment variable at all, so it has to be passed with `--instance` at arm time. One process probes both and they share one emit budget, because a second Monitor for the second address would double the ping rate against a throttle counted per monitor. Omitting `--instance` prints one warning naming what is not being watched, rather than halving the watch in silence. Giving an explicit `ADDRESS` suppresses both defaults and watches exactly what you named.
 
 Before the loop starts it preflights the engine with one registry call and one census per address. If the tuple space is unreachable or the mailbox is unreadable it prints one `SKIP` line on stdout and exits without watching, because an engine below the floor that answers every call with a 404 is otherwise indistinguishable from an empty mailbox. A dead-lettered backlog approaching the probe cap warns, since past the cap dead rows hide fresh mail again.
 

@@ -21,6 +21,7 @@ from nexus.tuple_watch import (
     WatchConfig,
     acquire_watch_locks,
     preflight,
+    resolve_watch_addresses,
     run_watch,
     state_path,
 )
@@ -773,3 +774,211 @@ class TestTupleWatchCliGuards:
             assert after.ok is True, "the finished watcher must not leave its lock held"
         finally:
             after.release()
+
+
+# ── nx tuple watch: two addresses per session (MM-1.3, nexus-6konb.4) ──────
+
+
+class TestWatchAddressResolution:
+    """A session has two mailboxes: the session id, which a fresh subprocess can
+    resolve from its own env, and the instance name, which has no env var
+    anywhere and can only arrive as a literal at arm time."""
+
+    def test_explicit_addresses_are_used_verbatim_with_no_resolution(self) -> None:
+        r = resolve_watch_addresses(("a", "b"), instance="", session_id="session-xyz")
+        assert r.addresses == ["a", "b"]
+        assert r.notices == []
+        assert r.error == ""
+
+    def test_no_addresses_resolves_the_session_and_adds_the_instance(self) -> None:
+        r = resolve_watch_addresses((), instance="nexus-19", session_id="session-xyz")
+        assert r.addresses == ["session-xyz", "nexus-19"]
+        assert r.notices == []
+
+    def test_instance_omitted_warns_rather_than_half_watching_in_silence(self) -> None:
+        r = resolve_watch_addresses((), instance="", session_id="session-xyz")
+        assert r.addresses == ["session-xyz"]
+        assert len(r.notices) == 1
+        assert "--instance" in r.notices[0]
+        assert "session-xyz" not in r.notices[0].split("--instance")[0].split("WARNING")[0]
+        assert r.error == ""
+
+    def test_unresolvable_session_and_no_addresses_is_a_skip_not_a_warning(self) -> None:
+        r = resolve_watch_addresses((), instance="", session_id=None)
+        assert r.addresses == []
+        assert r.error
+        assert "SKIP" in r.error
+
+    def test_instance_alone_is_enough_when_the_session_does_not_resolve(self) -> None:
+        r = resolve_watch_addresses((), instance="nexus-19", session_id=None)
+        assert r.addresses == ["nexus-19"]
+        assert r.error == ""
+        assert len(r.notices) == 1
+        assert "session" in r.notices[0]
+
+    def test_an_instance_equal_to_the_session_id_collapses_to_one_address(self) -> None:
+        r = resolve_watch_addresses((), instance="same", session_id="same")
+        assert r.addresses == ["same"]
+
+
+class TestWatchTwoAddresses:
+    def test_both_subspaces_are_probed_every_iteration(self, t2_service_env, tmp_path) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        a, b = _uniq("sess"), _uniq("inst")
+        probed = []
+
+        class _Recording:
+            def __init__(self, inner) -> None:
+                self.inner = inner
+
+            def rd(self, subspace, *args, **kw):
+                probed.append(subspace)
+                return self.inner.rd(subspace, *args, **kw)
+
+        lines, reports, clock = [], [], _Clock()
+        run_watch(
+            _Recording(store), [a, b], config=cfg, state_dir=sd, iterations=3,
+            emit=lines.append, report=reports.append, now=clock.now, sleep=lambda _s: None,
+        )
+        assert probed == [f"mailbox/{a}", f"mailbox/{b}"] * 3
+
+    def test_a_hit_on_either_address_names_which_one_it_arrived_at(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        a, b = _uniq("sess"), _uniq("inst")
+        id_a = _out(store, a, sender="from-session")
+        id_b = _out(store, b, sender="from-instance")
+        lines, reports, clock = [], [], _Clock()
+        run_watch(
+            store, [a, b], config=cfg, state_dir=sd, iterations=1,
+            emit=lines.append, report=reports.append, now=clock.now, sleep=lambda _s: None,
+        )
+        assert len(lines) == 2
+        by_addr = {line.split("mailbox/")[1].split()[0]: line for line in lines}
+        assert set(by_addr) == {a, b}
+        assert id_a in by_addr[a] and "from-session" in by_addr[a]
+        assert id_b in by_addr[b] and "from-instance" in by_addr[b]
+
+    def test_each_address_keeps_its_own_seen_set(self, t2_service_env, tmp_path) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        a, b = _uniq("sess"), _uniq("inst")
+        _out(store, a, sender="alice")
+        lines, reports, clock = [], [], _Clock()
+        run_watch(
+            store, [a, b], config=cfg, state_dir=sd, iterations=1,
+            emit=lines.append, report=reports.append, now=clock.now, sleep=lambda _s: None,
+        )
+        assert len(lines) == 1
+        assert state_path(sd, a).is_file()
+        assert not state_path(sd, b).is_file() or "seen" in state_path(sd, b).read_text()
+        # mail arriving at the OTHER address is new, not shadowed by the first one's state
+        _out(store, b, sender="bob")
+        clock.advance(cfg.interval_s)
+        run_watch(
+            store, [a, b], config=cfg, state_dir=sd, iterations=1,
+            emit=lines.append, report=reports.append, now=clock.now, sleep=lambda _s: None,
+        )
+        assert len(lines) == 2
+        assert f"mailbox/{b}" in lines[1]
+
+    def test_two_addresses_share_one_emit_budget_rather_than_one_each(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        """A simultaneous first-arm backlog on both mailboxes must stay under the
+        single measured auto-stop ceiling, not double it."""
+        store, cfg, sd = _watch_env(tmp_path)
+        a, b = _uniq("sess"), _uniq("inst")
+        for i in range(6):
+            _out(store, a, sender=f"a{i}")
+            _out(store, b, sender=f"b{i}")
+        lines, reports, clock = [], [], _Clock()
+        run_watch(
+            store, [a, b], config=cfg, state_dir=sd, iterations=1,
+            emit=lines.append, report=reports.append, now=clock.now, sleep=lambda _s: None,
+        )
+        # cfg.budget_lines is the ceiling for the WHOLE cycle across both addresses
+        assert len(lines) <= cfg.budget_lines
+        # and nothing was lost: every row counted as pinged, so the next cycle is silent
+        clock.advance(cfg.interval_s)
+        before = len(lines)
+        run_watch(
+            store, [a, b], config=cfg, state_dir=sd, iterations=1,
+            emit=lines.append, report=reports.append, now=clock.now, sleep=lambda _s: None,
+        )
+        assert len(lines) == before
+
+    def test_one_address_failing_does_not_stop_the_other(self, t2_service_env, tmp_path) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        a, b = _uniq("sess"), _uniq("inst")
+        tid = _out(store, b, sender="bob")
+
+        class _HalfBroken:
+            def __init__(self, inner) -> None:
+                self.inner = inner
+
+            def rd(self, subspace, *args, **kw):
+                if subspace == f"mailbox/{a}":
+                    raise _Boom("that one is unreachable")
+                return self.inner.rd(subspace, *args, **kw)
+
+        lines, reports, clock = [], [], _Clock()
+        stats = run_watch(
+            _HalfBroken(store), [a, b], config=cfg, state_dir=sd, iterations=2,
+            emit=lines.append, report=reports.append, now=clock.now, sleep=lambda _s: None,
+        )
+        assert stats.probe_errors == 2
+        pings = [line for line in lines if "new mail" in line]
+        assert len(pings) == 1 and tid in pings[0]
+        assert len([line for line in lines if "probe failed" in line]) == 1
+
+
+class TestWatchTwoAddressesCli:
+    def test_instance_flag_watches_both_mailboxes(self, t2_service_env, tmp_path,
+                                                  monkeypatch) -> None:
+        store, _cfg, sd = _watch_env(tmp_path)
+        sess, inst = _uniq("sess"), _uniq("inst")
+        monkeypatch.setenv("NX_SESSION_ID", sess)
+        id_a = _out(store, sess, sender="from-session")
+        id_b = _out(store, inst, sender="from-instance")
+        res = _invoke([
+            "watch", "--instance", inst, "--iterations", "1", "--interval", "0",
+            "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        pings = [line for line in res.output.splitlines() if "new mail" in line]
+        assert len(pings) == 2, res.output
+        assert any(id_a in p for p in pings) and any(id_b in p for p in pings)
+        assert not [line for line in res.output.splitlines() if "WARNING" in line]
+
+    def test_no_instance_flag_warns_once_and_still_watches_the_session(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        store, _cfg, sd = _watch_env(tmp_path)
+        sess = _uniq("sess")
+        monkeypatch.setenv("NX_SESSION_ID", sess)
+        tid = _out(store, sess, sender="alice")
+        res = _invoke([
+            "watch", "--iterations", "1", "--interval", "0", "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        warnings = [line for line in res.output.splitlines() if "WARNING" in line]
+        assert len(warnings) == 1, res.output
+        assert "--instance" in warnings[0]
+        pings = [line for line in res.output.splitlines() if "new mail" in line]
+        assert len(pings) == 1 and tid in pings[0]
+
+    def test_no_addresses_and_no_resolvable_session_skips(self, t2_service_env, tmp_path,
+                                                          monkeypatch) -> None:
+        cfgdir = tmp_path / "empty-cfg"
+        cfgdir.mkdir()
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfgdir))
+        res = _invoke([
+            "watch", "--iterations", "1", "--interval", "0", "--state-dir", str(tmp_path),
+        ])
+        assert res.exit_code == 0, res.output
+        skips = [line for line in res.output.splitlines() if "SKIP" in line]
+        assert len(skips) == 1, res.output
+        assert not [line for line in res.output.splitlines() if "new mail" in line]

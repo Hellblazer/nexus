@@ -256,7 +256,10 @@ def tuple_stats_cmd(subspace: str, json_out: bool) -> None:
 
 
 @tuple_group.command(name="watch")
-@click.argument("addresses", nargs=-1, required=True)
+@click.argument("addresses", nargs=-1)
+@click.option("--instance", "instance", default="", metavar="NAME",
+              help="This session's instance-name mailbox (the ListAgents row, e.g. nexus-19). "
+                   "It is in no environment variable, so it must be passed here.")
 @click.option("--interval", "interval_s", type=float, default=3.0, show_default=True,
               help="Seconds between probes.")
 @click.option("--reemit-after", "reemit_after_s", type=float, default=600.0, show_default=True,
@@ -268,10 +271,14 @@ def tuple_stats_cmd(subspace: str, json_out: bool) -> None:
 @click.option("--state-dir", "state_dir", type=click.Path(path_type=Path), default=None,
               help="Where the seen-set lives (default: the nexus config dir).")
 def tuple_watch_cmd(
-    addresses: tuple[str, ...], interval_s: float, reemit_after_s: float,
+    addresses: tuple[str, ...], instance: str, interval_s: float, reemit_after_s: float,
     max_emits: int, iterations: int, state_dir: Path | None,
 ) -> None:
     """Watch mailbox/ADDRESS... and print one ping line per newly arrived tuple.
+
+    With no ADDRESS, watches this session's own two mailboxes: the session id,
+    resolved from this process's environment, and the instance name given by
+    --instance. Both are probed by this one process, never by two Monitors.
 
     Built to be a Claude Code Monitor source: prints nothing on an empty probe,
     never claims, never prints a body. Re-pings a still-present tuple after
@@ -280,16 +287,17 @@ def tuple_watch_cmd(
     line instead of watching silently if it cannot read the mailbox, and refuses
     to start when another watcher already holds the address."""
     from nexus import config as _config  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred
     from nexus.tuple_watch import (  # noqa: PLC0415 — deferred: CLI startup cost
         WatchConfig,
         acquire_watch_locks,
         preflight,
+        resolve_watch_addresses,
         run_watch,
     )
 
     cfg = WatchConfig(interval_s=interval_s, reemit_after_s=reemit_after_s, max_emits=max_emits)
     sd = state_dir or _config.nexus_config_dir()
-    store = _store()
     report = lambda s: click.echo(s, err=True)  # noqa: E731 — one-liner, matches emit's shape
 
     # The ADDRESSES are resolved exactly once, here, and never re-resolved inside the
@@ -298,14 +306,25 @@ def tuple_watch_cmd(
     # peer session's SessionStart, so a re-resolve is either a no-op or a spurious exit.
     # A moved address is handled by this process dying with its session and the next
     # SessionStart re-arming (MM-3.1/MM-3.2), backed by the lock below.
-    if not preflight(store, addresses, config=cfg, emit=click.echo).ok:
+    resolved = resolve_watch_addresses(
+        addresses, instance=instance, session_id=resolve_active_session_id(),
+    )
+    if resolved.error:
+        click.echo(resolved.error)
         return
-    locks = acquire_watch_locks(addresses, state_dir=sd, emit=click.echo)
+    for notice in resolved.notices:
+        click.echo(notice)
+    watched = resolved.addresses
+
+    store = _store()
+    if not preflight(store, watched, config=cfg, emit=click.echo).ok:
+        return
+    locks = acquire_watch_locks(watched, state_dir=sd, emit=click.echo)
     if not locks.ok:
         return
     try:
         run_watch(
-            store, addresses, config=cfg, state_dir=sd,
+            store, watched, config=cfg, state_dir=sd,
             iterations=iterations, emit=click.echo, report=report,
         )
     except KeyboardInterrupt:
