@@ -885,8 +885,10 @@ public final class TupleRepository {
      * so if renew touched {@code ATTEMPTS} a long task would dead-letter itself by doing
      * precisely what this operation exists to let it do.
      *
-     * <p>The lease is clamped to the tuple's own expiry by {@link #clampedLeaseUntil},
-     * the same helper the claim statement uses. A lease longer than the template's
+     * <p>The lease is clamped to the tuple's own expiry IN SQL, against the row as it
+     * stands at UPDATE time — not by {@link #clampedLeaseUntil}, which is now
+     * {@code claimOnce}'s alone because that caller reads under a lock and this one does
+     * not. The reason is at the update itself. A lease longer than the template's
      * {@code max_lease_seconds} is REFUSED rather than clamped: renewal changes who
      * decides when work is long, not the cap.
      *
