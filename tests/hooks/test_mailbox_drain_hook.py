@@ -123,6 +123,9 @@ class _MockEngine:
         #: applying its effect. Models the killing case: the engine consumed the
         #: row and the client never learned it.
         self.drop_after_effect_on: tuple[str, int] | None = None
+        #: Kill the connection on an rd for this address, so the hook raises
+        #: _Skip on that mailbox and no other.
+        self.fail_rd_for: str | None = None
         self._route_counts: dict[str, int] = {}
         engine = self
 
@@ -140,6 +143,11 @@ class _MockEngine:
                 engine.calls.append((self.path, body))
                 engine._route_counts[self.path] = engine._route_counts.get(self.path, 0) + 1
                 if self.path == "/v1/tuples/rd":
+                    if engine.fail_rd_for and (body.get("keys_pattern") or {}).get(
+                        "to",
+                    ) == engine.fail_rd_for:
+                        self.close_connection = True
+                        return
                     if engine.rd_delay_s:
                         time.sleep(engine.rd_delay_s)
                     pattern = (body.get("keys_pattern") or {}).get("to")
@@ -515,6 +523,17 @@ class TestPartialFailureNeverLosesDeliveredMail:
         first = _run(tmp_path=tmp_path)
         assert "still in the mailbox" not in first.stdout
         assert eng.rows, "the row should still be there"
+        # A CLEAN refusal is unambiguous: the engine answered 404, so the ack
+        # definitively did not land and the row is definitely still in the
+        # mailbox. The pending record is therefore a duplicate and is dropped.
+        # That is the opposite of a TRANSPORT failure on ack, where the client
+        # cannot tell whether the engine consumed the row, and the record must
+        # survive -- the case test_a_row_consumed_with_a_lost_ack_response_is_
+        # recovered_next_prompt covers.
+        assert not (tmp_path / "config" / "tuple-watch"
+                    / f"{SESSION_ID}.pending.json").exists(), (
+            "a clean 404 refusal left a duplicate pending record behind"
+        )
         eng.ack_ok = True
         second = _run(tmp_path=tmp_path)
         assert second.stdout.count("still in the mailbox") == 1
@@ -528,13 +547,68 @@ class TestPartialFailureNeverLosesDeliveredMail:
             assert f"message {i}" in res.stdout
 
     def test_one_failing_address_does_not_stop_the_other(self, tmp_path, engine) -> None:
+        """_Skip is caught per address, not around the whole loop. The session-id
+        mailbox is probed FIRST and made to fail outright; the registered address
+        must still be drained afterwards."""
         eng = engine()
-        eng.rows = [_row("z1", body="from the good address")]
-        eng.rows[0]["keys"] = {"to": "other-addr"}
+        good = _row("z1", body="from the good address")
+        good["keys"] = {"to": "other-addr"}
+        eng.rows = [good]
+        # the FIRST rd is the session-id address: kill its connection so the
+        # hook raises _Skip on it before ever reaching the second address
+        eng.fail_rd_for = SESSION_ID
         reg = tmp_path / "config" / "tuple-watch" / "addresses"
         reg.parent.mkdir(parents=True, exist_ok=True)
         reg.write_text("other-addr\n", encoding="utf-8")
         _wired(tmp_path, eng)
         res = _run(tmp_path=tmp_path)
         assert res.returncode == 0
-        assert "from the good address" in res.stdout
+        assert "SKIP" in res.stderr, "the first address must actually have failed"
+        assert SESSION_ID in res.stderr
+        assert "from the good address" in res.stdout, (
+            "a failure on the first address stopped the second"
+        )
+
+    def test_a_pending_record_survives_a_drain_that_never_reclaims_the_row(
+        self, tmp_path, engine,
+    ) -> None:
+        """The critic's round-2 critical. A pending record whose row is still in
+        the mailbox must be KEPT, not cleared on sight.
+
+        Clearing on presence assumed the same drain would go on to claim that
+        row. A drain whose budget runs out first, or which cannot claim because
+        a peer holds it, would leave nothing anywhere to notice if the original
+        ambiguous ack later landed at the engine on its own schedule. The row
+        would be consumed and shown to nobody, which is the failure class the
+        recovery exists to close.
+        """
+        eng = engine()
+        eng.rows = [_row("p1", body="ambiguous then late")]
+        # prompt 1: the ack is applied but its response is lost -> pending record,
+        # and the row is gone from the engine
+        eng.drop_after_effect_on = ("/v1/tuples/ack", 1)
+        _wired(tmp_path, eng)
+        _run(tmp_path=tmp_path)
+        pending = tmp_path / "config" / "tuple-watch" / f"{SESSION_ID}.pending.json"
+        assert pending.exists()
+
+        # prompt 2: the row is visible again (as it would be after a lapsed
+        # lease) and this drain cannot claim it. The record must survive.
+        eng.drop_after_effect_on = None
+        eng.rows = [_row("p1", body="ambiguous then late")]
+        eng.claimable = False
+        second = _run(tmp_path=tmp_path)
+        assert "ambiguous then late" not in second.stdout
+        assert pending.exists(), (
+            "the pending record was cleared merely because the row was visible; "
+            "nothing is left to recover it if the original ack lands later"
+        )
+
+        # prompt 3: the original ack landed after all, so the row is gone. The
+        # record is the only thing that can still deliver it.
+        eng.rows = []
+        eng.claimable = True
+        third = _run(tmp_path=tmp_path)
+        assert "ambiguous then late" in third.stdout, (
+            "a message consumed at the engine was never shown to anyone"
+        )

@@ -179,61 +179,89 @@ def _pending_path(config_dir: Path, address: str) -> Path:
     return config_dir / "tuple-watch" / f"{address}.pending.json"
 
 
-def _write_pending(config_dir: Path, address: str, tuple_id: str, rendered: str) -> None:
-    """Record a claimed-but-not-yet-acked row, so its delivery survives a lost
-    ack RESPONSE. Best-effort: failing to write this must not stop the drain."""
+def _read_pending(config_dir: Path, address: str) -> list[dict[str, str]]:
     try:
-        path = _pending_path(config_dir, address)
+        raw = _pending_path(config_dir, address).read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return []
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return []
+    out = []
+    for e in entries:
+        if isinstance(e, dict) and e.get("id") and e.get("rendered"):
+            out.append({"id": str(e["id"]), "rendered": str(e["rendered"])})
+    return out
+
+
+def _save_pending(config_dir: Path, address: str, entries: list[dict[str, str]]) -> None:
+    """Best-effort: failing to write this must never stop a drain."""
+    path = _pending_path(config_dir, address)
+    try:
+        if not entries:
+            path.unlink(missing_ok=True)
+            return
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps({"id": tuple_id, "rendered": rendered}), encoding="utf-8",
-        )
+        tmp.write_text(json.dumps({"entries": entries}), encoding="utf-8")
         tmp.replace(path)
     except OSError:
         pass
 
 
-def _clear_pending(config_dir: Path, address: str) -> None:
-    try:
-        _pending_path(config_dir, address).unlink()
-    except OSError:
-        pass
+def _write_pending(config_dir: Path, address: str, tuple_id: str, rendered: str) -> None:
+    """Record a claimed-but-not-yet-acked row, so its delivery survives a lost
+    ack RESPONSE.
+
+    A LIST keyed by tuple id, not a single record: a drain consumes several rows
+    per prompt, so a single slot would let row B's record overwrite row A's while
+    A was still unresolved, losing exactly the trace this file exists to keep.
+    """
+    entries = [e for e in _read_pending(config_dir, address) if e["id"] != tuple_id]
+    entries.append({"id": tuple_id, "rendered": rendered})
+    _save_pending(config_dir, address, entries)
+
+
+def _clear_pending(config_dir: Path, address: str, tuple_id: str) -> None:
+    entries = [e for e in _read_pending(config_dir, address) if e["id"] != tuple_id]
+    _save_pending(config_dir, address, entries)
 
 
 def _recover_pending(config_dir: Path, address: str, present_ids: set[str],
                      out: _Out) -> None:
-    """Deliver a row this hook consumed on an earlier prompt but never showed.
+    """Deliver rows this hook consumed on an earlier prompt but never showed.
 
     The window is narrow and the consequence is total: ``ack`` reaches the
     engine, the engine consumes the row, and the response is lost. The client
     never learns the ack succeeded, so without this the row is gone from the
     mailbox and was never shown to anyone -- silent, permanent loss of a
-    delivered message, which is the failure class this whole epic exists to
-    prevent.
+    delivered message, the failure class this whole epic exists to prevent.
 
-    Presence in the mailbox is what distinguishes the two cases, and the probe
-    has already fetched it, so this costs no extra call:
+    Presence in the mailbox distinguishes the two cases, and the probe has
+    already fetched it, so this costs no extra call:
 
     * the id is ABSENT -- the ack landed, the row is consumed, its delivery was
-      lost. Deliver it now.
-    * the id is PRESENT -- the ack never landed. The row is still there (claimed
-      under a lease that will lapse, or already back), so the normal path will
-      deliver it. Drop the record rather than delivering it twice.
+      lost. Deliver it now, and drop the record.
+    * the id is PRESENT -- the ack never landed, so the row is still there and
+      the normal path can deliver it. The record is KEPT, not cleared. Clearing
+      here was a defect: it assumed this same drain would reach the live-claim
+      loop for that row, and a drain whose budget runs out first would leave
+      nothing anywhere to notice if the original ambiguous ack later landed at
+      the engine on its own schedule. Keeping the record costs a redundant entry
+      that the normal path clears on delivery; clearing it early costs the
+      message.
     """
-    try:
-        raw = _pending_path(config_dir, address).read_text(encoding="utf-8")
-        record = json.loads(raw)
-        tuple_id = str(record.get("id") or "")
-        rendered = str(record.get("rendered") or "")
-    except (OSError, ValueError, AttributeError):
+    entries = _read_pending(config_dir, address)
+    if not entries:
         return
-    if not tuple_id or not rendered:
-        _clear_pending(config_dir, address)
-        return
-    if tuple_id not in present_ids:
-        out.block(rendered)
-    _clear_pending(config_dir, address)
+    keep: list[dict[str, str]] = []
+    for entry in entries:
+        if entry["id"] in present_ids:
+            keep.append(entry)   # still in the mailbox: the normal path owns it
+        else:
+            out.block(entry["rendered"])
+    _save_pending(config_dir, address, keep)
 
 
 def _post(base_url: str, token: str, route: str, body: dict[str, Any],
@@ -382,24 +410,26 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
         if not claim or not claim.get("claim_id"):
             break  # a peer took it between rd and in, or the queue emptied
         row = claim.get("tuple") or {}
+        row_id = str(row.get("id"))
         rendered = _render_live(address, row)
         # Recorded BEFORE the ack, so that an ack whose response is lost --
         # the engine consumed the row, the client never learned it -- leaves a
         # trace the next prompt can recover from. Without this the row is gone
         # from the engine and was never shown to anyone.
-        _write_pending(config_dir, address, str(row.get("id")), rendered)
+        _write_pending(config_dir, address, row_id, rendered)
         acked = _post(base_url, token, "/v1/tuples/ack", {
             "claim_id": claim["claim_id"],
             "claimant": f"mailbox-drain-{address}",
         }, is_local=is_local, budget_s=deadline - time.monotonic())
         if acked is None:
-            # Claimed but not consumed: the lease lapses and the row returns to
-            # the mailbox, so delivering it now would deliver it twice. The
-            # pending entry is dropped for the same reason.
-            _clear_pending(config_dir, address)
+            # A clean refusal: the engine answered and said no. The lease lapses
+            # and the row returns to the mailbox, so the normal path will deliver
+            # it and this record would be a duplicate. Dropped by id, so no other
+            # row's record is disturbed.
+            _clear_pending(config_dir, address, row_id)
             break
         out.block(rendered)
-        _clear_pending(config_dir, address)
+        _clear_pending(config_dir, address, row_id)
 
 
 def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
