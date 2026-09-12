@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import uuid
+from pathlib import Path
 
 from click.testing import CliRunner
 
@@ -1227,3 +1230,73 @@ class TestWatcherExitAlwaysSpeaks:
         # capture: res.output interleaves both streams, so asserting against it would
         # pass with this line on stderr, which is the thing being ruled out
         assert "the watcher is exiting" not in res.stderr
+
+
+# ── Disjointness across both components (MM-2.2, nexus-6konb.7) ────────────
+
+
+class TestWatcherAndDrainHookAreDisjoint:
+    """The epic's central contract, tested across BOTH components against the
+    real engine rather than asserted in prose: the watcher pings and never
+    claims, the hook claims and consumes, and they are never two renderers of
+    one row."""
+
+    HOOK = (
+        Path(__file__).resolve().parent.parent
+        / "conexus" / "hooks" / "scripts" / "mailbox_drain.py"
+    )
+
+    def _run_hook(self, addr: str, tmp_path) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        env["NEXUS_CONFIG_DIR"] = str(tmp_path / "hookcfg")
+        env["XDG_STATE_HOME"] = str(tmp_path / "hookstate")
+        return subprocess.run(
+            [sys.executable, str(self.HOOK)],
+            input=json.dumps({"session_id": addr, "hook_event_name": "UserPromptSubmit"}),
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+
+    def test_the_watcher_pings_the_hook_consumes_and_nobody_renders_twice(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        addr = _uniq("sess")
+        tid = _out(store, addr, sender="peer-a", body="deliver me once")
+
+        # 1. the watcher pings it, and does NOT consume it
+        lines, reports, clock = [], [], _Clock()
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert len(lines) == 1 and tid in lines[0]
+        assert "deliver me once" not in lines[0], "the ping must never carry the body"
+        assert store.rd(f"mailbox/{addr}", {"to": addr}, n=5), (
+            "the watcher consumed the row; it must only ping"
+        )
+
+        # 2. the hook consumes it, and renders the body
+        res = self._run_hook(addr, tmp_path)
+        assert res.returncode == 0, res.stderr
+        assert "deliver me once" in res.stdout, res.stderr
+        assert not store.rd(f"mailbox/{addr}", {"to": addr}, n=5), (
+            "the hook rendered the row but did not consume it"
+        )
+
+        # 3. the watcher stops pinging it, because it is gone
+        clock.advance(cfg.reemit_after_s + 1)
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert len(lines) == 1, "the watcher re-pinged a row the hook already consumed"
+
+        # 4. and a second prompt delivers nothing: exactly once, across both
+        again = self._run_hook(addr, tmp_path)
+        assert "deliver me once" not in again.stdout
+
+    def test_the_hook_alone_delivers_with_no_watcher_ever_armed(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        """The floor. A session that never armed a Monitor still gets its mail."""
+        store, _cfg, _sd = _watch_env(tmp_path)
+        addr = _uniq("sess")
+        _out(store, addr, sender="peer-b", body="floor delivery")
+        res = self._run_hook(addr, tmp_path)
+        assert res.returncode == 0, res.stderr
+        assert "floor delivery" in res.stdout
+        assert not store.rd(f"mailbox/{addr}", {"to": addr}, n=5)

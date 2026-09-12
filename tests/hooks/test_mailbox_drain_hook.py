@@ -403,3 +403,39 @@ class TestNeverBlocksThePrompt:
         res = _run(tmp_path=tmp_path, stdin=json.dumps({"hook_event_name": "UserPromptSubmit"}))
         assert res.returncode == 0
         assert res.stdout.strip() == ""
+
+
+class TestCredentialPolicy:
+    """This hook is a synchronous call with a prompt waiting, like
+    t2_prefix_scan and routing/_lib, not a fire-and-forget write like the
+    sibling ledger hook. So it accepts a static service_token as a last
+    resort: refusing one would make the drain silently inert on a managed box
+    onboarded with `nx config set service_token` and nothing else, which is a
+    documented path. The floor must not vanish where a user did it right."""
+
+    def test_a_managed_box_with_only_a_static_env_token_still_drains(
+        self, tmp_path, engine,
+    ) -> None:
+        eng = engine()
+        eng.rows = [_row("kk11", body="managed box mail")]
+        res = _run(tmp_path=tmp_path, env_overrides={
+            "NX_SERVICE_URL": f"http://127.0.0.1:{eng.port}",
+            "NX_SERVICE_TOKEN": "static-managed-token",
+        })
+        assert res.returncode == 0, res.stderr
+        assert "managed box mail" in res.stdout
+
+    def test_a_group_readable_supervisor_lease_is_refused_not_used(
+        self, tmp_path, engine,
+    ) -> None:
+        """The lease token authorizes real engine writes. A lease another local
+        account could read must not be trusted, and the module's own accessor is
+        what enforces that -- reading the raw dict would skip the audit."""
+        eng = engine()
+        eng.rows = [_row("ll22", body="should not be delivered")]
+        _wired(tmp_path, eng)
+        (tmp_path / "config" / f"storage_service_addr.{os.getuid()}").chmod(0o644)
+        res = _run(tmp_path=tmp_path)
+        assert res.returncode == 0
+        assert "should not be delivered" not in res.stdout
+        assert "SKIP" in res.stderr

@@ -286,6 +286,61 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
     return blocks
 
 
+def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
+    """Resolve ``(base_url, token, is_local_supervisor)``.
+
+    CREDENTIAL POLICY, and why it is not the sibling ledger hook's. That hook
+    (``tuple_ledger_project.py``) is a fire-and-forget write with no reader and
+    no retry, so it deliberately refuses anything but a fresh tenant-scoped
+    data-token lease. This hook is a SYNCHRONOUS call with a prompt waiting on
+    it, the same shape as ``t2_prefix_scan.py`` and ``routing/_lib.py``, so it
+    takes the same looser last resort those two take: a static ``service_token``
+    from env or the persisted ``config.yml``. Refusing that would make the drain
+    silently inert on a managed box onboarded with ``nx config set
+    service_token`` and nothing else, which is a real, documented path -- the
+    floor would not exist exactly where a user had done everything right.
+
+    A fresh data-token lease for the resolved host still WINS over the static
+    token wherever one exists, mirroring the real client's
+    ``DataTokenManager.bearer_for``. Base-URL precedence comes from the shared
+    module (nexus-aginu) rather than being re-derived here, since that
+    precedence is what drifted between three hand-maintained copies before it
+    was factored out.
+    """
+    try:
+        base_url, is_local = _ep.resolve_base_url(config_dir)
+    except _ep.EndpointUnresolvable as exc:
+        raise _Skip(str(exc)) from exc
+
+    data_token = _ep.read_data_token_lease(config_dir, base_url)
+    if data_token:
+        return base_url, data_token, is_local
+
+    import os  # noqa: PLC0415 — deferred: only this path reads the environment
+
+    token = os.environ.get("NX_SERVICE_TOKEN", "").strip()
+    if not token:
+        token = (_ep.read_config_yml_credentials(config_dir) or {}).get(
+            "service_token", "",
+        ).strip()
+    if not token:
+        # Through the module's own accessor, never off the raw lease dict: it
+        # refuses a lease file that is not owner-only, because the token it
+        # carries authorizes real engine writes and a group- or world-readable
+        # lease means another local account could have read it too. Reading the
+        # dict directly would silently skip that audit.
+        try:
+            token = _ep.read_local_supervisor_token(config_dir).strip()
+        except _ep.EndpointUnresolvable:
+            token = ""
+    if not token:
+        raise _Skip(
+            f"resolved {base_url} but found no credential: no data-token lease, no "
+            "NX_SERVICE_TOKEN, no persisted service_token, no local supervisor lease",
+        )
+    return base_url, token, is_local
+
+
 def main() -> int:
     import time  # noqa: PLC0415 — deferred: only main needs a clock
 
@@ -316,10 +371,8 @@ def main() -> int:
         return 0
 
     try:
-        base_url, token, is_local = _ep.resolve_endpoint_and_token(
-            config_dir, tenant=_TENANT,
-        )
-    except _ep.EndpointUnresolvable as exc:
+        base_url, token, is_local = _resolve_endpoint(config_dir)
+    except _Skip as exc:
         _log_skip(f"no reachable tuple space: {exc}")
         return 0
 
