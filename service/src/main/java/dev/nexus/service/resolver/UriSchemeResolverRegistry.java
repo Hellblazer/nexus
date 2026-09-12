@@ -8,6 +8,8 @@ import org.slf4j.LoggerFactory;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -45,26 +47,17 @@ import java.util.concurrent.ConcurrentHashMap;
  * a handler that bypasses {@link dev.nexus.service.db.TenantScope} is a
  * security defect.
  *
- * <h2>Un-wired POJO — tracked by bead nexus-aphki</h2>
+ * <h2>Wiring — bead nexus-aphki (live)</h2>
  *
- * <p>This class registered the POJO + concrete handlers + unit tests
- * (nexus-064jj) but ships UN-WIRED: no production code constructs an
- * instance or registers handlers. Gap 3's read-time resolution surface is
- * distinct from Gap 1/Gap 4's write path — RDR-169 Phase B (bead
- * nexus-zw2em) lands the {@code retention} schema column and the
- * {@code POST /v1/vectors/upsert-reference-only} WRITE route
- * ({@link dev.nexus.service.http.VectorHandler}), not this class's wiring.
- * The bead that previously named this work (nexus-dtnpu) closed via
- * grooming without doing it; bead nexus-aphki (opened 2026-09-11 during the
- * Phase B landing) now tracks it — the following remains undone until it
- * is picked up:
- * <ol>
- *   <li>Construct a singleton {@code UriSchemeResolverRegistry}.</li>
- *   <li>Register {@link ChromaSchemeHandler} (for {@code chroma://}) and
- *       {@link HttpsSchemeHandler} (for {@code https://}) via
- *       {@link #register(String, UriSchemeHandler)}.</li>
- *   <li>Inject the registry into a read-time /v1 resolution route.</li>
- * </ol>
+ * <p>This class shipped the POJO + concrete handlers + unit tests at
+ * nexus-064jj; the read-time resolution wiring bead nexus-aphki opened for
+ * (Gap 3, distinct from Gap 1/Gap 4's schema column and WRITE route landed
+ * by RDR-169 Phase B / bead nexus-zw2em) is now live: {@link
+ * dev.nexus.service.NexusService}'s constructor builds one registry per
+ * service instance, registers {@link HttpsSchemeHandler} for {@code https://}
+ * unconditionally and {@link ChromaSchemeHandler} for {@code chroma://} when a
+ * {@code PgVectorRepository} is wired, and injects the registry into {@link
+ * dev.nexus.service.http.ResolveHandler} at {@code POST /v1/vectors/resolve}.
  */
 public final class UriSchemeResolverRegistry {
 
@@ -128,6 +121,17 @@ public final class UriSchemeResolverRegistry {
 
         log.debug("event=resolve_dispatch scheme={} tenant={}", scheme, tenant);
         return handler.resolve(sourceUri, tenant);
+    }
+
+    /**
+     * The currently-registered scheme tokens, sorted — used by {@link
+     * dev.nexus.service.http.ResolveHandler} to name the registered set in a
+     * 422 response when a caller's URI carries an unrecognised scheme.
+     *
+     * @return an immutable, alphabetically-sorted snapshot; never null
+     */
+    public Set<String> registeredSchemes() {
+        return new TreeSet<>(handlers.keySet());
     }
 
     /**

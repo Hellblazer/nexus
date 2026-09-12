@@ -23,11 +23,14 @@ import java.time.Duration;
  * <p>Tenant context is accepted but not used for access control (HTTPS URLs
  * are public; tenant scoping for private URL sets is a Phase B concern).
  *
- * <p>The handler is registered and unit-tested here but remains UN-WIRED
- * (see {@link UriSchemeResolverRegistry}'s class javadoc for the full status
- * of Gap 3's read-time resolution wiring, tracked as bead nexus-aphki —
- * distinct from RDR-169 Phase B / bead nexus-zw2em, which lands Gap 1's
- * schema column and Gap 4's WRITE route only).
+ * <p>Wired live (bead nexus-aphki): {@link dev.nexus.service.NexusService}'s
+ * constructor registers one instance of this handler for {@code https://}
+ * unconditionally, injects the registry into {@link
+ * dev.nexus.service.http.ResolveHandler} at {@code POST /v1/vectors/resolve},
+ * and closes it in {@code NexusService.stop()} (see {@link
+ * UriSchemeResolverRegistry}'s class javadoc for the full wiring — distinct
+ * from RDR-169 Phase B / bead nexus-zw2em, which landed Gap 1's schema
+ * column and Gap 4's WRITE route only).
  */
 public final class HttpsSchemeHandler implements UriSchemeHandler, AutoCloseable {
 

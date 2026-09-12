@@ -29,6 +29,7 @@ import dev.nexus.service.http.MemoryHandler;
 import dev.nexus.service.http.PipelineHandler;
 import dev.nexus.service.http.PlanHandler;
 import dev.nexus.service.http.RemapHandler;
+import dev.nexus.service.http.ResolveHandler;
 import dev.nexus.service.http.StagingHandler;
 import dev.nexus.service.http.ScratchHandler;
 import dev.nexus.service.http.SessionTokenHandler;
@@ -38,6 +39,9 @@ import dev.nexus.service.http.TokenAdminHandler;
 import dev.nexus.service.http.TupleHandler;
 import dev.nexus.service.http.VectorHandler;
 import dev.nexus.service.http.WhoamiHandler;
+import dev.nexus.service.resolver.ChromaSchemeHandler;
+import dev.nexus.service.resolver.HttpsSchemeHandler;
+import dev.nexus.service.resolver.UriSchemeResolverRegistry;
 import dev.nexus.service.tuples.TemplateRegistry;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -224,6 +228,15 @@ public final class NexusService {
      * {@link #stop()} skips its shutdown signal.
      */
     private final TupleRepository tupleRepo;
+
+    /**
+     * RDR-169 G3 (bead nexus-aphki): the {@code https://} handler owns a real
+     * {@link java.net.http.HttpClient} that must be closed on shutdown — held here
+     * (rather than only inside {@link UriSchemeResolverRegistry}, which has no
+     * lifecycle of its own) so {@link #stop()} can close it. Constructed
+     * unconditionally in every constructor overload, so never null.
+     */
+    private final HttpsSchemeHandler httpsSchemeHandler;
 
     /**
      * Convenience constructor: no vector backend (original signature for existing tests).
@@ -577,6 +590,26 @@ public final class NexusService {
         vectorCtx.getFilters().addAll(authFilter);
         log.info("event=vector_endpoints_registered has_embed_router={} has_pgvector={} has_reranker={}",
                 docEmbedderRouter != null, pgVectorRepository != null, reranker != null);
+
+        // /v1/vectors/resolve — URI-scheme resolver (RDR-169 G3, bead nexus-aphki).
+        // A more specific context than /v1/vectors above: com.sun.net.httpserver's
+        // longest-prefix-match routing dispatches POST /v1/vectors/resolve here,
+        // never reaching VectorHandler's default 404 arm. "https" is registered
+        // unconditionally (needs no backend); "chroma" only when a pgvector
+        // repository is wired (mirrors every other embed/vector-dependent
+        // capability's absent-backend degrade — see ResolveHandler's own 503 for
+        // the (collection, chash) form when unregistered).
+        var resolverRegistry = new UriSchemeResolverRegistry();
+        this.httpsSchemeHandler = new HttpsSchemeHandler();
+        resolverRegistry.register("https", httpsSchemeHandler);
+        if (pgVectorRepository != null) {
+            resolverRegistry.register("chroma",
+                    new ChromaSchemeHandler(pgVectorRepository::fetchChunkText));
+        }
+        var resolveCtx = server.createContext("/v1/vectors/resolve",
+                new ResolveHandler(resolverRegistry, pgVectorRepository));
+        resolveCtx.getFilters().addAll(authFilter);
+        log.info("event=resolve_endpoint_registered has_chroma_handler={}", pgVectorRepository != null);
 
         // /v1/tuples/* — RDR-205 Linda tuple space (bead nexus-em75s.4). Registered
         // only when a boot-checked TemplateRegistry was supplied (see the constructor
@@ -1341,6 +1374,7 @@ public final class NexusService {
         if (tupleRepo != null) {
             tupleRepo.shutdown();
         }
+        httpsSchemeHandler.close();
         catalogRepo.close();
         server.stop(0);
         log.info("event=service_stopped");

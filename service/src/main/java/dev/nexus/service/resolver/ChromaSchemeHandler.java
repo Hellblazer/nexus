@@ -30,12 +30,12 @@ import java.net.URI;
  * stamps {@code nexus.tenant} before touching the table, so cross-tenant rows
  * are invisible.
  *
- * <p>The handler is registered and unit-tested here but remains UN-WIRED: no
- * production code constructs a {@link UriSchemeResolverRegistry} or calls
- * this handler yet. RDR-169 Phase B (bead nexus-zw2em) lands Gap 1's schema
- * column and Gap 4's WRITE route only, not this Gap 3 read-time resolution
- * wiring — tracked as bead nexus-aphki (see {@link UriSchemeResolverRegistry}'s
- * class javadoc for the full status).
+ * <p>Wired live (bead nexus-aphki): {@link dev.nexus.service.NexusService}'s
+ * constructor registers this handler for {@code chroma://} whenever a
+ * {@code PgVectorRepository} is present, backed by {@code
+ * pgVectorRepository::fetchChunkText}, and injects the registry into {@link
+ * dev.nexus.service.http.ResolveHandler} at {@code POST /v1/vectors/resolve}
+ * (see {@link UriSchemeResolverRegistry}'s class javadoc for the full wiring).
  */
 public final class ChromaSchemeHandler implements UriSchemeHandler {
 
