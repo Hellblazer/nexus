@@ -25,11 +25,12 @@ Paired with engine-service-v0.1.116.
   no `source_uri`, or is reference-only; 422 for an unregistered scheme or a
   malformed URI; 502 when a fetch genuinely fails; 503 with no repository.
 - **`nx tuple watch`** — a ping-then-pull mailbox watcher over the RDR-205
-  tuple space. Watches one or more addresses in a single process; with no
-  positional address it watches the current session's own mailboxes, and
-  warns when the instance name is missing rather than silently watching
-  only part of what you asked for. `--instance NAME` names the instance
-  explicitly. Preflights each address before watching, locks per address,
+  tuple space, watching one or more addresses in a single process. Explicit
+  positional addresses win outright and suppress every default. With none
+  given it watches this session's own id, adding the instance mailbox when
+  `--instance NAME` supplies it and saying so out loud when it does not,
+  rather than silently halving the watch; with nothing to watch at all it
+  skips rather than warns. Preflights each address, locks per address,
   reports a given failure once rather than every tick, and holds emission
   to a rolling budget.
 
