@@ -48,7 +48,7 @@ Three fields are richer than the keys first settled, each for a stated reason.
   "ssm_param_version": 7,
   "redeploy_doc": "conexus-dev-engine-redeploy",
   "walk_rehearsed": "<T2 record title>",
-  "armed_at": "2026-09-13T10:30:00Z",
+  "armed_at": "2026-09-12T09:41:07Z",
   "armed_by": "sam@sha256:deadbeef"
 }
 ```
@@ -70,6 +70,13 @@ only `armed_by` needed the treatment, and why the ECR registry URI stays out
 of the body (the image is named `<repository>@<digest>`).
 
 `armed_at` is UTC with a `Z` suffix. The reader also accepts `+00:00`.
+
+The value above is illustrative and is **not** copy-pasteable into a fixture.
+`armed_at` is stamped at arming time and the reader bounds it from both sides:
+more than 72 hours old is refused as stale, and more than fifteen minutes in
+the future is refused as a bad clock. Any literal date written here fails one
+of those two eventually, so build test values as an offset from now rather than
+copying this one.
 
 The tag appears in both the filename and the body, so a mismatch between them
 is detectable.
