@@ -76,12 +76,15 @@ import _endpoint_resolve as _ep  # noqa: E402
 #: whose own timeout is per-socket-operation and is reset by every recv
 #: -- an engine trickling bytes would otherwise hold the prompt open far
 #: past this (the nexus-em75s.42 finding, same fix as the sibling hook).
-_CALL_TIMEOUT_S = 3.0
+_CALL_TIMEOUT_S = 2.0
 
-#: Bound on the whole drain, across every address and every row. Past
-#: this the hook stops and injects what it has already consumed: a row
-#: already acked must still be rendered, or it is lost.
-_TOTAL_BUDGET_S = 8.0
+#: Bound on the whole drain, across every address and every row. It must
+#: stay well under the harness's own hook timeout (``hooks.json``: 10 s),
+#: because that timeout is a KILL: anything this process has consumed but
+#: not yet written is lost with it. Checked before every HTTP call, and
+#: each call's own deadline is clamped to whatever remains, so a merely
+#: slow engine cannot walk past the budget one under-cap call at a time.
+_TOTAL_BUDGET_S = 6.0
 
 #: Rows fetched per probe. The engine caps a read at 300; a prompt-time
 #: drain wants far less, since anything beyond a handful is a backlog the
@@ -172,8 +175,69 @@ def _write_seen(config_dir: Path, address: str, dead_surfaced: set[str]) -> None
         pass
 
 
+def _pending_path(config_dir: Path, address: str) -> Path:
+    return config_dir / "tuple-watch" / f"{address}.pending.json"
+
+
+def _write_pending(config_dir: Path, address: str, tuple_id: str, rendered: str) -> None:
+    """Record a claimed-but-not-yet-acked row, so its delivery survives a lost
+    ack RESPONSE. Best-effort: failing to write this must not stop the drain."""
+    try:
+        path = _pending_path(config_dir, address)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps({"id": tuple_id, "rendered": rendered}), encoding="utf-8",
+        )
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def _clear_pending(config_dir: Path, address: str) -> None:
+    try:
+        _pending_path(config_dir, address).unlink()
+    except OSError:
+        pass
+
+
+def _recover_pending(config_dir: Path, address: str, present_ids: set[str],
+                     out: _Out) -> None:
+    """Deliver a row this hook consumed on an earlier prompt but never showed.
+
+    The window is narrow and the consequence is total: ``ack`` reaches the
+    engine, the engine consumes the row, and the response is lost. The client
+    never learns the ack succeeded, so without this the row is gone from the
+    mailbox and was never shown to anyone -- silent, permanent loss of a
+    delivered message, which is the failure class this whole epic exists to
+    prevent.
+
+    Presence in the mailbox is what distinguishes the two cases, and the probe
+    has already fetched it, so this costs no extra call:
+
+    * the id is ABSENT -- the ack landed, the row is consumed, its delivery was
+      lost. Deliver it now.
+    * the id is PRESENT -- the ack never landed. The row is still there (claimed
+      under a lease that will lapse, or already back), so the normal path will
+      deliver it. Drop the record rather than delivering it twice.
+    """
+    try:
+        raw = _pending_path(config_dir, address).read_text(encoding="utf-8")
+        record = json.loads(raw)
+        tuple_id = str(record.get("id") or "")
+        rendered = str(record.get("rendered") or "")
+    except (OSError, ValueError, AttributeError):
+        return
+    if not tuple_id or not rendered:
+        _clear_pending(config_dir, address)
+        return
+    if tuple_id not in present_ids:
+        out.block(rendered)
+    _clear_pending(config_dir, address)
+
+
 def _post(base_url: str, token: str, route: str, body: dict[str, Any],
-          *, is_local: bool) -> dict[str, Any] | None:
+          *, is_local: bool, budget_s: float | None = None) -> dict[str, Any] | None:
     """POST and return the decoded body, or None when the engine answered a
     non-2xx. Raises :class:`_Skip` on a transport failure. Bounds the whole
     call, not each socket operation."""
@@ -183,6 +247,12 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
         url, data=payload, method="POST",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
     )
+    # Never spend longer than the drain has left: a sequence of calls each
+    # just under the per-call cap would otherwise blow the whole budget while
+    # every individual call looked fine.
+    call_timeout = _CALL_TIMEOUT_S
+    if budget_s is not None:
+        call_timeout = max(0.1, min(_CALL_TIMEOUT_S, budget_s))
     outcome: dict[str, Any] = {}
 
     def _do() -> None:
@@ -191,7 +261,7 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
             if is_local:
                 handlers.append(urllib.request.ProxyHandler({}))
             opener = urllib.request.build_opener(*handlers)
-            with opener.open(req, timeout=_CALL_TIMEOUT_S) as resp:  # noqa: S310 — fixed engine URL
+            with opener.open(req, timeout=call_timeout) as resp:  # noqa: S310 — fixed engine URL
                 outcome["body"] = json.loads(resp.read().decode("utf-8") or "{}")
         except urllib.error.HTTPError:
             outcome["body"] = None
@@ -200,12 +270,37 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
 
     thread = threading.Thread(target=_do, daemon=True)
     thread.start()
-    thread.join(timeout=_CALL_TIMEOUT_S)
+    thread.join(timeout=call_timeout)
     if thread.is_alive():
-        raise _Skip(f"{route} exceeded the {_CALL_TIMEOUT_S}s deadline; the prompt is not waiting for it")
+        raise _Skip(
+            f"{route} exceeded its {call_timeout:.1f}s deadline; the prompt is not waiting for it",
+        )
     if "error" in outcome:
         raise _Skip(f"transport failure on {route}: {outcome['error']}")
     return outcome.get("body")
+
+
+class _Out:
+    """Writes each delivered block to stdout IMMEDIATELY, flushing every time.
+
+    Buffering blocks in memory and printing once at the end is what made an
+    already-consumed row losable: a transport failure on a LATER row discarded
+    the whole list, and the harness's own hook timeout (hooks.json: 10 s) is a
+    KILL, so anything consumed-but-unprinted died with the process. Streaming
+    makes "acked implies delivered" hold even under a mid-drain SIGKILL, for
+    every row already acked at the moment of the kill.
+    """
+
+    def __init__(self) -> None:
+        self._opened = False
+
+    def block(self, text: str) -> None:
+        if not self._opened:
+            # stdout IS the product here: a UserPromptSubmit hook's stdout
+            # becomes the injected context. These are not diagnostics.
+            print("## Mailbox (RDR-205): delivered at this prompt\n", flush=True)  # noqa: T201
+            self._opened = True
+        print(text, flush=True)  # noqa: T201
 
 
 def _render_live(address: str, row: dict[str, Any]) -> str:
@@ -234,27 +329,40 @@ def _render_dead(address: str, row: dict[str, Any]) -> str:
 
 
 def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
-                   config_dir: Path, deadline: float) -> list[str]:
-    """Probe one address, consume what it can, and return rendered blocks."""
+                   config_dir: Path, deadline: float, out: _Out) -> None:
+    """Probe one address and deliver what it can, writing each row as it goes.
+
+    Returns nothing: every delivered row has already been written by the time
+    this returns, so a failure part-way through cannot retract an earlier one.
+    A :class:`_Skip` still propagates -- the caller stops the drain -- but what
+    was already delivered stays delivered.
+    """
     import time  # noqa: PLC0415 — deferred: only this path needs a clock
 
     probe = _post(base_url, token, "/v1/tuples/rd", {
         "subspace": f"mailbox/{address}",
         "keys_pattern": {"to": address},
         "n": _PROBE_N,
-    }, is_local=is_local)
+    }, is_local=is_local, budget_s=deadline - time.monotonic())
     rows = (probe or {}).get("tuples") or []
-    if not rows:
-        return []
+    present_ids = {str(r.get("id")) for r in rows}
 
-    blocks: list[str] = []
+    # A row this hook consumed on an earlier prompt but never managed to
+    # deliver: the ack reached the engine and its RESPONSE did not, so the row
+    # is gone from the mailbox and nothing else will ever show it. Recover it
+    # here, before anything else, since it is already lost from the engine's
+    # point of view.
+    _recover_pending(config_dir, address, present_ids, out)
+
+    if not rows:
+        return
 
     dead_rows = [r for r in rows if r.get("claim_state") == "dead"]
     if dead_rows:
         seen = _read_seen(config_dir, address)
         fresh = [r for r in dead_rows if str(r.get("id")) not in seen]
         for row in fresh:
-            blocks.append(_render_dead(address, row))
+            out.block(_render_dead(address, row))
             seen.add(str(row.get("id")))
         if fresh:
             # Keep only ids still present, so the file cannot grow forever.
@@ -270,20 +378,28 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
             "keys_pattern": {"to": address},
             "claimant": f"mailbox-drain-{address}",
             "lease_s": 30,
-        }, is_local=is_local)
+        }, is_local=is_local, budget_s=deadline - time.monotonic())
         if not claim or not claim.get("claim_id"):
             break  # a peer took it between rd and in, or the queue emptied
+        row = claim.get("tuple") or {}
+        rendered = _render_live(address, row)
+        # Recorded BEFORE the ack, so that an ack whose response is lost --
+        # the engine consumed the row, the client never learned it -- leaves a
+        # trace the next prompt can recover from. Without this the row is gone
+        # from the engine and was never shown to anyone.
+        _write_pending(config_dir, address, str(row.get("id")), rendered)
         acked = _post(base_url, token, "/v1/tuples/ack", {
             "claim_id": claim["claim_id"],
             "claimant": f"mailbox-drain-{address}",
-        }, is_local=is_local)
+        }, is_local=is_local, budget_s=deadline - time.monotonic())
         if acked is None:
-            # Claimed but not consumed: the lease lapses and the row returns.
-            # Rendering it now would deliver it twice.
+            # Claimed but not consumed: the lease lapses and the row returns to
+            # the mailbox, so delivering it now would deliver it twice. The
+            # pending entry is dropped for the same reason.
+            _clear_pending(config_dir, address)
             break
-        row = claim.get("tuple") or {}
-        blocks.append(_render_live(address, row))
-    return blocks
+        out.block(rendered)
+        _clear_pending(config_dir, address)
 
 
 def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
@@ -377,27 +493,23 @@ def main() -> int:
         return 0
 
     deadline = time.monotonic() + _TOTAL_BUDGET_S
-    blocks: list[str] = []
-    try:
-        for address in addresses:
-            if time.monotonic() >= deadline:
-                _log_skip(f"drain budget of {_TOTAL_BUDGET_S}s spent before reaching "
-                          f"mailbox/{address}; it keeps until the next prompt")
-                break
-            blocks.extend(_drain_address(
+    out = _Out()
+    for address in addresses:
+        if time.monotonic() >= deadline:
+            _log_skip(f"drain budget of {_TOTAL_BUDGET_S}s spent before reaching "
+                      f"mailbox/{address}; it keeps until the next prompt")
+            break
+        try:
+            _drain_address(
                 base_url, token, address, is_local=is_local,
-                config_dir=config_dir, deadline=deadline,
-            ))
-    except _Skip as exc:
-        # Anything already acked is already consumed and MUST still be
-        # rendered, or it is lost: the engine will never hand it back.
-        _log_skip(str(exc))
-
-    if blocks:
-        # stdout IS the product: a UserPromptSubmit hook's stdout becomes the
-        # injected context. These are not diagnostics.
-        print("## Mailbox (RDR-205): delivered at this prompt\n")  # noqa: T201
-        print("\n".join(blocks))  # noqa: T201
+                config_dir=config_dir, deadline=deadline, out=out,
+            )
+        except _Skip as exc:
+            # Per ADDRESS, not around the whole loop: a transport failure on one
+            # mailbox must not stop the others, and everything already delivered
+            # has already been written and flushed, so nothing can be retracted.
+            _log_skip(f"mailbox/{address}: {exc}")
+            continue
     return 0
 
 

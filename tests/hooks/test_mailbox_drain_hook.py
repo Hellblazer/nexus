@@ -119,6 +119,11 @@ class _MockEngine:
         self.ack_ok: bool = True
         self.calls: list[tuple[str, dict]] = []
         self.rd_delay_s: float = 0.0
+        #: Drop the connection on the Nth call to this route (1-based), AFTER
+        #: applying its effect. Models the killing case: the engine consumed the
+        #: row and the client never learned it.
+        self.drop_after_effect_on: tuple[str, int] | None = None
+        self._route_counts: dict[str, int] = {}
         engine = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -133,6 +138,7 @@ class _MockEngine:
                 except json.JSONDecodeError:
                     body = {}
                 engine.calls.append((self.path, body))
+                engine._route_counts[self.path] = engine._route_counts.get(self.path, 0) + 1
                 if self.path == "/v1/tuples/rd":
                     if engine.rd_delay_s:
                         time.sleep(engine.rd_delay_s)
@@ -163,6 +169,12 @@ class _MockEngine:
                         return
                     cid = body.get("claim_id", "")
                     engine.rows = [r for r in engine.rows if "claim-" + r["id"] != cid]
+                    drop = engine.drop_after_effect_on
+                    if drop and drop[0] == self.path and \
+                            engine._route_counts[self.path] == drop[1]:
+                        # effect applied, response never sent
+                        self.close_connection = True
+                        return
                     self._json(200, {})
                 else:
                     self._json(404, {"error": "not found"})
@@ -439,3 +451,90 @@ class TestCredentialPolicy:
         assert res.returncode == 0
         assert "should not be delivered" not in res.stdout
         assert "SKIP" in res.stderr
+
+
+class TestPartialFailureNeverLosesDeliveredMail:
+    """The critical both reviewers reproduced. Every one of these needs MORE
+    THAN ONE live row per mailbox, which is exactly the path that had no
+    coverage and is why the defect shipped green."""
+
+    def test_a_failure_on_a_later_row_does_not_retract_an_earlier_one(
+        self, tmp_path, engine,
+    ) -> None:
+        eng = engine()
+        eng.rows = [_row("r1", body="first message"), _row("r2", body="second message")]
+        # row 1 acks cleanly; row 2's ack is applied and the response dropped
+        eng.drop_after_effect_on = ("/v1/tuples/ack", 2)
+        _wired(tmp_path, eng)
+        res = _run(tmp_path=tmp_path)
+        assert res.returncode == 0
+        assert "first message" in res.stdout, (
+            "a row that was cleanly claimed, acked and rendered was discarded "
+            "because a LATER row failed"
+        )
+
+    def test_a_row_consumed_with_a_lost_ack_response_is_recovered_next_prompt(
+        self, tmp_path, engine,
+    ) -> None:
+        """ack reached the engine, the response did not. The row is gone from
+        the mailbox, so nothing else will ever show it."""
+        eng = engine()
+        eng.rows = [_row("r9", body="consumed but never shown")]
+        eng.drop_after_effect_on = ("/v1/tuples/ack", 1)
+        _wired(tmp_path, eng)
+        first = _run(tmp_path=tmp_path)
+        assert "consumed but never shown" not in first.stdout
+        assert not eng.rows, "the engine should have consumed it"
+        second = _run(tmp_path=tmp_path)
+        assert "consumed but never shown" in second.stdout, (
+            "the row was consumed at the engine and never delivered to anyone"
+        )
+
+    def test_recovery_does_not_double_deliver_on_a_third_prompt(
+        self, tmp_path, engine,
+    ) -> None:
+        eng = engine()
+        eng.rows = [_row("r8", body="exactly once please")]
+        eng.drop_after_effect_on = ("/v1/tuples/ack", 1)
+        _wired(tmp_path, eng)
+        _run(tmp_path=tmp_path)
+        second = _run(tmp_path=tmp_path)
+        assert "exactly once please" in second.stdout
+        third = _run(tmp_path=tmp_path)
+        assert "exactly once please" not in third.stdout
+
+    def test_an_ack_that_never_reached_the_engine_is_not_recovered_twice(
+        self, tmp_path, engine,
+    ) -> None:
+        """The other branch: the row is STILL in the mailbox, so the normal path
+        owns it and the pending record must be dropped, not delivered."""
+        eng = engine()
+        eng.rows = [_row("r7", body="still in the mailbox")]
+        eng.ack_ok = False
+        _wired(tmp_path, eng)
+        first = _run(tmp_path=tmp_path)
+        assert "still in the mailbox" not in first.stdout
+        assert eng.rows, "the row should still be there"
+        eng.ack_ok = True
+        second = _run(tmp_path=tmp_path)
+        assert second.stdout.count("still in the mailbox") == 1
+
+    def test_several_rows_deliver_in_one_prompt(self, tmp_path, engine) -> None:
+        eng = engine()
+        eng.rows = [_row(f"m{i}", body=f"message {i}") for i in range(4)]
+        _wired(tmp_path, eng)
+        res = _run(tmp_path=tmp_path)
+        for i in range(4):
+            assert f"message {i}" in res.stdout
+
+    def test_one_failing_address_does_not_stop_the_other(self, tmp_path, engine) -> None:
+        eng = engine()
+        eng.rows = [_row("z1", body="from the good address")]
+        eng.rows[0]["keys"] = {"to": "other-addr"}
+        reg = tmp_path / "config" / "tuple-watch" / "addresses"
+        reg.parent.mkdir(parents=True, exist_ok=True)
+        reg.write_text("other-addr\n", encoding="utf-8")
+        _wired(tmp_path, eng)
+        res = _run(tmp_path=tmp_path)
+        assert res.returncode == 0
+        assert "from the good address" in res.stdout
