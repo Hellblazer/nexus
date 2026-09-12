@@ -56,6 +56,20 @@ So the originating failure is STILL UNEXPLAINED, with both candidates now
 eliminated rather than merely unexamined. 16 workers, plus 4 orphaned
 clusters, plus a live battery at its peak, is 26 against a ceiling of 32.
 
+WHAT THAT RESIDUAL CAN AND CANNOT DO TO THIS GUARD, since "unexplained" on
+its own reads as unbounded. Some consumer of roughly six segments is
+unaccounted for. If it is ALREADY holding segments when a run starts, the
+guard absorbs it by construction: ``free`` is computed from ``ipcs -m`` read
+live at session start, so an unknown consumer is indistinguishable from a
+known one and is subtracted either way. The cap is only wrong if the unknown
+consumer ARRIVES mid-run, after the count is taken -- and that is true of a
+peer's suite and a concurrent gate too, neither of which is mysterious. So
+the residual is a reason to keep DEFAULT_RESERVE generous, not a reason to
+distrust the derivation. What would change the design is evidence that a
+single worker can hold more than one segment; that is why
+SEGMENTS_PER_WORKER is a named constant with a test on it rather than a bare
+1 in the arithmetic.
+
 What the numbers do change is the MARGIN, and that is the part worth carrying.
 "About 21 of 32, comfortable" described a quiet box. A box carrying a battery
 and some orphans sits at 26 with six to spare, and any further consumer -- a
