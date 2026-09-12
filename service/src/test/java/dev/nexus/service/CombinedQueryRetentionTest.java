@@ -329,4 +329,44 @@ class CombinedQueryRetentionTest {
             }
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Fix round 1 (T2 critique-nexus-4k1vz-rdr169-gap2-remainder-2026-09-12): the
+    // DROP-then-CREATE in vectors-016 does not carry forward any pre-DROP GRANT --
+    // project policy (vectors-005-6 / vectors-008-2 precedent) is that a DROP-based
+    // recreate re-issues an explicit GRANT EXECUTE ... TO nexus_svc for every
+    // recreated function. vectors-016-2 does that; this asserts it landed.
+    // -------------------------------------------------------------------------
+
+    private static final List<String> COMBINED_QUERY_PREFIXES = List.of(
+        "search_metadata_scoped_", "search_graph_hop_",
+        "search_topic_scoped_", "search_aspect_scoped_");
+
+    /**
+     * Uses {@link PgCatalogProbes#hasExplicitRoutineGrant}, NOT {@code has_function_privilege}:
+     * the latter reports EFFECTIVE privilege, which is true for nexus_svc regardless of an
+     * explicit grant (Postgres's own default ACL already grants PUBLIC EXECUTE on every fresh
+     * CREATE FUNCTION) -- verified empirically: an earlier draft of this test using
+     * has_function_privilege stayed green with vectors-016-2's GRANT block removed entirely,
+     * so it could never have caught the regression it exists to catch. routine_privileges
+     * distinguishes an explicit {@code GRANT ... TO nexus_svc} from the PUBLIC default because
+     * only an explicit grant/revoke populates a role-specific row in the routine's ACL.
+     */
+    @Test
+    void allTwelveFunctions_nexusSvcHasExplicitExecuteGrant() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            for (int dim : new int[]{384, 768, 1024}) {
+                for (String prefix : COMBINED_QUERY_PREFIXES) {
+                    String name = prefix + dim;
+                    assertThat(PgCatalogProbes.hasExplicitRoutineGrant(ctx, "nexus", name, "nexus_svc", "EXECUTE"))
+                        .as("nexus_svc must have an EXPLICIT EXECUTE grant on nexus.%s "
+                            + "(RDR-169 Gap 2 remainder fix round 1, bead nexus-4k1vz: "
+                            + "vectors-016-2's GRANT, matching the vectors-005-6/vectors-008-2 "
+                            + "DROP-recreate precedent) -- not just the PUBLIC default", name)
+                        .isTrue();
+                }
+            }
+        }
+    }
 }

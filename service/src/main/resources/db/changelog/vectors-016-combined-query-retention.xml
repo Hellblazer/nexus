@@ -1094,4 +1094,25 @@ $$;
         </rollback>
     </changeSet>
 
+    <changeSet id="vectors-016-2" author="nexus-4k1vz">
+        <comment>Defensive GRANT EXECUTE on nexus_svc for the 12 combined-query functions this changeset just DROPped and re-CREATEd, matching vectors-005-6's / vectors-008-2's explicit-grant precedent: a fresh CREATE re-establishes only the PostgreSQL function-level default of PUBLIC EXECUTE, not any grant a now-superseded pre-DROP object carried, so the grant must be re-issued explicitly rather than relying on the PUBLIC default silently continuing to hold.</comment>
+        <sql splitStatements="true" stripComments="false">
+GRANT EXECUTE ON FUNCTION nexus.search_metadata_scoped_384(nexus.vector, text[], text, text, int, text, text, jsonb, int)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_metadata_scoped_768(nexus.vector, text[], text, text, int, text, text, jsonb, int)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_metadata_scoped_1024(nexus.vector, text[], text, text, int, text, text, jsonb, int) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_graph_hop_384(nexus.vector, text[], text[], text, int, text, jsonb, int)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_graph_hop_768(nexus.vector, text[], text[], text, int, text, jsonb, int)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_graph_hop_1024(nexus.vector, text[], text[], text, int, text, jsonb, int) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_topic_scoped_384(nexus.vector, text, text, int)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_topic_scoped_768(nexus.vector, text, text, int)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_topic_scoped_1024(nexus.vector, text, text, int) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_aspect_scoped_384(nexus.vector, text[], text, text, float8, jsonb, int)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_aspect_scoped_768(nexus.vector, text[], text, text, float8, jsonb, int)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_aspect_scoped_1024(nexus.vector, text[], text, text, float8, jsonb, int) TO nexus_svc;
+        </sql>
+        <rollback>
+            <!-- Revoke is a DBA operation; not automated (matches grants-nexus-svc.xml / vectors-005-6 / vectors-008-2 precedent). -->
+        </rollback>
+    </changeSet>
+
 </databaseChangeLog>

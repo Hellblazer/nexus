@@ -487,6 +487,43 @@ public final class PgCatalogProbes {
         return ctx.select(def).fetchOne(def);
     }
 
+    /**
+     * Does {@code role} have an EXPLICIT, NAMED grant of {@code privilege} on
+     * {@code schema.routineName} ({@code information_schema.routine_privileges}, one
+     * row per {@code (routine, grantor, grantee)} recorded in the routine's ACL)?
+     * Not {@code overload}-aware -- callers with an overloaded routine name must
+     * disambiguate some other way; every caller in this codebase today (the 12
+     * dim-suffixed combined-query functions) has a distinct name per dim, so this
+     * is not a live gap here.
+     *
+     * <p><b>Deliberately NOT {@code has_function_privilege}</b> (nexus-4k1vz fix
+     * round 1, T2 critique-nexus-4k1vz-rdr169-gap2-remainder-2026-09-12,
+     * discovered by this method's own predecessor going green with the GRANT
+     * removed): {@code has_function_privilege} reports the role's EFFECTIVE
+     * privilege, which is TRUE for any role the instant a fresh {@code CREATE
+     * FUNCTION} installs Postgres's own default ACL ({@code proacl IS NULL},
+     * which every role -- {@code nexus_svc} included -- inherits as PUBLIC
+     * EXECUTE) -- it cannot tell "explicit named grant" from "PUBLIC default
+     * only" and so can never go red for a missing explicit GRANT, the exact
+     * project policy (vectors-005-6 / vectors-008-2 precedent) this probe
+     * exists to verify. {@code information_schema.routine_privileges} explodes
+     * the routine's ACTUAL ACL ({@code aclexplode(coalesce(proacl,
+     * acldefault(...)))}): with no explicit grant/revoke ever issued, the only
+     * row it produces is {@code grantee='PUBLIC'} -- a row with
+     * {@code grantee='nexus_svc'} specifically appears ONLY once a real
+     * {@code GRANT ... TO nexus_svc} lands, which is the distinction this
+     * policy is actually about.
+     */
+    public static boolean hasExplicitRoutineGrant(
+            DSLContext ctx, String schema, String routineName, String role, String privilege) {
+        Table<?> t = DSL.table(DSL.name("information_schema", "routine_privileges"));
+        return ctx.fetchExists(t,
+            DSL.field(DSL.name("routine_schema"), String.class).eq(schema)
+            .and(DSL.field(DSL.name("routine_name"), String.class).eq(routineName))
+            .and(DSL.field(DSL.name("grantee"), String.class).eq(role))
+            .and(DSL.field(DSL.name("privilege_type"), String.class).eq(privilege)));
+    }
+
     // ── pg_roles ─────────────────────────────────────────────────────────
 
     /** {@code (rolsuper, rolbypassrls, rolinherit)} of one role. */
