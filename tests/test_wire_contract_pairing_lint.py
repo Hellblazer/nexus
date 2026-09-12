@@ -407,3 +407,108 @@ def test_live_repo_ledger_is_clean() -> None:
         "`uv run python scripts/check_wire_contract_pairing.py` for the "
         f"full report, and update {_LEDGER}."
     )
+
+
+# --- the Shipped section's structural convention (bead nexus-h0fo3) --------
+#
+# The arming gate reads a pairing's additivity out of the ledger, and after a
+# release the entry it needs has moved from `## Unshipped` to `## Shipped`.
+# For that read to be structural rather than a guess at prose punctuation,
+# a shipped entry at or above `SHIPPED_CONVENTION_FLOOR` must carry both
+# facts in a fixed position. Entries below the floor are out of scope by
+# declaration -- see that constant's docstring for why they cannot simply be
+# backfilled.
+
+
+def _in_scope_shipped() -> list[tuple[str, wctp.LedgerEntry]]:
+    ledger = wctp.parse_ledger(_LEDGER)
+    return [
+        (sha, e) for sha, e in ledger.shipped.items()
+        if wctp.shipped_is_in_convention_scope(e.note)
+    ]
+
+
+def test_in_scope_shipped_entries_name_exactly_one_engine_half() -> None:
+    """The engine tag must be findable by the anchored `engine half <tag>`
+    phrase, once per entry. Two occurrences would make the anchor ambiguous;
+    zero leaves the gate nothing to match the pairing against."""
+    in_scope = _in_scope_shipped()
+    assert len(in_scope) >= 20, (
+        f"only {len(in_scope)} in-scope shipped entries found; the scan is broken"
+    )
+    bad = [
+        sha for sha, e in in_scope
+        if len(wctp._SHIPPED_ENGINE_TAG_RE.findall(e.note)) != 1
+    ]
+    assert not bad, (
+        "shipped entries at or above "
+        f"{wctp.SHIPPED_CONVENTION_FLOOR} must name their engine tag exactly "
+        f"once as `engine half <tag>`: {bad}"
+    )
+
+
+def test_in_scope_shipped_entries_lead_a_segment_with_the_token() -> None:
+    """The direction-safety token must LEAD a `--` segment, not sit mid-
+    sentence. A mention is not a statement (see `_additive_token`), and the
+    arming gate must never infer additivity from prose."""
+    in_scope = _in_scope_shipped()
+    bad = [
+        sha for sha, e in in_scope
+        if wctp._shipped_additive_token(e.note) is None
+    ]
+    assert not bad, (
+        "shipped entries at or above "
+        f"{wctp.SHIPPED_CONVENTION_FLOOR} must carry [additive] or "
+        "[not-additive] LEADING a ` -- ` segment (a mid-sentence token is a "
+        f"mention, not a statement): {bad}"
+    )
+
+
+def test_shipped_convention_lint_fails_on_a_mid_sentence_token(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Kill control for the lint above: a token embedded mid-sentence — the
+    exact shape the v0.1.116 entries carried before the nexus-h0fo3 backfill
+    — must be read as UNKNOWN, never as an additive assertion."""
+    note = (
+        "engine half engine-service-v0.1.116 (deployed and cloud-gated "
+        "BEFORE the client tag). [additive] one NEW route, no field changes."
+    )
+    assert wctp.shipped_is_in_convention_scope(note) is True
+    assert wctp._shipped_additive_token(note) is None
+
+
+def test_shipped_token_leading_a_segment_is_a_statement() -> None:
+    note = (
+        "engine half engine-service-v0.1.112 (tagged on 9f0a5397c) -- "
+        "[additive] no route, request field or response field changes shape."
+    )
+    assert wctp._shipped_additive_token(note) is True
+
+
+def test_shipped_not_additive_anywhere_wins() -> None:
+    """Fail-safe, matching `_additive_token`'s own rule: a [not-additive]
+    appearing anywhere contradicts a leading [additive] assertion."""
+    note = "engine half engine-service-v0.1.109 -- [additive] but actually [not-additive]"
+    assert wctp._shipped_additive_token(note) is False
+
+
+def test_below_floor_entries_are_out_of_scope_by_declaration() -> None:
+    """The 16 untokened entries span v0.1.73 to v0.1.91 and cannot be
+    mechanically backfilled — there is no token to move. They are excluded by
+    a positive floor declaration rather than by reading their silence as an
+    answer."""
+    note = "engine half engine-service-v0.1.88 (deployed 2026-08-27), client half in the same commit"
+    assert wctp.shipped_is_in_convention_scope(note) is False
+    assert wctp._shipped_additive_token(note) is None
+
+
+def test_shipped_engine_tag_is_anchored_not_first_match() -> None:
+    """One in-scope entry legitimately mentions a second engine tag in its
+    prose. The anchor must return the one `engine half` names, not whichever
+    appears first."""
+    note = (
+        "engine half engine-service-v0.1.112 (supersedes the "
+        "engine-service-v0.1.109 behaviour) -- [additive] no shape change."
+    )
+    assert wctp.shipped_engine_tag(note) == "engine-service-v0.1.112"

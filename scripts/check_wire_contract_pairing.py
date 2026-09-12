@@ -390,6 +390,74 @@ _SHIPPED_RE = re.compile(
     r"^- `([0-9a-f]{7,40})` -- bead (\S+) -- shipped in `([^`]+)` -- (.+)$"
 )
 
+#: Where the `## Shipped` section's structural convention BEGINS (bead
+#: nexus-h0fo3). A positive declaration, not an inference from absence.
+#:
+#: Census, 2026-09-12, over all 48 shipped entries: every one names its
+#: engine tag, and the direction-safety token is present from
+#: engine-service-v0.1.92 onward without a gap. The 16 entries carrying no
+#: token at all span v0.1.73 to v0.1.91. Those cannot be backfilled
+#: mechanically -- there is no token to move, so giving them one would mean
+#: retroactively ADJUDICATING the additivity of pairings that are long gone,
+#: a judgment per entry that nobody can now check. Declaring the floor keeps
+#: that judgment off the critical path.
+#:
+#: Safe with enormous margin: engine tags are monotonic and the live engine
+#: is well past this, so no future pairing can name a tag below the floor.
+#: An entry below it parses with ``additive=None``, which consumers already
+#: read as not-additive -- a conservative answer on an unreachable input,
+#: never a silent pass.
+SHIPPED_CONVENTION_FLOOR = (0, 1, 92)
+
+#: The engine tag inside a shipped entry's note. ANCHORED on the literal
+#: "engine half " phrase rather than finding any engine-service-v* string in
+#: the note: one in-scope entry (14c97916a) legitimately mentions a second
+#: tag in its prose, and an unanchored search would pick between them by
+#: accident. Every in-scope entry carries exactly one occurrence of this
+#: phrase (measured); the colon variant appears only below the floor.
+_SHIPPED_ENGINE_TAG_RE = re.compile(r"engine half:? (engine-service-v\d+\.\d+\.\d+)")
+
+#: Engine-tag version inside a shipped note, for floor comparison only.
+_SHIPPED_TAG_VERSION_RE = re.compile(r"engine-service-v(\d+)\.(\d+)\.(\d+)")
+
+
+def shipped_engine_tag(note: str) -> str | None:
+    """The engine tag a shipped entry names, or ``None``."""
+    m = _SHIPPED_ENGINE_TAG_RE.search(note)
+    return m.group(1) if m else None
+
+
+def shipped_is_in_convention_scope(note: str) -> bool:
+    """Is this shipped entry at or above :data:`SHIPPED_CONVENTION_FLOOR`?
+
+    Keyed on the HIGHEST engine version the note mentions, so an in-scope
+    entry that also references an older tag in prose stays in scope.
+    """
+    versions = [
+        tuple(int(x) for x in m) for m in _SHIPPED_TAG_VERSION_RE.findall(note)
+    ]
+    return bool(versions) and max(versions) >= SHIPPED_CONVENTION_FLOOR
+
+
+def _shipped_additive_token(note: str) -> bool | None:
+    """:func:`_additive_token`'s counterpart for a shipped entry.
+
+    A shipped line carries one field more than an unshipped one -- the
+    engine-half clause sits between ``shipped in `vX.Y.Z` `` and the note
+    proper -- so the token leads a LATER ``" -- "`` segment rather than the
+    note's first character. Segment-anchored, for the same reason
+    :func:`_additive_token` is start-anchored: a token that merely appears
+    mid-sentence is a mention, not a statement, and reading it as one would
+    false-positive into the UNSAFE direction (authorizing an unarmed
+    non-additive pairing). A ``[not-additive]`` ANYWHERE still wins, exactly
+    as it does for an unshipped entry.
+    """
+    if "[not-additive]" in note:
+        return False
+    return True if any(
+        seg.startswith("[additive]") for seg in note.split(" -- ")
+    ) else None
+
 
 def _additive_token(note: str) -> bool | None:
     """Direction-safety token LEADING an Unshipped entry's note (nexus-1emxn).
@@ -444,8 +512,15 @@ def parse_ledger(path: pathlib.Path) -> Ledger:
             m = _SHIPPED_RE.match(line)
             if m:
                 sha, bead, tag, note = m.groups()
+                # nexus-h0fo3: populate engine_tag and additive here too.
+                # Until then the shipped branch dropped BOTH -- the text
+                # carried them, the parsed model did not -- so a gate reading
+                # additivity after a release found nothing and silently
+                # answered "additive".
                 ledger.shipped[sha] = LedgerEntry(
-                    sha=sha, bead=bead, note=note, shipped_in=tag
+                    sha=sha, bead=bead, note=note, shipped_in=tag,
+                    engine_tag=shipped_engine_tag(note),
+                    additive=_shipped_additive_token(note),
                 )
     return ledger
 
