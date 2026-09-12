@@ -21,9 +21,23 @@ much as what is.
   ``reemit_after_s``; after that a row still present re-pings, which is what
   heals a dropped notification. ``max_emits`` per tuple, then silent and
   counted, so a row nobody drains cannot burn the Monitor's auto-stop budget.
-- Reports a probe failure on stderr once per distinct error per address, and
-  once more when the probe recovers; a failure that persists is silent in
-  between (MM-1.2 owns the preflight and the wider failure visibility).
+- Preflights before the loop (:func:`preflight`): one bounded registry call
+  plus one census per address. A below-floor or unreachable engine 404s or
+  refuses every call forever and is otherwise indistinguishable from an empty
+  mailbox, so a failure here prints ONE named SKIP line and the loop is never
+  entered. A dead backlog approaching ``probe_n`` warns, because past the cap
+  dead rows hide fresh mail again.
+- Reports a probe failure on stdout, rate-limited to one line per
+  ``error_report_every_s`` per address, with a changed error reported at once
+  and a recovery line on stderr. Silence is not success: an engine that dies
+  mid-run says so. The rate limit is what keeps a sustained outage under the
+  measured auto-stop budget.
+- Holds one flock per watched address (:func:`acquire_watch_locks`), scoped
+  machine-wide by ADDRESS, not by session: a ``/clear`` changes the session id,
+  so a per-session lock would miss the double-arm it exists to catch. A second
+  watcher prints one line naming the holder and exits. A dead holder's lock is
+  released by the OS, so a stale file is acquired rather than refused, with no
+  pid-liveness heuristic to get wrong.
 - Never claims, never acks. The ping carries address, sender, kind,
   correlation id and tuple id, never the body; the id is for correlation and
   dedup only, because the mailbox template pins only ``to`` and a claim is
@@ -39,6 +53,7 @@ sustained suppression. Suppressed events are lost.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from collections import deque
@@ -65,6 +80,8 @@ class WatchConfig:
     max_lines_per_cycle: int = 5
     budget_window_s: float = 20.0
     budget_lines: int = 8
+    error_report_every_s: float = 300.0
+    dead_backlog_warn_ratio: float = 0.8
 
 
 @dataclass
@@ -165,6 +182,13 @@ class _Emitter:
             self._recent.popleft()
         return len(self._recent) + lines <= self._config.budget_lines
 
+    def emit_error(self, line: str, t: float) -> None:
+        """An outage line. It is already rate-limited by the caller's window, so it
+        is never withheld by the ping budget -- silence is the failure mode this
+        line exists to prevent -- but it does count toward it."""
+        self._emit(line)
+        self._recent.append(t)
+
     def emit_batch(self, address: str, rows: list[Any], t: float, stats: WatchStats) -> None:
         cap = self._config.max_lines_per_cycle
         head, tail = rows[:cap], rows[cap:]
@@ -183,6 +207,159 @@ class _Emitter:
             self._emit(_coalesced_line(address, len(tail)))
             self._recent.append(t)
             stats.coalesced += len(tail)
+
+
+def _error_note(e: BaseException) -> str:
+    """A short class note for an outage line, or "" when there is nothing to add."""
+    from nexus.db.t2.http_tuple_store import (  # noqa: PLC0415 — deferred: CLI startup cost
+        ClaimOwnershipError,
+        ParkCapExceededError,
+        UnknownSubspaceError,
+    )
+
+    if isinstance(e, ParkCapExceededError):
+        # B2: this watcher probes with timeout_s=0 and takes no park slot, so a park
+        # cap here is never this loop's own doing -- say so rather than swallowing it.
+        return " -- park cap, but this watcher never parks: something else holds the slots"
+    if isinstance(e, UnknownSubspaceError):
+        return " -- the subspace no longer resolves to a template"
+    if isinstance(e, ClaimOwnershipError):
+        return " -- claim ownership error on a read-only watcher"
+    text = f"{type(e).__name__}: {e}".lower()
+    if "401" in text or "403" in text or "auth" in text or "token" in text:
+        return " -- looks like an auth failure, not a blip"
+    return ""
+
+
+@dataclass(frozen=True)
+class PreflightResult:
+    ok: bool
+    detail: str = ""
+
+
+def preflight(
+    store: Any,
+    addresses: Iterable[str],
+    *,
+    config: WatchConfig,
+    emit: Callable[[str], None],
+    report: Callable[[str], None],
+) -> PreflightResult:
+    """One bounded probe of the engine before the loop starts.
+
+    An engine below the floor that first served ``/v1/tuples`` 404s every call
+    forever, and an unreachable one refuses every call forever; either way the
+    loop would print nothing, which reads exactly like an empty mailbox. So this
+    runs first and, on failure, prints ONE line beginning ``SKIP`` on STDOUT --
+    the stream the Monitor watches, because a skip the session cannot see is the
+    silent no-op this guard exists to prevent -- and the caller exits.
+    """
+    try:
+        store.registry()
+    except Exception as e:  # noqa: BLE001 — the whole point is to classify, not propagate
+        detail = f"{type(e).__name__}: {e}"
+        _log.warning("tuple_watch_preflight_failed", error=detail)
+        emit(
+            f"{PING_PREFIX} SKIP: the tuple space is not answering, so no mailbox is being"
+            f" watched ({detail}){_error_note(e)}. Nothing will be delivered until this is fixed.",
+        )
+        return PreflightResult(ok=False, detail=detail)
+
+    for address in addresses:
+        subspace = f"mailbox/{address}"
+        try:
+            census = store.subspace_stats(subspace)
+        except Exception as e:  # noqa: BLE001 — same classification, per address
+            detail = f"{type(e).__name__}: {e}"
+            _log.warning("tuple_watch_preflight_failed", address=address, error=detail)
+            emit(
+                f"{PING_PREFIX} SKIP: {subspace} is not readable, so it is not being watched"
+                f" ({detail}){_error_note(e)}.",
+            )
+            return PreflightResult(ok=False, detail=detail)
+        dead = getattr(census, "dead", 0) or 0
+        if dead >= config.probe_n * config.dead_backlog_warn_ratio:
+            # Past probe_n the read cap truncates and dead rows hide fresh mail again
+            # -- the head-of-line class this watcher filters for, returning at scale.
+            emit(
+                f"{PING_PREFIX} WARNING: {subspace} holds {dead} dead-lettered rows against a"
+                f" probe cap of {config.probe_n}; at the cap they hide fresh mail. Purge them.",
+            )
+    return PreflightResult(ok=True)
+
+
+@dataclass
+class WatchLocks:
+    """Held flocks, one per watched address. ``release()`` is idempotent."""
+
+    ok: bool
+    holders: list[Any] = field(default_factory=list)
+    refused_address: str = ""
+
+    def release(self) -> None:
+        from nexus._locking import unlock_file  # noqa: PLC0415 — deferred: CLI startup cost
+
+        while self.holders:
+            handle = self.holders.pop()
+            try:
+                unlock_file(handle)
+            except OSError:  # pragma: no cover — releasing a dying process's lock
+                pass
+            finally:
+                handle.close()
+
+
+def lock_path(state_dir: Path, address: str) -> Path:
+    return state_dir / _STATE_SUBDIR / (_SAFE_NAME.sub("_", address) + ".lock")
+
+
+def acquire_watch_locks(
+    addresses: Iterable[str],
+    *,
+    state_dir: Path,
+    emit: Callable[[str], None] = lambda _s: None,
+) -> WatchLocks:
+    """Take one exclusive advisory lock per address, machine-wide.
+
+    The scope is the ADDRESS, never the session: a ``/clear`` mints a new session
+    id, so a per-session lock would admit exactly the second watcher it exists to
+    refuse, and every ping would double. Because the lock is an ``flock``, a
+    holder that dies has it released by the OS -- a stale file is acquired, not
+    refused, with no pid-liveness guess. The body still carries pid, session id
+    and start time so a LIVE holder can be named in the refusal.
+    """
+    from nexus._locking import lock_file  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred
+
+    locks = WatchLocks(ok=True)
+    session_id = resolve_active_session_id() or "unknown-session"
+    for address in addresses:
+        path = lock_path(state_dir, address)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a+", encoding="utf-8")
+        try:
+            lock_file(handle, blocking=False)
+        except (BlockingIOError, OSError):
+            handle.seek(0)
+            held = handle.read().strip() or "an unnamed process"
+            handle.close()
+            locks.ok = False
+            locks.refused_address = address
+            emit(
+                f"{PING_PREFIX} SKIP: mailbox/{address} is already watched by {held}."
+                f" This second watcher is exiting rather than doubling every ping.",
+            )
+            locks.release()
+            return locks
+        handle.seek(0)
+        handle.truncate()
+        handle.write(
+            f"pid={os.getpid()} session={session_id} address={address}"
+            f" started_at={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
+        )
+        handle.flush()
+        locks.holders.append(handle)
+    return locks
 
 
 def _probe_once(
@@ -254,7 +431,7 @@ def run_watch(
         raise ValueError("at least one address is required")
     stats = WatchStats()
     emitter = _Emitter(config, emit)
-    failing: dict[str, str] = {}  # address -> the error text last reported
+    failing: dict[str, tuple[str, float]] = {}  # address -> (error text, last reported at)
     while iterations <= 0 or stats.cycles < iterations:
         t = now()
         for address in addrs:
@@ -270,11 +447,25 @@ def run_watch(
                 stats.probe_errors += 1
                 text = f"{type(e).__name__}: {e}"
                 _log.warning("tuple_watch_probe_failed", address=address, error=text)
-                if failing.get(address) != text:
-                    failing[address] = text
-                    report(
+                prior = failing.get(address)
+                # A CHANGED error is news and reports at once (a blip becoming an auth
+                # failure is a different problem); the SAME error re-reports only once
+                # per window, so a sustained outage costs one line per window rather
+                # than one per cycle -- silence would hide the outage, a line per cycle
+                # would trip the measured auto-stop.
+                due = (
+                    prior is None
+                    or prior[0] != text
+                    or t - prior[1] >= config.error_report_every_s
+                )
+                if due:
+                    failing[address] = (text, t)
+                    emitter.emit_error(
                         f"{PING_PREFIX} probe failed for mailbox/{address}: {text}"
-                        f" (reported once; silent until it changes or recovers)",
+                        f"{_error_note(e)}. No mail can be seen while this lasts;"
+                        f" reported at most once per"
+                        f" {int(config.error_report_every_s)}s.",
+                        t,
                     )
                 continue
             if address in failing:

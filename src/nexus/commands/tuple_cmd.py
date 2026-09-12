@@ -276,22 +276,45 @@ def tuple_watch_cmd(
     Built to be a Claude Code Monitor source: prints nothing on an empty probe,
     never claims, never prints a body. Re-pings a still-present tuple after
     --reemit-after, at most --max-emits times. Dead-lettered rows go to stderr
-    once per row; a probe failure once per distinct error, plus one line on
-    recovery."""
+    once per row; recovery too. Preflights the engine first and prints one SKIP
+    line instead of watching silently if it cannot read the mailbox, and refuses
+    to start when another watcher already holds the address."""
     from nexus import config as _config  # noqa: PLC0415 — deferred: CLI startup cost
-    from nexus.tuple_watch import WatchConfig, run_watch  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus.tuple_watch import (  # noqa: PLC0415 — deferred: CLI startup cost
+        WatchConfig,
+        acquire_watch_locks,
+        preflight,
+        run_watch,
+    )
 
     cfg = WatchConfig(interval_s=interval_s, reemit_after_s=reemit_after_s, max_emits=max_emits)
+    sd = state_dir or _config.nexus_config_dir()
+    store = _store()
+    report = lambda s: click.echo(s, err=True)  # noqa: E731 — one-liner, matches emit's shape
+
+    # The ADDRESSES are resolved exactly once, here, and never re-resolved inside the
+    # loop: CLAUDE_CODE_SESSION_ID is spawn-time env a long-lived process cannot see
+    # change, and ~/.config/nexus/current_session is machine-wide and clobbered by every
+    # peer session's SessionStart, so a re-resolve is either a no-op or a spurious exit.
+    # A moved address is handled by this process dying with its session and the next
+    # SessionStart re-arming (MM-3.1/MM-3.2), backed by the lock below.
+    if not preflight(store, addresses, config=cfg, emit=click.echo, report=report).ok:
+        return
+    locks = acquire_watch_locks(addresses, state_dir=sd, emit=click.echo)
+    if not locks.ok:
+        return
     try:
         run_watch(
-            _store(), addresses, config=cfg, state_dir=state_dir or _config.nexus_config_dir(),
-            iterations=iterations, emit=click.echo, report=lambda s: click.echo(s, err=True),
+            store, addresses, config=cfg, state_dir=sd,
+            iterations=iterations, emit=click.echo, report=report,
         )
     except KeyboardInterrupt:
         return
     except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
         _print_tuple_error(e)
         raise SystemExit(1) from e
+    finally:
+        locks.release()
 
 
 def _row_dict(row: Any) -> dict[str, Any]:

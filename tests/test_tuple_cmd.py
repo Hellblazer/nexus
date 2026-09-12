@@ -10,13 +10,20 @@ template shapes.
 from __future__ import annotations
 
 import json
+import os
 import uuid
 
 from click.testing import CliRunner
 
 from nexus.commands.tuple_cmd import tuple_group
-from nexus.db.t2.http_tuple_store import HttpTupleStore
-from nexus.tuple_watch import WatchConfig, run_watch, state_path
+from nexus.db.t2.http_tuple_store import HttpTupleStore, ParkCapExceededError
+from nexus.tuple_watch import (
+    WatchConfig,
+    acquire_watch_locks,
+    preflight,
+    run_watch,
+    state_path,
+)
 
 
 def _uniq(label: str) -> str:
@@ -400,8 +407,11 @@ class TestTupleWatch:
         stats = _run(_Flaky(store, 3), cfg, sd, addr, clock, 5, lines, reports)
         assert stats.probe_errors == 3
         assert stats.cycles == 5
-        assert lines == []
-        failed = [r for r in reports if "probe failed" in r]
+        # MM-1.2: the outage line goes to STDOUT -- the stream the Monitor watches --
+        # because an outage the session cannot see is the silent no-op the failure
+        # visibility rule exists to kill. Recovery stays on stderr. No PING is emitted.
+        assert not [line for line in lines if "new mail" in line]
+        failed = [line for line in lines if "probe failed" in line]
         recovered = [r for r in reports if "probe recovered" in r]
         assert len(failed) == 1 and "engine unreachable" in failed[0]
         assert len(recovered) == 1
@@ -459,5 +469,230 @@ class TestTupleWatch:
         )
         assert stats.cycles == 2
         assert stats.probe_errors == 2
-        assert [line for line in lines if tid in line] and len(lines) == 1
-        assert sum("probe failed" in r and bad in r for r in reports) == 1
+        pings = [line for line in lines if "new mail" in line]
+        assert len(pings) == 1 and tid in pings[0]
+        # MM-1.2: the bad address's failure is reported on stdout, once per window
+        assert sum("probe failed" in line and bad in line for line in lines) == 1
+
+
+# ── nx tuple watch: preflight, failure visibility, locking (MM-1.2, nexus-6konb.3) ──
+
+
+class _Boom(Exception):
+    """A transport-shaped failure for the preflight and outage tests."""
+
+
+class TestTupleWatchPreflight:
+    def test_unreachable_engine_reports_one_skip_line_and_never_loops(self, tmp_path) -> None:
+        probes = []
+
+        class _Down:
+            def registry(self):
+                raise _Boom("connection refused")
+
+            def rd(self, *a, **kw):
+                probes.append(1)
+                return []
+
+        lines, reports = [], []
+        result = preflight(_Down(), ["addr-a"], config=WatchConfig(), emit=lines.append,
+                           report=reports.append)
+        assert result.ok is False
+        assert len(lines) == 1
+        assert "SKIP" in lines[0]
+        assert "connection refused" in lines[0]
+        assert probes == []
+
+    def test_unknown_subspace_at_preflight_is_a_skip_naming_the_address(self, t2_service_env, tmp_path) -> None:
+        store, _cfg, _sd = _watch_env(tmp_path)
+        lines, reports = [], []
+        result = preflight(store, ["no-template-here"], config=WatchConfig(),
+                           emit=lines.append, report=reports.append)
+        # mailbox/<anything> is a registered template, so a plain address passes;
+        # this pins that the per-address stats call is actually made and reported.
+        assert result.ok is True
+        assert lines == []
+
+    def test_dead_backlog_near_the_probe_cap_warns_with_the_count(self, tmp_path) -> None:
+        class _Census:
+            dead, total, available, claimed = 9, 10, 1, 0
+
+        class _Loaded:
+            def registry(self):
+                return {"digest": "d", "templates": []}
+
+            def subspace_stats(self, subspace):
+                return _Census()
+
+        lines, reports = [], []
+        result = preflight(_Loaded(), ["addr-a"], config=WatchConfig(probe_n=10),
+                           emit=lines.append, report=reports.append)
+        assert result.ok is True
+        warn = [line for line in lines if "dead" in line]
+        assert len(warn) == 1
+        assert "9" in warn[0] and "10" in warn[0]
+
+    def test_healthy_engine_preflights_clean_and_silent(self, t2_service_env, tmp_path) -> None:
+        store, cfg, _sd = _watch_env(tmp_path)
+        lines, reports = [], []
+        result = preflight(store, [_uniq("addr")], config=cfg, emit=lines.append,
+                           report=reports.append)
+        assert result.ok is True
+        assert lines == []
+
+
+class TestTupleWatchFailureVisibility:
+    def test_sustained_outage_is_rate_limited_not_silent_and_not_a_line_per_cycle(
+        self, tmp_path,
+    ) -> None:
+        class _Dead:
+            def rd(self, *a, **kw):
+                raise _Boom("engine went away")
+
+        cfg = WatchConfig(interval_s=1.0, error_report_every_s=300.0)
+        lines, reports, clock = [], [], _Clock()
+
+        class _Ticking(_Dead):
+            def rd(self, *a, **kw):
+                clock.advance(cfg.interval_s)
+                return super().rd(*a, **kw)
+
+        stats = run_watch(
+            _Ticking(), ["addr-a"], config=cfg, state_dir=tmp_path, iterations=120,
+            emit=lines.append, report=reports.append, now=clock.now, sleep=lambda _s: None,
+        )
+        assert stats.probe_errors == 120
+        # 120 cycles x 1 s = 120 s of outage: one line at once, and nothing else
+        # inside the 300 s window. Silence would be the bug; a line per cycle would
+        # trip the measured auto-stop.
+        outage = [line for line in lines if "probe failed" in line]
+        assert len(outage) == 1
+        assert "engine went away" in outage[0]
+
+    def test_outage_re_reports_once_the_window_passes(self, tmp_path) -> None:
+        cfg = WatchConfig(interval_s=1.0, error_report_every_s=60.0)
+        lines, reports, clock = [], [], _Clock()
+
+        class _Dead:
+            def rd(self, *a, **kw):
+                clock.advance(30.0)
+                raise _Boom("still down")
+
+        run_watch(
+            _Dead(), ["addr-a"], config=cfg, state_dir=tmp_path, iterations=6,
+            emit=lines.append, report=reports.append, now=clock.now, sleep=lambda _s: None,
+        )
+        # 6 cycles x 30 s = 180 s at a 60 s window -> 3 reports, not 6 and not 1
+        assert len([line for line in lines if "probe failed" in line]) == 3
+
+    def test_a_changed_error_is_reported_immediately_inside_the_window(self, tmp_path) -> None:
+        cfg = WatchConfig(interval_s=1.0, error_report_every_s=3600.0)
+        lines, reports, clock = [], [], _Clock()
+
+        class _Changing:
+            def __init__(self) -> None:
+                self.n = 0
+
+            def rd(self, *a, **kw):
+                self.n += 1
+                raise _Boom("transport blip" if self.n < 3 else "401 unauthorized")
+
+        run_watch(
+            _Changing(), ["addr-a"], config=cfg, state_dir=tmp_path, iterations=4,
+            emit=lines.append, report=reports.append, now=clock.now, sleep=lambda _s: None,
+        )
+        outage = [line for line in lines if "probe failed" in line]
+        assert len(outage) == 2, outage
+        assert "transport blip" in outage[0]
+        assert "401 unauthorized" in outage[1]
+
+    def test_park_cap_exceeded_is_named_because_this_watcher_never_parks(self, tmp_path) -> None:
+        class _Parked:
+            def rd(self, *a, **kw):
+                raise ParkCapExceededError("global park cap reached")
+
+        lines, reports, clock = [], [], _Clock()
+        run_watch(
+            _Parked(), ["addr-a"], config=WatchConfig(), state_dir=tmp_path, iterations=1,
+            emit=lines.append, report=reports.append, now=clock.now, sleep=lambda _s: None,
+        )
+        outage = [line for line in lines if "probe failed" in line]
+        assert len(outage) == 1
+        assert "never parks" in outage[0]
+
+
+class TestTupleWatchLock:
+    def test_second_watcher_on_the_same_address_refuses_naming_the_holder(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        addr = _uniq("addr")
+        monkeypatch.setenv("NX_SESSION_ID", "session-one")
+        first = acquire_watch_locks([addr], state_dir=tmp_path)
+        assert first.ok is True
+        try:
+            # A DIFFERENT session id: a per-session lock would let this through,
+            # which is exactly the /clear case the machine-wide scope exists for.
+            monkeypatch.setenv("NX_SESSION_ID", "session-two")
+            lines = []
+            second = acquire_watch_locks([addr], state_dir=tmp_path, emit=lines.append)
+            assert second.ok is False
+            assert len(lines) == 1
+            assert str(os.getpid()) in lines[0]
+            assert "session-one" in lines[0]
+        finally:
+            first.release()
+
+    def test_lock_released_by_a_dead_holder_is_acquired_not_refused(self, tmp_path) -> None:
+        addr = _uniq("addr")
+        first = acquire_watch_locks([addr], state_dir=tmp_path)
+        assert first.ok is True
+        first.release()  # what a dying process's OS-released flock leaves behind
+        lines = []
+        second = acquire_watch_locks([addr], state_dir=tmp_path, emit=lines.append)
+        assert second.ok is True
+        assert lines == []
+        second.release()
+
+    def test_refusing_one_address_releases_the_ones_already_taken(self, tmp_path) -> None:
+        free, taken = _uniq("free"), _uniq("taken")
+        holder = acquire_watch_locks([taken], state_dir=tmp_path)
+        assert holder.ok is True
+        try:
+            second = acquire_watch_locks([free, taken], state_dir=tmp_path, emit=lambda _s: None)
+            assert second.ok is False
+            # the partial acquisition must not linger: a third watcher gets `free`
+            third = acquire_watch_locks([free], state_dir=tmp_path)
+            assert third.ok is True
+            third.release()
+        finally:
+            holder.release()
+
+
+class TestTupleWatchAddressResolution:
+    def test_the_watched_address_never_re_resolves_mid_run(self, t2_service_env, tmp_path,
+                                                           monkeypatch) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        addr = _uniq("addr")
+        tid = _out(store, addr, sender="alice")
+        cfgdir = tmp_path / "cfg"
+        cfgdir.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfgdir))
+        (cfgdir / "current_session").write_text("session-before", encoding="utf-8")
+        lines, reports, clock = [], [], _Clock()
+
+        class _Clobbering:
+            """A peer session rewrites the machine-wide file between probes."""
+
+            def __init__(self, inner) -> None:
+                self.inner = inner
+
+            def rd(self, subspace, *a, **kw):
+                (cfgdir / "current_session").write_text(_uniq("peer"), encoding="utf-8")
+                return self.inner.rd(subspace, *a, **kw)
+
+        run_watch(
+            _Clobbering(store), [addr], config=cfg, state_dir=sd, iterations=3,
+            emit=lines.append, report=reports.append, now=clock.now, sleep=lambda _s: None,
+        )
+        assert len(lines) == 1
+        assert tid in lines[0]

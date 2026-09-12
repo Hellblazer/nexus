@@ -3703,6 +3703,12 @@ An empty probe prints nothing. A newly seen tuple prints one line carrying the a
 | `--iterations N` | Probe cycles to run; 0 (default) runs until interrupted |
 | `--state-dir PATH` | Where the seen-set lives (default: the nexus config dir) |
 
+Before the loop starts it preflights the engine with one registry call and one census per address. If the tuple space is unreachable or the mailbox is unreadable it prints one `SKIP` line on stdout and exits without watching, because an engine below the floor that answers every call with a 404 is otherwise indistinguishable from an empty mailbox. A dead-lettered backlog approaching the probe cap warns, since past the cap dead rows hide fresh mail again.
+
+While the loop runs, a failed probe prints one line on stdout rather than going quiet: silence and an empty mailbox look identical. That line repeats at most once per five minutes for the same error, so a sustained outage cannot trip the Monitor's auto-stop, and a changed error (a transport blip becoming an auth failure) reports immediately.
+
+One watcher per address, machine-wide, enforced by a lock file next to the seen-set. A second watcher on an address someone else already holds prints one line naming the holder's process and session and exits, so a re-arm after `/clear` or `/compact` cannot double every ping. The lock is an advisory `flock`, so a holder that dies releases it and the next watcher acquires rather than refusing. Addresses are resolved once at startup and never re-resolved.
+
 ## nx service
 
 Storage-service administration.

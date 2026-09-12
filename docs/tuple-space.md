@@ -217,7 +217,7 @@ Three refusals outside the nine, all in `TupleHandler` itself: a request against
 
 Two access paths sit on top of `HttpTupleStore`:
 
-- **`nx tuple`** — `out`, `rd`, `in`, `ack`, `nack`, `templates`, `list`, `stats`, `watch` (a ping-then-pull mailbox watcher for a Claude Code Monitor; it never claims). See [CLI Reference — nx tuple](cli-reference.md#nx-tuple) for every flag.
+- **`nx tuple`** — `out`, `rd`, `in`, `ack`, `nack`, `templates`, `list`, `stats`, `watch` (a ping-then-pull mailbox watcher for a Claude Code Monitor; it never claims, preflights before watching, and holds a machine-wide lock per address). See [CLI Reference — nx tuple](cli-reference.md#nx-tuple) for every flag.
 - **Eight `tuple_*` MCP tools** — `tuple_out`, `tuple_rd`, `tuple_in`, `tuple_ack`, `tuple_nack`, `tuple_registry`, `tuple_list`, `tuple_stats` (`rd`/`in`'s own `timeout_s=0` default covers the probe case; there are no separate `tuple_rdp`/`tuple_inp` tools). See [MCP Servers — Tuple space](mcp-servers.md#tuple-space-t2-adjacent-rdr-205) for signatures and the routing rule of thumb.
 
 **Three `nx doctor` rows**, each gated the same way against the engine floor that first serves `/v1/tuples` — an install below that floor reports the check as informational, not a defect, and an install at or above the floor that still 404s reports UNKNOWN and asks you to investigate the engine install:
