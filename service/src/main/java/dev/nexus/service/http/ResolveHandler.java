@@ -82,11 +82,15 @@ import java.util.Map;
  *       "malformed"} or {@code "unreachable"} — e.g. a {@code chroma://} URI
  *       missing its collection/chash segment, or a non-{@code https://} URI
  *       misrouted to the https handler).</td></tr>
- *   <tr><td>502</td><td>the registered handler hit a genuine fetch/resolver
- *       failure for any OTHER {@code errorReason()} (a dangling {@code
- *       https://} URL, a non-2xx or empty HTTP response) — carries the
- *       handler's {@code errorReason}/{@code errorDetail}, never a stack
- *       trace.</td></tr>
+ *   <tr><td>502</td><td>a genuine fetch/resolver failure — {@code errorReason()}
+ *       of {@code "fetch_failed"} (an I/O error, an interrupted fetch, or a
+ *       non-2xx HTTP status from {@link
+ *       dev.nexus.service.resolver.HttpsSchemeHandler}; fix round 2, T2
+ *       fix-check-nexus-aphki-round1-2026-09-12 — distinct from that same
+ *       handler's caller-shaped {@code "unreachable"}/{@code "malformed"}
+ *       URI-format errors above) or {@code "empty"} (a 200 response with a
+ *       blank body) — carries the handler's {@code errorReason}/{@code
+ *       errorDetail}, never a stack trace.</td></tr>
  *   <tr><td>503</td><td>{@code (collection, chash)} form with no {@link
  *       PgVectorRepository} wired (matches {@link VectorHandler}'s
  *       absent-backend pattern).</td></tr>
@@ -220,9 +224,17 @@ public final class ResolveHandler implements HttpHandler {
      * (fix round 1, T2 critique-nexus-aphki-rdr169-gap3-resolve-2026-09-11 Critical):
      * {@code "reference_only"} → 404 (the target has no stored bytes; the caller
      * resolves it elsewhere — this is an honest "no content here," not a resolver
-     * failure); {@code "malformed"} / {@code "unreachable"} (the handler's own
-     * caller-shaped URI-format errors) → 422; anything else (a genuine fetch/resolver
-     * failure) → 502. See the class javadoc's status table for the full contract.
+     * failure); {@code "malformed"} / {@code "unreachable"} (a registered handler's
+     * own caller-shaped URI-format errors) → 422; {@code "fetch_failed"} / {@code
+     * "empty"} (a genuine fetch/resolver failure — fix round 2, T2
+     * fix-check-nexus-aphki-round1-2026-09-12 Critical: {@link
+     * dev.nexus.service.resolver.HttpsSchemeHandler} used to emit {@code
+     * "unreachable"} for BOTH its own URI-shape errors and a real network failure,
+     * which this branching would have wrongly mapped to 422 — the handler now emits
+     * the distinct {@code "fetch_failed"} token for its three network-failure sites)
+     * → 502, and any OTHER reason (there are none today; a future handler's new
+     * token still lands here rather than being silently swallowed) → 502 as well.
+     * See the class javadoc's status table for the full contract.
      */
     private void resolveAndRespond(HttpExchange exchange, String uri, String tenant, String retention)
             throws IOException {
@@ -262,9 +274,12 @@ public final class ResolveHandler implements HttpHandler {
                     "detail", result.errorDetail())));
                 return;
             }
-            // A genuine fetch/resolver failure (a dangling https:// URL, a non-2xx
-            // or empty HTTP response) — carries the handler's own reason/detail,
-            // never a stack trace.
+            // A genuine fetch/resolver failure: "fetch_failed" (HttpsSchemeHandler's
+            // I/O error, interrupted fetch, or non-2xx HTTP status) and "empty" (a
+            // 200 response with a blank body) are the two known members of this
+            // bucket today; any other/future reason token still lands here rather
+            // than being silently swallowed. Carries the handler's own
+            // reason/detail, never a stack trace.
             HttpUtil.send(exchange, 502, json(Map.of(
                 "error", reason,
                 "detail", result.errorDetail())));

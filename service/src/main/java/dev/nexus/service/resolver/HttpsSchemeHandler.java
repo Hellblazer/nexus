@@ -79,6 +79,9 @@ public final class HttpsSchemeHandler implements UriSchemeHandler, AutoCloseable
 
         // Scheme guard: this handler is registered for https:// only.
         // Fail loud rather than silently forwarding a mis-routed scheme.
+        // "unreachable" here is a CALLER-shaped URI problem (RDR-169 G3 fix
+        // round 2, T2 fix-check-nexus-aphki-round1-2026-09-12 Critical) --
+        // maps to 422 in ResolveHandler, same as a malformed chroma:// URI.
         if (uri == null || !uri.startsWith("https://")) {
             return ResolveResult.error("unreachable",
                     "HttpsSchemeHandler received a non-https URI: '" + uri + "'");
@@ -92,6 +95,7 @@ public final class HttpsSchemeHandler implements UriSchemeHandler, AutoCloseable
                     .GET()
                     .build();
         } catch (IllegalArgumentException e) {
+            // Also caller-shaped (a syntactically invalid URI) -- "unreachable", 422.
             return ResolveResult.error("unreachable",
                     "malformed https URI '" + uri + "': " + e.getMessage());
         }
@@ -100,17 +104,24 @@ public final class HttpsSchemeHandler implements UriSchemeHandler, AutoCloseable
         try {
             response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         } catch (IOException e) {
-            return ResolveResult.error("unreachable",
+            // GENUINE fetch failure (fix round 2): distinct from the URI-shape
+            // "unreachable" errors above -- a well-formed https:// request that
+            // could not be completed (DNS/connect/TLS/read failure). Maps to
+            // 502 in ResolveHandler, not 422: the URI itself was fine, the
+            // resolver just could not reach it.
+            return ResolveResult.error("fetch_failed",
                     "I/O error fetching '" + uri + "': " + e.getMessage());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return ResolveResult.error("unreachable",
+            return ResolveResult.error("fetch_failed",
                     "fetch interrupted for '" + uri + "'");
         }
 
         int status = response.statusCode();
         if (status < 200 || status >= 300) {
-            return ResolveResult.error("unreachable",
+            // A completed fetch that came back non-2xx is also a genuine
+            // resolver failure, not a caller-shaped URI problem -- 502.
+            return ResolveResult.error("fetch_failed",
                     "HTTP " + status + " fetching '" + uri + "'");
         }
 

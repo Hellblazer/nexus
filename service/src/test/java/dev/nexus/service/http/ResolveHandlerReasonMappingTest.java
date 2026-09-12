@@ -21,10 +21,11 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * RDR-169 G3 fix round 1 (bead nexus-aphki, T2 critique-nexus-aphki-rdr169-gap3-resolve-2026-09-11
- * Critical) — deterministic coverage of {@link ResolveHandler#handle}'s status-code branching,
- * independent of any REAL {@link dev.nexus.service.resolver.UriSchemeHandler} implementation or
- * {@code PgVectorRepository}.
+ * RDR-169 G3 fix rounds 1 and 2 (bead nexus-aphki, T2
+ * critique-nexus-aphki-rdr169-gap3-resolve-2026-09-11 Critical and
+ * fix-check-nexus-aphki-round1-2026-09-12 Critical) — deterministic coverage of {@link
+ * ResolveHandler#handle}'s status-code branching, independent of any REAL {@link
+ * dev.nexus.service.resolver.UriSchemeHandler} implementation or {@code PgVectorRepository}.
  *
  * <p>Hermetic: a bare {@link HttpServer} bound to {@link ResolveHandler} directly, no {@code
  * NexusService}/DataSource/Postgres involved (mirrors {@code StatusHandlerTest}'s pattern) — this
@@ -45,13 +46,20 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>400 — both {@code source_uri} and {@code collection}/{@code chash} given.</li>
  *   <li>400 — neither form given.</li>
  *   <li>400 — non-canonical {@code chash}.</li>
- *   <li>502 — a reason token that is neither {@code "reference_only"} nor {@code "malformed"}/
- *       {@code "unreachable"} (a genuine fetch/resolver failure, e.g. an https 200-empty-body).</li>
+ *   <li>502 — reason {@code "empty"} (a genuine fetch/resolver failure, e.g. an https
+ *       200-empty-body).</li>
+ *   <li>502 — reason {@code "fetch_failed"} (fix round 2: HttpsSchemeHandler's own
+ *       network-failure token, distinct from its caller-shaped {@code "unreachable"}).</li>
  *   <li>422 — reason {@code "malformed"} via a registered handler (not the unregistered-scheme
  *       path, which {@code ResolveHandlerTest} already covers).</li>
- *   <li>422 — reason {@code "unreachable"} via a registered handler.</li>
+ *   <li>422 — reason {@code "unreachable"} via a registered handler (fix round 2: this is now
+ *       ONLY a caller-shaped URI-format error, never a real network failure).</li>
  *   <li>503 — {@code (collection, chash)} form with no {@code PgVectorRepository} wired.</li>
  * </ol>
+ *
+ * <p>{@code ResolveHandlerHttpsFetchFailureTest} exercises the REAL {@code
+ * HttpsSchemeHandler} against real network failures end-to-end for the {@code
+ * "fetch_failed"} token this suite only stubs.
  */
 class ResolveHandlerReasonMappingTest {
 
@@ -163,11 +171,11 @@ class ResolveHandlerReasonMappingTest {
     // -------------------------------------------------------------------------
 
     @Test
-    void otherReason_maps502_carryingReasonAndDetail() throws Exception {
+    void emptyReason_maps502_carryingReasonAndDetail() throws Exception {
         var registry = new UriSchemeResolverRegistry();
         // "empty" is HttpsSchemeHandler's own reason for a 200-with-blank-body fetch --
-        // the one live-reachable 502 case (RDR-169 G3 fix round 1) -- reproduced here via a
-        // stub so the test is deterministic and needs no live socket.
+        // one of the two live-reachable 502 cases (RDR-169 G3 fix round 1) -- reproduced
+        // here via a stub so the test is deterministic and needs no live socket.
         registry.register("stub", new StubHandler("empty", "empty body at 'stub://x' (HTTP 200)"));
         start(registry, null);
 
@@ -177,6 +185,28 @@ class ResolveHandlerReasonMappingTest {
         Map<String, Object> body = jsonBody(resp);
         assertThat(body.get("error")).isEqualTo("empty");
         assertThat(body.get("detail")).isEqualTo("empty body at 'stub://x' (HTTP 200)");
+    }
+
+    @Test
+    void fetchFailedReason_maps502_carryingReasonAndDetail() throws Exception {
+        var registry = new UriSchemeResolverRegistry();
+        // "fetch_failed" is HttpsSchemeHandler's reason for a genuine network failure
+        // (fix round 2, T2 fix-check-nexus-aphki-round1-2026-09-12 Critical): an I/O
+        // error, an interrupted fetch, or a non-2xx HTTP status -- distinct from that
+        // same handler's caller-shaped "unreachable"/"malformed" URI-format errors,
+        // which map to 422 instead (see malformedReason_maps422/unreachableReason_maps422
+        // below). Reproduced here via a stub so the test is deterministic and needs no
+        // live socket; ResolveHandlerHttpsFetchFailureTest exercises the REAL handler
+        // against a real network failure end-to-end.
+        registry.register("stub", new StubHandler("fetch_failed", "HTTP 500 fetching 'stub://x'"));
+        start(registry, null);
+
+        var resp = post(Map.of("source_uri", "stub://x"));
+
+        assertThat(resp.statusCode()).as("body: %s", resp.body()).isEqualTo(502);
+        Map<String, Object> body = jsonBody(resp);
+        assertThat(body.get("error")).isEqualTo("fetch_failed");
+        assertThat(body.get("detail")).isEqualTo("HTTP 500 fetching 'stub://x'");
     }
 
     // -------------------------------------------------------------------------

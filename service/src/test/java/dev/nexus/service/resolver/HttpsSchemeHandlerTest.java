@@ -15,8 +15,17 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * <p>Tests that do not need a live network connection exercise the guard paths
  * directly (scheme guard, null guard, construction guard).  The
  * {@code AutoCloseable} contract is checked via the handler's {@code close()}
- * method.  Live-network tests are omitted — they belong in integration tests
- * tagged {@code @Tag("integration")}.
+ * method.  Live-network tests are omitted here — {@code
+ * dev.nexus.service.http.ResolveHandlerHttpsFetchFailureTest} (RDR-169 G3 fix
+ * round 2, T2 fix-check-nexus-aphki-round1-2026-09-12) exercises this handler
+ * against real network failures end-to-end.
+ *
+ * <p>Reason-token split (fix round 2): every case in THIS file is a
+ * caller-shaped URI-format error ({@code "unreachable"}) — the scheme guard
+ * and the null-URI guard never touch the network. A GENUINE fetch failure
+ * (I/O error, interrupted fetch, non-2xx status) emits the distinct {@code
+ * "fetch_failed"} token instead, which is why those three sites are only
+ * covered by the real-network test named above, not here.
  *
  * <p>Cases:
  * <ol>
