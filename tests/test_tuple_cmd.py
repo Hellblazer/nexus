@@ -1166,6 +1166,31 @@ class TestWatchFairnessAcrossAddresses:
             f"one address must never be able to consume the whole budget"
         )
 
+    def test_saturated_steady_state_stays_under_the_measured_throttle(self) -> None:
+        """The worst sustained case at PRODUCTION defaults, not the fixture's.
+
+        Under joint saturation every watched address emits one coalesced line per
+        cycle forever. That is the accepted single-address tradeoff MM-1.1 shipped,
+        multiplied by the number of addresses, and it must stay under the measured
+        throttle (about 20 events per 20 s, T2
+        nexus/mm-0.1-monitor-auto-stop-threshold-measured-2026-09-12). It currently
+        uses about two thirds of the ceiling with two addresses, so a third watched
+        address or a shorter interval would cross it -- and crossing it gets the
+        Monitor killed, which is silent to the hook that depends on it.
+        """
+        cfg = WatchConfig()
+        measured_throttle_events_per_window = 20.0
+        measured_window_s = 20.0
+        addresses = 2  # the session id and the instance name; MM-1.3's maximum
+        cycles_per_window = measured_window_s / cfg.interval_s
+        steady_state_lines = cycles_per_window * addresses
+        assert steady_state_lines < measured_throttle_events_per_window, (
+            f"a sustained flood on {addresses} addresses at interval={cfg.interval_s}s "
+            f"emits {steady_state_lines:.1f} lines per {measured_window_s:.0f}s against a "
+            f"measured throttle of {measured_throttle_events_per_window:.0f}; the Monitor "
+            f"would be stopped and the hook would never know"
+        )
+
     def test_one_address_cannot_consume_the_whole_shared_budget(self) -> None:
         """The arithmetic the test above depends on, pinned directly so a change to
         either constant fails here and names the reason."""
