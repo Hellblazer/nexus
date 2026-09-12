@@ -87,6 +87,7 @@ public final class TupleRepository {
     private static final String TRANSITION_CLAIM = "claim";
     private static final String TRANSITION_ACK = "ack";
     private static final String TRANSITION_NACK = "nack";
+    private static final String TRANSITION_RENEW = "renew";
     private static final String TRANSITION_EXPIRE = "expire";
     private static final String TRANSITION_DEAD = "dead";
 
@@ -109,15 +110,18 @@ public final class TupleRepository {
 
     /**
      * TEST-ONLY seam (RDR-206 Phase 1 Step 1, bead nexus-h61dl.2): invoked inside
-     * {@link #ack}'s and {@link #nack}'s transaction between {@link #liveClaimRow}'s
-     * unlocked read and the compare-and-swap {@code UPDATE}, so a test can release
-     * the row in that window (lapse the lease, run the sweep's release arm) and
-     * assert the stale update matches zero rows and raises {@link
-     * ClaimNotFoundException} with no claim-log row. Same shape and rules as {@link
+     * every claim-MUTATING transaction — {@link #ack}, {@link #nack} and {@link
+     * #renew} — between {@link #liveClaimRow}'s unlocked read and the
+     * compare-and-swap {@code UPDATE}, so a test can release the row in that window
+     * (lapse the lease, run the sweep's release arm) and assert the stale update
+     * matches zero rows and raises {@link ClaimNotFoundException} with no claim-log
+     * row. Renamed from {@code ..._ACK_NACK_...} when renew joined at Step 3
+     * (nexus-h61dl.4): a seam whose name lists two of its three callers reads as a
+     * guarantee that the third is not covered. Same shape and rules as {@link
      * #TEST_ONLY_CLAIM_SELECT_TO_UPDATE_DELAY}: a no-op by default, package-private,
      * never assigned outside test code, not a production delay mechanism.
      */
-    static volatile Runnable TEST_ONLY_ACK_NACK_READ_TO_UPDATE_DELAY = () -> { };
+    static volatile Runnable TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY = () -> { };
 
     /**
      * TEST-ONLY (RDR-205 bead nexus-em75s.7, the wake-test mutation pins): installs a
@@ -691,10 +695,7 @@ public final class TupleRepository {
                 // in the clamp branch already came from a DB fetch, so it is already at
                 // this precision; truncating it too is a no-op, not a second source of
                 // truth.
-                OffsetDateTime leaseUntil = now.plusSeconds(leaseSeconds).truncatedTo(java.time.temporal.ChronoUnit.MICROS);
-                if (leaseUntil.isAfter(row.getExpiresAt())) {
-                    leaseUntil = row.getExpiresAt().truncatedTo(java.time.temporal.ChronoUnit.MICROS); // clamped: a claim never outlives its tuple
-                }
+                OffsetDateTime leaseUntil = clampedLeaseUntil(now, leaseSeconds, row.getExpiresAt());
                 ctx.update(TUPLES)
                         .set(TUPLES.CLAIM_STATE, CLAIM_STATE_CLAIMED)
                         .set(TUPLES.CLAIMANT, claimant)
@@ -746,7 +747,7 @@ public final class TupleRepository {
         }
         // TEST-ONLY (nexus-h61dl.2): widens the read-to-update race window under
         // test; a no-op Runnable on every production path.
-        TEST_ONLY_ACK_NACK_READ_TO_UPDATE_DELAY.run();
+        TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY.run();
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         // RDR-206 Phase 1 Step 1: compare-and-swap. liveClaimRow read without a
         // lock, so the sweep's release arm (or a re-take after a lapse) may have
@@ -853,7 +854,7 @@ public final class TupleRepository {
             long maxAttempts = t.take().maxAttempts() == null ? Long.MAX_VALUE : t.take().maxAttempts();
             int attempts = row.getAttempts() + 1;
             // TEST-ONLY (nexus-h61dl.2): see ack.
-            TEST_ONLY_ACK_NACK_READ_TO_UPDATE_DELAY.run();
+            TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY.run();
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
             ReleaseOutcome outcome = releaseOrDeadLetter(ctx, tenant, row.getSubspace(), row.getTemplate(),
@@ -864,6 +865,73 @@ public final class TupleRepository {
                 throw new ClaimNotFoundException(claimId);
             }
             return null;
+        });
+    }
+
+    /**
+     * {@code renew(claim_id, claimant, lease_s) -> lease_until} — extend a LIVE claim's
+     * lease without consuming the tuple and without spending an attempt.
+     *
+     * <p>NO RESURRECTION, and that is the point of the operation. {@link #liveClaimRow}
+     * already requires {@code claim_state = 'claimed'}, {@code consumed_at IS NULL} and
+     * {@code lease_until > now()}, so a renew arriving after the lease lapsed finds
+     * nothing and fails {@link ClaimNotFoundException}, exactly as a late {@code ack}
+     * does. A holder that missed its window learns it lost the claim instead of
+     * extending one it no longer holds. Among the systems surveyed for RDR-206 only
+     * pgmq's {@code set_vt} resurrects; JavaSpaces raises {@code UnknownLeaseException}
+     * and SQS returns {@code MessageNotInflight}, which is the behaviour this matches.
+     *
+     * <p>A renew is NOT an attempt. {@code nack} counts one and dead-letters at the cap,
+     * so if renew touched {@code ATTEMPTS} a long task would dead-letter itself by doing
+     * precisely what this operation exists to let it do.
+     *
+     * <p>The lease is clamped to the tuple's own expiry by {@link #clampedLeaseUntil},
+     * the same helper the claim statement uses. A lease longer than the template's
+     * {@code max_lease_seconds} is REFUSED rather than clamped: renewal changes who
+     * decides when work is long, not the cap.
+     *
+     * @return the new {@code lease_until}, at the precision the row stores.
+     */
+    public OffsetDateTime renew(String tenant, String claimId, String claimant, long leaseSeconds) {
+        // Refused before the transaction opens: a non-positive lease needs neither the
+        // row nor the template to reject, so there is nothing to roll back. Same
+        // placement rule Step 2 settled for reply refusals.
+        if (leaseSeconds <= 0) {
+            throw new SchemaViolationException("lease_s", "must be positive");
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            TuplesRecord row = liveClaimRow(ctx, tenant, claimId);
+            if (row == null) {
+                throw new ClaimNotFoundException(claimId);
+            }
+            if (!row.getClaimant().equals(claimant)) {
+                throw new ClaimOwnershipException(claimId, claimant);
+            }
+            // Re-resolved from the ROW's subspace, as nack does: the caller names a
+            // claim, not a subspace, so the cap has to come from the row.
+            TemplateSchema t = resolveOrThrow(row.getSubspace());
+            Long maxLease = t.take().maxLeaseSeconds();
+            if (maxLease != null && leaseSeconds > maxLease) {
+                throw new LeaseTooLongException(leaseSeconds, maxLease, t.name());
+            }
+            // TEST-ONLY (nexus-h61dl.2): see ack.
+            TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY.run();
+            OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+            OffsetDateTime leaseUntil = clampedLeaseUntil(now, leaseSeconds, row.getExpiresAt());
+
+            // RDR-206 Phase 1 Step 1's compare-and-swap: liveClaimRow read without a
+            // lock, so the sweep's release arm or a re-take may have moved the row.
+            // ATTEMPTS is deliberately absent from this .set() list.
+            int updated = ctx.update(TUPLES)
+                    .set(TUPLES.LEASE_UNTIL, leaseUntil)
+                    .where(liveClaimCondition(row.getId(), claimId))
+                    .execute();
+            if (updated == 0) {
+                throw new ClaimNotFoundException(claimId);
+            }
+            insertClaimLog(ctx, tenant, row.getSubspace(), row.getTemplate(), row.getId(),
+                    claimId, claimant, TRANSITION_RENEW, now);
+            return leaseUntil;
         });
     }
 
@@ -931,6 +999,40 @@ public final class TupleRepository {
      * consumed fails to match, so the update touches zero rows instead of writing over
      * state this caller no longer owns.
      */
+    /**
+     * The deadline a lease may run to: {@code now + leaseSeconds}, never past the
+     * tuple's own {@code expiresAt}, at microsecond precision.
+     *
+     * <p>Shared by the claim statement and {@link #renew} (RDR-206 Phase 1 Step 3) so
+     * the two cannot drift. The one that drifted would hand out a lease running past a
+     * row the sweep is entitled to purge, which is the invariant RDR-205 states as a
+     * claim never outliving its tuple.
+     *
+     * <p>Truncation is not cosmetic (RDR-205 follow-on, nexus-mvfm9): Postgres
+     * TIMESTAMPTZ is microsecond-precision, while the JVM clock under
+     * {@code OffsetDateTime.now()} can carry more digits. Without truncating, a value
+     * returned from memory and the same row read back disagree on the fractional second
+     * though both name one instant. {@code expiresAt} already came from the database
+     * and is at that precision, so truncating it again is a no-op rather than a second
+     * source of truth.
+     *
+     * <p>The template's {@code max_lease_seconds} is deliberately NOT an input. It is
+     * enforced by REJECTION ({@link LeaseTooLongException}) before any clamping, so a
+     * caller asking for too long is told, not quietly given less. Folding it in here as
+     * a third term of the minimum would give the same instant and silently swallow that
+     * error.
+     */
+    private static OffsetDateTime clampedLeaseUntil(OffsetDateTime now, long leaseSeconds,
+                                                    OffsetDateTime expiresAt) {
+        OffsetDateTime leaseUntil = now.plusSeconds(leaseSeconds)
+                .truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        if (leaseUntil.isAfter(expiresAt)) {
+            // Clamped: a claim never outlives its tuple.
+            return expiresAt.truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        }
+        return leaseUntil;
+    }
+
     private static Condition liveClaimCondition(byte[] tupleId, String claimId) {
         return TUPLES.ID.eq(tupleId)
                 .and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED))

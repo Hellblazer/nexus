@@ -350,6 +350,58 @@ class TupleHandlerWiringTest {
         assertThat(resp.body()).contains("reply");
     }
 
+    // ── RDR-206 Phase 1 Step 3: the renew route ──────────────────────────────
+
+    @Test
+    void renew_extendsTheLease_andReturnsAnIso8601Deadline() throws Exception {
+        String to = "renew-ok-addr";
+        String claimId = outAndClaim(to, "renew-ok-claimant");
+
+        var resp = post(withRegistry, "/v1/tuples/renew", Map.of(
+                "claim_id", claimId, "claimant", "renew-ok-claimant", "lease_s", 600));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        String leaseUntil = (String) mapper.readValue(resp.body(), MAP_T).get("lease_until");
+        assertThat(leaseUntil).as("MAPPER's JavaTimeModule renders an instant, not an epoch number")
+                .isNotNull();
+        var parsed = java.time.OffsetDateTime.parse(leaseUntil);
+
+        // The claim's original lease was 60s; a 600s renew must land past that. Compared
+        // against the ORIGINAL deadline rather than against a wall-clock guess, so the
+        // assertion says nothing about how fast this box is.
+        var rdResp = post(withRegistry, "/v1/tuples/rd", Map.of(
+                "subspace", "mailbox/" + to, "keys_pattern", Map.of("to", to)));
+        var rows = (java.util.List<Map<String, Object>>) mapper.readValue(rdResp.body(), MAP_T)
+                .get("tuples");
+        assertThat(rows).hasSize(1);
+        assertThat(java.time.OffsetDateTime.parse((String) rows.get(0).get("lease_until")))
+                .as("the row carries exactly what the route returned").isEqualTo(parsed);
+        assertThat(rows.get(0).get("claim_state")).isEqualTo("claimed");
+    }
+
+    @Test
+    void renew_aboveTheTemplateCap_is400() throws Exception {
+        String to = "renew-cap-addr";
+        String claimId = outAndClaim(to, "renew-cap-claimant");
+
+        // mailbox.yaml caps max_lease_seconds at 900. Refused, never clamped.
+        var resp = post(withRegistry, "/v1/tuples/renew", Map.of(
+                "claim_id", claimId, "claimant", "renew-cap-claimant", "lease_s", 901));
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("LeaseTooLong");
+    }
+
+    @Test
+    void renew_requiresPost() throws Exception {
+        var req = HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + withRegistry.getPort() + "/v1/tuples/renew"))
+                .header("Authorization", "Bearer " + TOKEN)
+                .header("X-Nexus-Tenant", TENANT)
+                .GET()
+                .build();
+        var resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        assertThat(resp.statusCode()).isEqualTo(405);
+    }
+
     private HttpResponse<String> post(NexusService svc, String path, Object body) throws Exception {
         var req = HttpRequest.newBuilder()
                 .uri(URI.create("http://127.0.0.1:" + svc.getPort() + path))

@@ -390,7 +390,7 @@ class TupleAckWithReplyTest {
         String answerer = addr("answerer");
         String claimId = requestAndClaim(answerer, "worker-1");
         var claimReads = new java.util.concurrent.atomic.AtomicInteger();
-        TupleRepository.TEST_ONLY_ACK_NACK_READ_TO_UPDATE_DELAY = claimReads::incrementAndGet;
+        TupleRepository.TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY = claimReads::incrementAndGet;
         try {
             var bad = new TupleRepository.ReplySpec(
                     "mailbox/" + asker, Map.of("to", asker, "nope", "x"),
@@ -407,7 +407,7 @@ class TupleAckWithReplyTest {
             repo.ackWithReply(TENANT, claimId, "worker-1", reply(asker, "fine", null));
             assertThat(claimReads.get()).as("the seam does fire on the accepted path").isEqualTo(1);
         } finally {
-            TupleRepository.TEST_ONLY_ACK_NACK_READ_TO_UPDATE_DELAY = () -> { };
+            TupleRepository.TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY = () -> { };
         }
     }
 

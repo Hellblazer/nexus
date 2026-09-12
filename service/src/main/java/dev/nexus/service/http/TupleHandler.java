@@ -45,6 +45,7 @@ import java.util.Optional;
  *   POST /v1/tuples/ack             {claim_id, claimant, reply?{subspace, keys, dims?, body?, ttl_seconds?}}
  *                                   -&gt; {"acked": true, "reply_id": "&lt;hex&gt;"|null}
  *   POST /v1/tuples/nack            {claim_id, claimant} -&gt; {"nacked": true}
+ *   POST /v1/tuples/renew           {claim_id, claimant, lease_s} -&gt; {"lease_until": "&lt;ISO-8601&gt;"}
  *   GET  /v1/tuples/registry        -&gt; {"digest", "sources", "templates": [...]}
  *   GET  /v1/tuples/subspace_list   ?prefix= -&gt; {"subspaces": [...]}
  *   GET  /v1/tuples/subspace_stats  ?subspace= -&gt; {subspace, total, available, claimed, dead, consumed, expired_unpurged, oldest_created_at, newest_created_at}
@@ -109,6 +110,7 @@ public final class TupleHandler implements HttpHandler {
                 case "/inp" -> handleInp(exchange, tenant, method);
                 case "/ack" -> handleAck(exchange, tenant, method);
                 case "/nack" -> handleNack(exchange, tenant, method);
+                case "/renew" -> handleRenew(exchange, tenant, method);
                 case "/registry" -> handleRegistry(exchange, method);
                 case "/subspace_list" -> handleSubspaceList(exchange, tenant, method);
                 case "/subspace_stats" -> handleSubspaceStats(exchange, tenant, method);
@@ -281,6 +283,26 @@ public final class TupleHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         repo.nack(tenant, requireString(body, "claim_id"), requireString(body, "claimant"));
         HttpUtil.send(ex, 200, "{\"nacked\":true}");
+    }
+
+    /**
+     * {@code POST /v1/tuples/renew} (RDR-206 Phase 1 Step 3). Extends a live claim's
+     * lease; the response carries the resulting deadline, which may be EARLIER than
+     * {@code now + lease_s} because a claim is clamped to its tuple's own expiry.
+     * Serialised by {@code MAPPER}, whose {@code JavaTimeModule} renders it ISO-8601.
+     *
+     * <p>No new typed error: the four this can raise — ClaimNotFound, ClaimOwnership,
+     * LeaseTooLong, SchemaViolation — already exist with their statuses.
+     */
+    private void handleRenew(HttpExchange ex, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) {
+            HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}");
+            return;
+        }
+        Map<String, Object> body = readBody(ex);
+        var leaseUntil = repo.renew(tenant, requireString(body, "claim_id"),
+                requireString(body, "claimant"), requireLong(body, "lease_s"));
+        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(Map.of("lease_until", leaseUntil)));
     }
 
     // ── registry / census ────────────────────────────────────────────────────
