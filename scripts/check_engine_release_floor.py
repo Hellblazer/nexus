@@ -998,9 +998,14 @@ def _run_paired_precondition_battery(
     takes a pin-currency-only path when the cloud already meets the floor --
     it never calls this battery at all, so no arming row is emitted on that
     branch. ``release.yml``'s tag-push step runs exactly that mode. The
-    safety property survives (the branch fires only once the cloud is at or
-    above the new floor, i.e. the deploy already happened, and arming is a
-    claim about a deploy that has not); the audit guarantee does not.
+    safety property survives, and NECESSARILY rather than probably: the
+    predicate that selects that branch IS
+    ``parsed >= REQUIRED_ENGINE_VERSION`` -- the live cloud already running
+    the engine this release pins, which is the engine carrying the
+    non-additive change. So whenever the skip happens, the deploy has landed,
+    and arming is a claim about a deploy that has not. It is the branch
+    condition, not an observation about typical behaviour. What does not
+    survive is the audit guarantee.
 
     Returns 0 when all three pass; the first failing check's own named-reason
     exit code otherwise.

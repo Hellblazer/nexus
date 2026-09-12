@@ -2768,10 +2768,12 @@ def test_auto_paired_meets_floor_emits_no_arming_verdict_by_design(
     and documented (docs/tables/release-choreography.toml: the unattended
     path trusts the cloud probe because no human is present to interpret a
     dirty ledger, and the table says in terms not to unify the modes). And
-    the safety property survives: this branch fires only once the cloud is at
-    or above the new floor, which means the deploy already happened, while
-    arming is a claim about a deploy that has not. What is lost is the audit
-    trail, not the protection.
+    the safety property survives NECESSARILY, not probably: the predicate
+    selecting this branch IS ``parsed >= REQUIRED_ENGINE_VERSION``, the live
+    cloud already running the engine this release pins -- the one carrying
+    the non-additive change. So whenever the skip happens the deploy has
+    landed, and arming is a claim about a deploy that has not. What is lost
+    is the audit trail, not the protection.
 
     The ledger here carries a NON-ADDITIVE unshipped entry -- the state that
     would make arming REQUIRED and refuse, had the battery run at all. That

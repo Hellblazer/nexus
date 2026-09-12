@@ -185,10 +185,15 @@ is not a second one.
 
 That is a ruling, not an oversight (`nexus-jv9h3`, 2026-09-12). The two-mode
 asymmetry is deliberate and documented in
-`docs/tables/release-choreography.toml`, and the safety property survives it:
-the meets-floor branch fires only once the cloud is at or above the new floor,
-which means the deploy has already happened, and arming is a claim about a
-deploy that has not. What the branch costs is the audit trail, not the
+`docs/tables/release-choreography.toml`, and the safety property survives it
+necessarily rather than probably. The predicate that selects the branch IS
+`parsed >= REQUIRED_ENGINE_VERSION`: the live cloud already running the engine
+this release pins, which is the engine carrying the non-additive change. So
+whenever the skip happens the deploy has landed, and arming is a claim about a
+deploy that has not. That is the branch condition, not a caveat about likely
+behaviour — stated this way deliberately, because as a hedge it invites a
+reader to go re-derive whether the exception is safe, and as a predicate it
+closes the question. What the branch costs is the audit trail, not the
 protection.
 
 ## Retention
