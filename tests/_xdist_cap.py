@@ -27,6 +27,24 @@ regression rather than as resource contention.
 
 Non-macOS boxes have no ``kern.sysv.*`` and are not subject to this limit in
 the same way, so the cap is simply not applied there.
+
+WHY THE ORIGINATING FAILURE IS STILL UNEXPLAINED, and what has been ruled out.
+Two hypotheses were recorded for the missing term. The second -- that a coarse
+sampler understates the peak, because teardown and startup overlap on a
+contended box and a sub-second burst falls between two samples -- was measured
+on 2026-09-12 and is REFUTED, with its mechanism visible rather than merely
+absent. A 54ms trace of ``tests/db/`` at ``-n 16`` shows the churn is real
+during the ~9s boot ramp: the count oscillates 4, 0, 4, 8, 4, 8, 9, 12, 11, 12,
+11, 13, 16, 15, 16, with transients as short as 50ms that a 1s sampler would
+indeed step over. But every one of those excursions is BELOW the steady state,
+never above it, and the peak is bounded by the worker count. Subsampling that
+same trace at 0.5s, 1s and 2s returns a peak of 16 in all three cases: the
+coarse sampler misses dips, not peaks, so it understates nothing that matters
+to a budget. The first hypothesis -- that the release battery was LIVE rather
+than merely leaked during the failing run, and that its concurrently-running
+legs each provision Postgres -- remains unmeasured, and is now the only
+surviving candidate. Measuring it means sampling while the battery actually
+runs.
 """
 
 from __future__ import annotations
@@ -42,6 +60,11 @@ import subprocess
 #: worker boot to catch a transient. If a future PG allocates more than one,
 #: every cap here becomes too generous -- which is why the number is a named
 #: constant with a test pinning it rather than a bare 1 in the arithmetic.
+#:
+#: Re-measured the same day at 54ms resolution, on a box carrying other work,
+#: with a ZERO baseline: ``tests/db/`` at ``-n 16`` peaked at exactly 16, so
+#: peak == worker count and this constant is 1 on the nose. The earlier 21 was
+#: 16 workers plus a baseline of 5 that was not this run's.
 SEGMENTS_PER_WORKER = 1
 
 #: Segments held back for things that are not this run's workers: a concurrent
