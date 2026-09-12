@@ -27,17 +27,19 @@
 #   are caught the same way, rather than the former crashing the script
 #   via errexit or the latter silently misfolding into the diverged path.
 #
-#   When omitted, the required base defaults to the LOCAL `develop`
-#   branch tip if one exists (refs/heads are shared across all worktrees
-#   of a repo, so this is visible even though the worktree itself is
-#   checked out to some other branch); only if there is no local
-#   `develop` does it fall back to the repo-local `origin/develop` ref.
-#   Local-first matters because this project's own workflow (routine
-#   work commits direct to `develop`, batched pushes) routinely runs
-#   local `develop` ahead of `origin/develop` for extended windows — a
-#   pure-origin default would silently under-recover in exactly that
-#   window. Neither branch is ever fetched; if neither resolves locally,
-#   preflight refuses rather than guessing.
+#   When omitted, the required base is the NEWER of local `develop` and
+#   the repo-local `origin/develop` (nexus-aukeu). Both directions happen
+#   routinely and for structural reasons: batched pushes run local AHEAD
+#   of origin, while landings through worktrees leave the primary's local
+#   develop BEHIND origin for long stretches. Preferring local
+#   unconditionally, as this did until 2026-09-11, under-recovers in the
+#   second window exactly as a pure-origin default would in the first —
+#   measured, an agent told to build on a commit only origin had got
+#   PREFLIGHT_OK against a tree 25 commits behind. So the two are
+#   compared: whichever is a descendant of the other is the base. A
+#   genuine divergence refuses and names both tips rather than guessing.
+#   Neither branch is ever fetched; if neither resolves locally,
+#   preflight refuses. Dispatchers should pass the sha explicitly anyway.
 #
 # Exit codes (every failure path prints a named discriminator line first):
 #   0  PREFLIGHT_OK head=<sha> recovered=<yes|no>
@@ -70,13 +72,46 @@ if [ -n "$required_sha_input" ]; then
     echo "PREFLIGHT_FAIL_BAD_SHA ${required_sha_input}"
     exit 5
   fi
-elif required_sha="$(git rev-parse -q --verify refs/heads/develop^{commit})"; then
-  :
-elif required_sha="$(git rev-parse -q --verify refs/remotes/origin/develop^{commit})"; then
-  :
 else
-  echo "PREFLIGHT_FAIL_BAD_SHA develop|origin/develop"
-  exit 5
+  # No sha given: pick the NEWER of local develop and origin/develop rather than
+  # preferring local unconditionally (nexus-aukeu).
+  #
+  # Local-first was written for this project's batched-push workflow, where
+  # local develop routinely runs AHEAD of origin. But the opposite also holds
+  # routinely, and for a structural reason: landings go through worktrees, never
+  # the primary, so the primary's local develop sits BEHIND origin for long
+  # stretches. Measured 2026-09-11 — an agent told to build on a commit only
+  # origin had got PREFLIGHT_OK against a tree 25 commits behind it, and
+  # recovered by hand afterwards. Preferring local in that window is exactly the
+  # under-recovery local-first was meant to prevent, in the other direction.
+  #
+  # So compare instead of assuming. When one is an ancestor of the other, the
+  # descendant is the right base whichever ref it came from. When they have
+  # genuinely diverged, neither is safe to guess at, so refuse and name both
+  # tips rather than silently picking one.
+  local_dev="$(git rev-parse -q --verify refs/heads/develop^{commit} || true)"
+  origin_dev="$(git rev-parse -q --verify refs/remotes/origin/develop^{commit} || true)"
+  if [ -n "$local_dev" ] && [ -n "$origin_dev" ]; then
+    if [ "$local_dev" = "$origin_dev" ]; then
+      required_sha="$local_dev"
+    elif git merge-base --is-ancestor "$local_dev" "$origin_dev"; then
+      required_sha="$origin_dev"      # local is behind: origin is the real base
+    elif git merge-base --is-ancestor "$origin_dev" "$local_dev"; then
+      required_sha="$local_dev"       # local is ahead: the batched-push window
+    else
+      echo "PREFLIGHT_FAIL_DIVERGED_DEFAULT local=${local_dev} origin=${origin_dev}"
+      echo "  develop and origin/develop have diverged, so neither is a safe default."
+      echo "  Pass the required sha explicitly (dispatchers should always do this)."
+      exit 5
+    fi
+  elif [ -n "$local_dev" ]; then
+    required_sha="$local_dev"
+  elif [ -n "$origin_dev" ]; then
+    required_sha="$origin_dev"
+  else
+    echo "PREFLIGHT_FAIL_BAD_SHA develop|origin/develop"
+    exit 5
+  fi
 fi
 
 if git merge-base --is-ancestor "$required_sha" HEAD; then
