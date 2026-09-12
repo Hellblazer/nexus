@@ -4,6 +4,13 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.43.0] - 2026-09-12
+
+Paired engine: engine-service-v0.1.116 (`REQUIRED_ENGINE_VERSION` (0, 1, 116)).
+Plugin version aligned with conexus 7.43.0. `PENDING_RELEASE.md` was empty at
+this cut, so no previously-inert plugin behaviour becomes live with this pin
+advance.
+
 ## [7.42.0] - 2026-09-11
 
 Paired engine: engine-service-v0.1.115 (`REQUIRED_ENGINE_VERSION` (0, 1, 115)).
