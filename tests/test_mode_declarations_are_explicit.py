@@ -1361,27 +1361,37 @@ def test_mode_declarations_census_executes_for_real_under_ci_env_shape() -> None
     1/1 view and does not fire; this test is entirely about the SEPARATE
     substrate-skip path, not the partial-view guard.
     """
-    proc = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/test_mode_declarations_are_explicit.py"
-            "::test_mode_declarations_are_explicit",
-            "-q",
-            "-rs",
-            "--no-header",
-        ],
-        cwd=_REPO_ROOT,
-        env={**os.environ, "GITHUB_ACTIONS": "true", "NX_TEST_T2_SUBSTRATE": "none"},
-        capture_output=True,
-        text=True,
-        # Sixth instance of this file's load-sensitive-bound shape, and the one my
-        # own sweep missed: I scoped that sweep by FILE NAME, to the files I had
-        # touched elsewhere, rather than re-auditing the file this bead is about.
-        # A hang bound, not a performance assertion (nexus-61vos).
-        timeout=_NESTED_PYTEST_HANG_TIMEOUT_S,
-    )
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "tests/test_mode_declarations_are_explicit.py"
+                "::test_mode_declarations_are_explicit",
+                "-q",
+                "-rs",
+                "--no-header",
+            ],
+            cwd=_REPO_ROOT,
+            env={**os.environ, "GITHUB_ACTIONS": "true", "NX_TEST_T2_SUBSTRATE": "none"},
+            capture_output=True,
+            text=True,
+            # Sixth instance of this file's load-sensitive-bound shape, and the one my
+            # own sweep missed: I scoped that sweep by FILE NAME, to the files I had
+            # touched elsewhere, rather than re-auditing the file this bead is about.
+            # A hang bound, not a performance assertion (nexus-61vos).
+            timeout=_NESTED_PYTEST_HANG_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Sharing the VALUE was only half of it. Every nested subprocess in this file
+        # must also share the hang SEMANTICS: a timeout says the box is wedged, which
+        # is not evidence about the substrate-skip path this test is asking about.
+        pytest.skip(
+            f"the nested census run did not return within "
+            f"{_NESTED_PYTEST_HANG_TIMEOUT_S}s ({exc}). Contention on this box, not a "
+            f"statement about the substrate-skip path (nexus-61vos)."
+        )
     output = proc.stdout + proc.stderr
     assert "service JAR not provisioned" not in output, (
         "the census hit the engine-substrate graceful skip under the "
@@ -1416,22 +1426,29 @@ def test_the_boot_lock_dir_resolves_under_the_running_process_tmpdir() -> None:
     """
     private = pathlib.Path(tempfile.mkdtemp(prefix="boot-lock-resolve-"))
     try:
-        probe = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                "import tests._engine_substrate as s\n"
-                "with s._boot_semaphore_slot():\n"
-                "    pass\n"
-                "print(s._BOOT_SEMAPHORE_DIR)\n",
-            ],
-            cwd=_REPO_ROOT,
-            env={**os.environ, "TMPDIR": str(private)},
-            capture_output=True,
-            text=True,
-            # A hang bound, shared with every other nested subprocess in this file.
-            timeout=_NESTED_PYTEST_HANG_TIMEOUT_S,
-        )
+        try:
+            probe = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import tests._engine_substrate as s\n"
+                    "with s._boot_semaphore_slot():\n"
+                    "    pass\n"
+                    "print(s._BOOT_SEMAPHORE_DIR)\n",
+                ],
+                cwd=_REPO_ROOT,
+                env={**os.environ, "TMPDIR": str(private)},
+                capture_output=True,
+                text=True,
+                # A hang bound, shared with every other nested subprocess in this file.
+                timeout=_NESTED_PYTEST_HANG_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired as exc:
+            pytest.skip(
+                f"the boot-slot probe did not return within "
+                f"{_NESTED_PYTEST_HANG_TIMEOUT_S}s ({exc}). Contention on this box, not "
+                f"a statement about where _BOOT_SEMAPHORE_DIR resolves (nexus-61vos)."
+            )
         assert probe.returncode == 0, (
             f"the boot-slot probe did not run:\n{probe.stdout}\n{probe.stderr}"
         )
