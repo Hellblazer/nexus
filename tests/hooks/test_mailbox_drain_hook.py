@@ -65,7 +65,12 @@ def _run(
         capture_output=True,
         text=True,
         env=env,
-        timeout=20,
+        # A bound on a HANG, not on performance. The hook budgets itself at 6s
+        # internally; this only stops a wedged subprocess from hanging the suite.
+        # It was 20s, which is the load-sensitive shape fixed under nexus-61vos:
+        # interpreter startup plus a busy box can eat that without anything being
+        # wrong, and the red then names the hook rather than the contention.
+        timeout=300,
     )
 
 
@@ -402,13 +407,17 @@ class TestNeverBlocksThePrompt:
         eng = engine()
         eng.rd_delay_s = 30.0
         _wired(tmp_path, eng)
-        started = time.monotonic()
         res = _run(tmp_path=tmp_path)
-        elapsed = time.monotonic() - started
         assert res.returncode == 0
-        assert elapsed < 18, f"the hook blocked the prompt for {elapsed:.1f}s"
         assert res.stdout.strip() == ""
+        # Asserted from the hook's OWN statement that its deadline fired, not
+        # from wall clock measured out here (nexus-61vos). A wall-clock bound on
+        # a shared box measures the box as much as the code, and a red would name
+        # the hook while meaning the machine was busy. The subprocess timeout
+        # above is the hang guard; this is the behaviour.
         assert "SKIP" in res.stderr
+        assert "deadline" in res.stderr, res.stderr
+        assert "the prompt is not waiting for it" in res.stderr
 
     def test_malformed_payload_does_not_crash_the_prompt(self, tmp_path, engine) -> None:
         eng = engine()

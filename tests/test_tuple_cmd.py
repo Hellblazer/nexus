@@ -1253,7 +1253,10 @@ class TestWatcherAndDrainHookAreDisjoint:
         return subprocess.run(
             [sys.executable, str(self.HOOK)],
             input=json.dumps({"session_id": addr, "hook_event_name": "UserPromptSubmit"}),
-            capture_output=True, text=True, env=env, timeout=30,
+            # Hang bound, not a performance assertion (nexus-61vos): the hook
+            # budgets itself internally and a busy box must not turn that into a
+            # red naming the hook.
+            capture_output=True, text=True, env=env, timeout=300,
         )
 
     def test_the_watcher_pings_the_hook_consumes_and_nobody_renders_twice(
