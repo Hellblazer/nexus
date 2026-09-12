@@ -391,7 +391,9 @@ class TestTupleWatch:
             "watch", addr, "--iterations", "2", "--interval", "0", "--state-dir", str(sd),
         ])
         assert res.exit_code == 0, res.output
-        pings = [line for line in res.output.splitlines() if "nx-tuple-watch:" in line]
+        # res.output interleaves stderr, so it cannot carry a claim about WHICH stream a
+        # line reached; res.stdout is the one the Monitor watches.
+        pings = [line for line in res.stdout.splitlines() if "nx-tuple-watch:" in line]
         assert len(pings) == 1
         assert tid in pings[0]
 
@@ -739,9 +741,9 @@ class TestTupleWatchCliGuards:
             "--state-dir", str(tmp_path),
         ])
         assert res.exit_code == 0, res.output
-        skips = [line for line in res.output.splitlines() if "SKIP" in line]
+        skips = [line for line in res.stdout.splitlines() if "SKIP" in line]
         assert len(skips) == 1, res.output
-        assert not [line for line in res.output.splitlines() if "new mail" in line]
+        assert not [line for line in res.stdout.splitlines() if "new mail" in line]
 
     def test_cli_refuses_when_another_watcher_holds_the_address(
         self, t2_service_env, tmp_path, monkeypatch,
@@ -758,11 +760,11 @@ class TestTupleWatchCliGuards:
                 "watch", addr, "--iterations", "2", "--interval", "0", "--state-dir", str(sd),
             ])
             assert res.exit_code == 0, res.output
-            refusals = [line for line in res.output.splitlines() if "already watched by" in line]
+            refusals = [line for line in res.stdout.splitlines() if "already watched by" in line]
             assert len(refusals) == 1, res.output
             assert "holder-session" in refusals[0]
             # and it did NOT ping, even though real mail is sitting there
-            assert not [line for line in res.output.splitlines() if "new mail" in line]
+            assert not [line for line in res.stdout.splitlines() if "new mail" in line]
         finally:
             holder.release()
 
@@ -975,10 +977,10 @@ class TestWatchTwoAddressesCli:
             "--state-dir", str(sd),
         ])
         assert res.exit_code == 0, res.output
-        pings = [line for line in res.output.splitlines() if "new mail" in line]
+        pings = [line for line in res.stdout.splitlines() if "new mail" in line]
         assert len(pings) == 2, res.output
         assert any(id_a in p for p in pings) and any(id_b in p for p in pings)
-        assert not [line for line in res.output.splitlines() if "WARNING" in line]
+        assert not [line for line in res.stdout.splitlines() if "WARNING" in line]
 
     def test_no_instance_flag_warns_once_and_still_watches_the_session(
         self, t2_service_env, tmp_path, monkeypatch,
@@ -991,10 +993,10 @@ class TestWatchTwoAddressesCli:
             "watch", "--iterations", "1", "--interval", "0", "--state-dir", str(sd),
         ])
         assert res.exit_code == 0, res.output
-        warnings = [line for line in res.output.splitlines() if "WARNING" in line]
+        warnings = [line for line in res.stdout.splitlines() if "WARNING" in line]
         assert len(warnings) == 1, res.output
         assert "--instance" in warnings[0]
-        pings = [line for line in res.output.splitlines() if "new mail" in line]
+        pings = [line for line in res.stdout.splitlines() if "new mail" in line]
         assert len(pings) == 1 and tid in pings[0]
 
     def test_no_addresses_and_no_resolvable_session_skips(self, t2_service_env, tmp_path,
@@ -1008,9 +1010,9 @@ class TestWatchTwoAddressesCli:
             "watch", "--iterations", "1", "--interval", "0", "--state-dir", str(tmp_path),
         ])
         assert res.exit_code == 0, res.output
-        skips = [line for line in res.output.splitlines() if "SKIP" in line]
+        skips = [line for line in res.stdout.splitlines() if "SKIP" in line]
         assert len(skips) == 1, res.output
-        assert not [line for line in res.output.splitlines() if "new mail" in line]
+        assert not [line for line in res.stdout.splitlines() if "new mail" in line]
 
     def test_cli_explicit_address_wins_over_both_defaults(self, t2_service_env, tmp_path,
                                                           monkeypatch) -> None:
@@ -1025,10 +1027,10 @@ class TestWatchTwoAddressesCli:
             "--state-dir", str(sd),
         ])
         assert res.exit_code == 0, res.output
-        pings = [line for line in res.output.splitlines() if "new mail" in line]
+        pings = [line for line in res.stdout.splitlines() if "new mail" in line]
         assert len(pings) == 1, res.output
         assert id_named in pings[0]
-        assert inst not in res.output and sess not in res.output
+        assert inst not in res.stdout and sess not in res.stdout
         # and only the named address was locked
         assert lock_path(sd, named).is_file()
         assert not lock_path(sd, inst).exists()
@@ -1048,11 +1050,11 @@ class TestWatchTwoAddressesCli:
             "--state-dir", str(sd),
         ])
         assert res.exit_code == 0, res.output
-        assert "already watched by" not in res.output
-        pings = [line for line in res.output.splitlines() if "new mail" in line]
+        assert "already watched by" not in res.stdout
+        pings = [line for line in res.stdout.splitlines() if "new mail" in line]
         assert len(pings) == 1, res.output
         assert tid in pings[0]
-        assert not [line for line in res.output.splitlines() if "WARNING" in line]
+        assert not [line for line in res.stdout.splitlines() if "WARNING" in line]
 
 
 # ── Phase 1 review fixes (MM-1.4, nexus-6konb.5) ──────────────────────────
@@ -1218,6 +1220,10 @@ class TestWatcherExitAlwaysSpeaks:
             "--state-dir", str(tmp_path),
         ])
         assert res.exit_code == 1
-        stdout_lines = [line for line in res.output.splitlines() if "the watcher is exiting" in line]
+        stdout_lines = [line for line in res.stdout.splitlines() if "the watcher is exiting" in line]
         assert len(stdout_lines) == 1, res.output
         assert "resolver blew up" in stdout_lines[0]
+        # and it is genuinely on stdout, not merely present somewhere in the combined
+        # capture: res.output interleaves both streams, so asserting against it would
+        # pass with this line on stderr, which is the thing being ruled out
+        assert "the watcher is exiting" not in res.stderr

@@ -286,10 +286,11 @@ def tuple_watch_cmd(
 
     Built to be a Claude Code Monitor source: prints nothing on an empty probe,
     never claims, never prints a body. Re-pings a still-present tuple after
-    --reemit-after, at most --max-emits times. Dead-lettered rows go to stderr
-    once per row; recovery too. Preflights the engine first and prints one SKIP
-    line instead of watching silently if it cannot read the mailbox, and refuses
-    to start when another watcher already holds the address."""
+    --reemit-after, at most --max-emits times. Every line saying mail is not being
+    delivered goes to stdout, the stream a Monitor watches: pings, a dead-lettered
+    row never seen alive, a probe failure and its recovery, the SKIP when the
+    engine cannot be read, the refusal when another watcher holds the address.
+    Only the death of a row already pinged while alive goes to stderr."""
     from nexus import config as _config  # noqa: PLC0415 — deferred: CLI startup cost
     from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred
     from nexus.tuple_watch import (  # noqa: PLC0415 — deferred: CLI startup cost
