@@ -277,13 +277,13 @@ def tuple_watch_cmd(
     never claims, never prints a body. Re-pings a still-present tuple after
     --reemit-after, at most --max-emits times. Dead-lettered rows and probe
     failures go to stderr, once."""
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus import config as _config  # noqa: PLC0415 — deferred: CLI startup cost
     from nexus.tuple_watch import WatchConfig, run_watch  # noqa: PLC0415 — deferred: CLI startup cost
 
     cfg = WatchConfig(interval_s=interval_s, reemit_after_s=reemit_after_s, max_emits=max_emits)
     try:
         run_watch(
-            _store(), addresses, config=cfg, state_dir=state_dir or nexus_config_dir(),
+            _store(), addresses, config=cfg, state_dir=state_dir or _config.nexus_config_dir(),
             iterations=iterations, emit=click.echo, report=lambda s: click.echo(s, err=True),
         )
     except KeyboardInterrupt:
