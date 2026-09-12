@@ -68,6 +68,14 @@ import shutil
 import tempfile
 
 import tests._engine_substrate as _substrate
+
+#: Every nested-pytest subprocess in this file bounds a HANG, never performance.
+#: Six numbers in this one module turned out to be load-sensitive bounds on a
+#: shared box, each firing because something else was busy (nexus-61vos); this is
+#: the shared ceiling they collapse into. Far above any load the box realistically
+#: produces, and it exists only so a nested run that never returns cannot hang the
+#: suite.
+_NESTED_PYTEST_HANG_TIMEOUT_S = 300
 import time
 
 import pytest
@@ -1154,7 +1162,7 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard() -> 
     #: suite, but it is far above any load the box realistically produces, and
     #: if it DOES fire the probe skips loudly rather than failing, because a
     #: timeout proves nothing whatever about the census's skip semantics.
-    _PROBE_HANG_TIMEOUT_S = 300
+    _PROBE_HANG_TIMEOUT_S = _NESTED_PYTEST_HANG_TIMEOUT_S
     _pg_tmp_prefix = "nexus_t2_substrate_pg_"
     _census_nodeid = (
         "tests/test_mode_declarations_are_explicit.py"
@@ -1367,7 +1375,11 @@ def test_mode_declarations_census_executes_for_real_under_ci_env_shape() -> None
         env={**os.environ, "GITHUB_ACTIONS": "true", "NX_TEST_T2_SUBSTRATE": "none"},
         capture_output=True,
         text=True,
-        timeout=60,
+        # Sixth instance of this file's load-sensitive-bound shape, and the one my
+        # own sweep missed: I scoped that sweep by FILE NAME, to the files I had
+        # touched elsewhere, rather than re-auditing the file this bead is about.
+        # A hang bound, not a performance assertion (nexus-61vos).
+        timeout=_NESTED_PYTEST_HANG_TIMEOUT_S,
     )
     output = proc.stdout + proc.stderr
     assert "service JAR not provisioned" not in output, (
