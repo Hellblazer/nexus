@@ -141,11 +141,15 @@ class PgVectorCombinedQueryContractTest {
         Map<String, Object> top = rows.get(0);
         assertThat(top.keySet())
             .as("flat envelope: id, content, distance, collection, chash (catalog-008 "
-                + "added the matched-chunk chash for the query() repoint / RDR-086)")
-            .containsExactlyInAnyOrder("id", "content", "distance", "collection", "chash");
+                + "added the matched-chunk chash for the query() repoint / RDR-086), "
+                + "retention (RDR-169 Gap 2 remainder, bead nexus-4k1vz: "
+                + "vectors-016-combined-query-retention.xml)")
+            .containsExactlyInAnyOrder("id", "content", "distance", "collection", "chash", "retention");
         assertThat(top.get("collection")).isEqualTo(COLL_M);
         assertThat((String) top.get("chash")).as("chash is the matched chunk's hash").isNotBlank();
         assertThat(((Number) top.get("distance")).doubleValue()).isCloseTo(0.0, within());
+        assertThat(top.get("retention")).as("m1 was seeded with real content, retention='full'")
+            .isEqualTo("full");
     }
 
     @Test
