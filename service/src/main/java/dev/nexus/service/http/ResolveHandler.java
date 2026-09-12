@@ -58,24 +58,39 @@ import java.util.Map;
  * — {@code retention} is present only for the {@code (collection, chash)}
  * form (the {@code source_uri} form has no row to report retention on).
  *
- * <p>Errors:
- * <ul>
- *   <li>400 — malformed request (both forms given, neither given, bad chash).</li>
- *   <li>404 — {@code (collection, chash)} form: no such chunk, or the chunk
- *       carries no {@code metadata.source_uri} to resolve.</li>
- *   <li>422 — the URI's scheme has no registered handler ({@link
- *       UnknownSchemeException}); names the scheme and the registered set.
- *       This is the honest answer for a client-side scheme ({@code file://},
- *       {@code obsidian://}, {@code x-devonthink-item://}) — a managed engine
- *       cannot reach a tenant's local machine, and the registry is scoped to
- *       server-reachable schemes only (see its class javadoc).</li>
- *   <li>502 — the registered handler could not resolve the URI (a dangling
- *       {@code https://} URL, a missing {@code chroma://} row) — carries the
- *       handler's {@code errorReason}/{@code errorDetail}, never a stack trace.</li>
- *   <li>503 — {@code (collection, chash)} form with no {@link
+ * <h2>Status codes</h2>
+ * <table border="1">
+ *   <caption>Every response status this handler can return, and why</caption>
+ *   <tr><th>Status</th><th>Cause</th></tr>
+ *   <tr><td>400</td><td>malformed request — both forms given, neither given, or a
+ *       non-canonical {@code chash}.</td></tr>
+ *   <tr><td>404</td><td>{@code (collection, chash)} form: no such chunk, or the
+ *       chunk carries no {@code metadata.source_uri} to resolve; OR the
+ *       resolved handler reports {@code errorReason() == "reference_only"} (the
+ *       target itself is a reference-only chunk with no stored text — the
+ *       server has no bytes to serve, and the caller resolves it elsewhere;
+ *       body carries {@code error="reference_only"}, {@code detail}, and the
+ *       requested {@code source_uri} — never a 502, since this is not a
+ *       resolver failure).</td></tr>
+ *   <tr><td>422</td><td>the URI's scheme has no registered handler ({@link
+ *       UnknownSchemeException}; names the scheme and the registered set —
+ *       the honest answer for a client-side scheme like {@code file://} or
+ *       {@code obsidian://}, since a managed engine cannot reach a tenant's
+ *       local machine and the registry is scoped to server-reachable schemes
+ *       only, see its class javadoc); OR the resolved handler reports a
+ *       caller-shaped URI problem ({@code errorReason()} of {@code
+ *       "malformed"} or {@code "unreachable"} — e.g. a {@code chroma://} URI
+ *       missing its collection/chash segment, or a non-{@code https://} URI
+ *       misrouted to the https handler).</td></tr>
+ *   <tr><td>502</td><td>the registered handler hit a genuine fetch/resolver
+ *       failure for any OTHER {@code errorReason()} (a dangling {@code
+ *       https://} URL, a non-2xx or empty HTTP response) — carries the
+ *       handler's {@code errorReason}/{@code errorDetail}, never a stack
+ *       trace.</td></tr>
+ *   <tr><td>503</td><td>{@code (collection, chash)} form with no {@link
  *       PgVectorRepository} wired (matches {@link VectorHandler}'s
- *       absent-backend pattern).</li>
- * </ul>
+ *       absent-backend pattern).</td></tr>
+ * </table>
  */
 public final class ResolveHandler implements HttpHandler {
 
@@ -200,6 +215,14 @@ public final class ResolveHandler implements HttpHandler {
      * retention}, when non-null, is the retention of the ROW the caller looked up
      * by chash (not of whatever {@code uri} itself resolves to) — absent entirely
      * for the {@code source_uri} request form, which names no row.
+     *
+     * <p>A {@link ResolveResult#error} branches on {@link ResolveResult#errorReason()}
+     * (fix round 1, T2 critique-nexus-aphki-rdr169-gap3-resolve-2026-09-11 Critical):
+     * {@code "reference_only"} → 404 (the target has no stored bytes; the caller
+     * resolves it elsewhere — this is an honest "no content here," not a resolver
+     * failure); {@code "malformed"} / {@code "unreachable"} (the handler's own
+     * caller-shaped URI-format errors) → 422; anything else (a genuine fetch/resolver
+     * failure) → 502. See the class javadoc's status table for the full contract.
      */
     private void resolveAndRespond(HttpExchange exchange, String uri, String tenant, String retention)
             throws IOException {
@@ -216,8 +239,34 @@ public final class ResolveHandler implements HttpHandler {
         }
 
         if (!result.isOk()) {
+            String reason = result.errorReason();
+            if ("reference_only".equals(reason)) {
+                // The target itself is a reference-only chunk with no stored text —
+                // the server has no bytes to serve. 404, never 502: this is not a
+                // resolver failure, it's an honest "no content here" for an address
+                // the caller already has. Echo the REQUESTED uri (result.sourceUri()
+                // is null on error) so the caller knows exactly what it asked for.
+                HttpUtil.send(exchange, 404, json(Map.of(
+                    "error", "reference_only",
+                    "detail", result.errorDetail(),
+                    "source_uri", uri)));
+                return;
+            }
+            if ("malformed".equals(reason) || "unreachable".equals(reason)) {
+                // A caller-shaped URI problem (missing/garbled collection or chash
+                // segment, a non-https URI misrouted to the https handler) — the
+                // same "well-formed request the server won't honor" class as an
+                // unregistered scheme above, not a 502 resolver failure.
+                HttpUtil.send(exchange, 422, json(Map.of(
+                    "error", reason,
+                    "detail", result.errorDetail())));
+                return;
+            }
+            // A genuine fetch/resolver failure (a dangling https:// URL, a non-2xx
+            // or empty HTTP response) — carries the handler's own reason/detail,
+            // never a stack trace.
             HttpUtil.send(exchange, 502, json(Map.of(
-                "error", result.errorReason(),
+                "error", reason,
                 "detail", result.errorDetail())));
             return;
         }

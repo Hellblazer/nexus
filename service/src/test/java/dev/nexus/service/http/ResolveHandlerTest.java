@@ -186,6 +186,49 @@ class ResolveHandlerTest {
     }
 
     // -------------------------------------------------------------------------
+    // (collection, chash) lookup of a row that exists but carries no
+    // metadata.source_uri -> 404 (distinct code path from an unknown chash:
+    // ids is non-empty here, ResolveHandler.java:189-193)
+    // -------------------------------------------------------------------------
+
+    @Test
+    void chashLookup_rowWithNoSourceUri_returns404() throws Exception {
+        String chash = Chash.ofText("resolve-no-source-uri-metadata").toHex();
+        repo.upsertChunks(TENANT_A, COLLECTION,
+            List.of(chash), List.of("full content with no source_uri in its metadata"),
+            List.of(Map.of()));
+
+        var resp = post(TOKEN_A, Map.of("collection", COLLECTION, "chash", chash));
+
+        assertThat(resp.statusCode()).as("body: %s", resp.body()).isEqualTo(404);
+        assertThat((String) jsonBody(resp).get("error")).contains("no metadata.source_uri");
+    }
+
+    // -------------------------------------------------------------------------
+    // chroma:// source_uri whose TARGET is itself a reference-only chunk
+    // (fix round 1, T2 critique-nexus-aphki-rdr169-gap3-resolve-2026-09-11
+    // Critical) -> 404 with reason "reference_only", never a 502
+    // -------------------------------------------------------------------------
+
+    @Test
+    void chromaSourceUri_targetIsReferenceOnly_returns404WithReferenceOnlyReason() throws Exception {
+        String refChash = Chash.ofText("resolve-direct-reference-only-target").toHex();
+        repo.upsertReferenceOnlyChunk(TENANT_A, COLLECTION, refChash,
+            StubEmbedder.unitVector(1024), Map.of());
+        String refUri = "chroma://" + COLLECTION + "/" + refChash;
+
+        var resp = post(TOKEN_A, Map.of("source_uri", refUri));
+
+        assertThat(resp.statusCode())
+            .as("a reference-only TARGET must be 404 (never 502 -- this is not a resolver "
+                + "failure, the server simply has no bytes to serve; body: %s)", resp.body())
+            .isEqualTo(404);
+        Map<String, Object> body = jsonBody(resp);
+        assertThat(body.get("error")).isEqualTo("reference_only");
+        assertThat(body.get("source_uri")).isEqualTo(refUri);
+    }
+
+    // -------------------------------------------------------------------------
     // Unregistered scheme -> 422 naming it
     // -------------------------------------------------------------------------
 
