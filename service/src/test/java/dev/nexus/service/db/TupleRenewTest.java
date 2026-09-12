@@ -355,4 +355,126 @@ class TupleRenewTest {
                 .as("the ack consumed it; no renew row may follow")
                 .containsExactly("claim", "ack");
     }
+
+    // ── RDR-206 Phase 1 Step 4 (bead nexus-h61dl.5): a renew is invisible to the
+    //    sweep and to the census, and it is not an attempt ──────────────────────
+
+    /**
+     * The sweep's release arm does not touch a renewed claim.
+     *
+     * <p>The arm selects on {@code claim_state = 'claimed' AND consumed_at IS NULL AND
+     * lease_until < now()}, so a renewed row simply stops matching. There is no
+     * JVM-side cache of deadlines to go stale. The bead asks this be PROVED rather than
+     * read off that predicate.
+     *
+     * <p>TWO rows, identical in every respect except the renew: each claimed with a
+     * one-second lease, both left until that second has passed, only one renewed. The
+     * control is what makes this test able to fail — a sweep that released nothing
+     * because it found nothing looks exactly like a sweep that correctly spared a
+     * renewed row, so the un-renewed sibling's release is what proves the sweep was
+     * live, looking at this tenant, and would have taken the other one too.
+     *
+     * <p>The wait is real elapsed time and cannot be faked: a renew of an ALREADY
+     * lapsed claim is refused by design, so the renew has to happen while the claim
+     * lives and the original deadline has to pass afterwards. It is safe in the only
+     * direction that matters — a loaded box makes MORE time pass, never less, so
+     * contention can only strengthen the precondition, and the control asserts the
+     * precondition actually held.
+     */
+    @Test
+    void theSweepReleasesALapsedSiblingButNotTheRenewedClaim() throws Exception {
+        String tenant = "tuple-renew-sweep-" + UUID.randomUUID();
+        String keptTo = "agent-sweep-kept-" + UUID.randomUUID();
+        String goneTo = "agent-sweep-released-" + UUID.randomUUID();
+
+        byte[] keptId = repo.out(tenant, "mailbox/" + keptTo, Map.of("to", keptTo),
+                Map.of("from", "sender-renew"), "kept", "nonce-kept", null);
+        byte[] goneId = repo.out(tenant, "mailbox/" + goneTo, Map.of("to", goneTo),
+                Map.of("from", "sender-renew"), "released", "nonce-released", null);
+        var keptClaim = repo.inp(tenant, "mailbox/" + keptTo, Map.of("to", keptTo), "worker-1", 1);
+        var goneClaim = repo.inp(tenant, "mailbox/" + goneTo, Map.of("to", goneTo), "worker-2", 1);
+        assertThat(keptClaim).isPresent();
+        assertThat(goneClaim).isPresent();
+
+        // Renewed while still live; its sibling is left to lapse.
+        repo.renew(tenant, keptClaim.get().claimId(), "worker-1", 600);
+        Thread.sleep(1500);   // the one-second leases are now past, both of them
+
+        TupleRepository.ReleaseBatchResult batch = repo.releaseLapsedClaimsBatch(tenant, 300, null);
+
+        assertThat(batch.released())
+                .as("the control lapsed and was released, so the sweep was live and "
+                    + "capable — which is what makes the other row's survival mean "
+                    + "something")
+                .isEqualTo(1);
+        assertThat(rawRow(goneId).value4())
+                .as("the un-renewed sibling went back to available").isNull();
+        assertThat(rawRow(keptId).value4())
+                .as("the renewed claim is untouched").isEqualTo("claimed");
+        assertThat(transitionsFor(tenant, keptId))
+                .as("claim then renew, and no expire: the sweep never released it")
+                .containsExactly("claim", "renew");
+        assertThat(transitionsFor(tenant, goneId))
+                .as("the control's own expire row").containsExactly("claim", "expire");
+    }
+
+    /**
+     * The census counts a renewed claim as {@code claimed} — not available, not dead.
+     * A renew moves {@code lease_until} and nothing else, so nothing about how the row
+     * is counted may move with it.
+     */
+    @Test
+    void theCensusCountsARenewedClaimAsClaimed() {
+        Seeded s = outAndClaim("census", "worker-1");
+
+        repo.renew(s.tenant(), s.claimId(), "worker-1", 600);
+
+        var census = repo.subspaceStats(s.tenant(), s.subspace());
+        assertThat(census.claimed()).as("still claimed").isEqualTo(1);
+        assertThat(census.available()).as("not handed back").isZero();
+        assertThat(census.dead()).as("not dead-lettered").isZero();
+        assertThat(census.consumed()).as("not consumed").isZero();
+        assertThat(census.total()).isEqualTo(1);
+    }
+
+    /**
+     * The claim log of a renewed-then-acked claim reads exactly claim, renew, ack.
+     *
+     * <p>The absence of {@code expire} is the assertion that matters: it is what an
+     * audit would read as the claim having lapsed, and a renew must never look like
+     * one. {@code containsExactly} also pins that {@code renew} is non-terminal — the
+     * ack still follows it.
+     */
+    @Test
+    void theClaimLogOfARenewedThenAckedClaimReadsClaimRenewAck() {
+        Seeded s = outAndClaim("log", "worker-1");
+
+        repo.renew(s.tenant(), s.claimId(), "worker-1", 600);
+        repo.ack(s.tenant(), s.claimId(), "worker-1");
+
+        assertThat(transitionsFor(s.tenant(), s.id()))
+                .containsExactly("claim", "renew", "ack");
+    }
+
+    /**
+     * Attempts survive a renew AND the sweep pass that follows it.
+     *
+     * <p>{@code renewDoesNotCountAnAttempt} above already pins the repository call in
+     * isolation (Step 3). This is the Step 4 half the bead asks for and deliberately
+     * not a copy of it: the question here is whether a renewed row that a sweep has
+     * since walked past still carries its original attempt count, since the sweep's
+     * release arm is the other writer of that column.
+     */
+    @Test
+    void attemptsSurviveARenewAndTheSweepThatWalksPastIt() {
+        Seeded s = outAndClaim("attempts-sweep", "worker-1");
+        int before = rawRow(s.id()).value3();
+
+        repo.renew(s.tenant(), s.claimId(), "worker-1", 600);
+        TupleRepository.ReleaseBatchResult batch = repo.releaseLapsedClaimsBatch(s.tenant(), 300, null);
+
+        assertThat(batch.released()).as("the sweep found nothing lapsed to release").isZero();
+        assertThat(rawRow(s.id()).value3())
+                .as("neither the renew nor the sweep spent an attempt").isEqualTo(before);
+    }
 }
