@@ -6,6 +6,47 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.43.0] - 2026-09-12
+
+Paired with engine-service-v0.1.116.
+
+### Added
+- **Reference-only chunks (RDR-169).** A chunk can now carry its address,
+  span, hash, metadata and embedding without storing the content itself.
+  `nexus.chunks` gains a `retention` column (`full` or `reference-only`) and
+  `chunk_text` becomes nullable, with a biconditional CHECK so the two can
+  never disagree. All 21 search and combined-query functions return
+  `retention` alongside the row.
+- **`POST /v1/vectors/upsert-reference-only`** — embed without storing the
+  text, for callers that hold the content elsewhere.
+- **`POST /v1/vectors/resolve`** and `HttpVectorClient.resolve_content()` —
+  read-time resolution of a chunk's bytes through a pluggable URI-scheme
+  registry (`https`, `chroma`). Answers 404 when the chunk is missing, has
+  no `source_uri`, or is reference-only; 422 for an unregistered scheme or a
+  malformed URI; 502 when a fetch genuinely fails; 503 with no repository.
+- **`nx tuple watch`** — a ping-then-pull mailbox watcher over the RDR-205
+  tuple space, with preflight, per-address locking, once-only failure
+  reporting and a rolling emit budget.
+
+### Fixed
+- A reference-only row's null content no longer crashes `search` and
+  `query`, and no longer renders as a literal `None` through the four
+  combined-query MCP tools.
+- `SearchResult.content` is typed `str | None`, matching what the wire
+  actually allows.
+- Tuple claim `ack` and `nack` use compare-and-swap on the claim update
+  (RDR-206 Phase 1), so a lapsed lease cannot be acked by its former holder.
+- A plugin that is behind but already at the newest published version still
+  gets the ref-drift check.
+
+### Changed
+- The retention CHECK is added `NOT VALID` and validated in a separate,
+  guarded changeset, so the migration never takes `ACCESS EXCLUSIVE` for a
+  full scan of a large `chunks` table.
+- Documentation: the tuple-space and research site pages are rebuilt as
+  numbered how-to lessons, with the thinking behind each moved to
+  `docs/exploration/`.
+
 ## [7.42.0] - 2026-09-11
 
 Paired engine: engine-service-v0.1.115. `REQUIRED_ENGINE_VERSION` moves to
