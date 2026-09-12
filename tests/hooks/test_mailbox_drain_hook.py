@@ -131,6 +131,19 @@ class _MockEngine:
         #: Kill the connection on an rd for this address, so the hook raises
         #: _Skip on that mailbox and no other.
         self.fail_rd_for: str | None = None
+        #: Answer this route with this HTTP status instead of its normal reply.
+        #: Only 404 is a confirmed negative; every other status leaves the
+        #: outcome UNKNOWN, which is the distinction these model.
+        self.status_for: dict[str, int] = {}
+        #: Apply ack's effect (consume the row) and THEN answer 500. The engine
+        #: committed and failed on the way out -- the window where treating a
+        #: non-2xx as a clean refusal loses the message for good.
+        self.ack_500_after_effect: bool = False
+        #: rd answers 200 with a body that is not an object at all.
+        self.malformed_rd: bool = False
+        #: Same, but only for this address, so an unexpected failure can be aimed
+        #: at ONE mailbox and the others watched for collateral damage.
+        self.malformed_rd_for: str | None = None
         self._route_counts: dict[str, int] = {}
         engine = self
 
@@ -147,6 +160,16 @@ class _MockEngine:
                     body = {}
                 engine.calls.append((self.path, body))
                 engine._route_counts[self.path] = engine._route_counts.get(self.path, 0) + 1
+                if self.path in engine.status_for:
+                    self._json(engine.status_for[self.path], {"error": "forced"})
+                    return
+                if self.path == "/v1/tuples/rd" and engine.malformed_rd:
+                    self._json(200, ["not", "an", "object"])
+                    return
+                if self.path == "/v1/tuples/rd" and engine.malformed_rd_for is not None \
+                        and (body.get("keys_pattern") or {}).get("to") == engine.malformed_rd_for:
+                    self._json(200, ["not", "an", "object"])
+                    return
                 if self.path == "/v1/tuples/rd":
                     if engine.fail_rd_for and (body.get("keys_pattern") or {}).get(
                         "to",
@@ -182,6 +205,9 @@ class _MockEngine:
                         return
                     cid = body.get("claim_id", "")
                     engine.rows = [r for r in engine.rows if "claim-" + r["id"] != cid]
+                    if engine.ack_500_after_effect:
+                        self._json(500, {"error": "boom"})
+                        return
                     drop = engine.drop_after_effect_on
                     if drop and drop[0] == self.path and \
                             engine._route_counts[self.path] == drop[1]:
@@ -192,7 +218,7 @@ class _MockEngine:
                 else:
                     self._json(404, {"error": "not found"})
 
-            def _json(self, status: int, payload: dict) -> None:
+            def _json(self, status: int, payload: object) -> None:
                 data = json.dumps(payload).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -577,6 +603,120 @@ class TestPartialFailureNeverLosesDeliveredMail:
         assert "from the good address" in res.stdout, (
             "a failure on the first address stopped the second"
         )
+
+    def test_an_unexpected_failure_on_one_address_does_not_stop_the_others(
+        self, tmp_path, engine,
+    ) -> None:
+        """The per-address handler for UNEXPECTED exceptions, not just ``_Skip``.
+
+        Written after a mutation showed the sibling malformed-response test could
+        not tell the two handlers apart: deleting the per-address ``except
+        Exception`` left it green, because ``main``'s outer guard caught the same
+        error and still exited 0. The outer guard preserves the exit code and the
+        SKIP line; it does NOT preserve "one bad mailbox must not stop the others",
+        since it catches outside the loop and every later address is abandoned.
+        That is the property only this test pins, and deleting the per-address
+        handler fails it.
+        """
+        eng = engine()
+        good = _row("u1", body="from the second address")
+        good["keys"] = {"to": "other-addr"}
+        eng.rows = [good]
+        eng.malformed_rd_for = SESSION_ID
+        reg = tmp_path / "config" / "tuple-watch" / "addresses"
+        reg.parent.mkdir(parents=True, exist_ok=True)
+        reg.write_text("other-addr\n", encoding="utf-8")
+        _wired(tmp_path, eng)
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0
+        assert "SKIP" in res.stderr and SESSION_ID in res.stderr, (
+            "the first address must actually have failed"
+        )
+        assert "unexpected" in res.stderr, (
+            "an unanticipated failure must say so, not read as a planned skip"
+        )
+        assert "from the second address" in res.stdout, (
+            "an unexpected failure on the first address abandoned the second"
+        )
+
+    def test_a_500_on_ack_keeps_the_pending_record_because_the_outcome_is_unknown(
+        self, tmp_path, engine,
+    ) -> None:
+        """Phase 2 review ship-blocker. Every non-2xx used to collapse to the same
+        ``None`` a 404 produces, and ``None`` on ack means "a clean refusal, the
+        engine said no", which clears the pending-ack safety record.
+
+        A 500 is not that. ``TupleHandler`` lets an unexpected exception fall
+        through to a bare 500, so the ack may already have COMMITTED -- the row is
+        consumed and the record is the only trace anyone was ever going to see.
+        Clearing it there loses the message permanently, silently, exit 0. This is
+        the lost-ack-response window arriving as a status code instead of a dropped
+        connection.
+
+        The engine here applies ack's effect and THEN answers 500, which is exactly
+        that case rather than a polite refusal.
+        """
+        eng = engine()
+        eng.rows = [_row("s500", body="committed then five hundred")]
+        eng.ack_500_after_effect = True
+        _wired(tmp_path, eng)
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0
+        assert "SKIP" in res.stderr and "500" in res.stderr, (
+            "an ambiguous status must be reported, not swallowed"
+        )
+        pending = tmp_path / "config" / "tuple-watch" / f"{SESSION_ID}.pending.json"
+        assert pending.exists(), (
+            "the pending record was cleared on a 500, so the row the engine already "
+            "consumed can never be recovered"
+        )
+        assert "committed then five hundred" in pending.read_text()
+
+    def test_a_401_on_rd_is_not_read_as_an_empty_mailbox(
+        self, tmp_path, engine,
+    ) -> None:
+        """The same conflation on the read side. ``None`` from rd means the mailbox
+        is empty, which drives the pending record's presence check; a 401 says
+        nothing whatever about what is in the mailbox, and treating it as emptiness
+        delivered stale pending content and cleared it with nothing confirmed.
+        """
+        eng = engine()
+        eng.status_for = {"/v1/tuples/rd": 401}
+        _wired(tmp_path, eng)
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0
+        assert "SKIP" in res.stderr and "401" in res.stderr, (
+            "a 401 must surface as a skip, not pass as an empty mailbox"
+        )
+
+    def test_a_malformed_engine_response_skips_loudly_instead_of_crashing(
+        self, tmp_path, engine,
+    ) -> None:
+        """Phase 2 review ship-blocker. Nothing but ``_Skip`` was caught, so a
+        response the hook did not anticipate -- an rd body that is not an object --
+        raised AttributeError, exited 1 and printed a traceback.
+
+        This hook runs on EVERY UserPromptSubmit. That traceback lands in front of
+        someone who typed something unrelated, and it contradicts the contract
+        stated at the top of the script: one SKIP line, exit 0.
+        """
+        eng = engine()
+        eng.malformed_rd = True
+        _wired(tmp_path, eng)
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0, (
+            f"a malformed engine response must not fail the prompt; stderr:\n{res.stderr}"
+        )
+        assert "SKIP" in res.stderr
+        assert "Traceback" not in res.stderr, "a raw traceback reached the user's prompt"
 
     def test_a_pending_record_survives_a_drain_that_never_reclaims_the_row(
         self, tmp_path, engine,

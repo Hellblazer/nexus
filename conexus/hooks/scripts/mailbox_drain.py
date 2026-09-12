@@ -266,9 +266,25 @@ def _recover_pending(config_dir: Path, address: str, present_ids: set[str],
 
 def _post(base_url: str, token: str, route: str, body: dict[str, Any],
           *, is_local: bool, budget_s: float | None = None) -> dict[str, Any] | None:
-    """POST and return the decoded body, or None when the engine answered a
-    non-2xx. Raises :class:`_Skip` on a transport failure. Bounds the whole
-    call, not each socket operation."""
+    """POST and return the decoded body, or None on a 404. Raises :class:`_Skip`
+    on a transport failure OR on any other non-2xx. Bounds the whole call, not
+    each socket operation.
+
+    ONLY 404 IS A CONFIRMED NEGATIVE, and the distinction is the difference
+    between a duplicate and a lost message. Callers read ``None`` as "the engine
+    answered and said no": on ``ack`` that clears the pending-ack safety record,
+    and on ``rd`` it means the mailbox is empty. A 404 earns that reading -- it
+    is ClaimNotFound, the engine's considered answer. A 500, 502, 401, 403 or 429
+    does not. The engine may have COMMITTED the mutation and failed on the way
+    out (``TupleHandler`` lets an unexpected exception fall through to a bare
+    500), so treating it as a clean negative drops the only trace of a row that
+    is already consumed, and the message is gone with nobody having seen it.
+    Raising ``_Skip`` instead keeps the record and lets the next prompt recover.
+
+    This also restores the pattern the sibling hook ``tuple_ledger_project.py``
+    already follows -- it captures ``exc.code`` and refuses anything outside
+    2xx -- which this hook's own docstring claims to share.
+    """
     payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
     url = f"{base_url}{route}"
     req = urllib.request.Request(
@@ -291,8 +307,11 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
             opener = urllib.request.build_opener(*handlers)
             with opener.open(req, timeout=call_timeout) as resp:  # noqa: S310 — fixed engine URL
                 outcome["body"] = json.loads(resp.read().decode("utf-8") or "{}")
-        except urllib.error.HTTPError:
-            outcome["body"] = None
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                outcome["body"] = None      # ClaimNotFound: a confirmed negative
+            else:
+                outcome["status"] = exc.code
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             outcome["error"] = exc
 
@@ -305,6 +324,11 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
         )
     if "error" in outcome:
         raise _Skip(f"transport failure on {route}: {outcome['error']}")
+    if "status" in outcome:
+        raise _Skip(
+            f"engine returned HTTP {outcome['status']} on {route}; the outcome is "
+            f"UNKNOWN, so nothing is treated as confirmed and any pending record is kept",
+        )
     return outcome.get("body")
 
 
@@ -488,6 +512,24 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
 
 
 def main() -> int:
+    """The hook entry point. NEVER raises, and never exits non-zero.
+
+    The guarantee at the top of this file -- one SKIP line on stderr, exit 0 --
+    is the whole contract with a waiting prompt, so it is enforced here rather
+    than assumed from the per-address handlers below. Those cover the drain
+    itself; this covers everything before and around it (reading the payload,
+    resolving the config directory, reading the registry). A hook that runs on
+    EVERY UserPromptSubmit has no business putting a traceback in front of
+    someone who typed something unrelated.
+    """
+    try:
+        return _drain_all()
+    except Exception as exc:  # noqa: BLE001 — the contract above is the reason
+        _log_skip(f"unexpected {type(exc).__name__} before any mailbox was drained: {exc}")
+        return 0
+
+
+def _drain_all() -> int:
     import time  # noqa: PLC0415 — deferred: only main needs a clock
 
     try:
@@ -539,6 +581,17 @@ def main() -> int:
             # mailbox must not stop the others, and everything already delivered
             # has already been written and flushed, so nothing can be retracted.
             _log_skip(f"mailbox/{address}: {exc}")
+            continue
+        except Exception as exc:  # noqa: BLE001 — see below
+            # UNEXPECTED, and still not the prompt's problem. _Skip covers what
+            # this hook anticipated; a malformed engine response (a non-dict body,
+            # a row whose dims is not a dict) raises AttributeError or TypeError
+            # instead, and before this landed that escaped as an exit-1 traceback
+            # on whatever unrelated prompt the user had just typed -- flatly
+            # contradicting the contract at the top of this file. The type is
+            # named in the line so an unexpected failure stays diagnosable rather
+            # than being quietly indistinguishable from a planned skip.
+            _log_skip(f"mailbox/{address}: unexpected {type(exc).__name__}: {exc}")
             continue
     return 0
 
