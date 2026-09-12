@@ -111,9 +111,17 @@ the daily `engine-floor-verify` job in
 the real public endpoint) surfaces a still-stale cloud within 24 hours through
 the tracked "scheduled workflows are failing silently" issue.
 
-The flip-time half of the split is **not built yet** — conexus tracks it as
-`conexus-9xny`. Until it is, the digest and parameter-version columns above
-describe an intent, not a running check.
+The flip-time half of the split **is built** as of 2026-09-12 — conexus
+`conexus-9xny`, reported merged as their `gate.flip_engine_tag`, which wraps
+the SSM flip rather than sitting beside it: it re-reads the live ECR digest
+and the live parameter version, refuses if either moved from what the
+attestation recorded, then flips. So a tag re-pushed with different bytes
+between arming and flipping, or a parameter written by another session in
+that gap, is refused there.
+
+Taken on conexus's report and marked as such: that code is in a repository
+this side cannot see, so nothing here verifies it. Treat the digest and
+parameter-version rows above as checked by them, not as checked.
 
 Writer identity rests on convention. Nothing in the file is signed, and
 `armed_by` is read for the message and never validated; anyone who can commit
