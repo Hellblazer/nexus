@@ -148,11 +148,26 @@ class CombinedQueryParityIntegrationTest {
             String[] w = docs.get(q).text().split(" ");
             queries.add(w[0] + " " + w[1]);
         }
-        // Tombstone probe: a TOMBSTONED paper doc whose text == the first query, so it
-        // would rank at/near the top for that query if the deleted_at guard were missing.
+        // Tombstone probe: a TOMBSTONED paper doc that is a TEXTUAL TWIN of docs.get(0),
+        // the very doc queries.get(0) was drawn from. Identical text means an identical
+        // document embedding, so it ranks wherever its twin ranks — which is inside the
+        // result set by construction, since the query is that doc's own opening words.
         // Both the live-only app stitch and the combined function must exclude it; a
         // function that dropped `deleted_at IS NULL` would surface it → divergence.
-        docs.add(new CqDoc(TOMB_TUMBLER, sha256Hex("cq-tomb"), queries.get(0),
+        //
+        // nexus-xrkk4: this text used to be queries.get(0) ITSELF, on the reasoning that
+        // a doc whose text IS the query must be a top match. That is false for an
+        // ASYMMETRIC embedder, and this fixture uses one: documents embed through
+        // EmbedderRouter(onnx, "document") and queries through
+        // EmbedderRouter(onnx, "query"), which are different input types and therefore
+        // different points in the space for identical text. Measured — the two-word
+        // tombstone ranked DEAD LAST of 61 docs for its own text, the single doc dropped
+        // by the CQ_SIZE=60 cut, because a two-word document embedding sits far from a
+        // two-word QUERY embedding while the 8-to-12-word documents sit nearer it. The
+        // precondition was therefore asserting a property of symmetric embedders against
+        // an asymmetric one. Twinning an existing doc removes the cross-mode assumption
+        // entirely: the tombstone's rank is now tied to a doc that demonstrably ranks.
+        docs.add(new CqDoc(TOMB_TUMBLER, sha256Hex("cq-tomb"), docs.get(0).text(),
             "paper", "ada", false, true));
 
         // RDR-204 Phase 1 (nexus-ft04v.7): PgVectorRepository's stub-insert is retired —
@@ -272,11 +287,31 @@ class CombinedQueryParityIntegrationTest {
         String tombChash = docs.stream().filter(CqDoc::tombstoned).findFirst()
             .orElseThrow().chash();
 
-        // Precondition: the tombstoned chunk IS vector-reachable (strong match).
+        // Precondition, restated (nexus-xrkk4). This USED to assert that plain search
+        // returns the tombstoned chash, which is unsatisfiable BY CONSTRUCTION: the
+        // plain_search_<dim> functions carry their own tombstone filter (a NOT EXISTS
+        // over catalog_document_chunks joined to catalog_documents on deleted_at, with
+        // an inner NOT EXISTS so a chunk shared with a LIVE doc survives). So the old
+        // precondition asked plain search to return precisely what plain search exists
+        // to exclude, and it could only ever have passed if that filter were broken.
+        // Measured: the chash was the single doc missing from 60 of 61, every run.
+        //
+        // What the precondition is FOR is keeping the real assertion non-tautological:
+        // if the tombstoned text did not rank, the combined function omitting it would
+        // prove nothing. So assert that on its LIVE TEXTUAL TWIN instead — docs.get(0),
+        // whose text the tombstone copies verbatim, hence an identical embedding and an
+        // identical rank but for the guard. The twin ranking top proves the embedding is
+        // a top match; the combined function still has to exclude the tombstone anyway.
+        String twinChash = docs.get(0).chash();
         List<String> rawIds = ids(pgRepo.search(TENANT, q, List.of(COLL), CQ_SIZE, null));
         assertThat(rawIds)
-            .as("precondition: the tombstoned chunk is a top vector match for its own text")
-            .contains(tombChash);
+            .as("precondition: the tombstone's LIVE textual twin is a top vector match, so "
+                + "the tombstone's own identical embedding would rank too but for the guard")
+            .contains(twinChash);
+        assertThat(rawIds)
+            .as("plain search applies its OWN tombstone filter, so the tombstoned chash must "
+                + "be absent here as well -- if this ever fails, that filter regressed")
+            .doesNotContain(tombChash);
 
         List<String> combined = ids(pgRepo.searchMetadataScoped(
             TENANT, q, List.of(COLL), "paper", null, null, null, K));
