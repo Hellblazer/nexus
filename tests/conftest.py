@@ -68,6 +68,19 @@ import tests._engine_substrate  # noqa: E402, F401
 def pytest_configure(config):
     """Configure structlog level to match pytest's --log-level.
 
+    Also clamps xdist parallelism to what this box's SysV shared-memory
+    budget can actually support (nexus-6qp25). Each pytest process boots its
+    own engine substrate, each substrate is one Postgres cluster, and each
+    cluster holds one SysV segment against ``kern.sysv.shmmni`` -- a budget
+    SHARED with every other cluster on the box. Past it, ``initdb`` fails and
+    every substrate-backed test errors at SETUP, producing a wall of setup
+    errors that reads as a code regression rather than as contention. Runs
+    here rather than in a ``-p`` plugin because xdist resolves ``-n auto`` to
+    an integer in ``pytest_cmdline_main`` and builds its session in a
+    ``trylast`` ``pytest_configure``, so this sees a resolved number and
+    still lands before the workers are spawned. ``NX_XDIST_NO_CAP=1`` opts
+    out; see ``tests/_xdist_cap.py``.
+
     Default run: WARNING level — quiet, no clutter.
     Validation run: pytest --log-level=DEBUG — full structlog output to stdout.
 
@@ -75,6 +88,8 @@ def pytest_configure(config):
         uv run pytest                          # quiet (WARNING)
         uv run pytest --log-level=DEBUG        # full debug output
     """
+    _clamp_xdist_workers(config)
+
     try:
         level_str = (config.getoption("log_level") or "WARNING").upper()
     except (ValueError, AttributeError):
@@ -264,6 +279,31 @@ def _warn_if_service_jar_is_stale() -> None:
 #: ``_check_fixture_cache_leaks`` / ``_check_real_config_dir_mutations``
 #: docstrings for the full xdist-masking analysis this exists to avoid.
 _is_controller_or_serial: bool = False
+
+
+def _clamp_xdist_workers(config) -> None:
+    """Hold xdist parallelism inside the box's shared-memory budget (nexus-6qp25)."""
+    try:
+        requested = getattr(config.option, "numprocesses", None)
+    except Exception:  # noqa: BLE001 — never let the cap break collection
+        return
+    if not isinstance(requested, int):
+        # "auto"/"logical" unresolved (xdist absent), or no -n at all.
+        return
+    try:
+        from tests._xdist_cap import clamp_numprocesses, effective_cap
+
+        cap = effective_cap()
+        if cap is None:
+            return
+        value, note = clamp_numprocesses(requested=requested, cap=cap)
+        if note is not None:
+            config.option.numprocesses = value
+            # Printed, not logged: the operator needs to see this before a
+            # 15-minute run, and log level here is not yet configured.
+            print(f"\n[nexus] {note}\n")
+    except Exception:  # noqa: BLE001 — a cap that cannot be derived is not enforced
+        return
 
 
 def pytest_sessionstart(session):
