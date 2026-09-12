@@ -225,6 +225,12 @@ RELEASE_MESSAGES: dict[str, str] = {
         "from git. Cannot verify the pairing is fresh -- treat as a failed "
         "gate, not a pass."
     ),
+    "check_paired_preconditions::battery_tag_future": (
+        "PAIRED MODE REJECTED: [tag]'s commit date is [ahead]h in the FUTURE, "
+        "past the [tolerance]h skew tolerance. A commit author date is "
+        "settable to anything, and the freshness window only refuses what is "
+        "too OLD -- a future-dated tag would satisfy it forever."
+    ),
     "check_paired_preconditions::battery_too_old": (
         "PAIRED MODE REJECTED: [tag] is [age]h old, past the [max_age]h "
         "paired-tag freshness window. Deploy fires AT client-tag push -- a "
@@ -232,6 +238,73 @@ RELEASE_MESSAGES: dict[str, str] = {
         "reopens the multi-release i5c2u drift class this gate exists to "
         "close. If this release genuinely lagged its engine tag, override "
         "explicitly with --paired-tag-max-age-hours."
+    ),
+    # -- check_release_arming (check_engine_release_floor.py, nexus-h0fo3) -
+    # The paired-release battery's LAST step. "ARMED / NOT-ARMED /
+    # NOT-REQUIRED on every paired release, with emitting nothing itself a
+    # failure" is the settled contract, so every leaf below names which of
+    # the three it is in its first words.
+    "check_release_arming::arming_not_required": (
+        "release arming NOT-REQUIRED for [tag]: in [ledger_path], no "
+        "unshipped entry and no shipped entry naming this pairing is "
+        "non-additive, so old client + new engine is safe and the deploy may "
+        "land either side of the client tag (nexus-1emxn choreography (a)). "
+        "BOTH sections are read: the release PR moves an entry from "
+        "Unshipped to Shipped before the tag exists, so reading Unshipped "
+        "alone would answer NOT-REQUIRED for every release."
+    ),
+    "check_release_arming::arming_absent": (
+        "release arming NOT-ARMED: this pairing carries a NON-ADDITIVE wire "
+        "change, and no arming attestation exists at [path]. conexus must "
+        "stage the redeploy for [tag] and write the attestation BEFORE this "
+        "client tag pushes -- a client published against an engine that "
+        "never deployed makes cloud clients refuse the managed service as "
+        "below-identity (GH #1402). See docs/release-arming/README.md."
+    ),
+    "check_release_arming::arming_unreadable": (
+        "release arming UNVERIFIABLE: [path] exists but could not be read "
+        "as a JSON object ([exc]). Cannot verify the relay is armed -- "
+        "treat as a failed gate, not a pass."
+    ),
+    "check_release_arming::arming_tag_absent": (
+        "release arming NOT-ARMED: [path] carries no `engine_tag` field, so "
+        "there is nothing to match the pairing against. The tag belongs in "
+        "BOTH the filename and the body precisely so the two can disagree "
+        "detectably (docs/release-arming/README.md)."
+    ),
+    "check_release_arming::arming_tag_mismatch": (
+        "release arming NOT-ARMED: [path] declares engine_tag [declared], "
+        "but this release pairs with [tag]. An attestation for a different "
+        "tag is not arming for this one."
+    ),
+    "check_release_arming::arming_timestamp_absent": (
+        "release arming NOT-ARMED: [path] carries no `armed_at` field, so "
+        "the arming cannot be dated. An undated attestation is accepted "
+        "forever, which is the freshness bound's whole failure mode."
+    ),
+    "check_release_arming::arming_timestamp_unparseable": (
+        "release arming NOT-ARMED: [path]'s armed_at is [raw], which does "
+        "not parse as an ISO-8601 instant."
+    ),
+    "check_release_arming::arming_clock_ahead": (
+        "release arming NOT-ARMED: [path]'s armed_at is [ahead]h in the "
+        "FUTURE, past the [tolerance]h skew tolerance. armed_at is wall "
+        "clock from another machine; a future date is a broken or forged "
+        "clock, not a very fresh arming, and would read as fresh forever."
+    ),
+    "check_release_arming::arming_stale": (
+        "release arming NOT-ARMED: [path] was armed [age]h ago, past the "
+        "[max_age]h window. The deploy relay is armed and HELD until the "
+        "client tag lands, so an arming this old is not THIS release's -- "
+        "re-arm immediately before the tag, or override explicitly with "
+        "--paired-tag-max-age-hours."
+    ),
+    "check_release_arming::arming_ok": (
+        "release ARMED: [path] attests the redeploy of [tag] was staged by "
+        "[armed_by] [age]h ago (within the [max_age]h window). conexus "
+        "verifies the live image digest and SSM parameter version AT THE "
+        "FLIP -- those are claims about a deploy that has not happened yet, "
+        "so they are not checkable here."
     ),
     "check_paired_preconditions::battery_armed": (
         "paired mode ARMED: [tag] verified published, pinned to "

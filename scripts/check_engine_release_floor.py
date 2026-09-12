@@ -236,7 +236,7 @@ _UNPINNED_REMEDY = (
 # DELEGATING branch (this function just returns a sub-call's own return
 # value) emits nothing itself: the sub-function's row is the decision.
 # tests/scripts/test_release_table_parity.py pins every enumerated cell of
-# this script's nine cell-producing functions to the fixture.
+# this script's ten cell-producing functions to the fixture.
 # ---------------------------------------------------------------------------
 
 #: Sentinel for "the tag list could not be read". Distinct from "no tags", which
@@ -417,6 +417,23 @@ def _paired_tag_published(tag: str, repo_root: pathlib.Path | None = None) -> tu
 #: forever -- reopening the i5c2u multi-release drift class this gate exists
 #: to close.
 _DEFAULT_PAIRED_TAG_MAX_AGE_HOURS = 72.0
+
+#: How far into the future a timestamp may sit before it is refused, shared
+#: by BOTH age checks in this module.
+#:
+#: A freshness bound compares a timestamp against "now" and refuses what is
+#: too OLD. It says nothing about what is too NEW, so a timestamp dated
+#: ahead of now satisfies it forever -- the bound's own failure mode
+#: inverted, and an absence rather than a statement, which is why it
+#: survived review. Both timestamps this module bounds come from clocks it
+#: does not own: ``armed_at`` is conexus's wall clock, and a tag's commit
+#: author date is whatever machine authored it (git accepts an arbitrary
+#: author date). Neither is trustworthy in the forward direction.
+#:
+#: Fifteen minutes is generous for NTP-synced hosts and far too short to buy
+#: a meaningful window. This is NOT a second freshness constant -- the
+#: window itself stays :data:`_DEFAULT_PAIRED_TAG_MAX_AGE_HOURS`.
+_FUTURE_CLOCK_TOLERANCE_HOURS = 0.25
 
 
 def _tag_age_hours(tag: str, repo_root: pathlib.Path | None = None) -> object:
@@ -692,6 +709,18 @@ def check_paired_preconditions(
         return _choreo.emit_choreography(
             "check_paired_preconditions", {**guard, "age_state": "unavailable"}, {"tag": tag},
         )
+    if age_hours < -_FUTURE_CLOCK_TOLERANCE_HOURS:
+        # Sibling of the armed_at clock-ahead guard below (found in review of
+        # nexus-h0fo3, which added that one and did not sweep for this): the
+        # freshness bound is one-sided, and a commit author date is settable
+        # to anything, so a future-dated tag would satisfy (d) forever.
+        return _choreo.emit_choreography(
+            "check_paired_preconditions", {**guard, "age_state": "future"},
+            {
+                "tag": tag, "ahead": f"{-age_hours:.1f}",
+                "tolerance": f"{_FUTURE_CLOCK_TOLERANCE_HOURS:.2f}",
+            },
+        )
     if age_hours > max_age_hours:
         return _choreo.emit_choreography(
             "check_paired_preconditions", {**guard, "age_state": "too_old"},
@@ -702,6 +731,211 @@ def check_paired_preconditions(
     return _choreo.emit_choreography(
         "check_paired_preconditions", guard,
         {"tag": tag, "age": f"{age_hours:.1f}", "max_age": f"{max_age_hours:.1f}"},
+    )
+
+
+#: Where conexus writes a staged-redeploy arming attestation, one file per
+#: engine tag (bead nexus-h0fo3; see ``docs/release-arming/README.md`` for the
+#: full contract and the key list). In the tagged tree rather than T2 or a
+#: live API because the gate that actually refuses -- ``release.yml`` at
+#: client-tag push -- has no cloud reach beyond an unauthenticated
+#: ``GET /version``, and because a file cannot fail open on a transport error.
+_ARMING_DIR = "docs/release-arming"
+
+
+def arming_required(ledger: "_wire_ledger.Ledger", pairing_tag: str) -> bool:
+    """Does this pairing need an arming attestation? Derived from the wire
+    ledger, never entered by hand (bead nexus-h0fo3's contract).
+
+    A UNION of two rules, because the fact lives in a different section
+    depending on when the gate runs:
+
+    * any ``## Unshipped`` entry that is not ``[additive]``, whatever tag it
+      names. An unshipped entry often names no concrete tag at all -- the
+      live one reads ``engine tag `TBD (next engine-service cut)``` -- so
+      scoping this half by ``pairing_tag`` would match nothing on the
+      ATTENDED pre-bump run, which is the path that works today.
+    * any ``## Shipped`` entry whose ``engine_tag`` equals ``pairing_tag``
+      and is not ``[additive]``. This is the half that survives the release
+      PR moving the entry out of ``## Unshipped``, and without it the gate
+      is inert exactly at tag push.
+
+    Scoping the shipped half by tag is narrower than "any non-additive
+    entry" on purpose: another engine's lagging client half is the ledger
+    gate's business, not this pairing's deploy relay.
+
+    Both halves use :class:`check_wire_contract_pairing.LedgerEntry`'s own
+    documented fail-safe -- ``additive is None`` counts as not additive --
+    so the token has one interpretation in this codebase. For a shipped
+    entry that means anything below
+    :data:`check_wire_contract_pairing.SHIPPED_CONVENTION_FLOOR` demands
+    arming rather than silently passing: a conservative answer on an input
+    no monotonic tag sequence can reach.
+
+    Deliberately NOT built on :func:`check_wire_contract_pairing.classify_unshipped`'s
+    buckets. That function tests acknowledgment FIRST, so an operator
+    passing ``--ack-client-lag`` moves a non-additive entry into ``acked``
+    and out of ``blocking``. An ack says "I know the client half is lagging,
+    proceed anyway"; it does not make the change additive, and it is
+    PRECISELY the case where the relay must be armed.
+
+    What this ADMITS by default, stated so it is a choice and not an
+    absence: an empty or all-``[additive]`` ledger with no matching shipped
+    entry returns False, which is the nexus-1emxn choreography (a) fast path
+    and is correct. It also returns False when a non-additive engine change
+    was never filed in the ledger at all -- that hole belongs to
+    ``check_wire_contract_pairing``'s undeclared-commit lint, which fails on
+    a flagged both-halves commit missing from ``## Unshipped``.
+    """
+    if any(e.additive is not True for e in ledger.unshipped.values()):
+        return True
+    return any(
+        e.additive is not True
+        for e in ledger.shipped.values()
+        if e.engine_tag == pairing_tag
+    )
+
+
+def _arming_attestation_path(tag: str, repo_root: pathlib.Path | None = None) -> pathlib.Path:
+    root = repo_root or pathlib.Path(__file__).resolve().parent.parent
+    return root / _ARMING_DIR / f"{tag}.json"
+
+
+def _read_arming_attestation(path: pathlib.Path) -> tuple[str, object]:
+    """The attestation SENSOR, kept separate from the decision the way every
+    other sensor in this module is (the git/gh subprocesses, the HTTP probe,
+    the ledger parse). Returns ``(kind, value)`` where ``kind`` is exactly
+    one of :func:`check_release_arming`'s ``attestation`` guard values:
+
+    ``("missing", "")`` -- no file. ``("unreadable", reason)`` -- present but
+    unopenable, not UTF-8, not JSON, or JSON that is not an object.
+    ``("present", body)`` -- a parsed dict.
+
+    One sensor with three outcomes, 1:1 with the guard dimension, so the
+    enumerator drives it by patching this single name and the decision path
+    below stays free of filesystem calls.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ("missing", "")
+    except (OSError, UnicodeDecodeError) as exc:
+        return ("unreadable", str(exc))
+    try:
+        body = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return ("unreadable", str(exc))
+    if not isinstance(body, dict):
+        return ("unreadable", f"top level is {type(body).__name__}, expected an object")
+    return ("present", body)
+
+
+def check_release_arming(
+    tag: str,
+    max_age_hours: float = _DEFAULT_PAIRED_TAG_MAX_AGE_HOURS,
+    repo_root: pathlib.Path | None = None,
+) -> int:
+    """Is the deploy relay ARMED for this non-additive pairing? (nexus-h0fo3)
+
+    The reader half of ``docs/release-arming/``. conexus writes the
+    attestation when it stages a redeploy; this reads it at client-tag push.
+    Ownership is split so neither side reviews its own half: nexus builds the
+    reader, conexus builds the writer.
+
+    Runs LAST in :func:`_run_paired_precondition_battery`, after
+    :func:`check_paired_preconditions` has established that ``tag`` is
+    well-formed, exists, is published, equals the floor exactly, is the
+    newest, and is itself fresh. Checking an attestation against an
+    unvalidated tag string would report NOT-ARMED for what is really a bad
+    tag. Last position also gives the invariant the contract actually wants:
+    a paired release that returns 0 has ALWAYS emitted an arming verdict.
+
+    Checks exactly the two conditions this side can observe -- ``engine_tag``
+    exact match and ``armed_at`` freshness. ``image_digest`` and
+    ``ssm_param_version`` are conexus's, checked AT THE FLIP: for a
+    non-additive pairing the deploy is armed and held until the client tag
+    lands, so at tag time they are claims about a deploy that has not
+    happened and nobody can verify them.
+
+    Exit codes follow this module's convention: ``1`` for a verifiable
+    refusal (no attestation, wrong tag, missing/stale/future ``armed_at``),
+    ``2`` when the attestation exists but cannot be read or parsed -- "could
+    not verify" is never "must be fine". ``0`` when armed, and ``0`` with a
+    passed-by-default advisory when the ledger says no arming is required.
+    """
+    ledger = _wire_ledger.parse_ledger(_wire_ledger.DEFAULT_LEDGER_PATH)
+    if not arming_required(ledger, tag):
+        return _choreo.emit_choreography(
+            "check_release_arming", {"requirement": "not_required"},
+            {"tag": tag, "ledger_path": str(_wire_ledger.DEFAULT_LEDGER_PATH)},
+        )
+    guard = {"requirement": "required"}
+    path = _arming_attestation_path(tag, repo_root)
+    kind, value = _read_arming_attestation(path)
+    if kind == "missing":
+        return _choreo.emit_choreography(
+            "check_release_arming", {**guard, "attestation": "missing"},
+            {"tag": tag, "path": str(path)},
+        )
+    if kind == "unreadable":
+        return _choreo.emit_choreography(
+            "check_release_arming", {**guard, "attestation": "unreadable"},
+            {"path": str(path), "exc": str(value)},
+        )
+    guard["attestation"] = "present"
+    body: dict[str, object] = value  # type: ignore[assignment]
+
+    declared = body.get("engine_tag")
+    if declared is None:
+        return _choreo.emit_choreography(
+            "check_release_arming", {**guard, "tag_match": "absent"}, {"path": str(path)},
+        )
+    if declared != tag:
+        return _choreo.emit_choreography(
+            "check_release_arming", {**guard, "tag_match": "mismatch"},
+            {"path": str(path), "declared": repr(declared), "tag": tag},
+        )
+    guard["tag_match"] = "match"
+
+    raw = body.get("armed_at")
+    if raw is None:
+        return _choreo.emit_choreography(
+            "check_release_arming", {**guard, "armed_at": "absent"}, {"path": str(path)},
+        )
+    try:
+        armed_at = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return _choreo.emit_choreography(
+            "check_release_arming", {**guard, "armed_at": "unparseable"},
+            {"path": str(path), "raw": repr(raw)},
+        )
+    if armed_at.tzinfo is None:
+        armed_at = armed_at.replace(tzinfo=timezone.utc)
+    age_hours = (datetime.now(timezone.utc) - armed_at).total_seconds() / 3600.0
+    if age_hours < -_FUTURE_CLOCK_TOLERANCE_HOURS:
+        return _choreo.emit_choreography(
+            "check_release_arming", {**guard, "armed_at": "future"},
+            {
+                "path": str(path), "raw": repr(raw),
+                "ahead": f"{-age_hours:.1f}",
+                "tolerance": f"{_FUTURE_CLOCK_TOLERANCE_HOURS:.2f}",
+            },
+        )
+    if age_hours > max_age_hours:
+        return _choreo.emit_choreography(
+            "check_release_arming", {**guard, "armed_at": "stale"},
+            {
+                "tag": tag, "path": str(path),
+                "age": f"{age_hours:.1f}", "max_age": f"{max_age_hours:.1f}",
+            },
+        )
+    return _choreo.emit_choreography(
+        "check_release_arming", {**guard, "armed_at": "fresh"},
+        {
+            "tag": tag, "path": str(path),
+            "age": f"{age_hours:.1f}", "max_age": f"{max_age_hours:.1f}",
+            "armed_by": str(body.get("armed_by", "unspecified")),
+        },
     )
 
 
@@ -748,15 +982,28 @@ def _run_paired_precondition_battery(
 
     Order: the both-halves wire-contract ledger (nexus-1vogq) FIRST -- local,
     no network, actionable without ever looking at ``tag``'s git/gh state --
-    THEN :func:`check_paired_preconditions` (nexus-k1c08).
+    THEN :func:`check_paired_preconditions` (nexus-k1c08), THEN
+    :func:`check_release_arming` (nexus-h0fo3).
 
-    Returns 0 when both pass; the first failing check's own named-reason
+    Arming runs LAST on purpose: it looks up an attestation BY the pairing
+    tag, so it wants a tag the preceding step has already proven well-formed,
+    published, exactly at the floor, newest and fresh -- otherwise a bad tag
+    reports as NOT-ARMED. Last position is also what makes the contract's
+    "emit a verdict on every paired release" claim mechanical: a battery that
+    returns 0 has always emitted an arming row.
+
+    Returns 0 when all three pass; the first failing check's own named-reason
     exit code otherwise.
     """
     ledger_rc = check_client_lag_ledger(ack_client_lag)
     if ledger_rc != 0:
         return ledger_rc
-    return check_paired_preconditions(tag, newest, max_age_hours=paired_tag_max_age_hours)
+    paired_rc = check_paired_preconditions(
+        tag, newest, max_age_hours=paired_tag_max_age_hours
+    )
+    if paired_rc != 0:
+        return paired_rc
+    return check_release_arming(tag, max_age_hours=paired_tag_max_age_hours)
 
 
 def _paired_below_floor_path(
@@ -1145,7 +1392,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Only with --paired-deploy or --paired-deploy-auto (nexus-gc9ir: "
         "the auto-derived tag goes through the IDENTICAL freshness check): "
         "override the paired-tag freshness window (default "
-        f"{_DEFAULT_PAIRED_TAG_MAX_AGE_HOURS:g}h). Use only when this release "
+        f"{_DEFAULT_PAIRED_TAG_MAX_AGE_HOURS:g}h). NOTE: this one value bounds "
+        "TWO clocks -- the paired tag's commit age and, on a non-additive "
+        "pairing, the age of conexus's arming attestation -- so loosening it "
+        "for a lagging tag also loosens how old an arming may be. Use only "
+        "when this release "
         "genuinely lagged its engine tag -- the default exists to stop a "
         "reused pairing from silently accepting a stale tag across multiple "
         "releases (nexus-k1c08 fix round).",

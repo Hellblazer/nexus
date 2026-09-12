@@ -137,7 +137,8 @@ _DRIVERS = erc.DRIVERS
 #: ``test_function_script_map_covers_every_fixture_function`` below).
 _FLOOR_SCRIPT_FUNCTIONS = frozenset({
     "check_pin_currency", "check_source_ancestry", "check_client_lag_ledger",
-    "check_paired_preconditions", "record_deploy_from_gate_report_leg",
+    "check_paired_preconditions", "check_release_arming",
+    "record_deploy_from_gate_report_leg",
     "check_floor_bare", "check_floor_paired", "check_floor_auto_paired",
     "main_dispatch",
 })
@@ -200,7 +201,7 @@ def _precond_main_dispatch_wiring_case(inputs: dict[str, str]) -> str:
 #: table's own guard-dimension assignment (keyed WITHOUT the function
 #: prefix; ``_guard_for`` below applies it). Only functions whose
 #: table dimensions are NOT a direct 1:1 rename of the fixture's own
-#: input keys need an entry here -- seven of the twelve table groups
+#: input keys need an entry here -- eight of the thirteen table groups
 #: reuse the fixture's input key names verbatim (e.g.
 #: ``check_pin_currency.newest`` <- ``inputs["newest"]``) and need no
 #: transform at all.
@@ -251,7 +252,7 @@ def test_fixture_cell_count_is_nonzero_and_matches_the_fixtures_own_header() -> 
 
 def test_function_script_map_covers_every_fixture_function() -> None:
     """``_FUNCTION_SCRIPT`` is hand-maintained (there is no machine-readable
-    function -> script mapping to read from the enumerator). If a 13th
+    function -> script mapping to read from the enumerator). If a 14th
     cell-producing function ever appears in the fixture with no entry here,
     ``_first_cell_per_script`` would ``KeyError`` deep inside test
     collection with a confusing traceback -- this test fails loudly and

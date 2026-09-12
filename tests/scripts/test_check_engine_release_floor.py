@@ -2177,3 +2177,569 @@ def test_resolve_choreography_row_refuses_out_of_domain_value() -> None:
     the declared domain) must fail loudly, not silently misroute."""
     with pytest.raises(RuntimeError):
         _choreo.resolve_choreography_row("check_pin_currency", {"newest": "not-a-real-value"})
+
+
+# ---------------------------------------------------------------------------
+# nexus-h0fo3: the paired-release arming gate (the READER half of
+# docs/release-arming/; conexus writes the attestation)
+# ---------------------------------------------------------------------------
+#
+# Per-cell coverage of all ten leaves lives in
+# tests/scripts/test_release_table_parity.py, driven through the enumerator
+# with the read sensor patched. What is here instead is what the fixture
+# CANNOT express: the two negative controls the contract mandates, driven
+# against a REAL file on disk through the real path construction; the
+# ack-does-not-lift-arming claim; and the "a paired battery that returns 0
+# has emitted an arming verdict" invariant, which is a property of the
+# BATTERY's composition rather than of any one cell.
+
+from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone
+
+_ARMING_PINNED_TAG = gate._pinned_engine_tag()
+
+
+def _armed_at(hours_ago: float) -> str:
+    return (
+        _datetime.now(_timezone.utc) - _timedelta(hours=hours_ago)
+    ).isoformat().replace("+00:00", "Z")
+
+
+def _write_attestation(root, tag: str, body: dict) -> None:
+    """Write an attestation where PRODUCTION says it goes -- the directory
+    name and filename shape come from ``gate._ARMING_DIR`` and
+    ``gate._arming_attestation_path``, never retyped here, so a change to
+    either is a test failure rather than a silently-diverged copy."""
+    path = gate._arming_attestation_path(tag, root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(body), encoding="utf-8")
+
+
+def _rooted_at(monkeypatch, root):
+    """Relocate the attestation ROOT while keeping the real path builder:
+    ``docs/release-arming/<tag>.json`` is still constructed by production
+    code, just under ``root``."""
+    real = gate._arming_attestation_path
+    monkeypatch.setattr(
+        gate, "_arming_attestation_path",
+        lambda tag, repo_root=None: real(tag, root),
+    )
+
+
+def test_arming_not_required_when_every_unshipped_entry_is_additive(tmp_path) -> None:
+    ledger = _write_ledger(tmp_path, _ADDITIVE_ENTRY)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        assert gate.arming_required(
+            gate._wire_ledger.parse_ledger(ledger), _ARMING_PINNED_TAG
+        ) is False
+
+
+def test_arming_required_for_a_tokenless_entry(tmp_path) -> None:
+    """``additive is None`` is fail-safe not-additive -- the same reading
+    ``LedgerEntry.additive`` documents and ``check_client_lag_ledger``
+    already applies. An entry nobody classified must not buy a free pass."""
+    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        assert gate.arming_required(
+            gate._wire_ledger.parse_ledger(ledger), _ARMING_PINNED_TAG
+        ) is True
+
+
+def test_ack_client_lag_does_not_lift_the_arming_requirement(tmp_path) -> None:
+    """The reason ``arming_required`` reads the entries directly instead of
+    reusing ``classify_unshipped``'s buckets: that function tests
+    acknowledgment FIRST, so an ``--ack-client-lag`` moves a non-additive
+    entry out of ``blocking`` and into ``acked``. An ack says "I know the
+    client half is lagging, proceed"; it does not make the change additive,
+    and it is exactly the case where the relay must be armed. Reading the
+    buckets here would have excused it silently."""
+    ledger_path = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
+    ledger = gate._wire_ledger.parse_ledger(ledger_path)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger_path):
+        assert gate.check_client_lag_ledger(["nexus-notad"]) == 0
+    verdict = gate._wire_ledger.classify_unshipped(ledger, ["nexus-notad"])
+    assert not verdict.blocking, "precondition: the ack must clear the ledger gate"
+    assert gate.arming_required(ledger, _ARMING_PINNED_TAG) is True
+
+
+def test_missing_attestation_refuses(
+    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
+) -> None:
+    """Negative control 1 of the two the contract mandates. Real filesystem,
+    real path construction, no file written."""
+    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
+    _rooted_at(monkeypatch, tmp_path / "repo")
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        rc = gate.check_release_arming(_ARMING_PINNED_TAG)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "NOT-ARMED" in err
+    assert _ARMING_PINNED_TAG in err
+
+
+def test_attestation_for_a_different_tag_refuses(
+    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
+) -> None:
+    """Negative control 2. It exists because an ``engine_tag`` comparison
+    can quietly decay into a presence check -- a well-formed, fresh
+    attestation that names ANOTHER tag must still refuse."""
+    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
+    root = tmp_path / "repo"
+    _write_attestation(root, _ARMING_PINNED_TAG, {
+        "engine_tag": "engine-service-v9.9.9",
+        "armed_at": _armed_at(1.0),
+        "armed_by": "conexus",
+    })
+    _rooted_at(monkeypatch, root)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        rc = gate.check_release_arming(_ARMING_PINNED_TAG)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "NOT-ARMED" in err
+    assert "engine-service-v9.9.9" in err
+
+
+def test_fresh_attestation_on_disk_arms(
+    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
+) -> None:
+    """The positive control the two negatives are only meaningful against:
+    the same code path, the same real file layout, returns 0 when the
+    attestation is right. Without this, both refusals above would still
+    pass if the reader refused unconditionally."""
+    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
+    root = tmp_path / "repo"
+    _write_attestation(root, _ARMING_PINNED_TAG, {
+        "engine_tag": _ARMING_PINNED_TAG,
+        "armed_at": _armed_at(1.0),
+        "armed_by": "conexus",
+    })
+    _rooted_at(monkeypatch, root)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        rc = gate.check_release_arming(_ARMING_PINNED_TAG)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "release ARMED" in out
+    assert "conexus" in out
+
+
+def test_stale_attestation_refuses(tmp_path, monkeypatch) -> None:
+    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
+    root = tmp_path / "repo"
+    _write_attestation(root, _ARMING_PINNED_TAG, {
+        "engine_tag": _ARMING_PINNED_TAG,
+        "armed_at": _armed_at(gate._DEFAULT_PAIRED_TAG_MAX_AGE_HOURS + 1.0),
+        "armed_by": "conexus",
+    })
+    _rooted_at(monkeypatch, root)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        assert gate.check_release_arming(_ARMING_PINNED_TAG) == 1
+
+
+def test_future_dated_attestation_refuses_rather_than_reading_as_fresh(
+    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
+) -> None:
+    """``armed_at`` is wall clock from ANOTHER machine, so unlike the tag
+    age (a commit date out of this repo) its reference point is a foreign
+    clock. A date ahead of now would otherwise satisfy the freshness bound
+    forever, which is that bound's own failure mode inverted."""
+    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
+    root = tmp_path / "repo"
+    _write_attestation(root, _ARMING_PINNED_TAG, {
+        "engine_tag": _ARMING_PINNED_TAG,
+        "armed_at": _armed_at(-24.0),
+        "armed_by": "conexus",
+    })
+    _rooted_at(monkeypatch, root)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        rc = gate.check_release_arming(_ARMING_PINNED_TAG)
+    assert rc == 1
+    assert "FUTURE" in capsys.readouterr().err
+
+
+def test_unreadable_attestation_is_unverifiable_not_a_pass(tmp_path, monkeypatch) -> None:
+    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
+    root = tmp_path / "repo"
+    path = gate._arming_attestation_path(_ARMING_PINNED_TAG, root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{ truncated", encoding="utf-8")
+    _rooted_at(monkeypatch, root)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        assert gate.check_release_arming(_ARMING_PINNED_TAG) == 2
+
+
+def _paired_battery(ledger_path, ack=None):
+    """Drive the real ``_run_paired_precondition_battery`` with everything
+    ahead of the arming step passing, so the arming step is what the
+    verdict turns on."""
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger_path), \
+         patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=1.0):
+        return gate._run_paired_precondition_battery(
+            _ARMING_PINNED_TAG, REQUIRED_ENGINE_VERSION,
+            gate._DEFAULT_PAIRED_TAG_MAX_AGE_HOURS, ack,
+        )
+
+
+_ARMING_VERDICTS = ("release ARMED", "arming NOT-ARMED", "arming NOT-REQUIRED")
+
+
+def test_paired_battery_emits_an_arming_verdict_on_an_additive_pairing(
+    capsys: pytest.CaptureFixture[str], tmp_path
+) -> None:
+    ledger = _write_ledger(tmp_path, _ADDITIVE_ENTRY)
+    rc = _paired_battery(ledger)
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert any(v in captured.out + captured.err for v in _ARMING_VERDICTS)
+    assert "arming NOT-REQUIRED" in captured.out
+
+
+def test_paired_battery_emits_an_arming_verdict_on_an_armed_pairing(
+    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
+) -> None:
+    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
+    root = tmp_path / "repo"
+    _write_attestation(root, _ARMING_PINNED_TAG, {
+        "engine_tag": _ARMING_PINNED_TAG,
+        "armed_at": _armed_at(1.0),
+        "armed_by": "conexus",
+    })
+    _rooted_at(monkeypatch, root)
+    rc = _paired_battery(ledger, ack=["nexus-notad"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "release ARMED" in captured.out
+
+
+def test_paired_battery_refuses_a_non_additive_pairing_with_no_attestation(
+    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
+) -> None:
+    """The whole point, end to end: an acknowledged non-additive pairing
+    clears the ledger gate and the tag battery, and is still refused
+    because nothing attests the relay was armed."""
+    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
+    _rooted_at(monkeypatch, tmp_path / "repo")
+    rc = _paired_battery(ledger, ack=["nexus-notad"])
+    assert rc == 1
+    assert "arming NOT-ARMED" in capsys.readouterr().err
+
+
+def test_battery_returning_zero_always_emitted_an_arming_verdict(
+    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
+) -> None:
+    """"Emitting nothing is itself a failure" (the settled contract), made
+    mechanical: arming runs LAST in the battery, so every accepting paired
+    release has printed one of the three verdicts. A future edit that moves
+    the arming step above a check that can short-circuit past it, or drops
+    it, fails here."""
+    for entry, ack, armed in (
+        (_ADDITIVE_ENTRY, None, False),
+        (_NOT_ADDITIVE_ENTRY, ["nexus-notad"], True),
+    ):
+        root = tmp_path / f"repo-{armed}"
+        ledger = _write_ledger(tmp_path, entry)
+        if armed:
+            _write_attestation(root, _ARMING_PINNED_TAG, {
+                "engine_tag": _ARMING_PINNED_TAG,
+                "armed_at": _armed_at(1.0),
+                "armed_by": "conexus",
+            })
+        _rooted_at(monkeypatch, root)
+        capsys.readouterr()
+        rc = _paired_battery(ledger, ack=ack)
+        captured = capsys.readouterr()
+        assert rc == 0, (entry, captured)
+        assert any(v in captured.out for v in _ARMING_VERDICTS), captured
+
+
+# --- the CROSS-REPO contract: conexus's actually-shipped writer -------------
+#
+# conexus shipped the writer on their own main at their PR #336, with three
+# fields richer than the keys first settled: signature_verified is an object
+# (a bool cannot carry the KMS alias), walk_rehearsed is a POINTER to a T2
+# record (a bool would be unfalsifiable), and armed_by is
+# "<principal>@sha256:<8>" rather than an AWS caller ARN (an ARN carries a
+# 12-digit account id, and this repo is public). None of that was knowable
+# when the reader was written. This fixture is the shipped body verbatim, so
+# a reader change that stops parsing it — or a writer change that stops
+# producing it — fails HERE rather than at a release.
+
+_CONEXUS_SHIPPED_BODY = {
+    "engine_tag": None,  # filled with the pinned tag by the test
+    "image_digest": "sha256:" + "ab" * 32,
+    "signature_verified": {
+        "verified": True,
+        "kms_key": "awskms:///alias/conexus-dev-image-signing",
+        "image_ref": "conexus/engine:nexus-service-0.1.117@sha256:" + "ab" * 32,
+    },
+    "ssm_param": "/conexus/dev/engine/image-tag",
+    "ssm_param_version": 7,
+    "redeploy_doc": "conexus-dev-engine-redeploy",
+    "walk_rehearsed": "conexus/pitr-walk-rehearsal-2026-09-12",
+    "armed_at": None,  # filled per-case
+    "armed_by": "sam@sha256:deadbeef",
+}
+
+
+#: The two `armed_at` spellings conexus emits / asked us to accept, as
+#: FORMATTERS rather than literal instants. A literal date would be either
+#: stale or (as the first draft of this test was) in the FUTURE and correctly
+#: refused by the clock-ahead guard — pinning the SHAPE is the point.
+_ARMED_AT_SPELLINGS = {
+    "z-suffix": lambda dt: dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "offset-suffix": lambda dt: dt.isoformat(timespec="seconds"),
+}
+
+
+@pytest.mark.parametrize(
+    "spelling, walk_rehearsed",
+    [
+        ("z-suffix", "conexus/pitr-walk-rehearsal-2026-09-12"),
+        ("offset-suffix", "conexus/pitr-walk-rehearsal-2026-09-12"),
+        ("z-suffix", "not-required: no changeset in this cut"),
+    ],
+    ids=["z-suffix", "offset-suffix", "walk-not-required"],
+)
+def test_reader_arms_on_the_body_conexus_actually_writes(
+    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch, spelling, walk_rehearsed
+) -> None:
+    """conexus writes `armed_at` with a Z suffix; they asked us to accept the
+    `+00:00` form too. `walk_rehearsed` is a free-text pointer in either of
+    its two documented forms. The reader must arm on all of them."""
+    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
+    root = tmp_path / "repo"
+    one_hour_ago = _datetime.now(_timezone.utc) - _timedelta(hours=1)
+    body = dict(_CONEXUS_SHIPPED_BODY)
+    body["engine_tag"] = _ARMING_PINNED_TAG
+    body["armed_at"] = _ARMED_AT_SPELLINGS[spelling](one_hour_ago)
+    body["walk_rehearsed"] = walk_rehearsed
+    _write_attestation(root, _ARMING_PINNED_TAG, body)
+    _rooted_at(monkeypatch, root)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        rc = gate.check_release_arming(_ARMING_PINNED_TAG)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "release ARMED" in out
+
+
+def test_reader_reads_only_fields_conexus_guarantees(tmp_path, monkeypatch) -> None:
+    """The split gives nexus `engine_tag` and `armed_at`. `armed_by` is read
+    for the message only. Nothing else in the body may become load-bearing
+    without a cross-instance conversation, so dropping every other key must
+    still arm — this is what keeps a writer-side field rename from red-gating
+    a release."""
+    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
+    root = tmp_path / "repo"
+    _write_attestation(root, _ARMING_PINNED_TAG, {
+        "engine_tag": _ARMING_PINNED_TAG,
+        "armed_at": _armed_at(1.0),
+        "armed_by": "sam@sha256:deadbeef",
+    })
+    _rooted_at(monkeypatch, root)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        assert gate.check_release_arming(_ARMING_PINNED_TAG) == 0
+
+
+# --- the read sensor's own branches (both reviewers: untested) --------------
+
+
+def test_read_sensor_reports_missing_for_an_absent_file(tmp_path) -> None:
+    kind, value = gate._read_arming_attestation(tmp_path / "nope.json")
+    assert (kind, value) == ("missing", "")
+
+
+def test_read_sensor_reports_unreadable_for_a_json_non_object(tmp_path) -> None:
+    """A JSON array or scalar parses fine and is not an attestation. Flagged
+    by both reviewers as the one branch nothing exercised: the enumerator
+    patches this sensor's OUTPUT, so only a direct call reaches it."""
+    path = tmp_path / "a.json"
+    path.write_text("[1, 2, 3]", encoding="utf-8")
+    kind, value = gate._read_arming_attestation(path)
+    assert kind == "unreadable"
+    assert "list" in str(value)
+
+
+def test_read_sensor_reports_unreadable_for_an_unopenable_path(tmp_path) -> None:
+    """OSError that is not FileNotFoundError — here, a directory where a file
+    belongs. Distinct from `missing`: something IS there and cannot be read,
+    which is exit 2 (unverifiable), not exit 1."""
+    path = tmp_path / "a.json"
+    path.mkdir()
+    kind, value = gate._read_arming_attestation(path)
+    assert kind == "unreadable"
+    assert str(value)
+
+
+def test_read_sensor_reports_unreadable_for_non_utf8_bytes(tmp_path) -> None:
+    path = tmp_path / "a.json"
+    path.write_bytes(b"\xff\xfe\x00not utf-8")
+    kind, _value = gate._read_arming_attestation(path)
+    assert kind == "unreadable"
+
+
+def test_read_sensor_returns_the_parsed_object(tmp_path) -> None:
+    path = tmp_path / "a.json"
+    path.write_text('{"engine_tag": "x"}', encoding="utf-8")
+    assert gate._read_arming_attestation(path) == ("present", {"engine_tag": "x"})
+
+
+def test_paired_tag_dated_in_the_future_is_refused(
+    capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Sibling of the arming gate's clock-ahead guard, in the check that
+    already existed. The paired-tag freshness bound is one-sided — it refuses
+    what is too OLD and says nothing about what is too NEW — and a git commit
+    author date is settable to anything, so before this a future-dated tag
+    satisfied (d) forever. Found by sweeping for siblings after adding the
+    armed_at guard, not by it firing."""
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=-48.0):
+        rc = gate.check_paired_preconditions(
+            _ARMING_PINNED_TAG, REQUIRED_ENGINE_VERSION
+        )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "FUTURE" in err
+    assert "48.0" in err
+
+
+def test_paired_tag_within_the_skew_tolerance_still_passes() -> None:
+    """The tolerance is not a second freshness rule: a few minutes of
+    ordinary NTP skew must not red-gate a legitimate pairing."""
+    ahead = -(gate._FUTURE_CLOCK_TOLERANCE_HOURS / 2)
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=ahead):
+        rc = gate.check_paired_preconditions(
+            _ARMING_PINNED_TAG, REQUIRED_ENGINE_VERSION
+        )
+    assert rc == 0
+
+
+# --- the POST-RELEASE ledger shape (nexus-h0fo3, the inertness that every
+# --- other test in this file missed) ---------------------------------------
+#
+# The original arming gate read only `## Unshipped`, and every test built
+# that state directly. It passed, and five source mutations each failed a
+# named test, and the gate was still inert at tag push: a non-additive entry
+# blocks every PR to main (ci.yml's release-ledger-gate runs --ledger-only
+# with no --ack-client-lag), so the release PR must move it to `## Shipped`
+# before the tag exists. By the time the gate ran, the section it read was
+# empty. These tests drive the ledger in the shape it ACTUALLY has when the
+# gate runs, which is the thing no constructed "required" state can show.
+
+
+def _write_release_shaped_ledger(tmp_path, engine_tag: str, token: str, *, sha="fee1dead1"):
+    """A ledger as it looks AFTER the release PR: nothing unshipped, the
+    pairing's entry moved to `## Shipped` with a concrete engine tag."""
+    ledger = tmp_path / "wire-contract-pending.md"
+    ledger.write_text(
+        "## Unshipped\n\n(none)\n\n## Shipped\n\n"
+        f"- `{sha}` -- bead nexus-rel -- shipped in `v9.9.9` -- engine half "
+        f"{engine_tag} (deployed and cloud-gated before the client tag) -- "
+        f"{token} test fixture entry\n",
+        encoding="utf-8",
+    )
+    return ledger
+
+
+def test_post_release_non_additive_pairing_still_requires_arming(tmp_path) -> None:
+    """THE regression test for the original defect. Unshipped is empty — the
+    release PR moved the entry — and the gate must still demand arming,
+    because the Shipped entry names this pairing and is not additive."""
+    ledger = _write_release_shaped_ledger(
+        tmp_path, _ARMING_PINNED_TAG, "[not-additive]"
+    )
+    parsed = gate._wire_ledger.parse_ledger(ledger)
+    assert not parsed.unshipped, "precondition: the release PR emptied Unshipped"
+    assert gate.arming_required(parsed, _ARMING_PINNED_TAG) is True
+
+
+def test_post_release_additive_pairing_does_not_require_arming(tmp_path) -> None:
+    """The positive control. Without it the test above would pass against a
+    gate that demanded arming unconditionally."""
+    ledger = _write_release_shaped_ledger(
+        tmp_path, _ARMING_PINNED_TAG, "[additive]"
+    )
+    parsed = gate._wire_ledger.parse_ledger(ledger)
+    assert gate.arming_required(parsed, _ARMING_PINNED_TAG) is False
+
+
+def test_post_release_non_additive_entry_for_another_tag_is_not_ours(tmp_path) -> None:
+    """Scoped by pairing tag on purpose: another engine's lagging client half
+    is the ledger gate's business, not this pairing's deploy relay."""
+    ledger = _write_release_shaped_ledger(
+        tmp_path, "engine-service-v0.0.1", "[not-additive]"
+    )
+    parsed = gate._wire_ledger.parse_ledger(ledger)
+    assert gate.arming_required(parsed, _ARMING_PINNED_TAG) is False
+
+
+def test_post_release_untokened_entry_requires_arming(tmp_path) -> None:
+    """Below the convention floor there is no token to read. `additive is
+    None` counts as not additive — the documented fail-safe — so the answer
+    is "arming required", never a silent pass. Unreachable in practice
+    (engine tags are monotonic and the floor is far behind), which is why it
+    is pinned rather than relied upon."""
+    ledger = tmp_path / "wire-contract-pending.md"
+    ledger.write_text(
+        "## Unshipped\n\n(none)\n\n## Shipped\n\n"
+        f"- `fee1dead2` -- bead nexus-old -- shipped in `v7.0.0` -- engine half "
+        f"{_ARMING_PINNED_TAG} (no direction-safety token, pre-convention)\n",
+        encoding="utf-8",
+    )
+    parsed = gate._wire_ledger.parse_ledger(ledger)
+    assert parsed.shipped["fee1dead2"].additive is None
+    assert gate.arming_required(parsed, _ARMING_PINNED_TAG) is True
+
+
+def test_post_release_battery_refuses_without_an_attestation(
+    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
+) -> None:
+    """End to end in the release-time shape: empty Unshipped, a non-additive
+    Shipped entry for this pairing, no attestation. The battery must refuse.
+    Before nexus-h0fo3's union rule this returned 0 and printed NOT-REQUIRED."""
+    ledger = _write_release_shaped_ledger(
+        tmp_path, _ARMING_PINNED_TAG, "[not-additive]"
+    )
+    _rooted_at(monkeypatch, tmp_path / "repo")
+    rc = _paired_battery(ledger)
+    assert rc == 1
+    assert "arming NOT-ARMED" in capsys.readouterr().err
+
+
+def test_post_release_battery_arms_with_an_attestation(
+    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
+) -> None:
+    ledger = _write_release_shaped_ledger(
+        tmp_path, _ARMING_PINNED_TAG, "[not-additive]"
+    )
+    root = tmp_path / "repo"
+    _write_attestation(root, _ARMING_PINNED_TAG, {
+        "engine_tag": _ARMING_PINNED_TAG,
+        "armed_at": _armed_at(1.0),
+        "armed_by": "conexus",
+    })
+    _rooted_at(monkeypatch, root)
+    rc = _paired_battery(ledger)
+    assert rc == 0
+    assert "release ARMED" in capsys.readouterr().out
+
+
+def test_unshipped_half_still_fires_when_the_tag_is_not_yet_known(tmp_path) -> None:
+    """The attended pre-bump run: the entry is still unshipped and its engine
+    tag reads `TBD (next engine-service cut)`, as the live ledger's does. The
+    unshipped half of the union must not be scoped by pairing tag, or this
+    path — the one that worked before nexus-h0fo3 — would go inert instead."""
+    ledger = tmp_path / "wire-contract-pending.md"
+    ledger.write_text(
+        "## Unshipped\n\n"
+        "- `feedface1` -- bead nexus-tbd -- engine tag `TBD (next engine-service cut)` "
+        "-- [not-additive] store-side NOT NULL, old client breaks\n\n"
+        "## Shipped\n",
+        encoding="utf-8",
+    )
+    parsed = gate._wire_ledger.parse_ledger(ledger)
+    assert parsed.unshipped["feedface1"].engine_tag == "TBD (next engine-service cut)"
+    assert gate.arming_required(parsed, _ARMING_PINNED_TAG) is True

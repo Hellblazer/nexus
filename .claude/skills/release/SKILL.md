@@ -413,11 +413,25 @@ branch applies:
   ("fires when vX.Y.Z appears on origin") — and that arming is CONFIRMED
   back. An unarmed non-additive pairing does not tag; "I'll send the relay
   right after" is the exact shape that opened both measured windows.
-  INTERIM HONESTY: this branch is currently prose-enforced — the
-  mechanical check (a conexus-written arming attestation the tag-push gate
-  reads, tracker-pattern) is nexus-h0fo3; a releaser-side self-attestation
-  was deliberately NOT built (self-attested gates are the shape this
-  project already deleted once).
+  PARTLY MECHANIZED (nexus-h0fo3), and read the limits before relying on
+  it. `check_release_arming` is the last step of the paired battery in
+  `check_engine_release_floor.py`, so an explicit `--paired-deploy <tag>`
+  run — the attended pre-tag gate at Step 0 — does check arming. The
+  `--paired-deploy-auto` that `release.yml` runs at tag push does NOT
+  always reach it: that mode probes the cloud first and takes a
+  pin-currency-only path when the cloud already meets the floor, skipping
+  the ledger and arming checks entirely. Treat the attended Step 0 run as
+  the arming check; the tag-push run is not a second one. The gate
+  derives from the wire ledger whether arming is required and reads
+  conexus's attestation at
+  `docs/release-arming/engine-service-vX.Y.Z.json`. It prints `ARMED`,
+  `NOT-ARMED` or `NOT-REQUIRED` on every paired release and refuses on a
+  missing, wrong-tag, undated, future-dated or >72h-old attestation.
+  conexus writes it; nexus only reads it, so this is not the releaser-side
+  self-attestation the project deleted once. The live image digest and SSM
+  parameter version are conexus's to check AT THE FLIP — at tag time they
+  are claims about a deploy that has not happened. Contract:
+  `docs/release-arming/README.md`.
 
 Authority for the protocol: AGENTS.md § Engine-service release
 (nexus-1emxn refinement paragraph) — this step carries the operational
