@@ -49,8 +49,12 @@ _TEST_TREE = _REPO / "service" / "src" / "test" / "java"
 #: are CEILINGS: lower them whenever a file is migrated to TestHttp, never raise
 #: them. A raise means a new test shipped able to wedge the box for half an hour
 #: — use ``TestHttp.client()`` / ``TestHttp.request(uri)`` instead.
-MAX_BARE_CLIENTS = 43
-MAX_TIMEOUTLESS_REQUESTS = 120
+#: Lowered 2026-09-12 when TupleHandlerWiringTest migrated to TestHttp
+#: (nexus-h61dl.4): its two request helpers and its client now come from there, so
+#: every test in that file carries a timeout instead of three sites relying on
+#: nobody forgetting. 43 -> 42 and 120 -> 118.
+MAX_BARE_CLIENTS = 42
+MAX_TIMEOUTLESS_REQUESTS = 118
 
 _BARE_CLIENT = re.compile(r"HttpClient\.newHttpClient\(\)")
 _REQUEST_BUILDER = re.compile(r"HttpRequest\.newBuilder")

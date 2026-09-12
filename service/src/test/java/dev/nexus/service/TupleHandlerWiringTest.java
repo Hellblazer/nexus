@@ -14,7 +14,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -98,7 +97,7 @@ class TupleHandlerWiringTest {
         withoutRegistry = new NexusService(0, TOKEN, svcDs);
         withoutRegistry.start();
 
-        http = HttpClient.newHttpClient();
+        http = TestHttp.client();
     }
 
     @AfterAll
@@ -222,8 +221,7 @@ class TupleHandlerWiringTest {
     }
 
     private HttpResponse<String> get(NexusService svc, String path) throws Exception {
-        var req = HttpRequest.newBuilder()
-                .uri(URI.create("http://127.0.0.1:" + svc.getPort() + path))
+        var req = TestHttp.request("http://127.0.0.1:" + svc.getPort() + path)
                 .header("Authorization", "Bearer " + TOKEN)
                 .header("X-Nexus-Tenant", TENANT)
                 .GET()
@@ -392,19 +390,11 @@ class TupleHandlerWiringTest {
 
     @Test
     void renew_requiresPost() throws Exception {
-        var req = HttpRequest.newBuilder()
-                .uri(URI.create("http://127.0.0.1:" + withRegistry.getPort() + "/v1/tuples/renew"))
-                .header("Authorization", "Bearer " + TOKEN)
-                .header("X-Nexus-Tenant", TENANT)
-                .GET()
-                .build();
-        var resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-        assertThat(resp.statusCode()).isEqualTo(405);
+        assertThat(get(withRegistry, "/v1/tuples/renew").statusCode()).isEqualTo(405);
     }
 
     private HttpResponse<String> post(NexusService svc, String path, Object body) throws Exception {
-        var req = HttpRequest.newBuilder()
-                .uri(URI.create("http://127.0.0.1:" + svc.getPort() + path))
+        var req = TestHttp.request("http://127.0.0.1:" + svc.getPort() + path)
                 .header("Authorization", "Bearer " + TOKEN)
                 .header("X-Nexus-Tenant", TENANT)
                 .header("Content-Type", "application/json")
