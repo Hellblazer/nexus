@@ -362,4 +362,77 @@ class TupleAckWithReplyTest {
         assertThat(repo.subspaceStats(TENANT, "mailbox/" + answerer).claimed()).isEqualTo(1);
         assertThat(rowCount("mailbox/" + asker)).isEqualTo(0);
     }
+
+    // ── the refusal path never opens the transaction ─────────────────────────
+
+    /**
+     * The property `ackWithReply`'s javadoc claims: a reply refusal is decided before any
+     * transaction opens, so the request is still claimed because the ack never STARTED,
+     * not because a rollback undid it.
+     *
+     * <p>SCOPE, because this is easy to overread (nexus-h61dl.3 review). End-state
+     * assertions cannot tell the two designs apart: `TenantScope` rolls back on any
+     * RuntimeException, so every refusal test in this file would pass identically under a
+     * naive "do it all in one transaction and rely on rollback" implementation. What this
+     * test adds is one observation an end state cannot give -- `consumeClaim` never ran.
+     * The seam fires between `liveClaimRow`'s read and the compare-and-swap update, so if
+     * a validation that currently sits in `prepareOut` were moved into the transaction
+     * lambda (which runs `consumeClaim` first), the counter would be 1 and this fails.
+     *
+     * <p>It does NOT prove the transaction never opened, and a hypothetical rewrite that
+     * validated the reply inside the lambda BEFORE consuming would still pass. That
+     * rewrite is not the regression worth guarding; migrating a check out of `prepareOut`
+     * into the existing lambda is, and that is what this catches.
+     */
+    @Test
+    void aRefusedReplyNeverOpensTheTransaction() {
+        String asker = addr("asker");
+        String answerer = addr("answerer");
+        String claimId = requestAndClaim(answerer, "worker-1");
+        var claimReads = new java.util.concurrent.atomic.AtomicInteger();
+        TupleRepository.TEST_ONLY_ACK_NACK_READ_TO_UPDATE_DELAY = claimReads::incrementAndGet;
+        try {
+            var bad = new TupleRepository.ReplySpec(
+                    "mailbox/" + asker, Map.of("to", asker, "nope", "x"),
+                    Map.of("from", "answerer"), "body", null);
+            assertThatExceptionOfType(SchemaViolationException.class)
+                    .isThrownBy(() -> repo.ackWithReply(TENANT, claimId, "worker-1", bad));
+            assertThat(claimReads.get())
+                    .as("a refused reply must not have reached consumeClaim, so the request "
+                        + "is still claimed because the ack never started")
+                    .isZero();
+
+            // The control: a VALID reply on the same claim does reach it, so the counter
+            // above is measuring something rather than never incrementing at all.
+            repo.ackWithReply(TENANT, claimId, "worker-1", reply(asker, "fine", null));
+            assertThat(claimReads.get()).as("the seam does fire on the accepted path").isEqualTo(1);
+        } finally {
+            TupleRepository.TEST_ONLY_ACK_NACK_READ_TO_UPDATE_DELAY = () -> { };
+        }
+    }
+
+    // ── out()'s validation order, unchanged by the Step 2 extraction ─────────
+
+    /**
+     * `out` raises on a MISSING NONCE before it raises on a bad ttl. Both reviewers of
+     * nexus-h61dl.3 found that the extraction had silently swapped these: the combined
+     * `validateOut` checked shape and nonce together, ahead of the ttl checks, and the
+     * split moved the nonce check after them, flipping which exception a caller sees when
+     * a call violates both at once.
+     *
+     * <p>The 50-case `TupleRepositoryTest` pin did not catch it because no case combines
+     * the two violations: its ttl case uses the nonce-free ledger template and its
+     * missing-nonce case passes ttl=null. This is that missing case. Swapping the two
+     * checks back in `prepareOut` fails it.
+     */
+    @Test
+    void outRaisesOnAMissingNonceBeforeAnOverLongTtl() {
+        String to = addr("order");
+        assertThatExceptionOfType(SchemaViolationException.class)
+                .isThrownBy(() -> repo.out(TENANT, "mailbox/" + to, Map.of("to", to),
+                        Map.of("from", "asker"), "body", null, 99_999_999L))
+                .satisfies(e -> assertThat(e.field())
+                        .as("the NONCE is the rejected field, not the ttl")
+                        .isEqualTo("nonce"));
+    }
 }

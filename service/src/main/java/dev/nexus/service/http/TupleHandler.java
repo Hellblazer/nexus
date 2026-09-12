@@ -42,7 +42,8 @@ import java.util.Optional;
  *   POST /v1/tuples/rdp             {subspace, keys_pattern?, n?, since?} -&gt; {"tuples": [...]}
  *   POST /v1/tuples/in              {subspace, keys_pattern, claimant, lease_s, timeout_s?} -&gt; {"tuple": ..|null, "claim_id": ..|null}
  *   POST /v1/tuples/inp             {subspace, keys_pattern, claimant, lease_s} -&gt; same shape as /in
- *   POST /v1/tuples/ack             {claim_id, claimant} -&gt; {"acked": true}
+ *   POST /v1/tuples/ack             {claim_id, claimant, reply?{subspace, keys, dims?, body?, ttl_seconds?}}
+ *                                   -&gt; {"acked": true, "reply_id": "&lt;hex&gt;"|null}
  *   POST /v1/tuples/nack            {claim_id, claimant} -&gt; {"nacked": true}
  *   GET  /v1/tuples/registry        -&gt; {"digest", "sources", "templates": [...]}
  *   GET  /v1/tuples/subspace_list   ?prefix= -&gt; {"subspaces": [...]}

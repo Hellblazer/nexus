@@ -242,7 +242,7 @@ public final class TupleRepository {
      * interval conversions. The tuple id is NOT here, because {@code ackWithReply} cannot
      * compute a reply's id until the request it consumed hands back the nonce.
      *
-     * <p>The split is load-bearing rather than cosmetic (RDR-206 Phase 1 Step 2). Every
+     * <p>The split does real work rather than tidying (RDR-206 Phase 1 Step 2). Every
      * way a reply can be refused must leave the request STILL CLAIMED, and if validation
      * ran inside the transaction that guarantee would rest on the rollback restoring the
      * claim rather than on the ack never having started. Those look identical in an
@@ -256,11 +256,22 @@ public final class TupleRepository {
     }
 
     private PreparedOut prepareOut(String subspace, Map<String, String> keys,
-                                   Map<String, String> dims, Long ttlSecondsOrNull) {
+                                   Map<String, String> dims, Long ttlSecondsOrNull,
+                                   String nonce, boolean nonceDeferred) {
         TemplateSchema t = resolveOrThrow(subspace);
         Map<String, String> keysSafe = keys == null ? Map.of() : keys;
         Map<String, String> dimsSafe = dims == null ? Map.of() : dims;
         validateOutShape(t, keysSafe, dimsSafe);
+        // The nonce check runs HERE, between the shape checks and the ttl checks,
+        // because that is where the combined validateOut ran it before this split.
+        // Moving it after the ttl checks changed which exception `out` raises when a
+        // call violates both at once, and no test covered that pair (nexus-h61dl.3
+        // review, found independently by both reviewers). `ackWithReply` defers it:
+        // a reply's nonce is hex(request id) and does not exist until the request has
+        // been consumed, so there is nothing to check at this point on that path.
+        if (!nonceDeferred) {
+            validateNonce(t, nonce);
+        }
 
         if (ttlSecondsOrNull != null && ttlSecondsOrNull <= 0) {
             throw new SchemaViolationException("ttl_seconds", "must be positive");
@@ -313,8 +324,7 @@ public final class TupleRepository {
     /** {@code out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> id}. */
     public byte[] out(String tenant, String subspace, Map<String, String> keys, Map<String, String> dims,
                        String body, String nonce, Long ttlSecondsOrNull) {
-        PreparedOut prepared = prepareOut(subspace, keys, dims, ttlSecondsOrNull);
-        validateNonce(prepared.template(), nonce);
+        PreparedOut prepared = prepareOut(subspace, keys, dims, ttlSecondsOrNull, nonce, false);
         byte[] id = computeId(tenant, prepared.subspace(), prepared.template(),
                 prepared.keys(), prepared.dims(), nonce, body);
         byte[] result = tenantScope.withTenant(tenant, ctx -> writeOut(ctx, tenant, prepared, body, id));
@@ -779,10 +789,21 @@ public final class TupleRepository {
      * Ordering inside the transaction is immaterial and deliberately unpinned (RDR-206
      * amendment 1c8f109da): only atomicity is a contract.
      *
-     * <p>Every refusal happens BEFORE the transaction opens, so the request is still
-     * claimed and no reply row exists. That is a stronger guarantee than a rollback would
-     * give, because a rollback produces the same end state while depending on the ack
-     * having started; see {@link #prepareOut}.
+     * <p>Every way the REPLY can be refused happens before the transaction opens, so the
+     * request is still claimed and no reply row exists. That is a stronger guarantee than
+     * a rollback would give, because a rollback produces the same end state while
+     * depending on the ack having started; see {@link #prepareOut}. The scoping word
+     * carries the whole claim and was missing here for one commit: a refusal of the CLAIM
+     * itself
+     * (stale claim id, wrong claimant) is raised by {@code consumeClaim} INSIDE the
+     * transaction, exactly as a plain {@code ack} always has, and relies on rollback like
+     * any other. For a stale claim the request is not "still claimed" at all -- someone
+     * else consumed it, which is why the call failed.
+     *
+     * <p>The before-the-transaction property is enforced by code placement and pinned
+     * only in the narrow sense {@code aRefusedReplyNeverOpensTheTransaction} describes;
+     * read that test's scope note before assuming the suite would catch a check that
+     * migrated inside.
      *
      * <p>The reply's target template MUST be {@code id_from: keys+nonce}. A {@code keys}
      * template ignores the nonce in {@code computeId}, so two replies to the same keys
@@ -796,7 +817,7 @@ public final class TupleRepository {
             return null;
         }
         PreparedOut prepared = prepareOut(reply.subspace(), reply.keys(), reply.dims(),
-                reply.ttlSeconds());
+                reply.ttlSeconds(), null, /* nonceDeferred */ true);
         if (prepared.template().idFrom() != TemplateSchema.IdFrom.KEYS_NONCE) {
             throw new SchemaViolationException("reply.subspace",
                     "reply target template '" + prepared.template().name() + "' is id_from="
