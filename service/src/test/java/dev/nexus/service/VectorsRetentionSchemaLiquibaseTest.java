@@ -261,4 +261,54 @@ class VectorsRetentionSchemaLiquibaseTest {
                 .isInstanceOf(DataAccessException.class);
         }
     }
+    /**
+     * The 9 plain/text-gated search functions reach nexus_svc through PostgreSQL's
+     * PUBLIC EXECUTE default, NOT through an explicit grant, and that is recorded
+     * here as intentional rather than left as an unexamined asymmetry (nexus-ippbx).
+     *
+     * <p>Measured on production 2026-09-12 during the engine-service-v0.1.116
+     * fork-walk rehearsal: the 12 combined-query functions carry an explicit
+     * {@code nexus_svc=X} in proacl, while these 9 have proacl NULL. So
+     * vectors-016-1's DROP genuinely discarded explicit grants and vectors-016-2
+     * restores exactly what it removed, whereas vectors-015-1 has nothing to
+     * restore and its silence preserves the status quo. A vectors-015-2 granting
+     * these 9 explicitly was drafted and DELIBERATELY NOT SHIPPED: it would have
+     * been a live ACL change on 9 functions that no measured defect required, and
+     * a new changeset for every future deploy to walk.
+     *
+     * <p>What this pins is the property that actually matters -- nexus_svc can
+     * CALL them -- so the reliance cannot become a silent outage. It fails if
+     * someone REVOKEs PUBLIC EXECUTE anywhere in the schema, or DROPs one of these
+     * functions and re-creates it in a way that loses access. That is the
+     * operational risk the asymmetry carries, and it is now caught here rather
+     * than in production.
+     *
+     * <p>Uses {@code has_function_privilege} (effective access) and NOT
+     * {@code hasExplicitRoutineGrant}: here the PUBLIC default is the mechanism
+     * under test, so counting it is correct. The sibling assertion in
+     * CombinedQueryRetentionTest wants the opposite and says so.
+     */
+    @Test
+    void allNineSearchFunctions_areExecutableByNexusSvc() throws Exception {
+        try (var pg = PgContainerHelper.start();
+             Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            for (int dim : new int[]{384, 768, 1024}) {
+                String vec = "nexus.vector";
+                String[] sigs = {
+                    "nexus.plain_search_" + dim + "(" + vec + ", text[], jsonb, text, int)",
+                    "nexus.text_gated_search_hnsw_first_" + dim + "(" + vec + ", text, text[], jsonb, text, int)",
+                    "nexus.text_gated_search_by_chash_" + dim + "(" + vec + ", bytea[], text[], jsonb, text, int)",
+                };
+                for (String sig : sigs) {
+                    assertThat(PgCatalogProbes.canExecuteFunction(ctx, "nexus_svc", sig))
+                        .as("nexus_svc must be able to EXECUTE %s -- these 9 reach it via the "
+                            + "PUBLIC default rather than an explicit grant (nexus-ippbx), so a "
+                            + "REVOKE of PUBLIC or a DROP that loses access breaks search here "
+                            + "rather than in production", sig)
+                        .isTrue();
+                }
+            }
+        }
+    }
 }
