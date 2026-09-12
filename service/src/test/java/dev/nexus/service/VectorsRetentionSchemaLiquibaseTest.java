@@ -208,6 +208,33 @@ class VectorsRetentionSchemaLiquibaseTest {
         }
     }
 
+    /**
+     * chunks_content_retention_consistent is now added NOT VALID (vectors-014-1) and
+     * separately VALIDATEd (vectors-014-2) — a conexus deploy-side revision (unreleased)
+     * to avoid an ACCESS EXCLUSIVE full-table scan on a ~440k-row production table. This
+     * asserts the END STATE a fresh Liquibase walk reaches is unchanged by the split: the
+     * constraint exists AND {@code pg_constraint.convalidated} is {@code true} — i.e. the
+     * two-changeset split is genuinely transparent to every consumer of the constraint,
+     * not just "the constraint is present" (which NOT VALID alone would already satisfy).
+     */
+    @Test
+    void biconditionalCheck_existsAndIsValidated() throws Exception {
+        try (var pg = PgContainerHelper.start();
+             Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+
+            assertThat(PgCatalogProbes.constraintExists(ctx, "chunks_content_retention_consistent"))
+                .as("chunks_content_retention_consistent must exist after the full walk "
+                    + "(vectors-014-1's ADD CONSTRAINT ... NOT VALID)")
+                .isTrue();
+            assertThat(PgCatalogProbes.constraintValidated(ctx, "chunks_content_retention_consistent"))
+                .as("chunks_content_retention_consistent must be VALIDATED after the full "
+                    + "walk (vectors-014-2's ALTER TABLE ... VALIDATE CONSTRAINT) -- NOT "
+                    + "VALID alone is not the end state a fresh install reaches")
+                .isTrue();
+        }
+    }
+
     @Test
     void biconditionalCheck_rejectsNonNullContentMarkedReferenceOnly() throws Exception {
         try (var pg = PgContainerHelper.start();

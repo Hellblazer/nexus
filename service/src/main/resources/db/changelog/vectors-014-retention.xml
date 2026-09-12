@@ -85,7 +85,14 @@
     the pre-migration shape and the ALTER COLUMN ... SET NOT NULL will
     fail loud (not silently coerce) if one exists. This is deliberate: a
     rollback that silently deleted or NULL-coerced live docuverse data
-    would be worse than a rollback that refuses.
+    would be worse than a rollback that refuses. The biconditional CHECK
+    is now added across TWO changesets (vectors-014-1: ADD CONSTRAINT ...
+    NOT VALID; vectors-014-2: VALIDATE CONSTRAINT), an unreleased revision
+    to avoid an ACCESS EXCLUSIVE full-table scan on deploy (see
+    vectors-014-1's own comment) - rollback still drops the SAME one
+    constraint, just with vectors-014-2's rollback owning the DROP (it
+    runs first, in reverse-chronological order) and vectors-014-1's
+    rollback no longer repeating it.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
@@ -103,7 +110,16 @@
             future write path bypassing the two existing paths' own
             discipline. chunk_tsv generated expression, exactly_one_embedding
             CHECK, tenant_id NOT NULL, and RLS are all unchanged (see file
-            header).
+            header). The biconditional CHECK is added NOT VALID (conexus
+            deploy-side directive, unreleased): plain ADD CONSTRAINT takes
+            ACCESS EXCLUSIVE and full-scans nexus.chunks to verify every
+            existing row before the lock is even granted to release -
+            ~440k rows in production, an outage-shaped lock hold for what
+            is otherwise a routine additive migration. NOT VALID skips that
+            scan (only new/updated rows are checked going forward); the
+            following changeset (vectors-014-2) validates the existing data
+            separately, under SHARE UPDATE EXCLUSIVE, which does not block
+            ordinary reads/writes the way ACCESS EXCLUSIVE does.
         </comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.chunks
@@ -115,13 +131,15 @@ ALTER TABLE nexus.chunks
 
 ALTER TABLE nexus.chunks
     ADD CONSTRAINT chunks_content_retention_consistent
-    CHECK ((chunk_text IS NULL) = (retention = 'reference-only'));
+    CHECK ((chunk_text IS NULL) = (retention = 'reference-only')) NOT VALID;
         </sql>
         <rollback>
+            <!-- chunks_content_retention_consistent is dropped by vectors-014-2's own
+                 rollback (which runs FIRST in reverse-chronological order, since it is
+                 the LATER changeset) - this rollback no longer repeats that DROP so the
+                 pair rolls back cleanly with each changeset undoing exactly what it
+                 added, rather than the constraint being torn down twice. -->
             <sql splitStatements="true" stripComments="false">
-ALTER TABLE nexus.chunks
-    DROP CONSTRAINT IF EXISTS chunks_content_retention_consistent;
-
 ALTER TABLE nexus.chunks
     ALTER COLUMN chunk_text SET NOT NULL;
 
@@ -130,6 +148,30 @@ ALTER TABLE nexus.chunks
 
 ALTER TABLE nexus.chunks
     DROP COLUMN IF EXISTS retention;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-014-2" author="nexus-zw2em">
+        <comment>
+            Validates chunks_content_retention_consistent (added NOT VALID by
+            vectors-014-1) against the existing rows. ALTER TABLE ... VALIDATE
+            CONSTRAINT takes SHARE UPDATE EXCLUSIVE (not ACCESS EXCLUSIVE) and
+            only needs a single pass over the table with no row-level locking
+            of concurrent writers - the standard two-step pattern for adding
+            a CHECK constraint to a large, live table without an availability
+            hit (conexus deploy-side directive, unreleased: without this
+            split, ADD CONSTRAINT alone was measured to full-scan
+            nexus.chunks (~440k rows in production) under ACCESS EXCLUSIVE).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks
+    VALIDATE CONSTRAINT chunks_content_retention_consistent;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks
+    DROP CONSTRAINT IF EXISTS chunks_content_retention_consistent;
             </sql>
         </rollback>
     </changeSet>
