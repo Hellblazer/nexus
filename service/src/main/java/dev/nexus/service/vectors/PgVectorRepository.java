@@ -2301,6 +2301,11 @@ public final class PgVectorRepository {
             row.put("content",    rec.get("content", String.class));
             row.put("distance",   rec.get("distance", Double.class));
             row.put("collection", rec.get("collection", String.class));
+            // RDR-169 Gap 2 remainder (bead nexus-4k1vz): additive, alongside the
+            // already-nullable content -- every combined-query function this method
+            // backs (search_topic_scoped_<dim>) now selects it
+            // (vectors-016-combined-query-retention.xml).
+            row.put("retention",  rec.get("retention", String.class));
             rows.add(row);
         }
         return rows;
@@ -2334,6 +2339,12 @@ public final class PgVectorRepository {
             row.put("distance",   rec.get("distance", Double.class));
             row.put("collection", rec.get("collection", String.class));
             row.put("chash",      rec.get("chash", String.class));
+            // RDR-169 Gap 2 remainder (bead nexus-4k1vz): additive, alongside the
+            // already-nullable content -- every combined-query function this method
+            // backs (search_metadata_scoped_<dim>, search_graph_hop_<dim>,
+            // search_aspect_scoped_<dim>) now selects it
+            // (vectors-016-combined-query-retention.xml).
+            row.put("retention",  rec.get("retention", String.class));
             rows.add(row);
         }
         return rows;
