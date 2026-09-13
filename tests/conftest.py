@@ -780,6 +780,19 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # poll tick -- appear and vanish during any pytest run that overlaps
     # another session's /clear on this box. Observed 2026-08-21 (78blw run).
     "t1_handoff.",
+    # Mailbox push delivery state (epic nexus-6konb, live since 7.44.0):
+    # every armed `nx tuple watch` Monitor on the box rewrites its seen-set,
+    # cursor and lock files and its per-session instance registration
+    # (addresses.d/), the SessionStart hook writes session.<claude_pid> on
+    # every source and the arm-probe cache, and the UserPromptSubmit drain
+    # hook (conexus/hooks/scripts/mailbox_drain.py) keeps its pending and
+    # seen files here, all independent of pytest. MEASURED 2026-09-13: with
+    # live watchers armed by restarted sessions, every run of
+    # tests/test_native_smoke_client_probes.py failed this guard on
+    # tuple-watch/*.json while its tests passed. Unit tests pass state_dir
+    # or resolve the config dir through the autouse `_isolate_config_dir`
+    # tmp path, so they never write the real directory.
+    "tuple-watch/",
 )
 
 
