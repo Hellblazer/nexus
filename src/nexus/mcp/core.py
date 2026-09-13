@@ -2509,8 +2509,11 @@ def search(
     `search_graph_hop` when the search should be scoped by catalog metadata,
     an extracted aspect field, or graph neighbours, respectively.
 
-    Returns a ranked, human-readable list of chunks by default, or
-    `{ids, tumblers, distances, collections}` when `structured=True`.
+    Returns a ranked, human-readable list of chunks by default, or, when
+    `structured=True`, `{ids, tumblers, distances, collections,
+    chunk_collections, chunk_text_hash, truncated, truncated_chars, text}`:
+    `truncated`/`truncated_chars` say whether the text rendering cut the
+    page and by how much, and `text` is that rendering.
 
     Constraints:
     - Paged: `limit` <= 300 per call; advance with `offset`.
@@ -3187,7 +3190,7 @@ def search_topic_scoped(
     with a topic pre-filter and don't need chunk-level ids; use this tool
     only when the caller needs the structured chunk-chash ids directly.
     Returns a human-readable ranked list, or
-    `{ids, tumblers, distances, collections}` (`tumblers` is always empty —
+    `{ids, tumblers, distances, collections, contents}` (`tumblers` is always empty —
     results are chunk-level, not document-level) when `structured=True`.
 
     Constraints:
@@ -9050,7 +9053,6 @@ async def nx_answer(
     `structured=True`.
 
     Constraints:
-    - Not sub-second; most calls take 30s-4min (see module comment).
     - `budget_usd` is a soft cost guide (warns, does not hard-block, and
       can overshoot); `budget_seconds` is a hard wall-clock cap on plan
       execution only.
@@ -9058,6 +9060,8 @@ async def nx_answer(
       matching `nx_answer_report` call from the caller afterward.
     - A `structured=True` `answer_shape` other than "answered" means
       `final_text` is a one-line notice, not the raw payload.
+    - In text mode a degraded answer starts with `[budget exhausted ...]`
+      (a cost or time budget stopped the plan) or `[non-answer: <shape>]`.
     """
     import time  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
     import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path

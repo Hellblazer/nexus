@@ -210,6 +210,15 @@ def test_no_iso_date_in_parameter_descriptions() -> None:
     )
 
 
+def test_versions_and_rdr_ids_are_not_flagged() -> None:
+    """Negative control: a release version, an engine tag or an RDR id is
+    legitimate description text and must not trip the bead-id or date
+    patterns (cnzei.5 CRE pass)."""
+    for text in ("since 7.19.0", "see RDR-197", "engine-service-v0.1.118", "RDR-205 P4b"):
+        assert not BEAD_ID_RE.search(text), text
+        assert not ISO_DATE_RE.search(text), text
+
+
 def test_planted_bead_id_is_detected() -> None:
     """Non-vacuity: the bead-id regex fires on a real-shaped id and does
     NOT fire on the allowlisted server-name compounds."""

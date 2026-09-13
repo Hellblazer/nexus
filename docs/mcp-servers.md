@@ -217,7 +217,7 @@ Content (chunks, documents, notes) is on `nexus`; metadata and relationships (en
 
 ## Pagination
 
-Three tools return paged results and accept `offset`: `search`, `store_list`, `memory_search`. Response footer:
+Seven tools return paged results and accept `offset`: `search`, `store_list`, `memory_search` and `plan_search` on the nexus server, and `search`, `list` and `link_query` on the nexus-catalog server. The nexus tools end with a footer; the catalog tools add a `_pagination` entry carrying `next_offset` instead. Footer:
 
 ```
 --- showing 1-20 of 57. next: offset=20
