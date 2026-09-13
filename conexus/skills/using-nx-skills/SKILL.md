@@ -25,7 +25,7 @@ After a successful pipeline:
 Before code:
 - About to implement with no design of record → `/conexus:brainstorming-gate` (mandatory; a locked T2 memo, accepted RDR, or reviewed bead is the approved design, so implement it without re-gating)
 - Multi-step → `/conexus:create-plan`
-- Needs design across modules → `/conexus:architecture` then `/conexus:create-plan`
+- Needs design across modules → `/conexus:create-plan` then `/conexus:architecture` (architecture/SKILL.md's own Pipeline Position: strategic-planner -> nx_plan_audit -> architect-planner)
 
 Something broken:
 - Failure, exception, or unexpected behaviour → `/conexus:debug` immediately

@@ -177,12 +177,19 @@ dispatch below.
 
 ## Quick Routing
 
+The pipeline order below is `registry.yaml`'s own `pipelines:` section, not a
+second copy — this table restates it for quick lookup; `registry.yaml` is
+the one place to change it. `feature`/`bug` there always run BOTH reviewers
+(non-interchangeable, see development/SKILL.md § Post-Implementation
+Review); an "Implement code" pipeline that omits either one is a stale
+drift, not a variant.
+
 | Request Type | Primary Agent | Pipeline |
 |-------------|---------------|----------|
 | Plan a feature | strategic-planner | -> nx_plan_audit -> architect-planner |
-| Implement code | developer | -> code-review-expert -> test-validator |
+| Implement code | developer | -> code-review-expert -> substantive-critic -> test-validator |
 | Debug issue | debugger | -> (if cross-cutting) deep-analyst |
-| Review code | code-review-expert | -> substantive-critic (always, both reviewers) |
+| Review code | code-review-expert | -> substantive-critic (always, both reviewers — same gate as "Implement code" above) |
 | Research topic | deep-research-synthesizer | -> store_put (direct) |
 | Analyze system | codebase-deep-analyzer | -> (if deep) deep-analyst |
 
@@ -232,10 +239,13 @@ sweep that fits in one shell command is one shell command; never dispatch a
 subagent to verify your own work.
 
 This restraint does NOT apply to the two-reviewer gate
-(`code-review-expert` + `substantive-critic`, `~/.claude/CLAUDE.md` §
-Review Discipline) or to independent-state fork fleets (disjoint files, no
-shared mutable state). Both do genuinely more than "a handful of tool
-calls" worth of independent work, and serializing either buys no safety
-(see `~/.claude/CLAUDE.md` § Testing, "serial-vs-parallel: share a mutable
-resource -> serialize"). See § Parallel-Orchestration Discipline for the
-fleet-size cap that bounds the second case.
+(`code-review-expert` + `substantive-critic`, mandatory and non-
+interchangeable — see § Quick Routing above and development/SKILL.md §
+Post-Implementation Review + Commit) or to independent-state fork fleets
+(disjoint files, no shared mutable state). Both do genuinely more than "a
+handful of tool calls" worth of independent work, and serializing either
+buys no safety — the opposite case, sharing a mutable resource, IS where
+serialization is required: see "service/ builds: one builder at a time"
+above (§ Parallel-Orchestration Discipline items) for the concrete example.
+See § Parallel-Orchestration Discipline for the fleet-size cap that bounds
+the second case.

@@ -460,3 +460,20 @@ instead — same strategy nexus-cnzei.4 used for the "debug"/"research"/"review"
   (`code-review`, `Explore`/`codebase-deep-analyzer`), not only the always-empty `TASK_TEXT`
   the harness never populates in a real dispatch (injection audit S1). `TASK_TEXT` stays as
   a fallback OR-condition. Inert until the pin advances.
+- `conexus/registry.yaml` (nexus-cnzei.6): `pipelines.feature`/`pipelines.bug` sequences
+  gain `substantive-critic` after `code-review-expert` — they omitted it entirely, contradicting
+  development/SKILL.md's mandatory-both-reviewers gate (injection audit C5). This `pipelines:`
+  section is now the one place the implement-code pipeline order lives; orchestration/SKILL.md's
+  Quick Routing table points here instead of carrying its own copy. Inert until the pin advances.
+- `conexus/skills/orchestration/SKILL.md` (nexus-cnzei.6): Quick Routing's "Implement code" row
+  gains `-> substantive-critic`, matching the fixed registry.yaml pipeline and
+  development/SKILL.md's existing mandatory-both-reviewers rule. Replaced two stale
+  `~/.claude/CLAUDE.md § Review Discipline` / `§ Testing "serial-vs-parallel"` citations (neither
+  section exists in that file — injection audit S6) with pointers at the real in-repo locations
+  (development/SKILL.md § Post-Implementation Review + Commit; this same file's own
+  "service/ builds: one builder at a time" paragraph). Inert until the pin advances.
+- `conexus/skills/using-nx-skills/SKILL.md` (nexus-cnzei.6): "Needs design across modules" line
+  reordered from `/conexus:architecture` then `/conexus:create-plan` to the reverse — matching
+  architecture/SKILL.md's own stated Pipeline Position (strategic-planner before
+  architect-planner) and registry.yaml's `architect-planner` predecessor, which the old wording
+  contradicted (injection audit C5). Inert until the pin advances.

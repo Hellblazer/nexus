@@ -564,6 +564,15 @@ standalone_skills:
 # =============================================================================
 # Common agent sequences for different work types
 
+# nexus-cnzei.6: this `sequence:` list is the ONE canonical pipeline order —
+# orchestration/SKILL.md's Quick Routing table and development/SKILL.md's
+# Post-Implementation Review section both point here rather than restating
+# their own copy (the audit behind nexus-cnzei found the two disagreeing:
+# orchestration omitted substantive-critic from the implement-code row while
+# development/SKILL.md § Post-Implementation Review always required both
+# reviewers). code-review-expert and substantive-critic are BOTH mandatory,
+# non-interchangeable, every implementation — see development/SKILL.md for
+# why (they catch different, non-overlapping classes of issue).
 pipelines:
   feature:
     description: "Full feature development from planning to validation"
@@ -572,6 +581,7 @@ pipelines:
       - architect-planner
       - developer
       - code-review-expert
+      - substantive-critic
       - test-validator
 
   bug:
@@ -580,6 +590,7 @@ pipelines:
       - debugger
       - developer
       - code-review-expert
+      - substantive-critic
       - test-validator
 
   research:
