@@ -171,21 +171,23 @@ def mailbox_arm_instruction(session_id: str) -> str:
     spawns.
 
     Carries the session id in the Monitor's own ``description`` (nexus-
-    6konb.10, MM-3.2), never just in a header line: a Monitor SURVIVES
-    ``/clear``, ``/compact`` and an in-process ``/resume`` (T2
-    nexus/mm-3.2-clear-resume-monitor-survival-measured-2026-09-13,
-    nexus/mm-0.1-monitor-compact-survival-measured-2026-09-12), so a
-    session firing this instruction again may find one already running --
-    described with either THIS session's id (survived /compact or
-    /resume: no action needed) or a DIFFERENT one (survived /clear: it is
-    watching an address nobody uses any more and must be stopped before
-    the new one is armed, since the per-address lock it still holds would
-    otherwise refuse the replacement outright).
+    6konb.10, MM-3.2): a Monitor SURVIVES ``/clear``, ``/compact`` and an
+    in-process ``/resume`` (T2 nexus/mm-3.2-clear-resume-monitor-survival-
+    measured-2026-09-13, nexus/mm-0.1-monitor-compact-survival-measured-
+    2026-09-12), so a session firing this instruction again may find one
+    already running from before. No TaskStop step is needed for that,
+    unlike an earlier version of this instruction: a watcher from before a
+    ``/clear`` or ``/resume`` DISCOVERS the change itself (nexus-6konb.12,
+    MM-3.4 fix 1 -- :func:`nexus.tuple_watch.run_watch`'s per-cycle check
+    against the marker ``nexus.hooks`` writes) and stops on its own,
+    releasing its lock for the replacement Monitor this instruction arms.
+    The old TaskStop rule could never have worked after a genuine
+    ``/clear`` in the first place: the fresh conversation running this
+    instruction has no memory of the OLD Monitor's harness task id, so
+    there was no way for a model to discover what to stop.
     """
     return (
-        f"{ARM_MARKER}: arm once, now. A Monitor described \"mailbox watch "
-        "<other session id>\" is stale after /clear: TaskStop it, then arm. "
-        f'One described "mailbox watch {session_id}" needs no action.\n'
+        f"{ARM_MARKER}: arm once, now.\n"
         "    Monitor({\n"
         '      command: "nx tuple watch --instance <your ListAgents name>",\n'
         f'      description: "mailbox watch {session_id}",\n'
@@ -193,12 +195,13 @@ def mailbox_arm_instruction(session_id: str) -> str:
         "      timeout_ms: 3600000\n"
         "    })\n"
         "Without a name, omit --instance. Arming twice is harmless (a lock "
-        "refuses the second). Each line is a ping, never the message; the "
-        "watcher never claims: call mcp__plugin_conexus_nexus__tuple_in on "
-        "the named mailbox, handle it, then "
-        "mcp__plugin_conexus_nexus__tuple_ack (with reply for a request) or "
-        "mcp__plugin_conexus_nexus__tuple_nack. An unacked claim lapses, and "
-        "after three lapses it is dead-lettered."
+        "refuses the second); a watcher from before a /clear or /resume "
+        "stops itself and says so, then this instruction re-arms it. Each "
+        "line is a ping, never the message; the watcher never claims: call "
+        "mcp__plugin_conexus_nexus__tuple_in on the named mailbox, handle "
+        "it, then mcp__plugin_conexus_nexus__tuple_ack (with reply for a "
+        "request) or mcp__plugin_conexus_nexus__tuple_nack. An unacked "
+        "claim lapses, and after three lapses it is dead-lettered."
     )
 
 

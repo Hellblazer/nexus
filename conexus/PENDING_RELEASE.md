@@ -70,11 +70,15 @@ mechanize, it matters enough to ship.
   with `tuple_in` then ack or nack, the watcher is additive to the drain hook, and
   `/loop`, `/schedule` and prose poll loops are banned substitutes), plus a Success
   Criteria row. Also carries a nexus-6konb.10 (MM-3.2) addition: since a Monitor
-  survives `/clear`/`/compact`/an in-process `/resume`, the rule now states the
-  stale-watcher TaskStop step -- a watcher described with a DIFFERENT session id
-  is stale from a prior `/clear` and must be stopped before arming the
-  replacement, while one already running with THIS session's id needs no action.
-  Inert until the pin advances. Bead nexus-6konb.11 (MM-3.3), nexus-6konb.10 (MM-3.2).
+  survives `/clear`/`/compact`/an in-process `/resume`, the rule states what a
+  watcher from before a `/clear` or `/resume` does about it. UPDATED at
+  nexus-6konb.12 (MM-3.4 fix 1): the stale-watcher step no longer tells the model
+  to TaskStop it -- that could never work post-`/clear` (a fresh conversation has
+  no memory of the old Monitor's harness task id) -- it now says the watcher
+  discovers the change itself, from a marker the SessionStart hook writes for its
+  own claude ancestor pid, and stops on its own; the model just re-arms with the
+  same `Monitor` call. Inert until the pin advances. Bead nexus-6konb.11 (MM-3.3),
+  nexus-6konb.10 (MM-3.2), nexus-6konb.12 (MM-3.4).
 - nexus-h61dl.9 — `conexus/hooks/scripts/auto-approve-nx-mcp.sh`: auto-approves
   `mcp__plugin_conexus_nexus__tuple_renew`. Until the pin advances, a session
   running a client that registers the tool is prompted on every renew call.

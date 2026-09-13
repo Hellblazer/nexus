@@ -229,6 +229,75 @@ class TestT1HandoffMarkerWriter:
         assert "Nexus ready" in output
 
 
+# ── tuple-watch session marker writer (nexus-6konb.12, MM-3.4 fix 1) ────────
+#
+# On source=clear/resume, session_start() ALSO writes the tuple-watch
+# stale-self-stop marker (nexus.tuple_watch.write_session_marker) for the
+# hook's own claude ancestor pid, alongside (not instead of) the T1 handoff
+# marker above -- same source gate, same claude-pid derivation, different
+# consumer (a live ``nx tuple watch`` Monitor rather than the MCP lifespan).
+
+
+class TestTupleWatchSessionMarkerWriter:
+    def _session_start(self, monkeypatch, tmp_path, *, source, claude_pid=4242):
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        with (
+            patch("nexus.hooks.write_claude_session_id"),
+            patch("nexus.session.find_immediate_claude_pid", return_value=claude_pid),
+            patch("nexus.session.find_mcp_sibling_pids", return_value=[]),
+        ):
+            return session_start(claude_session_id="new-sess-id", source=source)
+
+    def test_clear_writes_the_session_marker(self, tmp_path, monkeypatch) -> None:
+        from nexus.tuple_watch import session_marker_path
+
+        self._session_start(monkeypatch, tmp_path, source="clear", claude_pid=4242)
+        marker = session_marker_path(tmp_path, 4242)
+        assert marker.is_file()
+        assert marker.read_text(encoding="utf-8").strip() == "new-sess-id"
+
+    def test_resume_writes_the_session_marker(self, tmp_path, monkeypatch) -> None:
+        from nexus.tuple_watch import session_marker_path
+
+        self._session_start(monkeypatch, tmp_path, source="resume", claude_pid=4242)
+        marker = session_marker_path(tmp_path, 4242)
+        assert marker.is_file()
+        assert marker.read_text(encoding="utf-8").strip() == "new-sess-id"
+
+    def test_startup_writes_no_session_marker(self, tmp_path, monkeypatch) -> None:
+        from nexus.tuple_watch import session_marker_path
+
+        self._session_start(monkeypatch, tmp_path, source="startup", claude_pid=4242)
+        assert not session_marker_path(tmp_path, 4242).exists()
+
+    def test_compact_writes_no_session_marker(self, tmp_path, monkeypatch) -> None:
+        from nexus.tuple_watch import session_marker_path
+
+        self._session_start(monkeypatch, tmp_path, source="compact", claude_pid=4242)
+        assert not session_marker_path(tmp_path, 4242).exists()
+
+    def test_unresolvable_claude_pid_writes_no_session_marker(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        from nexus.tuple_watch import session_marker_path
+
+        self._session_start(monkeypatch, tmp_path, source="clear", claude_pid=0)
+        assert not session_marker_path(tmp_path, 0).exists()
+
+    def test_marker_write_failure_does_not_crash_session_start(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        with (
+            patch("nexus.hooks.write_claude_session_id"),
+            patch("nexus.session.find_immediate_claude_pid", side_effect=RuntimeError("boom")),
+        ):
+            output = session_start(claude_session_id="new-sess-id", source="clear")
+        assert "Nexus ready" in output
+
+
 # ── session_end ──────────────────────────────────────────────────────────────
 
 
@@ -529,6 +598,21 @@ class TestGuidanceByteBudgetIntegration:
     #: out of this bead's scope — see nexus-h33x8.5 dev notes).
     _TOTAL_BUDGET_BYTES = 2000
 
+    #: nexus-6konb.12 (MM-3.4 fix 2): a uuid4()-shaped, 36-char session id --
+    #: the real ``CLAUDE_CODE_SESSION_ID`` / ``generate_session_id()`` shape
+    #: (session.py) -- not a short synthetic literal. code-review-expert's
+    #: stacked-review Critical (T2 nexus/mm34-phase3-cre-pass-2026-09-13)
+    #: measured this exact pin passing ONLY because its prior fixture id
+    #: ("s-h33x8-5-budget", 16 chars) was far shorter than a real one: the
+    #: session id appears in the rendered text (the "Nexus ready" prefix
+    #: and the Monitor's own description), so a real UUID costs more than
+    #: the short fixture id did, and with the OLD arm-instruction text
+    #: (repeating the id 3 times) a real UUID measured 2052B -- OVER this
+    #: 2000B budget -- while the pin stayed green throughout. Fixed by
+    #: nexus-6konb.12 fix 1 (dropping the TaskStop rule and its repeated
+    #: id) bringing this fixture back under budget: measured 1969B.
+    _REAL_SESSION_ID = "61710488-41ff-491f-b656-183042eb1f1b"
+
     def test_session_start_output_under_byte_budget_with_imperative_first(
         self, monkeypatch
     ) -> None:
@@ -547,10 +631,10 @@ class TestGuidanceByteBudgetIntegration:
             # an emitter with its largest block removed is not a budget.
             _patch(
                 "nexus.mailbox_arm.arm_block",
-                return_value=mailbox_arm_instruction("s-h33x8-5-budget"),
+                return_value=mailbox_arm_instruction(self._REAL_SESSION_ID),
             ),
         ):
-            output = session_start(claude_session_id="s-h33x8-5-budget")
+            output = session_start(claude_session_id=self._REAL_SESSION_ID)
         n = len(output.encode("utf-8"))
         assert n < self._TOTAL_BUDGET_BYTES, (
             f"nx hook session-start emitted {n} bytes, budget is "

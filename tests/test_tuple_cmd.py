@@ -18,6 +18,7 @@ from pathlib import Path
 
 from datetime import datetime, timezone
 
+import pytest
 from click.testing import CliRunner
 
 from nexus.commands.tuple_cmd import tuple_group
@@ -1053,6 +1054,58 @@ class TestTupleWatchLock:
         finally:
             holder.release()
 
+    def test_open_failure_mid_loop_releases_every_lock_already_acquired(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-6konb.12 (MM-3.4 fix 5, code-review Minor): an OSError from
+        ``path.open`` mid-loop (disk full, permission change) must not
+        leak the file handles already acquired for earlier addresses in
+        the same call. Before this fix, ``mkdir``/``open`` sat outside
+        the try/except that guards the flock attempt, so an exception
+        there propagated straight out of ``acquire_watch_locks`` with
+        the earlier addresses' handles still open and no ``WatchLocks``
+        object for the caller to release them through -- the caller's
+        own ``locks`` variable is never assigned when this function
+        raises (see ``tuple_cmd.py``'s ``cmd_watch``), so its
+        ``finally: locks.release()`` never ran for them either.
+
+        Asserted directly on the handle's own ``.closed`` state, captured
+        by this test's OWN reference to it (never via a retry-acquire
+        probe): CPython's prompt refcounting can close an unreferenced
+        file object the instant nothing else holds it, which would make a
+        retry-based check pass on the OLD, unfixed code too whenever
+        nothing else happens to keep the raised exception's frame (and
+        its ``handle`` local) alive long enough to observe the leak --
+        exactly the kind of accidental, GC-timing-dependent pass a fix
+        must never rely on. Holding this test's own reference to the
+        SAME handle the function opened sidesteps that: the handle stays
+        alive as long as this test's ``opened`` list does, so its
+        ``.closed`` state reflects only what ``acquire_watch_locks``
+        itself did before re-raising, on any Python implementation.
+        """
+        first, second = _uniq("first"), _uniq("second")
+        second_path = lock_path(tmp_path, second)
+        real_open = Path.open
+        opened: list = []
+
+        def _tracking_open(self: Path, *a, **kw):
+            if self == second_path:
+                raise OSError("disk full")
+            handle = real_open(self, *a, **kw)
+            opened.append(handle)
+            return handle
+
+        monkeypatch.setattr(Path, "open", _tracking_open)
+        with pytest.raises(OSError):
+            acquire_watch_locks([first, second], state_dir=tmp_path, emit=lambda _s: None)
+
+        assert len(opened) == 1, "only `first`'s handle should ever have been opened"
+        assert opened[0].closed, (
+            "acquire_watch_locks must explicitly release every lock it already "
+            "acquired before re-raising, not leave it to whatever the garbage "
+            "collector eventually does"
+        )
+
 
 class TestWatchAddressIsNeverReResolved:
     def test_the_watched_address_never_re_resolves_mid_run(self, t2_service_env, tmp_path,
@@ -1244,6 +1297,116 @@ class TestClearResumeReArm:
             holder.release()
 
 
+# ── nx tuple watch: stale watcher self-stop (MM-3.4 fix 1, nexus-6konb.12) ──
+#
+# Replaces the model-dependent TaskStop rule the SessionStart arm instruction
+# used to carry: a fresh conversation running that instruction after a real
+# /clear has no memory of the OLD Monitor's harness task id, so there was no
+# way for a model to discover what to stop. Instead the watcher discovers the
+# change itself, from the marker nexus.hooks writes on source=clear/resume
+# (session.<claude_pid>, keyed on the SAME claude ancestor pid both sides
+# independently derive -- the nexus-d76vc pattern). Every scenario below
+# crosses session ids on purpose, per this bead's own non-vacuity rule.
+
+
+class _NeverProbed:
+    """A store that must never be asked to probe. If the stale-watcher check
+    did not fire before the per-address loop, this raises loudly rather than
+    returning empty results that would pass the test silently."""
+
+    def rd(self, *a, **kw):
+        raise AssertionError("run_watch probed an address after it should have stopped")
+
+
+class TestStaleWatcherSelfStops:
+    def test_exits_before_probing_when_the_marker_names_a_different_session(
+        self, tmp_path,
+    ) -> None:
+        from nexus.tuple_watch import write_session_marker
+
+        write_session_marker(tmp_path, 4242, "S2")
+        lines: list[str] = []
+        stats = run_watch(
+            _NeverProbed(), ["addr"], config=WatchConfig(), state_dir=tmp_path,
+            iterations=5, emit=lines.append, report=lambda _s: None,
+            now=lambda: 1_800_000_000.0, sleep=lambda _s: None,
+            claude_pid=4242, spawn_session_id="S1",
+        )
+        assert stats.cycles == 0
+        stop_lines = [line for line in lines if "STOP" in line]
+        assert len(stop_lines) == 1
+        assert "S2" in stop_lines[0]
+        assert "S1" in stop_lines[0]
+
+    def test_stays_when_the_marker_names_its_own_session(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        from nexus.tuple_watch import write_session_marker
+
+        write_session_marker(sd, 4242, "S1")
+        lines, reports, clock = [], [], _Clock()
+        stats = run_watch(
+            store, [_uniq("addr")], config=cfg, state_dir=sd, iterations=3,
+            emit=lines.append, report=reports.append, now=clock.now,
+            sleep=lambda _s: None, claude_pid=4242, spawn_session_id="S1",
+        )
+        assert stats.cycles == 3
+        assert not [line for line in lines if "STOP" in line]
+
+    def test_stays_when_no_marker_is_present(self, t2_service_env, tmp_path) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        lines, reports, clock = [], [], _Clock()
+        stats = run_watch(
+            store, [_uniq("addr")], config=cfg, state_dir=sd, iterations=3,
+            emit=lines.append, report=reports.append, now=clock.now,
+            sleep=lambda _s: None, claude_pid=4242, spawn_session_id="S1",
+        )
+        assert stats.cycles == 3
+        assert not [line for line in lines if "STOP" in line]
+
+    def test_a_marker_for_a_different_claude_pid_never_stops_it(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        """Non-vacuity for the pid-keying: crossing session ids alone is not
+        enough -- the marker must also be keyed to THIS watcher's own claude
+        pid, or one peer conversation's /clear would stop a watcher armed by
+        an unrelated conversation on the same box."""
+        store, cfg, sd = _watch_env(tmp_path)
+        from nexus.tuple_watch import write_session_marker
+
+        write_session_marker(sd, 9999, "S2")  # a DIFFERENT claude pid than 4242
+        lines, reports, clock = [], [], _Clock()
+        stats = run_watch(
+            store, [_uniq("addr")], config=cfg, state_dir=sd, iterations=3,
+            emit=lines.append, report=reports.append, now=clock.now,
+            sleep=lambda _s: None, claude_pid=4242, spawn_session_id="S1",
+        )
+        assert stats.cycles == 3
+        assert not [line for line in lines if "STOP" in line]
+
+    def test_no_spawn_session_id_never_checks_the_marker(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        """A caller that never resolved a session id (spawn_session_id=None,
+        the default every pre-existing call site still uses) must behave
+        exactly as before this fix: the marker is never even read, matching
+        the "absent leaves it running" contract, even when the marker file
+        on disk names a different session and WOULD say to stop if read."""
+        from nexus.tuple_watch import write_session_marker
+
+        store, cfg, sd = _watch_env(tmp_path)
+        write_session_marker(sd, 4242, "S2")
+        lines, reports, clock = [], [], _Clock()
+        stats = run_watch(
+            store, [_uniq("addr")], config=cfg, state_dir=sd, iterations=1,
+            emit=lines.append, report=reports.append, now=clock.now,
+            sleep=lambda _s: None, claude_pid=4242,
+        )
+        assert stats.cycles == 1
+        assert not [line for line in lines if "STOP" in line]
+
+
 # ── nx tuple watch: two addresses per session (MM-1.3, nexus-6konb.4) ──────
 
 
@@ -1255,8 +1418,14 @@ class TestWatchAddressResolution:
     def test_explicit_addresses_are_used_verbatim_with_no_resolution(self) -> None:
         r = resolve_watch_addresses(("a", "b"), instance="", session_id="session-xyz")
         assert r.addresses == ["a", "b"]
-        assert r.notices == []
         assert r.error == ""
+        # nexus-6konb.12 (MM-3.4 fix 3): "session-xyz" is not one of the
+        # explicit addresses, so its own mailbox is a degraded-coverage
+        # branch too and must be stated out loud, like every other one
+        # here -- see test_explicit_positional_warns_the_session_id_mailbox_
+        # is_unwatched below for the dedicated pin.
+        assert len(r.notices) == 1
+        assert "session-xyz" not in r.notices[0]
 
     def test_no_addresses_resolves_the_session_and_adds_the_instance(self) -> None:
         r = resolve_watch_addresses((), instance="nexus-19", session_id="session-xyz")
@@ -1298,8 +1467,52 @@ class TestWatchAddressResolution:
         r = resolve_watch_addresses(("only-this",), instance="nexus-19",
                                     session_id="session-xyz")
         assert r.addresses == ["only-this"]
-        assert r.notices == []
         assert r.error == ""
+        # session-xyz is not "only-this", so this is the same degraded-coverage
+        # branch as the test above -- see the dedicated pin below.
+        assert len(r.notices) == 1
+
+    def test_explicit_positional_warns_the_session_id_mailbox_is_unwatched(
+        self,
+    ) -> None:
+        """nexus-6konb.12 (MM-3.4 fix 3, critic Significant 4 / code-review
+        Important 2): every OTHER degraded-coverage branch in this function
+        states the gap out loud; the explicit-positional path was the one
+        silent exception -- a model that deviates from the SessionStart
+        template and types a positional address got no notice at all that
+        its own session-id mailbox went completely unwatched."""
+        r = resolve_watch_addresses(("literal-addr",), instance="",
+                                    session_id="session-xyz")
+        assert r.addresses == ["literal-addr"]
+        assert len(r.notices) == 1
+        assert "WARNING" in r.notices[0]
+        assert "session-id mailbox" in r.notices[0]
+        # never embeds the value (matches this function's other notices, and
+        # what test_cli_explicit_address_wins_over_both_defaults asserts end
+        # to end: neither the session id nor the instance name leaks into
+        # stdout on this path)
+        assert "session-xyz" not in r.notices[0]
+
+    def test_explicit_positional_including_the_session_id_warns_of_nothing(
+        self,
+    ) -> None:
+        """No coverage is actually lost when the session id happens to be
+        one of the explicit addresses, so there is nothing to warn about."""
+        r = resolve_watch_addresses(("session-xyz", "other"), instance="",
+                                    session_id="session-xyz")
+        assert r.addresses == ["session-xyz", "other"]
+        assert r.notices == []
+
+    def test_explicit_positional_with_no_resolvable_session_warns_of_nothing(
+        self,
+    ) -> None:
+        """No session id resolved means there was never a session-id
+        mailbox to lose -- nothing to warn about, matching the default
+        path's own "nothing to watch is a SKIP, not an extra warning"
+        rule for an already-absent session id."""
+        r = resolve_watch_addresses(("literal-addr",), instance="", session_id=None)
+        assert r.addresses == ["literal-addr"]
+        assert r.notices == []
 
 
 class TestWatchTwoAddresses:

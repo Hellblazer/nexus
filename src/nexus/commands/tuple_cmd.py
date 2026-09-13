@@ -446,6 +446,7 @@ def tuple_watch_cmd(
         run_watch(
             store, locks.acquired, config=cfg, state_dir=sd,
             iterations=iterations, emit=click.echo, report=report,
+            spawn_session_id=session_id_from_env,
         )
     except KeyboardInterrupt:
         return

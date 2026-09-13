@@ -101,20 +101,26 @@ class TestMailboxArmInstructionText:
         text = mailbox_arm_instruction("sess-abc")
         assert 'description: "mailbox watch sess-abc"' in text
 
-    def test_states_the_stale_watcher_taskstop_rule(self) -> None:
-        """A Monitor already running under a DIFFERENT session id is stale
-        (it survived a /clear) and must be stopped before arming a fresh
-        one on this session's address."""
+    def test_states_a_stale_watcher_stops_itself_rather_than_taskstop(self) -> None:
+        """nexus-6konb.12 (MM-3.4 fix 1): the model-dependent TaskStop rule
+        cannot work after a genuine /clear -- the fresh conversation
+        running this instruction has no memory of the old Monitor's
+        harness task id. A stale watcher discovers the change itself
+        (the session marker :func:`nexus.tuple_watch.run_watch` checks)
+        and exits; the instruction never asks the model to stop anything."""
         text = mailbox_arm_instruction("sess-abc")
-        assert "TaskStop" in text
-        assert "different session id" in text or "other session id" in text
+        assert "TaskStop" not in text
+        assert "stops itself" in text
 
-    def test_states_the_same_session_no_action_rule(self) -> None:
-        """A Monitor already running described with THIS session's id (it
-        survived a /compact or /resume) needs no action -- re-arming it
-        would just be refused by the per-address lock anyway."""
+    def test_no_repeated_session_id_literal(self) -> None:
+        """The session id must appear at most once in the rendered text
+        (in the Monitor's own description) -- code-review-expert's
+        Critical on the byte-budget stack found the old text repeating it
+        three times, costing 3x the id-length delta over a short test
+        fixture and blowing the 2000-byte per-emitter budget with a real
+        36-char UUID session id."""
         text = mailbox_arm_instruction("sess-abc")
-        assert 'mailbox watch sess-abc" needs no action' in text
+        assert text.count("sess-abc") == 1
 
 
 # ── arm_block: the orchestrator hooks.session_start() calls ────────────────

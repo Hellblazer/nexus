@@ -191,6 +191,44 @@ def _write_t1_handoff_markers(new_session_id: str) -> None:
         _log.debug("t1_handoff_marker_write_failed", error=str(exc))
 
 
+def _write_tuple_watch_session_marker(new_session_id: str) -> None:
+    """nexus-6konb.12 (MM-3.4 fix 1): tell a live ``nx tuple watch`` Monitor
+    from before this ``/clear``/``/resume`` that the conversation is now a
+    different session, so it can stop itself rather than keep holding its
+    per-address lock on a mailbox nobody watches for any more.
+
+    Replaces the SessionStart arm instruction's old TaskStop rule, which
+    could not work in the first place: the fresh conversation it would run
+    in has no memory of the OLD Monitor's harness task id, so there was
+    never a way for it to discover what to stop. This writes a marker the
+    watcher checks ITSELF instead (see :func:`nexus.tuple_watch.run_watch`),
+    reusing the nexus-d76vc T1-handoff pattern immediately above: writer and
+    reader independently derive the SAME claude ancestor pid via
+    :func:`nexus.session.find_immediate_claude_pid`, from different vantage
+    points, rather than passing it between them.
+
+    Gated on the same ``source`` set as :func:`_write_t1_handoff_markers`
+    (``startup`` spawns nothing to notify; ``compact`` keeps the same
+    session id, so there is nothing stale to report) -- see this module's
+    call site in :func:`session_start`.
+
+    Best-effort: any failure (no ``ps``, no config dir, disk error) is
+    logged at debug and swallowed -- a SessionStart hook must never fail
+    the session over a mailbox-watch convenience feature.
+    """
+    try:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import; rare/branch-local path
+        from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — deferred import; rare/branch-local path
+        from nexus.tuple_watch import write_session_marker  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+        claude_pid = find_immediate_claude_pid()
+        if claude_pid <= 0:
+            return
+        write_session_marker(nexus_config_dir(), claude_pid, new_session_id)
+    except Exception as exc:  # noqa: BLE001 — best-effort; hook must never crash session-start over a mailbox-watch convenience feature
+        _log.debug("tuple_watch_session_marker_write_failed", error=str(exc))
+
+
 # -- SessionStart -------------------------------------------------------------
 
 def session_start(claude_session_id: str | None = None, source: str | None = None) -> str:
@@ -231,6 +269,7 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
 
     if source in _T1_HANDOFF_SOURCES and session_id and session_id != "unknown":
         _write_t1_handoff_markers(session_id)
+        _write_tuple_watch_session_marker(session_id)
 
     # nexus-gff3g: do NOT claim "T1 scratch initialized" here. This hook only
     # records the session-id; T1 chroma is owned by the MCP server's FastMCP

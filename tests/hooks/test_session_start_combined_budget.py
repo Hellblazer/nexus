@@ -122,11 +122,27 @@ def _fixture_session_start_hook_output() -> str:
     return "\n".join(lines)
 
 
+#: nexus-6konb.12 (MM-3.4 fix 2): a uuid4()-shaped, 36-char session id -- the
+#: real ``CLAUDE_CODE_SESSION_ID`` / ``generate_session_id()`` shape -- not
+#: the short synthetic literal this pin used before. See
+#: ``TestGuidanceByteBudgetIntegration._REAL_SESSION_ID`` in
+#: tests/test_hooks.py for the sibling pin and the measured-vs-fictional
+#: history this matches.
+_REAL_SESSION_ID = "8154ea0d-6649-4a18-9ef7-ea42818188b0"
+
+
 def _real_guidance_emitter_output() -> str:
     """The REAL ``nx hook session-start`` emitter output (deterministic:
     stale-process probe mocked, matching
-    ``TestGuidanceByteBudgetIntegration`` in tests/test_hooks.py)."""
+    ``TestGuidanceByteBudgetIntegration`` in tests/test_hooks.py). The
+    mailbox-arm block's own availability PROBE is mocked to ``True`` and
+    its text to the REAL rendered instruction (never ``""``) for the same
+    reason ``TestGuidanceByteBudgetIntegration`` mocks it: a budget that
+    measures an emitter with its largest conditional block silently
+    absent, because the ambient probe happened to fail in this run, is
+    not a budget."""
     from nexus.hooks import session_start
+    from nexus.mailbox_arm import mailbox_arm_instruction
 
     class _FakeSkewReport:
         def __init__(self) -> None:
@@ -138,8 +154,12 @@ def _real_guidance_emitter_output() -> str:
             "nexus.upgrade_finish.detect_stale_processes",
             return_value=_FakeSkewReport(),
         ),
+        patch(
+            "nexus.mailbox_arm.arm_block",
+            return_value=mailbox_arm_instruction(_REAL_SESSION_ID),
+        ),
     ):
-        return session_start(claude_session_id="s-h33x8-5-combined-budget")
+        return session_start(claude_session_id=_REAL_SESSION_ID)
 
 
 def test_combined_sessionstart_total_under_6000_bytes(monkeypatch) -> None:

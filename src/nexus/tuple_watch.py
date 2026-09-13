@@ -136,6 +136,16 @@ class WatchConfig:
     # repo's own gates) gives a slower concurrent commit time to land before the
     # cursor is allowed past it, at the cost of re-probing a handful of the most
     # recent rows each cycle -- negligible next to re-walking a large backlog.
+    #
+    # Bounded consequence if this margin is ever exceeded (a commit whose actual
+    # visibility lags its stamped created_at by more than cursor_safety_lag_s):
+    # the persisted cursor can advance past that row's timestamp before the row
+    # is ever queryable via since=, so it is permanently un-cursored -- THIS
+    # WATCHER never pings it, not even via the reemit-healing path above (it is
+    # never added to `seen`). The message itself is not lost: mailbox_drain.py's
+    # floor is independent of this cursor (a fresh since=None probe every prompt,
+    # claiming live rows via /v1/tuples/in unbounded by page), so only the PUSH
+    # notification is silently dropped, never the mail.
     cursor_safety_lag_s: float = 10.0
 
 
@@ -217,6 +227,71 @@ def _save_state(path: Path, st: _AddressState) -> None:
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")
     tmp.replace(path)
+
+
+def session_marker_path(state_dir: Path, claude_pid: int) -> Path:
+    """``<state_dir>/tuple-watch/session.<claude_pid>``: the stale-watcher
+    self-stop marker (nexus-6konb.12, MM-3.4 fix 1). Keyed on the CLAUDE
+    ancestor pid, never a session id -- the whole point is to tell a
+    watcher spawned under an OLDER session that a NEWER one now exists
+    for the same conversation, so the pid has to be the stable half of
+    the pair (see :func:`write_session_marker`).
+    """
+    return state_dir / _STATE_SUBDIR / f"session.{claude_pid}"
+
+
+def write_session_marker(state_dir: Path, claude_pid: int, session_id: str) -> None:
+    """Best-effort, atomic marker naming the NEW session id for
+    *claude_pid* (nexus-6konb.12, MM-3.4 fix 1).
+
+    Replaces the model-dependent TaskStop rule the SessionStart arm
+    instruction used to carry (:mod:`nexus.mailbox_arm`): that rule could
+    not work after ``/clear`` in the first place, because the fresh
+    conversation it would run in has no memory of the OLD Monitor's
+    harness task id -- there was never a way for a genuinely new context
+    to discover it. This marker sidesteps the discovery problem instead
+    of solving it: the watcher checks its OWN pid's marker, not a task
+    id nothing hands it.
+
+    Reuses the nexus-d76vc T1-handoff pattern (:mod:`nexus.daemon.t1_handoff`):
+    the writer (``nexus.hooks.session_start``, on ``/clear``/``/resume``)
+    and the reader (this module's :func:`run_watch`, from inside the
+    Monitor's own shell) each independently derive the SAME claude_pid
+    via :func:`nexus.session.find_immediate_claude_pid`, walking process
+    ancestry from wherever they happen to run up to the first ``claude*``
+    process. The pid is never passed between them -- it is recomputed on
+    both sides, which is what lets a watcher spawned minutes earlier,
+    from a different shell, still find the right file.
+
+    Called only from a best-effort caller (see
+    ``nexus.hooks._write_tuple_watch_session_marker``): a failure here
+    only means a stale watcher keeps running and holding its lock a
+    little longer, never a reason to fail SessionStart over it.
+    """
+    path = session_marker_path(state_dir, claude_pid)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.parent / f"{path.name}.{os.getpid()}.tmp"
+        tmp.write_text(session_id, encoding="utf-8")
+        tmp.replace(path)
+    except OSError as e:  # pragma: no cover — best-effort, disk-failure path
+        _log.debug("tuple_watch_session_marker_write_failed", claude_pid=claude_pid, error=str(e))
+
+
+def _read_session_marker(state_dir: Path, claude_pid: int) -> str | None:
+    """Read the marker :func:`write_session_marker` writes, or ``None`` for
+    anything short of a clean non-empty read -- missing file, unreadable,
+    or empty are the overwhelmingly common per-cycle case (no ``/clear``
+    or ``/resume`` happened since this watcher spawned) and must be
+    indistinguishable from each other: a stop decision is made only on an
+    actual, different session id, never inferred from an absent or
+    unreadable file.
+    """
+    path = session_marker_path(state_dir, claude_pid)
+    try:
+        return path.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
 
 
 def _parse_epoch(created_at: str) -> float | None:
@@ -328,10 +403,24 @@ def resolve_watch_addresses(
     literal-address callers unchanged. Otherwise the session id is watched, the
     instance is added when given, and its ABSENCE is said out loud rather than
     silently halving the watch. Nothing to watch at all is a SKIP, not a warning.
+
+    An explicit list that leaves out this session's own resolved session id is
+    a degraded-coverage branch too (nexus-6konb.12, MM-3.4 fix 3): a model that
+    deviates from the SessionStart template and types a positional address gets
+    exactly what it typed, silently losing the session-id mailbox the default
+    path would have watched -- so this warns out loud, matching every other
+    branch here's own philosophy of a stated gap rather than a silent one.
     """
     explicit_list = _unique_addresses(explicit)
     if explicit_list:
-        return ResolvedAddresses(addresses=explicit_list)
+        explicit_notices: list[str] = []
+        if session_id and session_id not in explicit_list:
+            explicit_notices.append(
+                f"{PING_PREFIX} WARNING: watching only the address(es) given"
+                f" explicitly; this session's own session-id mailbox is NOT"
+                f" watched unless it is one of them.",
+            )
+        return ResolvedAddresses(addresses=explicit_list, notices=explicit_notices)
 
     addresses: list[str] = []
     notices: list[str] = []
@@ -515,31 +604,40 @@ def acquire_watch_locks(
 
     locks = WatchLocks(ok=False)
     session_id = resolve_active_session_id() or "unknown-session"
-    for address in _unique_addresses(addresses):
-        path = lock_path(state_dir, address)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = path.open("a+", encoding="utf-8")
-        try:
-            lock_file(handle, blocking=False)
-        except (BlockingIOError, OSError):
+    try:
+        for address in _unique_addresses(addresses):
+            path = lock_path(state_dir, address)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handle = path.open("a+", encoding="utf-8")
+            try:
+                lock_file(handle, blocking=False)
+            except (BlockingIOError, OSError):
+                handle.seek(0)
+                held = handle.read().strip() or "an unnamed process"
+                handle.close()
+                locks.refused.append(address)
+                emit(
+                    f"{PING_PREFIX} SKIP: mailbox/{address} is already watched by {held};"
+                    f" not watching that address, rather than doubling every ping.",
+                )
+                continue
             handle.seek(0)
-            held = handle.read().strip() or "an unnamed process"
-            handle.close()
-            locks.refused.append(address)
-            emit(
-                f"{PING_PREFIX} SKIP: mailbox/{address} is already watched by {held};"
-                f" not watching that address, rather than doubling every ping.",
+            handle.truncate()
+            handle.write(
+                f"pid={os.getpid()} session={session_id} address={address}"
+                f" started_at={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
             )
-            continue
-        handle.seek(0)
-        handle.truncate()
-        handle.write(
-            f"pid={os.getpid()} session={session_id} address={address}"
-            f" started_at={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
-        )
-        handle.flush()
-        locks.holders.append(handle)
-        locks.acquired.append(address)
+            handle.flush()
+            locks.holders.append(handle)
+            locks.acquired.append(address)
+    except OSError:
+        # mkdir or open raised mid-loop (disk full, permission change): release
+        # every address already locked in THIS call before propagating, rather
+        # than leaking those handles -- the caller's `locks` variable is never
+        # assigned on a raised exception (see tuple_cmd.py's cmd_watch), so its
+        # own `finally: locks.release()` never runs for them otherwise.
+        locks.release()
+        raise
     locks.ok = bool(locks.acquired)
     return locks
 
@@ -740,18 +838,50 @@ def run_watch(
     report: Callable[[str], None],
     now: Callable[[], float] = time.time,
     sleep: Callable[[float], None] = time.sleep,
+    claude_pid: int | None = None,
+    spawn_session_id: str | None = None,
 ) -> WatchStats:
     """Probe every address once per ``config.interval_s``; ``iterations=0``
     runs until interrupted. State is reloaded from disk on every cycle so a
-    deleted file re-pings and never crashes the loop."""
+    deleted file re-pings and never crashes the loop.
+
+    *spawn_session_id* is this watcher's OWN session id, resolved once at
+    spawn (nexus-6konb.12, MM-3.4 fix 1) -- ``None`` (the default) means
+    "no session to compare against," so the stale-watcher check below never
+    fires, exactly like a caller that never resolved a session id at all.
+    *claude_pid* is the claude ancestor pid whose marker file this watcher
+    reads; when not given and *spawn_session_id* IS given, it is resolved
+    once here via :func:`nexus.session.find_immediate_claude_pid` rather
+    than on every cycle.
+    """
     addrs = _unique_addresses(addresses)
     if not addrs:
         raise ValueError("at least one address is required")
+    if claude_pid is None and spawn_session_id:
+        from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — deferred: CLI startup cost
+
+        claude_pid = find_immediate_claude_pid()
     stats = WatchStats()
     emitter = _Emitter(config, emit)
     failing: dict[str, tuple[str, float]] = {}  # address -> (error text, last reported at)
     while iterations <= 0 or stats.cycles < iterations:
         t = now()
+        # Stale-watcher self-stop (nexus-6konb.12, MM-3.4 fix 1): a /clear or
+        # /resume changes THIS conversation's session id out from under a
+        # Monitor that survives both (T2 nexus/mm-3.2-clear-resume-monitor-
+        # survival-measured-2026-09-13) -- the model that fired the OLD arm
+        # instruction has no way to discover the new one's harness task id
+        # to TaskStop it, so this watcher discovers the change itself and
+        # exits, releasing its locks for the replacement to acquire.
+        if spawn_session_id and claude_pid:
+            marker = _read_session_marker(state_dir, claude_pid)
+            if marker and marker != spawn_session_id:
+                emit(
+                    f"{PING_PREFIX} STOP: this conversation is now session {marker},"
+                    f" not {spawn_session_id} -- the watch for the old session is"
+                    f" stopping. Re-arm per the SessionStart instruction.",
+                )
+                return stats
         # Rotate which address goes first each cycle. This does NOT fix an observed
         # starvation: with the current constants one address can take at most
         # max_lines_per_cycle + 1 = 6 of the 8-line budget, so the second always has room
