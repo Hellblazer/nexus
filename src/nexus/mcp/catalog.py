@@ -26,17 +26,6 @@ _BULK_DELETE_CONFIRM_THRESHOLD = 10
 # ── Registered tools ─────────────────────────────────────────────────────────
 
 
-# Note: core server also registers a "search" tool. No collision — Claude Code
-# disambiguates by server prefix (mcp__plugin_conexus_nexus-catalog__search vs
-# mcp__plugin_conexus_nexus__search).
-@mcp.tool(
-    name="search",
-    title="Catalog Metadata Search",
-    annotations={"readOnlyHint": True},
-    structured_output=False,
-)
-
-
 def _file_path_matches(entry_path: str, wanted: str) -> bool:
     """True when *wanted* names the same document as the stored *entry_path*.
 
@@ -82,6 +71,16 @@ def _file_path_matches(entry_path: str, wanted: str) -> bool:
         return False
     return long_.endswith("/" + short_)
 
+
+# Note: core server also registers a "search" tool. No collision — Claude Code
+# disambiguates by server prefix (mcp__plugin_conexus_nexus-catalog__search vs
+# mcp__plugin_conexus_nexus__search).
+@mcp.tool(
+    name="search",
+    title="Catalog Metadata Search",
+    annotations={"readOnlyHint": True},
+    structured_output=False,
+)
 def catalog_search(
     query: str = "",
     content_type: str = "",

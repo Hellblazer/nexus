@@ -14,11 +14,17 @@ registered NAME is not always the Python function name: ``nexus-catalog``
 tools drop the redundant ``catalog_`` prefix via an explicit ``name=``
 keyword on the decorator (mcp-servers.md's own stated convention, "No
 redundant ``catalog_`` prefix on the short names") — ``catalog_show`` is
-registered as ``"show"``, and ``_file_path_matches`` is registered as
-``"search"``. Reading the function name alone would report all nine
+registered as ``"show"``, and ``catalog_search`` is registered as
+``"search"``. Reading the function name alone would report all ten
 ``nexus-catalog`` tools as undocumented; this walk reads the decorator's
 ``name=`` literal when present and falls back to the function name
 otherwise, exactly as FastMCP itself resolves the registered name.
+
+(nexus-cnzei.1: a private helper, ``_file_path_matches``, was briefly wired
+up under the "search" name by a decorator/def misplacement — fixed; see
+``tests/test_mcp_package.py``'s wire-level registry tests for the
+regression guard. This AST walk resolves names from source, not the live
+registry, so it could not have caught that class of bug on its own.)
 
 Coverage is judged by a literal backtick-quoted occurrence anywhere in the
 document (``` `tool_name` ```) — the doc uses that convention uniformly,
