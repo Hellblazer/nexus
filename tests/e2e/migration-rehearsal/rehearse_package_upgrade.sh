@@ -59,8 +59,32 @@ note() { printf '       %s\n' "$*"; }
 # "endpoint not resolvable". Shared with
 # tests/scripts/test_heartbeat_stall_note.py, which drives this same
 # function against fixture logs (RED and GREEN both pinned).
+#
+# FAIL LOUD IF THE LIBRARY IS ABSENT. This script runs under `set -uo
+# pipefail` with no `-e`, so a bare `source` of a missing file printed one
+# stderr line and carried on, leaving _stall_note calling an undefined
+# function — "command not found" instead of the attribution, on the failure
+# path only, where nobody was looking. Measured 2026-09-13: the library was
+# never COPYed into the package-upgrade image at all, so the note had never
+# once run in the environment it was written for, while its unit tests
+# passed against the function directly. An absent dependency must stop the
+# gate, not quietly remove one of its outputs.
+_STALL_NOTE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/heartbeat_stall_note.sh"
+if [ ! -r "$_STALL_NOTE_LIB" ]; then
+  echo "FATAL: $_STALL_NOTE_LIB is missing or unreadable." >&2
+  echo "  The heartbeat-stall attribution (nexus-wo6sc) cannot run without it." >&2
+  echo "  In a container this means lib/ was not staged or not COPYed;" >&2
+  echo "  see run.sh's --package-upgrade branch and Dockerfile.package-upgrade." >&2
+  exit 1
+fi
 # shellcheck source=./lib/heartbeat_stall_note.sh disable=SC1091
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/heartbeat_stall_note.sh"
+source "$_STALL_NOTE_LIB"
+for _fn in heartbeat_stall_note heartbeat_census; do
+  command -v "$_fn" >/dev/null 2>&1 || {
+    echo "FATAL: sourced $_STALL_NOTE_LIB but $_fn is not defined." >&2
+    exit 1
+  }
+done
 
 # Emit the stall note, if any, indented like the rest of the gate's evidence.
 _stall_note() { heartbeat_stall_note | sed 's/^/       /'; }
@@ -400,6 +424,14 @@ if printf '%s' "$PRE_CONTENT" | grep -q "$MARKER"; then
 else
   bad "pre-upgrade T1 row $PRE_ID did NOT survive (got: $PRE_CONTENT)"
 fi
+
+# nexus-wo6sc: the heartbeat census runs on EVERY exit path, pass included.
+# The supervisor log dies with the container, so a passing run that does not
+# report here reports nothing — and "no stall lines in the leg log" then
+# looks identical to "no stalls happened". An unreadable log says so rather
+# than counting as zero.
+say "Heartbeat census (nexus-wo6sc)"
+heartbeat_census | sed 's/^/       /'
 
 say "RESULT"
 if [ "$FAILS" -eq 0 ]; then

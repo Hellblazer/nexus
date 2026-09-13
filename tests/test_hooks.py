@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nexus.hooks import session_end, session_end_flush, session_start
+from nexus.mailbox_arm import mailbox_arm_instruction
 
 
 # NO _no_daemon stub: it forced `t2_index_write`'s direct-fallback path by
@@ -540,12 +541,14 @@ class TestGuidanceByteBudgetIntegration:
                 "nexus.upgrade_finish.detect_stale_processes",
                 return_value=_FakeSkewReport(stale=[]),
             ),
-            # nexus-6konb.9: this suite's autouse `_pin_t2_substrate` fixture
-            # gives every test a REAL, live tuple-space engine, so an
-            # unmocked mailbox-arm probe would render the real block here —
-            # exactly the ambient-timing dependency the other two mocks
-            # above already exist to keep out of this byte-budget pin.
-            _patch("nexus.mailbox_arm.arm_block", return_value=""),
+            # nexus-6konb.9: the arm block's availability PROBE is ambient
+            # (the autouse substrate is live), so it is mocked, but the block
+            # is mocked to its REAL text, never to "": a budget that measures
+            # an emitter with its largest block removed is not a budget.
+            _patch(
+                "nexus.mailbox_arm.arm_block",
+                return_value=mailbox_arm_instruction("s-h33x8-5-budget"),
+            ),
         ):
             output = session_start(claude_session_id="s-h33x8-5-budget")
         n = len(output.encode("utf-8"))

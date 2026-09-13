@@ -54,6 +54,9 @@ COPY worktree-wheel/conexus-*.whl /home/nexus/worktree-wheel/
 RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
     uv venv --python 3.12 /home/nexus/nxenv
 
+# nexus-wo6sc: the script sources lib/heartbeat_stall_note.sh; without
+# this COPY the source fails and the stall attribution never prints.
+COPY lib/ /home/nexus/lib/
 COPY rehearse_package_upgrade.sh /home/nexus/rehearse_package_upgrade.sh
 
 ENTRYPOINT ["/bin/bash", "/home/nexus/rehearse_package_upgrade.sh"]

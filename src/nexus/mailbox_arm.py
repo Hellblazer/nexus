@@ -171,44 +171,20 @@ def mailbox_arm_instruction(session_id: str) -> str:
     spawns.
     """
     return (
-        f"{ARM_MARKER} (RDR-205, nexus-6konb): arm a background watcher ONCE, "
-        f"now, so mail sent to your mailboxes pings you between prompts instead "
-        "of waiting for your next turn. Your session-id mailbox "
-        f"({session_id}) is always watched -- it resolves on its own, from "
-        "this session's own environment, the moment the watcher spawns; no "
-        "flag is needed for it. Your instance-name mailbox (the ListAgents "
-        "row, e.g. nexus-19 -- the \"This session is <name>\" line) is "
-        "watched too, but ONLY if you supply it yourself: if you know your "
-        "ListAgents name, pass it with --instance NAME; if you do not, omit "
-        "--instance entirely and only the session-id mailbox is watched. "
-        "NEVER pass the session id or the instance name as a bare positional "
-        "argument -- a positional address suppresses the session-id default "
-        "outright, so the command is always --instance NAME or no arguments "
-        "at all, never a literal address. Call Monitor exactly once this "
-        "session:\n\n"
+        f"{ARM_MARKER} (session {session_id}): arm a mailbox watcher once, now:\n"
         "    Monitor({\n"
-        '      command: "nx tuple watch --instance <your ListAgents name, '
-        'or omit this flag if you have none>",\n'
-        f'      description: "mailbox watch for {session_id}",\n'
+        '      command: "nx tuple watch --instance <your ListAgents name>",\n'
+        '      description: "mailbox watch",\n'
         "      persistent: true,\n"
         "      timeout_ms: 3600000\n"
-        "    })\n\n"
-        "timeout_ms is required by the tool's own schema even though "
-        "persistent: true makes it ignored -- any valid value works. Arming "
-        "twice is harmless: a second `nx tuple watch` for the same address "
-        "refuses itself (one lock per address) and exits at once, so this is "
-        "never a doubled watcher.\n\n"
-        "Every line it prints is a PING, never the message: sender, kind and a "
-        "tuple id, nothing more. On a ping, drain the address it names: call "
-        "mcp__plugin_conexus_nexus__tuple_in on that mailbox with a lease, "
-        "handle whatever comes back, then call "
-        "mcp__plugin_conexus_nexus__tuple_ack to consume it (passing its "
-        "reply argument when the message is a request that needs an answer), "
-        "or mcp__plugin_conexus_nexus__tuple_nack if you cannot handle it. An "
-        "unacked claim lapses, its attempts count goes up, and after three "
-        "lapses the message is dead-lettered undelivered -- so a claim you "
-        "cannot finish handling right away still needs an ack or a nack, "
-        "never silence. The watcher itself never claims and never acks."
+        "    })\n"
+        "Without a ListAgents name, omit --instance; never pass an address as a "
+        "positional. timeout_ms is required. Arming twice is harmless (a lock "
+        "refuses the second). Each line is a ping, never the message, and the "
+        "watcher never claims: call mcp__plugin_conexus_nexus__tuple_in on the "
+        "named mailbox, handle it, then mcp__plugin_conexus_nexus__tuple_ack "
+        "(with reply for a request) or mcp__plugin_conexus_nexus__tuple_nack. "
+        "An unacked claim lapses, and after three lapses it is dead-lettered."
     )
 
 
