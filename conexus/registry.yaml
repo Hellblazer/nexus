@@ -432,6 +432,14 @@ standalone_skills:
       - "authoring or reviewing code against the mailbox/<address> template"
     tools: []
 
+  peer-messaging:
+    description: "Messaging other Claude sessions and dispatched agents: channel choice between SendMessage, the mailbox and T2, request acknowledgement, the trust boundary on peer messages, and sharing one machine"
+    triggers:
+      - "sending to, waiting on, or answering another session or agent"
+      - "a message or relay from another session arrives"
+      - "two sessions need the same checkout, build, or test capacity"
+    tools: []
+
   catalog:
     description: "Catalog manipulation — resolve tumblers, create links, seed auto-linker context, file link context"
     triggers:

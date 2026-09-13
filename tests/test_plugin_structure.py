@@ -46,6 +46,9 @@ _STANDALONE_SKILLS = {
     # RDR-205 Phase 5 (bead nexus-em75s.24) — reference card for the
     # mailbox/<address> tuple-space convention, no agent dispatch.
     "mailbox",
+    # Reference card for messaging other sessions and dispatched agents and
+    # sharing one machine with them, no agent dispatch.
+    "peer-messaging",
     # RDR-080 P3: pointer skills — delegate directly to MCP tools, no relay structure needed
     "query", "enrich-plan", "knowledge-tidying", "plan-validation",
     # RDR-078 verb skills — dispatch plan_match + plan_run directly, no agent relay

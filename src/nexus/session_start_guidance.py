@@ -101,6 +101,8 @@ GUIDANCE_IMPERATIVE = (
     "prior work\n"
     "- a validated finding is about to go unstored, or a phase/RDR "
     "boundary is being crossed\n"
+    "- another session or agent is being messaged, waited on, or "
+    "answered, or shares this machine's checkout or build\n"
     "\n"
     "Which skill handles which situation, the MCP tool catalogue, and "
     "the known failure modes live in the Skill body — invoke `Skill` on "

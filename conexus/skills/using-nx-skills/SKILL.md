@@ -75,7 +75,7 @@ Catalog and linking: entries, links, tumblers, link-context seeding → `/conexu
 
 Reference (no agent dispatch): `/conexus:serena-code-nav`, `/conexus:nexus`, `/conexus:cli-controller`, `/conexus:writing-nx-skills`.
 
-Sending or draining a tuple-space message to an agent's or instance's mailbox → `/conexus:mailbox`.
+Messaging, waiting on, or answering another session or agent, or sharing a checkout, build, or test capacity with one → `/conexus:peer-messaging`. The tuple-space mailbox protocol itself → `/conexus:mailbox`.
 
 ## Essential MCP Tools (always available)
 

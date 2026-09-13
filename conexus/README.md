@@ -112,6 +112,7 @@ conexus/
     ├── brainstorming-gate/  # Standalone: design gate before implementation
     ├── orchestration/       # Standalone: routing reference
     ├── mailbox/             # Standalone: RDR-205 mailbox/<address> tuple-space convention
+    ├── peer-messaging/      # Standalone: messaging other sessions and agents, sharing one machine
     │
     │   # RDR-078 verb skills (dispatch plan_match + plan_run)
     ├── research/            # verb: research / design / architecture
@@ -187,6 +188,7 @@ This includes RDR-078 verb skills, RDR-080 MCP-tool pointers, and infrastructure
 | git-worktrees | Isolated workspace setup via git worktrees with safety verification |
 | mailbox | RDR-205 mailbox/<address> tuple-space convention — send by tuple_out, drain by tuple_in before hand-back |
 | nexus | Nexus CLI reference for all tiers (T1/T2/T3) |
+| peer-messaging | Messaging other sessions and dispatched agents: channel choice, acknowledgement, trust boundary, sharing one machine |
 | orchestration | Agent routing reference — routing tables, pipeline templates |
 | phase-review-gate | Phase-boundary gate — cross-walks RDR §Approach against closing beads to block silent scope reduction |
 | receiving-review | Technical evaluation of code review feedback |
