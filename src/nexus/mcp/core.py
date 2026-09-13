@@ -4295,8 +4295,8 @@ def _annotation_line_for_entry(entry) -> str:
 def store_put(
     content: Annotated[str, Field(
         description=(
-            "Text to store, capped at 16,384 UTF-8 bytes (~3,000-4,000 words); "
-            "single-chunk only. Split an oversized note into titled parts "
+            "Text to store, capped at 16,384 UTF-8 bytes (~3,000-4,000 words). "
+            "Split an oversized note into titled parts "
             "(e.g. \"my-note (1/2)\", \"(2/2)\") with the same tags instead of "
             "one oversized call."
         ),
@@ -4336,7 +4336,7 @@ def store_put(
         description="Optional explicit session_id override. Falls back to the NX_SESSION_ID env var.",
     )] = "",
 ) -> str:
-    """Store content as a permanent T3 knowledge document (single-chunk).
+    """Store content as a permanent T3 knowledge document.
 
     Use `memory_put` instead for a project-scoped T2 note with a shorter
     lifetime; use `scratch` for an ephemeral, session-only T1 note.
