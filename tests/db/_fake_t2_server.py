@@ -39,7 +39,7 @@ import socket
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -109,13 +109,26 @@ class FakeT2HandlerBase(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def fake_http_server(handler_cls: type[BaseHTTPRequestHandler]) -> Iterator[str]:
+def fake_http_server(
+    handler_cls: type[BaseHTTPRequestHandler], *, threaded: bool = False,
+) -> Iterator[str]:
     """Start ``handler_cls`` on a free port in a daemon thread; yield its
     base URL; shut it down on exit. Replaces the ~15-line bind/start/yield/
     shutdown block every ``fake_server`` fixture in this cluster repeated.
+
+    ``threaded=False`` (default, unchanged behavior for every existing
+    caller) binds a plain ``HTTPServer``, which processes one connection
+    at a time to completion -- fine for the serial single-client-thread
+    usage every other consumer of this helper has. ``threaded=True``
+    (nexus-hddw2) binds a ``ThreadingHTTPServer`` instead, so multiple
+    handler threads can be genuinely in flight at once -- required for a
+    handler that gates on N concurrent arrivals (e.g. a rendezvous
+    barrier) before responding, which a serial server cannot host at all
+    (it can only ever have one request in progress).
     """
     port = free_port()
-    server = HTTPServer(("127.0.0.1", port), handler_cls)
+    server_cls = ThreadingHTTPServer if threaded else HTTPServer
+    server = server_cls(("127.0.0.1", port), handler_cls)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

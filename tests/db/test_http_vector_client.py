@@ -3073,12 +3073,60 @@ _T3_ECHO_HEALED = False
 #: no-op for every other test.
 _T3_REJECT_TOKEN: str | None = None
 
+#: nexus-hddw2: set (only) by test_concurrent_401s_remint_bounded before it
+#: starts its threads. When armed, _T3AlwaysUnauthorizedHandler.do_GET
+#: holds a request carrying EXACTLY this bearer at
+#: ``_T3_ARRIVAL_GATE.wait()`` before 401ing it -- see _T3ArrivalGate
+#: below. None (the reset-per-test default) is a no-op for every other
+#: test in this section.
+_T3_ARRIVAL_GATE: "_T3ArrivalGate | None" = None
+_T3_ARRIVAL_GATE_BEARER: str | None = None
+
 
 def _t3_reset_fake_state() -> None:
     global _T3_MINT_CALLS, _T3_ECHO_HEALED, _T3_REJECT_TOKEN
+    global _T3_ARRIVAL_GATE, _T3_ARRIVAL_GATE_BEARER
     _T3_MINT_CALLS = 0
     _T3_ECHO_HEALED = False
     _T3_REJECT_TOKEN = None
+    _T3_ARRIVAL_GATE = None
+    _T3_ARRIVAL_GATE_BEARER = None
+
+
+class _T3ArrivalGate:
+    """nexus-hddw2: server-side rendezvous so N concurrent callers are
+    concurrent BY CONSTRUCTION -- see the byte-for-byte identical
+    ``_ArrivalGate`` in tests/db/test_refreshable_client.py (T2 half of
+    this same bead) for the full rationale, including why this is a
+    "release the first N, pass the rest" gate rather than a strict
+    ``threading.Barrier(n)`` (a legitimate (N+1)th arrival carrying the
+    same bearer -- a retry whose own ``bearer_for()`` call lands before
+    the winner's re-mint publishes a fresh token -- must not hang a
+    fixed-size barrier). File-local per this section's own convention
+    of duplicating small T3 test helpers rather than cross-importing
+    (see ``_FakeMonotonicClock``'s docstring above).
+    """
+
+    def __init__(self, n: int, timeout: float = 15.0) -> None:
+        self.n = n
+        self.timeout = timeout
+        self._lock = _umue1_threading.Lock()
+        self._count = 0
+        self._released = _umue1_threading.Event()
+        self.timed_out = False
+        self.arrived_at_timeout = 0
+
+    def wait(self) -> None:
+        with self._lock:
+            self._count += 1
+            if self._count >= self.n:
+                self._released.set()
+        if self._released.wait(timeout=self.timeout):
+            return
+        with self._lock:
+            if not self._released.is_set():
+                self.timed_out = True
+                self.arrived_at_timeout = self._count
 
 
 class _T3AlwaysUnauthorizedHandler(_Umue1Handler):
@@ -3125,6 +3173,11 @@ class _T3AlwaysUnauthorizedHandler(_Umue1Handler):
         if _T3_ECHO_HEALED:
             self._send(200, {"ok": True})
             return
+        # nexus-hddw2: hold a request carrying the arrival gate's known
+        # stale bearer until N have arrived -- see _T3ArrivalGate. A
+        # no-op unless test_concurrent_401s_remint_bounded armed it.
+        if _T3_ARRIVAL_GATE is not None and auth == _T3_ARRIVAL_GATE_BEARER:
+            _T3_ARRIVAL_GATE.wait()
         self._send(401, {"error": "unauthorized"})
 
 
@@ -3215,6 +3268,20 @@ class TestRemintSingleFlightT3:
         mutation more cleanly (sequential calls give it a completely
         deterministic 5-vs-2 signature); this test additionally exercises
         it under genuine concurrency.
+
+        Arrival is made deterministic by a _T3ArrivalGate (nexus-hddw2):
+        the fake server holds every GET /v1/x request carrying the
+        cold-start-minted bearer until all threads_n of them have
+        arrived, then releases them together, so the N callers' 401-
+        triggered invalidate races are concurrent BY CONSTRUCTION --
+        the client-side threading.Barrier below only needs to get all N
+        threads INTO their call() bodies, not have them race the
+        (already-threaded) server unaided. The cold-start mint's own
+        result is deterministic without capturing it dynamically: this
+        is the FIRST mint of the test (``_t3_reset_fake_state()`` just
+        zeroed ``_T3_MINT_CALLS``) and ``_mint_guarded``'s flock
+        coalesces the whole 7-way cold-start race to exactly one actual
+        mint call, so the published token is always ``t3-minted-1``.
         """
         import nexus.db.http_vector_client as hv
 
@@ -3226,6 +3293,11 @@ class TestRemintSingleFlightT3:
             monkeypatch.setattr(hv, "_resolve_endpoint", lambda: (f"http://127.0.0.1:{port}", "static-tok"))
             monkeypatch.setattr(hv, "_wait_for_lease_republication", lambda: None)
             monkeypatch.setenv("NX_MINT_TOKEN", _T3_MINT_CREDENTIAL)
+
+            global _T3_ARRIVAL_GATE, _T3_ARRIVAL_GATE_BEARER
+            _T3_ARRIVAL_GATE_BEARER = "Bearer t3-minted-1"
+            gate = _T3ArrivalGate(threads_n)
+            _T3_ARRIVAL_GATE = gate
 
             failures: list[BaseException] = []
             barrier = _umue1_threading.Barrier(threads_n)
@@ -3245,6 +3317,13 @@ class TestRemintSingleFlightT3:
             for t in threads:
                 t.join(timeout=30)
 
+            assert not gate.timed_out, (
+                f"arrival gate timed out after {gate.timeout}s: only "
+                f"{gate.arrived_at_timeout}/{threads_n} concurrent requests "
+                f"carrying the cold-start-minted bearer arrived -- box too "
+                f"loaded to produce genuine concurrency, or the cold-start "
+                f"mint did not publish the predicted 't3-minted-1' token"
+            )
             assert not failures, f"unexpected non-401 failures: {failures}"
             assert all(not t.is_alive() for t in threads), "a worker thread hung"
             assert _T3_MINT_CALLS == 2, (
@@ -3253,6 +3332,8 @@ class TestRemintSingleFlightT3:
                 f"{_T3_MINT_CALLS}"
             )
         finally:
+            _T3_ARRIVAL_GATE = None
+            _T3_ARRIVAL_GATE_BEARER = None
             self._reset_manager()
             _t3_stop_server(server)
 

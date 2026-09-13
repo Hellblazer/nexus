@@ -1060,6 +1060,99 @@ def always_401_mint_server():
     _reset_mint_state()
 
 
+class _ArrivalGate:
+    """nexus-hddw2: server-side rendezvous so N concurrent HTTP callers
+    are concurrent BY CONSTRUCTION, not by assumption about client-side
+    thread-start timing.
+
+    ``threading.Barrier(self.THREADS)`` in the test only synchronizes
+    when the N *client* threads START; it says nothing about whether
+    their requests actually arrive at the server while the bearer is
+    still stale. Under ``pytest -n auto`` on a loaded box, a thread can
+    be scheduled far enough ahead that it completes its ENTIRE round
+    trip (send, 401, re-mint, retry, mark futile) before a sibling
+    thread even calls ``_current_authorization_header()`` -- at which
+    point the sibling reads the ALREADY-healed bearer and never
+    contends for the guard at all. Measured 2026-09-13 (nexus-58's run):
+    0 re-mints for 7 threads against an expected 1 (see nexus-hddw2).
+
+    This gate closes that hole from the other end: the handler holds a
+    request carrying the KNOWN stale bearer at ``wait()`` until ``n`` of
+    them have arrived, then releases every held request together AND
+    lets any FURTHER matching request through immediately (never
+    blocking a later wave). That "release the first N, pass the rest"
+    shape -- not a strict ``threading.Barrier(n)`` -- matters even here,
+    where T1's guard runs its whole invalidate-and-rebuild under one
+    lock (unlike T2's narrower compare-then-mint window): a strict
+    N-sized barrier still hangs on any legitimate (N+1)th arrival
+    (e.g. a retry that happens to reuse the same header value), where
+    this design just lets it through unheld.
+
+    Since ``sent_bearer`` is fixed by the CLIENT before the request is
+    ever sent (``HttpScratchStore._post`` resolves
+    ``_current_authorization_header()`` immediately before
+    ``self._client.post(...)``), and none of the N INITIAL callers can
+    have reacted to a 401 they have not yet received, holding the
+    RESPONSE is sufficient to guarantee all N captured the identical
+    stale bearer on their first attempt -- regardless of box load.
+
+    A bounded timeout protects against a genuine hang: if fewer than
+    ``n`` ever arrive, every blocked ``wait()`` returns after
+    ``timeout`` seconds and ``timed_out``/``arrived_at_timeout`` record
+    exactly how many did, so the test fails loudly naming the count
+    instead of silently measuring a smaller, non-N storm or hanging
+    outright.
+    """
+
+    def __init__(self, n: int, timeout: float = 15.0) -> None:
+        self.n = n
+        self.timeout = timeout
+        self._lock = threading.Lock()
+        self._count = 0
+        self._released = threading.Event()
+        self.timed_out = False
+        self.arrived_at_timeout = 0
+
+    def wait(self) -> None:
+        with self._lock:
+            self._count += 1
+            if self._count >= self.n:
+                self._released.set()
+        if self._released.wait(timeout=self.timeout):
+            return
+        with self._lock:
+            if not self._released.is_set():
+                self.timed_out = True
+                self.arrived_at_timeout = self._count
+
+
+#: Set by test_concurrent_401s_remint_exactly_once before starting its
+#: threads; consulted by _ArrivalGatedUnauthorizedHandler.do_POST. None
+#: outside that test -- every other consumer of _AlwaysUnauthorizedHandler
+#: (and its subclass here) never touches it.
+_ARRIVAL_GATE: _ArrivalGate | None = None
+_ARRIVAL_GATE_BEARER: str | None = None
+
+
+class _ArrivalGatedUnauthorizedHandler(_AlwaysUnauthorizedHandler):
+    """Like ``_AlwaysUnauthorizedHandler``, but holds a ``/v1/t1/put``
+    request carrying exactly ``_ARRIVAL_GATE_BEARER`` at ``_ARRIVAL_GATE
+    .wait()`` before answering it -- see ``_ArrivalGate``. Only the
+    storm's FIRST wave (the original stale bearer) is gated; the
+    post-remint retry wave carries a freshly-minted, DIFFERENT bearer
+    and passes straight through un-gated, exactly like the mint
+    endpoint and every other path.
+    """
+
+    def do_POST(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if path == "/v1/t1/put" and _ARRIVAL_GATE is not None:
+            auth = self.headers.get("Authorization", "")
+            if auth == _ARRIVAL_GATE_BEARER:
+                _ARRIVAL_GATE.wait()
+        super().do_POST()
+
+
 class TestRemintSingleFlight:
     """nexus-r0d37 defect 2."""
 
@@ -1082,7 +1175,7 @@ class TestRemintSingleFlight:
         )
 
     def test_concurrent_401s_remint_exactly_once(
-        self, always_401_mint_server, monkeypatch, tmp_path
+        self, monkeypatch, tmp_path
     ) -> None:
         """N concurrent calls that all 401 must produce exactly ONE re-mint.
 
@@ -1093,39 +1186,68 @@ class TestRemintSingleFlight:
         test_futile_remint_is_not_repeated_on_the_next_call (4 calls, 4
         mints without the guards). Kept separate because the two guards fail
         independently and a single test would not say which one broke.
+
+        Arrival is made deterministic by an _ArrivalGate (nexus-hddw2):
+        the fake server holds every /v1/t1/put request carrying the
+        original stale bearer until all THREADS of them have arrived,
+        then releases them together, so the N callers are concurrent BY
+        CONSTRUCTION -- the client-side threading.Barrier below only
+        needs to get all N threads INTO their call() bodies, not have
+        them race the server unaided. A THREADED fake server is required
+        to host that gate at all: a plain HTTPServer processes one
+        connection to completion before accepting the next, so it could
+        never hold N requests in flight simultaneously.
         """
+        global _ARRIVAL_GATE, _ARRIVAL_GATE_BEARER
+        _reset_mint_state()
         try:
-            store = self._store(always_401_mint_server, monkeypatch, tmp_path)
-            mints_after_construction = _MINT_CALLS
-            assert mints_after_construction == 1, "ctor mints exactly one bearer"
+            with fake_http_server(_ArrivalGatedUnauthorizedHandler, threaded=True) as url:
+                store = self._store(url, monkeypatch, tmp_path)
+                mints_after_construction = _MINT_CALLS
+                assert mints_after_construction == 1, "ctor mints exactly one bearer"
 
-            barrier = threading.Barrier(self.THREADS)
-            failures: list[BaseException] = []
+                _ARRIVAL_GATE_BEARER = store._headers["Authorization"]
+                gate = _ArrivalGate(self.THREADS)
+                _ARRIVAL_GATE = gate
 
-            def call() -> None:
-                barrier.wait(timeout=10)
-                try:
-                    store.put("storm")
-                except RuntimeError:
-                    pass  # every call 401s by construction; the COUNT is the assertion
-                except BaseException as exc:  # noqa: BLE001 — surfaced below, never swallowed
-                    failures.append(exc)
+                barrier = threading.Barrier(self.THREADS)
+                failures: list[BaseException] = []
 
-            threads = [threading.Thread(target=call) for _ in range(self.THREADS)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join(timeout=30)
+                def call() -> None:
+                    barrier.wait(timeout=10)
+                    try:
+                        store.put("storm")
+                    except RuntimeError:
+                        pass  # every call 401s by construction; the COUNT is the assertion
+                    except BaseException as exc:  # noqa: BLE001 — surfaced below, never swallowed
+                        failures.append(exc)
 
-            assert not failures, f"unexpected non-401 failures: {failures}"
-            assert all(not t.is_alive() for t in threads), "a worker thread hung"
-            assert _MINT_CALLS == mints_after_construction + 1, (
-                f"{self.THREADS} concurrent 401s must re-mint exactly ONCE "
-                f"(saw {_MINT_CALLS - mints_after_construction} re-mints; "
-                f"2 is the unguarded value for this arrival pattern)"
-            )
+                threads = [threading.Thread(target=call) for _ in range(self.THREADS)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=30)
+
+                assert not gate.timed_out, (
+                    f"arrival gate timed out after {gate.timeout}s: only "
+                    f"{gate.arrived_at_timeout}/{self.THREADS} concurrent "
+                    f"requests carrying the stale bearer arrived -- box too "
+                    f"loaded to produce genuine concurrency, or a client-side "
+                    f"regression stopped a caller from ever sending the "
+                    f"original bearer"
+                )
+                assert not failures, f"unexpected non-401 failures: {failures}"
+                assert all(not t.is_alive() for t in threads), "a worker thread hung"
+                assert _MINT_CALLS == mints_after_construction + 1, (
+                    f"{self.THREADS} concurrent 401s must re-mint exactly ONCE "
+                    f"(saw {_MINT_CALLS - mints_after_construction} re-mints; "
+                    f"2 is the unguarded value for this arrival pattern)"
+                )
         finally:
+            _ARRIVAL_GATE = None
+            _ARRIVAL_GATE_BEARER = None
             self._reset_manager()
+            _reset_mint_state()
 
     def test_remint_helper_is_single_flighted_on_the_sent_bearer(
         self, always_401_mint_server, monkeypatch, tmp_path

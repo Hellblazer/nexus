@@ -145,10 +145,19 @@ _MINT_FORCE_STATUS: int | None = None
 #: no-op for every other test in this file.
 _REJECT_TOKEN: str | None = None
 
+#: nexus-hddw2: set (only) by test_concurrent_401s_remint_bounded before it
+#: starts its threads. When armed, _FakeHandler._check_bearer holds a
+#: request carrying EXACTLY this bearer at ``_ARRIVAL_GATE.wait()`` before
+#: 401ing it -- see _ArrivalGate below. None (the reset-per-test default) is
+#: a no-op for every other test in this file.
+_ARRIVAL_GATE: "_ArrivalGate | None" = None
+_ARRIVAL_GATE_BEARER: str | None = None
+
 
 def _reset_fake_service_state() -> None:
     global _VALID_BEARER, _ALWAYS_401, _MINTED_DATA_TOKEN, _MINT_CALLS, _MINT_FORCE_STATUS
     global _HOLD_ECHO_EVENT, _ECHO_ENTERED_EVENT, _HOOK_FAILURE_RECORD_DELAY_S, _REJECT_TOKEN
+    global _ARRIVAL_GATE, _ARRIVAL_GATE_BEARER
     _VALID_BEARER = _INITIAL_BEARER
     _ALWAYS_401 = False
     _REQUEST_COUNT.clear()
@@ -161,8 +170,80 @@ def _reset_fake_service_state() -> None:
     _RECEIVED_TENANTS.clear()
     _HOOK_FAILURE_RECORD_DELAY_S = 0.0
     _REJECT_TOKEN = None
+    _ARRIVAL_GATE = None
+    _ARRIVAL_GATE_BEARER = None
     with _HELD_ECHO_COUNT_LOCK:
         _HELD_ECHO_COUNT.clear()
+
+
+class _ArrivalGate:
+    """nexus-hddw2: server-side rendezvous so N concurrent HTTP callers
+    are concurrent BY CONSTRUCTION, not by assumption about client-side
+    thread-start timing alone.
+
+    ``threading.Barrier(threads_n)`` in the test only synchronizes when
+    the N *client* threads START; it says nothing about whether their
+    requests actually arrive at the server while the bearer is still
+    stale. Under ``pytest -n auto`` on a loaded box, a thread can be
+    scheduled far enough ahead that it completes its ENTIRE round trip
+    (send, 401, re-mint, retry) before a sibling thread even resolves
+    its own Authorization header -- at which point the sibling never
+    contends for the guard with the original bearer at all. Measured
+    2026-09-13 (nexus-58's run): 2 re-mints for 7 threads against an
+    expected 1 (see nexus-hddw2).
+
+    This gate closes that hole from the server side: it holds a request
+    carrying the KNOWN stale bearer until ``n`` of them have arrived,
+    then releases every held request together AND lets any further
+    matching request through immediately (never blocking a THIRD wave).
+    That "release the first N, pass the rest" shape -- not a strict
+    ``threading.Barrier(n)`` -- is deliberate: MEASURED (not assumed)
+    against this exact handler, a retrying caller can legitimately
+    resolve the STILL-stale bearer a second time if its own
+    ``bearer_for()`` call lands before the winner's re-mint has
+    published a fresh token (the very race
+    test_concurrent_401s_remint_bounded exists to exercise) -- an
+    (N+1)th arrival carrying the identical stale bearer is a real,
+    valid retry, not a test-harness bug, and a strict N-sized Barrier
+    would time out on it instead of the storm it was built to gate.
+
+    Since the bearer a request carries is fixed by the CLIENT before
+    the request is ever sent, and none of the N INITIAL callers can
+    have reacted to a 401 they have not yet received, holding the
+    RESPONSE is sufficient to guarantee all N captured the identical
+    stale bearer on their first attempt -- regardless of box load. A
+    THREADED fake server (``_start_threaded_fake_server``) is required
+    to host this at all: a plain single-threaded ``HTTPServer`` can
+    never have more than one request in flight to hold.
+
+    A bounded timeout protects against a genuine hang: if fewer than
+    ``n`` ever arrive, every blocked ``wait()`` returns after
+    ``timeout`` seconds and ``timed_out``/``arrived_at_timeout`` record
+    exactly how many did, so the test fails loudly naming the count
+    instead of silently measuring a smaller, non-N storm or hanging
+    outright.
+    """
+
+    def __init__(self, n: int, timeout: float = 15.0) -> None:
+        self.n = n
+        self.timeout = timeout
+        self._lock = threading.Lock()
+        self._count = 0
+        self._released = threading.Event()
+        self.timed_out = False
+        self.arrived_at_timeout = 0
+
+    def wait(self) -> None:
+        with self._lock:
+            self._count += 1
+            if self._count >= self.n:
+                self._released.set()
+        if self._released.wait(timeout=self.timeout):
+            return
+        with self._lock:
+            if not self._released.is_set():
+                self.timed_out = True
+                self.arrived_at_timeout = self._count
 
 
 class _FakeHandler(BaseHTTPRequestHandler):
@@ -197,6 +278,11 @@ class _FakeHandler(BaseHTTPRequestHandler):
         if _MINTED_DATA_TOKEN:
             valid.add(f"Bearer {_MINTED_DATA_TOKEN}")
         if _ALWAYS_401 or auth not in valid:
+            # nexus-hddw2: hold a request carrying the arrival gate's
+            # known stale bearer until N have arrived -- see _ArrivalGate.
+            # A no-op unless test_concurrent_401s_remint_bounded armed it.
+            if _ARRIVAL_GATE is not None and auth == _ARRIVAL_GATE_BEARER:
+                _ARRIVAL_GATE.wait()
             self._send(401, {"error": "unauthorized"})
             return False
         return True
@@ -2234,8 +2320,16 @@ class TestRemintSingleFlight:
         token before checking, so the mint count scales with thread
         count) while test_staggered_401s_remint_exactly_once above keeps
         passing (its guard is the OTHER one).
+
+        Arrival is made deterministic by an _ArrivalGate (nexus-hddw2):
+        the fake server holds every /v1/echo request carrying the
+        original stale bearer until all threads_n of them have arrived,
+        then releases them together, so the N callers are concurrent BY
+        CONSTRUCTION -- the client-side threading.Barrier below only
+        needs to get all N threads INTO their call() bodies, not have
+        them race the (already-threaded) server unaided.
         """
-        global _ALWAYS_401
+        global _ALWAYS_401, _ARRIVAL_GATE, _ARRIVAL_GATE_BEARER
         threads_n = 7
         server, port = _start_threaded_fake_server()
         try:
@@ -2249,6 +2343,10 @@ class TestRemintSingleFlight:
             assert baseline == 1
 
             _ALWAYS_401 = True
+            _ARRIVAL_GATE_BEARER = f"Bearer {store._token}"
+            gate = _ArrivalGate(threads_n)
+            _ARRIVAL_GATE = gate
+
             failures: list[BaseException] = []
             barrier = threading.Barrier(threads_n)
 
@@ -2267,6 +2365,13 @@ class TestRemintSingleFlight:
             for t in threads:
                 t.join(timeout=30)
 
+            assert not gate.timed_out, (
+                f"arrival gate timed out after {gate.timeout}s: only "
+                f"{gate.arrived_at_timeout}/{threads_n} concurrent requests "
+                f"carrying the stale bearer arrived -- box too loaded to "
+                f"produce genuine concurrency, or a client-side regression "
+                f"stopped a caller from ever sending the original bearer"
+            )
             assert not failures, f"unexpected non-401 failures: {failures}"
             assert all(not t.is_alive() for t in threads), "a worker thread hung"
             assert _MINT_CALLS == baseline + 1, (
@@ -2275,6 +2380,8 @@ class TestRemintSingleFlight:
             )
         finally:
             _ALWAYS_401 = False
+            _ARRIVAL_GATE = None
+            _ARRIVAL_GATE_BEARER = None
             self._reset_manager()
             _stop_fake_server(server)
 
