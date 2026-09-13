@@ -81,6 +81,10 @@ EOF
                least one pathspec (prefix match on a directory, exact
                match, or a shell glob pattern). The repo-root
                .gitignore and CLAUDE.md are always in scope.
+EOF
+    # Split again at nexus-5h3df: each heredoc body stays under the 512B
+    # degraded pipe capacity (tests/hooks/test_heredoc_pipe_budget.py).
+    cat >&2 <<'EOF'
 
 Exit status: 0 if every commit in range stayed within the allowlist;
              1 if any commit touched a file outside it (flagged inline);
