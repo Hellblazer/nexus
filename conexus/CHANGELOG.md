@@ -4,6 +4,25 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.44.0] - 2026-09-13
+
+Paired engine: engine-service-v0.1.117 (`REQUIRED_ENGINE_VERSION` (0, 1, 117)).
+Plugin version aligned with conexus 7.44.0. This pin advance makes live the
+plugin changes `PENDING_RELEASE.md` held:
+
+- `conexus/hooks/hooks.json` gains a `UserPromptSubmit` block that runs
+  `conexus/hooks/scripts/mailbox_drain.py` on every prompt: the consumer of record
+  for RDR-205 mailbox mail (claims, acks and renders the session-id mailbox and the
+  instance mailbox `nx tuple watch --instance` registered for that session), with
+  the nexus-1kvk3 starvation fix and the per-session address registry (nexus-6konb.7,
+  nexus-6konb.9).
+- `conexus/skills/mailbox/SKILL.md`: RDR-206 renew and reply-in-ack rules
+  (nexus-h61dl.11) and the push-delivery rule: arm one `Monitor` on
+  `nx tuple watch`, a line is a ping to drain with `tuple_in` then ack or nack, a
+  watcher from before a `/clear` stops itself (nexus-6konb.11, .10, .12).
+- `conexus/hooks/scripts/auto-approve-nx-mcp.sh` auto-approves
+  `mcp__plugin_conexus_nexus__tuple_renew` (nexus-h61dl.9).
+
 ## [7.43.0] - 2026-09-12
 
 Paired engine: engine-service-v0.1.116 (`REQUIRED_ENGINE_VERSION` (0, 1, 116)).

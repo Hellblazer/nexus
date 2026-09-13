@@ -6,6 +6,57 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.44.0] - 2026-09-13
+
+Paired with engine-service-v0.1.117.
+
+### Added
+- **Tuple claim renewal and reply-in-ack (RDR-206).** A holder extends a live
+  claim with `renew` instead of letting a long task's lease lapse, and answers a
+  request by acking it with a reply, so the reply write and the request's
+  consumption commit together. Surfaces: `HttpTupleStore.renew` and
+  `ack(reply=ReplySpec(...))`, the `tuple_renew` MCP tool and `tuple_ack`'s
+  `reply` object, `nx tuple renew` and `nx tuple ack --reply-subspace`,
+  `--reply-key`, `--reply-dim`, `--reply-body`, `--reply-ttl-seconds`. A lease
+  above the template's `max_lease_seconds` is refused; inside that cap it is
+  clipped to the tuple's expiry. The engine sets a reply's nonce to the
+  request's tuple id; a nonce or unknown key in `reply` is refused. Engine:
+  `POST /v1/tuples/renew`, and `/v1/tuples/ack` accepts `reply` and returns
+  `reply_id` on every ack.
+- **Mailbox push delivery (nexus-6konb).** `nx tuple watch` watches a session's
+  mailboxes with a zero-timeout probe and prints one ping per newly seen
+  message, never claiming it. A SessionStart instruction asks the session to
+  arm it once in a `Monitor` (`nx tuple watch --instance <ListAgents name>`).
+  A `UserPromptSubmit` drain hook is the consumer of record: at each prompt it
+  claims, acks and renders mail for the session-id mailbox and the instance
+  mailbox the watcher registered for that session. A watcher from before a
+  `/clear` stops itself. Needs `Bash(nx tuple watch:*)` in `~/.claude/settings.json`
+  permissions so arming does not prompt.
+- The mailbox skill carries the renew, reply-in-ack and push-delivery rules.
+- `/version` reports `process_uptime_seconds` and `process_start_time`
+  (engine; trimmed at the managed edge).
+
+### Fixed
+- `ack` with a reply against an engine that predates RDR-206 raises
+  `ReplyNotWrittenError` instead of returning as if the reply were written.
+- `nx tuple watch` pages past its 300-row probe window instead of missing mail
+  behind a large backlog; the drain hook no longer starves a live message
+  behind more than 20 claimed or dead rows.
+- `memory_put` with no `ttl` stores a permanent entry, not a 30-day one.
+- `nx` imports on Windows: the last module-scope `fcntl` imports go through
+  `nexus._locking` (#1541).
+- `renew`'s lease ceiling is applied in SQL against the live row, so a
+  concurrent refire cannot leave a lease past the tuple's new expiry.
+
+### Changed
+- Release tooling reads arming attestations for non-additive paired releases,
+  and shipped wire-ledger entries carry their engine tag and direction token
+  structurally.
+- The release battery's package-upgrade leg ships its heartbeat stall-note
+  library into the image and prints the heartbeat census on a passing run.
+- Documentation: tuple-space docs, walkthroughs, the site page and the Linda
+  essay retire RDR-205's two accepted limits and document push delivery.
+
 ## [7.43.0] - 2026-09-12
 
 Paired with engine-service-v0.1.116.
