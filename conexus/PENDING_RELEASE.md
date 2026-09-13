@@ -521,7 +521,7 @@ guidance-consolidation half's own review.
   both, contradicting registry.yaml's now-canonical bug pipeline (fixed elsewhere in this same
   bead). Pre-existing drift, not introduced by this bead, but in the exact file orchestration's
   Quick Routing table points to as canonical expansion. Inert until the pin advances.
-- `conexus/commands/rdr-gate.md`, `commands/rdr-fix.md`, `commands/rdr-accept.md` (nexus-cnzei.6
+- `conexus/commands/rdr-gate.md`, `conexus/commands/rdr-fix.md`, `conexus/commands/rdr-accept.md` (nexus-cnzei.6
   fix round, critic Significant 4): the Action section's independently re-authored procedure
   replaced with a pointer at the matching `-checklist` skill; the command's own content is now
   only the bash-injected preamble and $ARGUMENTS parsing. The two-file duplication (not one
