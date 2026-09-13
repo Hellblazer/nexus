@@ -68,7 +68,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
-from nexus.db.t2.http_tuple_store import HttpTupleStore
+from nexus.db.t2.http_tuple_store import ClaimNotFoundError, HttpTupleStore, ReplySpec
 from tests._catalog_fixture_ops import active_reader, documents_by_file_path, documents_by_title
 from tests._engine_substrate import ensure_engine
 
@@ -1035,6 +1035,120 @@ def test_cross_instance_request_and_ack_two_sessions_one_box(t2_service_env) -> 
     rd_b = runner.invoke(main, ["tuple", "rd", f"mailbox/{b}", "--pattern", f"to={b}", "--json"])
     assert rd_b.exit_code == 0, rd_b.output
     assert _tuple_last_json_line(rd_b.output) == [], "B's acked request row must never come back from rd"
+
+
+@pytest.mark.scenario
+def test_cross_instance_reply_in_ack_survives_a_crash_between_work_and_ack(
+    t2_service_env,
+) -> None:
+    """RDR-206 Testing Strategy item 2 (bead nexus-h61dl.15): re-run the
+    mailbox's cross-instance request/reply with reply-in-ack, and prove
+    ONE reply per request across a forced crash between the work and the
+    ack -- the exact window RDR-205 left open (RDR-206 Gap 2).
+
+    A sends a request to B's mailbox. Responder attempt #1 claims it on a
+    short lease, does the work, then CRASHES: it never calls ack, so
+    nothing commits and the claim lapses. The next probe on the SAME
+    subspace -- the mailbox template's own re-claim-on-lapse rule, pinned
+    above by ``test_mailbox_max_attempts_lapsed_leases_dead_letters`` --
+    redelivers the request; responder attempt #2 does the work again and
+    acks WITH the reply in the same transaction.
+
+    Proves: the work ran twice (redelivery is real -- RDR-206 accepts
+    that cost), but the requester's mailbox ends with EXACTLY ONE reply
+    row, whose id is the one ``ack`` returned -- a write that did run
+    lands on that one row, never a sibling. This is the property a crash
+    between a bare ``out`` and ``ack`` cannot give; the mutation recorded
+    in the commit message that introduces this test writes attempt #2
+    the old way and watches this exact assertion go red.
+
+    The second block retries attempt #2's own ack-with-reply after it
+    already committed: the engine answers ``ClaimNotFoundError`` (the
+    claim is gone) and the reply address still holds exactly the one row
+    -- a retry of an already-committed ack-with-reply cannot mint a
+    second reply, which is the idempotence half of the same property.
+    """
+    runner = CliRunner()
+    store = HttpTupleStore()
+    stamp = _tuple_uniq("h61dl15")
+    asker, answerer = f"requester-{stamp}", f"responder-{stamp}"
+    req_subspace, reply_subspace = f"mailbox/{answerer}", f"mailbox/{asker}"
+    correlation_id = _tuple_uniq("corr")
+
+    out = runner.invoke(main, [
+        "tuple", "out", req_subspace,
+        "--key", f"to={answerer}", "--dim", f"from={asker}",
+        "--dim", "kind=request", "--dim", f"correlation_id={correlation_id}",
+        "--body", "do the work", "--nonce", correlation_id,
+    ])
+    assert out.exit_code == 0, out.output
+    request_id = out.output.strip().splitlines()[-1]
+
+    work_done = 0
+
+    # Responder attempt #1: claims, does the work, then CRASHES -- no ack.
+    claimed_1 = store.inp(req_subspace, {"to": answerer}, claimant="responder-1", lease_s=1)
+    assert claimed_1 is not None, "attempt #1 must claim the request"
+    row_1, claim_id_1 = claimed_1
+    assert row_1.id == request_id
+    work_done += 1  # attempt #1's work is lost -- it crashes before ack
+
+    time.sleep(1.5)  # let attempt #1's 1s lease lapse (house convention, journey 12 above)
+
+    # Responder attempt #2: the SAME probe pattern journey 12 pins as the
+    # re-claim-on-lapse path finds the redelivered request.
+    claimed_2 = store.inp(req_subspace, {"to": answerer}, claimant="responder-2", lease_s=60)
+    assert claimed_2 is not None, "the lapsed claim must be redelivered, not lost"
+    row_2, claim_id_2 = claimed_2
+    assert row_2.id == request_id, "the redelivered row is the SAME request, not a new one"
+    work_done += 1  # attempt #2 repeats the work RDR-206 accepts as the cost of redelivery
+
+    reply_id = store.ack(
+        claim_id_2,
+        "responder-2",
+        reply=ReplySpec(
+            subspace=reply_subspace,
+            keys={"to": asker},
+            dims={"from": answerer, "kind": "reply", "correlation_id": correlation_id},
+            body="work result",
+        ),
+    )
+    assert reply_id and len(reply_id) == 64, f"ack returns the reply's hex id: {reply_id!r}"
+
+    assert work_done == 2, "redelivery must have made the work run twice"
+
+    reply_rows = store.rdp(reply_subspace, {"to": asker}, n=2)
+    assert len(reply_rows) == 1, (
+        f"the requester's mailbox must hold EXACTLY ONE reply row despite the crash "
+        f"and redelivery: {reply_rows}"
+    )
+    assert reply_rows[0].id == reply_id, "the one reply row is the row ack reported writing"
+
+    census = store.subspace_stats(req_subspace)
+    assert census.consumed == 1, census
+    assert census.claimed == 0, census
+
+    # The idempotence half: retrying attempt #2's own ack-with-reply after
+    # it already committed must not mint a sibling reply -- the claim is
+    # gone, and a retry answers ClaimNotFound rather than writing again.
+    with pytest.raises(ClaimNotFoundError):
+        store.ack(
+            claim_id_2,
+            "responder-2",
+            reply=ReplySpec(
+                subspace=reply_subspace,
+                keys={"to": asker},
+                dims={"from": answerer, "kind": "reply", "correlation_id": correlation_id},
+                body="work result (retried)",
+            ),
+        )
+
+    reply_rows_after_retry = store.rdp(reply_subspace, {"to": asker}, n=2)
+    assert len(reply_rows_after_retry) == 1, (
+        f"a retried ack-with-reply on an already-consumed claim must write no "
+        f"second row: {reply_rows_after_retry}"
+    )
+    assert reply_rows_after_retry[0].id == reply_id, "no sibling row displaced the original reply"
 
 
 @pytest.mark.scenario
