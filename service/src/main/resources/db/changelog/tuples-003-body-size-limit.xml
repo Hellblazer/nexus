@@ -157,7 +157,10 @@ ALTER TABLE nexus.tuples DROP CONSTRAINT IF EXISTS chk_tuples_body_size;
 
     <!-- ── Changeset 4: validate the CHECK (SHARE UPDATE EXCLUSIVE, DDL) ───── -->
     <changeSet id="tuples-003-4" author="nexus-r7xao">
-        <comment>VALIDATE chk_tuples_body_size -- expected to succeed on every install, since tuples-003-2 already removed every violating row. SHARE UPDATE EXCLUSIVE only (no write block); DDL, never row-filtered by RLS (catalog-013's own precedent), so no toggle is needed here.</comment>
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="1">SELECT COUNT(*) FROM pg_constraint WHERE conname = 'chk_tuples_body_size'</sqlCheck>
+        </preConditions>
+        <comment>VALIDATE chk_tuples_body_size -- expected to succeed on every install, since tuples-003-2 already removed every violating row. SHARE UPDATE EXCLUSIVE only (no write block); DDL, never row-filtered by RLS (catalog-013's own precedent), so no toggle is needed here. Guarded (nexus-4m6i0/nexus-ms57z crash-loop class, fk-002-7's shape): a whole-changeset precondition naming this constraint marks the changeset ran, once, instead of hard-failing on any box where tuples-003-3 has not yet added it (e.g. this changeset applied out of the normal changelog order, or a future rollback of tuples-003-3 alone).</comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.tuples VALIDATE CONSTRAINT chk_tuples_body_size;
         </sql>
