@@ -2466,6 +2466,14 @@ async def test_mcp_catalog_server_round_trip():
             r = await session.call_tool("stats", {})
             assert r.content[0].text
 
+            # nexus-cnzei.1: `search` over the wire takes the arguments every
+            # skill passes. For three weeks it was backed by a private
+            # two-argument helper and only an in-process import was tested.
+            tools = {t.name: t for t in (await session.list_tools()).tools}
+            assert "query" in tools["search"].inputSchema.get("properties", {})
+            r = await session.call_tool("search", {"query": "nexus"})
+            assert not r.isError, r.content
+
 
 def test_mcp_shim_imports():
     """Verify mcp_server.py shim re-exports all expected symbols."""
