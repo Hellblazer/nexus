@@ -222,14 +222,14 @@ def _write_tuple_watch_session_marker(new_session_id: str) -> None:
     the session over a mailbox-watch convenience feature.
     """
     try:
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import; rare/branch-local path
+        from nexus import config as _nx_config  # noqa: PLC0415 — deferred import; module attribute so a patched nexus.config reaches it (nexus-78blw)
         from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — deferred import; rare/branch-local path
         from nexus.tuple_watch import write_session_marker  # noqa: PLC0415 — deferred import; rare/branch-local path
 
         claude_pid = find_immediate_claude_pid()
         if claude_pid <= 0:
             return
-        write_session_marker(nexus_config_dir(), claude_pid, new_session_id)
+        write_session_marker(_nx_config.nexus_config_dir(), claude_pid, new_session_id)
     except Exception as exc:  # noqa: BLE001 — best-effort; hook must never crash session-start over a mailbox-watch convenience feature
         _log.debug("tuple_watch_session_marker_write_failed", error=str(exc))
 
