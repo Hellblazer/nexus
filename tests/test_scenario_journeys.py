@@ -1109,7 +1109,7 @@ def test_cross_instance_reply_in_ack_survives_a_crash_between_work_and_ack(
         reply=ReplySpec(
             subspace=reply_subspace,
             keys={"to": asker},
-            dims={"from": answerer, "kind": "reply", "correlation_id": correlation_id},
+            dims={"from": answerer, "kind": "ack", "correlation_id": correlation_id},
             body="work result",
         ),
     )
@@ -1138,7 +1138,7 @@ def test_cross_instance_reply_in_ack_survives_a_crash_between_work_and_ack(
             reply=ReplySpec(
                 subspace=reply_subspace,
                 keys={"to": asker},
-                dims={"from": answerer, "kind": "reply", "correlation_id": correlation_id},
+                dims={"from": answerer, "kind": "ack", "correlation_id": correlation_id},
                 body="work result (retried)",
             ),
         )

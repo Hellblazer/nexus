@@ -154,7 +154,7 @@ class TestTupleInAckNack:
         # The request is gone (consumed) ...
         assert tuple_rd(f"mailbox/{req_addr}", {"to": req_addr}) == []
         # ... and the reply landed in the SAME call, visible on a fresh read.
-        reply_rows = tuple_rd(f"mailbox/{reply_addr}", {"to": reply_addr})
+        reply_rows = tuple_rd(f"mailbox/{reply_addr}", {"to": reply_addr}, n=2)  # n=2: n=1 would hide a duplicate
         assert len(reply_rows) == 1
         assert reply_rows[0]["body"] == "the answer"
 

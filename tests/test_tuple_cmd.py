@@ -403,7 +403,7 @@ class TestTupleAckReplyAgainstTheRealEngine:
         assert len(reply_id) == 64
         int(reply_id, 16)
 
-        rows = HttpTupleStore().rd(f"mailbox/{reply_addr}", {"to": reply_addr})
+        rows = HttpTupleStore().rd(f"mailbox/{reply_addr}", {"to": reply_addr}, n=2)  # n=2: n=1 would hide a duplicate
         assert [r.body for r in rows] == ["done"]
         assert rows[0].id == reply_id
 

@@ -58,7 +58,7 @@ def _print_tuple_error(e: Exception) -> None:
 
 @click.group(name="tuple")
 def tuple_group() -> None:
-    """RDR-205 Linda tuple space: out / rd / in / ack / nack / templates / list / stats / watch."""
+    """RDR-205 Linda tuple space: out / rd / in / ack (with an optional reply) / nack / renew / templates / list / stats / watch."""
 
 
 @tuple_group.command(name="out")
