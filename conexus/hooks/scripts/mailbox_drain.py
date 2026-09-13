@@ -229,7 +229,7 @@ def _clear_pending(config_dir: Path, address: str, tuple_id: str) -> None:
 
 
 def _recover_pending(config_dir: Path, address: str, present_ids: set[str],
-                     out: _Out) -> None:
+                     *, confirmed_complete: bool, out: _Out) -> None:
     """Deliver rows this hook consumed on an earlier prompt but never showed.
 
     The window is narrow and the consequence is total: ``ack`` reaches the
@@ -238,8 +238,7 @@ def _recover_pending(config_dir: Path, address: str, present_ids: set[str],
     mailbox and was never shown to anyone -- silent, permanent loss of a
     delivered message, the failure class this whole epic exists to prevent.
 
-    Presence in the mailbox distinguishes the two cases, and the probe has
-    already fetched it, so this costs no extra call:
+    Presence in the mailbox distinguishes the two cases:
 
     * the id is ABSENT -- the ack landed, the row is consumed, its delivery was
       lost. Deliver it now, and drop the record.
@@ -251,14 +250,25 @@ def _recover_pending(config_dir: Path, address: str, present_ids: set[str],
       the engine on its own schedule. Keeping the record costs a redundant entry
       that the normal path clears on delivery; clearing it early costs the
       message.
+
+    ABSENCE FROM ``present_ids`` IS ONLY MEANINGFUL WHEN ``confirmed_complete``
+    IS TRUE (nexus-1kvk3). The engine's ``rd`` orders by created_at ascending,
+    never excludes claimed or dead-lettered rows, and this hook only ever
+    fetches a bounded number per call -- so on a backlog deeper than that
+    bound, "not in the page(s) fetched so far" does not mean "not in the
+    mailbox". Guessing absence there used to misread a row still sitting
+    claimed-but-unresolved as an ack that landed, delivering (or dropping) it
+    for the wrong reason. When the caller could not walk far enough to be
+    sure, an unresolved id is treated exactly like a PRESENT one: kept, never
+    guessed away.
     """
     entries = _read_pending(config_dir, address)
     if not entries:
         return
     keep: list[dict[str, str]] = []
     for entry in entries:
-        if entry["id"] in present_ids:
-            keep.append(entry)   # still in the mailbox: the normal path owns it
+        if entry["id"] in present_ids or not confirmed_complete:
+            keep.append(entry)   # still there, or its absence is unconfirmed
         else:
             out.block(entry["rendered"])
     _save_pending(config_dir, address, keep)
@@ -399,6 +409,30 @@ def _render_dead(address: str, row: dict[str, Any]) -> str:
     )
 
 
+def _probe_page(base_url: str, token: str, address: str, *, is_local: bool,
+                deadline: float, since: tuple[str, str] | None) -> list[dict[str, Any]]:
+    """One page of ``rd`` on *address*, optionally continuing past *since*.
+
+    *since* is the engine's own ``(created_at, id)`` cursor
+    (``nexus.db.t2.http_tuple_store.rd``'s wire contract: ``{"created_at":
+    ..., "id": ...}``), so a follow-up page picks up strictly after the
+    previous page's last row instead of reading the same head of the address
+    again.
+    """
+    import time  # noqa: PLC0415 — deferred: only this path needs a clock
+
+    body: dict[str, Any] = {
+        "subspace": f"mailbox/{address}",
+        "keys_pattern": {"to": address},
+        "n": _PROBE_N,
+    }
+    if since is not None:
+        body["since"] = {"created_at": since[0], "id": since[1]}
+    probe = _post(base_url, token, "/v1/tuples/rd", body, is_local=is_local,
+                  budget_s=deadline - time.monotonic())
+    return (probe or {}).get("tuples") or []
+
+
 def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
                    config_dir: Path, deadline: float, out: _Out) -> None:
     """Probe one address and deliver what it can, writing each row as it goes.
@@ -410,25 +444,58 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
     """
     import time  # noqa: PLC0415 — deferred: only this path needs a clock
 
-    probe = _post(base_url, token, "/v1/tuples/rd", {
-        "subspace": f"mailbox/{address}",
-        "keys_pattern": {"to": address},
-        "n": _PROBE_N,
-    }, is_local=is_local, budget_s=deadline - time.monotonic())
-    rows = (probe or {}).get("tuples") or []
+    rows = _probe_page(base_url, token, address, is_local=is_local,
+                       deadline=deadline, since=None)
     present_ids = {str(r.get("id")) for r in rows}
+    dead_rows = [r for r in rows if r.get("claim_state") == "dead"]
+    saw_any_row = bool(rows)
+    # A full page (exactly _PROBE_N rows) means there might be more behind it;
+    # anything shorter is the engine's own confirmation there is nothing else.
+    complete = len(rows) < _PROBE_N
+
+    # PAGINATE PAST THE PROBE CEILING (nexus-1kvk3). ``rd`` orders by
+    # created_at ascending and never excludes claimed or dead-lettered rows
+    # (dead rows are purged only by a human, per this hook's own contract
+    # above), so a backlog deeper than one page can rank a pending row's
+    # presence check wrong: "not on the page(s) read so far" is not "not in
+    # the mailbox". Walk forward with the engine's own cursor ONLY as far as
+    # there is a pending id still unresolved and the address might hold more
+    # than what has been read -- an ordinary drain with no pending entries,
+    # or whose entries already resolved on the first page, pays nothing for
+    # this loop at all.
+    pending_ids = {e["id"] for e in _read_pending(config_dir, address)}
+    unresolved = pending_ids - present_ids
+    while unresolved and not complete:
+        if time.monotonic() >= deadline:
+            _log_skip(
+                f"mailbox/{address}: drain budget spent confirming "
+                f"{len(unresolved)} pending id(s) against a backlog deeper "
+                f"than {_PROBE_N} rows; kept for the next prompt rather "
+                "than guessed",
+            )
+            break
+        last = rows[-1]
+        since = (str(last.get("created_at")), str(last.get("id")))
+        rows = _probe_page(base_url, token, address, is_local=is_local,
+                           deadline=deadline, since=since)
+        if not rows:
+            complete = True
+            break
+        saw_any_row = True
+        present_ids |= {str(r.get("id")) for r in rows}
+        dead_rows.extend(r for r in rows if r.get("claim_state") == "dead")
+        unresolved = pending_ids - present_ids
+        if len(rows) < _PROBE_N:
+            complete = True
 
     # A row this hook consumed on an earlier prompt but never managed to
     # deliver: the ack reached the engine and its RESPONSE did not, so the row
     # is gone from the mailbox and nothing else will ever show it. Recover it
     # here, before anything else, since it is already lost from the engine's
-    # point of view.
-    _recover_pending(config_dir, address, present_ids, out)
+    # point of view -- ``complete`` says whether that "gone" conclusion is
+    # actually confirmed, or just where this probe's budget ran out.
+    _recover_pending(config_dir, address, present_ids, confirmed_complete=complete, out=out)
 
-    if not rows:
-        return
-
-    dead_rows = [r for r in rows if r.get("claim_state") == "dead"]
     if dead_rows:
         seen = _read_seen(config_dir, address)
         fresh = [r for r in dead_rows if str(r.get("id")) not in seen]
@@ -440,8 +507,24 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
             present = {str(r.get("id")) for r in dead_rows}
             _write_seen(config_dir, address, seen & present)
 
-    live_count = sum(1 for r in rows if r.get("claim_state") != "dead")
-    for _ in range(min(live_count, _MAX_DELIVER)):
+    if not saw_any_row:
+        return
+
+    # LIVE DELIVERY. Deliberately NOT gated on a live-row count read off a
+    # probe page: ``/v1/tuples/in`` claims the address's own oldest unclaimed
+    # live row directly at the engine, unbounded by whatever ``rd`` page this
+    # hook happened to read. A genuinely live row ranked behind more dead or
+    # claimed rows than a page holds -- the starvation nexus-1kvk3 names --
+    # is still reachable this way; the probe above only had to see it for
+    # dead-row surfacing and pending-id resolution, never as a precondition
+    # for attempting a claim. (The sibling starvation in the ``rd``-only
+    # watcher, nexus-qw386, has no such escape hatch and needs its own
+    # cursor-based fix.) Attempted up to _MAX_DELIVER times and stopped the
+    # moment a claim comes back empty -- the engine's own confirmation that
+    # nothing more is available, whether because a peer got there first or
+    # the address is now empty.
+    delivered = 0
+    while delivered < _MAX_DELIVER:
         if time.monotonic() >= deadline:
             break
         claim = _post(base_url, token, "/v1/tuples/in", {
@@ -473,6 +556,7 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
             break
         out.block(rendered)
         _clear_pending(config_dir, address, row_id)
+        delivered += 1
 
 
 def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:

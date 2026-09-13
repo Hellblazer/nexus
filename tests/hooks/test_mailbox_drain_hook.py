@@ -124,6 +124,11 @@ class _MockEngine:
         self.ack_ok: bool = True
         self.calls: list[tuple[str, dict]] = []
         self.rd_delay_s: float = 0.0
+        #: Delay applied only to a paginated follow-up ``rd`` (one that carries
+        #: a ``since`` cursor), so a full first page can answer instantly while
+        #: the page needed to confirm a pending id's true absence never
+        #: returns in time (nexus-1kvk3's budget-exhausted path).
+        self.rd_delay_since_s: float = 0.0
         #: Drop the connection on the Nth call to this route (1-based), AFTER
         #: applying its effect. Models the killing case: the engine consumed the
         #: row and the client never learned it.
@@ -178,6 +183,8 @@ class _MockEngine:
                         return
                     if engine.rd_delay_s:
                         time.sleep(engine.rd_delay_s)
+                    if engine.rd_delay_since_s and body.get("since"):
+                        time.sleep(engine.rd_delay_since_s)
                     pattern = (body.get("keys_pattern") or {}).get("to")
                     rows = [
                         r for r in engine.rows
@@ -767,6 +774,44 @@ class TestPartialFailureNeverLosesDeliveredMail:
         )
         assert "SKIP" in res.stderr
         assert "Traceback" not in res.stderr, "a raw traceback reached the user's prompt"
+
+    def test_budget_exhausted_confirming_a_pending_id_keeps_the_record_and_says_so(
+        self, tmp_path, engine,
+    ) -> None:
+        """nexus-1kvk3's budget-exhausted path. A pending id from an earlier
+        ambiguous ack is not resolved by the first probe page -- a FULL page of
+        PROBE_N rows, none of them matching it, so its true absence is still
+        unknown -- and the page needed to confirm that never returns in time.
+
+        The record must survive untouched (never guessed absent and delivered,
+        never guessed present and dropped) and the hook must say why on
+        stderr, not silently truncate.
+        """
+        eng = engine()
+        eng.rows = [_row(f"filler{i}") for i in range(20)]  # a full PROBE_N page
+        eng.rd_delay_since_s = 30.0  # the paginated follow-up never returns in time
+        _wired(tmp_path, eng)
+
+        pending_dir = tmp_path / "config" / "tuple-watch"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        pending_path = pending_dir / f"{SESSION_ID}.pending.json"
+        pending_body = json.dumps({"entries": [
+            {"id": "ghost-id", "rendered": "- from=peer-z ... an ambiguous earlier ack"},
+        ]})
+        pending_path.write_text(pending_body, encoding="utf-8")
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0
+        assert res.stdout.strip() == "", (
+            "a pending row whose presence could not be confirmed must not be "
+            "rendered as either delivered or dropped"
+        )
+        assert "SKIP" in res.stderr
+        assert pending_path.read_text() == pending_body, (
+            "the pending record must survive an unconfirmed presence check "
+            "untouched, not be cleared on a guess"
+        )
 
     def test_a_pending_record_survives_a_drain_that_never_reclaims_the_row(
         self, tmp_path, engine,

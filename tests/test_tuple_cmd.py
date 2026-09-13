@@ -1616,3 +1616,56 @@ class TestWatcherAndDrainHookAreDisjoint:
         assert res.returncode == 0, res.stderr
         assert "floor delivery" in res.stdout
         assert not store.rd(f"mailbox/{addr}", {"to": addr}, n=5)
+
+
+class TestMailboxDrainDoesNotStarveBehindALargeDeadBacklog:
+    """nexus-1kvk3: the engine's ``rd`` orders by created_at ascending, never
+    excludes claimed or dead-lettered rows, and caps a page at the hook's own
+    PROBE_N (20, ``mailbox_drain.py``). A live row ranked behind more than
+    that many dead-lettered rows must still reach this hook -- unlike the
+    ``rd``-only watcher (the sibling starvation, nexus-qw386), this hook
+    claims via ``/v1/tuples/in``, which is not windowed by any probe page."""
+
+    HOOK = (
+        Path(__file__).resolve().parent.parent
+        / "conexus" / "hooks" / "scripts" / "mailbox_drain.py"
+    )
+
+    def _run_hook(self, addr: str, tmp_path) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        env["NEXUS_CONFIG_DIR"] = str(tmp_path / "hookcfg")
+        env["XDG_STATE_HOME"] = str(tmp_path / "hookstate")
+        return subprocess.run(
+            [sys.executable, str(self.HOOK)],
+            input=json.dumps({"session_id": addr, "hook_event_name": "UserPromptSubmit"}),
+            capture_output=True, text=True, env=env, timeout=300,
+        )
+
+    def test_a_live_row_ranked_beyond_probe_n_dead_rows_is_still_drained(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        store, _cfg, _sd = _watch_env(tmp_path)
+        addr = _uniq("addr")
+        sub = f"mailbox/{addr}"
+        # PROBE_N is 20 in mailbox_drain.py; one more than that dead-lettered
+        # ahead of the live row reproduces the starvation the bead names.
+        for i in range(21):
+            tid = _out(store, addr, sender="poison", body=f"dead-{i}")
+            for _ in range(3):  # mailbox.yaml max_attempts=3: the third nack dead-letters it
+                claimant = _uniq("c")
+                claimed = store.in_(sub, {"to": addr}, claimant=claimant, lease_s=30)
+                assert claimed is not None and claimed[0].id == tid
+                store.nack(claimed[1], claimant)
+        live_id = _out(store, addr, sender="alice", body="the live row ranked 22nd")
+
+        res = self._run_hook(addr, tmp_path)
+
+        assert res.returncode == 0, res.stderr
+        assert "the live row ranked 22nd" in res.stdout, (
+            "a live row ranked beyond the probe window was starved behind "
+            "more than PROBE_N dead-lettered rows"
+        )
+        remaining = {r.id for r in store.rd(sub, {"to": addr}, n=50)}
+        assert live_id not in remaining, (
+            "the live row was never claimed, so it is still sitting in the mailbox"
+        )
