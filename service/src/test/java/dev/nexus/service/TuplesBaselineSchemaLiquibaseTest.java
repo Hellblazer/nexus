@@ -550,24 +550,31 @@ class TuplesBaselineSchemaLiquibaseTest {
         }
     }
 
-    // ── Test 15: tuples-003's body-size CHECK — NOT VALID, and enforced on new rows ──
+    // ── Test 15: tuples-003's body-size CHECK — VALIDATED, and enforced on new rows ──
 
     /**
-     * RDR-205 amendment (bead nexus-r7xao): {@code chk_tuples_body_size} exists,
-     * is NOT VALID (so a pre-existing legacy row over the cap is tolerated), and
-     * still rejects a NEW insert whose body exceeds 4096 UTF-8 bytes — the
-     * DB-level backstop behind {@code TupleRepository}'s own engine-side check,
-     * proven directly against the table rather than through the repository.
+     * RDR-205 amendment (bead nexus-r7xao, fix round): {@code chk_tuples_body_size}
+     * exists AND is VALIDATED — tuples-003-2's cleanup DELETE removes every legacy
+     * violator before tuples-003-3/-4 add and validate the constraint, so this
+     * shared, already-fully-migrated cluster (walked from empty, no legacy rows
+     * ever existed on it) ends the walk with the constraint proven, not merely
+     * present. {@link #tuplesBodySizeCheckCleanup_deletesLegacyOversizedRows_keepsAtCapRow_thenValidates}
+     * below is the scenario proof: a REAL pre-existing oversized row, inserted
+     * before tuples-003 ever runs, is what tuples-003-2 must remove for
+     * tuples-003-4's VALIDATE to succeed at all — this test alone (an
+     * already-clean cluster) could pass even if tuples-003-2 did nothing.
      */
     @Test
-    void tuplesBodySizeCheck_existsNotValid_andRejectsAnOversizedNewRow() throws Exception {
+    void tuplesBodySizeCheck_isValidated_andRejectsAnOversizedNewRow() throws Exception {
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             assertThat(PgCatalogProbes.constraintExists(ctx, "chk_tuples_body_size"))
                 .as("chk_tuples_body_size must exist").isTrue();
             assertThat(PgCatalogProbes.constraintValidated(ctx, "chk_tuples_body_size"))
-                .as("chk_tuples_body_size must be NOT VALID (a pre-existing legacy row is tolerated)")
-                .isFalse();
+                .as("chk_tuples_body_size must be VALIDATED (tuples-003-2 removes every "
+                    + "violator before tuples-003-4's VALIDATE runs, so this cluster's walk "
+                    + "from empty must end with the constraint proven, not merely present)")
+                .isTrue();
         }
 
         try (Connection su = pg.createConnection("")) {
@@ -617,6 +624,124 @@ class TuplesBaselineSchemaLiquibaseTest {
                     .execute();
                 su.commit();
             }
+        }
+    }
+
+    // ── Test 16: tuples-003-2's cleanup DELETE against a REAL legacy oversized row ──
+
+    /**
+     * RDR-205 amendment (bead nexus-r7xao, fix round — the CRE/critic Critical
+     * finding both raised: a plain NOT VALID CHECK tolerates a legacy oversized
+     * row at INSERT time but Postgres re-validates it on every SUBSEQUENT UPDATE
+     * regardless of which columns that UPDATE's SET list touches, so a real
+     * pre-existing violator would 500 on its first claim/ack/nack/renew forever).
+     *
+     * <p>Migrates up to (and including) {@code tuples-002-4} ONLY — the state a
+     * real install would be in immediately before this bead's engine-service
+     * upgrade — inserts an oversized row DIRECTLY (simulating a genuine
+     * pre-existing legacy tuple, written by an engine that predates this bead's
+     * body cap: the superuser connection {@link PgContainerHelper#start} hands
+     * back bypasses {@code nexus.tuples}'s FORCE RLS automatically, the same way
+     * Liquibase's own migration role would need to for tuples-003-2's DELETE to
+     * see the row at all — {@code nexus-1wjmq}'s incident class), an at-cap row,
+     * and a {@code tuple_claim_log} row referencing the oversized tuple (so the
+     * FK's {@code ON DELETE SET NULL} cascade has something real to prove), THEN
+     * applies the rest of the changelog (tuples-003's four changesets) and
+     * asserts: the oversized row is gone, the at-cap row survives untouched, the
+     * referencing claim-log row survives with {@code tuple_id} nulled (the SAME
+     * cascade the sweep's own {@code purgeExpiredTuplesBatch} already relies on),
+     * and the constraint ends VALIDATED — proving tuples-003-2's cleanup is what
+     * makes tuples-003-4's VALIDATE succeed, not merely that the constraint
+     * exists on an already-clean cluster (this test's own control case, {@link
+     * #tuplesBodySizeCheck_isValidated_andRejectsAnOversizedNewRow}, could pass
+     * vacuously if tuples-003-2 did nothing).
+     */
+    @Test
+    void tuplesBodySizeCheckCleanup_deletesLegacyOversizedRows_keepsAtCapRow_thenValidates() throws Exception {
+        PostgreSQLContainer<?> dedicated = PgContainerHelper.startDedicated();
+        try {
+            try (Connection su = dedicated.createConnection("")) {
+                migrateUpTo(su, "tuples-002-4", true);
+            }
+
+            byte[] oversizedId = HexFormat.of().parseHex("c0ffee0000000000000000000000000000000000000000000000000000f00d");
+            byte[] atCapId = HexFormat.of().parseHex("c0ffee1111111111111111111111111111111111111111111111111111f00d");
+            String tenant = "tuples-cleanup-tenant";
+            String legacyClaimId = "legacy-claim-id";
+
+            try (Connection su = dedicated.createConnection("")) {
+                su.setAutoCommit(false);
+                // Superuser connection: bypasses nexus.tuples/tuple_claim_log's FORCE RLS
+                // automatically (Testcontainers precedent, catalog-013-1b's own header) --
+                // exactly how a genuine legacy row, written before this bead's engine-side
+                // cap existed, would already sit in the table with no tenant GUC in play.
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                OffsetDateTime now = OffsetDateTime.now();
+                ctx.insertInto(TUPLES)
+                    .set(TUPLES.ID, oversizedId)
+                    .set(TUPLES.TENANT_ID, tenant)
+                    .set(TUPLES.SUBSPACE, "mailbox/legacy-oversized")
+                    .set(TUPLES.TEMPLATE, "mailbox/<address>")
+                    .set(TUPLES.KEYS, JSONB.valueOf("{}"))
+                    .set(TUPLES.BODY, "x".repeat(5000))
+                    .set(TUPLES.EXPIRES_AT, now.plusDays(7))
+                    .set(TUPLES.CREATED_AT, now)
+                    .execute();
+                ctx.insertInto(TUPLES)
+                    .set(TUPLES.ID, atCapId)
+                    .set(TUPLES.TENANT_ID, tenant)
+                    .set(TUPLES.SUBSPACE, "mailbox/legacy-at-cap")
+                    .set(TUPLES.TEMPLATE, "mailbox/<address>")
+                    .set(TUPLES.KEYS, JSONB.valueOf("{}"))
+                    .set(TUPLES.BODY, "x".repeat(4096))
+                    .set(TUPLES.EXPIRES_AT, now.plusDays(7))
+                    .set(TUPLES.CREATED_AT, now)
+                    .execute();
+                ctx.insertInto(TUPLE_CLAIM_LOG)
+                    .set(TUPLE_CLAIM_LOG.TENANT_ID, tenant)
+                    .set(TUPLE_CLAIM_LOG.SUBSPACE, "mailbox/legacy-oversized")
+                    .set(TUPLE_CLAIM_LOG.TEMPLATE, "mailbox/<address>")
+                    .set(TUPLE_CLAIM_LOG.TUPLE_ID, oversizedId)
+                    .set(TUPLE_CLAIM_LOG.CLAIM_ID, legacyClaimId)
+                    .set(TUPLE_CLAIM_LOG.CLAIMANT, "legacy-claimant")
+                    .set(TUPLE_CLAIM_LOG.TRANSITION, "claim")
+                    .set(TUPLE_CLAIM_LOG.AT, now)
+                    .set(TUPLE_CLAIM_LOG.EXPIRES_AT, now.plusDays(180))
+                    .execute();
+                su.commit();
+            }
+
+            try (Connection su = dedicated.createConnection("")) {
+                applyFullChangelog(su);
+            }
+
+            try (Connection su = dedicated.createConnection("")) {
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+
+                assertThat(ctx.fetchExists(ctx.selectFrom(TUPLES).where(TUPLES.ID.eq(oversizedId))))
+                    .as("the legacy oversized row must be deleted by tuples-003-2").isFalse();
+
+                var atCapRow = ctx.selectFrom(TUPLES).where(TUPLES.ID.eq(atCapId)).fetchOne();
+                assertThat(atCapRow).as("the at-cap row must survive tuples-003-2 untouched").isNotNull();
+                assertThat(atCapRow.getBody()).hasSize(4096);
+
+                var logRow = ctx.selectFrom(TUPLE_CLAIM_LOG)
+                    .where(TUPLE_CLAIM_LOG.CLAIM_ID.eq(legacyClaimId))
+                    .fetchOne();
+                assertThat(logRow)
+                    .as("the referencing tuple_claim_log row must survive the tuple's deletion").isNotNull();
+                assertThat(logRow.getTupleId())
+                    .as("tuple_claim_log_tuple_fk's ON DELETE SET NULL must have fired, the same "
+                        + "cascade the sweep's own purgeExpiredTuplesBatch already relies on")
+                    .isNull();
+
+                assertThat(PgCatalogProbes.constraintExists(ctx, "chk_tuples_body_size")).isTrue();
+                assertThat(PgCatalogProbes.constraintValidated(ctx, "chk_tuples_body_size"))
+                    .as("VALIDATE must succeed once tuples-003-2 has removed the only violator")
+                    .isTrue();
+            }
+        } finally {
+            dedicated.stop();
         }
     }
 

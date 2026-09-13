@@ -35,13 +35,11 @@
 # external, non-throwaway NX_DB_URL -- the mailbox template's own
 # retention_seconds (604800, a week) is what eventually reclaims them, the
 # same as any other mailbox traffic.
-import os
 import uuid
 from datetime import datetime
 
 import httpx
 
-from nexus.db.t2._refreshable_client import DEFAULT_TENANT
 from nexus.db.t2.http_tuple_store import ClaimNotFoundError, HttpTupleStore, TooLargeError
 from nexus.db.t2.records import ReplySpec
 
@@ -158,14 +156,21 @@ except TooLargeError:
 # Bypasses HttpTupleStore's identical 8 KB client-side pre-check entirely (a
 # raw httpx POST, not the client) so this leg actually reaches the compiled
 # native engine rather than being refused locally before any bytes are sent.
-_raw_base = f"http://{os.environ['NX_SERVICE_HOST']}:{os.environ['NX_SERVICE_PORT']}"
+# Reuses the ALREADY-RESOLVED endpoint off `tuples` itself (its own
+# `_base_url`/`_token`/`_tenant`, set by RefreshableHttpStoreMixin's own
+# resolution) rather than reading NX_SERVICE_HOST/PORT directly: the real
+# native-smoke.sh sets those two separately, but tests/test_native_smoke_
+# client_probes.py's pytest harness sets only NX_SERVICE_URL (see that
+# module's own docstring) -- going through the client's own resolved state
+# works under both, the way every other call in this script already does.
+raw_addr = f"native-smoke-tuples-raw-oversize-{uuid.uuid4().hex[:12]}"
 raw_resp = httpx.post(
-    f"{_raw_base}/v1/tuples/out",
-    content=b'{"subspace":"mailbox/' + oversize_addr.encode() + b'","keys":{"to":"'
+    f"{tuples._base_url}/v1/tuples/out",
+    content=b'{"subspace":"mailbox/' + raw_addr.encode() + b'","keys":{"to":"'
     + (b"x" * 9000) + b'"}}',
     headers={
-        "Authorization": f"Bearer {os.environ['NX_SERVICE_TOKEN']}",
-        "X-Nexus-Tenant": os.environ.get("NX_SERVICE_TENANT", DEFAULT_TENANT),
+        "Authorization": f"Bearer {tuples._token}",
+        "X-Nexus-Tenant": tuples._tenant,
         "Content-Type": "application/json",
     },
 )

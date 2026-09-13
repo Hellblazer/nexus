@@ -105,6 +105,53 @@ class TupleSizeLimitsWireTest {
         assertThat((String) body.get("detail")).contains("request body");
     }
 
+    /**
+     * CRE minor: the whole-request cap's own boundary (8192 succeeds past the
+     * bounded read / 8193 is refused there) was previously only proven "+100
+     * over" and "well under the cap" -- not the exact off-by-one edge the way
+     * every per-field cap already is in {@code TupleSizeLimitsTest}. Uses the
+     * SAME map instance for the measurement and the actual send (never two
+     * separate {@code Map.of} calls) so there is no risk of Jackson
+     * serialising two structurally-identical-but-distinct map instances to
+     * different byte lengths.
+     */
+    @Test
+    void wholeRequestBoundary_exactlyAtCapPassesThroughToAFieldCheck_oneByteOverIsRefusedByTheWholeRequestGuard()
+            throws Exception {
+        java.util.LinkedHashMap<String, Object> payload = new java.util.LinkedHashMap<>();
+        payload.put("subspace", "mailbox/wire-boundary");
+        java.util.LinkedHashMap<String, String> keys = new java.util.LinkedHashMap<>();
+        keys.put("to", "");
+        payload.put("keys", keys);
+        int base = mapper.writeValueAsBytes(payload).length;
+
+        // Exactly at the whole-request cap: the bounded read must NOT refuse this
+        // one. "to" is then, by construction, far over its OWN 256-byte field cap
+        // (base is a handful of bytes, so the padded value is over 8000 bytes) --
+        // refused AFTER parsing, with a field-specific detail, proving the two
+        // guards are independent and this one passed the whole-request guard.
+        keys.put("to", "x".repeat(TupleLimits.MAX_REQUEST_BODY_BYTES - base));
+        byte[] atCapBytes = mapper.writeValueAsBytes(payload);
+        assertThat(atCapBytes.length).isEqualTo(TupleLimits.MAX_REQUEST_BODY_BYTES);
+        var atCapResp = post(payload);
+        assertThat(atCapResp.statusCode()).isEqualTo(413);
+        var atCapBody = mapper.readValue(atCapResp.body(), MAP_T);
+        assertThat(atCapBody.get("error")).isEqualTo("TooLarge");
+        assertThat((String) atCapBody.get("detail")).contains("keys.to");
+        assertThat((String) atCapBody.get("detail")).doesNotContain("request body");
+
+        // One byte over: the bounded read refuses THIS one directly, before any
+        // JSON parsing -- detail names "request body", never the field.
+        keys.put("to", "x".repeat(TupleLimits.MAX_REQUEST_BODY_BYTES - base + 1));
+        byte[] overBytes = mapper.writeValueAsBytes(payload);
+        assertThat(overBytes.length).isEqualTo(TupleLimits.MAX_REQUEST_BODY_BYTES + 1);
+        var overResp = post(payload);
+        assertThat(overResp.statusCode()).isEqualTo(413);
+        var overBody = mapper.readValue(overResp.body(), MAP_T);
+        assertThat(overBody.get("error")).isEqualTo("TooLarge");
+        assertThat((String) overBody.get("detail")).contains("request body");
+    }
+
     @Test
     void everyFieldAtItsOwnCap_sumsWellUnderTheWholeRequestCap_succeeds() throws Exception {
         // body at its 4096-byte cap, "to" and "from" at the 256-byte field cap, the

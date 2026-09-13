@@ -1128,6 +1128,22 @@ public final class NexusService {
     }
 
     /**
+     * The worse (higher {@link Enum#ordinal()}) of two {@link
+     * TupleSweepIncompleteCause} values (fix round, coordinator: sweep-arm
+     * isolation). {@link #runScheduledTupleSweep} calls this once per arm's
+     * cap-break or catch, the same ordinal-max rule the outer per-run
+     * aggregation already applies across TENANTS, now also applied across the
+     * three ARMS within one tenant — so a tenant whose arm 1 merely hits its
+     * batch-share cap (TENANT_CAP) and whose arm 2 then THROWS (TENANT_ERROR)
+     * reports the worse TENANT_ERROR, never silently downgraded back to
+     * TENANT_CAP by a later arm's own cap-break reassigning the field.
+     */
+    private static TupleSweepIncompleteCause worseTupleSweepCause(
+            TupleSweepIncompleteCause a, TupleSweepIncompleteCause b) {
+        return a.ordinal() >= b.ordinal() ? a : b;
+    }
+
+    /**
      * As {@link #runScheduledTupleSweep(OffsetDateTime)}, with every tunable
      * injected — production passes the real settings; tests pass small ones so
      * the budget scenarios (RDR-205 §Test Plan) are fast assertions rather than
@@ -1201,27 +1217,33 @@ public final class NexusService {
             boolean complete = true;
             TupleSweepIncompleteCause tenantCause = TupleSweepIncompleteCause.NONE;
 
-            try {
-                // nexus-em75s.34: each arm below gets its OWN counter checked against
-                // its OWN share of maxBatchesPerTenant (see tupleSweepArmBatchShare's
-                // javadoc for the split rule and the starvation this fixes) — an arm
-                // hitting its own share no longer gates whether the NEXT arm's loop
-                // even runs. Every arm's loop still runs unconditionally (not gated on
-                // an earlier arm's outcome); `complete`/`tenantCause` only record
-                // whether ANY arm was cut short, for the tenant-level stamping decision
-                // below.
+            // nexus-em75s.34 / fix round (coordinator, sweep-isolation critical): each
+            // arm below gets its OWN counter checked against its OWN share of
+            // maxBatchesPerTenant (see tupleSweepArmBatchShare's javadoc for the split
+            // rule and the starvation this fixes) AND its OWN try/catch — arm 1 no
+            // longer shares one try block with arms 2/3. Before this fix an EXCEPTION
+            // thrown by arm 1 (as opposed to merely hitting its own batch-share cap,
+            // which was already isolated) propagated out of one shared try block and
+            // skipped arms 2 and 3 entirely for that tenant that tick, leaving
+            // last_swept_at stale so the SAME tenant sorted first again next run and
+            // failed the same way forever. Each arm below now fails CONTAINED: logged
+            // with its own name and the tenant, `complete`/`tenantCause` updated to the
+            // WORST cause seen across arms (ordinal-max, the same rule the outer
+            // per-run aggregation below already uses across tenants), and the
+            // following arm(s) still run regardless.
 
-                // Arm 1: release lapsed claims nobody re-took. No wall-clock check here
-                // or in arms 2/3 below — maxBatchesPerTenant (split into per-arm shares)
-                // is the only bound WITHIN a tenant; the wall clock is checked only at
-                // the tenant boundary above.
+            // Arm 1: release lapsed claims nobody re-took. No wall-clock check here or
+            // in arms 2/3 below — maxBatchesPerTenant (split into per-arm shares) is
+            // the only bound WITHIN a tenant; the wall clock is checked only at the
+            // tenant boundary above.
+            try {
                 int releaseShare = tupleSweepArmBatchShare(maxBatchesPerTenant, 0);
                 int releaseBatches = 0;
                 boolean releaseDrained = false;
                 while (!releaseDrained) {
                     if (releaseBatches >= releaseShare) {
                         complete = false;
-                        tenantCause = TupleSweepIncompleteCause.TENANT_CAP;
+                        tenantCause = worseTupleSweepCause(tenantCause, TupleSweepIncompleteCause.TENANT_CAP);
                         break;
                     }
                     TupleRepository.ReleaseBatchResult r =
@@ -1234,15 +1256,23 @@ public final class NexusService {
                         releaseDrained = true; // drained
                     }
                 }
-                // Arm 2: purge expired / consumed-past-retention tuples. Runs
-                // regardless of whether arm 1 above hit its own share.
+            } catch (Exception ex) {
+                complete = false;
+                tenantCause = worseTupleSweepCause(tenantCause, TupleSweepIncompleteCause.TENANT_ERROR);
+                log.warn("event=tuple_sweep_arm_failed arm=release tenant={} error={}",
+                        tenant, ex.getMessage(), ex);
+            }
+
+            // Arm 2: purge expired / consumed-past-retention tuples. Runs regardless
+            // of whether arm 1 above hit its own share or threw.
+            try {
                 int purgeShare = tupleSweepArmBatchShare(maxBatchesPerTenant, 1);
                 int purgeBatches = 0;
                 boolean purgeDrained = false;
                 while (!purgeDrained) {
                     if (purgeBatches >= purgeShare) {
                         complete = false;
-                        tenantCause = TupleSweepIncompleteCause.TENANT_CAP;
+                        tenantCause = worseTupleSweepCause(tenantCause, TupleSweepIncompleteCause.TENANT_CAP);
                         break;
                     }
                     TupleRepository.PurgeBatchResult r2 =
@@ -1254,15 +1284,23 @@ public final class NexusService {
                         purgeDrained = true;
                     }
                 }
-                // Arm 3: purge claim-log rows past their own (longer) TTL. Runs
-                // regardless of whether arms 1/2 above hit their own share.
+            } catch (Exception ex) {
+                complete = false;
+                tenantCause = worseTupleSweepCause(tenantCause, TupleSweepIncompleteCause.TENANT_ERROR);
+                log.warn("event=tuple_sweep_arm_failed arm=purge_tuples tenant={} error={}",
+                        tenant, ex.getMessage(), ex);
+            }
+
+            // Arm 3: purge claim-log rows past their own (longer) TTL. Runs
+            // regardless of whether arms 1/2 above hit their own share or threw.
+            try {
                 int logPurgeShare = tupleSweepArmBatchShare(maxBatchesPerTenant, 2);
                 int logPurgeBatches = 0;
                 boolean logPurgeDrained = false;
                 while (!logPurgeDrained) {
                     if (logPurgeBatches >= logPurgeShare) {
                         complete = false;
-                        tenantCause = TupleSweepIncompleteCause.TENANT_CAP;
+                        tenantCause = worseTupleSweepCause(tenantCause, TupleSweepIncompleteCause.TENANT_CAP);
                         break;
                     }
                     TupleRepository.PurgeBatchResult r3 =
@@ -1275,11 +1313,10 @@ public final class NexusService {
                     }
                 }
             } catch (Exception ex) {
-                // One tenant's failure must not starve the rest (same doctrine as
-                // runScheduledSweep's per-tenant catch above) — never stops the whole run.
                 complete = false;
-                tenantCause = TupleSweepIncompleteCause.TENANT_ERROR;
-                log.warn("event=tuple_sweep_tenant_failed tenant={} error={}", tenant, ex.getMessage(), ex);
+                tenantCause = worseTupleSweepCause(tenantCause, TupleSweepIncompleteCause.TENANT_ERROR);
+                log.warn("event=tuple_sweep_arm_failed arm=purge_log tenant={} error={}",
+                        tenant, ex.getMessage(), ex);
             }
 
             tenantsVisited++;

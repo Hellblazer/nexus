@@ -2,24 +2,91 @@
 <!--
     RDR-205 amendment (bead nexus-r7xao, Sam's decision 2026-09-13): the
     tuple space is a metadata store, not a value store. The engine-side
-    java checks in TupleRepository (out / ackWithReply) already refuse an
+    Java checks in TupleRepository (out / ackWithReply) already refuse an
     over-4096-byte body before any write, but this DB-level CHECK is the
     backstop for any writer that reaches nexus.tuples without going
     through TupleRepository: there is none today, and this constraint
     is what keeps that true even if one is added later without noticing
     the engine-side check.
 
-    NOT VALID (unlike catalog-021's immediate-validate case, and matching
-    the fk-002/fk-003 NOT VALID precedent's reasoning, though for a
-    different underlying cause): nexus.tuples is a live, already-shipped
-    table (tuples-001-baseline.xml, deployed since engine-service-v0.1.114)
-    that may carry a pre-existing row from before this bead's engine-side
-    check landed, on any install that wrote a tuple in that window. NOT
-    VALID lets the deploy proceed without a full-table scan under an
-    ACCESS EXCLUSIVE lock, and without failing on a legacy oversized row;
-    every NEW insert and update is checked from the moment this changeset
-    applies. No VALIDATE CONSTRAINT follow-up is scheduled here; see the
-    bead for that decision.
+    FIX ROUND (coordinator, fix-check pass): a plain NOT VALID CHECK is
+    NOT the safe-tolerance story the first cut of this changeset claimed.
+    Postgres re-validates a CHECK constraint against the FULL row on
+    EVERY subsequent INSERT and UPDATE regardless of which columns that
+    UPDATE's SET list touches: NOT VALID skips only the one-time bulk
+    scan of rows that existed at ADD time, never future enforcement.
+    None of TupleRepository's claim-lifecycle UPDATEs (claimOnce's claim
+    and dead-letter branches, consumeClaim's ack, releaseOrDeadLetter's
+    nack/expire, renew) ever SET body, so a legacy row with body already
+    over 4096 bytes (legal before this bead: nexus.tuples.body has been
+    unbounded TEXT since engine-service-v0.1.114) would fail EVERY one of
+    those UPDATEs with SQLSTATE 23514 forever, not a TooLarge/413 but an
+    opaque 409 (HttpUtil's sqlState23 mapping). Because claimOnce's SELECT
+    orders by created_at ASC, an old poisoned row sorts to the front and
+    is reselected on every attempt, so a single legacy oversized tuple can
+    stall its whole subspace's claim queue indefinitely, and once claimed
+    and lapsed, the sweep's release arm hits the same 23514 on every tick;
+    see the sibling fix in this same round for why that no longer takes
+    down the OTHER two sweep arms with it.
+
+    THE FIX. tuples-003-1 counts and logs (RAISE NOTICE) every existing
+    nexus.tuples row whose body already exceeds 4096 UTF-8 bytes;
+    tuples-003-2 deletes them, BEFORE the constraint is added below, so a
+    deploy with real violators is visible in the boot log rather than
+    silently corrected. This is the project's standing cleanup-migration
+    convention (warn and delete; tuples are short-lived coordination
+    rows, never a value store, so a body this old and this large was
+    never meant to survive anyway: its own template's retention_seconds
+    would have expired it within the week regardless). The corresponding
+    nexus.tuple_claim_log rows are handled the SAME WAY the sweep's own
+    purge already handles a deleted tuple: tuple_claim_log_tuple_fk is ON
+    DELETE SET NULL (tuples-001-2), so the DELETE's own cascade nulls
+    tuple_id on every claim-log row that referenced a deleted tuple, with
+    no extra statement needed here: exactly the FK the sweep's
+    purgeExpiredTuplesBatch already relies on for the identical shape of
+    delete.
+
+    TWO CHANGESETS, NOT ONE, for the count-and-delete pair (a departure
+    from this changeset's own first draft, which combined both in one
+    RAISE-NOTICE-reporting DO block): tests/test_changelog_rls_lint.py's
+    mechanized FORCE-RLS DML tripwire (nexus-1wjmq) parses each
+    changeset's <sql> text for a toggle-then-DML-then-restore shape of
+    FLAT, splitStatements="true" statements: the exact shape
+    catalog-013-1b already uses, and one it does not recognise a DML
+    statement nested inside a DO $$ ... $$ block as satisfying, even when the
+    toggle is the very first thing the SAME block does. tuples-003-2's
+    actual DELETE is therefore flat SQL, matching catalog-013-1b
+    statement for statement; tuples-003-1's count-and-log step stays a DO
+    block (it needs a variable to hold the count for RAISE NOTICE) but
+    contains no INSERT/UPDATE/DELETE keyword anywhere in its text, so the
+    tripwire has nothing to flag there regardless of block shape.
+
+    RLS. Both nexus.tuples and nexus.tuple_claim_log carry FORCE ROW
+    LEVEL SECURITY (tuples-001-1 / tuples-001-2), and the Liquibase
+    migration role (nexus_admin) is the table OWNER with no BYPASSRLS:
+    the exact nexus-1wjmq incident class (catalog-013-1b's header). Under
+    FORCE, even the owner's DELETE (or, in tuples-003-1, SELECT) sees
+    zero rows, and the FK's own ON DELETE SET NULL action against
+    tuple_claim_log is likewise subject to that table's FORCE RLS.
+    Both changesets below toggle NO FORCE / FORCE for their own duration
+    (tuples-003-2 toggles BOTH tables: the catalog-013-1b multi-table
+    shape, needed here because the cascade writes to the second table
+    under the same role), so the cleanup runs correctly on a real
+    forced-RLS cluster, not only under Testcontainers' superuser
+    (implicit BYPASSRLS) the way catalog-013-0 originally shipped
+    un-toggled and silently no-op'd in production.
+
+    VALIDATED, not left NOT VALID. Because tuples-003-2 removes every
+    violator first, tuples-003-4's VALIDATE CONSTRAINT (SHARE UPDATE
+    EXCLUSIVE, non-blocking, DDL: never row-filtered by RLS, per
+    catalog-013's own header) runs immediately after ADD ... NOT VALID
+    and is expected to succeed on every install, proving the constraint
+    rather than leaving it enforced-but-unproven. Split into ADD NOT
+    VALID (tuples-003-3) then VALIDATE (tuples-003-4), the catalog-013
+    two-step shape, rather than one ADD ... CHECK (...) with no NOT
+    VALID: the two-step keeps the ADD itself a metadata-only operation
+    (no table scan under the brief ACCESS EXCLUSIVE ADD CONSTRAINT
+    takes) and isolates the scan to the weaker-locked VALIDATE step.
 
     octet_length(), not length(): the column is TEXT, and the limit is on
     UTF-8 BYTES (a multibyte character does not cost one "length" unit),
@@ -37,9 +104,45 @@
     xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
-    <!-- ── Changeset 1: body-size CHECK, NOT VALID ─────────────────────────── -->
+    <!-- ── Changeset 1: count + log legacy oversized rows (read-only) ──────── -->
     <changeSet id="tuples-003-1" author="nexus-r7xao">
-        <comment>chk_tuples_body_size: nexus.tuples.body capped at 4096 UTF-8 bytes (TupleLimits.MAX_BODY_BYTES) -- the DB-level backstop behind TupleRepository's own engine-side check. NOT VALID: an already-live table may carry a pre-existing legacy row; new writes are checked from this changeset forward.</comment>
+        <comment>Read-only: counts and RAISE NOTICEs how many nexus.tuples rows already have body over 4096 UTF-8 bytes, before tuples-003-2 deletes them. Toggles FORCE RLS off on nexus.tuples for the duration of the count (nexus_admin is the owner with no BYPASSRLS) and restores it. No DML anywhere in this changeset.</comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+DECLARE
+    v_count integer;
+BEGIN
+    ALTER TABLE nexus.tuples NO FORCE ROW LEVEL SECURITY;
+    SELECT count(*) INTO v_count FROM nexus.tuples WHERE octet_length(body) &gt; 4096;
+    ALTER TABLE nexus.tuples FORCE ROW LEVEL SECURITY;
+    RAISE NOTICE 'tuples-003-1: % legacy row(s) found in nexus.tuples with body &gt; 4096 UTF-8 bytes; tuples-003-2 deletes them next', v_count;
+END $$;
+        </sql>
+        <!-- Read-only: nothing to roll back. -->
+        <rollback/>
+    </changeSet>
+
+    <!-- ── Changeset 2: delete legacy oversized rows BEFORE constraining ────── -->
+    <changeSet id="tuples-003-2" author="nexus-r7xao">
+        <comment>Cleanup migration (warn and delete; tuples are short-lived coordination rows): delete every nexus.tuples row whose body already exceeds 4096 UTF-8 bytes (tuples-003-1 logged the count), before chk_tuples_body_size is added below. tuple_claim_log_tuple_fk's ON DELETE SET NULL (tuples-001-2) nulls the referencing claim-log rows the same way the sweep's own purge does -- no extra statement needed. Toggles FORCE RLS off on both nexus.tuples and nexus.tuple_claim_log for the duration (nexus_admin is the owner with no BYPASSRLS, and the DELETE's cascade writes to both tables), restoring it before the changeset ends. Flat, splitStatements="true" statements (catalog-013-1b's exact shape), not a DO block: tests/test_changelog_rls_lint.py's FORCE-RLS DML tripwire does not recognise a toggle nested inside a procedural block as guarding the DML inside it.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.tuples NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.tuple_claim_log NO FORCE ROW LEVEL SECURITY;
+DELETE FROM nexus.tuples WHERE octet_length(body) &gt; 4096;
+ALTER TABLE nexus.tuple_claim_log FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.tuples FORCE ROW LEVEL SECURITY;
+        </sql>
+        <!-- Data deletion: the pre-image is not recoverable, and nothing
+             should recover it: a body this old and this large would
+             already have expired under its own template's
+             retention_seconds regardless. Same no-op rollback posture as
+             catalog-013-0's normalization DELETE. -->
+        <rollback/>
+    </changeSet>
+
+    <!-- ── Changeset 3: add the CHECK, NOT VALID (metadata-only) ───────────── -->
+    <changeSet id="tuples-003-3" author="nexus-r7xao">
+        <comment>chk_tuples_body_size: nexus.tuples.body capped at 4096 UTF-8 bytes (TupleLimits.MAX_BODY_BYTES) -- the DB-level backstop behind TupleRepository's own engine-side check. Added NOT VALID (metadata-only, no table scan) because tuples-003-2 already removed every violator; tuples-003-4 validates it immediately after.</comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.tuples
     ADD CONSTRAINT chk_tuples_body_size
@@ -50,6 +153,18 @@ ALTER TABLE nexus.tuples
 ALTER TABLE nexus.tuples DROP CONSTRAINT IF EXISTS chk_tuples_body_size;
             </sql>
         </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 4: validate the CHECK (SHARE UPDATE EXCLUSIVE, DDL) ───── -->
+    <changeSet id="tuples-003-4" author="nexus-r7xao">
+        <comment>VALIDATE chk_tuples_body_size -- expected to succeed on every install, since tuples-003-2 already removed every violating row. SHARE UPDATE EXCLUSIVE only (no write block); DDL, never row-filtered by RLS (catalog-013's own precedent), so no toggle is needed here.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.tuples VALIDATE CONSTRAINT chk_tuples_body_size;
+        </sql>
+        <!-- VALIDATE has no state to roll back: the constraint simply
+             returns to enforced-but-unproven. Same no-op posture as
+             catalog-013-2. -->
+        <rollback/>
     </changeSet>
 
 </databaseChangeLog>

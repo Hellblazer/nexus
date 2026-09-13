@@ -459,6 +459,15 @@ public final class TupleHandler implements HttpHandler {
      * without touching the stream; a missing, malformed, or under-cap header falls
      * through to the bounded read either way, so a caller cannot bypass the cap by
      * lying about (or omitting) the header.
+     *
+     * <p>CRE minor (accepted trade-off, not a bug): on refusal, this does NOT drain
+     * whatever bytes remain beyond the cap before the try-with-resources closes the
+     * stream — the JDK httpserver most likely closes rather than reuses the
+     * keep-alive connection for an oversized request, same as {@code
+     * InstallPingHandler}'s identical shape. Deliberate: draining an attacker-sized
+     * body just to preserve a connection that refused the request buys the client
+     * nothing and costs the server the exact unbounded read this guard exists to
+     * avoid.
      */
     private Map<String, Object> readBody(HttpExchange ex) throws IOException {
         String contentLength = ex.getRequestHeaders().getFirst("Content-Length");

@@ -327,7 +327,7 @@ def _check_request_size(payload: dict[str, Any]) -> None:
 
 
 def _raise_typed(exc: httpx.HTTPStatusError) -> NoReturn:
-    """Re-raise *exc* as one of the nine typed :class:`TupleError`
+    """Re-raise *exc* as one of the ten typed :class:`TupleError`
     subclasses when the engine's response body names one; otherwise
     re-raise *exc* unchanged.
 

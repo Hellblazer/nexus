@@ -22,6 +22,9 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -32,6 +35,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 
 import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
@@ -1196,9 +1200,33 @@ public final class TupleRepository {
                 long maxAttempts = (t == null || t.take().maxAttempts() == null)
                         ? Long.MAX_VALUE : t.take().maxAttempts();
                 int attempts = row.getAttempts() + 1;
-                ReleaseOutcome outcome = releaseOrDeadLetter(ctx, tenant, row.getSubspace(), row.getTemplate(),
-                        row.getId(), row.getClaimId(), row.getClaimant(), TRANSITION_EXPIRE, now,
-                        attempts, maxAttempts);
+                // Fix round (coordinator, sweep-isolation critical sibling): savepoint-
+                // guarded, so ONE row's failure (any exception -- a constraint
+                // violation, a transient statement error) cannot wedge the REST of this
+                // batch. Without the savepoint, a thrown exception here would leave
+                // Postgres's server-side transaction in the aborted state for every
+                // statement after it, including every OTHER row's release still to
+                // come in this loop and the SELECT above's own row lock; with it, only
+                // this row's own write is rolled back, and the loop moves on to the
+                // next selected row. A row that fails EVERY tick still sorts first
+                // (ORDER BY lease_until ASC) and is reselected every tick, but it no
+                // longer prevents this SAME batch's other (up to batchSize-1) rows from
+                // making progress the way the shared-transaction-abort failure mode
+                // did. Mirrors CatalogRepository#withSavepointFailOpen's exact
+                // mechanism (same doctrine: a sweep failure must never leave the
+                // surrounding transaction aborted for load-bearing work after it).
+                ReleaseOutcome outcome;
+                try {
+                    outcome = withRowSavepoint(ctx, () -> releaseOrDeadLetter(ctx, tenant, row.getSubspace(),
+                            row.getTemplate(), row.getId(), row.getClaimId(), row.getClaimant(),
+                            TRANSITION_EXPIRE, now, attempts, maxAttempts));
+                } catch (RuntimeException ex) {
+                    log.warn("event=tuple_sweep_release_row_failed tenant={} subspace={} tuple_id={} "
+                                    + "claim_id={} error={}",
+                            tenant, row.getSubspace(), HexFormat.of().formatHex(row.getId()), row.getClaimId(),
+                            ex.toString());
+                    continue;
+                }
                 switch (outcome) {
                     case DEAD_LETTERED -> deadLettered++;
                     case RELEASED -> released++;
@@ -1409,6 +1437,42 @@ public final class TupleRepository {
     }
 
     // ── shared helpers ───────────────────────────────────────────────────────
+
+    /**
+     * Run {@code body} under a JDBC SAVEPOINT taken on {@code ctx}'s own connection,
+     * rolling back to it (never releasing -- Postgres discards it at the enclosing
+     * transaction's own COMMIT/ROLLBACK regardless, same reasoning as {@code
+     * CatalogRepository#withSavepointFailOpen}) and RE-THROWING on any exception, so
+     * the surrounding transaction is restored to a workable state for whatever runs
+     * after this call rather than being left in Postgres's server-side aborted state.
+     *
+     * <p>Unlike {@code CatalogRepository#withSavepointFailOpen} this does NOT
+     * swallow the exception (no {@code fallback} value) -- {@link
+     * #releaseLapsedClaimsBatch}'s only caller here needs to know a row failed (to
+     * log it and skip to the next row without counting it as released or dead-
+     * lettered), not a silently substituted value. The savepoint is the shared
+     * mechanism between the two call sites; whether to swallow or rethrow is each
+     * caller's own policy.
+     */
+    private static <T> T withRowSavepoint(DSLContext ctx, Callable<T> body) {
+        Connection conn = ctx.configuration().connectionProvider().acquire();
+        Savepoint sp = null;
+        try {
+            sp = conn.setSavepoint();
+            return body.call();
+        } catch (Exception e) {
+            if (sp != null) {
+                try {
+                    conn.rollback(sp);
+                } catch (SQLException se) {
+                    log.error("event=tuple_sweep_savepoint_rollback_failed error={}", se.getMessage(), se);
+                }
+            }
+            throw (e instanceof RuntimeException re) ? re : new RuntimeException(e);
+        } finally {
+            ctx.configuration().connectionProvider().release(conn);
+        }
+    }
 
     private TemplateSchema resolveOrThrow(String subspace) {
         TemplateSchema t = registry.resolve(subspace);
