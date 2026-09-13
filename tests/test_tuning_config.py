@@ -134,8 +134,10 @@ def test_tuning_config_equals_old_hardcoded_values() -> None:
 # ── I1: pdf_chunk_chars wiring ──────────────────────────────────────────────
 
 @pytest.mark.parametrize("chunk_chars,expected_call", [
-    (800, lambda cls: cls.assert_called_once_with(chunk_chars=800)),
-    (None, lambda cls: cls.assert_called_once_with()),
+    # token_window (nexus-spujb) is None here: a Voyage model's window is
+    # out of the chunk cap's reach.
+    (800, lambda cls: cls.assert_called_once_with(chunk_chars=800, token_window=None)),
+    (None, lambda cls: cls.assert_called_once_with(token_window=None)),
 ])
 def test_pdf_chunk_chars_wiring(tmp_path, chunk_chars, expected_call) -> None:
     from nexus.doc_indexer import _pdf_chunks

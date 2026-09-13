@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 import yaml
 
-from nexus.chunker import split_text_to_byte_cap, split_text_to_char_cap
+from nexus.chunker import split_text_to_char_cap, split_text_to_limits
 from nexus.db.limits import SAFE_CHUNK_BYTES
+
+if TYPE_CHECKING:
+    from nexus.embed_window import TokenWindow
 
 _log = structlog.get_logger()
 
@@ -154,10 +157,12 @@ class SemanticMarkdownChunker:
         chunk_size: int = 512,
         chunk_overlap: int = 50,
         preserve_code_blocks: bool = True,
+        token_window: TokenWindow | None = None,
     ) -> None:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.preserve_code_blocks = preserve_code_blocks
+        self.token_window = token_window
         self.max_chars = int(chunk_size * _CHARS_PER_TOKEN)
         self.overlap_chars = int(chunk_overlap * _CHARS_PER_TOKEN)
         self.md = MarkdownIt() if MARKDOWN_IT_AVAILABLE else None
@@ -176,14 +181,16 @@ class SemanticMarkdownChunker:
             chunks = self._naive_chunking(text, metadata)
         return self._split_oversized_chunks(chunks)
 
-    @staticmethod
-    def _split_oversized_chunks(chunks: list[MarkdownChunk]) -> list[MarkdownChunk]:
-        """Byte cap post-pass: split any chunk over the storage limit, then
-        renumber. It used to truncate, which dropped the end of a code block
-        the section splitter had deliberately kept whole (nexus-2s91y)."""
+    def _split_oversized_chunks(self, chunks: list[MarkdownChunk]) -> list[MarkdownChunk]:
+        """Post-pass: split any chunk over the storage byte cap or the
+        embedding model's token window, then renumber. It used to truncate,
+        which dropped the end of a code block the section splitter had
+        deliberately kept whole (nexus-2s91y); the window keeps every chunk
+        inside what the embedder reads (nexus-spujb)."""
+        window = self.token_window
         out: list[MarkdownChunk] = []
         for c in chunks:
-            if len(c.text.encode()) <= SAFE_CHUNK_BYTES:
+            if len(c.text.encode()) <= SAFE_CHUNK_BYTES and (window is None or window.fits(c.text)):
                 out.append(c)
                 continue
             out.extend(
@@ -193,7 +200,7 @@ class SemanticMarkdownChunker:
                     metadata=dict(c.metadata),
                     header_path=c.header_path,
                 )
-                for piece in split_text_to_byte_cap(c.text, SAFE_CHUNK_BYTES)
+                for piece in split_text_to_limits(c.text, SAFE_CHUNK_BYTES, window)
             )
         for i, c in enumerate(out):
             c.chunk_index = i

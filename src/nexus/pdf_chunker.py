@@ -14,15 +14,21 @@ time. Downstream consumers (aspect_extractor, search filters) read
 section_type to scope retrieval to relevant sections without re-reading
 the source PDF.
 """
+from __future__ import annotations
+
 import re
 from bisect import bisect_right
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import structlog
 
-from nexus.chunker import split_text_to_byte_cap
+from nexus.chunker import split_text_to_limits
 from nexus.db.limits import SAFE_CHUNK_BYTES
 from nexus.md_chunker import classify_section_type
+
+if TYPE_CHECKING:
+    from nexus.embed_window import TokenWindow
 
 _log = structlog.get_logger()
 
@@ -174,9 +180,11 @@ class PDFChunker:
         self,
         chunk_chars: int = _DEFAULT_CHUNK_CHARS,
         overlap_percent: float = _DEFAULT_OVERLAP,
+        token_window: TokenWindow | None = None,
     ) -> None:
         self.chunk_chars = chunk_chars
         self.overlap_chars = max(1, int(chunk_chars * overlap_percent))
+        self.token_window = token_window
 
     def chunk(self, text: str, extraction_metadata: dict) -> list[TextChunk]:
         """Split *text* into chunks.
@@ -284,16 +292,18 @@ class PDFChunker:
                 break
             start = next_start
 
-        # Byte cap post-pass: split, never truncate (nexus-2s91y), then
-        # renumber so chunk_index stays dense.
+        # Post-pass: split to the byte cap and the model's token window,
+        # never truncate (nexus-2s91y, nexus-spujb), then renumber so
+        # chunk_index stays dense.
+        window = self.token_window
         capped: list[TextChunk] = []
         for c in chunks:
-            if len(c.text.encode()) <= SAFE_CHUNK_BYTES:
+            if len(c.text.encode()) <= SAFE_CHUNK_BYTES and (window is None or window.fits(c.text)):
                 capped.append(c)
                 continue
             capped.extend(
                 TextChunk(text=piece, chunk_index=c.chunk_index, metadata=dict(c.metadata))
-                for piece in split_text_to_byte_cap(c.text, SAFE_CHUNK_BYTES)
+                for piece in split_text_to_limits(c.text, SAFE_CHUNK_BYTES, window)
             )
         for i, c in enumerate(capped):
             c.chunk_index = i

@@ -4387,12 +4387,18 @@ def store_put(
         # fire_batch below needs real metadatas regardless of catalog_doc_id.
         from nexus.catalog.store_hook import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             catalog_store_hook_tracked,
+            note_manifest_metadata,
+            note_pieces,
+            put_note_pieces,
             raise_if_oversized,
             rollback_minted_catalog_entry,
-            single_chunk_manifest_metadata,
             store_put_manifest_direct,
         )
-        chunk_chroma_id, manifest_metadatas = single_chunk_manifest_metadata(content)
+        # nexus-spujb: a note longer than the collection model's token
+        # window is written as several chunks under one catalog document;
+        # one piece is the single-chunk store it always was.
+        pieces = note_pieces(content, col_name)
+        chunk_chroma_id, manifest_metadatas = note_manifest_metadata(pieces)
         # nexus-xzyr3 fold-in: refuse an over-quota document BEFORE minting
         # a catalog row for it — put() already refuses it too, but only
         # after paying for a wasted mint + rollback round trip.
@@ -4418,7 +4424,10 @@ def store_put(
         # single-chunk store — see that function's docstring). Fence begin
         # BEFORE the vector put, mirroring every other producer's T0
         # ordering (memo §3.5); this path was previously entirely unfenced.
-        content_hash = manifest_metadatas[0].get("chunk_text_hash", "") if manifest_metadatas else ""
+        from nexus.catalog.store_hook import note_content_hash  # noqa: PLC0415 — deferred for startup cost, as above
+
+        # nexus-spujb: the whole note's hash, whether it was split or not.
+        content_hash = note_content_hash(content, manifest_metadatas)
         if catalog_doc_id:
             from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
             _fence_begin(catalog_doc_id, content_hash, col_name)
@@ -4431,9 +4440,8 @@ def store_put(
         # the put deduped onto), then surface the original error. The
         # compensation never raises, so it cannot mask the put failure.
         try:
-            doc_id = t3.put(
-                collection=col_name,
-                content=content,
+            doc_ids = put_note_pieces(
+                t3, col_name, pieces,
                 title=title,
                 tags=tags,
                 category=category,
@@ -4442,6 +4450,7 @@ def store_put(
                 ttl_days=ttl_days,
                 catalog_doc_id=catalog_doc_id,
             )
+            doc_id = doc_ids[0]
         except Exception as put_exc:
             # nexus-vw594 F2 fix-round IMPORTANT (code-review-expert, T1
             # scratch d9173ec9): a dedup-hit store_put (catalog_row_minted
@@ -4532,15 +4541,17 @@ def store_put(
         # with a 1-element list so batch-shape consumers (taxonomy,
         # chash, manifest) see MCP ``store_put`` as a single-document
         # batch.
-        _hooks.fire_single(doc_id, col_name, content)
+        for piece_id, piece in zip(doc_ids, pieces, strict=True):
+            _hooks.fire_single(piece_id, col_name, piece)
         # nexus-vw594 F2: manifest_complete rides this existing call
         # through manifest_write_batch_hook's write_manifest_many
         # completion stamp (the SAME manifest rows store_put_manifest_
         # direct above already wrote — an idempotent re-UPSERT), no extra
-        # round trip. store_put is single-chunk by construction so the
-        # file-atomicity claim always holds.
+        # round trip. The batch carries every piece of the note
+        # (nexus-spujb), so the file-atomicity claim holds for a split
+        # note as it does for a single chunk.
         _hooks.fire_batch(
-            [doc_id], col_name, [content], None, manifest_metadatas,
+            doc_ids, col_name, pieces, None, manifest_metadatas,
             catalog_doc_id=catalog_doc_id,
             manifest_complete={catalog_doc_id: content_hash} if catalog_doc_id else None,
         )
@@ -4624,7 +4635,11 @@ def store_put(
                 f"may show chunk_count=0; retry store_put with the same "
                 f"content (idempotent dedup makes retry safe)."
             )
-        return f"Stored: {doc_id} -> {col_name}"
+        split_note = (
+            f" ({len(pieces)} chunks, split to the embedding model's token window)"
+            if len(pieces) > 1 else ""
+        )
+        return f"Stored: {doc_id} -> {col_name}{split_note}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("store_put", e)
 
@@ -4660,7 +4675,14 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
             looks_like_hash = len(doc_id) in (32, 64) and all(c in "0123456789abcdef" for c in doc_id)
             if not looks_like_hash:
                 ids = t3.find_ids_by_title(col_name, doc_id)
-                if len(ids) == 1:
+                # nexus-spujb: every chunk of a split note carries its title,
+                # so several ids can be ONE note rather than an ambiguity.
+                from nexus.catalog.store_hook import split_note_text  # noqa: PLC0415 — deferred for startup cost, as in store_put
+
+                split = split_note_text(t3, col_name, ids) if len(ids) > 1 else None
+                if split is not None:
+                    entry = t3.get_by_id(col_name, split[0])
+                elif len(ids) == 1:
                     entry = t3.get_by_id(col_name, ids[0])
                 elif len(ids) > 1:
                     return (
@@ -4689,8 +4711,14 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
             lines.append(f"Indexed:    {indexed_at}")
         if extraction_method:
             lines.append(f"Extractor:  {extraction_method}")
+        # nexus-spujb: a note split to its model's token window reads back whole.
+        from nexus.catalog.store_hook import split_note_text  # noqa: PLC0415 — deferred for startup cost, as in store_put
+
+        split = split_note_text(t3, col_name, [entry["id"]])
+        if split is not None:
+            lines.append(f"Chunks:     {split[2]} (split to the embedding model's token window)")
         lines.append("")
-        lines.append(entry.get("content", ""))
+        lines.append(split[1] if split is not None else entry.get("content", ""))
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("store_get", e)

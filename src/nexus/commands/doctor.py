@@ -3215,17 +3215,22 @@ def _collect_quota_report() -> dict:
     # ONNX MiniLM (384-dim) or fastembed bge (768-dim) is active. RDR-109
     # Phase 2: report what's actually embedding, not what the canonical
     # cloud schema would suggest.
+    # nexus-spujb: token windows come from the one per-model table the
+    # chunkers enforce, so doctor cannot report a window they do not apply.
+    from nexus.embed_window import MODEL_MAX_TOKENS  # noqa: PLC0415 — deferred; doctor loads per-check dependencies lazily
+
     if is_local_mode():
         from nexus.db.local_ef import (  # noqa: PLC0415 — circular-dep avoidance (nexus.db.local_ef)
             LocalEmbeddingFunction,
             local_model_token,
         )
         _ef = LocalEmbeddingFunction()
+        _local_token = local_model_token()
         voyage_limits = {
             "mode": "local",
             "models": {
-                local_model_token(): {
-                    "max_tokens": 512,
+                _local_token: {
+                    "max_tokens": MODEL_MAX_TOKENS.get(_local_token, 0),
                     "embedding_dims": _ef.dimensions,
                 },
             },
@@ -3244,12 +3249,18 @@ def _collect_quota_report() -> dict:
                 # voyage-code-3 / voyage-context-3 exclusively (see
                 # corpus.py:effective_embedding_model_for_writes).
                 "voyage-3": {
-                    "max_tokens": 32_000,
+                    "max_tokens": MODEL_MAX_TOKENS["voyage-3"],
                     "embedding_dims": 1024,
                     "status": "retired",
                 },
-                "voyage-code-3": {"max_tokens": 32_000, "embedding_dims": 1024},
-                "voyage-context-3": {"max_tokens": 32_000, "embedding_dims": 1024},
+                "voyage-code-3": {
+                    "max_tokens": MODEL_MAX_TOKENS["voyage-code-3"],
+                    "embedding_dims": 1024,
+                },
+                "voyage-context-3": {
+                    "max_tokens": MODEL_MAX_TOKENS["voyage-context-3"],
+                    "embedding_dims": 1024,
+                },
             },
             "target_rpm": 250,  # matches ``doc_indexer._RATE_LIMIT_RPM``
             "api_key_set": False,

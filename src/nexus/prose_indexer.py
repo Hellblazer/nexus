@@ -20,6 +20,7 @@ from pathlib import Path
 
 import structlog
 
+from nexus.embed_window import window_for_model
 from nexus.index_context import IndexContext
 from nexus.indexer_utils import check_staleness
 
@@ -48,7 +49,10 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     nexus-deyd5 per-record-survivable handling — the caller sees this as a
     named, counted skip, not a run-ending failure.
     """
-    from nexus.chunker import _line_chunk  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
+    from nexus.chunker import _line_chunk, split_line_chunks_to_window  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
+
+    # nexus-spujb: chunks must fit the embedding model's token window.
+    token_window = window_for_model(ctx.embedding_model)
     from nexus.errors import UnextractableContentError  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
     from nexus.md_chunker import SemanticMarkdownChunker, classify_section_type, parse_frontmatter  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
     from nexus.pdf_chunker import _extract_headings  # noqa: PLC0415 — deferred import — circular-dep avoidance / heavy dep deferred
@@ -145,7 +149,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             frontmatter, body = parse_frontmatter(content, source=str(file_path))
             frontmatter_len = len(content) - len(body)
             base_meta: dict = {"source_path": str(file_path), "corpus": ctx.corpus}
-            chunks = SemanticMarkdownChunker().chunk(body, base_meta)
+            chunks = SemanticMarkdownChunker(token_window=token_window).chunk(body, base_meta)
         if not chunks:
             _log.debug("skipped file with no chunks", path=str(file_path))
             _fence_fail_and_raise("no chunks produced from markdown content")
@@ -195,6 +199,8 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
             if not content.strip():
                 _fence_fail_and_raise("empty file content")
             raw_chunks = [(1, 1, content)]
+        if token_window is not None:
+            raw_chunks = split_line_chunks_to_window(raw_chunks, token_window)
 
         # Detect headings across the whole file once so each line-based
         # chunk can carry section_type / section_title (matches PDF and

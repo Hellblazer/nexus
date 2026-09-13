@@ -31,6 +31,7 @@ from nexus.checkpoint import (
 )
 from nexus.corpus import ensure_collection_registered, index_model_for_collection
 from nexus.db import make_t3
+from nexus.embed_window import window_for_model
 from nexus.retry import _vector_with_retry
 from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
 from nexus.pdf_chunker import PDFChunker
@@ -2196,7 +2197,12 @@ def _pdf_chunks(
         extraction_stats["page_count"] = int(result.metadata.get("page_count", 0) or 0)
         _pwt = result.metadata.get("pages_with_text")
         extraction_stats["pages_with_text"] = list(_pwt) if _pwt is not None else None
-    chunker = PDFChunker(chunk_chars=chunk_chars) if chunk_chars is not None else PDFChunker()
+    window = window_for_model(target_model)  # nexus-spujb
+    chunker = (
+        PDFChunker(chunk_chars=chunk_chars, token_window=window)
+        if chunk_chars is not None
+        else PDFChunker(token_window=window)
+    )
     chunks = chunker.chunk(result.text, result.metadata)
     if not chunks:
         if result.text.strip():
@@ -2306,7 +2312,9 @@ def _markdown_chunks(
     base_meta: dict = {
         "corpus": corpus,
     }
-    chunks = SemanticMarkdownChunker().chunk(body, base_meta)
+    chunks = SemanticMarkdownChunker(
+        token_window=window_for_model(target_model),  # nexus-spujb
+    ).chunk(body, base_meta)
     if not chunks:
         return []
 

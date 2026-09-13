@@ -16,6 +16,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before this release keep the truncated text until reindexed with `--force`
   through whichever command built them: `nx index repo`, `nx index md` or
   `nx index rdr`.
+- **Chunks fit their embedding model's token window (nexus-spujb).** bge-base-en-v1.5
+  reads 512 tokens and MiniLM 256; the rest of a longer chunk was silently left
+  out of its vector, so search could not find it. Indexing now splits any chunk
+  over its collection's model window, counted with that model's own tokenizer.
+  In such a collection, `store_put` and `nx store put` store a note longer than
+  the window as several chunks under one catalog document, and `store_get` and
+  `nx store get` return it whole, by id or by title. The 16,384-byte limit is
+  unchanged. Voyage collections are unaffected: the 12 KB chunk cap keeps every
+  chunk inside their 32,000-token window. `nx doctor` reports the windows the
+  chunkers enforce. Collections indexed earlier keep their truncated vectors
+  until reindexed with `--force`.
 
 ## [7.44.0] - 2026-09-13
 
