@@ -698,14 +698,18 @@ fi
 # either builds nothing here (COLD/HOLE_PUNCH/PACKAGE_UPGRADE/ERA_HOP/
 # ACQUIRE/STRANDED) or has its own pre-tag posture already.
 if [ "$SHAKEOUT" = 1 ]; then
+  # The JVM jar from the same build, for a host that cannot execute the
+  # Linux candidate (see lib/shakeout_shape_check.sh).
   if [ -n "$ARTIFACTS" ]; then
     _shakeout_shape_bin="$ARTIFACTS/native/nexus-service"
+    _shakeout_shape_jar="$(find "$ARTIFACTS/jar" -maxdepth 1 -name 'nexus-service-*.jar' -type f 2>/dev/null | sort | tail -1)"
   else
     _shakeout_shape_bin="$PWD/service/target/nexus-service"
+    _shakeout_shape_jar="$(find "$PWD/service/target" -maxdepth 1 -name 'nexus-service-*.jar' ! -name 'original-*' -type f 2>/dev/null | sort | tail -1)"
   fi
   # shellcheck source=lib/shakeout_shape_check.sh disable=SC1091
   source "$HERE/lib/shakeout_shape_check.sh"
-  shakeout_release_workflow_shape_check "$_shakeout_shape_bin" || exit 1
+  shakeout_release_workflow_shape_check "$_shakeout_shape_bin" "$_shakeout_shape_jar" || exit 1
 fi
 
 # nexus-nyry9.13 (2026-08-21): --acquire is a cold-acquire leg too — it stages

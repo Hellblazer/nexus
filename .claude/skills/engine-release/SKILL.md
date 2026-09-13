@@ -100,8 +100,12 @@ packaging defects, which remain `--acquire`-only by construction (see below).
 **Also runs the release-workflow SHAPE check now, automatically (nexus-xihsm).**
 Right after `run.sh`'s own native-build step (the `-Ob` candidate plus jOOQ
 codegen), `--shakeout` calls `scripts/check_release_workflow_shape.py`
-against the just-built REAL native binary (no JVM-jar shim) via
-`tests/e2e/migration-rehearsal/lib/shakeout_shape_check.sh`. This does NOT
+against the just-built native candidate via
+`tests/e2e/migration-rehearsal/lib/shakeout_shape_check.sh`. On a host that
+cannot execute that Linux candidate (a macOS host, where the `-Ob` build
+runs in a container) phase (a) boots the same build's JVM jar through a
+shim instead; phase (a) tests the checkout classification, which does not
+depend on native versus JVM. A missing jar there is a FAILED verdict. This does NOT
 live inside `rehearse_shakeout.sh`: that script runs inside the `--shakeout`
 container, which is a `uv`-tool-installed wheel with no `.git`/`pyproject.toml`
 ancestor by design, so the check's phase (a) non-vacuity assert could only

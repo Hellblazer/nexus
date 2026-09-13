@@ -52,13 +52,28 @@ def _stub_uv(tmp_path: Path, returncode: int) -> tuple[Path, Path]:
     return bindir, log
 
 
-def _run_function(bindir: Path, bin_path: str) -> subprocess.CompletedProcess[str]:
+def _run_function(bindir: Path, bin_path: str, *extra: str) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
-    script = f'source "{LIB}"; shakeout_release_workflow_shape_check "$1"'
+    script = f'source "{LIB}"; shakeout_release_workflow_shape_check "$@"'
     return subprocess.run(
-        ["bash", "-c", script, "_", bin_path],
+        ["bash", "-c", script, "_", bin_path, *extra],
         cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=30, check=False,
     )
+
+
+def _stub_exe(bindir: Path, name: str, body: str) -> None:
+    exe = bindir / name
+    exe.write_text("#!/usr/bin/env bash\n" + body)
+    exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+
+
+def _fake_elf(tmp_path: Path) -> Path:
+    """Enough of an ELF header for `file -b` to call it ELF, and never
+    runnable anywhere."""
+    elf = tmp_path / "nexus-service"
+    elf.write_bytes(b"\x7fELF\x02\x01\x01" + b"\x00" * 57)
+    elf.chmod(0o755)
+    return elf
 
 
 def test_the_lib_exists() -> None:
@@ -86,11 +101,72 @@ def test_fail_prints_the_verdict_and_returns_nonzero(tmp_path: Path) -> None:
 
 
 def test_passes_the_real_native_binary_path_through_unmodified(tmp_path: Path) -> None:
-    """No JVM-jar shim -- the caller's exact binary path reaches the check
-    verbatim."""
+    """A path that is not an ELF (here, not a file at all) reaches the check
+    verbatim, with no JVM-jar shim."""
     bindir, log = _stub_uv(tmp_path, 0)
     _run_function(bindir, "/some/other/path/nexus-service")
     assert "--bin /some/other/path/nexus-service" in log.read_text()
+
+
+# ── JVM-jar shim when the host cannot execute the candidate ─────────────
+# First real --shakeout on a macOS host (2026-09-13): the -Ob build runs in
+# a Linux container there, so the candidate is a Linux ELF and native-smoke.sh
+# died with "Exec format error". `uname` is stubbed so these behave the same
+# on a macOS box and a Linux CI runner.
+
+def test_linux_elf_on_a_non_linux_host_is_checked_through_a_jvm_shim(tmp_path: Path) -> None:
+    bindir, log = _stub_uv(tmp_path, 0)
+    _stub_exe(bindir, "uname", "echo Darwin\n")
+    elf = _fake_elf(tmp_path)
+    jar = tmp_path / "nexus-service-1.0-SNAPSHOT.jar"
+    jar.write_bytes(b"PK")
+    proc = _run_function(bindir, str(elf), str(jar))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    call = log.read_text().splitlines()[0]
+    checked = call.split("--bin ", 1)[1].strip()
+    assert checked != str(elf), "the unrunnable ELF reached native-smoke.sh"
+    assert checked.endswith("nexus-service-jvm-shim")
+    assert f"boots the same build's JVM jar ({jar})" in proc.stdout
+
+
+def test_jvm_shim_moves_system_properties_ahead_of_jar(tmp_path: Path) -> None:
+    """native-smoke.sh starts $BIN with -Duser.timezone=UTC; java ignores a
+    -D placed after -jar, so the shim must reorder it."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    argv_log = tmp_path / "java-argv.log"
+    _stub_exe(bindir, "java", f"printf '%s\\n' \"$@\" > '{argv_log}'\n")
+    jar = tmp_path / "engine.jar"
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
+    made = subprocess.run(
+        ["bash", "-c", f'source "{LIB}"; shakeout_shape_write_jvm_shim "$1" "$2"', "_", str(jar), str(shim_dir)],
+        cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=30, check=True,
+    )
+    shim = made.stdout.strip()
+    subprocess.run([shim, "-Duser.timezone=UTC", "serve"], env=env, check=True, timeout=30)
+    assert argv_log.read_text().splitlines() == ["-Duser.timezone=UTC", "-jar", str(jar), "serve"]
+
+
+def test_linux_elf_on_a_linux_host_runs_the_real_candidate(tmp_path: Path) -> None:
+    bindir, log = _stub_uv(tmp_path, 0)
+    _stub_exe(bindir, "uname", "echo Linux\n")
+    elf = _fake_elf(tmp_path)
+    proc = _run_function(bindir, str(elf), str(tmp_path / "unused.jar"))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert f"--bin {elf}" in log.read_text()
+
+
+def test_unrunnable_candidate_with_no_jar_fails_loud_without_running_the_check(tmp_path: Path) -> None:
+    bindir, log = _stub_uv(tmp_path, 0)
+    _stub_exe(bindir, "uname", "echo Darwin\n")
+    elf = _fake_elf(tmp_path)
+    proc = _run_function(bindir, str(elf), str(tmp_path / "missing.jar"))
+    assert proc.returncode != 0
+    assert "release-workflow SHAPE check: FAILED" in proc.stderr
+    assert "cannot execute" in proc.stderr
+    assert not log.exists(), "the check ran against a binary this host cannot execute"
 
 
 # ── run.sh wiring pins ───────────────────────────────────────────────────
@@ -155,6 +231,17 @@ def test_artifacts_mode_uses_the_manifest_native_path() -> None:
     candidate, not a stale/absent service/target/nexus-service."""
     text = RUN_SH.read_text(encoding="utf-8")
     assert '$ARTIFACTS/native/nexus-service' in text
+
+
+def test_run_sh_passes_the_same_builds_jvm_jar() -> None:
+    """A host that cannot execute the Linux candidate needs the jar; the call
+    site must hand it over in both default and --artifacts mode."""
+    text = RUN_SH.read_text(encoding="utf-8")
+    call_at = text.index("shakeout_release_workflow_shape_check ")
+    call_line = text[call_at:text.index("\n", call_at)]
+    assert '"$_shakeout_shape_jar"' in call_line
+    assert '"$ARTIFACTS/jar"' in text
+    assert "'nexus-service-*.jar'" in text
 
 
 def test_default_mode_uses_the_freshly_built_host_binary() -> None:
