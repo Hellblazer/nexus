@@ -744,6 +744,67 @@ class TestTupleWatch:
         assert sum("probe failed" in line and bad in line for line in lines) == 1
 
 
+# ── nx tuple watch: backlog beyond probe_n (nexus-qw386) ────────────────────
+#
+# MM-1.1 fetches probe_n rows per probe with no ``since`` cursor: past that
+# ceiling (dead rows included, since they stay rd-readable for the full
+# retention window without ever being claimable) the newest mail falls
+# outside the window and is never pinged. probe_n is overridden small here
+# (not the 300 default) so the backlog that exceeds it is a handful of rows,
+# not hundreds, against the real engine substrate.
+
+
+class TestTupleWatchBeyondProbeN:
+    def test_live_backlog_beyond_probe_n_still_pings_new_mail(self, t2_service_env, tmp_path) -> None:
+        store = HttpTupleStore()
+        cfg = WatchConfig(interval_s=1.0, reemit_after_s=600.0, max_emits=3, probe_n=3)
+        sd = tmp_path
+        addr = _uniq("addr")
+        sub = f"mailbox/{addr}"
+        for i in range(cfg.probe_n + 3):  # 6 live rows > probe_n=3
+            _out(store, addr, sender=f"old{i}")
+        fresh_id = _out(store, addr, sender="alice")
+
+        # Non-vacuity: a single probe capped at probe_n cannot see the fresh row at all --
+        # this is the truncation the fix must page past, not something already unreachable.
+        head = store.rd(sub, {"to": addr}, n=cfg.probe_n)
+        assert len(head) == cfg.probe_n
+        assert fresh_id not in [r.id for r in head]
+
+        lines, reports, clock = [], [], _Clock()
+        _run(store, cfg, sd, addr, clock, cfg.probe_n + 3, lines, reports)
+        pings = [line for line in lines if "new mail" in line]
+        assert any(fresh_id in line for line in pings), lines
+
+    def test_dead_backlog_beyond_probe_n_still_pings_new_mail(self, t2_service_env, tmp_path) -> None:
+        store = HttpTupleStore()
+        cfg = WatchConfig(interval_s=1.0, reemit_after_s=600.0, max_emits=3, probe_n=2)
+        sd = tmp_path
+        addr = _uniq("addr")
+        sub = f"mailbox/{addr}"
+        dead_ids = []
+        for i in range(cfg.probe_n + 1):  # 3 dead rows > probe_n=2
+            tid = _out(store, addr, sender=f"poison{i}")
+            for _ in range(3):  # mailbox.yaml max_attempts=3: the third nack dead-letters it
+                claimant = _uniq("c")
+                claimed = store.in_(sub, {"to": addr}, claimant=claimant, lease_s=30)
+                assert claimed is not None and claimed[0].id == tid
+                store.nack(claimed[1], claimant)
+            dead_ids.append(tid)
+        fresh_id = _out(store, addr, sender="alice")
+
+        # Non-vacuity: a single probe capped at probe_n is dead rows only, fresh mail hidden.
+        head = store.rd(sub, {"to": addr}, n=cfg.probe_n)
+        assert len(head) == cfg.probe_n
+        assert all(r.claim_state == "dead" for r in head)
+        assert fresh_id not in [r.id for r in head]
+
+        lines, reports, clock = [], [], _Clock()
+        _run(store, cfg, sd, addr, clock, cfg.probe_n + 3, lines, reports)
+        pings = [line for line in lines if "new mail" in line]
+        assert any(fresh_id in line for line in pings), lines
+
+
 # ── nx tuple watch: preflight, failure visibility, locking (MM-1.2, nexus-6konb.3) ──
 
 

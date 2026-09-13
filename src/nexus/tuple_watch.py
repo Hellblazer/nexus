@@ -11,6 +11,29 @@ much as what is.
   fetching many rows per probe and filtering on ``claim_state``: a dead-lettered
   row stays readable for the whole retention window while never being claimable,
   and at ``n=1`` one such row at the head would hide every newer message.
+- **Beyond ``probe_n`` (nexus-qw386):** a plain ``since=None`` probe returns only
+  the OLDEST ``probe_n`` live-or-dead rows on the address (the engine orders by
+  ``(created_at, id)`` ascending and caps at ``probe_n``); once an address holds
+  more than that, the newest mail sits past the cap and a probe that never moves
+  its window would never reach it. When a probe returns a FULL page (``==
+  probe_n``, the standard "there may be more" signal), the address permanently
+  switches to a persisted per-address cursor (:func:`state_path`'s JSON file) and
+  every following probe passes ``since=<cursor>``, walking forward instead of
+  re-reading the same head every cycle. The cursor only advances to a row old
+  enough that no concurrent writer still assigned an earlier timestamp could
+  land behind it undetected (the engine stamps ``created_at`` with the JVM clock
+  at insert time, before commit, so two concurrent ``out`` calls to the same
+  address can commit out of the order their timestamps would suggest); rows
+  newer than that safety margin are left un-cursored and simply reappear on the
+  next probe, which is free because of the seen-set dedup below. Once triggered,
+  cursor mode never reverts to a bare head scan: the backlog that caused it is
+  still there, so reverting would re-truncate on the very next cycle. This
+  trades the FOREVER re-emit healing of the old, pre-cap rows the cursor walks
+  past (they are still pinged/reported exactly once as the cursor reaches them)
+  for guaranteed eventual visibility of the tail -- a strict improvement over
+  never seeing it at all -- and costs no more than today's steady-state probe:
+  the extra load is one page's worth of catch-up while paging past the backlog,
+  never a full re-walk from the start on every cycle.
 - Emits only on a hit. An empty probe prints nothing.
 - Emits one ping line per newly seen live tuple, capped per cycle (a burst
   beyond the cap is one coalesced line, and every burst row still counts as
@@ -30,8 +53,11 @@ much as what is.
   plus one census per address. A below-floor or unreachable engine 404s or
   refuses every call forever and is otherwise indistinguishable from an empty
   mailbox, so a failure here prints ONE named SKIP line and the loop is never
-  entered. A dead backlog approaching ``probe_n`` warns, because past the cap
-  dead rows hide fresh mail again.
+  entered. A dead backlog approaching ``probe_n`` warns: past the cap dead
+  rows no longer hide fresh mail permanently (the cursor above pages past
+  them), but they force the address into permanent cursor mode, add
+  catch-up latency before new mail is seen, and drop the forever re-emit
+  healing the address had while it fit inside one probe.
 - Reports a probe failure on stdout, rate-limited to one line per
   ``error_report_every_s`` per address, with a changed error reported at once
   and a recovery line on stderr. Silence is not success: an engine that dies
@@ -72,6 +98,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +122,16 @@ class WatchConfig:
     budget_lines: int = 8
     error_report_every_s: float = 300.0
     dead_backlog_warn_ratio: float = 0.8
+    # nexus-qw386: once a probe returns a full page, the cursor this module pages
+    # forward with never advances past (probe time - this margin). created_at is
+    # stamped with the JVM clock at insert time, before commit (TupleRepository),
+    # so two concurrent `out` calls to the same address can commit out of the
+    # order their timestamps suggest; a margin comfortably larger than a single
+    # HTTP+DB round trip (single-digit milliseconds, measured elsewhere in this
+    # repo's own gates) gives a slower concurrent commit time to land before the
+    # cursor is allowed past it, at the cost of re-probing a handful of the most
+    # recent rows each cycle -- negligible next to re-walking a large backlog.
+    cursor_safety_lag_s: float = 10.0
 
 
 @dataclass
@@ -123,6 +160,12 @@ class _Seen:
 class _AddressState:
     seen: dict[str, _Seen] = field(default_factory=dict)
     dead_reported: set[str] = field(default_factory=set)
+    # nexus-qw386: None means "scan the whole address from the start" (today's
+    # behaviour, unchanged for any address that fits in one probe). Set once a
+    # probe returns a full page and never cleared after that -- see the module
+    # docstring's "Beyond probe_n" section for why reverting to None would just
+    # re-truncate on the next cycle.
+    cursor: tuple[str, str] | None = None
 
 
 def _unique_addresses(addresses: Iterable[str]) -> list[str]:
@@ -147,7 +190,11 @@ def _load_state(path: Path) -> _AddressState:
             tid: _Seen(float(v["last_emit"]), int(v["count"]))
             for tid, v in dict(raw.get("seen", {})).items()
         }
-        return _AddressState(seen=seen, dead_reported=set(raw.get("dead_reported", [])))
+        cursor_raw = raw.get("cursor")
+        cursor = (str(cursor_raw[0]), str(cursor_raw[1])) if cursor_raw else None
+        return _AddressState(
+            seen=seen, dead_reported=set(raw.get("dead_reported", [])), cursor=cursor,
+        )
     except FileNotFoundError:
         return _AddressState()
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
@@ -160,10 +207,21 @@ def _save_state(path: Path, st: _AddressState) -> None:
     payload = {
         "seen": {tid: s.to_json() for tid, s in st.seen.items()},
         "dead_reported": sorted(st.dead_reported),
+        "cursor": list(st.cursor) if st.cursor else None,
     }
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")
     tmp.replace(path)
+
+
+def _parse_epoch(created_at: str) -> float | None:
+    """*created_at* (ISO-8601, as the engine renders it) to epoch seconds, or
+    ``None`` on anything unparseable -- a row this module cannot date is left
+    out of the cursor-advancement decision rather than guessed at."""
+    try:
+        return datetime.fromisoformat(created_at).timestamp()
+    except (TypeError, ValueError):
+        return None
 
 
 def ping_line(address: str, row: Any) -> str:
@@ -465,10 +523,27 @@ def _probe_once(
     report: Callable[[str], None],
     stats: WatchStats,
 ) -> None:
-    rows = store.rd(f"mailbox/{address}", {"to": address}, n=config.probe_n, timeout_s=0)
+    since = st.cursor
+    rows = store.rd(f"mailbox/{address}", {"to": address}, n=config.probe_n, since=since, timeout_s=0)
+    # A full page (== probe_n) is the standard pagination signal that there may be
+    # more beyond it -- the engine caps `rd` at probe_n regardless of how many rows
+    # actually exist, so this call alone cannot tell "exactly probe_n" from "more".
+    # Only a `since=None` call that came back short is a genuine full-address view;
+    # anything else (already in cursor mode, or a fresh full page) sees a WINDOW,
+    # not the whole address, and must not prune or reset on that partial view.
+    full_scan = since is None and len(rows) < config.probe_n
+    boundary = t - config.cursor_safety_lag_s
+    safe_cursor = since
     present: set[str] = set()
     new_rows: list[Any] = []
     for row in rows:
+        # Rows arrive ordered ascending by (created_at, id) (engine guarantee), so
+        # the first one too recent to be safe ends the advance for every row after
+        # it too -- but that only matters once `full_scan` is False and this value
+        # is actually used below.
+        row_epoch = _parse_epoch(row.created_at)
+        if row_epoch is not None and row_epoch <= boundary:
+            safe_cursor = (row.created_at, row.id)
         if row.claim_state == "dead":
             if row.id not in st.dead_reported:
                 st.dead_reported.add(row.id)
@@ -513,10 +588,19 @@ def _probe_once(
         elif t - seen.last_emit >= config.reemit_after_s:
             new_rows.append(row)
 
-    # Prune rows that are gone (consumed or expired): they can never come back.
-    for tid in [tid for tid in st.seen if tid not in present]:
-        del st.seen[tid]
-    st.dead_reported.intersection_update(present)
+    if full_scan:
+        # `present` is the WHOLE address here (nothing was truncated), so absence
+        # really does mean consumed or expired -- prune exactly as before nexus-qw386.
+        for tid in [tid for tid in st.seen if tid not in present]:
+            del st.seen[tid]
+        st.dead_reported.intersection_update(present)
+    else:
+        # `present` is only this page's window; a row outside it may simply not
+        # have been reached yet, so pruning by absence here would misfire. Advance
+        # the persisted cursor instead (never past `boundary`) so the NEXT probe
+        # walks forward rather than re-reading this same window -- nexus-qw386's
+        # fix for the address exceeding one probe's worth of rows.
+        st.cursor = safe_cursor
 
     if new_rows:
         emitter.emit_batch(address, new_rows, t, stats)
