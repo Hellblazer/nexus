@@ -6149,6 +6149,40 @@ def tuple_in(
         return {"error": _mcp_tool_error("tuple_in", e)}
 
 
+_REPLY_FIELDS: frozenset[str] = frozenset(ReplySpec.__dataclass_fields__)
+
+
+def _reply_spec_from_tool_arg(reply: dict[str, Any] | None) -> ReplySpec | None:
+    """Turn ``tuple_ack``'s ``reply`` object into a :class:`ReplySpec`.
+
+    Refuses rather than ignores (RDR-206): a ``nonce`` key, because the
+    engine sets the reply's nonce and a caller believing it chose one is the
+    divergence the engine's own refusal exists to prevent; any other unknown
+    key, because a misspelt ``body`` dropped here would ack the request with
+    a reply the caller never meant to send; and a missing ``subspace`` or
+    ``keys``. All of these raise before the ack is sent, so the request
+    stays claimed.
+    """
+    if reply is None:
+        return None
+    if not isinstance(reply, dict):
+        raise ValueError(f"reply must be an object, got {type(reply).__name__}")
+    if "nonce" in reply:
+        raise ValueError(
+            "reply must not carry a nonce: the engine sets it to the request's tuple id"
+        )
+    unknown = sorted(set(reply) - _REPLY_FIELDS)
+    if unknown:
+        raise ValueError(
+            f"reply has unknown field(s) {unknown}; allowed: {sorted(_REPLY_FIELDS)}"
+        )
+    if not reply.get("subspace"):
+        raise ValueError("reply.subspace is required")
+    if not reply.get("keys"):
+        raise ValueError("reply.keys is required and must be non-empty")
+    return ReplySpec(**reply)
+
+
 @mcp.tool(
     title="Ack Tuple Claim",
     annotations={"readOnlyHint": False, "destructiveHint": True},
@@ -6157,53 +6191,37 @@ def tuple_in(
 def tuple_ack(
     claim_id: str,
     claimant: str,
-    reply_subspace: str = "",
-    reply_keys: dict[str, str] | None = None,
-    reply_dims: dict[str, str] | None = None,
-    reply_body: str | None = None,
-    reply_ttl_seconds: int | None = None,
+    reply: dict[str, Any] | None = None,
 ) -> str:
     """Consume a claimed tuple (``ack``), optionally writing a reply in the
     same transaction (RDR-206).
 
-    Pass ``reply_subspace`` to write a reply as the request is consumed —
-    both commit together or not at all. Without it, behaviour is
-    unchanged from before RDR-206. There is no reply-nonce argument: the
-    engine sets the reply's nonce itself to the request's own tuple id, so
-    the same request never produces two colliding replies.
+    Pass ``reply`` to write a reply as the request is consumed; both commit
+    together or not at all. Without it, behaviour is unchanged from before
+    RDR-206. ``reply`` carries the fields ``tuple_out`` takes, minus the
+    nonce: ``subspace`` and ``keys`` (required), ``dims``, ``body`` and
+    ``ttl_seconds`` (optional). The engine sets the reply's nonce itself to
+    the request's own tuple id, so a ``nonce`` key is refused here, as is any
+    other key the reply does not have.
 
     The reply's target must resolve to a ``keys+nonce`` template (e.g. a
     mailbox address); a ``keys``-only target (e.g. the RDR-184 ledger) is
     refused. A reply that fails validation (``UnknownSubspace``,
-    ``TtlTooLong``, ``SchemaViolation``) leaves the request still claimed
-    and still ackable — nothing is written on either side.
+    ``TtlTooLong``, ``SchemaViolation``, or a malformed ``reply`` object)
+    leaves the request still claimed and still ackable: nothing is written
+    on either side.
 
     Args:
         claim_id: The claim id returned by ``tuple_in``.
         claimant: Must match the identity that made the claim.
-        reply_subspace: The concrete subspace to reply into. Leave empty
-            for a plain ack with no reply.
-        reply_keys: The reply's pinned key fields (required, non-empty,
-            when ``reply_subspace`` is set).
-        reply_dims: Optional dimension fields for the reply.
-        reply_body: Optional reply payload.
-        reply_ttl_seconds: Optional explicit TTL for the reply, capped at
-            its template's retention ceiling.
+        reply: Optional reply object, e.g.
+            ``{"subspace": "mailbox/<addr>", "keys": {"to": "<addr>"},
+            "dims": {"from": "<me>"}, "body": "..."}``.
     """
     try:
-        reply = (
-            ReplySpec(
-                subspace=reply_subspace,
-                keys=reply_keys or {},
-                dims=reply_dims,
-                body=reply_body,
-                ttl_seconds=reply_ttl_seconds,
-            )
-            if reply_subspace
-            else None
-        )
+        spec = _reply_spec_from_tool_arg(reply)
         reply_id = _t2_index_write(
-            lambda db: db.tuples.ack(claim_id, claimant, reply=reply), op="tuple_ack",
+            lambda db: db.tuples.ack(claim_id, claimant, reply=spec), op="tuple_ack",
         )
         msg = f"Acked claim {claim_id}"
         if reply_id:

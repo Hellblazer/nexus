@@ -11,6 +11,11 @@ docstring for the full template shapes).
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
+
+import pytest
+
+from nexus.db.t2.http_tuple_store import HttpTupleStore, ReplyNotWrittenError
 
 from nexus.mcp.core import (
     tuple_ack,
@@ -110,7 +115,7 @@ class TestTupleInAckNack:
         assert "Error" in msg
 
     def test_ack_without_reply_args_is_unchanged(self, t2_service_env) -> None:
-        """RDR-206: the default (empty ``reply_subspace``) plain ack must
+        """RDR-206: the default (no ``reply``) plain ack must
         keep behaving exactly as before the reply argument existed."""
         addr = _uniq("addr")
         tuple_out(f"mailbox/{addr}", {"to": addr}, {"from": "sender-plain"}, "plain", nonce=_uniq("nonce"))
@@ -122,7 +127,7 @@ class TestTupleInAckNack:
         assert "reply" not in msg.lower()
 
     def test_ack_with_reply_writes_reply_in_one_transaction(self, t2_service_env) -> None:
-        """RDR-206: ``tuple_ack(reply_subspace=...)`` consumes the request
+        """RDR-206: ``tuple_ack(reply=...)`` consumes the request
         and writes the reply together, and the tool reports the reply id."""
         req_addr = _uniq("req")
         reply_addr = _uniq("reply")
@@ -136,10 +141,12 @@ class TestTupleInAckNack:
 
         msg = tuple_ack(
             claim["claim_id"], claimant,
-            reply_subspace=f"mailbox/{reply_addr}",
-            reply_keys={"to": reply_addr},
-            reply_dims={"from": claimant},
-            reply_body="the answer",
+            reply={
+                "subspace": f"mailbox/{reply_addr}",
+                "keys": {"to": reply_addr},
+                "dims": {"from": claimant},
+                "body": "the answer",
+            },
         )
         assert "Acked" in msg
         assert "with reply" in msg
@@ -165,8 +172,7 @@ class TestTupleInAckNack:
         session_id = _uniq("session")
         msg = tuple_ack(
             claim["claim_id"], claimant,
-            reply_subspace=f"ledger/{session_id}",
-            reply_keys={"agent_id": "a", "kind": "start"},
+            reply={"subspace": f"ledger/{session_id}", "keys": {"agent_id": "a", "kind": "start"}},
         )
         assert "Error" in msg
 
@@ -174,6 +180,38 @@ class TestTupleInAckNack:
         # succeeds afterward, proving nothing was consumed by the refusal.
         plain_msg = tuple_ack(claim["claim_id"], claimant)
         assert "Acked" in plain_msg
+
+    @pytest.mark.parametrize(
+        ("reply", "refusal"),
+        [
+            ({"subspace": "mailbox/x", "keys": {"to": "x"}, "nonce": "mine"}, "must not carry a nonce"),
+            ({"subspace": "mailbox/x", "keys": {"to": "x"}, "bdy": "typo"}, "unknown field(s) ['bdy']"),
+            ({"keys": {"to": "x"}, "body": "no target"}, "reply.subspace is required"),
+            ({"subspace": "mailbox/x", "body": "no keys"}, "reply.keys is required"),
+        ],
+        ids=["nonce", "unknown-key", "no-subspace", "no-keys"],
+    )
+    def test_malformed_reply_is_refused_and_leaves_request_claimed(
+        self, t2_service_env, reply, refusal,
+    ) -> None:
+        """RDR-206: a malformed ``reply`` object is refused, never dropped.
+        A misspelt field or a missing target that were silently ignored
+        would ack the request as a plain ack and lose the answer; a
+        caller-supplied nonce would let the caller believe it chose the
+        reply's identity. Each refusal happens before the ack is sent, so
+        the same claimant can still ack the request afterwards."""
+        addr = _uniq("addr")
+        tuple_out(f"mailbox/{addr}", {"to": addr}, {"from": "sender-m"}, "keep-me", nonce=_uniq("nonce"))
+        claimant = _uniq("claimant")
+        claim = tuple_in(f"mailbox/{addr}", {"to": addr}, claimant=claimant, lease_s=30)
+        assert claim is not None
+
+        msg = tuple_ack(claim["claim_id"], claimant, reply=reply)
+        assert "Error" in msg
+        assert refusal in msg
+
+        plain_msg = tuple_ack(claim["claim_id"], claimant)
+        assert plain_msg == f"Acked claim {claim['claim_id']}"
 
     def test_ack_reply_not_written_surfaces_as_tool_error_not_raised(
         self, t2_service_env, monkeypatch,
@@ -185,8 +223,6 @@ class TestTupleInAckNack:
         ``_mcp_tool_error`` text -- never let it raise through the wire --
         and the text must say the request was consumed.
         """
-        from nexus.db.t2.http_tuple_store import HttpTupleStore, ReplyNotWrittenError
-
         def _fake_ack(self, claim_id, claimant, reply=None):
             raise ReplyNotWrittenError(
                 "the engine acked without writing the reply: the request "
@@ -198,7 +234,7 @@ class TestTupleInAckNack:
 
         msg = tuple_ack(
             "some-claim-id", "some-claimant",
-            reply_subspace="mailbox/whoever", reply_keys={"to": "whoever"},
+            reply={"subspace": "mailbox/whoever", "keys": {"to": "whoever"}},
         )
         assert "HAS BEEN CONSUMED" in msg
         assert "Error" in msg
@@ -219,8 +255,6 @@ class TestTupleRenew:
         assert "lease_until" in result
         # Must be the engine's own timestamp -- parseable, and it moved
         # forward from the original 5 s lease.
-        from datetime import datetime
-
         new_lease_until = datetime.fromisoformat(result["lease_until"])
         assert new_lease_until > datetime.fromisoformat(original_lease_until)
 
