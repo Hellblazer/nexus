@@ -68,6 +68,7 @@ cleanup() {
   # backstop, not just the happy path.
   [ -n "${T1_PY_TMPDIR:-}" ] && rm -rf "$T1_PY_TMPDIR"
   [ -n "${T2_PY_TMPDIR:-}" ] && rm -rf "$T2_PY_TMPDIR"
+  [ -n "${TUPLES_PY_TMPDIR:-}" ] && rm -rf "$TUPLES_PY_TMPDIR"
 }
 trap cleanup EXIT
 
@@ -261,6 +262,45 @@ if command -v uv >/dev/null 2>&1 && [ -f "$REPO_ROOT/pyproject.toml" ]; then
   fi
 else
   echo "  WARN skipping (uv or pyproject.toml not found at $REPO_ROOT) -- this run does NOT cover routing+backend together for memory/plans/taxonomy/chash, only backend-via-curl above"
+fi
+
+# ── tuples (/v1/tuples) via the REAL Python client (nexus-6flt7) ────────────
+# RDR-205/RDR-206's Linda tuple space had NO probe here of either kind (curl or
+# real-client): every tuple route -- out, rd, rdp, in, inp, ack, ack-with-reply,
+# nack, renew -- ran on the JVM jar only (the Java suite,
+# tests/test_rdr206_mvv_*.py), so this script's native binary never exercised
+# TupleHandler/TupleRepository at all, RDR-206's renew and ack-with-reply
+# included. Same fix shape and same reasoning as the T1 (nexus-97oz3) and
+# memory/plans/taxonomy/chash (nexus-rxqqd) blocks above: the real Python
+# client (nexus.db.t2.http_tuple_store.HttpTupleStore), not curl, because its
+# typed-error classification (ClaimNotFound vs SchemaViolation, which share
+# HTTP status codes) and its parsed response shapes (renew's ISO-8601
+# lease_until, ack's 64-hex-or-null reply_id) are exactly what a status-code-
+# only curl assert() cannot tell apart. Covers out, inp (claim), renew
+# (asserts lease_until moves forward), ack with a reply object (asserts a
+# 64-hex reply_id), rdp of the reply address (asserts exactly that one row),
+# and a typed refusal (a stale ack on the now-consumed claim -> ClaimNotFound).
+# See service/smoke-probes/tuples_real_client.py's own header for the full
+# non-vacuity argument: against an engine predating /renew, the probe's
+# uncaught httpx.HTTPStatusError on the unmapped 404 fails this block exactly
+# the way a real regression would.
+echo "tuples (/v1/tuples) via the real Python client:"
+if command -v uv >/dev/null 2>&1 && [ -f "$REPO_ROOT/pyproject.toml" ]; then
+  TUPLES_PY_TMPDIR=$(mktemp -d)
+  # NEXUS_CONFIG_DIR isolation alone is NOT sufficient -- see the identical
+  # NX_SERVICE_URL='' comment on the T1 block above; the same ambient-env-var
+  # leak applies here and is closed the same way.
+  PY_OUT=$(cd "$REPO_ROOT" && NEXUS_CONFIG_DIR="$TUPLES_PY_TMPDIR" NX_SERVICE_URL='' \
+    NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SVCPORT" NX_SERVICE_TOKEN=smoketoken \
+    $TIMEOUT_CMD uv run python "$REPO_ROOT/service/smoke-probes/tuples_real_client.py" 2>&1)
+  rm -rf "$TUPLES_PY_TMPDIR"
+  if echo "$PY_OUT" | grep -q "^OK$"; then
+    echo "  ok   tuples real-client out/inp/renew/ack-with-reply/rdp/typed-refusal (routing + backend together)"
+  else
+    echo "  FAIL tuples real-client check:"; echo "$PY_OUT" | sed 's/^/    /'; fail=1
+  fi
+else
+  echo "  WARN skipping (uv or pyproject.toml not found at $REPO_ROOT) -- this run does NOT cover routing+backend together for tuples, and no curl fallback exists for this surface"
 fi
 
 # ── Local bge-768 EMBED (nexus-pqatt) ────────────────────────────────────────

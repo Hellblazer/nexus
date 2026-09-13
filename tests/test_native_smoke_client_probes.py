@@ -52,6 +52,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 _PROBE_DIR = REPO_ROOT / "service" / "smoke-probes"
 _T1_PROBE = _PROBE_DIR / "t1_real_client.py"
 _T2_PROBE = _PROBE_DIR / "t2_real_client.py"
+_TUPLES_PROBE = _PROBE_DIR / "tuples_real_client.py"
 
 #: Same bound native-smoke.sh applies via its own $TIMEOUT_CMD (60s).
 _PROBE_TIMEOUT_S = 60
@@ -128,6 +129,18 @@ class TestT2RealClientProbe:
             _T2_PROBE,
             extra_env={"NATIVE_SMOKE_CLEANUP_ROWS": "1"},
         )
+        _assert_probe_ok(result)
+
+
+class TestTuplesRealClientProbe:
+    """service/smoke-probes/tuples_real_client.py against the engine substrate
+    (nexus-6flt7): out, inp, renew, ack-with-reply, rdp, and a typed refusal
+    over the RDR-205/RDR-206 /v1/tuples surface, through the same real
+    HttpTupleStore client native-smoke.sh's tuples block runs."""
+
+    def test_tuples_probe_reports_ok(self) -> None:
+        assert _TUPLES_PROBE.is_file(), f"probe file missing: {_TUPLES_PROBE}"
+        result = _run_probe(_TUPLES_PROBE, extra_env={})
         _assert_probe_ok(result)
 
 
