@@ -1895,7 +1895,17 @@ def _command_md_files() -> list[Path]:
 
 def test_command_files_exist() -> None:
     """Sanity: the command-context command files are discoverable."""
-    assert len(_command_md_files()) == 17  # 17 since devonthink-index.md (nexus-i0cwh)
+    # 17 since devonthink-index.md (nexus-i0cwh); 12 after nexus-cnzei.4
+    # deleted five commands/*.md files that carried an "nx command-context"
+    # line (architecture, deep-analysis, enrich-plan, substantive-critique,
+    # knowledge-tidy). phase-review-gate.md and the rdr-close/create/research/
+    # show commands used a different preamble mechanism ("nx rdr preamble"),
+    # and upgrade.md used a plain `nx upgrade --dry-run` -- none of those five
+    # ever counted here, so their deletion left this count unchanged.
+    # Distinct from test_command_shell_quoting_e2e.py's test_inventory_is_sane
+    # (17), which tracks a DIFFERENT, broader `!`nx command-context <name>``
+    # injection-line shape.
+    assert len(_command_md_files()) == 12
 
 
 def test_no_command_context_file_passes_arguments() -> None:
