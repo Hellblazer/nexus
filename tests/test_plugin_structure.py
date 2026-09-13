@@ -1745,8 +1745,8 @@ class TestRdrGateLoopRemedies:
     def test_t2_ttl_convention_in_the_write_back_skills(self) -> None:
         """nexus-um2h1, updated for nexus-473mx: every skill that prescribes
         memory_put states the lifetime convention. The convention reversed
-        2026-09-12 (nexus-473mx) — omitting ttl is now permanent, not a
-        30-day default — so a skill must name that reversal rather than the
+        2026-09-12 (nexus-473mx): omitting ttl is now permanent, not a
+        30-day default, so a skill must name that reversal rather than the
         retired omitted-ttl trap; stating the old trap after the reversal
         would be actively wrong, not merely silent."""
         for name in ("using-nx-skills", "knowledge-tidying", "nexus"):
