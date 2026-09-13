@@ -4,18 +4,7 @@ description: Use when the design intent behind a failing code path must be reduc
 effort: medium
 ---
 
-**Tier-aware discipline** — apply at session start and before every major step:
-
-1. **Read** widest → narrowest before duplicating effort:
-   - T3 (cross-project): `mcp__plugin_conexus_nexus__search(...)` for the check itself (tier checks use `search`, not `nx_answer`); reach for `nx_answer` only when the answer must be reduced from many documents.
-   - T2 (project): `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")`.
-   - T1 (siblings, this session): `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")`.
-2. **Reuse plans** before dispatching multiple agents: `mcp__plugin_conexus_nexus__plan_search(query="<task>", limit=3)`.
-3. **Write back at end** — findings not stored are findings lost. Pick the tier that matches the audience:
-   - `mcp__plugin_conexus_nexus__scratch(action="put", ..., tags="<topic>")` for sibling agents downstream THIS session (T1, narrowest scope, cheapest write).
-   - `mcp__plugin_conexus_nexus__memory_put(...)` for project-scoped decisions, future sessions same project (T2).
-   - `mcp__plugin_conexus_nexus__store_put(...)` for permanent cross-project knowledge, future sessions everywhere (T3).
-   - Retrieval pipelines grow the plan library on their own through `nx_answer`; only `plan_save` a genuinely reusable retrieval plan with a required `verb`. Implementation, pipeline, and phased-execution plans do not go here — beads and T2 memory.
+**Tier-aware discipline** — apply at session start and before every major step: read widest → narrowest, reuse plans, write back before returning. See [resources/tier-discipline.md](../../resources/tier-discipline.md) for the full checklist (shared across every skill that prescribes it — nexus-cnzei.6).
 
 # why-was-this-written
 

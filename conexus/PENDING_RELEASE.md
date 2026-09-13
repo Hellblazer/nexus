@@ -477,6 +477,20 @@ instead — same strategy nexus-cnzei.4 used for the "debug"/"research"/"review"
   architecture/SKILL.md's own stated Pipeline Position (strategic-planner before
   architect-planner) and registry.yaml's `architect-planner` predecessor, which the old wording
   contradicted (injection audit C5). Inert until the pin advances.
+- `conexus/resources/tier-discipline.md` (new, nexus-cnzei.6): the "Tier-aware discipline"
+  checklist (read widest -> narrowest, reuse plans, write back) extracted from 8 skills that
+  each carried a byte-identical inline copy (analyze, design-to-code-trace, deep-analysis,
+  document, knowledge-tidying, query, research-synthesis, why-was-this-written — injection
+  audit S7). Inert until the pin advances.
+- `conexus/skills/analyze/SKILL.md`, `design-to-code-trace/SKILL.md`, `deep-analysis/SKILL.md`,
+  `document/SKILL.md`, `query/SKILL.md`, `research-synthesis/SKILL.md`,
+  `why-was-this-written/SKILL.md` (nexus-cnzei.6): the inline "Tier-aware discipline" block
+  replaced with a one-line summary + link to `resources/tier-discipline.md`. Content unchanged
+  (still linked, not lost). Inert until the pin advances.
+- `conexus/skills/knowledge-tidying/SKILL.md` (nexus-cnzei.6): same replacement, with the
+  `ttl=None`/nexus-473mx sentence kept inline (test_t2_ttl_convention_in_the_write_back_skills
+  pins that literal text in this file's own content, not through a followed link). Inert until
+  the pin advances.
 - `conexus/skills/test-authoring/SKILL.md` (nexus-cnzei.6): DELETED — moved to
   `.claude/skills/test-authoring/SKILL.md` (repo-local, not shipped in the plugin). It was
   entirely nexus-repo-specific (this repo's own test suite, dev-loop layers, tests/AGENTS.md)
