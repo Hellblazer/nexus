@@ -32,6 +32,12 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.43.0)
 
+- nexus-cnzei.5: `conexus/hooks/scripts/auto-approve-nx-mcp.sh` — removed
+  `mcp__plugin_conexus_nexus__daemon_uninstall` from the PermissionRequest/
+  PreToolUse auto-approve allowlist (destructive, `confirm=true` is a
+  trivial self-gate, not a human-in-the-loop check). Inert until the pin
+  advances; a live session on the pinned tag still auto-approves it until
+  then.
 - `conexus/skills/peer-messaging/SKILL.md` (new, nexus-tacsg): standalone skill for messaging
   other Claude sessions and dispatched agents (channel choice, request acknowledgement,
   trust boundary, sharing one machine). Inert until the pin advances. Bead nexus-tacsg.
