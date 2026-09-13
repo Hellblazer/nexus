@@ -147,7 +147,7 @@ agents:
     slash_command: /implement
     description: "TDD implementation with test-first methodology"
     triggers:
-      - "plan approved by plan-auditor"
+      - "plan approved by nx_plan_audit"
       - "user says implement"
       - "bead status is in_progress for implementation"
       - "executing phase from plan"
@@ -495,7 +495,7 @@ standalone_skills:
     tools: [Bash, Read]
 
   composition-probe:
-    description: "Runtime composition smoke test for coordinator beads — dispatches a general-purpose subagent to generate a 30-50 line end-to-end test against the coordinator's entry point, runs it via project-native test runner (py/java/ts auto-detected), reports PASS or FAIL with dependency attribution. Fires on beads tagged metadata.coordinator=true (set by plan-enricher ≥2 deps heuristic). Read-only tool budget per RDR-066 Phase 1a CA-1 finding."
+    description: "Runtime composition smoke test for coordinator beads — dispatches a general-purpose subagent to generate a 30-50 line end-to-end test against the coordinator's entry point, runs it via project-native test runner (py/java/ts auto-detected), reports PASS or FAIL with dependency attribution. Fires on beads tagged metadata.coordinator=true (set by the nx_enrich_beads ≥2 deps heuristic). Read-only tool budget per RDR-066 Phase 1a CA-1 finding."
     triggers:
       - "run composition probe on bead X"
       - "verify coordinator bead composition"

@@ -30,7 +30,7 @@ mechanize, it matters enough to ship.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.43.0)
+## Awaiting the next release or plugin cut (pinned: v7.44.0)
 
 - nexus-cnzei.5: `conexus/hooks/scripts/auto-approve-nx-mcp.sh` — removed
   `mcp__plugin_conexus_nexus__daemon_uninstall` from the PermissionRequest/
