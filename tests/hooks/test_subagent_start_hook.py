@@ -286,3 +286,63 @@ class TestWorktreeProjectResolution:
         )
         ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         assert "T2-SCAN-MARKER" in ctx
+
+
+class TestAgentTypeClassification:
+    """nexus-cnzei.6 (injection audit S1): the real harness payload carries
+    agent_id/agent_type/session_id/prompt_id and never task/prompt, so a
+    classification keyed on TASK_TEXT alone never fires in production. These
+    tests use a payload shaped like a REAL dispatch — no ``task``/``prompt``
+    keys at all — to prove the agent_type-keyed classification actually
+    fires without them, unlike STDIN_PAYLOAD above (which fabricates a
+    task/prompt the harness never sends and would mask this exact defect)."""
+
+    _REAL_SHAPE_NO_TASK_OR_PROMPT = {
+        "session_id": "test-session",
+        "hook_event_name": "SubagentStart",
+        "prompt_id": "abc123",
+    }
+
+    def _payload(self, agent_type: str) -> str:
+        return json.dumps({**self._REAL_SHAPE_NO_TASK_OR_PROMPT, "agent_type": agent_type})
+
+    def test_code_review_agent_type_skips_storage_docs_with_no_task_text(self) -> None:
+        result = _run_hook(stdin=self._payload("code-review-expert"))
+        assert result.returncode == 0, result.stderr
+        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "## nx storage" not in ctx
+        assert "## Analytical operators" not in ctx
+
+    def test_explore_agent_type_skips_storage_docs_with_no_task_text(self) -> None:
+        result = _run_hook(stdin=self._payload("Explore"))
+        assert result.returncode == 0, result.stderr
+        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "## nx storage" not in ctx
+        assert "## Analytical operators" not in ctx
+
+    def test_unclassified_agent_type_keeps_storage_docs_with_no_task_text(self) -> None:
+        """A general-purpose dispatch (no task/prompt, agent_type matching
+        neither classification) still gets the full storage/operators
+        content — this is the negative case proving the classification is
+        selective, not merely always-on."""
+        result = _run_hook(stdin=self._payload("general-purpose"))
+        assert result.returncode == 0, result.stderr
+        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "## nx storage" in ctx
+        assert "## Analytical operators" in ctx
+
+    def test_task_text_fallback_still_classifies_when_present(self) -> None:
+        """The old TASK_TEXT path stays live as a fallback: a payload that
+        DOES carry task/prompt (the shape tests, not the harness, produce)
+        still classifies correctly, so this is a strict addition, not a
+        replacement that could regress an existing caller."""
+        payload = json.dumps({
+            "session_id": "test-session",
+            "hook_event_name": "SubagentStart",
+            "task": "run a lint style check",
+            "prompt": "",
+        })
+        result = _run_hook(stdin=payload)
+        assert result.returncode == 0, result.stderr
+        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "## nx storage" not in ctx

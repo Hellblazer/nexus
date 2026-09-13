@@ -88,16 +88,46 @@ if [[ -n "$AGENT_ID" ]]; then
     echo "Claimant id: $AGENT_ID — mailbox: mailbox/$AGENT_ID"
 fi
 
+# nexus-cnzei.6 (injection audit S1): the real SubagentStart payload carries
+# agent_id/agent_type/session_id/prompt_id — never task or prompt, so
+# TASK_TEXT above is empty in every live dispatch and every grep against it
+# below is dead code that only "passes" in a test that fabricates a task/
+# prompt field the harness never sends (confirmed empirically: this
+# session's own SubagentStart injection carried no Phase Gate block for a
+# review-gate task). agent_type is the one classification signal a
+# dispatcher actually controls (it is the Agent tool's own subagent_type,
+# verbatim — see agent-dispatch-expect.sh's own measured note), so the
+# agent-PURPOSE classification below (code-nav vs code-review, which
+# sections of injected content a given agent needs) is re-keyed on it.
+# TASK_TEXT stays as a fallback OR-condition, harmless dead weight today,
+# live again the moment a caller ever supplies task/prompt.
+#
+# The PHASE_GATE and catalog-awareness blocks further down are genuinely
+# about what the TASK is about, not what the agent IS — any agent type can
+# be dispatched to close a phase or run a catalog query — so there is no
+# sound agent_type proxy for them. They stay TASK_TEXT-gated and stay dead
+# in practice; that gap is real and undocumented elsewhere, not silently
+# left unfixed here.
+AGENT_TYPE=$(python3 -c "
+import json, sys
+try:
+    print(json.loads(sys.argv[1]).get('agent_type', ''))
+except Exception:
+    print('')
+" "$STDIN" 2>/dev/null)
+
 # Classify agent purpose
 SKIP_STORAGE_DOCS=0
 SKIP_T2_SCAN=0
 SKIP_OPERATORS=0
 
-if echo "$TASK_TEXT" | grep -qiE "refactor|rename.*symbol|find.*method|type.hierarch|navigate.code"; then
+if echo "$AGENT_TYPE" | grep -qiE "^explore$|codebase-deep-analyzer" \
+    || echo "$TASK_TEXT" | grep -qiE "refactor|rename.*symbol|find.*method|type.hierarch|navigate.code"; then
     # Code-nav agents don't need storage docs or operators
     SKIP_STORAGE_DOCS=1
     SKIP_OPERATORS=1
-elif echo "$TASK_TEXT" | grep -qiE "code.review|review.code|lint|style.check"; then
+elif echo "$AGENT_TYPE" | grep -qiE "code-review" \
+    || echo "$TASK_TEXT" | grep -qiE "code.review|review.code|lint|style.check"; then
     # Code review agents don't need storage docs or operators
     SKIP_STORAGE_DOCS=1
     SKIP_OPERATORS=1
