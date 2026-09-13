@@ -301,6 +301,8 @@ REAL_HOME="$HOME"
 # shellcheck source=tests/e2e/lib/fence_home.sh
 source "$REPO_ROOT/tests/e2e/lib/fence_home.sh"
 source "$REPO_ROOT/tests/e2e/lib/gate_advisory.sh"   # passed_by_default (nexus-1c7oq)
+# shellcheck source=./scripts/lib/build-lease.sh disable=SC1091
+source "$REPO_ROOT/scripts/lib/build-lease.sh"   # nexus-56qvf: holds the lease across stamp+package+restore, not just the mvn call
 GATE_HOME="$SCRATCH/home"
 fence_home "$REAL_HOME" "$GATE_HOME" ".config/nexus"
 export HOME="$GATE_HOME"
@@ -381,6 +383,11 @@ cleanup() {
   # Restore the pre-invocation BYTES, never HEAD (nexus-iws18).
   cp "$RELEASE_PROPS_SNAPSHOT" "$RELEASE_PROPS" 2>/dev/null || true
   rm -f "$RELEASE_PROPS_SNAPSHOT"
+  # nexus-56qvf: backstop release of the build lease this gate may hold
+  # across its stamp+package+restore step below — safe to call
+  # unconditionally (a no-op if this process never acquired it, or already
+  # released it on the success path), per build_lease_release's own contract.
+  build_lease_release service
   echo "[gate] cleaned up"
 }
 trap cleanup EXIT
@@ -470,24 +477,67 @@ print(jar_freshness_skip_reason() or "")
   # smoke-leg compare, and the restore choreography differs) — keep in step.
   GATE_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
   GATE_BUILD_REF="${GATE_SHA}+$(date +%s)-$$"
+  # nexus-56qvf: hold the SINGLE-BUILDER lease across the WHOLE compound
+  # step below (stamp -> package -> assert -> restore), not just the mvn
+  # call. Before this fix, mvnw-leased.sh acquired its OWN lease around
+  # bare `./mvnw` alone, leaving the stamp (above) and the restore (below)
+  # unprotected: a concurrent build-gate-jar.sh (or another local-service-
+  # gate.sh) could stamp its own values, build, and restore its OWN
+  # snapshot in that window, landing this gate's `./mvnw` on a
+  # release.properties it never wrote. Acquiring here means this call must
+  # be the BARE `./mvnw`, never scripts/mvnw-leased.sh (which would try to
+  # re-acquire the same named lease from a DIFFERENT pid — this script's
+  # subprocess — and deadlock against the lease this process already
+  # holds). This does not itself explain the 2026-09-07 incident (a peer
+  # session confirmed no concurrent Maven/build-gate-jar.sh ran in that
+  # window) — it closes the CONCURRENT-CLOBBER hazard the bead names as
+  # fixable, not that specific unreplicated occurrence.
+  build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" local-service-gate.sh-stamp-package
   echo "[gate] rebuilding service jar (release_version=$GATE_STAMP build_ref=$GATE_BUILD_REF)..."
   # Pre-invocation bytes, never `git checkout` (nexus-iws18: HEAD is not
   # what was in the tree when the gate started).
   _restore_props() { cp "$RELEASE_PROPS_SNAPSHOT" "$RELEASE_PROPS"; }
+  _restore_props_and_release_lease() { _restore_props; build_lease_release service; }
   sed -e "s/^release_version=.*/release_version=${GATE_STAMP}/" \
       -e "s/^build_ref=.*/build_ref=${GATE_BUILD_REF}/" \
       "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp" \
     && mv "$RELEASE_PROPS.tmp" "$RELEASE_PROPS"
-  # nexus-c00dw: mvnw-leased.sh takes the single-builder lease around this
-  # ./mvnw call itself (cds into service/ internally) — never call the bare
-  # ./mvnw here, or this gate can collide with a concurrent build.
-  if ! "$REPO_ROOT/scripts/mvnw-leased.sh" -q package -DskipTests; then
-    _restore_props
+  # Bare mvnw, deliberately (see the lease comment above) — this process
+  # already holds the lease scripts/mvnw-leased.sh would otherwise acquire.
+  if ! (cd "$REPO_ROOT/service" && ./mvnw -q package -DskipTests); then
+    _restore_props_and_release_lease
     echo "[gate] ERROR: service jar rebuild failed — fix the Maven build and re-run:" >&2
     echo "         scripts/mvnw-leased.sh package -DskipTests" >&2
     exit 2
   fi
-  _restore_props
+  # nexus-56qvf: assert the BUILT ARTIFACTS actually carry the stamp this
+  # run just wrote, before trusting either one — the 2026-09-07 incident
+  # was exactly a stamped SOURCE file next to an unstamped BUILT jar, which
+  # nothing checked until the smoke leg failed several steps later. Check
+  # both target/classes (what -DskipTests actually produces from the
+  # resources phase) and the packaged jar itself; fail loud, naming which
+  # one and what it actually contained, rather than proceeding on a jar
+  # this run cannot prove is the one it just stamped.
+  GATE_CLASSES_PROPS="$REPO_ROOT/service/target/classes/META-INF/nexus/release.properties"
+  if ! grep -qx "release_version=${GATE_STAMP}" "$GATE_CLASSES_PROPS" 2>/dev/null \
+     || ! grep -qx "build_ref=${GATE_BUILD_REF}" "$GATE_CLASSES_PROPS" 2>/dev/null; then
+    echo "[gate] FATAL: target/classes/META-INF/nexus/release.properties does not carry the stamp this run just wrote (release_version=$GATE_STAMP build_ref=$GATE_BUILD_REF); actual contents:" >&2
+    cat "$GATE_CLASSES_PROPS" >&2 2>/dev/null || echo "  (file missing)" >&2
+    _restore_props_and_release_lease
+    exit 2
+  fi
+  # Command substitution (not a pipe into grep -q) so pipefail can never
+  # promote unzip's own exit status over a short-circuited consumer
+  # (nexus-i66g4/nexus-6zxfb/nexus-wbeyi class, tests/test_pipefail_early_
+  # exit_consumer_lint.py) -- `$(...)` always drains its producer to EOF.
+  JAR_RELEASE_PROPS="$(unzip -p "$JAR" META-INF/nexus/release.properties 2>/dev/null || true)"
+  if [[ "$JAR_RELEASE_PROPS" != *"release_version=${GATE_STAMP}"* ]]; then
+    echo "[gate] FATAL: $JAR's packaged release.properties does not carry release_version=$GATE_STAMP; actual contents:" >&2
+    printf '%s\n' "${JAR_RELEASE_PROPS:-  (entry missing)}" >&2
+    _restore_props_and_release_lease
+    exit 2
+  fi
+  _restore_props_and_release_lease
 fi
 
 # 3. Resolve a launch artifact: installed native binary wins; dev jar fallback.
