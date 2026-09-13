@@ -98,7 +98,15 @@ class TestRdr206MvvThroughHttpTupleStore:
         row, claim_id = claimed
         original_deadline = _parse(row.lease_until)
 
-        renewed_until = store.renew(claim_id, "mvv-worker", _RENEW_LEASE_S)
+        try:
+            renewed_until = store.renew(claim_id, "mvv-worker", _RENEW_LEASE_S)
+        except ClaimNotFoundError:
+            if datetime.now(timezone.utc) >= original_deadline:
+                pytest.skip(
+                    f"the box stalled past the {_SHORT_LEASE_S}s lease between claim and "
+                    f"renew; a stall is not a statement about renew (nexus-61vos)"
+                )
+            raise
         assert renewed_until.tzinfo is not None, "renew returns an aware datetime"
         assert renewed_until > original_deadline + timedelta(seconds=_RENEW_LEASE_S // 2), (
             f"the renew must extend well past the original lease: "
