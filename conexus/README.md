@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-10 agents, 46 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
+10 agents, 45 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
 
 New to Nexus? The [install guide](https://hellblazer.github.io/nexus/) covers setup end to end, and [Getting started](https://hellblazer.github.io/nexus/getting-started.html) walks the first search, memory, scratch, and knowledge lessons; [Working with RDRs](https://hellblazer.github.io/nexus/rdr.html) covers the RDR lifecycle. This file is reference — what the plugin ships, not how to use it.
 
@@ -50,7 +50,7 @@ story.
 ## What You Get
 
 - **10 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility. The three MCP-tool redirect stubs (`knowledge-tidier`, `plan-auditor`, `plan-enricher`) were deleted (nexus-cnzei.4) — call `nx_tidy` / `nx_plan_audit` / `nx_enrich_beads` directly
-- **46 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
+- **45 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
@@ -147,7 +147,6 @@ conexus/
     ├── rdr-gate/            # RDR: quality gate before finalizing
     ├── rdr-accept/          # RDR: accept a gated RDR
     ├── rdr-close/           # RDR: close RDR, bead advisory
-    ├── rdr-list/            # RDR: list RDRs with status
     ├── rdr-show/            # RDR: show RDR details
     ├── rdr-research/        # RDR: delegate research to agents
     └── rdr-audit/           # RDR: audit project RDR lifecycle
@@ -313,7 +312,12 @@ project-context calls cover the same ground.
 - `/conexus:continuation [topic]` — write a paste-ready handoff prompt to `~/.cache/nexus/continuations/` capturing branch, in-progress beads, open PRs, and active T2 memory. Use at session close. Compressed prompt is emitted in chat as a copy-clickable code block.
 - `/conexus:nx-preflight` — verify conexus plugin dependencies (CLI, doctor, beads).
 
-**RDR commands**: `/conexus:rdr-create`, `/conexus:rdr-list`, `/conexus:rdr-show`, `/conexus:rdr-research`, `/conexus:rdr-gate`, `/conexus:rdr-accept`, `/conexus:rdr-close`, `/conexus:rdr-audit`
+**RDR commands**: `/conexus:rdr-create`, `/conexus:rdr-list`, `/conexus:rdr-show`, `/conexus:rdr-research`, `/conexus:rdr-gate`, `/conexus:rdr-accept`, `/conexus:rdr-close`, `/conexus:rdr-audit`. Four of these
+(`rdr-gate`, `rdr-accept`, `rdr-audit`, plus `rdr-fix` not shown above) are backed by BOTH a `commands/*.md`
+file and a same-named skill — a deliberately-kept dual surface (see `_KNOWN_COMMAND_SKILL_COLLISIONS`
+in `tests/test_plugin_structure.py`). `rdr-list` is command-only (its skill depended on the command's
+own bash-injected data and was deleted at nexus-cnzei.4); `rdr-create`/`rdr-close`/`rdr-research`/`rdr-show`
+are skill-only (the redundant command was deleted at nexus-cnzei.4).
 
 
 ## MCP Servers

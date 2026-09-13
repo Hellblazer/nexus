@@ -224,13 +224,21 @@ agents:
 # =============================================================================
 
 rdr_skills:
-  # Each rdr_skill has a corresponding commands/*.md file that injects live context
-  # (RDR dir from .nexus.yml, existing RDRs, T2 state, beads) before invoking the skill.
-  # RDR directory is read from .nexus.yml indexing.rdr_paths[0]; default docs/rdr.
+  # nexus-cnzei.4 fix round: only rdr-gate/rdr-fix/rdr-accept/rdr-audit still
+  # carry a `command_file:` — those four are a deliberately-kept dual surface
+  # (TestRdrGateLoopRemedies pins verbatim clauses across both files; rdr-audit
+  # has its own dedicated test_rdr_audit_skill.py requiring the command to
+  # exist). Every other name here now has EITHER a command_file (rdr-list —
+  # its skill was deleted; the command's `!`nx rdr preamble rdr-list`` bash
+  # injection is a live, tested E2E fixture, tests/cc-validation/scenarios/19
+  # and 23, and the skill was a documentation shell dependent on it having
+  # already run) OR no command_file at all (rdr-create, rdr-research,
+  # rdr-close, rdr-show, phase-review-gate — the command was deleted; the
+  # skill is independently executable via Bash/MCP tool calls, RDR directory
+  # is read from .nexus.yml indexing.rdr_paths[0], default docs/rdr).
 
   rdr-create:
     slash_command: /rdr-create
-    command_file: commands/rdr-create.md
     description: "Scaffold new RDR from template, assign ID, register in T2"
     triggers:
       - "create an RDR"
@@ -239,7 +247,6 @@ rdr_skills:
 
   rdr-research:
     slash_command: /rdr-research
-    command_file: commands/rdr-research.md
     description: "Add, track, and verify structured research findings"
     triggers:
       - "add research finding"
@@ -279,7 +286,6 @@ rdr_skills:
 
   rdr-close:
     slash_command: /rdr-close
-    command_file: commands/rdr-close.md
     description: "Close RDR with post-mortem, bead status advisory, T3 archive"
     triggers:
       - "close this RDR"
@@ -300,7 +306,6 @@ rdr_skills:
 
   phase-review-gate:
     slash_command: /phase-review-gate
-    command_file: commands/phase-review-gate.md
     description: "Cross-walk RDR §Approach against closing beads at a phase boundary; blocks silent scope reduction"
     triggers:
       - "phase review gate"
@@ -311,7 +316,7 @@ rdr_skills:
 
   rdr-list:
     slash_command: /rdr-list
-    command_file: commands/rdr-list.md
+    command_file: commands/rdr-list.md  # command-only (nexus-cnzei.4): skills/rdr-list deleted, see header note
     description: "List all RDRs with status, type, priority"
     triggers:
       - "list RDRs"
@@ -319,7 +324,6 @@ rdr_skills:
 
   rdr-show:
     slash_command: /rdr-show
-    command_file: commands/rdr-show.md
     description: "Display detailed RDR information"
     triggers:
       - "show RDR"

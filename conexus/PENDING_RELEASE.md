@@ -355,3 +355,29 @@ the first line.
   command above. Inert until the pin advances.
 - `conexus/skills/query/SKILL.md` (nexus-cnzei.4): "Verb-scoped shortcuts" section updated
   to the renamed verb-skill names above. Inert until the pin advances.
+
+nexus-cnzei.4 fix round (review pass): finished the four rdr-* pairs that had no pinned-test
+block, per pair below. rdr-gate/rdr-fix/rdr-accept/rdr-audit are unchanged — genuinely
+pinned by TestRdrGateLoopRemedies and test_rdr_audit_skill.py; both files stay.
+
+- `conexus/commands/rdr-close.md` (nexus-cnzei.4 fix round): DELETED — the skill
+  (skills/rdr-close/SKILL.md) is independently executable via Bash/MCP tool calls and does
+  not depend on the command's bash-injected data; no test or E2E fixture referenced this
+  file. Inert until the pin advances.
+- `conexus/commands/rdr-create.md` (nexus-cnzei.4 fix round): DELETED, same reason as
+  rdr-close.md above. Inert until the pin advances.
+- `conexus/commands/rdr-research.md` (nexus-cnzei.4 fix round): DELETED, same reason as
+  rdr-close.md above. Inert until the pin advances.
+- `conexus/commands/rdr-show.md` (nexus-cnzei.4 fix round): DELETED, same reason as
+  rdr-close.md above. Inert until the pin advances.
+- `conexus/skills/rdr-list/SKILL.md` (nexus-cnzei.4 fix round): DELETED — the reverse of the
+  usual pattern in this bead. Its content explicitly said "the /conexus:rdr-list command
+  already gathered" the data it formats, so it has no independent capability; the command
+  (`!`nx rdr preamble rdr-list``) is the operative surface and is a live, tested fixture in
+  two E2E scenarios (tests/cc-validation/scenarios/19_command_bash_injection_renders.sh and
+  23_rdr130_flipped_command_renders.sh) that assert on its actual injected RDR-table content.
+  Deleting the command instead (the default pattern) would have broken both. Inert until the
+  pin advances.
+- `conexus/skills/using-nx-skills/SKILL.md` (nexus-cnzei.4 fix round): RDR lifecycle line
+  gains a note on which of the five rdr-* names now resolve via command-only, skill-only, or
+  both. Inert until the pin advances.
