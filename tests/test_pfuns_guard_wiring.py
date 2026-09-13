@@ -82,6 +82,12 @@ def _run_inner(tmp_path: Path, mode: str, *pytest_args: str) -> tuple[int, str]:
     env = dict(os.environ)
     env["NX_REAL_CONFIG_DIR_FOR_GUARD_TEST"] = str(tmp_path / "home")
     env["NX_PROBE_MODE"] = mode
+    # The child is a real session: its session-start build-lease gate reads
+    # the box's shared lease unless pointed elsewhere, and a Maven run
+    # anywhere on the machine would turn this probe red for an unrelated
+    # reason (nexus-fam6l).
+    env["NX_BUILD_LEASE_ROOT"] = str(tmp_path / "build-lease")
+    env.pop("NX_BUILD_LEASE_WAIT", None)
     env["PYTHONPATH"] = os.pathsep.join(
         [str(plugin_dir), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
     )

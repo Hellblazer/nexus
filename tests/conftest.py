@@ -189,6 +189,31 @@ def _scan_fixture_cache_files() -> set[Path]:
 _fixture_cache_baseline: set[Path] = set()
 
 
+#: ``NX_TEST_T2_SUBSTRATE`` values that name a deleted substrate, with the
+#: refusal ``_pin_t2_substrate`` raises for each. One table for both readers:
+#: ``_pin_t2_substrate`` refuses these by name, and ``_gate_on_build_lease``
+#: skips them because refusing a value boots nothing (nexus-fam6l). Adding a
+#: retired value here updates both; a second hand-kept list is how the gate
+#: once reported a build in progress for a run that had asked for a deleted
+#: substrate.
+_RETIRED_T2_SUBSTRATES: dict[str, str] = {
+    "sqlite": (
+        "NX_TEST_T2_SUBSTRATE=sqlite: the SQLite test substrate was "
+        "deleted with the SQLite T2 stores (nexus-i711w). The engine is "
+        "the only substrate. If you meant 'this test needs no T2 store', "
+        "that intent now has its own spelling: NX_TEST_T2_SUBSTRATE=none."
+    ),
+}
+
+
+def _selected_t2_substrate_boots_engine() -> bool:
+    """True when the session's ``NX_TEST_T2_SUBSTRATE`` leads
+    ``_pin_t2_substrate`` to provision the engine: anything except ``none``
+    (provision nothing) and a retired value (refused by name)."""
+    selected = os.environ.get("NX_TEST_T2_SUBSTRATE")
+    return selected != "none" and selected not in _RETIRED_T2_SUBSTRATES
+
+
 def _gate_on_build_lease() -> None:
     """Refuse the whole session ONCE while a service build holds the lease,
     or wait for it when asked (nexus-pv93h).
@@ -205,13 +230,13 @@ def _gate_on_build_lease() -> None:
     refused there; one that starts after every worker has booted is not
     seen by either (the shell lease's own residual, nexus-06fu4).
 
-    ``NX_TEST_T2_SUBSTRATE=none`` runs need no engine and are never gated.
-    Neither is ``=sqlite``: ``_pin_t2_substrate`` refuses that value by name
-    without booting anything, and gating it first reported a build in
-    progress instead of the deleted substrate the run asked for
-    (nexus-fam6l).
+    Only a run that will boot the engine is gated
+    (``_selected_t2_substrate_boots_engine``). ``=none`` provisions nothing,
+    and a retired value such as ``=sqlite`` is refused by name without
+    booting anything; gating those first reported a build in progress
+    instead of the mistake the run actually made (nexus-fam6l).
     """
-    if os.environ.get("NX_TEST_T2_SUBSTRATE") in ("none", "sqlite"):
+    if not _selected_t2_substrate_boots_engine():
         return
     try:
         from tests.db._service_fixture import build_lease_wait_seconds, wait_for_build_lease
@@ -1902,13 +1927,8 @@ def _pin_t2_substrate(request: pytest.FixtureRequest) -> None:
     selected = os.environ.get("NX_TEST_T2_SUBSTRATE")
     if selected == "none":
         return
-    if selected == "sqlite":
-        raise RuntimeError(
-            "NX_TEST_T2_SUBSTRATE=sqlite: the SQLite test substrate was "
-            "deleted with the SQLite T2 stores (nexus-i711w). The engine is "
-            "the only substrate. If you meant 'this test needs no T2 store', "
-            "that intent now has its own spelling: NX_TEST_T2_SUBSTRATE=none."
-        )
+    if selected in _RETIRED_T2_SUBSTRATES:
+        raise RuntimeError(_RETIRED_T2_SUBSTRATES[selected])
     request.getfixturevalue("t2_service_env")
 
 
