@@ -79,10 +79,12 @@ if [ ! -r "$_STALL_NOTE_LIB" ]; then
 fi
 # shellcheck source=./lib/heartbeat_stall_note.sh disable=SC1091
 source "$_STALL_NOTE_LIB"
-command -v heartbeat_stall_note >/dev/null 2>&1 || {
-  echo "FATAL: sourced $_STALL_NOTE_LIB but heartbeat_stall_note is not defined." >&2
-  exit 1
-}
+for _fn in heartbeat_stall_note heartbeat_census; do
+  command -v "$_fn" >/dev/null 2>&1 || {
+    echo "FATAL: sourced $_STALL_NOTE_LIB but $_fn is not defined." >&2
+    exit 1
+  }
+done
 
 # Emit the stall note, if any, indented like the rest of the gate's evidence.
 _stall_note() { heartbeat_stall_note | sed 's/^/       /'; }
@@ -422,6 +424,14 @@ if printf '%s' "$PRE_CONTENT" | grep -q "$MARKER"; then
 else
   bad "pre-upgrade T1 row $PRE_ID did NOT survive (got: $PRE_CONTENT)"
 fi
+
+# nexus-wo6sc: the heartbeat census runs on EVERY exit path, pass included.
+# The supervisor log dies with the container, so a passing run that does not
+# report here reports nothing — and "no stall lines in the leg log" then
+# looks identical to "no stalls happened". An unreadable log says so rather
+# than counting as zero.
+say "Heartbeat census (nexus-wo6sc)"
+heartbeat_census | sed 's/^/       /'
 
 say "RESULT"
 if [ "$FAILS" -eq 0 ]; then

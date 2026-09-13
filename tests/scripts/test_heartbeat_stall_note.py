@@ -206,3 +206,84 @@ class TestTheLibraryReachesTheContainer:
                 "the guard fired even though the library was present -- it "
                 f"would refuse every real run: {with_lib.stderr[:400]}"
             )
+
+
+class TestHeartbeatCensus:
+    """nexus-wo6sc, 2026-09-13. The census exists because a zero from a
+    passing run was worth nothing.
+
+    The 4-wide battery at ef6d9c466 produced no missed-TTL lines, and that
+    could not be read as "no stalls": the supervisor log lives inside the
+    container and is dumped only on the FAILURE path, so a green run
+    discards it. The distribution that would distinguish a threshold effect
+    from a structural one was unobservable by construction.
+
+    Its load-bearing rule is that an unreadable log is NOT zero ticks.
+    Those are different findings, and conflating them is how a run reports
+    clean when it measured nothing.
+    """
+
+    SLOW = (
+        "2026-09-12 20:34:54,016 nexus.daemon.storage_service_daemon WARNING "
+        "event='storage_service_heartbeat_slow' elapsed_s=6.806 ttl_s=15.0 "
+        "phases_s={'stamp': 6.775, 'stamp.unaccounted': 0.002}"
+    )
+
+    @staticmethod
+    def _census(log_path) -> str:
+        proc = subprocess.run(
+            ["bash", "-c", f'source "{LIB}"; heartbeat_census "$1"', "_", str(log_path)],
+            capture_output=True, text=True, check=False,
+        )
+        assert proc.returncode == 0, f"the census must never fail a run: {proc.stderr}"
+        return proc.stdout
+
+    def test_an_unreadable_log_is_not_reported_as_zero(self, tmp_path) -> None:
+        """The rule the whole thing turns on. If this ever regresses to
+        printing missed_ttl=0, a run that measured nothing reads as clean —
+        which is exactly the reading that wasted a 43-minute battery."""
+        out = self._census(tmp_path / "absent.log")
+        assert "UNREADABLE" in out
+        assert "NOT a report of zero stalls" in out
+        assert "missed_ttl=0" not in out, (
+            "an absent log must not be rendered as a zero count"
+        )
+
+    def test_a_clean_readable_log_reports_a_real_zero(self, tmp_path) -> None:
+        log = tmp_path / "storage_service.log"
+        log.write_text(_HEALTHY + "\n")
+        out = self._census(log)
+        assert "missed_ttl=0 slow=0" in out
+        assert "a real zero, read from a readable log" in out
+        assert "UNREADABLE" not in out
+
+    def test_slow_ticks_are_counted_and_printed_verbatim(self, tmp_path) -> None:
+        """A count discards the stamp.* breakdown, which is the entire
+        reason the sub-phasing was built, so the lines come out whole."""
+        log = tmp_path / "storage_service.log"
+        log.write_text("\n".join([_HEALTHY, self.SLOW, self.SLOW]) + "\n")
+        out = self._census(log)
+        assert "missed_ttl=0 slow=2" in out
+        assert out.count("stamp.unaccounted") == 2, (
+            "each slow line must appear whole, with its phase breakdown"
+        )
+
+    def test_missed_and_slow_are_counted_separately(self, tmp_path) -> None:
+        log = tmp_path / "storage_service.log"
+        log.write_text("\n".join([self.SLOW, _MISSED % "", _HEALTHY]) + "\n")
+        out = self._census(log)
+        assert "missed_ttl=1 slow=1" in out
+
+    def test_the_harness_runs_the_census_on_every_exit_path(self) -> None:
+        """Wiring pin. The census must sit ABOVE the pass/fail branch, or it
+        only reports when something else already failed — which is the
+        defect it was written to remove."""
+        text = HARNESS.read_text(encoding="utf-8")
+        census_at = text.index("heartbeat_census | sed")
+        result_at = text.index('say "RESULT"')
+        assert census_at < result_at, (
+            "the census must run before the pass/fail branch, not inside it"
+        )
+        assert "heartbeat_census" in text.split("_STALL_NOTE_LIB")[-1], (
+            "the startup guard must require heartbeat_census to exist too"
+        )
