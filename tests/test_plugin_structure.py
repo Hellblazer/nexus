@@ -22,7 +22,10 @@ pytestmark = pytest.mark.lint
 REPO_ROOT = Path(__file__).parent.parent
 PLUGIN_DIR = REPO_ROOT / "conexus"
 AGENTS_DIR = PLUGIN_DIR / "agents"
-SHARED_DIR = AGENTS_DIR / "_shared"
+RESOURCES_DIR = PLUGIN_DIR / "resources"
+# nexus-cnzei.4: moved out of agents/ so the five reference docs are no longer
+# listed as dispatchable conexus:_shared:* agent entries.
+SHARED_DIR = RESOURCES_DIR / "agent-shared"
 SKILLS_DIR = PLUGIN_DIR / "skills"
 COMMANDS_DIR = PLUGIN_DIR / "commands"
 REGISTRY_PATH = PLUGIN_DIR / "registry.yaml"
@@ -52,7 +55,13 @@ _STANDALONE_SKILLS = {
     # RDR-080 P3: pointer skills — delegate directly to MCP tools, no relay structure needed
     "query", "enrich-plan", "knowledge-tidying", "plan-validation",
     # RDR-078 verb skills — dispatch plan_match + plan_run directly, no agent relay
-    "research", "review", "analyze", "debug", "document",
+    # nexus-cnzei.4: "debug"/"research"/"review" renamed off their bare verb
+    # names — those names collided with, respectively, the debugger-dispatch
+    # command, the deep-research-synthesizer-dispatch command, and the
+    # code-review naming family. The nx_answer dimensions={"verb": ...} value
+    # each skill passes is unchanged; only the skill's own folder/display
+    # name moved.
+    "design-to-code-trace", "decision-drift-review", "analyze", "why-was-this-written", "document",
     "plan-author", "plan-inspect", "plan-promote", "plan-first",
     # nexus-j327 — phase closeout cross-walk gate. Pointer skill with Python
     # preamble; no agent dispatch. Enforces §Approach coverage at phase
@@ -101,10 +110,10 @@ def _extract_recover_block(text: str) -> str | None:
 def _collect_shared_links() -> list[tuple[Path, str]]:
     results = []
     for md_file in sorted(PLUGIN_DIR.rglob("*.md")):
-        if "_shared" in md_file.parts:
+        if "agent-shared" in md_file.parts:
             continue
         text = md_file.read_text()
-        for match in re.finditer(r"\[([^\]]*)\]\(([^)]*_shared/[^)]*)\)", text):
+        for match in re.finditer(r"\[([^\]]*)\]\(([^)]*agent-shared/[^)]*)\)", text):
             results.append((md_file, match.group(2)))
     return results
 
@@ -651,12 +660,23 @@ class TestSharedResources:
     @pytest.mark.parametrize("filename", EXPECTED_SHARED_FILES)
     def test_shared_file_exists_and_non_empty(self, filename: str) -> None:
         path = SHARED_DIR / filename
-        assert path.exists(), f"_shared/{filename} missing"
-        assert len(path.read_text()) > 100, f"_shared/{filename} nearly empty"
+        assert path.exists(), f"resources/agent-shared/{filename} missing"
+        assert len(path.read_text()) > 100, f"resources/agent-shared/{filename} nearly empty"
 
     def test_no_unregistered_shared_files(self) -> None:
         orphans = {p.name for p in SHARED_DIR.glob("*.md")} - set(EXPECTED_SHARED_FILES)
-        assert not orphans, f"Unexpected files in _shared/: {orphans}"
+        assert not orphans, f"Unexpected files in resources/agent-shared/: {orphans}"
+
+    def test_shared_resources_not_agent_discoverable(self) -> None:
+        """nexus-cnzei.4 (S1): the shared reference docs must not live under
+        agents/, where recursive discovery lists each of them as a
+        dispatchable conexus:_shared:<name> agent entry with nothing
+        meaningful to dispatch."""
+        assert not (AGENTS_DIR / "_shared").exists(), (
+            "agents/_shared/ must not exist — shared reference docs moved to "
+            "resources/agent-shared/ (nexus-cnzei.4)"
+        )
+        assert SHARED_DIR.is_dir()
 
 
 class TestSharedRelativePaths:
@@ -1220,7 +1240,7 @@ class TestEnginePinParity:
 
 REQUIRED_ROOT_FILES = ["registry.yaml", "README.md", "CHANGELOG.md", "hooks/hooks.json"]
 REQUIRED_ROOT_DIRS = [
-    "agents", "agents/_shared", "skills", "commands",
+    "agents", "resources/agent-shared", "skills", "commands",
     "hooks/scripts", "resources/rdr", "resources/rdr/post-mortem",
 ]
 
@@ -1251,6 +1271,75 @@ class TestPluginRootRefs:
     def test_plugin_root_ref_resolves(self, source: str, rel_path: str) -> None:
         assert (PLUGIN_DIR / rel_path).exists(), \
             f"{source}: $CLAUDE_PLUGIN_ROOT/{rel_path} missing"
+
+
+# ── One entry point per situation (nexus-cnzei.4) ────────────────────────────
+#
+# A command file (conexus/commands/<name>.md) and a skill (conexus/skills/
+# <name>/SKILL.md) sharing the same <name> is a real collision: Claude Code's
+# listing shows only one entry per name, so the other is shadowed and
+# unreachable by name — the audit behind nexus-cnzei.4 found 17 such pairs.
+# Most were resolved by deleting the redundant command or renaming the skill.
+# Nine remain, deliberately: the rdr-gate/rdr-fix/rdr-accept trio is one half
+# of an actively byte-pinned four-surface consistency system
+# (TestRdrGateLoopRemedies below), rdr-audit's command carries subcommand
+# logic its own dedicated test file (test_rdr_audit_skill.py) requires to
+# exist, and rdr-list's command is a real fixture in an E2E bash-injection
+# scenario (tests/cc-validation/scenarios/19, 23). Deleting or renaming any of
+# these nine without the matching multi-file surgery those tests demand is a
+# bigger, separate piece of work — tracked as a follow-up under nexus-cnzei.6.
+_KNOWN_COMMAND_SKILL_COLLISIONS = frozenset({
+    "rdr-accept", "rdr-audit", "rdr-close", "rdr-create", "rdr-fix",
+    "rdr-gate", "rdr-list", "rdr-research", "rdr-show",
+})
+
+
+class TestOneEntryPointPerName:
+
+    def test_no_undeclared_command_skill_name_collisions(self) -> None:
+        skill_names = {p.parent.name for p in skill_skill_mds()}
+        command_names = {p.stem for p in command_files()}
+        collisions = skill_names & command_names
+        undeclared = collisions - _KNOWN_COMMAND_SKILL_COLLISIONS
+        assert not undeclared, (
+            f"commands/{{name}}.md and skills/{{name}}/SKILL.md share a name for "
+            f"{sorted(undeclared)} — one shadows the other in the Skill-tool "
+            "listing. Delete the redundant command (default), rename the skill, "
+            "or add the name to _KNOWN_COMMAND_SKILL_COLLISIONS with a reason "
+            "if it is a deliberately-kept dual surface."
+        )
+        resolved = _KNOWN_COMMAND_SKILL_COLLISIONS - collisions
+        assert not resolved, (
+            f"_KNOWN_COMMAND_SKILL_COLLISIONS names {sorted(resolved)} but no "
+            "collision exists any more for them — shrink the allowlist to "
+            "match, so it can't silently paper over a future re-collision "
+            "under the same name."
+        )
+
+    def test_every_conexus_slash_reference_resolves(self) -> None:
+        """Every /conexus:<name> reference inside the live routing surface
+        (agents, skills, commands) must name a real entry point — a skill
+        directory, a command file, or a registered standalone/utility/rdr
+        skill. Catches a rename that updates most call sites but misses one,
+        and a command that points at a skill deleted out from under it."""
+        skill_names = {p.parent.name for p in skill_skill_mds()}
+        command_names = {p.stem for p in command_files()}
+        registered_names = (
+            skill_names | command_names
+            | set(REGISTRY.get("standalone_skills", {}))
+            | set(REGISTRY.get("utility_commands", {}))
+            | set(REGISTRY.get("rdr_skills", {}))
+        )
+        ref_re = re.compile(r"/conexus:([a-zA-Z0-9][a-zA-Z0-9-]*)")
+        offenders: list[str] = []
+        for md_file in ALL_MD_FILES:
+            for name in ref_re.findall(md_file.read_text()):
+                if name not in registered_names:
+                    offenders.append(f"{md_file.relative_to(PLUGIN_DIR)}: /conexus:{name}")
+        assert not offenders, (
+            "References to a /conexus:<name> that resolves to no skill, "
+            "command, or registered entry point:\n" + "\n".join(sorted(offenders))
+        )
 
 
 # ── Bidirectional registry coverage ──────────────────────────────────────────
@@ -1289,41 +1378,15 @@ class TestBidirectionalRegistry:
 
 
 # ── RDR-080 stub agent content guards ────────────────────────────────────────
-
-# Agents deleted by RDR-080 P3/P4. Stub files must not reference these names
-# or an agent reading the stub would try to dispatch a non-existent agent.
-_DELETED_AGENTS = frozenset({
-    "query-planner",
-    "analytical-operator",
-    "pdf-chromadb-processor",
-})
-
-# Stub agent files that redirect to MCP tools (RDR-080 SC-5).
-_STUB_AGENTS = ("knowledge-tidier", "plan-auditor", "plan-enricher")
-
-
-class TestRdr080StubAgents:
-    """Stub agents must redirect to MCP tools and not reference deleted agents."""
-
-    @pytest.mark.parametrize("agent_name", _STUB_AGENTS)
-    def test_stub_does_not_reference_deleted_agents(self, agent_name: str) -> None:
-        stub = PLUGIN_DIR / "agents" / f"{agent_name}.md"
-        assert stub.exists(), f"Expected stub file: {stub}"
-        content = stub.read_text()
-        for deleted in _DELETED_AGENTS:
-            assert deleted not in content, (
-                f"conexus/agents/{agent_name}.md references deleted agent '{deleted}'. "
-                "Stubs must redirect to MCP tools only (RDR-080 SC-4)."
-            )
-
-    @pytest.mark.parametrize("agent_name", _STUB_AGENTS)
-    def test_stub_references_mcp_tool(self, agent_name: str) -> None:
-        stub = PLUGIN_DIR / "agents" / f"{agent_name}.md"
-        content = stub.read_text()
-        assert "mcp__plugin_conexus_nexus__" in content, (
-            f"conexus/agents/{agent_name}.md must reference an MCP tool "
-            "(mcp__plugin_conexus_nexus__*) as its redirect target (RDR-080)."
-        )
+#
+# nexus-cnzei.4 (S2): the RDR-080 stub agents (knowledge-tidier, plan-auditor,
+# plan-enricher) were themselves deleted outright — they were 40-line files
+# whose only content was "call this MCP tool instead", so keeping the stub
+# was pure indirection. TestRdr080StubAgents, _STUB_AGENTS, and
+# _DELETED_AGENTS (which existed only to parametrize that class) were removed
+# with them. The MCP-tool redirect these stubs pointed at is now documented
+# directly on the pointer skills (enrich-plan, knowledge-tidying,
+# plan-validation) and the commands that inject context for them.
 
 
 def test_changelog_has_a_section_for_pyprojects_version() -> None:
@@ -1877,10 +1940,12 @@ class TestRdrGateLoopRemedies:
                 f"{name}: none of {paths} references substantive-critic at all"
             )
         # The two names the bullet used to carry are confirmed NOT real
-        # dispatchers — this is the defect nexus-yjf5l.10 fixes.
+        # dispatchers — this is the defect nexus-yjf5l.10 fixes. The
+        # plan-auditor stub agent this once also checked was deleted at
+        # nexus-cnzei.4 (S2) — commands/plan-audit.md alone carries the
+        # "no agent spawn" text now.
         plan_audit_cmd = (PLUGIN_DIR / "commands" / "plan-audit.md").read_text()
-        plan_auditor_agent = (PLUGIN_DIR / "agents" / "plan-auditor.md").read_text()
-        assert "no agent spawn" in plan_audit_cmd or "no agent spawn" in plan_auditor_agent
+        assert "no agent spawn" in plan_audit_cmd
         phase_gate_skill = (SKILLS_DIR / "phase-review-gate" / "SKILL.md").read_text()
         assert "substantive-critic" not in phase_gate_skill
 

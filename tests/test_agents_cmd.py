@@ -55,12 +55,12 @@ class TestCompose:
             assert heading in developer_body and heading in body, heading
         assert body.index("activate_project") < body.index("## Pre-flight"), "activation comes before the method"
         # Everything of the developer body survives except the rewritten links.
-        stripped = developer_body.replace("./_shared/", "")
-        assert stripped.strip("\n") in body.replace((CONEXUS_DIR / "agents" / "_shared").as_posix() + "/", "")
+        stripped = developer_body.replace("../resources/agent-shared/", "")
+        assert stripped.strip("\n") in body.replace((CONEXUS_DIR / "resources" / "agent-shared").as_posix() + "/", "")
 
     def test_shared_links_resolve_from_the_agents_dir(self, composed: str) -> None:
-        assert "](./_shared/" not in composed
-        shared = CONEXUS_DIR / "agents" / "_shared"
+        assert "](../resources/agent-shared/" not in composed
+        shared = CONEXUS_DIR / "resources" / "agent-shared"
         assert f"]({shared.as_posix()}/CONTEXT_PROTOCOL.md" in composed
         assert (shared / "CONTEXT_PROTOCOL.md").is_file()
 
@@ -77,8 +77,8 @@ class TestCompose:
     def test_relative_conexus_dir_yields_absolute_shared_links(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.chdir(REPO_ROOT)
         composed = compose_worktree_developer(sn_dir=Path("sn"), conexus_dir=Path("conexus"))
-        assert f"]({(REPO_ROOT / 'conexus' / 'agents' / '_shared').resolve().as_posix()}/" in composed
-        assert "](conexus/agents/_shared" not in composed
+        assert f"]({(REPO_ROOT / 'conexus' / 'resources' / 'agent-shared').resolve().as_posix()}/" in composed
+        assert "](conexus/resources/agent-shared" not in composed
 
     def test_bad_template_frontmatter_is_a_click_error(self, tmp_path: Path) -> None:
         sn = tmp_path / "sn"
