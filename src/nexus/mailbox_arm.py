@@ -220,9 +220,11 @@ def arm_block(session_id: str | None, *, config_dir: Path | None = None) -> str:
     if not session_id or session_id == "unknown":
         return ""
     if config_dir is None:
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred: rare/branch-local path
+        # Module import, not a by-value ``nexus_config_dir`` import, so a test
+        # that setattr-patches nexus.config reaches this call (nexus-78blw).
+        from nexus import config as _nx_config  # noqa: PLC0415 — deferred: rare/branch-local path
 
-        config_dir = nexus_config_dir()
+        config_dir = _nx_config.nexus_config_dir()
     if not tuple_surface_available(config_dir):
         return ""
     return mailbox_arm_instruction(session_id)
