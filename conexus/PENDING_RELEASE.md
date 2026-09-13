@@ -438,10 +438,6 @@ instead — same strategy nexus-cnzei.4 used for the "debug"/"research"/"review"
 - `conexus/skills/rdr-accept-checklist/SKILL.md` (nexus-cnzei.6): RENAMED from
   `skills/rdr-accept/SKILL.md`, same reason, against `commands/rdr-accept.md`. Content
   unchanged. Inert until the pin advances.
-- `conexus/skills/rdr-accept/SKILL.md` -> `conexus/skills/rdr-accept-checklist/SKILL.md`
-  (nexus-cnzei.6): same rename, same reason, against `commands/rdr-accept.md`. Content
-- `conexus/skills/rdr-audit/SKILL.md` -> `conexus/skills/rdr-audit-checklist/SKILL.md`
-  (nexus-cnzei.6): same rename, same reason, against `commands/rdr-audit.md`. Content
 - `conexus/skills/rdr-audit-checklist/SKILL.md` (nexus-cnzei.6): RENAMED from
   `skills/rdr-audit/SKILL.md`, same reason, against `commands/rdr-audit.md`. Content
   unchanged. Inert until the pin advances.
@@ -480,11 +476,11 @@ instead — same strategy nexus-cnzei.4 used for the "debug"/"research"/"review"
   each carried a byte-identical inline copy (analyze, design-to-code-trace, deep-analysis,
   document, knowledge-tidying, query, research-synthesis, why-was-this-written — injection
   audit S7). Inert until the pin advances.
-- `conexus/skills/analyze/SKILL.md`, `design-to-code-trace/SKILL.md`, `deep-analysis/SKILL.md`,
+- `conexus/skills/analyze/SKILL.md` (nexus-cnzei.6), `design-to-code-trace/SKILL.md`, `deep-analysis/SKILL.md`,
   `document/SKILL.md`, `query/SKILL.md`, `research-synthesis/SKILL.md`,
-  `why-was-this-written/SKILL.md` (nexus-cnzei.6): the inline "Tier-aware discipline" block
-  replaced with a one-line summary + link to `resources/tier-discipline.md`. Content unchanged
-  (still linked, not lost). Inert until the pin advances.
+  `why-was-this-written/SKILL.md`: the inline "Tier-aware discipline" block replaced with a
+  short inline rule naming the tool calls, plus a link to `resources/tier-discipline.md` for the
+  detail. Inert until the pin advances.
 - `conexus/skills/knowledge-tidying/SKILL.md` (nexus-cnzei.6): same replacement, with the
   `ttl=None`/nexus-473mx sentence kept inline (test_t2_ttl_convention_in_the_write_back_skills
   pins that literal text in this file's own content, not through a followed link). Inert until
@@ -508,7 +504,7 @@ instead — same strategy nexus-cnzei.4 used for the "debug"/"research"/"review"
 nexus-cnzei.6 fix round (2026-09-13, both reviewers): five more fixes against the
 guidance-consolidation half's own review.
 
-- `conexus/skills/analyze/SKILL.md`, `deep-analysis/SKILL.md`, `design-to-code-trace/SKILL.md`,
+- `conexus/skills/analyze/SKILL.md` (nexus-cnzei.6), `deep-analysis/SKILL.md`, `design-to-code-trace/SKILL.md`,
   `document/SKILL.md`, `knowledge-tidying/SKILL.md`, `query/SKILL.md`, `research-synthesis/SKILL.md`,
   `why-was-this-written/SKILL.md` (nexus-cnzei.6 fix round, critic Significant 3): the
   tier-aware-discipline summary sentence now names the actual tool calls (`search`,

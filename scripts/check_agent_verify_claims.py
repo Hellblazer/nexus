@@ -131,7 +131,7 @@ def _make_store() -> Any:
 
 def _make_memory_store() -> Any:
     """The same client path ``memory_get``'s own ``db.resolve_title``
-    uses underneath (``nexus.mcp.core.memory_get`` -> ``T2Database`` ->
+    uses underneath (the ``memory_get`` MCP tool -> ``T2Database`` ->
     this store) — constructed directly here, the same way ``_make_store``
     constructs ``HttpTupleStore`` directly, rather than pulling in the
     MCP session-context glue this standalone script has no use for."""
