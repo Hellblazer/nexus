@@ -6128,8 +6128,9 @@ def tuple_in(
         subspace: The concrete subspace to claim from.
         keys_pattern: Every pinned key the template declares, exact match.
         claimant: This caller's identity (mailbox/agent id).
-        lease_s: Claim lease length, capped at the template's
-            ``take.max_lease_seconds`` and the row's remaining TTL.
+        lease_s: Claim lease length. Refused (``LeaseTooLong``) above the
+            template's ``take.max_lease_seconds``; clipped to the row's
+            remaining TTL.
         timeout_s: Seconds to park when nothing matches immediately;
             ``0`` (default) never blocks.
     """
@@ -6277,9 +6278,9 @@ def tuple_renew(claim_id: str, claimant: str, lease_s: int) -> dict:
     Args:
         claim_id: The claim id returned by ``tuple_in``.
         claimant: Must match the identity that made the claim.
-        lease_s: New lease length in seconds from now, capped at the
-            template's ``max_lease_seconds`` and clipped to the tuple's
-            remaining expiry.
+        lease_s: New lease length in seconds from now. Refused
+            (``LeaseTooLong``) above the template's ``max_lease_seconds``;
+            inside that, clipped to the tuple's remaining expiry.
     """
     try:
         lease_until = _t2_index_write(

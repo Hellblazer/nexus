@@ -290,7 +290,7 @@ tuple_ack  claim_id: ede42f56-…   claimant: a3f7c2e1
 → Acked claim ede42f56-…</pre></details>
 
 <h3>Delivery</h3>
-<p>Each message reaches exactly one reader. When two readers take from the same mailbox, the engine hands each message to one of them, and the other does not receive it. A reader that takes a message and then crashes never acks it, so its lease ends, the message becomes available again, and the next reader gets it. After three failed take operations the engine marks the message as a dead letter: nobody can take it, but anybody can read it, so a message that makes every reader crash stays visible. An unclaimed or dead-lettered message survives at most seven days.</p>
+<p>Each message reaches exactly one reader. When two readers take from the same mailbox, the engine hands each message to one of them, and the other does not receive it. A reader that takes a message and then crashes never acks it, so its lease ends, the message becomes available again, and the next reader gets it. A reader whose work is still running renews its lease with <code>tuple_renew</code> before the lease ends, so the message stays with that reader. After three failed take operations the engine marks the message as a dead letter: nobody can take it, but anybody can read it, so a message that makes every reader crash stays visible. An unclaimed or dead-lettered message survives at most seven days.</p>
 <p class="note">Neither side has to know when the other is running. The agent reads the space, the sender writes the space, and that is why a shared space works better than a direct message between two processes on different schedules.</p>
 </section>
 
@@ -321,7 +321,7 @@ tuple_ack  claim_id: ede42f56-…   claimant: a3f7c2e1
 <p class="why">A mailbox addressed to a session's name is a channel between any two sessions on one machine. The sessions share the same engine and the same tenant, and each has a name that the harness shows, so no new addressing is needed.</p>
 
 <h3>The exchange</h3>
-<p>Behind the instruction in lesson 1, Claude writes a request tuple to the peer's mailbox with kind "request" and a new correlation id, then waits on its own mailbox. The peer takes the request, opens what it names, does the work, and writes an ack with the same correlation id to your mailbox. The request names its subject with a pointer, whether a bead id, a memory title, or a document address, and if the work produced something, the ack names where it was written.</p>
+<p>Behind the instruction in lesson 1, Claude writes a request tuple to the peer's mailbox with kind "request" and a new correlation id, then waits on its own mailbox. The peer takes the request, opens what it names, does the work, and acks the request with a reply that carries the same correlation id. The engine writes that reply to your mailbox in the same step that consumes the request. The request names its subject with a pointer, whether a bead id, a memory title, or a document address, and if the work produced something, the ack names where it was written.</p>
 <details class="gloss out"><summary>What you see, on your side</summary><pre class="out">tuple_out  subspace: mailbox/<b>conexus-98</b>   keys: {to: conexus-98}
            dims: {from: nexus-19, kind: request, correlation_id: r-41, address_kind: instance}
            body: Rebuild the gate jar. Ack when done.
@@ -336,7 +336,7 @@ tuple_in   … timeout_s: 25
   "claim_id": "…"
 }
 tuple_ack  … → Acked</pre></details>
-<p>The peer session went through the mirror of this: a <code>tuple_in</code> on its own mailbox that returned your request, the work, a <code>tuple_out</code> of the ack, and a <code>tuple_ack</code> on your request. An unanswered request is a tuple with an age that the census in lesson 5 shows, not a line in a chat window that nobody reads.</p>
+<p>The peer session went through the mirror of this: a <code>tuple_in</code> on its own mailbox that returned your request, the work, and one <code>tuple_ack</code> on your request with the ack as its reply. Because the reply and the ack are one call, a crash cannot deliver the reply and leave the request to run again. An unanswered request is a tuple with an age that the census in lesson 5 shows, not a line in a chat window that nobody reads.</p>
 <p class="note">To find a peer's name, ask Claude to list the sessions on the machine. The name it shows, such as <code>conexus-98</code>, is the mailbox address.</p>
 </section>
 
@@ -375,8 +375,8 @@ tuple_ack  … → Acked</pre></details>
 
 <div class="tbl"><table>
 <tr><th>Surface</th><th>What it is</th></tr>
-<tr><td>Eight MCP tools</td><td><code>tuple_out</code>, <code>tuple_rd</code>, <code>tuple_in</code>, <code>tuple_ack</code>, <code>tuple_nack</code>, <code>tuple_registry</code>, <code>tuple_list</code>, <code>tuple_stats</code>. Claude calls these inside a session.</td></tr>
-<tr><td><code>nx tuple</code></td><td>The same operations from the terminal: <code>out</code>, <code>rd</code>, <code>in</code>, <code>ack</code>, <code>nack</code>, <code>templates</code>, <code>list</code>, <code>stats</code>. Hooks and scripts call these.</td></tr>
+<tr><td>Nine MCP tools</td><td><code>tuple_out</code>, <code>tuple_rd</code>, <code>tuple_in</code>, <code>tuple_ack</code>, <code>tuple_nack</code>, <code>tuple_renew</code>, <code>tuple_registry</code>, <code>tuple_list</code>, <code>tuple_stats</code>. Claude calls these inside a session.</td></tr>
+<tr><td><code>nx tuple</code></td><td>The same operations from the terminal: <code>out</code>, <code>rd</code>, <code>in</code>, <code>ack</code>, <code>nack</code>, <code>renew</code>, <code>templates</code>, <code>list</code>, <code>stats</code>. Hooks and scripts call these.</td></tr>
 <tr><td>Hooks</td><td>The agent-start hook gives each agent its id and mailbox address. The start and stop hooks write the ledger's start and report tuples without blocking the agent.</td></tr>
 <tr><td>Skills</td><td><code>/conexus:mailbox</code> holds the rules for sending and reading messages. <code>/conexus:orchestration</code> holds the rule for waiting on a report.</td></tr>
 <tr><td><code>nx doctor</code></td><td>The three rows described in <a href="#l5">lesson 5</a>.</td></tr>
@@ -445,8 +445,8 @@ nx tuple rd ledger/<span class="ph">&lt;SESSION-ID&gt;</span> -n 300</pre><butto
 <li><strong>Waiting happens inside the engine.</strong> A waiting read waits on a signal for its subspace, which the engine sends after commit. The client does not poll, the wait holds no connection, and each wait is bounded so the client's own timeouts never fire first.</li>
 <li><strong>Templates are delivered with the engine.</strong> They are files the engine loads and checks at start. A client can ask the engine for the templates and their digest and detect a mismatch instead of guessing.</li>
 </ul>
-<p>A claim can be extended. A holder that is still working calls <code>tuple_renew</code> before its lease ends. The engine moves the lease forward, never past the tuple's own expiry and never past the template's own cap on lease length. Renewing does not count as one of the three failed take operations a message can survive.</p>
-<p>A reply can travel with the ack that closes a take operation, instead of as a separate call. <code>tuple_ack</code> takes an optional reply. The engine writes the reply and consumes the take operation together, in one transaction, so a crash between the two can no longer happen: either both take effect or neither does.</p>
+<p>A claim can be extended. A holder that is still working calls <code>tuple_renew</code> before its lease ends. The engine moves the lease forward, but never past the tuple's own expiry. A renew that asks for more than the template's longest lease is refused. Renewing does not count as one of the three failed take operations a message can survive.</p>
+<p>A reply can travel with the ack that closes a take operation, instead of as a separate call. <code>tuple_ack</code> takes an optional reply. The engine writes the reply and consumes the request in one transaction. Both take effect or neither does, so a crash cannot fall between them.</p>
 </div></details>
 </section>
 

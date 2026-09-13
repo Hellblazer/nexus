@@ -131,7 +131,7 @@ def tuple_rd_cmd(
               help="Every pinned key the template declares, exact match (required).")
 @click.option("--claimant", required=True, help="This caller's identity.")
 @click.option("--lease-s", "lease_s", type=int, required=True,
-              help="Claim lease length, capped at the template's max_lease_seconds.")
+              help="Claim lease length. Refused above the template's max_lease_seconds; clipped to the row's remaining TTL.")
 @click.option("--timeout-s", "timeout_s", type=int, default=0, show_default=True,
               help="Seconds to park when nothing matches immediately; 0 never blocks.")
 @click.option("--json", "json_out", is_flag=True, default=False, help="Output as JSON.")

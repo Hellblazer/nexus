@@ -286,8 +286,8 @@ _EXCLUDED_SITES: dict[tuple[str, int], str] = {
     # -> 8317 (nexus-em75s.10's eight tuple_* MCP tools inserted above it; +10 at the Phase 2 fix round)
     # -> 8501 (nexus-abyi9's T1 handoff re-lease consecutive-failure backoff inserted above it; +173).
     # -> 8528 (RDR-206 fda0b6e18 +6 above it; RDR-169 Gap 2 remainder None-content coercion in the four combined-query tools, +21 above it).
-    # -> 8629 (RDR-206 Phase 2, nexus-h61dl.9: tuple_renew tool and the tuple_ack reply object with its validator, +101 above it).
-    ("src/nexus/mcp/core.py", 8629): (
+    # -> 8630 (RDR-206 Phase 2, nexus-h61dl.9: tuple_renew tool, the tuple_ack reply object with its validator, and the lease_s refuse-not-cap docstrings, +102 above it).
+    ("src/nexus/mcp/core.py", 8630): (
         "mcp__ tool name: `raw_tool.rsplit(\"__\", 1)[-1] if "
         'raw_tool.startswith("mcp__")` strips an MCP tool-name prefix for '
         "planner-step normalization, not a collection name."

@@ -3620,7 +3620,7 @@ Destructive (claiming) read from `SUBSPACE`. Unlike `rd`, every key the template
 |------|-------------|
 | `--pattern KEY=VALUE` | Every pinned key the template declares, exact match (repeatable, required) |
 | `--claimant ID` | This caller's identity (required) |
-| `--lease-s N` | Claim lease length, capped at the template's `max_lease_seconds` and the row's remaining TTL (required) |
+| `--lease-s N` | Claim lease length: refused above the template's `max_lease_seconds`, clipped to the row's remaining TTL (required) |
 | `--timeout-s SECONDS` | Seconds to park when nothing matches immediately; 0 (default) never blocks |
 | `--json` | Output as JSON |
 
