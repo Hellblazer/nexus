@@ -881,6 +881,11 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
         return
 
     old_session_id = _os.environ.get("NX_T1_SESSION_ID", "").strip() or None
+    # Captured now, before any env swap below (nexus-r0d37 fix-round): the
+    # token THIS process itself still holds for `old_session_id`, used
+    # later to compare-then-delete its lease rather than blindly unlink
+    # it -- see `clear_t1_session_lease_if_matches`'s docstring.
+    old_session_token = _os.environ.get("NX_T1_SESSION", "").strip() or None
     if old_session_id == new_session_id:
         # Nothing to do (e.g. a re-tick that raced the previous one's own
         # consume, or a resume that lands back on the id already active).
@@ -1058,25 +1063,55 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     # exactly as if no lease had ever been published for it. Best-effort:
     # a failure to clear just leaves an orphaned lease that self-heals
     # once its own TTL genuinely elapses, same as today.
-    old_session_was_owned = (
-        old_session_id is not None
-        and _OWNED_T1_SESSION.get("session_id") == old_session_id
-    )
-    global _T1_SESSION_REFRESH_TASK
-    if _T1_SESSION_REFRESH_TASK is not None:
-        _T1_SESSION_REFRESH_TASK.cancel()
-        _T1_SESSION_REFRESH_TASK = None
-    _OWNED_T1_SESSION.clear()
-
-    if old_session_was_owned:
+    #
+    # nexus-r0d37 fix-round finding 1: NOT `clear_t1_session_lease`'s
+    # unconditional unlink -- that function's own contract requires
+    # PERMANENT sole ownership (genuine process teardown), which a
+    # handoff-away is not. Between this tick checking `_OWNED_T1_SESSION`
+    # above and the delete running, a live sibling MCP process (another
+    # window/host resolved to the SAME `old_session_id`) could
+    # independently win `_lock_guarded_mint_or_borrow`'s flock and
+    # publish a FRESH lease for it -- an unconditional delete here would
+    # erase THAT sibling's live lease, not this process's stale one,
+    # forcing its next reader to mint a competing token (the persistent
+    # 401-rotation churn nexus-jwqjm's flock exists to prevent).
+    # `clear_t1_session_lease_if_matches` closes that window: under the
+    # SAME per-session flock the mint-or-borrow path uses, it deletes
+    # the lease only if it still holds the exact token THIS process
+    # published/refreshed (`old_session_token`, captured above before
+    # any swap) -- a sibling's fresher lease is left untouched.
+    #
+    # Out of scope (by design, not an oversight): a sibling MCP HOST
+    # process (e.g. `nx-mcp-catalog`) that only ever BORROWED
+    # `old_session_id`'s lease -- never owned/refreshed it -- can be
+    # transiently left without a borrowable lease between this clear and
+    # its own next handoff tick or mint-or-borrow call; it self-heals by
+    # minting fresh on its own next T1 touch (at most one
+    # `_T1_HANDOFF_WATCH_INTERVAL_S` tick later for a handoff-watching
+    # sibling). And a `/resume` into a BRAND-NEW process (no prior
+    # handoff history, no `_OWNED_T1_SESSION` entry for the id it
+    # inherits) is not covered by this fix at all -- it always mints or
+    # borrows fresh at `_t1_lifespan` startup, never touching a lease
+    # this function abandoned.
+    if old_session_id is not None and (
+        _OWNED_T1_SESSION.get("session_id") == old_session_id
+    ):
         try:
-            from nexus.db.t1 import clear_t1_session_lease  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-            clear_t1_session_lease(old_session_id, config_dir)
+            from nexus.db.t1 import clear_t1_session_lease_if_matches  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            clear_t1_session_lease_if_matches(
+                old_session_id, config_dir, old_session_token or "",
+            )
         except Exception as exc:  # noqa: BLE001 — best-effort; a failed clear just leaves a lease that self-heals via its own TTL, must not crash the handoff
             log.warning(
                 "t1_handoff_abandoned_lease_clear_failed",
                 mcp_pid=mcp_pid, old_session_id=old_session_id, error=str(exc),
             )
+
+    global _T1_SESSION_REFRESH_TASK
+    if _T1_SESSION_REFRESH_TASK is not None:
+        _T1_SESSION_REFRESH_TASK.cancel()
+        _T1_SESSION_REFRESH_TASK = None
+    _OWNED_T1_SESSION.clear()
 
     from nexus import mcp_infra  # noqa: PLC0415 — deferred to avoid import cycle at module load
 

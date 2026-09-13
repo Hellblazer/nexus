@@ -980,6 +980,14 @@ def clear_t1_session_lease(session_id: str, config_dir: Path) -> None:
     ``mcp.core._t1_lifespan``). Removing the lease promptly on
     teardown ensures a stale lease is never read by a later, unrelated
     process once this session has genuinely ended.
+
+    UNCONDITIONAL unlink -- safe only at genuine session teardown (this
+    process is the sole, permanent owner and nothing else will ever read
+    or republish this lease again). NOT safe mid-process, where a
+    concurrent sibling could have republished a fresh lease for the same
+    ``session_id`` between this caller's own liveness check and the
+    unlink: see :func:`clear_t1_session_lease_if_matches` for that case
+    (nexus-r0d37 fix-round finding 1).
     """
     path = _t1_session_lease_path(session_id, config_dir)
     try:
@@ -996,6 +1004,98 @@ def clear_t1_session_lease(session_id: str, config_dir: Path) -> None:
         _t1_session_mint_lock_path(session_id, config_dir).unlink()
     except OSError:
         pass
+
+
+def clear_t1_session_lease_if_matches(
+    session_id: str, config_dir: Path, expected_token: str,
+) -> bool:
+    """Delete a published T1 session lease ONLY if it still holds
+    ``expected_token`` (nexus-r0d37 fix-round finding 1).
+
+    A MID-PROCESS abandonment (an MCP handoff tick moving this process's
+    T1 scope away from ``session_id``, as opposed to genuine process
+    teardown) cannot safely reuse :func:`clear_t1_session_lease`'s
+    unconditional unlink: that function's own contract requires this
+    process to be the lease's sole, PERMANENT owner, which a handoff-away
+    is not -- another live MCP sibling could independently win
+    :func:`_lock_guarded_mint_or_borrow`'s flock for the SAME
+    ``session_id`` and publish a fresh lease at any point between this
+    caller checking its own ownership and the unlink running. An
+    unconditional delete at that point would erase the SIBLING's live
+    lease, not this process's stale one -- forcing the next reader to
+    mint a COMPETING token instead of borrowing the sibling's, which is
+    exactly the persistent 401-rotation churn ``nexus-jwqjm``'s flock
+    exists to prevent (two owners of one session id each periodically
+    invalidating the other's token via ``HttpTokenStore.start_session``'s
+    ``ON CONFLICT DO UPDATE``).
+
+    So this deletes ONLY the lease THIS process itself most recently
+    published or refreshed -- verified by comparing the lease file's
+    CURRENT ``token`` field against ``expected_token`` (the token this
+    process still holds in its own env, captured before any swap) --
+    performed under the SAME per-session flock
+    (:func:`_t1_session_mint_lock_path`) the mint-or-borrow path uses, so
+    the compare-then-delete is atomic with respect to a concurrent
+    sibling's own mint-or-borrow publish. If the token has already
+    changed (a sibling won the race and republished), this is a no-op:
+    the sibling's fresher lease survives untouched.
+
+    Deliberately does NOT unlink the mint-lock file (contrast
+    :func:`clear_t1_session_lease`'s teardown-only cleanup of it) --
+    this call happens mid-process, while the session may still be
+    resumed and re-leased any number of further times; removing the lock
+    file here would race a concurrent locker exactly the way
+    :func:`clear_t1_session_lease`'s own docstring says it must not.
+
+    Args:
+        session_id: the session whose lease to conditionally clear.
+        config_dir: the nexus config directory (lock + lease files live
+            here).
+        expected_token: the token this caller believes is still the
+            live, published one for ``session_id``. An empty string
+            never matches (nothing is ever deleted for a caller with no
+            token of its own to compare against).
+
+    Returns:
+        ``True`` if the lease was deleted (it still held
+        ``expected_token``), ``False`` if left alone (already gone,
+        unparseable, or -- the case this function exists for -- holds a
+        DIFFERENT token because a sibling already republished a fresher
+        lease).
+    """
+    if not expected_token:
+        return False
+    lock_path = _t1_session_mint_lock_path(session_id, config_dir)
+    lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        _locking.lock_fd(lock_fd, blocking=True)  # lifecycle-gate-allow: same one-shot mint-or-borrow mutex, guarding this compare-then-delete against a concurrent mint-or-borrow publish
+        try:
+            path = _t1_session_lease_path(session_id, config_dir)
+            try:
+                raw = path.read_text()
+            except OSError:
+                return False  # already gone -- nothing to do
+            try:
+                data = json.loads(raw)
+                current_token = data["token"]
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                # Unparseable / foreign-format lease: not provably ours,
+                # leave it for read_t1_session_lease's own fail-safe
+                # absent-treatment rather than guessing.
+                return False
+            if current_token != expected_token:
+                # A sibling already won the flock and republished a
+                # fresher lease for this session id -- theirs survives.
+                return False
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return True
+        finally:
+            _locking.unlock_fd(lock_fd)
+    finally:
+        os.close(lock_fd)
 
 
 class T1RoutingAction(enum.StrEnum):
