@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import enum
-import fcntl
 import json
 import os
 import time
@@ -19,6 +18,7 @@ _log = structlog.get_logger(__name__)
 
 from datetime import UTC, datetime
 
+from nexus import _locking
 from nexus.db.t2 import T2Database
 
 
@@ -776,10 +776,10 @@ def _cli_dedicated_session_id(config_dir: Path) -> str:
     Race-safe first creation: two bare-CLI processes racing to create the
     cache file for the FIRST time converge on the SAME id rather than each
     generating a different one and silently picking one. Uses the same
-    ``fcntl.flock`` election + temp-file/``os.replace`` atomic-publish
-    pattern as :mod:`nexus.daemon.service_registry` -- a blocking exclusive
-    lock serializes the read-or-create critical section, and the publish
-    itself can never be observed torn.
+    :func:`nexus._locking.lock_fd` election + temp-file/``os.replace``
+    atomic-publish pattern as :mod:`nexus.daemon.service_registry` -- a
+    blocking exclusive lock serializes the read-or-create critical
+    section, and the publish itself can never be observed torn.
     """
     config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = config_dir / _CLI_DEDICATED_SESSION_FILENAME
@@ -793,7 +793,7 @@ def _cli_dedicated_session_id(config_dir: Path) -> str:
         # mutex; the id, once written, never changes. Routing it through
         # ServiceRegistry would misuse a leased-liveness primitive for a value
         # with no liveness concept.
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)  # lifecycle-gate-allow: one-shot idempotent file-create mutex, not a lifecycle election
+        _locking.lock_fd(lock_fd, blocking=True)  # lifecycle-gate-allow: one-shot idempotent file-create mutex, not a lifecycle election
         try:
             try:
                 existing = path.read_text().strip()
@@ -812,7 +812,7 @@ def _cli_dedicated_session_id(config_dir: Path) -> str:
             os.replace(str(tmp), str(path))
             return new_id
         finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            _locking.unlock_fd(lock_fd)
     finally:
         os.close(lock_fd)
 
@@ -1310,11 +1310,11 @@ def _lock_guarded_mint_or_borrow(
         # callers (the MCP Branch-0 stale-lease recovery path) keep the
         # original blocking semantics.
         if deadline is None:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)  # lifecycle-gate-allow: one-shot mint-or-borrow mutex serializing concurrent stale-lease recoverers, not a lifecycle election
+            _locking.lock_fd(lock_fd, blocking=True)  # lifecycle-gate-allow: one-shot mint-or-borrow mutex serializing concurrent stale-lease recoverers, not a lifecycle election
         else:
             while True:
                 try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # lifecycle-gate-allow: bounded-poll variant of the same one-shot mint-or-borrow mutex
+                    _locking.lock_fd(lock_fd, blocking=False)  # lifecycle-gate-allow: bounded-poll variant of the same one-shot mint-or-borrow mutex
                     break
                 except BlockingIOError:
                     if time.monotonic() >= deadline:
@@ -1360,7 +1360,7 @@ def _lock_guarded_mint_or_borrow(
                 )
             return minted["session_token"], True, mint_ttl
         finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            _locking.unlock_fd(lock_fd)
     finally:
         os.close(lock_fd)
 
