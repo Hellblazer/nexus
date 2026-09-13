@@ -1,4 +1,5 @@
 """Session hook tests: session_start and session_end lifecycle."""
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -539,6 +540,12 @@ class TestGuidanceByteBudgetIntegration:
                 "nexus.upgrade_finish.detect_stale_processes",
                 return_value=_FakeSkewReport(stale=[]),
             ),
+            # nexus-6konb.9: this suite's autouse `_pin_t2_substrate` fixture
+            # gives every test a REAL, live tuple-space engine, so an
+            # unmocked mailbox-arm probe would render the real block here —
+            # exactly the ambient-timing dependency the other two mocks
+            # above already exist to keep out of this byte-budget pin.
+            _patch("nexus.mailbox_arm.arm_block", return_value=""),
         ):
             output = session_start(claude_session_id="s-h33x8-5-budget")
         n = len(output.encode("utf-8"))
@@ -561,3 +568,169 @@ class TestGuidanceByteBudgetIntegration:
         # sentence it pins changed.
         head = output.encode("utf-8")[:500].decode("utf-8", errors="ignore")
         assert "Conexus skills carry this project's accumulated practice" in head
+
+
+# ── nexus-6konb.9 (MM-3.1): SessionStart mailbox-watch arm instruction ──────
+#
+# The instruction text and probe/registry logic are unit-tested directly in
+# tests/test_mailbox_arm.py. These pin the INTEGRATION into session_start():
+# it fires on every SessionStart source, it is silent when the mailbox_arm
+# module says no arm is possible, a probe failure never breaks the hook, and
+# the hook stays inside its 10s budget with the engine genuinely absent.
+
+
+class TestMailboxArmIntegration:
+    def test_arm_text_appended_when_available(self, monkeypatch) -> None:
+        from unittest.mock import patch as _patch
+
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch(
+                "nexus.mailbox_arm.arm_block", return_value="MAILBOX-ARM-MARKER-TEXT",
+            ),
+        ):
+            output = session_start(claude_session_id="s-6konb9-available")
+        assert "Nexus ready" in output
+        assert "MAILBOX-ARM-MARKER-TEXT" in output
+
+    def test_arm_text_absent_when_module_says_no(self, monkeypatch) -> None:
+        from unittest.mock import patch as _patch
+
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch("nexus.mailbox_arm.arm_block", return_value=""),
+        ):
+            output = session_start(claude_session_id="s-6konb9-absent")
+        assert "Nexus ready" in output
+        assert "MAILBOX WATCH" not in output
+
+    def test_arm_probe_failure_never_breaks_session_start(self, monkeypatch) -> None:
+        from unittest.mock import patch as _patch
+
+        def boom(*_a, **_kw):
+            raise RuntimeError("mailbox_arm blew up")
+
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch("nexus.mailbox_arm.arm_block", side_effect=boom),
+        ):
+            output = session_start(claude_session_id="s-6konb9-boom")
+        assert "Nexus ready" in output
+        assert "MAILBOX WATCH" not in output
+
+    @pytest.mark.parametrize("source", ["startup", "resume", "clear", "compact"])
+    def test_arm_text_appears_on_every_session_start_source(
+        self, source: str, monkeypatch,
+    ) -> None:
+        """Unlike the T1 handoff marker (gated to clear/resume only), the
+        mailbox arm instruction is worth repeating on every source -- a
+        fresh watcher after /compact is exactly as useful as after /clear,
+        and the underlying `nx tuple watch` lock makes a redundant arm
+        harmless (nexus-6konb.9 dev note)."""
+        from unittest.mock import patch as _patch
+
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch(
+                "nexus.mailbox_arm.arm_block", return_value="MAILBOX-ARM-MARKER-TEXT",
+            ),
+        ):
+            output = session_start(
+                claude_session_id=f"s-6konb9-{source}", source=source,
+            )
+        assert "MAILBOX-ARM-MARKER-TEXT" in output, (
+            f"arm instruction missing for SessionStart source={source!r}"
+        )
+
+    def test_instance_name_interpolated_when_known(self, tmp_path: Path) -> None:
+        """End-to-end through the real nexus.mailbox_arm module (only the
+        network probe is mocked): a registered instance name reaches the
+        rendered instruction."""
+        from unittest.mock import patch as _patch
+
+        registry = tmp_path / "tuple-watch" / "addresses"
+        registry.parent.mkdir(parents=True)
+        registry.write_text("nexus-19\n", encoding="utf-8")
+
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch("nexus.config.nexus_config_dir", return_value=tmp_path),
+            _patch("nexus.mailbox_arm.tuple_surface_available", return_value=True),
+        ):
+            output = session_start(claude_session_id="s-6konb9-instance-known")
+        assert 'command: "nx tuple watch s-6konb9-instance-known nexus-19"' in output
+
+    def test_degrades_to_session_id_only_when_instance_not_known(
+        self, tmp_path: Path,
+    ) -> None:
+        from unittest.mock import patch as _patch
+
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch("nexus.config.nexus_config_dir", return_value=tmp_path),
+            _patch("nexus.mailbox_arm.tuple_surface_available", return_value=True),
+        ):
+            output = session_start(claude_session_id="s-6konb9-instance-unknown")
+        assert 'command: "nx tuple watch s-6konb9-instance-unknown"' in output
+        assert "nexus-19" not in output
+
+    def test_emitted_text_includes_timeout_ms_and_persistent_true(
+        self, tmp_path: Path,
+    ) -> None:
+        from unittest.mock import patch as _patch
+
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch("nexus.config.nexus_config_dir", return_value=tmp_path),
+            _patch("nexus.mailbox_arm.tuple_surface_available", return_value=True),
+        ):
+            output = session_start(claude_session_id="s-6konb9-timeout-ms")
+        assert "timeout_ms: 3600000" in output
+        assert "persistent: true" in output
+
+    def test_absent_when_tuple_surface_unavailable_end_to_end(
+        self, tmp_path: Path,
+    ) -> None:
+        """Real nexus.mailbox_arm.arm_block, only the HTTP probe mocked to
+        fail -- never an arm request that cannot succeed."""
+        from unittest.mock import patch as _patch
+
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch("nexus.config.nexus_config_dir", return_value=tmp_path),
+            _patch("nexus.mailbox_arm._probe_tuple_surface", return_value=False),
+        ):
+            output = session_start(claude_session_id="s-6konb9-unavailable")
+        assert "Nexus ready" in output
+        assert "MAILBOX WATCH" not in output
+
+    def test_hook_stays_within_budget_with_engine_genuinely_absent(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """No mocking of nexus.mailbox_arm at all: point NEXUS_CONFIG_DIR at
+        an empty directory (no published local-supervisor lease to find)
+        and strip every service-endpoint env var, so
+        resolve_service_endpoint() fails loud with no network attempt --
+        the genuine "engine absent" case, measured end to end through
+        session_start(), well inside the hook's own 10s SessionStart
+        budget (hooks.json: `"command": "nx hook session-start", "timeout":
+        10`)."""
+        from unittest.mock import patch as _patch
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        for var in (
+            "NX_SERVICE_URL", "NX_SERVICE_TOKEN", "NX_SERVICE_HOST", "NX_SERVICE_PORT",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        start = time.monotonic()
+        with _patch("nexus.hooks.write_claude_session_id"):
+            output = session_start(claude_session_id="s-6konb9-timing")
+        elapsed = time.monotonic() - start
+
+        assert "Nexus ready" in output
+        assert "MAILBOX WATCH" not in output
+        assert elapsed < 9.0, (
+            f"nx hook session-start took {elapsed:.3f}s with the engine "
+            f"absent; budget is 10s"
+        )

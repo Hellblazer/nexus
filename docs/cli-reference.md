@@ -3737,6 +3737,20 @@ While the loop runs, a failed probe prints one line on stdout rather than going 
 
 One watcher per address, machine-wide, enforced by a lock file next to the seen-set. A second watcher on an address someone else already holds prints one line naming the holder's process and session and exits, so a re-arm after `/clear` or `/compact` cannot double every ping. The lock is an advisory `flock`, so a holder that dies releases it and the next watcher acquires rather than refusing. Addresses are resolved once at startup and never re-resolved.
 
+**Arming via a Claude Code `Monitor` needs a permission allowlist entry** (nexus-6konb.9, MM-3.1): a `Monitor`'s `command` runs under the same permission machinery as `Bash`, so without one, arming raises a permission prompt in exactly the session nobody is present to approve. Add to `~/.claude/settings.json` (never `settings.local.json`):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(nx tuple watch:*)"
+    ]
+  }
+}
+```
+
+This is user-global operator config, not something a hook or the plugin writes on your behalf — `nx hook session-start` (see `nexus.mailbox_arm`) emits the arm instruction itself but never touches `settings.json`.
+
 ## nx service
 
 Storage-service administration.

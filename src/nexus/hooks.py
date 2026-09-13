@@ -244,6 +244,7 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
         f"Nexus ready (session: {session_id})."
         f"{_stale_mcp_host_warning()}"
         f"{_guidance_imperative_block()}"
+        f"{_mailbox_arm_block(session_id)}"
     )
 
 
@@ -283,6 +284,30 @@ def _stale_mcp_host_warning() -> str:
         f"installed conexus {report.installed_version} — if tool calls "
         f"start failing with import errors, run /mcp to reconnect."
     )
+
+
+def _mailbox_arm_block(session_id: str) -> str:
+    """nexus-6konb.9 (MM-3.1): the RDR-205 mailbox-watch arm instruction.
+
+    Emitted on every SessionStart source (startup/resume/clear/compact --
+    unlike :func:`_write_t1_handoff_markers`, there is no reason to gate
+    this on ``source``: a fresh watcher is worth re-arming after a
+    ``/compact`` exactly as much as after ``/clear``, and the underlying
+    ``nx tuple watch`` lock makes a redundant arm harmless). See
+    :mod:`nexus.mailbox_arm` for the instruction text, the bounded+cached
+    tuple-surface availability probe, and why it is silent when that probe
+    fails.
+
+    Never raises — mirrors every other best-effort leg in this module.
+    """
+    try:
+        from nexus.mailbox_arm import arm_block  # noqa: PLC0415 — deferred import, only needed on this path
+
+        text = arm_block(session_id)
+    except Exception as exc:  # noqa: BLE001 — session start must never break on this probe
+        _log.debug("mailbox_arm_block_failed", error=str(exc))
+        return ""
+    return f"\n\n{text}" if text else ""
 
 
 def _guidance_imperative_block() -> str:
