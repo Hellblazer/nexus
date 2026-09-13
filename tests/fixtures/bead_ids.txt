@@ -1001,6 +1001,7 @@ nexus-5g5ek
 nexus-5gaj7
 nexus-5gaj7.1
 nexus-5gby
+nexus-5h3df
 nexus-5h4ou
 nexus-5h4ou.1
 nexus-5haam
@@ -3269,6 +3270,7 @@ nexus-hcw0g
 nexus-hcy4w
 nexus-hcy4w.1
 nexus-hd0gb
+nexus-hddw2
 nexus-hdumg
 nexus-hdx2u
 nexus-hdx2u.1

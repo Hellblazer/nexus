@@ -745,6 +745,85 @@ class TuplesBaselineSchemaLiquibaseTest {
         }
     }
 
+    // ── Test 17: tuples-004-1's cleanup UPDATE against pre-existing consumed rows ──
+
+    /**
+     * Bead nexus-8zoyp: {@code tuples-004-1} nulls {@code body} on every row already
+     * consumed before {@code TupleRepository.consumeClaim} started doing this itself
+     * on every future ack. Migrates up to (and including) {@code tuples-003-4} —
+     * the state a real install would be in immediately before this bead's engine
+     * upgrade, with {@code chk_tuples_body_size} already added and validated —
+     * inserts a consumed row carrying a body and an unconsumed row carrying a body
+     * DIRECTLY (the superuser connection bypasses {@code nexus.tuples}'s FORCE RLS
+     * automatically, exactly as {@code tuplesBodySizeCheckCleanup_*} above relies
+     * on), THEN applies the rest of the changelog (tuples-004-1) and asserts: the
+     * consumed row's body is NULL, the unconsumed row's body is untouched.
+     */
+    @Test
+    void tuplesConsumedBodyCleanup_nullsConsumedRowBody_keepsUnconsumedRowBodyUntouched() throws Exception {
+        PostgreSQLContainer<?> dedicated = PgContainerHelper.startDedicated();
+        try {
+            try (Connection su = dedicated.createConnection("")) {
+                migrateUpTo(su, "tuples-003-4", true);
+            }
+
+            byte[] consumedId = HexFormat.of().parseHex("c0ffee4444444444444444444444444444444444444444444444444444f00d");
+            byte[] unconsumedId = HexFormat.of().parseHex("c0ffee5555555555555555555555555555555555555555555555555555f00d");
+            String tenant = "tuples-consumed-cleanup-tenant";
+
+            try (Connection su = dedicated.createConnection("")) {
+                su.setAutoCommit(false);
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                OffsetDateTime now = OffsetDateTime.now();
+                ctx.insertInto(TUPLES)
+                    .set(TUPLES.ID, consumedId)
+                    .set(TUPLES.TENANT_ID, tenant)
+                    .set(TUPLES.SUBSPACE, "mailbox/legacy-consumed")
+                    .set(TUPLES.TEMPLATE, "mailbox/<address>")
+                    .set(TUPLES.KEYS, JSONB.valueOf("{}"))
+                    .set(TUPLES.BODY, "already-consumed")
+                    .set(TUPLES.CONSUMED_AT, now)
+                    .set(TUPLES.CONSUMED_BY, "legacy-claimant")
+                    .set(TUPLES.EXPIRES_AT, now.plusDays(7))
+                    .set(TUPLES.CREATED_AT, now)
+                    .execute();
+                ctx.insertInto(TUPLES)
+                    .set(TUPLES.ID, unconsumedId)
+                    .set(TUPLES.TENANT_ID, tenant)
+                    .set(TUPLES.SUBSPACE, "mailbox/legacy-unconsumed")
+                    .set(TUPLES.TEMPLATE, "mailbox/<address>")
+                    .set(TUPLES.KEYS, JSONB.valueOf("{}"))
+                    .set(TUPLES.BODY, "still-here")
+                    .set(TUPLES.EXPIRES_AT, now.plusDays(7))
+                    .set(TUPLES.CREATED_AT, now)
+                    .execute();
+                su.commit();
+            }
+
+            try (Connection su = dedicated.createConnection("")) {
+                applyFullChangelog(su);
+            }
+
+            try (Connection su = dedicated.createConnection("")) {
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+
+                var consumedRow = ctx.selectFrom(TUPLES).where(TUPLES.ID.eq(consumedId)).fetchOne();
+                assertThat(consumedRow).as("the pre-existing consumed row must survive tuples-004-1").isNotNull();
+                assertThat(consumedRow.getBody())
+                    .as("tuples-004-1 must null the body of a row already consumed").isNull();
+
+                var unconsumedRow = ctx.selectFrom(TUPLES).where(TUPLES.ID.eq(unconsumedId)).fetchOne();
+                assertThat(unconsumedRow)
+                    .as("the pre-existing unconsumed row must survive tuples-004-1 untouched").isNotNull();
+                assertThat(unconsumedRow.getBody())
+                    .as("tuples-004-1 must never touch an unconsumed row's body")
+                    .isEqualTo("still-here");
+            }
+        } finally {
+            dedicated.stop();
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────
 
     private static Set<String> columnNames(Connection su, String table) throws Exception {

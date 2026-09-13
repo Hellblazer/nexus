@@ -482,6 +482,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   hygiene-004-1 nexus-ztafa
                 //   hygiene-005-3 nexus-uxd2a
                 //   tuples-003-2 nexus-r7xao
+                //   tuples-004-1 nexus-8zoyp
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -1046,6 +1047,33 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .isEqualTo(0);
                 }
 
+                // ── nexus-8zoyp seed-coverage follow-up: tuples-004-1's UPDATE
+                // (nulling body on already-consumed rows) -- same shape as
+                // tuples-003-2's own follow-up above, one changeset further --
+                // migrate up to just before tuples-004-1 (this also applies
+                // tuples-003-2/3/4, still pending from the migrateUpTo call
+                // above, so chk_tuples_body_size already exists and is
+                // validated by this point), seed a consumed row WITH a body and
+                // an unconsumed row WITH a body directly (both well under the
+                // 4096-byte cap), THEN let the normal whole-hop migrate below
+                // finish tuples-004-1 through the rest of HEAD exactly as it
+                // would have run in one shot. ──────────────────────────────────
+                byte[] tuplesConsumedId = HexFormat.of()
+                    .parseHex("c0ffee4444444444444444444444444444444444444444444444444444f00d");
+                byte[] tuplesUnconsumedId = HexFormat.of()
+                    .parseHex("c0ffee5555555555555555555555555555555555555555555555555555f00d");
+                migrateUpTo(adminDs, "tuples-004-1");
+                try (Connection su = pg.createConnection("")) {
+                    su.setAutoCommit(true);
+                    seedTupleConsumedBodyCleanupRows(su, tuplesTenant, tuplesConsumedId, tuplesUnconsumedId);
+                }
+                try (Connection admin = adminDs.getConnection()) {
+                    assertThat(count(admin, "SELECT count(*) FROM nexus.tuples"))
+                        .as("FORCE RLS must hide every seeded nexus.tuples row from the "
+                            + "non-BYPASSRLS owner -- tuples-004-1's own toggle-wrap target")
+                        .isEqualTo(0);
+                }
+
                 // ── HEAD LEG over a populated database. This is the leg the
                 // v0.1.33 outage proved was untested: catalog-013-0's naked DML
                 // no-ops under RLS here exactly as it did in production; only
@@ -1091,6 +1119,31 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     assertThat(PgCatalogProbes.constraintValidated(ctx, "chk_tuples_body_size"))
                         .as("VALIDATE must succeed once tuples-003-2 has removed the only violator")
                         .isTrue();
+                }
+
+                // ── tuples-004-1's own effect: the pre-existing consumed row's body
+                // is nulled, the pre-existing unconsumed row's body survives
+                // untouched. ─────────────────────────────────────────────────────
+                try (Connection su = pg.createConnection("")) {
+                    var ctx = DSL.using(su, SQLDialect.POSTGRES);
+                    var consumedRow = ctx.selectFrom(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                        .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(tuplesConsumedId))
+                        .fetchOne();
+                    assertThat(consumedRow)
+                        .as("the pre-existing consumed row must survive tuples-004-1").isNotNull();
+                    assertThat(consumedRow.getBody())
+                        .as("tuples-004-1 must null the body of an already-consumed row")
+                        .isNull();
+
+                    var unconsumedRow = ctx.selectFrom(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                        .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(tuplesUnconsumedId))
+                        .fetchOne();
+                    assertThat(unconsumedRow)
+                        .as("the pre-existing unconsumed row must survive tuples-004-1 untouched")
+                        .isNotNull();
+                    assertThat(unconsumedRow.getBody())
+                        .as("tuples-004-1 must leave an unconsumed row's body intact")
+                        .isEqualTo("still-here");
                 }
 
                 // ── Ground truth as superuser: the DML took EFFECT (rows changed),
@@ -2400,6 +2453,49 @@ class SchemaUpgradeRehearsalIntegrationTest {
             ps.setString(7, "claim");
             ps.setObject(8, now);
             ps.setObject(9, now.plusDays(180));
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * nexus-8zoyp seed-coverage: tuples-004-1's own input shape -- a consumed
+     * row carrying a body, and an unconsumed row carrying a body -- modeling
+     * the population tuples-004-1's one-shot cleanup exists to fix: rows
+     * consumed before {@code TupleRepository.consumeClaim} started nulling
+     * body itself. Runs on a superuser connection (bypasses FORCE RLS
+     * automatically, same as every other seed helper in this file); both
+     * bodies are well under the 4096-byte {@code chk_tuples_body_size} cap,
+     * already enforced by this point in the walk (tuples-003-3/4 ran as part
+     * of the {@code migrateUpTo("tuples-004-1")} call above).
+     */
+    private static void seedTupleConsumedBodyCleanupRows(Connection su, String tenant, byte[] consumedId,
+                                                          byte[] unconsumedId) throws Exception {
+        java.time.OffsetDateTime now = java.time.OffsetDateTime.now();
+        try (var ps = su.prepareStatement(
+                "INSERT INTO nexus.tuples (id, tenant_id, subspace, template, keys, body, "
+                + "consumed_at, consumed_by, expires_at, created_at) "
+                + "VALUES (?, ?, ?, ?, '{}'::jsonb, ?, ?, ?, ?, ?)")) {
+            ps.setBytes(1, consumedId);
+            ps.setString(2, tenant);
+            ps.setString(3, "mailbox/rehearsal-consumed");
+            ps.setString(4, "mailbox/<address>");
+            ps.setString(5, "already-consumed");
+            ps.setObject(6, now);
+            ps.setString(7, "rehearsal-claimant");
+            ps.setObject(8, now.plusDays(7));
+            ps.setObject(9, now);
+            ps.executeUpdate();
+        }
+        try (var ps = su.prepareStatement(
+                "INSERT INTO nexus.tuples (id, tenant_id, subspace, template, keys, body, expires_at, created_at) "
+                + "VALUES (?, ?, ?, ?, '{}'::jsonb, ?, ?, ?)")) {
+            ps.setBytes(1, unconsumedId);
+            ps.setString(2, tenant);
+            ps.setString(3, "mailbox/rehearsal-unconsumed");
+            ps.setString(4, "mailbox/<address>");
+            ps.setString(5, "still-here");
+            ps.setObject(6, now.plusDays(7));
+            ps.setObject(7, now);
             ps.executeUpdate();
         }
     }

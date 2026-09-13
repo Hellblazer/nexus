@@ -802,6 +802,17 @@ public final class TupleRepository {
      * from nexus-h61dl.2, which is why {@code ackWithReply} could not have shipped before
      * this extraction: a reply written beside a consume that lost a race would be a reply
      * to a request someone else now holds.
+     *
+     * <p>The same UPDATE that sets {@code consumed_at} also sets {@code body} to NULL
+     * (bead nexus-8zoyp): the tuple space is a coordination and metadata store, not a
+     * value store, and a consumed row's body is already unreachable through the API
+     * ({@code rd}/{@code in} both filter {@code consumed_at IS NULL}), so there is no
+     * reason to keep it around for the row's remaining retention. The returned {@link
+     * TuplesRecord} was read BEFORE this update via {@link #liveClaimRow}, so its
+     * in-memory {@code body} still reflects the pre-consume value — {@code ackWithReply}
+     * relies on that only for {@code getId()}, never {@code getBody()}, so this clears
+     * nothing a caller of this method still needs. A reply written by {@code
+     * ackWithReply} is a separate row (via {@code writeOut}) and keeps its own body.
      */
     private TuplesRecord consumeClaim(DSLContext ctx, String tenant, String claimId, String claimant) {
         TuplesRecord row = liveClaimRow(ctx, tenant, claimId);
@@ -824,6 +835,7 @@ public final class TupleRepository {
         int updated = ctx.update(TUPLES)
                 .set(TUPLES.CONSUMED_AT, now)
                 .set(TUPLES.CONSUMED_BY, claimant)
+                .set(TUPLES.BODY, (String) null)
                 .where(liveClaimCondition(row.getId(), claimId))
                 .execute();
         if (updated == 0) {

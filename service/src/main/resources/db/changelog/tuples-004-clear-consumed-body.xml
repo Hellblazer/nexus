@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-8zoyp (Sam's decision 2026-09-13): the tuple space holds
+    coordination metadata, not payloads (tuples-003-body-size-limit.xml's
+    own header; docs/tuple-space.md § Size limits), and a consumed row's
+    body is already unreachable through the API — rd/in both filter
+    consumed_at IS NULL (TupleRepository.java: liveClaimRow/matchCondition
+    and the rd/in read queries never return a consumed row) — yet it sat in
+    the table for the rest of the row's retention. TupleRepository's own
+    consumeClaim now sets body NULL in the SAME UPDATE that sets
+    consumed_at, for both the plain ack path and the ackWithReply path
+    (both route through consumeClaim; a reply written by ackWithReply is a
+    SEPARATE row via writeOut and keeps its own body). This changeset is
+    the one-shot cleanup for rows that were already consumed before that
+    engine change shipped.
+
+    A plain UPDATE, not a DELETE: the row itself — its keys, dims,
+    consumed_at, consumed_by, claim history — still carries meaning for the
+    template's retention window; only the body is a value this store was
+    never meant to hold once consumed. Never touches a nacked, claimed-and-
+    lapsed, or dead-lettered row: the WHERE clause is consumed_at IS NOT
+    NULL, and none of those states set it.
+
+    Row-DML under FORCE RLS (nexus.tuples carries FORCE ROW LEVEL SECURITY,
+    tuples-001-1), so this follows the SAME toggle-wrapped, flat
+    splitStatements="true" shape tuples-003-2 uses (catalog-013-1b's
+    original pattern): tests/test_changelog_rls_lint.py's FORCE-RLS DML
+    tripwire does not recognise a toggle nested inside a DO $$ ... $$ block
+    as guarding the DML inside it, so this stays flat SQL, not a DO block.
+    No cascade concern here (unlike tuples-003-2's DELETE): an UPDATE that
+    only ever touches nexus.tuples.body does not write to
+    nexus.tuple_claim_log, and no other table's FORCE-RLS state gates this
+    statement, so only nexus.tuples itself needs the toggle.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: clear body on already-consumed rows ────────────────── -->
+    <changeSet id="tuples-004-1" author="nexus-8zoyp">
+        <comment>One-shot cleanup: sets nexus.tuples.body to NULL for every row already consumed (consumed_at IS NOT NULL) before TupleRepository.consumeClaim started nulling it for every future ack. Toggles FORCE RLS off on nexus.tuples for the duration (nexus_admin is the table owner with no BYPASSRLS) and restores it before the changeset ends. Flat, splitStatements="true" statements (catalog-013-1b / tuples-003-2's shape), not a DO block: tests/test_changelog_rls_lint.py's FORCE-RLS DML tripwire does not recognise a toggle nested inside a procedural block as guarding the DML inside it.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.tuples NO FORCE ROW LEVEL SECURITY;
+UPDATE nexus.tuples SET body = NULL WHERE consumed_at IS NOT NULL AND body IS NOT NULL;
+ALTER TABLE nexus.tuples FORCE ROW LEVEL SECURITY;
+        </sql>
+        <!-- Data mutation, one-shot cleanup: the pre-image is not
+             recoverable and nothing should recover it — these are rows
+             already consumed, whose body has been unreachable through the
+             API from the moment they were consumed. Same no-op rollback
+             posture as tuples-003-2. -->
+        <rollback/>
+    </changeSet>
+
+</databaseChangeLog>

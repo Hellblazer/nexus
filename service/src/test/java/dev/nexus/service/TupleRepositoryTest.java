@@ -322,6 +322,88 @@ class TupleRepositoryTest {
         assertThat(repo.inp(TENANT_A, "mailbox/" + to, Map.of("to", to), "someone-else", 60)).isEmpty();
     }
 
+    /**
+     * Bead nexus-8zoyp: {@code consumeClaim}'s own UPDATE now sets {@code body} to
+     * NULL in the SAME statement that sets {@code consumed_at}. A consumed row is
+     * invisible to every read ({@code ack_setsConsumedAt_invisibleToRdAndIn} above),
+     * so the only way to observe the cleared body is a raw superuser read of
+     * {@code nexus.tuples} that bypasses the {@code consumed_at IS NULL} filter
+     * every {@code rd}/{@code in} query applies.
+     */
+    @Test
+    void ack_clearsBody_rawRowShowsNullBody() throws Exception {
+        String to = "agent-ack-clear-" + UUID.randomUUID();
+        byte[] id = repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+                Map.of("from", "sender-ack-clear"), "sensitive-body", "nonce-ack-clear-1", null);
+        var claimed = repo.inp(TENANT_A, "mailbox/" + to, Map.of("to", to), "claimant-ack-clear", 60);
+        assertThat(claimed).isPresent();
+
+        repo.ack(TENANT_A, claimed.get().claimId(), "claimant-ack-clear");
+
+        try (Connection su = pg.createConnection("")) {
+            String body = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .select(dev.nexus.service.jooq.nexus.Tables.TUPLES.BODY)
+                    .from(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(id))
+                    .fetchOne(dev.nexus.service.jooq.nexus.Tables.TUPLES.BODY);
+            assertThat(body)
+                    .as("consumeClaim's UPDATE must null the body in the same statement "
+                            + "that sets consumed_at (bead nexus-8zoyp)")
+                    .isNull();
+        }
+    }
+
+    /**
+     * Bead nexus-8zoyp: a {@code nack} releases the claim but never consumes the
+     * row -- only {@code ack} (via {@code consumeClaim}) clears the body, so a
+     * nacked-but-still-available row must keep it.
+     */
+    @Test
+    void nack_keepsBody() {
+        String to = "agent-nack-keep-" + UUID.randomUUID();
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+                Map.of("from", "sender-nack-keep"), "keep-me", "nonce-nack-keep-1", null);
+        var claimed = repo.inp(TENANT_A, "mailbox/" + to, Map.of("to", to), "claimant-nack-keep", 60);
+        assertThat(claimed).isPresent();
+
+        repo.nack(TENANT_A, claimed.get().claimId(), "claimant-nack-keep");
+
+        var rows = repo.rdp(TENANT_A, "mailbox/" + to, Map.of("to", to), 10, null);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).body())
+                .as("a nack must never clear the body -- only ack consumes the row "
+                        + "(bead nexus-8zoyp)")
+                .isEqualTo("keep-me");
+    }
+
+    /**
+     * Bead nexus-8zoyp: a claim whose lease lapses is released (by the claim
+     * loop's own lapsed-lease branch, on the next claim attempt) and re-taken as a
+     * fresh claim -- an {@code expire} transition, never a consume -- so its body
+     * must survive untouched.
+     */
+    @Test
+    void claimLapsed_thenReclaimed_keepsBody() throws Exception {
+        String to = "agent-lapse-keep-" + UUID.randomUUID();
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+                Map.of("from", "sender-lapse-keep"), "lapse-body", "nonce-lapse-keep-1", null);
+
+        var first = repo.inp(TENANT_A, "mailbox/" + to, Map.of("to", to), "claimant-lapse-keep", 1);
+        assertThat(first).isPresent();
+
+        Thread.sleep(1_500); // let the 1-second lease lapse
+
+        var second = repo.inp(TENANT_A, "mailbox/" + to, Map.of("to", to), "claimant-lapse-keep-2", 60);
+        assertThat(second).isPresent();
+
+        var rows = repo.rdp(TENANT_A, "mailbox/" + to, Map.of("to", to), 10, null);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).body())
+                .as("a lapsed-then-reclaimed row must keep its body -- only ack clears it "
+                        + "(bead nexus-8zoyp)")
+                .isEqualTo("lapse-body");
+    }
+
     @Test
     void ackOrNack_byNonHolder_claimOwnership_secondAck_claimNotFound() {
         String to = "agent-ownership-1";
@@ -345,7 +427,7 @@ class TupleRepositoryTest {
     void nack_maxAttemptsTimes_deadLettered_noFurtherIn_rdReturnsWithDeadState() {
         String to = "agent-deadletter-" + UUID.randomUUID();
         repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
-                Map.of("from", "sender-dl"), "body", "nonce-dl-1", null);
+                Map.of("from", "sender-dl"), "dead-letter-body", "nonce-dl-1", null);
 
         // mailbox/<address> max_attempts is 3 (RDR-205 v1 template).
         for (int i = 0; i < 3; i++) {
@@ -359,6 +441,12 @@ class TupleRepositoryTest {
         var rows = repo.rdp(TENANT_A, "mailbox/" + to, Map.of("to", to), 10, null);
         assertThat(rows).hasSize(1);
         assertThat(rows.get(0).claimState()).isEqualTo("dead");
+        // Bead nexus-8zoyp: dead-lettering is reached via nack/expire, never a
+        // consume, so the body must survive intact even in the terminal dead state.
+        assertThat(rows.get(0).body())
+                .as("a dead-lettered row must keep its body -- only ack clears it "
+                        + "(bead nexus-8zoyp)")
+                .isEqualTo("dead-letter-body");
 
         var stats = repo.subspaceStats(TENANT_A, "mailbox/" + to);
         assertThat(stats.dead()).isEqualTo(1);

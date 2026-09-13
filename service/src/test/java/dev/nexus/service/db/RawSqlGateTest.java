@@ -1023,7 +1023,10 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/SchemaRollbackRoundTripIntegrationTest.java", 16),
         // nexus-cbo4a batch 9 item 0: 98 -> 103 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 103 -> 105 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
-        Map.entry("dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java", 104),
+        // nexus-8zoyp seed-coverage follow-up: 104 -> 111 (seedTupleConsumedBodyCleanupRows'
+        // two prepareStatement/executeUpdate pairs seeding tuples-004-1's consumed/unconsumed
+        // rows, mirroring nexus-r7xao's own seedTupleBodySizeLimitRows already counted here).
+        Map.entry("dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java", 111),
         Map.entry("dev/nexus/service/ScratchHandlerTest.java", 3),
         Map.entry("dev/nexus/service/ScratchRepositoryTest.java", 2),
         Map.entry("dev/nexus/service/ScratchSchemaLiquibaseTest.java", 1),
@@ -1409,7 +1412,9 @@ class RawSqlGateTest {
     // (+8: NexusServiceTupleSweepIsolationTest.java new at 3, TupleRepositoryTest.java
     // new at 5 -- both genuinely new REVOKE/GRANT/CREATE TRIGGER raw SQL with no jOOQ
     // codegen equivalent, see the two entries' own comments above).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 918;
+    // nexus-8zoyp seed-coverage follow-up: 918 -> 925 (+7, matching
+    // SchemaUpgradeRehearsalIntegrationTest.java's own 104 -> 111 above).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 925;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

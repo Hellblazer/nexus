@@ -478,6 +478,17 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # survives with tuple_id nulled by tuple_claim_log_tuple_fk's ON
         # DELETE SET NULL, chk_tuples_body_size exists and is VALIDATED).
         ("tuples-003-2", "nexus-r7xao"),
+        # nexus-8zoyp: tuples-004-1's UPDATE nulling body on already-consumed
+        # rows -- same shape as tuples-003-2's own follow-up above (nexus.tuples
+        # exists from tuples-001-baseline onward, so this is another table
+        # created PARTWAY through this hop). Seeded via a SECOND migrateUpTo
+        # call, one changeset further than tuples-003-2's own (up to, not
+        # including, tuples-004-1 -- so chk_tuples_body_size already exists and
+        # is validated by this point): a consumed row carrying a body and an
+        # unconsumed row carrying a body, both directly. Effect-asserted (the
+        # consumed row's body is NULL, the unconsumed row's body survives
+        # untouched).
+        ("tuples-004-1", "nexus-8zoyp"),
     }
 )
 
