@@ -231,10 +231,10 @@ class TestT1HandoffMarkerWriter:
 
 # ── tuple-watch session marker writer (nexus-6konb.12, MM-3.4 fix 1) ────────
 #
-# On source=clear/resume, session_start() ALSO writes the tuple-watch
+# On every SessionStart source, session_start() ALSO writes the tuple-watch
 # stale-self-stop marker (nexus.tuple_watch.write_session_marker) for the
 # hook's own claude ancestor pid, alongside (not instead of) the T1 handoff
-# marker above -- same source gate, same claude-pid derivation, different
+# marker above -- on every source (pid reuse), same claude-pid derivation, different
 # consumer (a live ``nx tuple watch`` Monitor rather than the MCP lifespan).
 
 
@@ -265,17 +265,21 @@ class TestTupleWatchSessionMarkerWriter:
         assert marker.is_file()
         assert marker.read_text(encoding="utf-8").strip() == "new-sess-id"
 
-    def test_startup_writes_no_session_marker(self, tmp_path, monkeypatch) -> None:
-        from nexus.tuple_watch import session_marker_path
+    @pytest.mark.parametrize("source", ["startup", "compact", None])
+    def test_every_source_writes_the_current_session(
+        self, tmp_path, monkeypatch, source,
+    ) -> None:
+        """A marker left by a DEAD process that owned this pid must be
+        overwritten at startup, or the new process's watcher reads a foreign
+        session id and stops itself on its first cycle (pid reuse; MM-3.4
+        round-2 critic). compact and a missing source write the same id,
+        which the watcher treats as no change."""
+        from nexus.tuple_watch import session_marker_path, write_session_marker
 
-        self._session_start(monkeypatch, tmp_path, source="startup", claude_pid=4242)
-        assert not session_marker_path(tmp_path, 4242).exists()
-
-    def test_compact_writes_no_session_marker(self, tmp_path, monkeypatch) -> None:
-        from nexus.tuple_watch import session_marker_path
-
-        self._session_start(monkeypatch, tmp_path, source="compact", claude_pid=4242)
-        assert not session_marker_path(tmp_path, 4242).exists()
+        write_session_marker(tmp_path, 4242, "dead-process-session")
+        self._session_start(monkeypatch, tmp_path, source=source, claude_pid=4242)
+        marker = session_marker_path(tmp_path, 4242)
+        assert marker.read_text(encoding="utf-8").strip() == "new-sess-id"
 
     def test_unresolvable_claude_pid_writes_no_session_marker(
         self, tmp_path, monkeypatch,

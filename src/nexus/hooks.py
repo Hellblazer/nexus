@@ -207,10 +207,15 @@ def _write_tuple_watch_session_marker(new_session_id: str) -> None:
     :func:`nexus.session.find_immediate_claude_pid`, from different vantage
     points, rather than passing it between them.
 
-    Gated on the same ``source`` set as :func:`_write_t1_handoff_markers`
-    (``startup`` spawns nothing to notify; ``compact`` keeps the same
-    session id, so there is nothing stale to report) -- see this module's
-    call site in :func:`session_start`.
+    Written on EVERY SessionStart source, unlike the T1 handoff marker. The
+    marker is keyed by pid and nothing prunes it, and pids are reused: a new
+    Claude process that inherited a dead one's pid would otherwise read that
+    process's last marker, name a session it is not, and stop its own freshly
+    armed watcher on the first cycle. Writing on ``startup`` (and on
+    ``compact``, where the id is unchanged) overwrites whatever a previous
+    owner of the pid left, so a marker always names the CURRENT process's
+    session. The watcher still only stops on a mismatch, so a same-id write
+    is a no-op for it.
 
     Best-effort: any failure (no ``ps``, no config dir, disk error) is
     logged at debug and swallowed -- a SessionStart hook must never fail
@@ -269,6 +274,8 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
 
     if source in _T1_HANDOFF_SOURCES and session_id and session_id != "unknown":
         _write_t1_handoff_markers(session_id)
+    if session_id and session_id != "unknown":
+        # Every source, not just clear/resume: see the writer's docstring.
         _write_tuple_watch_session_marker(session_id)
 
     # nexus-gff3g: do NOT claim "T1 scratch initialized" here. This hook only
