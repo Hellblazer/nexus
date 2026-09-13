@@ -3757,6 +3757,8 @@ A watcher does not need to be told to stop. `nx hook session-start` writes a mar
 
 This is user-global operator config, not something a hook or the plugin writes on your behalf — `nx hook session-start` (see `nexus.mailbox_arm`) emits the arm instruction itself but never touches `settings.json`.
 
+`nx doctor`'s `tuples.watch_permission` row (bead nexus-rml7o, MM-3.4 critic finding S5) checks this for you: it reads `~/.claude/settings.json` (honouring `CLAUDE_CONFIG_DIR`; never writes it) and reports whether a covering rule — the exact entry above, or a genuinely broader `Bash(<prefix>:*)` ancestor such as `Bash(nx tuple:*)` or `Bash(nx:*)` — is present, naming the exact entry to add when it is not. Always informational: a missing or unreadable `settings.json` is reported as "not configured", never a crash, and this row never claims a permission prompt WILL happen — during the RDR-206 live verification arming raised no prompt at all with no rule present (most likely because that session ran in auto mode), so the row only says the rule is absent.
+
 ## nx service
 
 Storage-service administration.

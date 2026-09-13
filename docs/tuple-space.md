@@ -239,6 +239,7 @@ Two access paths sit on top of `HttpTupleStore`:
 | `tuples.oldest_unclaimed` | Oldest unclaimed tuple's age, per subspace, over claimable rows only (live, unclaimed, not dead-lettered); subspaces whose template disables `take` are skipped |
 | `tuples.dead_tuple_ratio` | Dead-tuple ratio and last autovacuum on `nexus.tuples` / `nexus.tuple_claim_log` (local-only admin-psql path, same as the migration-state and RLS checks) |
 | `tuples.sweep_freshness` | Age of the last tuple sweep, read off `nexus.tuple_tenants.last_swept_at` alone — the sweep's own incomplete-cause classification is a structured log line, never a persisted row, so this row reports staleness, not cause |
+| `tuples.watch_permission` | Whether `~/.claude/settings.json` (read-only, honours `CLAUDE_CONFIG_DIR`) carries a `permissions.allow` rule covering `nx tuple watch` — the exact documented entry or a genuinely broader `Bash(<prefix>:*)` ancestor (`Bash(nx tuple:*)`, `Bash(nx:*)`); always informational, never a failure (bead nexus-rml7o) |
 
 ## Push delivery (RDR-205, ping-then-pull)
 

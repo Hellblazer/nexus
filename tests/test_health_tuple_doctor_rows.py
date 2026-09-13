@@ -17,6 +17,7 @@ informational (ok=True); above it, the identical absence is a loud WARN.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -520,6 +521,135 @@ class TestCheckTupleSweepFreshness:
         )[0]
         assert r.ok is False and r.warn is True
         assert "engine unreachable" in r.detail
+
+
+# ── row 4: _check_tuple_watch_permission (bead nexus-rml7o) ─────────────────
+#
+# MM-3.4 critic finding S5 (T2 mm34-phase3-critic-pass-2026-09-13): a Monitor
+# running ``nx tuple watch`` goes through the same permission machinery as
+# Bash, so without a covering ``permissions.allow`` entry, arming raises a
+# permission prompt in a session nobody may be present to approve. This row
+# reads ``~/.claude/settings.json`` (read-only, never writes it) and reports
+# whether a covering rule exists. Always informational (never fatal) —
+# ``warn=True`` when the rule is absent or the file could not be read,
+# ``ok=True`` when it is present.
+
+
+def _settings_file(tmp_path: Path, payload: dict) -> Path:
+    p = tmp_path / "settings.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    return p
+
+
+class TestCheckTupleWatchPermission:
+    def test_missing_settings_file_is_not_configured_never_crashes(self, tmp_path) -> None:
+        missing = tmp_path / "settings.json"
+        r = h._check_tuple_watch_permission(settings_path=missing)[0]
+        assert r.ok is False and r.warn is True
+        assert "not configured" in r.detail
+        assert str(missing) in r.detail
+
+    def test_directory_in_place_of_file_is_not_configured_never_crashes(self, tmp_path) -> None:
+        as_dir = tmp_path / "settings.json"
+        as_dir.mkdir()
+        r = h._check_tuple_watch_permission(settings_path=as_dir)[0]
+        assert r.ok is False and r.warn is True
+        assert "not configured" in r.detail
+
+    def test_malformed_json_is_not_configured(self, tmp_path) -> None:
+        p = tmp_path / "settings.json"
+        p.write_text("{not json", encoding="utf-8")
+        r = h._check_tuple_watch_permission(settings_path=p)[0]
+        assert r.ok is False and r.warn is True
+        assert "not configured" in r.detail
+
+    def test_no_permissions_block_is_not_configured(self, tmp_path) -> None:
+        p = _settings_file(tmp_path, {"env": {}})
+        r = h._check_tuple_watch_permission(settings_path=p)[0]
+        assert r.ok is False and r.warn is True
+        assert "not configured" in r.detail
+
+    def test_unrelated_rules_are_not_configured(self, tmp_path) -> None:
+        p = _settings_file(tmp_path, {"permissions": {"allow": ["Bash(git:*)", "Read"]}})
+        r = h._check_tuple_watch_permission(settings_path=p)[0]
+        assert r.ok is False and r.warn is True
+        assert "not configured" in r.detail
+
+    def test_exact_documented_rule_is_ok(self, tmp_path) -> None:
+        p = _settings_file(tmp_path, {"permissions": {"allow": ["Bash(nx tuple watch:*)"]}})
+        r = h._check_tuple_watch_permission(settings_path=p)[0]
+        assert r.ok is True
+        assert "covers" in r.detail
+
+    def test_broader_nx_tuple_rule_is_ok(self, tmp_path) -> None:
+        p = _settings_file(tmp_path, {"permissions": {"allow": ["Bash(nx tuple:*)"]}})
+        r = h._check_tuple_watch_permission(settings_path=p)[0]
+        assert r.ok is True
+
+    def test_broader_nx_rule_is_ok(self, tmp_path) -> None:
+        # This is Sam's own real settings.json shape (Bash(nx:*)) -- the
+        # broader-rule branch this check exists to recognise, not a
+        # hypothetical.
+        p = _settings_file(tmp_path, {"permissions": {"allow": ["Bash(nx:*)"]}})
+        r = h._check_tuple_watch_permission(settings_path=p)[0]
+        assert r.ok is True
+
+    def test_loose_substring_match_does_not_count(self, tmp_path) -> None:
+        p = _settings_file(tmp_path, {"permissions": {"allow": ["Bash(echo nx tuple watch:*)"]}})
+        r = h._check_tuple_watch_permission(settings_path=p)[0]
+        assert r.ok is False and r.warn is True
+
+    def test_partial_word_prefix_does_not_count(self, tmp_path) -> None:
+        # "nx t" is a string-prefix of "nx tuple watch" but not a word-
+        # boundary prefix -- must not count (conservative by design).
+        p = _settings_file(tmp_path, {"permissions": {"allow": ["Bash(nx t:*)"]}})
+        r = h._check_tuple_watch_permission(settings_path=p)[0]
+        assert r.ok is False and r.warn is True
+
+    def test_rule_with_no_trailing_colon_star_does_not_count(self, tmp_path) -> None:
+        p = _settings_file(tmp_path, {"permissions": {"allow": ["Bash(nx tuple watch)"]}})
+        r = h._check_tuple_watch_permission(settings_path=p)[0]
+        assert r.ok is False and r.warn is True
+
+    def test_detail_never_claims_a_prompt_will_happen(self, tmp_path) -> None:
+        missing = tmp_path / "settings.json"
+        r = h._check_tuple_watch_permission(settings_path=missing)[0]
+        assert "will raise" not in r.detail.lower()
+        assert "may" in r.detail.lower()
+
+    def test_severity_is_always_informational_never_fatal(self, tmp_path) -> None:
+        missing = tmp_path / "settings.json"
+        r = h._check_tuple_watch_permission(settings_path=missing)[0]
+        assert r.fatal is False
+        covered = _settings_file(tmp_path, {"permissions": {"allow": ["Bash(nx:*)"]}})
+        r2 = h._check_tuple_watch_permission(settings_path=covered)[0]
+        assert r2.fatal is False
+
+    def test_names_the_exact_entry_to_add(self, tmp_path) -> None:
+        missing = tmp_path / "settings.json"
+        r = h._check_tuple_watch_permission(settings_path=missing)[0]
+        assert "Bash(nx tuple watch:*)" in r.detail
+
+    def test_honours_claude_config_dir_env_var(self, tmp_path, monkeypatch) -> None:
+        config_dir = tmp_path / "custom-claude-home"
+        config_dir.mkdir()
+        (config_dir / "settings.json").write_text(
+            json.dumps({"permissions": {"allow": ["Bash(nx tuple watch:*)"]}}), encoding="utf-8",
+        )
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+        r = h._check_tuple_watch_permission()[0]
+        assert r.ok is True
+
+    def test_default_path_is_home_dot_claude_settings_json(self, monkeypatch) -> None:
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        assert h._claude_settings_path() == Path.home() / ".claude" / "settings.json"
+
+
+def test_watch_permission_row_is_registered_in_run_health_checks() -> None:
+    import inspect
+
+    source = inspect.getsource(h.run_health_checks)
+    assert "_check_tuple_watch_permission()" in source
 
 
 # ── registration ─────────────────────────────────────────────────────────────

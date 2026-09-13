@@ -5462,6 +5462,138 @@ def _check_tuple_sweep_freshness(
     return [HealthResult(label=label, ok=True, detail=detail)]
 
 
+_TUPLE_WATCH_COMMAND = "nx tuple watch"
+_TUPLE_WATCH_PERMISSION_LABEL = "tuples.watch_permission"
+_TUPLE_WATCH_DOCUMENTED_RULE = "Bash(nx tuple watch:*)"
+# Prefixes that, in Claude Code's `Bash(<prefix>:*)` permission grammar,
+# genuinely cover every `nx tuple watch` invocation: the documented entry
+# itself plus its two whitespace-delimited ancestors. `Bash(nx:*)` is not a
+# hypothetical -- it is the shape actually seen in a real operator's
+# settings.json, so it must be recognised, not just the exact entry.
+_TUPLE_WATCH_COVERING_PREFIXES = ("nx tuple watch", "nx tuple", "nx")
+
+
+def _bash_rule_covers_tuple_watch(rule: object) -> bool:
+    """True when *rule* is a ``Bash(<prefix>:*)`` permission pattern whose
+    prefix is one of :data:`_TUPLE_WATCH_COVERING_PREFIXES` (bead
+    nexus-rml7o, MM-3.4 critic finding S5).
+
+    Conservative by design, per the bead's own instruction: only the exact
+    documented entry or a genuinely broader ancestor prefix in the SAME
+    ``:*``-suffixed form counts. A rule that merely CONTAINS the command as
+    a substring (``Bash(echo nx tuple watch:*)``), a string-prefix that is
+    not a whitespace boundary (``Bash(nx t:*)``), or a rule with no
+    trailing ``:*`` at all, does not -- this exists to confirm a named
+    gap, not to guess at coverage from an unfamiliar pattern shape.
+    """
+    if not isinstance(rule, str):
+        return False
+    if not (rule.startswith("Bash(") and rule.endswith(":*)")):
+        return False
+    prefix = rule[len("Bash("):-len(":*)")]
+    return prefix in _TUPLE_WATCH_COVERING_PREFIXES
+
+
+def _claude_settings_path() -> Path:
+    """Resolve ``~/.claude/settings.json``, honouring ``CLAUDE_CONFIG_DIR``.
+
+    Nothing else in this codebase resolves the Claude settings path via
+    that variable today, but Claude Code itself honours it to relocate the
+    whole ``~/.claude`` tree, so a doctor row reading ``settings.json``
+    must follow it too rather than hardcoding the default location.
+    """
+    override = os.environ.get("CLAUDE_CONFIG_DIR")
+    base = Path(override).expanduser() if override else Path.home() / ".claude"
+    return base / "settings.json"
+
+
+def _check_tuple_watch_permission(settings_path: Path | None = None) -> list[HealthResult]:
+    """Informational doctor row (bead nexus-rml7o, MM-3.4 critic finding S5):
+    does a ``permissions.allow`` rule in ``~/.claude/settings.json`` cover
+    ``nx tuple watch``?
+
+    A Claude Code ``Monitor``'s ``command`` runs under the same permission
+    machinery as ``Bash`` (:mod:`nexus.mailbox_arm`'s arm instruction,
+    MM-3.1), so arming the mailbox watcher with no covering rule MAY raise
+    a permission prompt in a session nobody is present to approve. This
+    row never claims that prompt WILL happen: during the RDR-206 live
+    verification (T2 ``nexus/rdr-206-live-verification-7.44.0-2026-09-13``)
+    arming raised no prompt at all with no rule present, most likely
+    because that session ran in auto mode. So the detail only says the
+    rule is absent and names what it is for -- never a certainty about a
+    prompt that this check cannot actually observe.
+
+    Read-only: this NEVER writes ``settings.json``. A missing file, a
+    directory in its place, unreadable bytes, or unparseable JSON are all
+    reported the same way an absent rule is -- "not configured", never a
+    crash and never a reason to fail ``nx doctor``.
+
+    Always informational, per the bead's own severity note: ``ok=True``
+    when a covering rule is present, ``ok=False, warn=True`` (soft, never
+    fatal) whenever it cannot confirm one.
+    """
+    label = _TUPLE_WATCH_PERMISSION_LABEL
+    path = settings_path if settings_path is not None else _claude_settings_path()
+    hint = f"add {_TUPLE_WATCH_DOCUMENTED_RULE!r} to permissions.allow in {path}"
+    prompt_note = (
+        "MAY raise a permission prompt with nobody present to approve (not "
+        "guaranteed -- an auto-mode session raised none during the RDR-206 "
+        "live verification)"
+    )
+
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"not configured -- {path} does not exist, so no permissions.allow rule "
+                f"covers '{_TUPLE_WATCH_COMMAND}'. Arming it as a Monitor {prompt_note}. {hint}."
+            ),
+        )]
+    except OSError as exc:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"not configured -- {path} unreadable ({exc}); could not check the "
+                f"'{_TUPLE_WATCH_COMMAND}' allowlist entry."
+            ),
+        )]
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"not configured -- {path} is not valid JSON ({exc}); could not check the "
+                f"'{_TUPLE_WATCH_COMMAND}' allowlist entry."
+            ),
+        )]
+
+    rules: list = []
+    if isinstance(data, dict):
+        permissions = data.get("permissions")
+        if isinstance(permissions, dict):
+            allow = permissions.get("allow")
+            if isinstance(allow, list):
+                rules = allow
+
+    if any(_bash_rule_covers_tuple_watch(r) for r in rules):
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"{path} permissions.allow covers '{_TUPLE_WATCH_COMMAND}'",
+        )]
+
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(
+            f"not configured -- no permissions.allow rule in {path} covers "
+            f"'{_TUPLE_WATCH_COMMAND}'. Arming it as a Monitor {prompt_note}. {hint}."
+        ),
+    )]
+
+
 def _check_pending_rungs() -> list[HealthResult]:
     """RDR-185 P0.4 (nexus-n7u38.4): read-only upgrade-ladder surface.
 
@@ -7491,6 +7623,10 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     results.extend(_check_tuple_unclaimed_age())
     results.extend(_check_tuple_table_bloat())
     results.extend(_check_tuple_sweep_freshness())
+    # bead nexus-rml7o (MM-3.4 critic finding S5): read-only, always
+    # informational -- never gated by route_predates_floor, since it reads
+    # local Claude Code settings, not the engine.
+    results.extend(_check_tuple_watch_permission())
     # RDR-185 P0.4: read-only pending-rungs surface (degrades internally).
     results.extend(_check_pending_rungs())
 
