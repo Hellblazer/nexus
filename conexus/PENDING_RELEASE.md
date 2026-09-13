@@ -501,3 +501,8 @@ instead — same strategy nexus-cnzei.4 used for the "debug"/"research"/"review"
   same reason nexus-dkotg dropped n03/p07/p08 for release/engine-release) also updated. Inert
   until the pin advances (the DELETION half; the .claude/skills/ addition is repo-local and
   active immediately, not gated by the plugin pin at all).
+- `conexus/skills/orchestration/SKILL.md` (nexus-cnzei.6): the "service/ builds: one builder
+  at a time" bullet's nexus-specific mechanics (`scripts/mvnw-leased.sh`, the exact env vars,
+  bead ids) trimmed to a pointer at this repo's own AGENTS.md § Engine-service release, keeping
+  only the general shared-mutable-resource principle inline (injection audit S6: repo-only
+  content shipping to every conexus plugin user). Inert until the pin advances.
