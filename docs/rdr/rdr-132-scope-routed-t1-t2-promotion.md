@@ -2,7 +2,10 @@
 title: "Scope-Routed T1 to T2 Promotion: Entity / Session / Project Scopes for Targeted Memory Retrieval"
 id: RDR-132
 type: Architecture
-status: draft
+status: abandoned
+abandoned_date: 2026-09-12
+abandon_reason: >-
+  Scope-routed T1-to-T2 promotion. Nothing shipped: no scope routing exists in the promotion path. Not folded into another RDR -- unlike RDR-131's Gap 1, no open RDR needs this design, so it is abandoned outright rather than moved. One stub commit ever (ba3566106, 2026-05-27, "stub RDR-131/132/133 from MemForest leverage synthesis"). Never researched: the rationale, alternatives, trade-offs, test plan and finalization gate sections read "to be completed during research" and never got it. No beads, no implementation, no references outside the file itself in 3.5 months. Abandoned as a batch on 2026-09-12 (Sam) because all three sat in identical evidentiary condition and deciding one while leaving two identical siblings would have been arbitrary. The ideas remain recoverable from the T3 synthesis note they came from, research-memforest-nexus-leverage-2026-05-27, and from the MemForest paper at catalog tumbler 1.14.4. Abandoning the container is not a ruling that the idea is wrong; it is a ruling that an unresearched stub is not how it stays alive.
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self

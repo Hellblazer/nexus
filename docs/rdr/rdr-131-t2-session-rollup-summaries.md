@@ -2,14 +2,17 @@
 title: "T2 Session Rollup Summaries (MemTree-Lite): Recency-Windowed Memory Consolidation for Compact Context Injection"
 id: RDR-131
 type: Architecture
-status: draft
+status: abandoned
+abandoned_date: 2026-09-12
+abandon_reason: >-
+  Its live half moved to RDR-207. Gap 1 (no recency-windowed consolidation) is the design RDR-207's mark-and-gate candidate needs, and RDR-207 now carries the measurements and failure-mode analysis this stub never had. Gap 2 (SubagentStart injection cannot bound its size) was overtaken differently: conexus/hooks/scripts/t2_prefix_scan.py caps at _MAX_NAMESPACES=5 with a scan budget, which bounds by DROPPING namespaces rather than by injecting a compact representation -- a different answer to a narrower question, and worth knowing if the gap is reopened. Two mechanics here are also stale: it names db/t2/memory_store.py as the extension point (deleted at RDR-158 with the SQLite stores; the live module is http_memory_store.py over PG) and calls for a WAL-safe migration (new T2 tables go through Liquibase, memory-00N pattern). One stub commit ever (ba3566106, 2026-05-27, "stub RDR-131/132/133 from MemForest leverage synthesis"). Never researched: the rationale, alternatives, trade-offs, test plan and finalization gate sections read "to be completed during research" and never got it. No beads, no implementation, no references outside the file itself in 3.5 months. Abandoned as a batch on 2026-09-12 (Sam) because all three sat in identical evidentiary condition and deciding one while leaving two identical siblings would have been arbitrary. The ideas remain recoverable from the T3 synthesis note they came from, research-memforest-nexus-leverage-2026-05-27, and from the MemForest paper at catalog tumbler 1.14.4. Abandoning the container is not a ruling that the idea is wrong; it is a ruling that an unresearched stub is not how it stays alive.
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-27
 accepted_date:
 related_issues: []
-related_rdrs: [RDR-057, RDR-063, RDR-089]
+related_rdrs: [RDR-057, RDR-063, RDR-089, RDR-207]
 related_tests: []
 implementation_notes: ""
 ---
