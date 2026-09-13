@@ -145,6 +145,41 @@ A wait of minutes is a loop of parked calls, never one long park. Each call park
 
 `scripts/check_inbound_relay_acks.py`'s mailbox arm is that unacked-request sweep, addressed by `--mailbox-prefix`/`--tuple-read-max`: it scans every `mailbox/*` subspace for `kind=request` rows with no matching `kind=ack` row at `mailbox/<from>`, distinguished in its findings by a `MAILBOX-UNACKED-REQUEST:` tag, and reports into the same finding list as the older T2-memory ack check (the pre-tuple-space relay convention between the nexus and conexus repos). An empty mailbox tuple space is a legitimate clean state for this arm, not a blindspot; a request younger than `--max-age-days` is a legitimate in-flight handshake and is not reported even unacked.
 
+## Push delivery: ping then pull
+
+The watcher (`nx tuple watch`) and the drain hook (`conexus/hooks/scripts/mailbox_drain.py`) are two renderers of one row that never wait on each other. This follows one message arriving at an idle session that has a watcher already armed as a Claude Code Monitor from the SessionStart instruction. See [Push delivery](tuple-space.md#push-delivery-rdr-205-ping-then-pull).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Sn as Sender
+    participant E as Engine
+    participant W as nx tuple watch (Monitor)
+    participant H as Claude Code harness
+    participant M as Session (idle, no user input)
+
+    Note over M,W: Monitor armed earlier from the SessionStart instruction
+    Sn->>E: out mailbox/[session] keys to dims from kind nonce msg-9 body
+    loop every --interval (3 s default)
+        W->>E: rd mailbox/[session] to=[session] n=300 since=cursor timeout_s=0
+    end
+    E-->>W: the new row, no park slot held
+    W->>W: not in the local seen-set: emit one ping line, mark seen
+    W-->>H: stdout line
+    H-->>M: task notification, a fresh turn with no user input
+    M->>M: reads the ping: address, sender, kind, correlation id, tuple id -- never the body
+    M->>E: in mailbox/[session] to=[session] claimant=<id> lease_s=60 (mcp tuple_in)
+    E-->>M: the tuple and a claim id
+    M->>M: act on the message
+    M->>E: ack claim_id claimant=<id> (mcp tuple_ack)
+    E-->>M: consumed
+    Note over M: nothing left for the next UserPromptSubmit's drain hook -- the model already claimed and acked it
+```
+
+The ping never claims and the claim never needs the ping. When no watcher is armed, or a ping never arrives (harness auto-stop, a dropped notification), the row is still delivered: the next prompt fires `mailbox_drain.py`, which probes independently, claims, acks and renders the same row inline in that prompt's context, with no ping ever having existed. The drain hook is never told a ping already named a row and never skips one on that account: it is the model, not the hook, that claimed and acked the row above; a row still sitting unclaimed when the hook runs is simply delivered there instead.
+
+A `/clear` or `/resume` mints a new session id out from under a watcher that is still running against the old one; the old watcher discovers this itself on its next probe cycle, stops, and releases its lock so the SessionStart instruction's re-arm can take the address. See [Push delivery](tuple-space.md#push-delivery-rdr-205-ping-then-pull) for that handoff.
+
 ## How a blocking read parks
 
 The wake path is what makes `rd` and `in` with a timeout cheap. There is one engine JVM and every `out` passes through it, so a per-subspace condition variable is enough; `LISTEN`/`NOTIFY` is deferred until a second JVM exists. See [Blocking reads](tuple-space.md#blocking-reads).
