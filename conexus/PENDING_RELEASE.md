@@ -109,7 +109,7 @@ mechanize, it matters enough to ship.
   example. Inert until the pin advances.
 - `conexus/skills/query/SKILL.md` (nexus-cnzei.3): same plan_save fix as analyze/SKILL.md
   above. Inert until the pin advances.
-- `conexus/skills/rdr-audit/SKILL.md` (nexus-cnzei.3): dropped every `ttl=0` (canonical-prompt
+- `conexus/skills/rdr-audit-checklist/SKILL.md` (nexus-cnzei.3): dropped every `ttl=0` (canonical-prompt
   load note, audit persistence call, checklist item, incident-filing note, PRODUCE line); also
   fixed a `memory_list` reference to the real `memory_get(title="")` listing call. Inert until
   the pin advances.
@@ -135,15 +135,15 @@ mechanize, it matters enough to ship.
   rdr-gate.md above. Inert until the pin advances.
 - `conexus/skills/rdr-create/SKILL.md` (nexus-cnzei.3, fix round): dropped two
   `ttl="permanent"` sites, same fix as rdr-gate.md above. Inert until the pin advances.
-- `conexus/skills/rdr-accept/SKILL.md` (nexus-cnzei.3, fix round): same `ttl="permanent"` fix
+- `conexus/skills/rdr-accept-checklist/SKILL.md` (nexus-cnzei.3, fix round): same `ttl="permanent"` fix
   as rdr-gate.md above. Inert until the pin advances.
-- `conexus/skills/rdr-fix/SKILL.md` (nexus-cnzei.3, fix round): same `ttl="permanent"` fix as
+- `conexus/skills/rdr-fix-checklist/SKILL.md` (nexus-cnzei.3, fix round): same `ttl="permanent"` fix as
   rdr-gate.md above. Inert until the pin advances.
 - `conexus/skills/rdr-close/SKILL.md` (nexus-cnzei.3, fix round): dropped three
   `ttl="permanent"` sites, same fix as rdr-gate.md above. Inert until the pin advances.
 - `conexus/skills/rdr-research/SKILL.md` (nexus-cnzei.3, fix round): same `ttl="permanent"`
   fix as rdr-gate.md above. Inert until the pin advances.
-- `conexus/skills/rdr-gate/SKILL.md` (nexus-cnzei.3, fix round): dropped four
+- `conexus/skills/rdr-gate-checklist/SKILL.md` (nexus-cnzei.3, fix round): dropped four
   `ttl="permanent"` sites, same fix as rdr-gate.md above. Inert until the pin advances.
 - nexus-r7xao — `conexus/hooks/scripts/_tuple_size_limits.py`, new: a
   stdlib-only, no-`nexus`-import mirror of the RDR-205 tuple-space size
@@ -322,10 +322,10 @@ the first line.
   stale-phrase fix as analyze/SKILL.md above. Inert until the pin advances.
 - `conexus/skills/orchestration/SKILL.md` (nexus-cnzei.4): relative-link rewrite only, same
   as analyze/SKILL.md above. Inert until the pin advances.
-- `conexus/skills/rdr-audit/SKILL.md` (nexus-cnzei.4): relative-link rewrite, plus fixes a
+- `conexus/skills/rdr-audit-checklist/SKILL.md` (nexus-cnzei.4): relative-link rewrite, plus fixes a
   `memory_list` reference (no such MCP tool exists) to `memory_get(project=..., title="")`.
   Inert until the pin advances.
-- `conexus/skills/rdr-gate/SKILL.md` (nexus-cnzei.4): relative-link rewrite only, same as
+- `conexus/skills/rdr-gate-checklist/SKILL.md` (nexus-cnzei.4): relative-link rewrite only, same as
   analyze/SKILL.md above. Inert until the pin advances.
 - `conexus/skills/rdr-research/SKILL.md` (nexus-cnzei.4): relative-link rewrite only, same
   as analyze/SKILL.md above. Inert until the pin advances.
@@ -431,16 +431,22 @@ injection and $ARGUMENTS parsing that TestRdrGateLoopRemedies and test_rdr_audit
 pin, and the skill carries content those same tests pin elsewhere. Renamed the skill side
 instead — same strategy nexus-cnzei.4 used for the "debug"/"research"/"review" verb skills.
 
-- `conexus/skills/rdr-gate/SKILL.md` -> `conexus/skills/rdr-gate-checklist/SKILL.md`
-  (nexus-cnzei.6): renamed (directory + frontmatter `name:`) to resolve the collision with
+- `conexus/skills/rdr-gate-checklist/SKILL.md` (nexus-cnzei.6): RENAMED from
+  `skills/rdr-gate/SKILL.md` (directory + frontmatter `name:`) to resolve the collision with
   `commands/rdr-gate.md`. Content unchanged. Inert until the pin advances.
-- `conexus/skills/rdr-fix/SKILL.md` -> `conexus/skills/rdr-fix-checklist/SKILL.md`
-  (nexus-cnzei.6): same rename, same reason, against `commands/rdr-fix.md`. Content
+- `conexus/skills/rdr-fix-checklist/SKILL.md` (nexus-cnzei.6): RENAMED from
+  `skills/rdr-fix/SKILL.md`, same reason, against `commands/rdr-fix.md`. Content unchanged.
+  Inert until the pin advances.
+- `conexus/skills/rdr-accept-checklist/SKILL.md` (nexus-cnzei.6): RENAMED from
+  `skills/rdr-accept/SKILL.md`, same reason, against `commands/rdr-accept.md`. Content
   unchanged. Inert until the pin advances.
 - `conexus/skills/rdr-accept/SKILL.md` -> `conexus/skills/rdr-accept-checklist/SKILL.md`
   (nexus-cnzei.6): same rename, same reason, against `commands/rdr-accept.md`. Content
 - `conexus/skills/rdr-audit/SKILL.md` -> `conexus/skills/rdr-audit-checklist/SKILL.md`
   (nexus-cnzei.6): same rename, same reason, against `commands/rdr-audit.md`. Content
+- `conexus/skills/rdr-audit-checklist/SKILL.md` (nexus-cnzei.6): RENAMED from
+  `skills/rdr-audit/SKILL.md`, same reason, against `commands/rdr-audit.md`. Content
+  unchanged. Inert until the pin advances.
 - `conexus/registry.yaml` (nexus-cnzei.6): `rdr_skills:` keys `rdr-gate`/`rdr-fix`/
   `rdr-accept`/`rdr-audit` renamed to `rdr-gate-checklist`/`rdr-fix-checklist`/
   `rdr-accept-checklist`/`rdr-audit-checklist` to match the renamed skill directories;
