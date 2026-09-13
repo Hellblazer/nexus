@@ -429,7 +429,7 @@ Agents should reference this protocol instead of duplicating:
 ```markdown
 ## Context Protocol
 
-This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
+This agent follows the [Shared Context Protocol](../resources/agent-shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
 - [Additional artifacts this agent produces]

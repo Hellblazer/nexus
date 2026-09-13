@@ -11,16 +11,21 @@ This directory contains shared resources used across multiple agents.
 
 ## Usage Pattern
 
-All 13 agents (10 active + 3 RDR-080 MCP-tool redirect stubs) reference this shared Context Protocol using:
+All 10 agents reference this shared Context Protocol using:
 
 ```markdown
 ## Context Protocol
 
-This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
+This agent follows the [Shared Context Protocol](../resources/agent-shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
 - [Agent-specific artifacts this agent produces]
 ```
+
+This directory moved out of `agents/` to `resources/agent-shared/` at
+nexus-cnzei.4 — as a subdirectory of `agents/`, it and its five reference
+documents were listed as dispatchable `conexus:_shared:*` entries alongside
+the real agents, with no way to invoke them meaningfully.
 
 This approach reduces maintenance burden and ensures consistency across all agents.
 

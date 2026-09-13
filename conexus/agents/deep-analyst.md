@@ -78,7 +78,7 @@ The only valid skip is structural inapplicability (a tier physically cannot have
 
 ## Relay Reception (MANDATORY)
 
-Before starting, validate the relay contains all required fields per [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md):
+Before starting, validate the relay contains all required fields per [RELAY_TEMPLATE.md](../resources/agent-shared/RELAY_TEMPLATE.md):
 
 1. [ ] Non-empty **Task** field (1-2 sentences)
 2. [ ] **Bead** field present (ID with status, or 'none')
@@ -86,7 +86,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 4. [ ] **Deliverable** description
 5. [ ] At least one **Quality Criterion** in checkbox format
 
-**If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
+**If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](../resources/agent-shared/CONTEXT_PROTOCOL.md):
 1. Search T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
 2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
@@ -225,7 +225,7 @@ When your investigation reveals issues requiring planned remediation, your final
 
 ## Context Protocol
 
-This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
+This agent follows the [Shared Context Protocol](../resources/agent-shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
 - **Significant Analysis Findings**: Store confirmed analytical conclusions to T3:
@@ -269,17 +269,16 @@ Store using these naming conventions:
 **CRITICAL**: Complete all data persistence BEFORE generating final response.
 
 **Sequence** (follow strictly):
-1. **Persist Analysis**: Write all findings to T2 memory (memory_put tool) and T3 store (store_put tool)
+1. **Persist Analysis**: Write findings to the single tier the `<HARD-GATE>` below names — T3 `store_put` by default, or T2 `memory_put` / T1 `scratch` when the dispatching relay specifies that target. Not all three; see the HARD-GATE for the exact rule.
 2. **Document Hypotheses**: Store hypothesis results with confidence levels
 3. **Create Relationship Maps**: Include as `--tags` in nx store documents
-4. **Verify Persistence**: Confirm all writes succeeded
-5. **Generate Response**: Only after all above steps complete, generate final analysis response
+4. **Verify Persistence**: Confirm the write succeeded
+5. **Generate Response**: Only after the step above completes, generate final analysis response
 
 **Verification Checklist**:
-- [ ] nx memory written (verify with: memory_get tool: project="...")
-- [ ] nx store documents created (verify with: search tool: query="topic", corpus="knowledge")
+- [ ] The tier named by the HARD-GATE was written (verify with `memory_get`, `search`, or a `scratch` read, matching whichever tier you used)
 - [ ] Hypothesis results documented (always verify - core deliverable)
-- [ ] All data persisted before composing final response
+- [ ] Persistence complete before composing final response
 
 **If Verification Fails** (partial persistence):
 1. **Retry once**: Attempt failed write again

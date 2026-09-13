@@ -2,8 +2,8 @@
 
 ## Quick Reference
 
-- **Context Protocol**: All agents reference `_shared/CONTEXT_PROTOCOL.md`
-- **Error Handling**: Common patterns in `_shared/ERROR_HANDLING.md`
+- **Context Protocol**: All agents reference `resources/agent-shared/CONTEXT_PROTOCOL.md`
+- **Error Handling**: Common patterns in `resources/agent-shared/ERROR_HANDLING.md`
 - **Versions**: v2.0 standard, v2.1 for enhanced agents (strategic-planner)
 
 ## Adding a New Agent
@@ -27,7 +27,7 @@
    ```markdown
    ## Context Protocol
 
-   This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
+   This agent follows the [Shared Context Protocol](../resources/agent-shared/CONTEXT_PROTOCOL.md).
 
    ### Agent-Specific PRODUCE
    - **Output Type 1**: Description
@@ -40,7 +40,7 @@
 
 ## Updating the Shared Context Protocol
 
-1. Edit `_shared/CONTEXT_PROTOCOL.md`
+1. Edit `resources/agent-shared/CONTEXT_PROTOCOL.md`
 2. All agents automatically use new version
 3. No per-agent edits needed
 
@@ -73,7 +73,7 @@ Run from the **plugin root** (the `conexus/` directory):
 
 ```bash
 # All agents reference shared protocol
-grep -l "Shared Context Protocol.*_shared" agents/*.md | wc -l
+grep -l "Shared Context Protocol.*resources/agent-shared" agents/*.md | wc -l
 
 # No inline RECEIVE sections (should return nothing)
 grep -l "^### RECEIVE " agents/*.md
@@ -94,8 +94,8 @@ Update version in frontmatter when making significant changes to an agent.
 ## Troubleshooting
 
 **Agent not finding shared protocol**:
-- Check that `_shared/CONTEXT_PROTOCOL.md` exists
-- Verify link syntax: `[Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md)`
+- Check that `resources/agent-shared/CONTEXT_PROTOCOL.md` exists
+- Verify link syntax from an agent file: `[Shared Context Protocol](../resources/agent-shared/CONTEXT_PROTOCOL.md)`
 
 **PRODUCE section missing**:
 - Each agent should have `### Agent-Specific PRODUCE` section

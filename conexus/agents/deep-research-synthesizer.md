@@ -79,7 +79,7 @@ The only valid skip is structural inapplicability (a tier physically cannot have
 
 ## Relay Reception (MANDATORY)
 
-Before starting, validate the relay contains all required fields per [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md):
+Before starting, validate the relay contains all required fields per [RELAY_TEMPLATE.md](../resources/agent-shared/RELAY_TEMPLATE.md):
 
 1. [ ] Non-empty **Task** field (1-2 sentences)
 2. [ ] **Bead** field present (ID with status, or 'none')
@@ -87,7 +87,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 4. [ ] **Deliverable** description
 5. [ ] At least one **Quality Criterion** in checkbox format
 
-**If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
+**If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](../resources/agent-shared/CONTEXT_PROTOCOL.md):
 1. Search T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
 2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
@@ -226,7 +226,7 @@ Your final output MUST include a clearly labeled next-step recommendation.
 
 ## Context Protocol
 
-This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
+This agent follows the [Shared Context Protocol](../resources/agent-shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
 - **Research Synthesis (default — T3)**: mcp__plugin_conexus_nexus__store_put(content="# Research: {topic}\n{content}", collection="<subject>", title="research-{topic}-{date}", tags="research,{domain}") — use when the dispatching relay does NOT specify an alternative target

@@ -78,7 +78,7 @@ The only valid skip is structural inapplicability (a tier physically cannot have
 
 ## Relay Reception (MANDATORY)
 
-Before starting, validate the relay contains all required fields per [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md):
+Before starting, validate the relay contains all required fields per [RELAY_TEMPLATE.md](../resources/agent-shared/RELAY_TEMPLATE.md):
 
 1. [ ] Non-empty **Task** field (1-2 sentences)
 2. [ ] **Bead** field present (ID with status, or 'none')
@@ -86,7 +86,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 4. [ ] **Deliverable** description
 5. [ ] At least one **Quality Criterion** in checkbox format
 
-**If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
+**If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](../resources/agent-shared/CONTEXT_PROTOCOL.md):
 1. Search Nexus for missing context: mcp__plugin_conexus_nexus__search(query="query", corpus="knowledge", limit=5
 2. Check Nexus memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
@@ -180,7 +180,7 @@ hand back per § Completion Protocol below. The caller dispatches the reviewers,
 gates on both being clean, then commits.
 
 Recommend a NEXT AGENT only for a genuine escalation, per
-[CONTEXT_PROTOCOL.md § Escalation](./_shared/CONTEXT_PROTOCOL.md): a blocker
+[CONTEXT_PROTOCOL.md § Escalation](../resources/agent-shared/CONTEXT_PROTOCOL.md): a blocker
 outside your role, a remediation needing a plan you cannot write, or relay
 criteria you cannot meet. § Circuit Breaker and § Automatic Escalation
 Triggers below are this agent's concrete triggers.
@@ -188,7 +188,7 @@ Triggers below are this agent's concrete triggers.
 
 ## Context Protocol
 
-This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
+This agent follows the [Shared Context Protocol](../resources/agent-shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
 - **Code Changes**: Committed with bead reference in message
