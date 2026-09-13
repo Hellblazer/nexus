@@ -18,7 +18,7 @@ Nexus auto-detects local mode when cloud credentials are absent. The recommended
 | Env var | Default | Description |
 |---|---|---|
 | `NX_LOCAL` | (auto) | `1` = force local, `0` = force cloud, unset = auto-detect |
-| `NX_LOCAL_CHROMA_PATH` | `~/.local/share/nexus/chroma` | Path to a legacy ChromaDB store. **Inert as of 7.0.0** — the migration reader was deleted with the `chromadb` dependency (RDR-155 P4b). The directory is left on disk untouched as a rollback source; T3 serves from the Postgres+pgvector service. |
+| `NX_LOCAL_CHROMA_PATH` | `~/.local/share/nexus/chroma` | Path to a legacy ChromaDB store. **Inert as of 7.0.0** (the migration reader was deleted with the `chromadb` dependency, RDR-155 P4b). The directory is a relic nothing reads, with no path back to that era (Sam, 2026-08-29); T3 serves from the Postgres+pgvector service. |
 | `NEXUS_CATALOG_PATH` | `~/.config/nexus/catalog` | Override catalog git repo location |
 | `NEXUS_CATALOG_ALLOW_CROSS_PROJECT` | unset | Set to `1` on the **client** to bypass the register-time cross-project source_uri guard, enforced engine-side (`CatalogRepository.deriveSourceUri`, nexus-e7cys). `HttpCatalogClient.register`/`.register_many` read this and forward it on the wire as `allow_cross_project` — the engine has no access to the client's environment. Emergency-only escape hatch for known-good recovery scripts that legitimately need to register rows across project boundaries; never the right answer for normal indexing. The engine logs `event=cross_project_source_uri_override_used` whenever the override is actually exercised |
 
@@ -33,7 +33,7 @@ Nexus auto-detects local mode when cloud credentials are absent. The recommended
 
 **Embedding tiers**: Tier 0 (bundled MiniLM-L6-v2, 384d) is always available. Ask for tier 1 (bge-base-en-v1.5, 768d, better quality; downloads the model on first embed) when you install the CLI: `uv tool install "conexus[local]"`. The extra is recorded in the generation's install receipt and [`nx self install`](cli-reference.md#nx-self-install) threads it into every later generation, so an upgrade never drops it; to ADD it to an existing generation install, run `nx self install --extras local` (nexus-pffc4 — merges with the extras the install already has). (On a box still on the legacy uv-tool layout, `uv tool install --reinstall "conexus[local]"` still adds it; on a generation install that same command rebuilds the legacy uv tree over the nexus-owned shims instead.)
 
-**Legacy ChromaDB store path**: Defaults to `$XDG_DATA_HOME/nexus/chroma` or `~/.local/share/nexus/chroma`, overridable with `NX_LOCAL_CHROMA_PATH`. **No longer read as of 7.0.0** — the migration reader was deleted with the `chromadb` dependency. The directory is orphaned by design (rollback source, no cleanup verb); live T3 serves from the Postgres+pgvector service.
+**Legacy ChromaDB store path**: Defaults to `$XDG_DATA_HOME/nexus/chroma` or `~/.local/share/nexus/chroma`, overridable with `NX_LOCAL_CHROMA_PATH`. **No longer read as of 7.0.0** — the migration reader was deleted with the `chromadb` dependency. The directory is a relic nothing reads, with no path back to that era (Sam, 2026-08-29) and no cleanup verb; live T3 serves from the Postgres+pgvector service.
 
 **Switching embedders or modes**: Changing the embedding model (switching local↔cloud, *or* switching local tiers 384-dim MiniLM ↔ 768-dim bge) makes the existing vectors incompatible (different dimensions/space). On the next `nx index repo .` the staleness check detects the model change and re-embeds into **new** collections under the new model token. **It does NOT automatically delete or migrate the old collections**: they remain behind under the previous token and silently return no results (their dimension no longer matches the active embedder).
 
@@ -56,7 +56,7 @@ Export both in your shell profile or process manager. You do not supply a Voyage
 
 Through 6.x they were read by the ladder's substrate rung so `nx upgrade` could read an existing ChromaDB Cloud store as a migration source. RDR-155 P4b deleted the Chroma read client, the migration ETL and finally the `chromadb` dependency itself, so there is no code left that could consume them. They are documented here only so an operator who finds them in an old `config.yml` or shell profile knows they are dead rather than broken — they can be deleted.
 
-**If you are still on a pre-migration install**, do not set these and expect an upgrade to work. Upgrading straight from a Chroma-era install into 7.0.0 is detected and refused with a loud two-hop redirect (`nexus.stranded_install`): migrate on a 6.x release first, which still ships the migration tool, then upgrade to 7.0.0. Frozen Chroma directories on disk are left untouched by design as rollback sources; there is no cleanup verb.
+**If you are still on a pre-migration install**, do not set these and expect an upgrade to work. Upgrading straight from a Chroma-era install into 7.0.0 is detected and refused with a loud two-hop redirect (`nexus.stranded_install`): migrate on a 6.x release first, which still ships the migration tool, then upgrade to 7.0.0. Frozen Chroma directories on disk are relics nothing reads, with no path back to that era (Sam, 2026-08-29) and no cleanup verb.
 
 ## Semantic Scholar (Enrichment)
 

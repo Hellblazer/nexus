@@ -92,7 +92,7 @@ claude --plugin-dir ./conexus
 
 ## Cloud mode (optional)
 
-Local mode embeds with the on-device bge-768 ONNX model (768-dim) the service provisions; the bundled minilm-384 remains a zero-download fallback. The managed-cloud deployment embeds server-side with Voyage AI (1024d) and cross-chunk context (CCE). Both modes rerank server-side (RDR-188) — local mode with an `ms-marco-MiniLM` cross-encoder, cloud mode with `voyage-rerank-2.5`.
+Local mode embeds with the on-device bge-768 ONNX model (768-dim) the service provisions; the bundled minilm-384 remains a zero-download fallback. The managed-cloud deployment embeds server-side with Voyage AI (1024d) and cross-chunk context (CCE). Both modes rerank server-side (RDR-188): local mode with an `ms-marco-MiniLM` cross-encoder, cloud mode with `voyage-rerank-2.5`.
 
 In managed-cloud mode there is no local service and no local Postgres: `nx` talks HTTPS to a hosted nexus service that owns its cloud Postgres + pgvector and embeds with Voyage AI server-side. You do not create a ChromaDB Cloud account or supply a Voyage key yourself (the service owns it).
 

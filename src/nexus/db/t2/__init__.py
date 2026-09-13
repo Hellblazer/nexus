@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""T2 memory bank — seven domain stores behind a composing facade.
+"""T2 memory bank — nine domain stores behind a composing facade.
 
-The T2 tier is split into seven domain stores, all HTTP clients over the
+The T2 tier is split into nine domain stores, all HTTP clients over the
 engine's PG tables (their SQLite predecessors died across nexus-i711w
 Stage 2; the local CatalogStore and the facade's ``catalog`` property died
 with the terminal i711w deletion — the catalog is served by
@@ -18,10 +18,11 @@ Attribute                  Class                       Responsibility
 ``db.chash_index``         ``HttpChashIndex``          chash → (collection, doc_id) global lookup (RDR-086)
 ``db.document_aspects``    ``HttpDocumentAspectsStore``  Per-document structured aspects table (RDR-089)
 ``db.aspect_queue``        ``HttpAspectQueue``         Async queue feeding the aspect-extraction worker (nexus-qeo8)
+``db.document_highlights`` ``HttpDocumentHighlightsStore`` Per-document DEVONthink highlight/mention notes (RDR-139 Layer E)
 ``db.tuples``               ``HttpTupleStore``          Linda tuple space over ``/v1/tuples`` (RDR-205)
 =========================  ==========================  =================================================================
 
-``T2Database`` is a facade: it constructs the six stores and re-exposes
+``T2Database`` is a facade: it constructs the nine stores and re-exposes
 the memory-domain public methods as thin delegates for backward
 compatibility (the chash, taxonomy, and document_aspects domains are
 accessed directly via their attributes — no facade delegates exist).
@@ -92,9 +93,10 @@ __all__ = [
 class T2Database:
     """T2 memory bank facade.
 
-    Composition over seven domain stores (``memory``, ``plans``,
+    Composition over nine domain stores (``memory``, ``plans``,
     ``taxonomy``, ``telemetry``, ``chash_index``, ``document_aspects``,
-    ``aspect_queue``), all HTTP clients over the engine's PG tables.
+    ``aspect_queue``, ``document_highlights``, ``tuples``), all HTTP
+    clients over the engine's PG tables.
     The facade forwards legacy public methods to the appropriate store
     and owns only the cross-domain ``expire()`` composition and the
     context manager.
@@ -117,8 +119,8 @@ class T2Database:
 
         # client= (nexus-m20mf P3, additive): a caller that constructs one
         # shared httpx.Client (nexus.db.t2._refreshable_client.build_shared_t2_client)
-        # and passes it here gets all eight domain stores sharing ONE
-        # connection pool instead of eight independent ones -- the general
+        # and passes it here gets all nine domain stores sharing ONE
+        # connection pool instead of nine independent ones -- the general
         # fix for callers option B's t2_index_write singleton does not
         # reach: taxonomy_cmd's ~20 per-command _T2Database(...) sites and
         # the indexer's per-file facades. Nothing changes for the default

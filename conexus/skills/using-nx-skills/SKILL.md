@@ -88,10 +88,10 @@ Conexus Storage Tiers: check before any work, and write your findings back. Read
 
 Write path: T1 (immediate, shared with siblings) → `--persist` flag to T2 (survives the session) → `/conexus:knowledge-tidy` to T3 (permanent, cross-project). Findings not stored are findings lost: call `store_put` (T3) or `memory_put` (T2) before returning a result you would want a future session to know.
 
-**T2 ttl convention (reversed 2026-09-12, nexus-473mx — omitting `ttl` now means permanent, not 30 days; a clock is something you ask for):**
+**T2 ttl convention (reversed 2026-09-12, nexus-473mx: omitting `ttl` now means permanent, not 30 days; a clock is something you ask for):**
 
 - Omit `ttl` (or pass `ttl=None` explicitly, same effect) for a record of record: a handoff, a decision, a directive, a ship record, a coordination brief, a research finding a future session must find.
-- Pass an explicit `ttl=N` (days) for a session finding, an interim result, a review round, a probe that should expire unless someone reads it again — reads extend it (`effective_ttl = ttl * (1 + ln(access_count + 1))`), silence does not buy one.
+- Pass an explicit `ttl=N` (days) for a session finding, an interim result, a review round, a probe that should expire unless someone reads it again. Reads extend it (`effective_ttl = ttl * (1 + ln(access_count + 1))`); silence does not buy one.
 - `tags` name the bead or RDR the entry serves, so the entry can be found by the work, not only by the title.
 
 ## Common Mistakes

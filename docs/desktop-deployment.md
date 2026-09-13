@@ -11,7 +11,8 @@ Nexus runs in three Claude surfaces, all backed by shared host state so it round
 > carry `chroma.sqlite3` / `t2.db` / `memory.db` on disk), do NOT run a bare
 > `nx upgrade` on this version expecting it to migrate you: install the
 > pinned `conexus==6.18.1`, run `nx upgrade` **there** to migrate the data
-> (copy-not-move — the Chroma files stay behind as a rollback source),
+> (copy-not-move, so the Chroma files stay behind afterward as a relic
+> nothing reads, with no path back to that era, Sam 2026-08-29),
 > then upgrade back to this version.
 > [migration-runbook.md § Installs that predate Postgres](migration-runbook.md#installs-that-predate-postgres)
 > carries that procedure — including the exact first-hop command, which

@@ -39,3 +39,10 @@ mechanize, it matters enough to ship.
   situations to /conexus:peer-messaging. Inert until the pin advances. Bead nexus-tacsg.
 - `conexus/skills/orchestration/SKILL.md` (nexus-tacsg): points its mid-turn message section at
   /conexus:peer-messaging. Inert until the pin advances. Bead nexus-tacsg.
+- `conexus/skills/using-nx-skills/SKILL.md` (nexus-x5kfm): rewrote the T2 ttl convention for
+  the nexus-473mx reversal (omitting ttl is now permanent, not a 30-day default). Inert until
+  the pin advances.
+- `conexus/skills/knowledge-tidying/SKILL.md` (nexus-x5kfm): rewrote the memory_put write-back
+  line for the same nexus-473mx ttl reversal. Inert until the pin advances.
+- `conexus/skills/nexus/SKILL.md` (nexus-x5kfm): rewrote the memory_put example comment for the
+  same nexus-473mx ttl reversal. Inert until the pin advances.

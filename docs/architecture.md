@@ -82,7 +82,7 @@ CLI (cli.py)            MCP Server (mcp_server.py)
                  arbitrated a single SQLite writer; Postgres does that now)
                 memory · plans · taxonomy · telemetry · document_aspects ·
                 aspect_queue · document_highlights · tuples · chash_index
-                (chash_index's PG table RETIRED — dropped by RDR-187, v0.1.51;
+                (chash_index's PG table RETIRED: dropped by RDR-187, v0.1.51;
                  the class remains a client-side shim)
           T3: Postgres 17 + pgvector behind the native nexus-service ── nx daemon service start
               Same service in BOTH modes; embedding is server-side
