@@ -970,6 +970,8 @@ class TestTupleWatchLock:
             lines = []
             second = acquire_watch_locks([addr], state_dir=tmp_path, emit=lines.append)
             assert second.ok is False
+            assert second.acquired == []
+            assert second.refused == [addr]
             assert len(lines) == 1
             assert str(os.getpid()) in lines[0]
             assert "session-one" in lines[0]
@@ -999,18 +1001,55 @@ class TestTupleWatchLock:
         finally:
             locks.release()
 
-    def test_refusing_one_address_releases_the_ones_already_taken(self, tmp_path) -> None:
+    def test_partial_acquisition_keeps_the_free_address_and_names_the_held_one(
+        self, tmp_path,
+    ) -> None:
+        """nexus-6konb.10 (MM-3.2): acquire_watch_locks is PARTIAL, not
+        all-or-nothing (MM-1.4 review finding 3, decided here). A held
+        address must not refuse an address that IS free -- a fresh session
+        re-arming after /clear typically finds its instance-name mailbox
+        still held by the stale watcher while its own session-id mailbox
+        is brand new and free, and must watch the free one rather than
+        nothing."""
         free, taken = _uniq("free"), _uniq("taken")
         holder = acquire_watch_locks([taken], state_dir=tmp_path, emit=lambda _s: None)
         assert holder.ok is True
         try:
-            second = acquire_watch_locks([free, taken], state_dir=tmp_path, emit=lambda _s: None)
+            lines = []
+            second = acquire_watch_locks([free, taken], state_dir=tmp_path, emit=lines.append)
+            try:
+                assert second.ok is True
+                assert second.acquired == [free]
+                assert second.refused == [taken]
+                assert len(lines) == 1
+                assert taken in lines[0]
+                assert "already watched by" in lines[0]
+                # the acquired address is NOT released on the partial refusal: a
+                # third watcher asking for `free` alone is refused it too.
+                third = acquire_watch_locks([free], state_dir=tmp_path, emit=lambda _s: None)
+                assert third.ok is False
+            finally:
+                second.release()
+        finally:
+            holder.release()
+
+    def test_every_address_already_held_refuses_as_before(self, tmp_path) -> None:
+        """Only when NOTHING could be acquired does the watcher exit
+        refused, matching the pre-partial-acquisition behaviour."""
+        free_but_also_taken = _uniq("addr")
+        holder = acquire_watch_locks(
+            [free_but_also_taken], state_dir=tmp_path, emit=lambda _s: None,
+        )
+        assert holder.ok is True
+        try:
+            lines = []
+            second = acquire_watch_locks(
+                [free_but_also_taken], state_dir=tmp_path, emit=lines.append,
+            )
             assert second.ok is False
-            assert second.refused_address == taken
-            # the partial acquisition must not linger: a third watcher gets `free`
-            third = acquire_watch_locks([free], state_dir=tmp_path, emit=lambda _s: None)
-            assert third.ok is True
-            third.release()
+            assert second.acquired == []
+            assert second.refused == [free_but_also_taken]
+            assert len(lines) == 1
         finally:
             holder.release()
 
@@ -1101,6 +1140,108 @@ class TestTupleWatchCliGuards:
             assert after.ok is True, "the finished watcher must not leave its lock held"
         finally:
             after.release()
+
+
+# ── nx tuple watch: /clear and /resume re-arm path (MM-3.2, nexus-6konb.10) ─
+#
+# Every scenario below crosses session ids on purpose (bead's own scenario
+# list): a per-session lock would pass a same-session test trivially while
+# failing the /clear case that actually matters. "A" below plays the stale
+# watcher a Monitor's survival across /clear leaves running under the OLD
+# session id (T2 nexus/mm-3.2-clear-resume-monitor-survival-measured-
+# 2026-09-13); it is simulated by holding locks directly rather than via a
+# second CLI invocation, since both run in this same test process.
+
+
+class TestClearResumeReArm:
+    def test_new_session_acquires_its_own_mailbox_while_the_instance_name_stays_with_the_old_watcher(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """Scenario (a): watcher A for session S1 holds mailbox/S1 and
+        mailbox/NAME; a new watcher started with session S2 and
+        --instance NAME acquires mailbox/S2, states that mailbox/NAME is
+        held by A (naming it), runs, and writes addresses.d/S2 with
+        NAME."""
+        store, _cfg, sd = _watch_env(tmp_path)
+        s1, s2, name = _uniq("s1"), _uniq("s2"), _uniq("name")
+        monkeypatch.setenv("NX_SESSION_ID", s1)
+        holder = acquire_watch_locks([s1, name], state_dir=sd, emit=lambda _s: None)
+        assert holder.ok is True
+        try:
+            monkeypatch.setenv("NX_SESSION_ID", s2)
+            tid = _out(store, s2, sender="alice")
+            res = _invoke([
+                "watch", "--instance", name, "--iterations", "1", "--interval", "0",
+                "--state-dir", str(sd),
+            ])
+            assert res.exit_code == 0, res.output
+            refusals = [
+                line for line in res.stdout.splitlines() if "already watched by" in line
+            ]
+            assert len(refusals) == 1, res.output
+            assert name in refusals[0]
+            assert s1 in refusals[0], "must name the holder (A's session), not just refuse"
+            pings = [line for line in res.stdout.splitlines() if "new mail" in line]
+            assert len(pings) == 1, res.output
+            assert tid in pings[0]
+            path = registration_path(sd, s2)
+            assert path.is_file(), (
+                "the per-session registry must be written for S2 even though "
+                "NAME's lock was refused (nexus-6konb.10 dev notes bullet 3)"
+            )
+            assert path.read_text(encoding="utf-8").strip() == name
+        finally:
+            holder.release()
+
+    def test_after_the_old_watcher_exits_a_fresh_watch_acquires_both(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """Scenario (b): after A exits, a fresh watcher for S2 acquires
+        both."""
+        store, _cfg, sd = _watch_env(tmp_path)
+        s1, s2, name = _uniq("s1"), _uniq("s2"), _uniq("name")
+        monkeypatch.setenv("NX_SESSION_ID", s1)
+        holder = acquire_watch_locks([s1, name], state_dir=sd, emit=lambda _s: None)
+        assert holder.ok is True
+        holder.release()  # what a dying watcher process's OS-released flock leaves
+        monkeypatch.setenv("NX_SESSION_ID", s2)
+        res = _invoke([
+            "watch", "--instance", name, "--iterations", "1", "--interval", "0",
+            "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        assert "already watched by" not in res.stdout
+        # both addresses are now free for a subsequent watcher too
+        after = acquire_watch_locks([s2, name], state_dir=sd, emit=lambda _s: None)
+        try:
+            assert after.ok is True
+            assert sorted(after.acquired) == sorted([s2, name])
+        finally:
+            after.release()
+
+    def test_all_addresses_held_elsewhere_refuses_and_watches_nothing(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """Scenario (c): all addresses held -> refused exit, as today."""
+        store, _cfg, sd = _watch_env(tmp_path)
+        s1, s2, name = _uniq("s1"), _uniq("s2"), _uniq("name")
+        monkeypatch.setenv("NX_SESSION_ID", s1)
+        holder = acquire_watch_locks([s1, name], state_dir=sd, emit=lambda _s: None)
+        assert holder.ok is True
+        try:
+            monkeypatch.setenv("NX_SESSION_ID", s2)
+            res = _invoke([
+                "watch", s1, name, "--iterations", "2", "--interval", "0",
+                "--state-dir", str(sd),
+            ])
+            assert res.exit_code == 0, res.output
+            refusals = [
+                line for line in res.stdout.splitlines() if "already watched by" in line
+            ]
+            assert len(refusals) == 2, res.output
+            assert not [line for line in res.stdout.splitlines() if "new mail" in line]
+        finally:
+            holder.release()
 
 
 # ── nx tuple watch: two addresses per session (MM-1.3, nexus-6konb.4) ──────

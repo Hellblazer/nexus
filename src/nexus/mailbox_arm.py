@@ -169,22 +169,36 @@ def mailbox_arm_instruction(session_id: str) -> str:
     ``--instance NAME`` or nothing, and the session-id mailbox resolves on
     its own, from this session's own environment, the moment the watcher
     spawns.
+
+    Carries the session id in the Monitor's own ``description`` (nexus-
+    6konb.10, MM-3.2), never just in a header line: a Monitor SURVIVES
+    ``/clear``, ``/compact`` and an in-process ``/resume`` (T2
+    nexus/mm-3.2-clear-resume-monitor-survival-measured-2026-09-13,
+    nexus/mm-0.1-monitor-compact-survival-measured-2026-09-12), so a
+    session firing this instruction again may find one already running --
+    described with either THIS session's id (survived /compact or
+    /resume: no action needed) or a DIFFERENT one (survived /clear: it is
+    watching an address nobody uses any more and must be stopped before
+    the new one is armed, since the per-address lock it still holds would
+    otherwise refuse the replacement outright).
     """
     return (
-        f"{ARM_MARKER} (session {session_id}): arm a mailbox watcher once, now:\n"
+        f"{ARM_MARKER}: arm once, now. A Monitor described \"mailbox watch "
+        "<other session id>\" is stale after /clear: TaskStop it, then arm. "
+        f'One described "mailbox watch {session_id}" needs no action.\n'
         "    Monitor({\n"
         '      command: "nx tuple watch --instance <your ListAgents name>",\n'
-        '      description: "mailbox watch",\n'
+        f'      description: "mailbox watch {session_id}",\n'
         "      persistent: true,\n"
         "      timeout_ms: 3600000\n"
         "    })\n"
-        "Without a ListAgents name, omit --instance; never pass an address as a "
-        "positional. timeout_ms is required. Arming twice is harmless (a lock "
-        "refuses the second). Each line is a ping, never the message, and the "
-        "watcher never claims: call mcp__plugin_conexus_nexus__tuple_in on the "
-        "named mailbox, handle it, then mcp__plugin_conexus_nexus__tuple_ack "
-        "(with reply for a request) or mcp__plugin_conexus_nexus__tuple_nack. "
-        "An unacked claim lapses, and after three lapses it is dead-lettered."
+        "Without a name, omit --instance. Arming twice is harmless (a lock "
+        "refuses the second). Each line is a ping, never the message; the "
+        "watcher never claims: call mcp__plugin_conexus_nexus__tuple_in on "
+        "the named mailbox, handle it, then "
+        "mcp__plugin_conexus_nexus__tuple_ack (with reply for a request) or "
+        "mcp__plugin_conexus_nexus__tuple_nack. An unacked claim lapses, and "
+        "after three lapses it is dead-lettered."
     )
 
 

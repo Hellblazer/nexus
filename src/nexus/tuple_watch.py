@@ -73,10 +73,15 @@ much as what is.
   not delivering something is on stdout.
 - Holds one flock per watched address (:func:`acquire_watch_locks`), scoped
   machine-wide by ADDRESS, not by session: a ``/clear`` changes the session id,
-  so a per-session lock would miss the double-arm it exists to catch. A second
-  watcher prints one line naming the holder and exits. A dead holder's lock is
-  released by the OS, so a stale file is acquired rather than refused, with no
-  pid-liveness heuristic to get wrong.
+  so a per-session lock would miss the double-arm it exists to catch. PARTIAL
+  across a multi-address request (nexus-6konb.10, MM-3.2): a held address is
+  named and skipped, never a reason to refuse an address that IS free -- a
+  session re-arming after ``/clear`` typically finds its instance-name mailbox
+  still held by the stale watcher while its own session-id mailbox is brand
+  new and free, and must watch the free one rather than nothing. Only when
+  EVERY requested address is already held does the watcher exit refused, as
+  before. A dead holder's lock is released by the OS, so a stale file is
+  acquired rather than refused, with no pid-liveness heuristic to get wrong.
 - Never claims, never acks. The ping carries address, sender, kind,
   correlation id and tuple id, never the body; the id is for correlation and
   dedup only, because the mailbox template pins only ``to`` and a claim is
@@ -440,11 +445,23 @@ def preflight(
 
 @dataclass
 class WatchLocks:
-    """Held flocks, one per watched address. ``release()`` is idempotent."""
+    """Held flocks, one per SUCCESSFULLY acquired address. ``release()`` is
+    idempotent.
+
+    Partial by construction (nexus-6konb.10, MM-3.2 -- resolving MM-1.4
+    review finding 3): ``acquired`` names what is actually held, and is
+    what the caller must pass on to :func:`run_watch` -- not the original
+    requested address list, which may include addresses this call could
+    not lock. ``refused`` names what was already held elsewhere. ``ok`` is
+    true as soon as at least one address was acquired; only a request
+    where EVERY address was already held comes back ``ok=False``, exactly
+    the all-or-nothing refusal this replaces for that one case.
+    """
 
     ok: bool
     holders: list[Any] = field(default_factory=list)
-    refused_address: str = ""
+    acquired: list[str] = field(default_factory=list)
+    refused: list[str] = field(default_factory=list)
 
     def release(self) -> None:
         from nexus._locking import unlock_file  # noqa: PLC0415 — deferred: CLI startup cost
@@ -469,7 +486,22 @@ def acquire_watch_locks(
     state_dir: Path,
     emit: Callable[[str], None],
 ) -> WatchLocks:
-    """Take one exclusive advisory lock per address, machine-wide.
+    """Take one exclusive advisory lock per address, machine-wide, PARTIAL
+    across the request (nexus-6konb.10, MM-3.2 -- resolving MM-1.4 review
+    finding 3, previously undecided).
+
+    A held address is named and skipped, never a reason to refuse an
+    address that IS free: a session re-arming after ``/clear`` typically
+    finds its instance-name mailbox still held by the stale watcher from
+    before the clear (a Monitor SURVIVES ``/clear`` -- T2 nexus/mm-3.2-
+    clear-resume-monitor-survival-measured-2026-09-13) while its own
+    session-id mailbox is brand new and free. An all-or-nothing lock would
+    refuse that free address too, leaving the new session watching
+    nothing at all -- never a silent half-watch, but a stated one is
+    fine, matching this phase's own philosophy elsewhere (module
+    docstring). Only when NOTHING could be acquired does this behave as
+    the all-or-nothing form did: ``ok=False``, nothing held, the caller
+    exits.
 
     The scope is the ADDRESS, never the session: a ``/clear`` mints a new session
     id, so a per-session lock would admit exactly the second watcher it exists to
@@ -481,7 +513,7 @@ def acquire_watch_locks(
     from nexus._locking import lock_file  # noqa: PLC0415 — deferred: CLI startup cost
     from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred
 
-    locks = WatchLocks(ok=True)
+    locks = WatchLocks(ok=False)
     session_id = resolve_active_session_id() or "unknown-session"
     for address in _unique_addresses(addresses):
         path = lock_path(state_dir, address)
@@ -493,14 +525,12 @@ def acquire_watch_locks(
             handle.seek(0)
             held = handle.read().strip() or "an unnamed process"
             handle.close()
-            locks.ok = False
-            locks.refused_address = address
+            locks.refused.append(address)
             emit(
-                f"{PING_PREFIX} SKIP: mailbox/{address} is already watched by {held}."
-                f" This second watcher is exiting rather than doubling every ping.",
+                f"{PING_PREFIX} SKIP: mailbox/{address} is already watched by {held};"
+                f" not watching that address, rather than doubling every ping.",
             )
-            locks.release()
-            return locks
+            continue
         handle.seek(0)
         handle.truncate()
         handle.write(
@@ -509,6 +539,8 @@ def acquire_watch_locks(
         )
         handle.flush()
         locks.holders.append(handle)
+        locks.acquired.append(address)
+    locks.ok = bool(locks.acquired)
     return locks
 
 

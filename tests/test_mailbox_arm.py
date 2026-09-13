@@ -91,6 +91,31 @@ class TestMailboxArmInstructionText:
         assert "lapses" in text
         assert "dead-lettered" in text
 
+    def test_monitor_description_embeds_the_session_id(self) -> None:
+        """nexus-6konb.10 (MM-3.2): the Monitor description must carry the
+        session id exactly, so a model can tell a stale watcher (a
+        different session id, surviving a prior /clear -- T2
+        nexus/mm-3.2-clear-resume-monitor-survival-measured-2026-09-13)
+        apart from its own, current one (same session id, surviving a
+        /compact or /resume)."""
+        text = mailbox_arm_instruction("sess-abc")
+        assert 'description: "mailbox watch sess-abc"' in text
+
+    def test_states_the_stale_watcher_taskstop_rule(self) -> None:
+        """A Monitor already running under a DIFFERENT session id is stale
+        (it survived a /clear) and must be stopped before arming a fresh
+        one on this session's address."""
+        text = mailbox_arm_instruction("sess-abc")
+        assert "TaskStop" in text
+        assert "different session id" in text or "other session id" in text
+
+    def test_states_the_same_session_no_action_rule(self) -> None:
+        """A Monitor already running described with THIS session's id (it
+        survived a /compact or /resume) needs no action -- re-arming it
+        would just be refused by the per-address lock anyway."""
+        text = mailbox_arm_instruction("sess-abc")
+        assert 'mailbox watch sess-abc" needs no action' in text
+
 
 # ── arm_block: the orchestrator hooks.session_start() calls ────────────────
 

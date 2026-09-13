@@ -429,12 +429,22 @@ def tuple_watch_cmd(
         # matching what it actually watched. Never keyed by a positional literal:
         # only by the session id this process resolved from its own environment,
         # which is what `mailbox_drain.py` reads back per its own payload session id.
+        #
+        # Deliberately keyed on `watched` (what was RESOLVED), not `locks.acquired`
+        # (what was actually LOCKED): nexus-6konb.10 (MM-3.2) decision 3 -- this
+        # registration is written whether or not the instance-name lock was
+        # acquired. The name belongs to the new session regardless of whether a
+        # stale watcher from a prior /clear still holds that address's lock, and
+        # the drain hook must drain it at this session's prompts either way.
         if instance and session_id_from_env and instance in watched and not addresses:
             write_instance_registration(sd, session_id_from_env, instance)
         if session_id_from_env:
             prune_stale_registrations(sd, session_id_from_env)
+        # Watch exactly what was LOCKED (nexus-6konb.10, MM-3.2): acquire_watch_locks
+        # is partial, so `locks.acquired` can be a strict subset of `watched` when
+        # another watcher already holds one of the requested addresses.
         run_watch(
-            store, watched, config=cfg, state_dir=sd,
+            store, locks.acquired, config=cfg, state_dir=sd,
             iterations=iterations, emit=click.echo, report=report,
         )
     except KeyboardInterrupt:
