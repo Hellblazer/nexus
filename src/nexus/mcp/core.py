@@ -4341,11 +4341,18 @@ def store_put(
     Use `memory_put` instead for a project-scoped T2 note with a shorter
     lifetime; use `scratch` for an ephemeral, session-only T1 note.
 
-    Returns "Stored: <doc_id> -> <collection>", or an explicit error naming
-    what did not land (e.g. content stored but not cataloged).
+    Returns "Stored: <id> -> <collection>" (for a split note, the first
+    chunk's id, plus "(N chunks, split to the embedding model's token
+    window)"), or an explicit error naming what did not land (e.g. content
+    stored but not cataloged).
 
     Constraints:
     - `content` is capped at 16,384 UTF-8 bytes (~3,000-4,000 words).
+    - On a collection whose embedding model has a small token window
+      (bge-base-en-v1.5 at 512 tokens, MiniLM at 256; both local mode), a
+      note longer than the window is stored as several chunks under one
+      catalog document, split at newlines, sentence ends or spaces. Voyage
+      collections never split.
     - `collection` must be a bare subject area, never a placeholder or a
       pre-rendered four-segment/model-token name.
     - A non-empty `title` reconciles onto the existing (collection, title)
@@ -4689,10 +4696,13 @@ def store_get(
     document those return only fragments or metadata of.
 
     Returns the document's id, collection, title, tags, index date, and
-    full content as text.
+    full content as text. A note that `store_put` split comes back whole,
+    rebuilt in position order, with a "Chunks: N" line.
 
     Constraints:
-    - `doc_id` is either a 64-char content-hash or an exact title.
+    - `doc_id` is either a 64-char content-hash (any chunk of a split note
+      works) or an exact title; a title shared by one split note's chunks
+      resolves to that note.
     - `collection` defaults to the knowledge__knowledge placeholder, not
       every knowledge__* collection — see the `collection` parameter.
     - A title matching more than one document returns the candidate ids
@@ -4960,6 +4970,8 @@ def store_get_many(
       collection, not every knowledge__* collection.
     - Each document body is capped at `max_chars_per_doc`; a cut body ends
       with an explicit truncation marker, never a silent cut.
+    - Ids are chunk ids, so a note that `store_put` split comes back as its
+      separate pieces; use `store_get` for the whole note.
     """
     try:
         # Detect parallel-stream form: ids is a non-empty list of lists.
