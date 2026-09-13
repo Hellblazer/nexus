@@ -32,8 +32,10 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.43.0)
 
-- `conexus/skills/peer-messaging/SKILL.md` (new), `conexus/skills/using-nx-skills/SKILL.md`,
-  `conexus/skills/orchestration/SKILL.md`: standalone skill for messaging other
-  Claude sessions and dispatched agents (channel choice, request
-  acknowledgement, trust boundary, sharing one machine), routed from
-  using-nx-skills and orchestration. Inert until the pin advances. Bead nexus-tacsg.
+- `conexus/skills/peer-messaging/SKILL.md` (new): standalone skill for messaging other
+  Claude sessions and dispatched agents (channel choice, request acknowledgement,
+  trust boundary, sharing one machine). Inert until the pin advances. Bead nexus-tacsg.
+- `conexus/skills/using-nx-skills/SKILL.md`: routes messaging and machine-sharing
+  situations to /conexus:peer-messaging. Inert until the pin advances. Bead nexus-tacsg.
+- `conexus/skills/orchestration/SKILL.md`: points its mid-turn message section at
+  /conexus:peer-messaging. Inert until the pin advances. Bead nexus-tacsg.
