@@ -22,7 +22,8 @@ def memory() -> None:
 @click.option("--project", "-p", required=True, help="Project namespace (e.g. BFDB)")
 @click.option("--title", "-t", required=True, help="Entry title/filename")
 @click.option("--tags", default="", help="Comma-separated tags")
-@click.option("--ttl", default="30d", show_default=True, help="TTL: Nd, Nw, or permanent")
+@click.option("--ttl", default="permanent", show_default=True,
+              help="TTL: Nd, Nw, or permanent (nexus-473mx: silence no longer buys a clock)")
 @click.option(
     "--merge",
     is_flag=True,

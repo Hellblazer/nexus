@@ -77,8 +77,8 @@ class TestOut:
         assert isinstance(tuple_id, str) and len(tuple_id) == 64
         int(tuple_id, 16)  # lowercase hex, RDR-086 convention
 
-        rows = store.rd(f"mailbox/{addr}", {"to": addr})
-        assert len(rows) == 1
+        rows = store.rd(f"mailbox/{addr}", {"to": addr}, n=2)
+        assert len(rows) == 1, f"expected one row, got {len(rows)}"
         row = rows[0]
         assert isinstance(row, TupleRow)
         assert row.id == tuple_id
@@ -121,8 +121,8 @@ class TestRd:
         assert store.rd(f"ledger/{session}", {"agent_id": "a1", "kind": "start"}) == []
 
         store.out(f"ledger/{session}", {"agent_id": "a1", "kind": "start"}, None, None)
-        rows = store.rd(f"ledger/{session}", {"agent_id": "a1", "kind": "start"})
-        assert len(rows) == 1
+        rows = store.rd(f"ledger/{session}", {"agent_id": "a1", "kind": "start"}, n=2)
+        assert len(rows) == 1, f"expected one row, got {len(rows)}"
         assert rows[0].keys == {"agent_id": "a1", "kind": "start"}
 
     def test_unknown_subspace_is_unknown_subspace_error(self, t2_service_env) -> None:
@@ -149,8 +149,8 @@ class TestRdp:
             f"mailbox/{addr}", {"to": addr}, {"from": "sender-a"}, "hi",
             nonce=_uniq("nonce"),
         )
-        rows = store.rdp(f"mailbox/{addr}", {"to": addr})
-        assert len(rows) == 1
+        rows = store.rdp(f"mailbox/{addr}", {"to": addr}, n=2)
+        assert len(rows) == 1, f"expected one row, got {len(rows)}"
 
     def test_unknown_subspace_is_unknown_subspace_error(self, t2_service_env) -> None:
         store = HttpTupleStore()
@@ -262,8 +262,8 @@ class TestNack:
 
         store.nack(claim_id, "c1")
 
-        rows = store.rd(f"mailbox/{addr}", {"to": addr})
-        assert len(rows) == 1
+        rows = store.rd(f"mailbox/{addr}", {"to": addr}, n=2)
+        assert len(rows) == 1, f"expected one row, got {len(rows)}"
         assert rows[0].claim_state is None
         assert rows[0].claimant is None
 
@@ -841,8 +841,16 @@ class TestAckWithReply:
         assert isinstance(reply_id, str) and len(reply_id) == 64
         int(reply_id, 16)
 
-        rows = store.rd(f"mailbox/{reply_addr}", {"to": reply_addr})
-        assert [r.body for r in rows] == ["done"]
+        # n=2, not the default n=1 (nexus-dd, RDR-206 Phase 2 review). With
+        # the default the read can return at most one row, so "exactly one
+        # reply exists" is satisfied by the READ'S LIMIT rather than by the
+        # store's state, and a duplicate reply write passes unnoticed. Ask
+        # for more than the expected count whenever the assertion IS the
+        # count.
+        rows = store.rd(f"mailbox/{reply_addr}", {"to": reply_addr}, n=2)
+        assert [r.body for r in rows] == ["done"], (
+            f"expected exactly one reply row, got {[r.body for r in rows]}"
+        )
         assert rows[0].id == reply_id
 
     def test_a_reply_to_an_unresolvable_subspace_leaves_the_request_claimed(

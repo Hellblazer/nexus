@@ -124,6 +124,11 @@ class _MockEngine:
         self.ack_ok: bool = True
         self.calls: list[tuple[str, dict]] = []
         self.rd_delay_s: float = 0.0
+        #: Delay applied only to a paginated follow-up ``rd`` (one that carries
+        #: a ``since`` cursor), so a full first page can answer instantly while
+        #: the page needed to confirm a pending id's true absence never
+        #: returns in time (nexus-1kvk3's budget-exhausted path).
+        self.rd_delay_since_s: float = 0.0
         #: Drop the connection on the Nth call to this route (1-based), AFTER
         #: applying its effect. Models the killing case: the engine consumed the
         #: row and the client never learned it.
@@ -178,6 +183,8 @@ class _MockEngine:
                         return
                     if engine.rd_delay_s:
                         time.sleep(engine.rd_delay_s)
+                    if engine.rd_delay_since_s and body.get("since"):
+                        time.sleep(engine.rd_delay_since_s)
                     pattern = (body.get("keys_pattern") or {}).get("to")
                     rows = [
                         r for r in engine.rows
@@ -373,7 +380,18 @@ class TestAddressRegistry:
     """The session id resolves from the hook payload. The INSTANCE NAME is in
     no environment variable anywhere (MM-1.3), so it can only be drained once
     something has registered it. Until then instance-addressed mail has no
-    floor, which the bead says out loud."""
+    floor, which the bead says out loud.
+
+    nexus-6konb.9 defect fix: the registry is PER-SESSION
+    (``<config>/tuple-watch/addresses.d/<session id>``), corrected from an
+    earlier machine-wide ``<config>/tuple-watch/addresses`` file that let
+    whichever session prompted first drain every other session's
+    instance-addressed mail too."""
+
+    def _reg(self, tmp_path, session_id: str = SESSION_ID):
+        reg = tmp_path / "config" / "tuple-watch" / "addresses.d" / session_id
+        reg.parent.mkdir(parents=True, exist_ok=True)
+        return reg
 
     def test_the_session_id_address_is_always_drained(self, tmp_path, engine) -> None:
         eng = engine()
@@ -386,9 +404,7 @@ class TestAddressRegistry:
 
     def test_a_registered_address_is_drained_too(self, tmp_path, engine) -> None:
         eng = engine()
-        reg = tmp_path / "config" / "tuple-watch" / "addresses"
-        reg.parent.mkdir(parents=True, exist_ok=True)
-        reg.write_text("nexus-19\n", encoding="utf-8")
+        self._reg(tmp_path).write_text("nexus-19\n", encoding="utf-8")
         _wired(tmp_path, eng)
         _run(tmp_path=tmp_path)
         rd_bodies = [b for p, b in eng.calls if p == "/v1/tuples/rd"]
@@ -407,10 +423,9 @@ class TestAddressRegistry:
 
     def test_registry_junk_and_duplicates_are_tolerated(self, tmp_path, engine) -> None:
         eng = engine()
-        reg = tmp_path / "config" / "tuple-watch" / "addresses"
-        reg.parent.mkdir(parents=True, exist_ok=True)
-        reg.write_text(f"\n  nexus-19  \n\n# a comment\nnexus-19\n{SESSION_ID}\n",
-                       encoding="utf-8")
+        self._reg(tmp_path).write_text(
+            f"\n  nexus-19  \n\n# a comment\nnexus-19\n{SESSION_ID}\n", encoding="utf-8",
+        )
         _wired(tmp_path, eng)
         res = _run(tmp_path=tmp_path)
         assert res.returncode == 0, res.stderr
@@ -418,6 +433,50 @@ class TestAddressRegistry:
         assert subspaces.count("mailbox/nexus-19") == 1
         assert subspaces.count(f"mailbox/{SESSION_ID}") == 1
         assert not any(s and "#" in s for s in subspaces)
+
+    def test_a_machine_wide_flat_registry_file_is_ignored(self, tmp_path, engine) -> None:
+        """The old design's flat ``<config>/tuple-watch/addresses`` file, if
+        one happens to exist on disk (a relic, or a human who followed the
+        stale doc), must never be read by this hook any more -- only the
+        per-session ``addresses.d/<session id>`` file counts."""
+        eng = engine()
+        flat = tmp_path / "config" / "tuple-watch" / "addresses"
+        flat.parent.mkdir(parents=True, exist_ok=True)
+        flat.write_text("nexus-flat-relic\n", encoding="utf-8")
+        _wired(tmp_path, eng)
+        res = _run(tmp_path=tmp_path)
+        assert res.returncode == 0, res.stderr
+        rd_bodies = [b for p, b in eng.calls if p == "/v1/tuples/rd"]
+        assert not any(b.get("subspace") == "mailbox/nexus-flat-relic" for b in rd_bodies)
+
+    def test_cross_session_drain_never_leaks_a_peer_sessions_instance_mailbox(
+        self, tmp_path, engine,
+    ) -> None:
+        """Two sessions on one box. Session A's watcher registered instance
+        NAME_A under A's own session id. Session B's drain (a DIFFERENT
+        payload session id) must NOT drain mailbox/NAME_A -- only A's own
+        drain may. This crosses session ids on purpose: a same-session test
+        would pass even with the retired machine-wide design, which is
+        exactly the bug this fix closes."""
+        session_a, session_b = "sess-A-owns-instance", "sess-B-different-session"
+        instance_a = "nexus-instance-a"
+        eng = engine()
+        eng.rows = [_row("kk11", sender="peer", body="for instance A")]
+        eng.rows[0]["keys"] = {"to": instance_a}
+        eng.rows[0]["subspace"] = f"mailbox/{instance_a}"
+        _wired(tmp_path, eng)
+        self._reg(tmp_path, session_a).write_text(instance_a + "\n", encoding="utf-8")
+
+        res_b = _run(tmp_path=tmp_path, stdin=_payload(session_id=session_b))
+        assert res_b.returncode == 0, res_b.stderr
+        rd_bodies_b = [b for p, b in eng.calls if p == "/v1/tuples/rd"]
+        assert not any(b.get("subspace") == f"mailbox/{instance_a}" for b in rd_bodies_b)
+
+        eng.calls.clear()
+        res_a = _run(tmp_path=tmp_path, stdin=_payload(session_id=session_a))
+        assert res_a.returncode == 0, res_a.stderr
+        rd_bodies_a = [b for p, b in eng.calls if p == "/v1/tuples/rd"]
+        assert any(b.get("subspace") == f"mailbox/{instance_a}" for b in rd_bodies_a)
 
 
 class TestNeverBlocksThePrompt:
@@ -592,7 +651,7 @@ class TestPartialFailureNeverLosesDeliveredMail:
         # the FIRST rd is the session-id address: kill its connection so the
         # hook raises _Skip on it before ever reaching the second address
         eng.fail_rd_for = SESSION_ID
-        reg = tmp_path / "config" / "tuple-watch" / "addresses"
+        reg = tmp_path / "config" / "tuple-watch" / "addresses.d" / SESSION_ID
         reg.parent.mkdir(parents=True, exist_ok=True)
         reg.write_text("other-addr\n", encoding="utf-8")
         _wired(tmp_path, eng)
@@ -623,7 +682,7 @@ class TestPartialFailureNeverLosesDeliveredMail:
         good["keys"] = {"to": "other-addr"}
         eng.rows = [good]
         eng.malformed_rd_for = SESSION_ID
-        reg = tmp_path / "config" / "tuple-watch" / "addresses"
+        reg = tmp_path / "config" / "tuple-watch" / "addresses.d" / SESSION_ID
         reg.parent.mkdir(parents=True, exist_ok=True)
         reg.write_text("other-addr\n", encoding="utf-8")
         _wired(tmp_path, eng)
@@ -767,6 +826,44 @@ class TestPartialFailureNeverLosesDeliveredMail:
         )
         assert "SKIP" in res.stderr
         assert "Traceback" not in res.stderr, "a raw traceback reached the user's prompt"
+
+    def test_budget_exhausted_confirming_a_pending_id_keeps_the_record_and_says_so(
+        self, tmp_path, engine,
+    ) -> None:
+        """nexus-1kvk3's budget-exhausted path. A pending id from an earlier
+        ambiguous ack is not resolved by the first probe page -- a FULL page of
+        PROBE_N rows, none of them matching it, so its true absence is still
+        unknown -- and the page needed to confirm that never returns in time.
+
+        The record must survive untouched (never guessed absent and delivered,
+        never guessed present and dropped) and the hook must say why on
+        stderr, not silently truncate.
+        """
+        eng = engine()
+        eng.rows = [_row(f"filler{i}") for i in range(20)]  # a full PROBE_N page
+        eng.rd_delay_since_s = 30.0  # the paginated follow-up never returns in time
+        _wired(tmp_path, eng)
+
+        pending_dir = tmp_path / "config" / "tuple-watch"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        pending_path = pending_dir / f"{SESSION_ID}.pending.json"
+        pending_body = json.dumps({"entries": [
+            {"id": "ghost-id", "rendered": "- from=peer-z ... an ambiguous earlier ack"},
+        ]})
+        pending_path.write_text(pending_body, encoding="utf-8")
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0
+        assert res.stdout.strip() == "", (
+            "a pending row whose presence could not be confirmed must not be "
+            "rendered as either delivered or dropped"
+        )
+        assert "SKIP" in res.stderr
+        assert pending_path.read_text() == pending_body, (
+            "the pending record must survive an unconfirmed presence check "
+            "untouched, not be cleared on a guess"
+        )
 
     def test_a_pending_record_survives_a_drain_that_never_reclaims_the_row(
         self, tmp_path, engine,

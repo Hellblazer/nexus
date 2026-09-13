@@ -35,6 +35,7 @@ from nexus.tuple_watch import (
     acquire_watch_locks,
     lock_path,
     preflight,
+    registration_path,
     resolve_watch_addresses,
     run_watch,
     state_path,
@@ -744,6 +745,67 @@ class TestTupleWatch:
         assert sum("probe failed" in line and bad in line for line in lines) == 1
 
 
+# ── nx tuple watch: backlog beyond probe_n (nexus-qw386) ────────────────────
+#
+# MM-1.1 fetches probe_n rows per probe with no ``since`` cursor: past that
+# ceiling (dead rows included, since they stay rd-readable for the full
+# retention window without ever being claimable) the newest mail falls
+# outside the window and is never pinged. probe_n is overridden small here
+# (not the 300 default) so the backlog that exceeds it is a handful of rows,
+# not hundreds, against the real engine substrate.
+
+
+class TestTupleWatchBeyondProbeN:
+    def test_live_backlog_beyond_probe_n_still_pings_new_mail(self, t2_service_env, tmp_path) -> None:
+        store = HttpTupleStore()
+        cfg = WatchConfig(interval_s=1.0, reemit_after_s=600.0, max_emits=3, probe_n=3)
+        sd = tmp_path
+        addr = _uniq("addr")
+        sub = f"mailbox/{addr}"
+        for i in range(cfg.probe_n + 3):  # 6 live rows > probe_n=3
+            _out(store, addr, sender=f"old{i}")
+        fresh_id = _out(store, addr, sender="alice")
+
+        # Non-vacuity: a single probe capped at probe_n cannot see the fresh row at all --
+        # this is the truncation the fix must page past, not something already unreachable.
+        head = store.rd(sub, {"to": addr}, n=cfg.probe_n)
+        assert len(head) == cfg.probe_n
+        assert fresh_id not in [r.id for r in head]
+
+        lines, reports, clock = [], [], _Clock()
+        _run(store, cfg, sd, addr, clock, cfg.probe_n + 3, lines, reports)
+        pings = [line for line in lines if "new mail" in line]
+        assert any(fresh_id in line for line in pings), lines
+
+    def test_dead_backlog_beyond_probe_n_still_pings_new_mail(self, t2_service_env, tmp_path) -> None:
+        store = HttpTupleStore()
+        cfg = WatchConfig(interval_s=1.0, reemit_after_s=600.0, max_emits=3, probe_n=2)
+        sd = tmp_path
+        addr = _uniq("addr")
+        sub = f"mailbox/{addr}"
+        dead_ids = []
+        for i in range(cfg.probe_n + 1):  # 3 dead rows > probe_n=2
+            tid = _out(store, addr, sender=f"poison{i}")
+            for _ in range(3):  # mailbox.yaml max_attempts=3: the third nack dead-letters it
+                claimant = _uniq("c")
+                claimed = store.in_(sub, {"to": addr}, claimant=claimant, lease_s=30)
+                assert claimed is not None and claimed[0].id == tid
+                store.nack(claimed[1], claimant)
+            dead_ids.append(tid)
+        fresh_id = _out(store, addr, sender="alice")
+
+        # Non-vacuity: a single probe capped at probe_n is dead rows only, fresh mail hidden.
+        head = store.rd(sub, {"to": addr}, n=cfg.probe_n)
+        assert len(head) == cfg.probe_n
+        assert all(r.claim_state == "dead" for r in head)
+        assert fresh_id not in [r.id for r in head]
+
+        lines, reports, clock = [], [], _Clock()
+        _run(store, cfg, sd, addr, clock, cfg.probe_n + 3, lines, reports)
+        pings = [line for line in lines if "new mail" in line]
+        assert any(fresh_id in line for line in pings), lines
+
+
 # ── nx tuple watch: preflight, failure visibility, locking (MM-1.2, nexus-6konb.3) ──
 
 
@@ -1290,6 +1352,44 @@ class TestWatchTwoAddressesCli:
         assert lock_path(sd, named).is_file()
         assert not lock_path(sd, inst).exists()
 
+    def test_instance_flag_with_no_positional_writes_the_per_session_registry(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-6konb.9 defect fix: the drain hook (``mailbox_drain.py``)
+        reads ``<config>/tuple-watch/addresses.d/<session id>`` -- this is
+        the write side. Written atomically: no leftover ``.tmp`` sibling
+        once the command has exited."""
+        store, _cfg, sd = _watch_env(tmp_path)
+        sess, inst = _uniq("sess"), _uniq("inst")
+        monkeypatch.setenv("NX_SESSION_ID", sess)
+        res = _invoke([
+            "watch", "--instance", inst, "--iterations", "1", "--interval", "0",
+            "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        path = registration_path(sd, sess)
+        assert path.is_file(), res.output
+        assert path.read_text(encoding="utf-8").strip() == inst
+        assert not path.with_name(path.name + ".tmp").exists()
+
+    def test_positional_address_form_writes_nothing_to_the_registry(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """An explicit positional ADDRESS suppresses the session-id/instance
+        default outright (``resolve_watch_addresses``'s own contract), so
+        `--instance` is not part of what this invocation actually watched
+        and nothing should be registered under this session's id."""
+        store, _cfg, sd = _watch_env(tmp_path)
+        named, inst, sess = _uniq("named"), _uniq("inst"), _uniq("sess")
+        monkeypatch.setenv("NX_SESSION_ID", sess)
+        _out(store, named, sender="wanted")
+        res = _invoke([
+            "watch", named, "--instance", inst, "--iterations", "1", "--interval", "0",
+            "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        assert not registration_path(sd, sess).exists()
+
     def test_cli_instance_equal_to_the_session_id_watches_once(
         self, t2_service_env, tmp_path, monkeypatch,
     ) -> None:
@@ -1555,3 +1655,56 @@ class TestWatcherAndDrainHookAreDisjoint:
         assert res.returncode == 0, res.stderr
         assert "floor delivery" in res.stdout
         assert not store.rd(f"mailbox/{addr}", {"to": addr}, n=5)
+
+
+class TestMailboxDrainDoesNotStarveBehindALargeDeadBacklog:
+    """nexus-1kvk3: the engine's ``rd`` orders by created_at ascending, never
+    excludes claimed or dead-lettered rows, and caps a page at the hook's own
+    PROBE_N (20, ``mailbox_drain.py``). A live row ranked behind more than
+    that many dead-lettered rows must still reach this hook -- unlike the
+    ``rd``-only watcher (the sibling starvation, nexus-qw386), this hook
+    claims via ``/v1/tuples/in``, which is not windowed by any probe page."""
+
+    HOOK = (
+        Path(__file__).resolve().parent.parent
+        / "conexus" / "hooks" / "scripts" / "mailbox_drain.py"
+    )
+
+    def _run_hook(self, addr: str, tmp_path) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        env["NEXUS_CONFIG_DIR"] = str(tmp_path / "hookcfg")
+        env["XDG_STATE_HOME"] = str(tmp_path / "hookstate")
+        return subprocess.run(
+            [sys.executable, str(self.HOOK)],
+            input=json.dumps({"session_id": addr, "hook_event_name": "UserPromptSubmit"}),
+            capture_output=True, text=True, env=env, timeout=300,
+        )
+
+    def test_a_live_row_ranked_beyond_probe_n_dead_rows_is_still_drained(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        store, _cfg, _sd = _watch_env(tmp_path)
+        addr = _uniq("addr")
+        sub = f"mailbox/{addr}"
+        # PROBE_N is 20 in mailbox_drain.py; one more than that dead-lettered
+        # ahead of the live row reproduces the starvation the bead names.
+        for i in range(21):
+            tid = _out(store, addr, sender="poison", body=f"dead-{i}")
+            for _ in range(3):  # mailbox.yaml max_attempts=3: the third nack dead-letters it
+                claimant = _uniq("c")
+                claimed = store.in_(sub, {"to": addr}, claimant=claimant, lease_s=30)
+                assert claimed is not None and claimed[0].id == tid
+                store.nack(claimed[1], claimant)
+        live_id = _out(store, addr, sender="alice", body="the live row ranked 22nd")
+
+        res = self._run_hook(addr, tmp_path)
+
+        assert res.returncode == 0, res.stderr
+        assert "the live row ranked 22nd" in res.stdout, (
+            "a live row ranked beyond the probe window was starved behind "
+            "more than PROBE_N dead-lettered rows"
+        )
+        remaining = {r.id for r in store.rd(sub, {"to": addr}, n=50)}
+        assert live_id not in remaining, (
+            "the live row was never claimed, so it is still sitting in the mailbox"
+        )
