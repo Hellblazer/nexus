@@ -468,7 +468,19 @@ from __future__ import annotations
 #: the engine was tagged, deployed and cloud-gated BEFORE this client tag
 #: (nexus-1emxn choreography (a)). Local-mode installs get the reference-only
 #: retention model and the resolve route ONLY through this pin.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 116)
+#: ->(0,1,117) 2026-09-13: paired with conexus 7.44.0 (RDR-206 claim renewal
+#: and reply-in-ack; nexus-904y8 /version uptime fields). Engine delta over
+#: v0.1.116 is additive only: one NEW route (`POST /v1/tuples/renew`), an
+#: optional `reply` object on `/v1/tuples/ack` with `reply_id` on every ack
+#: response, and two `/version` fields the managed edge trims. No Liquibase
+#: changeset (the cloud walk replayed only runAlways changesets, 450 before
+#: and after). Both wire-ledger entries (nexus-904y8, nexus-h61dl.12) lead with
+#: [additive], so the engine was tagged (2a56d164f), --acquire gated and
+#: deployed with STEP-6 green (gate-report-20260913T015915Z-v011.json) BEFORE
+#: this client tag (nexus-1emxn choreography (a)); cloud-client-path-gate leg H
+#: probed renew and ack-with-reply through the edge, 7/7. Local-mode installs
+#: get renew and reply-in-ack ONLY through this pin.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 117)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
