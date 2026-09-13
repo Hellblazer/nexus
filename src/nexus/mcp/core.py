@@ -5237,7 +5237,7 @@ def memory_put(
     project: str,
     title: str,
     tags: str = "",
-    ttl: int | None = 30,
+    ttl: int | None = None,
     agent: str = "",
     session: str = "",
 ) -> str:
@@ -5248,15 +5248,29 @@ def memory_put(
         project: Project namespace (e.g. "nexus", "nexus_active")
         title: Entry title (unique within project)
         tags: Comma-separated tags
-        ttl: Time-to-live in days. DEFAULT 30: an entry whose call does not
-            name a ttl EXPIRES in 30 days (extended by reads: effective ttl =
-            ttl * (1 + ln(access_count + 1)), so the row nobody reads is the
-            one that goes). Pass ``None``/``null`` EXPLICITLY for a permanent
-            row; omitting the argument does NOT make it permanent — the
-            signature's default wins (nexus-sv152; a previous version of this
-            text said the opposite and every caller that believed it persisted
-            nothing). ``memory_get`` shows the stored value on its ``TTL:``
-            line. ``ttl=0`` is RETIRED (RDR-194 D5, nexus-tk070.p6a): this tool
+        ttl: Time-to-live in days. DEFAULT None (PERMANENT): an entry whose
+            call does not name a ttl is kept. A clock is now something a
+            caller ASKS for, never something silence buys — pass an integer
+            for one, and the row then expires in that many days, extended by
+            reads (effective ttl = ttl * (1 + ln(access_count + 1)), so the
+            row nobody reads is the one that goes). ``memory_get`` shows the
+            stored value on its ``TTL:`` line.
+
+            REVERSED 2026-09-12 (nexus-473mx, Sam's ruling), and the history
+            matters because this paragraph has been wrong in BOTH directions.
+            The default was 30, and nexus-sv152 hardened this text to say so
+            after an earlier version claimed omission meant permanent and
+            "every caller that believed it persisted nothing". That warning
+            was correct when written and is now obsolete: omission DOES mean
+            permanent. What changed is the default, not the documentation of
+            it. The evidence was a live-store census on 2026-09-12 — 1,183 of
+            2,269 TTL-bearing rows in the hosted T2 carried exactly 30, i.e.
+            expiry by omission rather than by decision, and the whole tenant
+            had to be swept to permanent to stop the loss. Retention inferred
+            from silence is the defect; RDR-194 §A14 ruled the same way about
+            ``0`` reading as "no TTL". See RDR-207 for the boundary question
+            this does NOT answer: what a manage phase should do before a row
+            is destroyed. ``ttl=0`` is RETIRED (RDR-194 D5, nexus-tk070.p6a): this tool
             no longer coerces it to ``None``, and the engine itself now
             REJECTS ``ttl=0`` (and any ``ttl<=0``) with a loud 400 naming the
             fix, for every caller and every path — ``POST /v1/memory/put``
