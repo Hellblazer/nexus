@@ -118,3 +118,20 @@ mechanize, it matters enough to ship.
   as analyze/SKILL.md) and the write-path line that attributed the T3 persist step to
   `/conexus:knowledge-tidy` itself rather than the `store_put` call after it. Inert until the
   pin advances.
+- `conexus/commands/rdr-gate.md` (nexus-cnzei.3, fix round): dropped two `ttl="permanent"`
+  sites (memory_put's ttl is int|None; the string form is store_put's contract, not this
+  tool's). Inert until the pin advances.
+- `conexus/commands/rdr-accept.md` (nexus-cnzei.3, fix round): same `ttl="permanent"` fix as
+  rdr-gate.md above. Inert until the pin advances.
+- `conexus/skills/rdr-create/SKILL.md` (nexus-cnzei.3, fix round): dropped two
+  `ttl="permanent"` sites, same fix as rdr-gate.md above. Inert until the pin advances.
+- `conexus/skills/rdr-accept/SKILL.md` (nexus-cnzei.3, fix round): same `ttl="permanent"` fix
+  as rdr-gate.md above. Inert until the pin advances.
+- `conexus/skills/rdr-fix/SKILL.md` (nexus-cnzei.3, fix round): same `ttl="permanent"` fix as
+  rdr-gate.md above. Inert until the pin advances.
+- `conexus/skills/rdr-close/SKILL.md` (nexus-cnzei.3, fix round): dropped three
+  `ttl="permanent"` sites, same fix as rdr-gate.md above. Inert until the pin advances.
+- `conexus/skills/rdr-research/SKILL.md` (nexus-cnzei.3, fix round): same `ttl="permanent"`
+  fix as rdr-gate.md above. Inert until the pin advances.
+- `conexus/skills/rdr-gate/SKILL.md` (nexus-cnzei.3, fix round): dropped four
+  `ttl="permanent"` sites, same fix as rdr-gate.md above. Inert until the pin advances.

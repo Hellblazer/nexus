@@ -5,11 +5,18 @@ O(repo) meta-tests, hence the lint marker. Three doctrines these checks
 protect, each reversed or clarified after guidance had already taught the
 old shape:
 
-- ``memory_put``'s ``ttl`` semantics reversed 2026-09-12 (nexus-473mx):
-  omitting ``ttl`` now means permanent, and the engine REJECTS ``ttl<=0``
-  (0 included) outright with a 400 — there is no "0 means permanent"
+- ``memory_put`` AND ``plan_save`` share one ``ttl: int | None = None``
+  contract (``mcp/core.py``), reversed 2026-09-12 (nexus-473mx): omitting
+  ``ttl`` now means permanent, and the engine REJECTS ``ttl<=0`` (0
+  included) outright with a 400 — there is no "0 means permanent"
   coercion. ``ttl=30`` for every write is the retired default, not a
-  convention worth reproducing in new guidance.
+  convention worth reproducing in new guidance. And the type is ``int``,
+  never a string — ``ttl="permanent"`` or ``ttl="30d"`` is ``store_put``'s
+  contract (``ttl: str``, ``"Nd"``/``"Nw"``/``"permanent"``) leaking into
+  the wrong tool; a real nexus-cnzei.3 fix round found ``ttl="permanent"``
+  prescribed at 15 sites across the RDR skill/command family, none caught
+  by this lint's first cut because it only matched the two retired bare
+  integers.
 - ``query()`` (``mcp/core.py``) has no ``topic`` parameter — only
   ``search()`` and the ``search_*_scoped`` tools do. ``query()`` filters by
   ``content_type`` / ``author`` / ``follow_links`` / ``subtree`` instead.
@@ -17,7 +24,7 @@ old shape:
   summary and performs no writes. The T3 write a tidy workflow ends in is a
   separate ``store_put`` call, never something ``nx_tidy`` itself does.
 
-A reader who follows stale guidance for any of the three gets a 400, a
+A reader who follows stale guidance for any of these gets a 400, a
 validation error, or a false belief that a review is unnecessary because
 "nx_tidy already persisted it".
 """
@@ -56,9 +63,37 @@ pytestmark = pytest.mark.lint
 #: stale entry, so an exemption cannot silently outlive the text it excuses.
 ALLOWLIST: dict[tuple[str, str, str], str] = {}
 
-_MEMORY_PUT_RE = re.compile(r"memory_put\(")
+#: memory_put and plan_save share the ttl: int | None contract; store_put's
+#: ttl is a genuinely different, string-typed contract ("Nd"/"Nw"/
+#: "permanent") and stays OUT of scope for this check on purpose.
+#:
+#: Anchored on the bare NAME, not `name(` — this repo's PRODUCE-section
+#: guidance routinely writes "via memory_put tool: project=..., ttl=..."
+#: with no call-syntax parens at all, and that prose form carries the exact
+#: same ttl defect as a real call. Safe to widen: a bare mention with no
+#: ttl anywhere in its window (fenced block or line) never matches
+#: _BAD_TTL_RE, so this only ever adds true positives, never false ones.
+#:
+#: NO leading \b: every real call in this repo is fully-qualified
+#: (``mcp__plugin_conexus_nexus__memory_put(``), so the character right
+#: before the name is ``_`` — a word character — and a leading \b would
+#: never fire there, silently missing every prefixed call and leaving
+#: only the unprefixed prose mentions matched. Trailing \b stays, to keep
+#: this from matching as a prefix of some unrelated longer identifier.
+_TTL_BEARING_CALL_RE = re.compile(r"(?:memory_put|plan_save)\b")
 _QUERY_CALL_RE = re.compile(r"query\(")
-_BAD_TTL_RE = re.compile(r"\bttl\s*=\s*(?:0|30)\b(?!\d)")
+#: Flags two distinct wrong shapes for memory_put/plan_save's ttl:
+#: (a) the retired bare-int literals 0 and 30, any spacing around `=`;
+#: (b) ANY quoted value at all (ttl="30", ttl='permanent', ttl="30d") —
+#: the type itself is wrong, since ttl here is int | None, never a string.
+_BAD_TTL_RE = re.compile(
+    r"""\bttl\s*=\s*(?:
+        (?:0|30)\b(?!\d)
+        |
+        ["'][^"'\n]*["']
+    )""",
+    re.VERBOSE,
+)
 _TOPIC_KWARG_RE = re.compile(r"\btopic\s*=")
 
 #: Historical wrong phrasings that asserted nx_tidy performs the T3 write
@@ -99,6 +134,13 @@ def _window(text: str, start: int, size: int = 400) -> str:
     NEXT, unrelated table row describing a different tool. Scope the
     window to the fence (cut at the closing fence or a blank line) when
     inside one, and to the current line otherwise.
+
+    The non-fenced branch does NOT also apply *size* — the newline is
+    already the correct boundary, and a single very long guidance line
+    (a memory_put call whose ``content=`` argument runs to hundreds of
+    chars before reaching ``ttl=``) must not be truncated away from its
+    own ttl kwarg. *size* only bounds the fenced branch, where an
+    unrelated later call could otherwise share the same fence.
     """
     if _in_fenced_block(text, start):
         end = min(len(text), start + size)
@@ -111,12 +153,12 @@ def _window(text: str, start: int, size: int = 400) -> str:
         return text[start:end]
     newline = text.find("\n", start)
     end = newline if newline != -1 else len(text)
-    return text[start : min(end, start + size)]
+    return text[start:end]
 
 
 def _find_bad_ttl_calls(text: str) -> list[str]:
     hits = []
-    for call in _MEMORY_PUT_RE.finditer(text):
+    for call in _TTL_BEARING_CALL_RE.finditer(text):
         window = _window(text, call.start())
         for bad in _BAD_TTL_RE.finditer(window):
             hits.append(window[max(0, bad.start() - 20) : bad.end() + 5])
@@ -175,13 +217,16 @@ def _unallowed(files: list[Path], finder, kind: str) -> list[str]:
     return problems
 
 
-def test_memory_put_never_prescribes_ttl_0_or_ttl_30(scanned_files: list[Path]) -> None:
+def test_memory_put_and_plan_save_never_prescribe_a_bad_ttl(scanned_files: list[Path]) -> None:
     problems = _unallowed(scanned_files, _find_bad_ttl_calls, "bad-ttl")
     assert not problems, (
-        "memory_put(...) examples must omit ttl for permanent (nexus-473mx) "
-        "and must never prescribe ttl=0 (rejected with a 400 — there is no "
-        "0-means-permanent coercion) or ttl=30 (the retired default, not a "
-        "convention to reproduce):\n" + "\n".join(problems)
+        "memory_put(...) and plan_save(...) examples must omit ttl for "
+        "permanent (nexus-473mx) and must never prescribe ttl=0 (rejected "
+        "with a 400 — there is no 0-means-permanent coercion), ttl=30 (the "
+        "retired default, not a convention to reproduce), or ANY quoted ttl "
+        "value (ttl is int | None on both tools — a string like "
+        "\"permanent\" or \"30d\" is store_put's contract, not theirs):\n"
+        + "\n".join(problems)
     )
 
 

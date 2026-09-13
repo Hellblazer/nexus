@@ -80,7 +80,7 @@ The accept skill writes a T1 scratch entry tagged `rdr-planning-context` before 
 
 Outputs produced directly by this skill (Steps 1-6):
 
-- **T2 memory**: Updated status record via memory_put tool: project="{repo}_rdr", title="NNN", ttl="permanent", tags="rdr,accepted"
+- **T2 memory**: Updated status record via memory_put tool: project="{repo}_rdr", title="NNN", tags="rdr,accepted" (omit `ttl`; permanent by omission)
 - **Filesystem**: Updated RDR markdown (frontmatter `status: accepted`, `accepted_date`), regenerated `{rdr_dir}/README.md`
 - **T1 scratch**: mcp__plugin_conexus_nexus__scratch(action="put", content="RDR NNN: accepted YYYY-MM-DD" for ephemeral tracking during multi-step acceptance flow
 - **T1 scratch**: rdr-planning-context tag entry via scratch tool (for nx_plan_audit context)
