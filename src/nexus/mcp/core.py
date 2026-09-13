@@ -2472,9 +2472,8 @@ def search(
     corpus: Annotated[str, Field(
         description=(
             "Corpus prefixes or full collection names, comma-separated; \"all\" for "
-            "every corpus. \"knowledge\" here means every knowledge__* subject "
-            "collection (not the knowledge__knowledge placeholder store_get/store_list "
-            "use for untitled MCP notes)."
+            "every corpus. \"knowledge\" means every live knowledge__* subject "
+            "collection, the same scope store_get/store_list give it."
         ),
     )] = "knowledge,code,docs",
     limit: Annotated[int, Field(description="Page size, at most 300.")] = 10,
@@ -2517,8 +2516,8 @@ def search(
 
     Constraints:
     - Paged: `limit` <= 300 per call; advance with `offset`.
-    - `corpus="knowledge"` means every `knowledge__*` subject collection —
-      see the `corpus` parameter for how this differs from `store_get`/`store_list`.
+    - `corpus="knowledge"` means every `knowledge__*` subject collection,
+      the same scope the store read tools give `collection="knowledge"`.
     - `cluster_by` defaults to "" (no clustering).
     - The text and `structuredContent` channels can disagree on ranking order
       within a page: text applies a per-file diversity cap, structuredContent
@@ -4685,11 +4684,10 @@ def store_get(
     )],
     collection: Annotated[str, Field(
         description=(
-            "Collection name or subject prefix. \"knowledge\" (default) is the "
-            "single knowledge__knowledge placeholder collection, NOT every "
-            "knowledge__* subject collection the way search/query's "
-            "corpus=\"knowledge\" is. Pass the actual subject collection name "
-            "to read a titled note."
+            "Collection name or subject prefix. \"knowledge\" (default) means "
+            "every live knowledge__* collection, the same scope as search/"
+            "query's corpus=\"knowledge\"; a subject or full collection name "
+            "narrows the lookup to that one collection."
         ),
     )] = "knowledge",
 ) -> str:
@@ -4706,8 +4704,9 @@ def store_get(
     - `doc_id` is either a 64-char content-hash (any chunk of a split note
       works) or an exact title; a title shared by one split note's chunks
       resolves to that note.
-    - `collection` defaults to the knowledge__knowledge placeholder, not
-      every knowledge__* collection — see the `collection` parameter.
+    - `collection="knowledge"` (default) looks in every knowledge__*
+      collection, as `search` does; a title found in more than one names
+      those collections instead of guessing.
     - A title matching more than one document returns the candidate ids
       instead of content; pass a content-hash to disambiguate.
     """
@@ -4715,34 +4714,50 @@ def store_get(
         if not doc_id:
             return "Error: doc_id is required"
         t3 = _get_t3()
-        col_name = t3_collection_name(collection, t3=t3)
-        entry = t3.get_by_id(col_name, doc_id)
-        if entry is None:
-            # Title fallback: 64 lowercase hex chars is the canonical id
-            # (RDR-180 full digest); 32 is a legacy half-digest reference —
-            # no longer resolvable (nexus-lgdel.l1 retired chash_alias),
-            # but still hash-SHAPED, so still never a title. Anything else,
-            # try treating it as an exact title.
-            looks_like_hash = len(doc_id) in (32, 64) and all(c in "0123456789abcdef" for c in doc_id)
-            if not looks_like_hash:
-                ids = t3.find_ids_by_title(col_name, doc_id)
+        # nexus-mgqs8: the bare name spans every knowledge collection; any
+        # other name is one collection and behaves exactly as before.
+        scope = _read_scope(t3, collection)
+        col_name = scope[0]
+        # 64 lowercase hex chars is the canonical id (RDR-180 full digest);
+        # 32 is a legacy half-digest reference, no longer resolvable
+        # (nexus-lgdel.l1 retired chash_alias) but still hash-SHAPED, so
+        # never a title. Anything else is tried as an exact title.
+        looks_like_hash = len(doc_id) in (32, 64) and all(c in "0123456789abcdef" for c in doc_id)
+        entry = None
+        if looks_like_hash or len(scope) == 1:
+            for candidate in scope:
+                entry = t3.get_by_id(candidate, doc_id)
+                if entry is not None:
+                    col_name = candidate
+                    break
+        if entry is None and not looks_like_hash:
+            from nexus.catalog.store_hook import split_note_text  # noqa: PLC0415 — deferred for startup cost, as in store_put
+
+            matches = [(c, found) for c in scope if (found := t3.find_ids_by_title(c, doc_id))]
+            if len(matches) > 1:
+                return (
+                    f"Title {doc_id!r} matches documents in {len(matches)} collections: "
+                    + ", ".join(c for c, _ in matches)
+                    + ". Pass one as collection=, or a 64-char content-hash."
+                )
+            if matches:
+                col_name, ids = matches[0]
                 # nexus-spujb: every chunk of a split note carries its title,
                 # so several ids can be ONE note rather than an ambiguity.
-                from nexus.catalog.store_hook import split_note_text  # noqa: PLC0415 — deferred for startup cost, as in store_put
-
                 split = split_note_text(t3, col_name, ids) if len(ids) > 1 else None
                 if split is not None:
                     entry = t3.get_by_id(col_name, split[0])
                 elif len(ids) == 1:
                     entry = t3.get_by_id(col_name, ids[0])
-                elif len(ids) > 1:
+                else:
                     return (
                         f"Multiple documents with title {doc_id!r} in {col_name}: "
                         + ", ".join(ids[:5]) + (" …" if len(ids) > 5 else "")
                         + ". Pass a 64-char content-hash to disambiguate."
                     )
         if entry is None:
-            return f"Not found: {doc_id!r} in {col_name} (pass a 64-char content-hash from store_list/store_put/search, or an exact title)"
+            where = col_name if len(scope) == 1 else f"any of {len(scope)} knowledge collections"
+            return f"Not found: {doc_id!r} in {where} (pass a 64-char content-hash from store_list/store_put/search, or an exact title)"
         title = entry.get("title", "")
         tags = entry.get("tags", "")
         indexed_at = (entry.get("indexed_at") or "")[:10]
@@ -4773,6 +4788,23 @@ def store_get(
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("store_get", e)
+
+
+def _read_scope(t3, collection: str) -> list[str]:
+    """The collections a store read tool looks in for *collection*.
+
+    Bare ``"knowledge"`` means every live ``knowledge__*`` collection, the
+    scope ``search`` and ``query`` give ``corpus="knowledge"`` (nexus-mgqs8,
+    Sam's ruling 2026-09-13), so a note ``search`` found is found again by
+    ``store_get`` with the same literal. The legacy ``knowledge__knowledge``
+    placeholder is one member of that scope and stays reachable by its full
+    name. Anything else resolves to its one collection, as before.
+    """
+    if collection.strip() == "knowledge":
+        fanned = resolve_corpus("knowledge", _get_collection_names())
+        if fanned:
+            return fanned
+    return [t3_collection_name(collection, t3=t3)]
 
 
 def _unique_preserve_order(ids: Iterable[str]) -> list[str]:
@@ -4932,8 +4964,8 @@ def store_get_many(
     collections: Annotated[str | list, Field(
         description=(
             "Target collection name(s): a single name, comma-separated string, or "
-            "list. \"knowledge\" (default) is the single knowledge__knowledge "
-            "placeholder, not every knowledge__* collection. In single-stream "
+            "list. \"knowledge\" (default) means every live knowledge__* "
+            "collection, as in search/query. In single-stream "
             "form a list aligned 1:1 with ids routes per-id; in parallel-stream "
             "form a list aligned 1:1 with the outer ids length routes each "
             "stream to its own collection."
@@ -4969,8 +5001,8 @@ def store_get_many(
     - `ids` accepts a comma-separated string, a flat list, or a list of
       lists paired with a matching `limit_per_source` for per-stream
       collection routing.
-    - `collections="knowledge"` (default) is the single placeholder
-      collection, not every knowledge__* collection.
+    - `collections="knowledge"` (default) looks in every knowledge__*
+      collection, as `search` does.
     - Each document body is capped at `max_chars_per_doc`; a cut body ends
       with an explicit truncation marker, never a silent cut.
     - Ids are chunk ids, so a note that `store_put` split comes back as its
@@ -5119,38 +5151,46 @@ def store_get_many(
         # source note; aligned with ``entries``.
         entry_collections: list[str] = [""] * len(id_list)
 
-        if per_id_routing:
-            idxs_by_collection: dict[str, list[int]] = {}
-            for idx, cand in enumerate(coll_list):
-                col_name = t3_collection_name(cand, t3=t3)
-                idxs_by_collection.setdefault(col_name, []).append(idx)
+        # nexus-mgqs8: every candidate resolves to a LIST of collections
+        # (_read_scope); a bare "knowledge" is the whole knowledge scope.
+        # Per-id routing gives each id its own candidate's list; broadcast
+        # gives every id the candidates' lists concatenated in order. The
+        # routing decision above is still made on the caller's list, never
+        # the expanded one. Lookup runs in rounds: round r tries the r-th
+        # collection of each still-unresolved id's list, batched per
+        # collection, so a one-collection list is the single lookup it
+        # always was and broadcast keeps its first-match-wins order.
+        scope_cache: dict[str, list[str]] = {}
 
+        def _scope(cand: str) -> list[str]:
+            if cand not in scope_cache:
+                scope_cache[cand] = _read_scope(t3, cand)
+            return scope_cache[cand]
+
+        if per_id_routing:
+            candidates = [_scope(cand) for cand in coll_list]
+        else:
+            shared = _unique_preserve_order(c for cand in coll_list for c in _scope(cand))
+            candidates = [shared] * len(id_list)
+        remaining_idxs = list(range(len(id_list)))
+        depth = 0
+        while remaining_idxs:
+            idxs_by_collection: dict[str, list[int]] = {}
+            for idx in remaining_idxs:
+                if depth < len(candidates[idx]):
+                    idxs_by_collection.setdefault(candidates[idx][depth], []).append(idx)
+            if not idxs_by_collection:
+                break
             for col_name, idxs in idxs_by_collection.items():
                 batch_ids = _unique_preserve_order(id_list[idx] for idx in idxs)
                 id_to_entry = _batched_get_by_ids(t3, col_name, batch_ids)
                 for idx in idxs:
-                    entries[idx] = id_to_entry.get(id_list[idx])
-                    if entries[idx] is not None:
-                        entry_collections[idx] = col_name
-        else:
-            remaining_idxs = list(range(len(id_list)))
-            for cand in coll_list:
-                if not remaining_idxs:
-                    break
-                col_name = t3_collection_name(cand, t3=t3)
-                batch_ids = _unique_preserve_order(
-                    id_list[idx] for idx in remaining_idxs
-                )
-                id_to_entry = _batched_get_by_ids(t3, col_name, batch_ids)
-                still_remaining: list[int] = []
-                for idx in remaining_idxs:
                     found = id_to_entry.get(id_list[idx])
                     if found is not None:
                         entries[idx] = found
                         entry_collections[idx] = col_name
-                    else:
-                        still_remaining.append(idx)
-                remaining_idxs = still_remaining
+            remaining_idxs = [idx for idx in remaining_idxs if entries[idx] is None]
+            depth += 1
 
         # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, Sam's decision
         # 3): ``section_types`` rides along on the SAME per-id/broadcast
@@ -5246,9 +5286,9 @@ def store_get_many(
 def store_list(
     collection: Annotated[str, Field(
         description=(
-            "Collection name or subject prefix. \"knowledge\" (default) is the "
-            "single knowledge__knowledge placeholder collection, not every "
-            "knowledge__* collection."
+            "Collection name or subject prefix. \"knowledge\" (default) lists "
+            "the knowledge subjects (every live knowledge__* collection, as in "
+            "search/query) with their entry counts; name one to list its entries."
         ),
     )] = "knowledge",
     limit: Annotated[int, Field(description="Page size.")] = 20,
@@ -5270,13 +5310,25 @@ def store_list(
     Returns a paged, human-readable listing; advance with `offset`.
 
     Constraints:
-    - `collection="knowledge"` (default) means the single placeholder
-      collection, not every knowledge__* collection.
+    - `collection="knowledge"` (default) lists the knowledge subject
+      collections and their entry counts, the scope `search` uses; name one
+      to page its entries.
     - `docs=True` scans the whole collection and ignores `limit`/`offset`.
     """
     try:
         t3 = _get_t3()
-        col_name = t3_collection_name(collection, t3=t3)
+        # nexus-mgqs8: the bare name spans every knowledge collection, so it
+        # lists the subjects rather than paging one collection's entries.
+        scope = _read_scope(t3, collection)
+        if len(scope) > 1:
+            counts = _get_collection_counts()
+            lines = [
+                f"{len(scope)} knowledge collections "
+                "(pass one as collection= to list its entries):"
+            ]
+            lines.extend(f"  {name}  {counts.get(name, '?')} entries" for name in scope)
+            return _cap_text_result("\n".join(lines), "store_list")
+        col_name = scope[0]
         try:
             info = t3.collection_info(col_name)
             total = info["count"]
@@ -11108,10 +11160,9 @@ async def nx_tidy(
     topic: Annotated[str, Field(description="The knowledge topic to consolidate (e.g. \"chromadb quotas\").")],
     collection: Annotated[str, Field(
         description=(
-            "T3 collection to search. \"knowledge\" (default) is the single "
-            "knowledge__knowledge placeholder collection, not every "
-            "knowledge__* collection; a bare subject name resolves like "
-            "store_put's."
+            "T3 collection to search. \"knowledge\" (default) means every live "
+            "knowledge__* collection, as in search/query; a bare subject name "
+            "resolves like store_put's."
         ),
     )] = "knowledge",
     timeout: Annotated[float, Field(

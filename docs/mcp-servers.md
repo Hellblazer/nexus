@@ -190,12 +190,12 @@ place to compare all of them at once.
 | A durable per-project note or decision | `memory_search` / `memory_get` (T2) |
 | Permanent cross-project knowledge | `store_get` / `search` against the `knowledge` corpus (T3) |
 
-`search`'s `corpus="knowledge"` and `query`'s `corpus="knowledge"` both mean
-every `knowledge__*` subject collection. `store_get`, `store_list`,
-`store_get_many`, and `nx_tidy` instead default `collection="knowledge"` to
-the single `knowledge__knowledge` placeholder collection used for untitled
-MCP notes — pass the actual subject collection name to read a titled note
-with those four tools.
+`corpus="knowledge"` on `search` and `query`, and the `collection="knowledge"`
+default of `store_get`, `store_get_many`, `store_list`, and `nx_tidy`, mean the
+same scope: every live `knowledge__*` subject collection. A note `search`
+finds, `store_get` finds again with the same literal. With the bare name,
+`store_list` lists the subjects and their entry counts rather than every
+entry. Pass one subject collection's name to narrow any of these tools to it.
 
 ## Routing rule of thumb
 
