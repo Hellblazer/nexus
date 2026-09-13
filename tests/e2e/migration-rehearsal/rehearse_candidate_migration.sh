@@ -19,7 +19,15 @@
 #            puts, an md index, and a real taxonomy discovery pass so
 #            nexus.taxonomy_centroids and nexus.topic_assignments hold
 #            genuine rows too. Every invariant this leg proves is
-#            captured HERE, before the swap.
+#            captured HERE, before the swap. Stage 3h (bead nexus-58vc9)
+#            adds the RDR-205 tuple space: mailbox rows in every claim
+#            state (unclaimed, claimed-and-left, consumed with and
+#            without a reply, dead-lettered), an over-4096-byte body and
+#            an at-cap 4096-byte body, and ledger rows — written through
+#            the FLOOR engine's own /v1/tuples so tuples-003's cleanup
+#            DELETE and nexus-8zoyp's consumed-body nulling walk a real,
+#            RLS-guarded table instead of an empty one. Seeded under two
+#            tenants when the floor supports minting a second one.
 #   Stage 4  stop the service (PG stays up — nx daemon service stop
 #            without --with-pg); hand-swap the LOCALLY-BUILT candidate
 #            binary in at the well-known location; rewrite ONLY the
@@ -75,6 +83,33 @@
 # exists to rehearse. T2 tables (memory, plans, telemetry, ...) are
 # DELIBERATELY out of scope: T2 is a separate store family with its own
 # migration surface, and this leg's population never writes to it.
+#
+# TUPLE-SPACE COVERAGE (bead nexus-58vc9, vpl9c riders critic pass, T2
+# nexus/vpl9c-riders-critic-pass-2026-09-13): before this bead, nothing
+# populated nexus.tuples before a candidate walk, so tuples-003 (count
+# legacy oversized rows, DELETE them under a toggled FORCE RLS, ADD
+# CONSTRAINT chk_tuples_body_size NOT VALID, VALIDATE) and nexus-8zoyp's
+# consumed-body cleanup would apply against an EMPTY table on every
+# rehearsal — vacuous coverage of exactly the risk those changesets exist
+# to retire. Stage 3h seeds mailbox rows in every claim state, an
+# over-4096-byte body (written past the working-tree client's OWN mirrored
+# 4096-byte pre-check, since the FLOOR predates it and enforces nothing at
+# all), an exactly-4096-byte body, and ledger rows, under one or two
+# tenants (a second is minted for real via `nx tenant create` when the
+# floor supports it). Post-walk it asserts: the over-cap row is gone with
+# its claim-log history surviving at tuple_id=NULL (tuple_claim_log_tuple_
+# fk's ON DELETE SET NULL); the at-cap row is untouched; unconsumed and
+# dead-lettered bodies are untouched; chk_tuples_body_size is VALIDATED;
+# RLS is ENABLE+FORCE on both tuple-space tables; and the candidate can
+# still claim and ack a surviving row. Consumed-body-NULL is asserted
+# against the nexus-8zoyp contract even when that changeset is not yet
+# stacked in the tree this leg builds from — see Stage 3h's own header for
+# why, and this leg's PASSED line names whether that assert actually held.
+# The scheduled sweep itself (6h interval, 6h initial delay) cannot fire
+# inside this leg's wall-clock budget, so "the candidate can run the
+# sweep" is asserted structurally (the dead-lettered row's claim_state/
+# attempts shape matches what the sweep's own release/purge arms key
+# their WHERE clauses on), not by observing a scheduled pass execute.
 set -uo pipefail
 
 FLOOR_VERSION="${FLOOR_VERSION:?FLOOR_VERSION must be set (e.g. 0.1.75)}"
@@ -417,6 +452,271 @@ else
   bad "floor-engine search cannot find the seeded marker — fixture broken before the swap"
 fi
 
+say "Stage 3h — seed the RDR-205 tuple space through the floor engine (bead nexus-58vc9)"
+# See this script's own file header ("TUPLE-SPACE COVERAGE") for why this
+# stage exists and what it does and does not prove.
+TUPLE_SHORT_BODY="candmigtuplebody"
+TUPLE_ATCAP_BODY="$(head -c 4096 /dev/zero | tr '\0' 'A')"
+TUPLE_OVERCAP_BODY="$(head -c 5000 /dev/zero | tr '\0' 'B')"
+if [ "${#TUPLE_ATCAP_BODY}" -eq 4096 ]; then
+  ok "at-cap body fixture is exactly 4096 bytes"
+else
+  bad "at-cap body fixture is ${#TUPLE_ATCAP_BODY} bytes, expected 4096"
+fi
+if [ "${#TUPLE_OVERCAP_BODY}" -eq 5000 ]; then
+  ok "over-cap body fixture is 5000 bytes (over the 4096 cap, under the 8192-byte request-size guard)"
+else
+  bad "over-cap body fixture is ${#TUPLE_OVERCAP_BODY} bytes, expected 5000"
+fi
+
+TUPLE_TENANT2_NAME="candmigtenant2"
+TUPLE_TENANT2_TOKEN=""
+if TENANT2_OUT=$(nx tenant create "$TUPLE_TENANT2_NAME" 2>&1); then
+  TUPLE_TENANT2_TOKEN="${TENANT2_OUT##*$'\n'}"
+  if [ -n "$TUPLE_TENANT2_TOKEN" ]; then
+    ok "minted a second tenant ($TUPLE_TENANT2_NAME) for the tuple-space RLS population"
+  else
+    bad "nx tenant create reported success but printed no token: $TENANT2_OUT"
+  fi
+else
+  note "nx tenant create failed against the floor engine: $TENANT2_OUT"
+  note "covering ONE tenant (default) only for the tuple-space population -- the floor does not support minting a second tenant here"
+fi
+TUPLE_TENANT_IDS=(default)
+[ -n "$TUPLE_TENANT2_TOKEN" ] && TUPLE_TENANT_IDS+=("$TUPLE_TENANT2_NAME")
+
+# One tenant's worth of mailbox + ledger rows across every state this leg
+# needs the candidate's walk to exercise. $1: tenant_id (also the row-
+# naming suffix); $2: bearer token override, empty for the ambient
+# bootstrap token (tenant "default").
+_tuple_seed_tenant() {
+  local label="$1" tok="$2" claimant="candmig-claimant-$1"
+  local -a NXTOK=()
+  [ -n "$tok" ] && NXTOK=(env "NX_SERVICE_TOKEN=$tok")
+
+  # unclaimed -- ordinary short body, never touched again.
+  if OUT=$("${NXTOK[@]}" nx tuple out "mailbox/candmig-unclaimed-$label" \
+      --key to="candmig-unclaimed-$label" --dim from="candmig-sender-$label" \
+      --nonce "candmig-nonce-unclaimed-$label" --body "$TUPLE_SHORT_BODY" 2>&1); then
+    ok "seeded unclaimed mailbox row ($label)"
+  else
+    bad "seeding unclaimed mailbox row failed ($label): $OUT"
+  fi
+
+  # claimed and left -- claimed, never acked or nacked.
+  if OUT=$("${NXTOK[@]}" nx tuple out "mailbox/candmig-claimed-$label" \
+      --key to="candmig-claimed-$label" --dim from="candmig-sender-$label" \
+      --nonce "candmig-nonce-claimed-$label" --body "$TUPLE_SHORT_BODY" 2>&1); then
+    ok "seeded claimed-and-left mailbox row ($label)"
+  else
+    bad "seeding claimed-and-left mailbox row failed ($label): $OUT"
+  fi
+  if OUT=$("${NXTOK[@]}" nx tuple in "mailbox/candmig-claimed-$label" \
+      --pattern to="candmig-claimed-$label" --claimant "$claimant" --lease-s 900 2>&1); then
+    ok "claimed (and left claimed) the claimed-and-left mailbox row ($label)"
+  else
+    bad "claiming the claimed-and-left mailbox row failed ($label): $OUT"
+  fi
+
+  # consumed, no reply.
+  if OUT=$("${NXTOK[@]}" nx tuple out "mailbox/candmig-consumed-$label" \
+      --key to="candmig-consumed-$label" --dim from="candmig-sender-$label" \
+      --nonce "candmig-nonce-consumed-$label" --body "$TUPLE_SHORT_BODY" 2>&1); then
+    ok "seeded consumed(no-reply) mailbox row ($label)"
+  else
+    bad "seeding consumed(no-reply) mailbox row failed ($label): $OUT"
+  fi
+  if CLAIM_JSON=$("${NXTOK[@]}" nx tuple in "mailbox/candmig-consumed-$label" \
+      --pattern to="candmig-consumed-$label" --claimant "$claimant" --lease-s 60 --json 2>&1); then
+    CID="$("$TOOLPY" -c "import json,sys; print(json.load(sys.stdin)['claim_id'])" <<<"$CLAIM_JSON")"
+    if OUT=$("${NXTOK[@]}" nx tuple ack "$CID" --claimant "$claimant" 2>&1); then
+      ok "claimed+acked the consumed(no-reply) mailbox row ($label)"
+    else
+      bad "acking the consumed(no-reply) mailbox row failed ($label): $OUT"
+    fi
+  else
+    bad "claiming the consumed(no-reply) mailbox row failed ($label): $CLAIM_JSON"
+  fi
+
+  # consumed, with a reply written in the same ack transaction (RDR-206).
+  if OUT=$("${NXTOK[@]}" nx tuple out "mailbox/candmig-consumed-reply-$label" \
+      --key to="candmig-consumed-reply-$label" --dim from="candmig-sender-$label" \
+      --nonce "candmig-nonce-consumed-reply-$label" --body "$TUPLE_SHORT_BODY" 2>&1); then
+    ok "seeded consumed(with-reply) mailbox row ($label)"
+  else
+    bad "seeding consumed(with-reply) mailbox row failed ($label): $OUT"
+  fi
+  if CLAIM_JSON=$("${NXTOK[@]}" nx tuple in "mailbox/candmig-consumed-reply-$label" \
+      --pattern to="candmig-consumed-reply-$label" --claimant "$claimant" --lease-s 60 --json 2>&1); then
+    CID="$("$TOOLPY" -c "import json,sys; print(json.load(sys.stdin)['claim_id'])" <<<"$CLAIM_JSON")"
+    if OUT=$("${NXTOK[@]}" nx tuple ack "$CID" --claimant "$claimant" \
+        --reply-subspace "mailbox/candmig-reply-target-$label" \
+        --reply-key to="candmig-reply-target-$label" \
+        --reply-dim from="candmig-consumed-reply-$label" \
+        --reply-body "${TUPLE_SHORT_BODY}reply" 2>&1); then
+      ok "claimed+acked-with-reply the consumed(with-reply) mailbox row ($label)"
+    else
+      bad "acking with a reply failed ($label): $OUT"
+    fi
+  else
+    bad "claiming the consumed(with-reply) mailbox row failed ($label): $CLAIM_JSON"
+  fi
+
+  # dead-lettered -- claim+nack the mailbox template's own max_attempts (3)
+  # times; the 4th claim attempt must then find nothing (dead rows are
+  # excluded from the claim-scan predicate).
+  if OUT=$("${NXTOK[@]}" nx tuple out "mailbox/candmig-dead-$label" \
+      --key to="candmig-dead-$label" --dim from="candmig-sender-$label" \
+      --nonce "candmig-nonce-dead-$label" --body "$TUPLE_SHORT_BODY" 2>&1); then
+    ok "seeded dead-letter-candidate mailbox row ($label)"
+  else
+    bad "seeding dead-letter-candidate mailbox row failed ($label): $OUT"
+  fi
+  local attempt=1 dead_ok=1
+  while [ "$attempt" -le 3 ]; do
+    if CLAIM_JSON=$("${NXTOK[@]}" nx tuple in "mailbox/candmig-dead-$label" \
+        --pattern to="candmig-dead-$label" --claimant "$claimant" --lease-s 60 --json 2>&1); then
+      CID="$("$TOOLPY" -c "import json,sys; print(json.load(sys.stdin)['claim_id'])" <<<"$CLAIM_JSON")"
+      if ! "${NXTOK[@]}" nx tuple nack "$CID" --claimant "$claimant" >/dev/null 2>&1; then
+        dead_ok=0
+      fi
+    else
+      dead_ok=0
+    fi
+    attempt=$((attempt + 1))
+  done
+  if [ "$dead_ok" -eq 1 ]; then
+    ok "claimed+nacked the dead-letter-candidate mailbox row 3 times ($label, mailbox's own max_attempts)"
+  else
+    bad "the claim/nack cycle for the dead-letter-candidate mailbox row did not complete cleanly ($label)"
+  fi
+  if ! FOURTH=$("${NXTOK[@]}" nx tuple in "mailbox/candmig-dead-$label" \
+      --pattern to="candmig-dead-$label" --claimant "$claimant" --lease-s 60 2>&1); then
+    ok "a 4th claim attempt finds nothing -- the row is genuinely dead-lettered ($label)"
+  else
+    bad "a 4th claim attempt unexpectedly succeeded after 3 nacks ($label): $FOURTH"
+  fi
+
+  # at-cap body: exactly 4096 UTF-8 bytes, at the GLOBAL limit -- accepted
+  # by both the working-tree client and (once tuples-003 lands) the
+  # candidate's own DB constraint. Left unclaimed; must survive untouched.
+  if OUT=$("${NXTOK[@]}" nx tuple out "mailbox/candmig-atcap-$label" \
+      --key to="candmig-atcap-$label" --dim from="candmig-sender-$label" \
+      --nonce "candmig-nonce-atcap-$label" --body "$TUPLE_ATCAP_BODY" 2>&1); then
+    ok "seeded the at-cap (4096-byte body) mailbox row ($label)"
+  else
+    bad "seeding the at-cap mailbox row failed ($label): $OUT"
+  fi
+
+  # over-cap body: over the working-tree client's OWN 4096-byte pre-check
+  # (nexus-r7xao mirrors the engine-side limit client-side), so written by
+  # calling HttpTupleStore._post() directly -- past out()'s pre-checks,
+  # never past the transport/auth machinery those sit in front of -- the
+  # way any pre-r7xao caller (or the floor engine itself, which enforces no
+  # size limit at all) would have written it. Then claimed once (and left
+  # claimed) so it carries real claim-log history for the candidate's
+  # tuples-003-2 DELETE's ON DELETE SET NULL cascade to act on.
+  if OVER_OUT=$("$TOOLPY" - "candmig-oversize-$label" "candmig-sender-$label" \
+      "candmig-nonce-oversize-$label" "$TUPLE_OVERCAP_BODY" "$tok" <<'PYEOF' 2>&1
+import os
+import sys
+
+addr, sender, nonce, body, tok = sys.argv[1:6]
+if tok:
+    os.environ["NX_SERVICE_TOKEN"] = tok
+from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: E402
+
+store = HttpTupleStore()
+payload = {
+    "subspace": f"mailbox/{addr}", "keys": {"to": addr},
+    "dims": {"from": sender}, "body": body, "nonce": nonce,
+}
+# noqa: SLF001 -- deliberate bypass of out()'s client-side 4096-byte
+# pre-check (nexus-58vc9); see this stage's header for why.
+r = store._post("/out", payload)
+print(f"RESULT:ID={r['id']}")
+PYEOF
+  ); then
+    if [[ "$OVER_OUT" == *"RESULT:ID="* ]]; then
+      ok "seeded the over-cap (5000-byte body) mailbox row past the working-tree client's own pre-check, straight to the floor ($label)"
+    else
+      bad "seeding the over-cap mailbox row did not report an id ($label): $OVER_OUT"
+    fi
+  else
+    bad "seeding the over-cap mailbox row failed ($label): $OVER_OUT"
+  fi
+  if OUT=$("${NXTOK[@]}" nx tuple in "mailbox/candmig-oversize-$label" \
+      --pattern to="candmig-oversize-$label" --claimant "$claimant" --lease-s 900 2>&1); then
+    ok "claimed (and left claimed) the over-cap mailbox row, so it carries claim-log history ($label)"
+  else
+    bad "claiming the over-cap mailbox row failed ($label): $OUT"
+  fi
+
+  # ledger rows -- read-only template (take.enabled: false), no claim traffic.
+  if OUT=$("${NXTOK[@]}" nx tuple out "ledger/candmig-session-$label" \
+      --key agent_id="candmig-agent-$label" --key kind=start \
+      --dim agent_type=developer 2>&1); then
+    ok "seeded a ledger start row ($label)"
+  else
+    bad "seeding the ledger start row failed ($label): $OUT"
+  fi
+  if OUT=$("${NXTOK[@]}" nx tuple out "ledger/candmig-session-$label" \
+      --key agent_id="candmig-agent-$label" --key kind=report \
+      --dim agent_type=developer 2>&1); then
+    ok "seeded a ledger report row ($label)"
+  else
+    bad "seeding the ledger report row failed ($label): $OUT"
+  fi
+}
+
+for TUPLE_LABEL in "${TUPLE_TENANT_IDS[@]}"; do
+  if [ "$TUPLE_LABEL" = default ]; then
+    _tuple_seed_tenant "$TUPLE_LABEL" ""
+  else
+    _tuple_seed_tenant "$TUPLE_LABEL" "$TUPLE_TENANT2_TOKEN"
+  fi
+done
+
+say "Stage 3h — non-vacuity: the planned tuple-space row counts actually exist, per tenant, before the walk"
+for TUPLE_LABEL in "${TUPLE_TENANT_IDS[@]}"; do
+  MAILBOX_PRE="$(diag_sql "SELECT count(*) FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace LIKE 'mailbox/candmig-%'")"
+  if [ "${MAILBOX_PRE:-0}" = 8 ]; then
+    ok "tenant $TUPLE_LABEL: 8 mailbox rows planted (unclaimed, claimed-left, consumed x2 [+its reply target], dead, at-cap, over-cap)"
+  else
+    bad "tenant $TUPLE_LABEL: expected 8 mailbox rows, counted '$MAILBOX_PRE' -- population is incomplete; downstream tuple-space asserts would be vacuous"
+  fi
+  LEDGER_PRE="$(diag_sql "SELECT count(*) FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace LIKE 'ledger/candmig-%'")"
+  if [ "${LEDGER_PRE:-0}" = 2 ]; then
+    ok "tenant $TUPLE_LABEL: 2 ledger rows planted (start, report)"
+  else
+    bad "tenant $TUPLE_LABEL: expected 2 ledger rows, counted '$LEDGER_PRE'"
+  fi
+  ATCAP_LEN_PRE="$(diag_sql "SELECT octet_length(body) FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-atcap-${TUPLE_LABEL}'")"
+  if [ "$ATCAP_LEN_PRE" = 4096 ]; then
+    ok "tenant $TUPLE_LABEL: at-cap row body is exactly 4096 bytes pre-walk"
+  else
+    bad "tenant $TUPLE_LABEL: at-cap row body is '$ATCAP_LEN_PRE' bytes pre-walk, expected 4096"
+  fi
+  OVERCAP_LEN_PRE="$(diag_sql "SELECT octet_length(body) FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-oversize-${TUPLE_LABEL}'")"
+  if [ "${OVERCAP_LEN_PRE:-0}" -gt 4096 ] 2>/dev/null; then
+    ok "tenant $TUPLE_LABEL: over-cap row body is $OVERCAP_LEN_PRE bytes pre-walk (over 4096 -- the floor enforced nothing)"
+  else
+    bad "tenant $TUPLE_LABEL: over-cap row body is '$OVERCAP_LEN_PRE' bytes pre-walk, expected > 4096"
+  fi
+  DEAD_STATE_PRE="$(diag_sql "SELECT claim_state FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-dead-${TUPLE_LABEL}'")"
+  if [ "$DEAD_STATE_PRE" = dead ]; then
+    ok "tenant $TUPLE_LABEL: dead-letter row's claim_state is 'dead' pre-walk"
+  else
+    bad "tenant $TUPLE_LABEL: dead-letter row's claim_state is '$DEAD_STATE_PRE' pre-walk, expected 'dead'"
+  fi
+  CLAIMLOG_PRE="$(diag_sql "SELECT count(*) FROM nexus.tuple_claim_log WHERE tenant_id='${TUPLE_LABEL}' AND subspace LIKE 'mailbox/candmig-%'")"
+  if [ "${CLAIMLOG_PRE:-0}" -ge 1 ] 2>/dev/null; then
+    ok "tenant $TUPLE_LABEL: $CLAIMLOG_PRE claim-log row(s) exist pre-walk from the claim/ack/nack traffic above"
+  else
+    bad "tenant $TUPLE_LABEL: expected >=1 claim-log row pre-walk from the claim/ack/nack traffic above, counted '$CLAIMLOG_PRE'"
+  fi
+done
+
 # ── Stage 4: stop; hand-swap the CANDIDATE binary; harness bookkeeping ───
 say "Stage 4 — nx daemon service stop (PG stays up: no --with-pg)"
 if nx daemon service stop 2>&1 | tail -6 | sed 's/^/       /'; then
@@ -537,6 +837,84 @@ TOPIC_ASSIGN_POST="$(diag_sql "SELECT count(*) FROM nexus.topic_assignments")"
 [ "$DOCS_POST" = "$DOCS_PRE" ] && ok "live catalog documents: $DOCS_POST unchanged" || bad "live documents changed: pre=$DOCS_PRE post=$DOCS_POST"
 [ "$CENTROIDS_POST" = "$CENTROIDS_PRE" ] && ok "taxonomy centroids: $CENTROIDS_POST unchanged" || bad "taxonomy centroids changed: pre=$CENTROIDS_PRE post=$CENTROIDS_POST"
 [ "$TOPIC_ASSIGN_POST" = "$TOPIC_ASSIGN_PRE" ] && ok "topic assignments: $TOPIC_ASSIGN_POST unchanged" || bad "topic assignments changed: pre=$TOPIC_ASSIGN_PRE post=$TOPIC_ASSIGN_POST"
+
+say "Assert — RDR-205 tuple-space migration behavior across the candidate boot (bead nexus-58vc9)"
+# chk_tuples_body_size exists and is VALIDATED (tuples-003-3 + tuples-003-4).
+CHK_VALIDATED="$(diag_sql "SELECT convalidated FROM pg_constraint WHERE conname='chk_tuples_body_size'")"
+if [ "$CHK_VALIDATED" = t ]; then
+  ok "chk_tuples_body_size exists and is VALIDATED"
+else
+  bad "chk_tuples_body_size is not validated (got '$CHK_VALIDATED') -- either tuples-003 has not landed in this candidate, or VALIDATE did not run"
+fi
+
+# RLS ENABLE+FORCE survives the migration on both tuple-space tables.
+TUPLES_RLS="$(diag_sql "SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid = 'nexus.tuples'::regclass")"
+[ "$TUPLES_RLS" = "t|t" ] && ok "nexus.tuples: RLS ENABLE+FORCE after the walk" || bad "nexus.tuples RLS is '$TUPLES_RLS' after the walk, expected 't|t'"
+CLAIMLOG_RLS="$(diag_sql "SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid = 'nexus.tuple_claim_log'::regclass")"
+[ "$CLAIMLOG_RLS" = "t|t" ] && ok "nexus.tuple_claim_log: RLS ENABLE+FORCE after the walk" || bad "nexus.tuple_claim_log RLS is '$CLAIMLOG_RLS' after the walk, expected 't|t'"
+
+for TUPLE_LABEL in "${TUPLE_TENANT_IDS[@]}"; do
+  # Over-cap row: gone. Its claim-log row(s) survive with tuple_id NULLed by
+  # tuple_claim_log_tuple_fk's ON DELETE SET NULL (tuples-001-2) -- the same
+  # FK the sweep's own purge relies on for the identical shape of delete.
+  OVERCAP_POST="$(diag_sql "SELECT count(*) FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-oversize-${TUPLE_LABEL}'")"
+  [ "$OVERCAP_POST" = 0 ] && ok "tenant $TUPLE_LABEL: the over-cap row is gone after the walk (tuples-003-2's cleanup DELETE)" \
+    || bad "tenant $TUPLE_LABEL: the over-cap row still exists after the walk (count=$OVERCAP_POST) -- tuples-003-2 did not remove it"
+  OVERCAP_LOG_POST="$(diag_sql "SELECT count(*) FROM nexus.tuple_claim_log WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-oversize-${TUPLE_LABEL}' AND tuple_id IS NULL")"
+  if [ "${OVERCAP_LOG_POST:-0}" -ge 1 ] 2>/dev/null; then
+    ok "tenant $TUPLE_LABEL: the over-cap row's claim-log row(s) survive with tuple_id NULLed ($OVERCAP_LOG_POST row(s))"
+  else
+    bad "tenant $TUPLE_LABEL: expected >=1 surviving claim-log row with tuple_id NULL for the deleted over-cap row, counted '$OVERCAP_LOG_POST'"
+  fi
+
+  # At-cap row: intact, unchanged.
+  ATCAP_POST="$(diag_sql "SELECT octet_length(body) FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-atcap-${TUPLE_LABEL}'")"
+  [ "$ATCAP_POST" = 4096 ] && ok "tenant $TUPLE_LABEL: the at-cap row is intact at exactly 4096 bytes after the walk" \
+    || bad "tenant $TUPLE_LABEL: the at-cap row body is '$ATCAP_POST' bytes after the walk, expected 4096"
+
+  # Consumed rows: NULL bodies once nexus-8zoyp's cleanup lands. Its
+  # changeset is NOT in this worktree (see this leg's own header) -- this
+  # assert is written against that contract regardless, and is expected to
+  # FAIL here until nexus-8zoyp's changeset is stacked in this tree.
+  CONSUMED_BODY_POST="$(diag_sql "SELECT body FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-consumed-${TUPLE_LABEL}'")"
+  [ -z "$CONSUMED_BODY_POST" ] && ok "tenant $TUPLE_LABEL: the consumed(no-reply) row's body is NULL after the walk (nexus-8zoyp contract)" \
+    || bad "tenant $TUPLE_LABEL: the consumed(no-reply) row's body is non-empty after the walk (nexus-8zoyp contract) -- expected to hold only once nexus-8zoyp's changeset is stacked in this tree"
+  CONSUMED_REPLY_BODY_POST="$(diag_sql "SELECT body FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-consumed-reply-${TUPLE_LABEL}'")"
+  [ -z "$CONSUMED_REPLY_BODY_POST" ] && ok "tenant $TUPLE_LABEL: the consumed(with-reply) row's body is NULL after the walk (nexus-8zoyp contract)" \
+    || bad "tenant $TUPLE_LABEL: the consumed(with-reply) row's body is non-empty after the walk (nexus-8zoyp contract) -- expected to hold only once nexus-8zoyp's changeset is stacked in this tree"
+
+  # Unconsumed and dead-lettered bodies: intact.
+  CLAIMED_BODY_POST="$(diag_sql "SELECT body FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-claimed-${TUPLE_LABEL}'")"
+  [ "$CLAIMED_BODY_POST" = "$TUPLE_SHORT_BODY" ] && ok "tenant $TUPLE_LABEL: the claimed-and-left row's body is intact after the walk" \
+    || bad "tenant $TUPLE_LABEL: the claimed-and-left row's body changed after the walk (got '$CLAIMED_BODY_POST')"
+  DEAD_BODY_POST="$(diag_sql "SELECT body FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-dead-${TUPLE_LABEL}'")"
+  [ "$DEAD_BODY_POST" = "$TUPLE_SHORT_BODY" ] && ok "tenant $TUPLE_LABEL: the dead-lettered row's body is intact after the walk" \
+    || bad "tenant $TUPLE_LABEL: the dead-lettered row's body changed after the walk (got '$DEAD_BODY_POST')"
+  DEAD_STATE_POST="$(diag_sql "SELECT claim_state FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-dead-${TUPLE_LABEL}'")"
+  [ "$DEAD_STATE_POST" = dead ] && ok "tenant $TUPLE_LABEL: the dead-lettered row's claim_state is still 'dead' after the walk" \
+    || bad "tenant $TUPLE_LABEL: the dead-lettered row's claim_state is '$DEAD_STATE_POST' after the walk, expected 'dead'"
+
+  # The candidate can still claim and ack a surviving row -- the same
+  # TupleRepository write paths the scheduled sweep's release/purge arms
+  # share. See this leg's file header for why the scheduled sweep itself
+  # (6h interval/initial delay) cannot be observed firing within this leg's
+  # wall-clock budget, and what "sweep-ready" means here instead.
+  TUPLE_LABEL_TOK=""
+  [ "$TUPLE_LABEL" != default ] && TUPLE_LABEL_TOK="$TUPLE_TENANT2_TOKEN"
+  NXTOK=()
+  [ -n "$TUPLE_LABEL_TOK" ] && NXTOK=(env "NX_SERVICE_TOKEN=$TUPLE_LABEL_TOK")
+  if POST_CLAIM_JSON=$("${NXTOK[@]}" nx tuple in "mailbox/candmig-unclaimed-${TUPLE_LABEL}" \
+      --pattern to="candmig-unclaimed-${TUPLE_LABEL}" --claimant "candmig-postboot-${TUPLE_LABEL}" --lease-s 60 --json 2>&1); then
+    POST_CID="$("$TOOLPY" -c "import json,sys; print(json.load(sys.stdin)['claim_id'])" <<<"$POST_CLAIM_JSON")"
+    if OUT=$("${NXTOK[@]}" nx tuple ack "$POST_CID" --claimant "candmig-postboot-${TUPLE_LABEL}" 2>&1); then
+      ok "tenant $TUPLE_LABEL: the candidate can claim and ack a surviving row post-boot"
+    else
+      bad "tenant $TUPLE_LABEL: acking a surviving row through the candidate failed: $OUT"
+    fi
+  else
+    bad "tenant $TUPLE_LABEL: claiming a surviving row through the candidate failed: $POST_CLAIM_JSON"
+  fi
+done
 
 say "Assert — serve: reads, writes, search all live over the candidate"
 POST_SEARCH="$(nx search "$MARKER1" --corpus knowledge -m 3 2>&1)"

@@ -153,6 +153,29 @@ re-validation plus this leg's EXACT row-invariant asserts, now spanning
 chunks, catalog manifest/documents, taxonomy centroids AND
 `topic_assignments`).
 
+**Tuple space (bead nexus-58vc9, added for the v0.1.118 cut that carries
+tuples-003 + nexus-8zoyp).** Stage 3h seeds `nexus.tuples` through the
+FLOOR engine before the swap: mailbox rows in every claim state
+(unclaimed, claimed-and-left, consumed with and without a reply,
+dead-lettered via 3 claim/nack cycles), an over-4096-byte body (written
+past the working-tree client's own mirrored 4096-byte pre-check, since
+the floor enforces no size limit at all), an exactly-4096-byte body, and
+ledger rows — under a second tenant too when the floor's `nx tenant
+create` supports minting one. Post-walk it asserts: the over-cap row is
+gone with its claim-log history surviving at `tuple_id=NULL`
+(`tuple_claim_log_tuple_fk`'s `ON DELETE SET NULL`); the at-cap row is
+untouched; unconsumed and dead-lettered bodies are untouched;
+`chk_tuples_body_size` is VALIDATED; RLS is ENABLE+FORCE on both
+tuple-space tables; and the candidate can still claim and ack a surviving
+row. The consumed-body-NULL assert is written against the nexus-8zoyp
+contract even on a tree where that changeset is not yet stacked — expect
+it red until nexus-8zoyp lands. The scheduled sweep itself (6h interval,
+6h initial delay) cannot fire inside this leg's wall-clock budget, so
+"the candidate can run the sweep" is asserted structurally (the
+dead-lettered row's `claim_state`/`attempts` shape matches what the
+sweep's own release/purge arms key their `WHERE` clauses on), not by
+observing a scheduled pass execute.
+
 It structurally CANNOT catch two classes, by construction of what this leg
 seeds:
 - **Cross-shard PK collision** (the "cross-shard collision" `DO $$` guards
