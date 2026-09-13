@@ -616,7 +616,7 @@ For each unique `source_title` in the collection: extracts DOI / arXiv ID from c
 | Flag | Description |
 |------|-------------|
 | `COLLECTION` (positional) | Fully-qualified T3 collection name (e.g. `knowledge__papers`) |
-| `--source {semantic-scholar\|openalex}` | Bibliographic backend (default: `semantic-scholar`) |
+| `--source {auto\|s2\|openalex\|dt}` | Bibliographic backend (default: `auto`) |
 | `--delay SECONDS` | Delay between API calls (default: 0.5s). Increase to avoid rate limiting |
 | `--limit N` | Maximum number of titles to enrich (default: 0 = unlimited) |
 | `--backfill-catalog` | Re-drive the catalog write from ALREADY-enriched chunk metadata — no external API calls. Populates the catalog Document rows' `bib_*` fields (surfaced by `catalog_search` / `catalog_list` / `nx catalog show`) for collections enriched before those columns had a writer. Idempotent; titles whose chunks carry bib metadata but have no matching catalog row are reported separately as skipped |
@@ -1816,7 +1816,7 @@ echo "# Cache Strategy" | nx store put - --collection distributed-systems --titl
 
 | Flag | Description |
 |------|-------------|
-| `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`) |
+| `-c` / `--collection NAME` | Collection name or prefix (required) |
 | `-t` / `--title TITLE` | Entry title (required when SOURCE is `-`) |
 | `--tags TAG,TAG` | Comma-separated tags |
 | `--category LABEL` | Category label |
@@ -1990,7 +1990,7 @@ promotion result as `Promoted <id> -> <project>/<title> (action=<ACTION>)`.
 Two actions are possible today:
 
 - `action=new` — no similar entry found under the target project. Clean write.
-- `action=overlap_detected` — an FTS5 keyword scan found a similar entry in the
+- `action=overlap_detected` — a keyword scan (PostgreSQL full-text search) found a similar entry in the
   target project under a different title. The new row is **still** written to
   T2 as a separate entry — the report is an advisory, not a rejection.
   Agents should decide whether to manually merge via `memory_consolidate(action="merge", ...)`.
@@ -2060,7 +2060,7 @@ tqdm progress bar renders in an interactive terminal (auto-disabled on
 non-TTY CI logs).
 
 Scale reference: a full `--all` on a 278k-chunk / 136-collection corpus
-takes ~25–70 minutes on ChromaDB Cloud. Maintenance-window operation.
+takes ~25–70 minutes against the pgvector service. Maintenance-window operation.
 
 **`re-embed` flags:**
 
@@ -2529,7 +2529,9 @@ so a sweep that printed genuine ✗ lines exited `0` and any script gating on
 **Supplementary checks (new in 7.11.0).** After the default sweep prints its
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
-`aspect-queue`, and `t1`. Before 7.11.0 all fourteen `--check-*` modes were
+`aspect-queue`, `t1`, `engine-activity`, `index-failures`, and
+`fanout-floor` (the last has no `--check-fanout-floor` flag; it only runs
+as part of this supplementary set). Before 7.11.0 all fourteen `--check-*` modes were
 opt-in only, so a real backlog was invisible unless an operator happened to
 run its exact flag (the motivating case: an aspect-queue throwing hundreds of
 claim failures while nothing in the default run watched it). These are
