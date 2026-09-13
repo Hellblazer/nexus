@@ -323,7 +323,7 @@ TUPLE_CLAIMANT="shakeout-tuple-claimant"
 # out
 TUPLE_OUT_ID="$(nx tuple out "mailbox/$TUPLE_REQ_TO" --key to="$TUPLE_REQ_TO" \
   --dim from=shakeout-asker --body "shakeout tuple probe" --nonce "$TUPLE_NONCE" 2>&1)" || true
-if printf '%s' "$TUPLE_OUT_ID" | grep -qE '^[0-9a-f]{64}$'; then
+if grep -qE '^[0-9a-f]{64}$' <<<"$TUPLE_OUT_ID"; then
   ok "tuple out (64-hex id)"
 else
   bad "tuple out"
@@ -357,7 +357,7 @@ fi
 # rendering, so a lexicographic string compare orders them the same as a
 # chronological one.
 TUPLE_RENEW_OUT="$(nx tuple renew --claim-id "$TUPLE_CLAIM_ID" --claimant "$TUPLE_CLAIMANT" --lease-s 120 2>&1)" || true
-if printf '%s' "$TUPLE_RENEW_OUT" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' \
+if grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' <<<"$TUPLE_RENEW_OUT" \
    && [[ "$TUPLE_RENEW_OUT" > "$TUPLE_LEASE_BEFORE" ]]; then
   ok "tuple renew (lease_until printed and moved forward: $TUPLE_LEASE_BEFORE -> $TUPLE_RENEW_OUT)"
 else
@@ -372,7 +372,7 @@ fi
 # ClaimNotFound instead and prove nothing about LeaseTooLong specifically).
 TUPLE_RENEW_REFUSAL_OUT="$(nx tuple renew --claim-id "$TUPLE_CLAIM_ID" --claimant "$TUPLE_CLAIMANT" --lease-s 99999 2>&1)" \
   && TUPLE_RENEW_REFUSAL_RC=0 || TUPLE_RENEW_REFUSAL_RC=$?
-if [ "$TUPLE_RENEW_REFUSAL_RC" != "0" ] && printf '%s' "$TUPLE_RENEW_REFUSAL_OUT" | grep -q "LeaseTooLong"; then
+if [ "$TUPLE_RENEW_REFUSAL_RC" != "0" ] && grep -q "LeaseTooLong" <<<"$TUPLE_RENEW_REFUSAL_OUT"; then
   ok "tuple renew over max_lease_seconds refused (LeaseTooLongError, exit $TUPLE_RENEW_REFUSAL_RC)"
 else
   bad "tuple renew over max_lease_seconds should refuse with LeaseTooLong"
@@ -385,8 +385,8 @@ TUPLE_ACK_OUT="$(nx tuple ack "$TUPLE_CLAIM_ID" --claimant "$TUPLE_CLAIMANT" \
   --reply-subspace "mailbox/$TUPLE_REPLY_TO" --reply-key to="$TUPLE_REPLY_TO" \
   --reply-dim from=shakeout-answerer --reply-body "shakeout tuple reply" 2>&1)" || true
 TUPLE_REPLY_ID="$(printf '%s' "$TUPLE_ACK_OUT" | sed -n 's/^reply_id=//p')"
-if printf '%s' "$TUPLE_ACK_OUT" | grep -qxF "Acked claim $TUPLE_CLAIM_ID" \
-   && printf '%s' "$TUPLE_REPLY_ID" | grep -qE '^[0-9a-f]{64}$'; then
+if grep -qxF "Acked claim $TUPLE_CLAIM_ID" <<<"$TUPLE_ACK_OUT" \
+   && grep -qE '^[0-9a-f]{64}$' <<<"$TUPLE_REPLY_ID"; then
   ok "tuple ack with reply (reply_id=$TUPLE_REPLY_ID)"
 else
   bad "tuple ack with reply"

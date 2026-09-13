@@ -294,7 +294,7 @@ if command -v uv >/dev/null 2>&1 && [ -f "$REPO_ROOT/pyproject.toml" ]; then
     NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SVCPORT" NX_SERVICE_TOKEN=smoketoken \
     $TIMEOUT_CMD uv run python "$REPO_ROOT/service/smoke-probes/tuples_real_client.py" 2>&1)
   rm -rf "$TUPLES_PY_TMPDIR"
-  if echo "$PY_OUT" | grep -q "^OK$"; then
+  if grep -q "^OK$" <<<"$PY_OUT"; then
     echo "  ok   tuples real-client out/inp/renew/ack-with-reply/rdp/typed-refusal (routing + backend together)"
   else
     echo "  FAIL tuples real-client check:"; echo "$PY_OUT" | sed 's/^/    /'; fail=1
