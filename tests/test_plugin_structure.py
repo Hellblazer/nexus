@@ -360,6 +360,48 @@ class TestSkillDescriptionCSO:
                 f"{skill_path.parent.name}/SKILL.md: description contains workflow keyword {kw!r}"
 
 
+class TestSkillListingByteBudget:
+    """nexus-cnzei.6 (injection audit S3): Claude Code drops descriptions
+    from the Skill-tool listing once the listing exceeds a fraction of the
+    context window (docs: skills troubleshooting, skillListingBudgetFraction)
+    — the least-invoked skills lose their triggers first, silently. This
+    repo cannot reproduce Claude Code's own internal budget math, but it CAN
+    catch the thing that actually drives it up over time: every skill,
+    command, and agent frontmatter `description:` field summed together.
+    This is a regression ceiling, not a reproduction of the real threshold —
+    it exists so a newly-added, unusually long description is caught here
+    rather than discovered later as a dropped trigger for an unrelated
+    skill."""
+
+    #: Measured 2026-09-13: 72 descriptions (skills + commands + agents),
+    #: 10,385 bytes total. Ceiling set with ~25% margin above that so
+    #: ordinary one- or two-skill additions don't immediately fail this,
+    #: while a description-bloat regression (or a batch of verbose new
+    #: skills) still trips it.
+    _TOTAL_DESCRIPTION_BUDGET_BYTES = 13000
+
+    def _description_bytes(self, path: Path) -> int:
+        # A regex line-grab on purpose, not _extract_frontmatter's full
+        # yaml.safe_load: some command frontmatter (e.g. continuation.md's
+        # `argument-hint: [foo] (optional...)`) is valid enough for Claude
+        # Code's own lenient frontmatter reader but not strict YAML — an
+        # unquoted `[` starts flow-sequence parsing and the trailing prose
+        # after `]` breaks it. This test only needs one field's raw text.
+        m = re.search(r"^description:\s*(.*)$", path.read_text(), re.MULTILINE)
+        return len(m.group(1).strip().encode("utf-8")) if m else 0
+
+    def test_total_description_bytes_under_budget(self) -> None:
+        paths = list(skill_skill_mds()) + command_files() + agent_files()
+        assert paths, "no skill/command/agent files found — path resolution broke"
+        total = sum(self._description_bytes(p) for p in paths)
+        assert total < self._TOTAL_DESCRIPTION_BUDGET_BYTES, (
+            f"total frontmatter description bytes across {len(paths)} skills/"
+            f"commands/agents is {total}B >= budget "
+            f"{self._TOTAL_DESCRIPTION_BUDGET_BYTES}B — the Skill-tool "
+            f"listing is at real risk of Claude Code dropping the least-"
+            f"invoked skills' descriptions (injection audit S3)"
+        )
+
 
 def _command_bash_block(text: str) -> str | None:
     """Return the body of the documented ```! fenced bash block, or None.

@@ -109,6 +109,21 @@ _FIXTURE_KNOWLEDGE_MAP = (
 #: mechanical, non-negotiable check the bead calls for.
 _COMBINED_BUDGET_BYTES = 6000
 
+#: nexus-cnzei.6 (injection audit S5): the check above budgets only two of
+#: the emitters a real SessionStart actually fires — it covers ~5.2KB of a
+#: measured ~13.1-13.6KB total (T2 nexus/llm-guidance-audit-injection-
+#: 2026-09-13). The sn plugin's own static session-start-section.md rides
+#: the same SessionStart event unconditionally and was entirely unbudgeted.
+#: bd prime (beads plugin, ~6.5KB) is a THIRD contributor but is not this
+#: repo's surface to pin — it ships from a different plugin this repo does
+#: not own or version. This constant is the two-emitter-plus-sn total; see
+#: test_full_sessionstart_census_under_budget below.
+_FULL_SESSIONSTART_BUDGET_BYTES = 7000
+
+_SN_SESSION_START_SECTION = (
+    Path(__file__).resolve().parents[2] / "sn" / "hooks" / "scripts" / "session-start-section.md"
+)
+
 
 def _fixture_session_start_hook_output() -> str:
     """Assemble session_start_hook.py's REPRESENTATIVE combined output:
@@ -174,6 +189,29 @@ def test_combined_sessionstart_total_under_6000_bytes(monkeypatch) -> None:
         f"combined SessionStart total {combined}B "
         f"(guidance {guidance_bytes}B + session_start_hook.py fixture "
         f"{hook_bytes}B) >= budget {_COMBINED_BUDGET_BYTES}B"
+    )
+
+
+def test_full_sessionstart_census_under_budget(monkeypatch) -> None:
+    """nexus-cnzei.6: the SAME two emitters as the combined check above,
+    PLUS sn's static session-start-section.md (a plain file read — no
+    execution, no side effect, safe to include directly). Never imports
+    nexus.hooks.session_start's live path or shells out to `nx hook
+    session-start`: this reuses the same side-effect-free
+    render_session_start() seam the combined check already uses."""
+    assert _SN_SESSION_START_SECTION.exists(), (
+        f"{_SN_SESSION_START_SECTION} missing — sn plugin layout changed; "
+        "update this census's file list"
+    )
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    guidance_bytes = len(_real_guidance_emitter_output().encode("utf-8"))
+    hook_bytes = len(_fixture_session_start_hook_output().encode("utf-8"))
+    sn_bytes = len(_SN_SESSION_START_SECTION.read_bytes())
+    total = guidance_bytes + hook_bytes + sn_bytes
+    assert total < _FULL_SESSIONSTART_BUDGET_BYTES, (
+        f"full SessionStart census {total}B (guidance {guidance_bytes}B + "
+        f"session_start_hook.py fixture {hook_bytes}B + sn static "
+        f"{sn_bytes}B) >= budget {_FULL_SESSIONSTART_BUDGET_BYTES}B"
     )
 
 
