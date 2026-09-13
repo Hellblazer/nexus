@@ -499,6 +499,25 @@ class TestTupleWatch:
         assert "secret-body-xyz" not in lines[0]  # the body never rides the ping
         assert "address-wide" in lines[0]
 
+    def test_ping_names_the_mcp_drain_not_the_cli(self, t2_service_env, tmp_path) -> None:
+        """nexus-dyfg8: the arm instruction and mailbox skill tell the model to
+        drain with mcp__plugin_conexus_nexus__tuple_in then tuple_ack/tuple_nack
+        -- the ping line must name the same tools, not the ``nx tuple in`` CLI
+        form it used to carry.
+        """
+        store, cfg, sd = _watch_env(tmp_path)
+        addr = _uniq("addr")
+        _out(store, addr, sender="alice", kind="request")
+        lines, reports, clock = [], [], _Clock()
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert len(lines) == 1
+        assert "mcp__plugin_conexus_nexus__tuple_in" in lines[0]
+        assert "mcp__plugin_conexus_nexus__tuple_ack" in lines[0]
+        assert "mcp__plugin_conexus_nexus__tuple_nack" in lines[0]
+        assert "nx tuple in" not in lines[0]
+        assert "--claimant" not in lines[0]
+        assert "--pattern" not in lines[0]
+
     def test_same_row_on_next_five_iterations_is_not_re_pinged(self, t2_service_env, tmp_path) -> None:
         store, cfg, sd = _watch_env(tmp_path)
         addr = _uniq("addr")
