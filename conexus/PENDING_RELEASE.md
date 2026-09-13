@@ -45,3 +45,10 @@ mechanize, it matters enough to ship.
   the pin advances, and the floor the epic's design rests on does not exist
   until it is live — a session today loses mail the watcher pinged but nobody
   drained. Bead nexus-6konb.7 (MM-2.2).
+- nexus-h61dl.11 — `conexus/skills/mailbox/SKILL.md`: renew and reply-in-ack
+  rules for RDR-206 Phase 2 (renew at half the lease, reply through
+  `tuple_ack(reply=...)` in one transaction instead of a separate `tuple_out`
+  then `tuple_ack`), plus two `## Success Criteria` rows. Migrates the old
+  cross-instance ack line off `tuple_out` back to your address. Inert until
+  the pin advances — a session today still sees the pre-RDR-206 rules. Bead
+  nexus-h61dl.11.
