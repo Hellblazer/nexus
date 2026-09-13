@@ -171,16 +171,16 @@ mechanize, it matters enough to ship.
   `nexus.catalog`/`nexus.db`, so structlog's default stdout logger factory no
   longer leaks debug/warning lines into this SessionStart hook's own stdout.
   Inert until the pin advances. Bead nexus-cnzei.2.
-- `conexus/hooks/scripts/routing/phase_review_close_requires_gate.py`
-  (nexus-cnzei.2): same `configure_logging(mode="hook")` fix ahead of its
-  `nexus.session` import; its deny message no longer hands the
-  `# routing-allow:` escape to the gated subagent as its own move. Inert
-  until the pin advances. Bead nexus-cnzei.2.
-- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`
-  (nexus-cnzei.2): deny messages reword the hand-back instruction to scope
-  SendMessage to background dispatches, and no longer hand the
-  `# routing-allow:` escape to the gated subagent as its own move. Inert
-  until the pin advances. Bead nexus-cnzei.2.
+- (nexus-cnzei.2) `conexus/hooks/scripts/routing/phase_review_close_requires_gate.py`:
+  same `configure_logging(mode="hook")` fix ahead of its `nexus.session`
+  import; its deny message no longer hands the `# routing-allow:` escape
+  to the gated subagent as its own move. Inert until the pin advances.
+  Bead nexus-cnzei.2.
+- (nexus-cnzei.2) `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`:
+  deny messages reword the hand-back instruction to scope SendMessage to
+  background dispatches, and no longer hand the `# routing-allow:` escape
+  to the gated subagent as its own move. Inert until the pin advances.
+  Bead nexus-cnzei.2.
 - `conexus/hooks/scripts/pre_close_verification_hook.sh` (nexus-cnzei.2): the
   deny/warning messages no longer hand `NX_REVIEW_GATE_OVERRIDE=1` to the
   closing party as its own move, and the marker-write remedy now names the
