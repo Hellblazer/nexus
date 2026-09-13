@@ -649,7 +649,10 @@ elif [ "$DO_BUILD" = 1 ]; then
     # -Pnative's Testcontainers jOOQ codegen reach the host daemon (DooD);
     # TESTCONTAINERS_HOST_OVERRIDE + the host-gateway alias make the build
     # container reach the sibling pgvector. -Ob = quick-build (correctness gate,
-    # not a perf binary). Output: service/target/nexus-service + its *.so siblings.
+    # not a perf binary). Output: service/target/nexus-service alone since
+    # nexus-223oj cut native-image's AWT reachability roots (measured: 7 .so
+    # siblings -> 0); stage_native (lib/stage_artifacts.sh) fails loud if one
+    # reappears (nexus-og52j).
     # Builder heap: the pom default (native.image.maxheap=5632m) is sized for
     # the 7GB CI runner; locally it GC-thrashes (403 GCs / 6.8% of build time
     # observed on the 8GB-VM default, 2026-07-13). Auto-size to ~70% of the
@@ -698,18 +701,12 @@ fi
 
 # nexus-mfage: the two artifact-staging seams. Every leg below stages its
 # wheel and (where it consumes one) its native candidate through these, so
-# the artifacts/dist choice is made in exactly one place each.
-stage_wheel() {  # stage_wheel <dest-dir>
-  if [ -n "$ARTIFACTS" ]; then cp "$ARTIFACT_WHEEL" "$1/"
-  else cp "$(ls -t dist/conexus-*.whl | head -1)" "$1/"; fi   # keep real PEP 427 name
-}
-stage_native() {  # stage_native <dest-dir>: the binary + its native-image .so siblings
-  local src="service/target"
-  [ -n "$ARTIFACTS" ] && src="$ARTIFACTS/native"
-  mkdir -p "$1"
-  cp "$src/nexus-service" "$1/"
-  if compgen -G "$src/*.so" > /dev/null; then cp "$src"/*.so "$1/"; fi
-}
+# the artifacts/dist choice is made in exactly one place each. Extracted to
+# lib/stage_artifacts.sh (nexus-og52j) so a unit test can drive stage_native
+# directly against a fixture directory -- see that file for the function
+# bodies and the nexus-og52j .so-assertion rationale.
+# shellcheck source=lib/stage_artifacts.sh disable=SC1091
+source "$HERE/lib/stage_artifacts.sh"
 
 # ── Pre-flight Docker disk-pressure check (nexus-h8rf6.13) ────────────────────
 # The recurring barf is Docker Desktop's capped VM disk, not the host:
@@ -895,8 +892,8 @@ elif [ "$FULLSTACK" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ]; then
   cp "$HERE/rehearse_fullstack.sh" "$HERE/rehearse_shakeout_e2e.sh" "$HERE/seed_legacy.py" "$STAGE/"
 elif [ "$CANDIDATE_MIGRATION" = 1 ]; then
   # nexus-z0ylb: BOTH staging shapes at once — the native/ candidate (like
-  # the default/--shakeout path: the locally-built, now-stamped -Ob binary
-  # + its .so siblings, hand-swapped in at Stage 4) AND the working-tree
+  # the default/--shakeout path: the locally-built, now-stamped -Ob binary,
+  # hand-swapped in at Stage 4) AND the working-tree
   # wheel under its own subdirectory (like --era-hop/--package-upgrade:
   # installed via `uv tool install` at runtime, never
   # colliding with anything `pip`/`uv` resolves from real PyPI — this leg
@@ -912,11 +909,13 @@ elif [ "$CANDIDATE_MIGRATION" = 1 ]; then
   cp "$HERE/rehearse_candidate_migration.sh" "$STAGE/"
   cp -R "$HERE/lib" "$STAGE/lib"   # assert_build_ref.sh (nexus-mfage)
 else
-  # The native binary travels into the image. A LOCAL -Pnative -Ob quick build also
-  # emits native-image .so siblings (libjvm/libawt/liblcms/...) that must be
-  # co-located (native-image dlopen's JDK libs from the executable's own dir); a
-  # RELEASE binary (engine-service-v*) is self-contained with NO .so siblings. So
-  # the .so copy is best-effort — present them when they exist, skip when they don't.
+  # The native binary travels into the image, and ONLY the binary: a RELEASE
+  # binary (engine-service-v*) is self-contained with no .so siblings, and
+  # since nexus-223oj cut native-image's AWT reachability roots a correct
+  # LOCAL -Pnative -Ob quick build ships none either (measured: 7 -> 0). If
+  # one somehow reappears, stage_native (lib/stage_artifacts.sh) fails loud
+  # instead of silently staging a library the release would never ship
+  # (nexus-og52j).
   stage_native "$STAGE/native"
   cp "$HERE/Dockerfile" "$HERE/rehearse.sh" "$HERE/rehearse_shakeout.sh" "$HERE/seed_legacy.py" "$STAGE/"
   # nexus-l8xnz: the SAME service/native-smoke.sh the release workflow runs

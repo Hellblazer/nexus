@@ -939,7 +939,10 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[tuple[str, tuple[str, ...]]] = frozenset(
         ("tests/e2e/migration-rehearsal/run.sh", ('self_version="$(sed -n \'s/^version = "\\(.*\\)"/\\1/p\' "$(pwd)/pyproject.toml" | head -1)"', 'cur_engine="$(sed -n \'s/^REQUIRED_ENGINE_VERSION[^(]*(\\([0-9]*\\), *\\([0-9]*\\), *\\([0-9]*\\)).*/\\1.\\2.\\3/p\' "$(pwd)/src/nexus/engine_version.py" | head -1)"')),
         ("tests/e2e/migration-rehearsal/run.sh", ('[ "$tuple" = "$cur_engine" ] && continue', 'if [ "$(printf \'%s\\n%s\\n\' "$tuple" "$cur_engine" | sort -V | head -1)" = "$tuple" ]; then')),
         ("tests/e2e/migration-rehearsal/run.sh", ('tuple="$(git show "v$rel:src/nexus/engine_version.py" 2>/dev/null \\', '| sed -n \'s/^REQUIRED_ENGINE_VERSION[^(]*(\\([0-9]*\\), *\\([0-9]*\\), *\\([0-9]*\\)).*/\\1.\\2.\\3/p\' | head -1)"')),
-        ("tests/e2e/migration-rehearsal/run.sh", ('if [ -n "$ARTIFACTS" ]; then cp "$ARTIFACT_WHEEL" "$1/"', 'else cp "$(ls -t dist/conexus-*.whl | head -1)" "$1/"; fi   # keep real PEP 427 name')),
+        # nexus-og52j: stage_wheel/stage_native moved verbatim out of run.sh
+        # into lib/stage_artifacts.sh (a sourced file) so a unit test could
+        # drive stage_native directly; this anchor followed it.
+        ("tests/e2e/migration-rehearsal/lib/stage_artifacts.sh", ('if [ -n "$ARTIFACTS" ]; then cp "$ARTIFACT_WHEEL" "$1/"', 'else cp "$(ls -t dist/conexus-*.whl | head -1)" "$1/"; fi   # keep real PEP 427 name')),
         # --- tests/e2e/mac-signed-binary-gate.sh (7 entries): needs an
         # actually-signed macOS binary + `spctl`/`codesign` on real macOS
         # to safely verify a rewrite of the signature-inspection logic.
