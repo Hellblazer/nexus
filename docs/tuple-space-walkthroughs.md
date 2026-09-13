@@ -134,7 +134,7 @@ sequenceDiagram
     E-->>C: the request tuple, claim c9
     C->>C: deploy engine, re-gate
     C->>E: ack c9 reply: subspace mailbox/nexus-a6, keys {to nexus-a6}, dims {kind ack, correlation_id r-41}
-    Note over E: c9 consumed and the reply written in the SAME transaction (RDR-206); the reply's nonce is the engine's own, hex(request tuple id), never the caller's
+    Note over E: c9 consumed and the reply written in the SAME transaction (RDR-206). The reply's nonce is the engine's own, hex(request tuple id), never the caller's
     E->>E: signal waiters on mailbox/nexus-a6
     E-->>N: the ack tuple, claim c10
     N->>E: ack c10
@@ -263,9 +263,9 @@ sequenceDiagram
     E-->>C: request, claim c1, lease_until = now + 900 s clamped to expires_at
     Note over C: work runs past 900 s
     C->>E: renew c1 lease_s=900
-    E-->>C: lease_until extended, clamped to expires_at; no attempt spent
+    E-->>C: lease_until extended, clamped to expires_at, no attempt spent
     C->>E: ack c1 reply subspace=mailbox/[requester] keys {to [requester]} dims {kind ack, correlation_id r-41}
-    Note over C,E: c1 consumed and the reply written in the SAME transaction; a crash before this call leaves the request still claimed, to be re-delivered at lease lapse -- there is no longer a window between a written reply and its ack
+    Note over C,E: c1 consumed and the reply written in the SAME transaction. A crash before this call leaves the request still claimed, to be re-delivered at lease lapse -- there is no longer a window between a written reply and its ack
     E-->>Q: reply visible only once the ack has committed
 ```
 
