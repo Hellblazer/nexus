@@ -773,7 +773,11 @@ def _probe_once(
                 if row.id in st.seen:
                     # Already pinged while it was alive: the session knows this message
                     # exists, so its death is a status update, not news of lost mail.
+                    # Spend its re-emit budget too, so the heal branch below never
+                    # repeats this status update onto stdout (nexus-6konb.13 docs
+                    # critic: the documented stderr-only rule was true once, then not).
                     report(line)
+                    st.seen[row.id] = _Seen(last_emit=t, count=config.max_emits)
                 else:
                     # NEVER seen alive -- the watcher's first sight of it is already dead.
                     # This is undeliverable mail the session has heard nothing about, which

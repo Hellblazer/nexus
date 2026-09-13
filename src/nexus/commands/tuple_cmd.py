@@ -446,7 +446,11 @@ def tuple_watch_cmd(
         run_watch(
             store, locks.acquired, config=cfg, state_dir=sd,
             iterations=iterations, emit=click.echo, report=report,
-            spawn_session_id=session_id_from_env,
+            # An explicit positional ADDRESS is a literal mailbox, not this session's
+            # own, so a /clear does not make it stale and it must not self-stop
+            # (nexus-6konb.13 docs critic). Only the default, session-resolved
+            # watch compares itself against the SessionStart marker.
+            spawn_session_id=None if addresses else session_id_from_env,
         )
     except KeyboardInterrupt:
         return

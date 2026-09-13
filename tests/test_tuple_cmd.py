@@ -1385,6 +1385,34 @@ class TestStaleWatcherSelfStops:
         assert stats.cycles == 3
         assert not [line for line in lines if "STOP" in line]
 
+    @pytest.mark.parametrize("positional", [True, False])
+    def test_only_the_session_resolved_watch_compares_against_the_marker(
+        self, t2_service_env, tmp_path, monkeypatch, positional,
+    ) -> None:
+        """An explicit positional ADDRESS is a literal mailbox, not the session's
+        own, so a /clear must not stop it: the CLI passes no spawn session id for
+        it. The default watch passes the session id it resolved at spawn."""
+        import nexus.session as session_mod
+        import nexus.tuple_watch as tuple_watch_mod
+
+        captured: dict = {}
+
+        def _fake_run_watch(*args, **kwargs):
+            captured.update(kwargs)
+            return None
+
+        # The watch command imports both names at call time, so patch the modules.
+        monkeypatch.setattr(tuple_watch_mod, "run_watch", _fake_run_watch)
+        monkeypatch.setattr(session_mod, "resolve_active_session_id", lambda: "S1")
+        _store_obj, _cfg, sd = _watch_env(tmp_path)
+        argv = ["watch"] + ([_uniq("addr")] if positional else []) + [
+            "--iterations", "1", "--interval", "0", "--state-dir", str(sd),
+        ]
+        res = _invoke(argv)
+        assert res.exit_code == 0, res.output
+        assert "spawn_session_id" in captured, res.output
+        assert captured["spawn_session_id"] == (None if positional else "S1")
+
     def test_no_spawn_session_id_never_checks_the_marker(
         self, t2_service_env, tmp_path,
     ) -> None:
@@ -1834,6 +1862,31 @@ class TestDeadLetterReachesTheWatchedStream:
         _run(store, cfg, sd, addr, clock, 1, lines, reports)
         assert len([line for line in lines if tid in line]) == 1  # no new stdout line
         assert [r for r in reports if tid in r and "never be claimed" in r]
+
+    def test_a_row_pinged_while_alive_never_re_announces_its_death_on_stdout(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        """The death report of a message the session already knows about stays a
+        stderr status update for good: the re-emit window that heals a never-seen
+        dead row must not later repeat THIS one onto stdout."""
+        store, cfg, sd = _watch_env(tmp_path)
+        addr = _uniq("addr")
+        sub = f"mailbox/{addr}"
+        tid = _out(store, addr, sender="alice")
+        lines, reports, clock = [], [], _Clock()
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        for _ in range(3):
+            claimant = _uniq("c")
+            claimed = store.in_(sub, {"to": addr}, claimant=claimant, lease_s=30)
+            assert claimed is not None
+            store.nack(claimed[1], claimant)
+        clock.advance(cfg.interval_s)
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        for _ in range(3):
+            clock.advance(cfg.reemit_after_s + 1)
+            _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        dead_stdout = [line for line in lines if tid in line and "dead-lettered" in line]
+        assert dead_stdout == [], dead_stdout
 
 
 class TestWatchFairnessAcrossAddresses:
