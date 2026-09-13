@@ -104,8 +104,22 @@ elif echo "$TASK_TEXT" | grep -qiE "code.review|review.code|lint|style.check"; t
 fi
 
 # T2 memory for active project
+#
+# nexus-cnzei.2 (S6): `--show-toplevel` resolves to the WORKTREE root for a
+# worktree-isolated dispatch (e.g. `.claude/worktrees/agent-<id>`), whose
+# basename is the worktree's own name, not the project's -- so PROJECT was
+# never a real project name there, the T2 scan below always came back
+# empty, and the Knowledge Map fell through to the legacy machine-wide
+# ~/.config/nexus/context_l1.txt (removed below). `--git-common-dir`
+# resolves to the SAME shared .git directory from either the primary
+# checkout or any linked worktree, so its parent directory names the
+# actual project consistently in both.
 if [[ $SKIP_T2_SCAN -eq 0 ]] && command -v git &> /dev/null; then
-  PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null)
+  COMMON_GIT_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
+  PROJECT=""
+  if [[ -n "$COMMON_GIT_DIR" ]]; then
+    PROJECT=$(basename "$(cd "$(dirname "$COMMON_GIT_DIR")" 2>/dev/null && pwd -P)" 2>/dev/null)
+  fi
   if [[ -n "$PROJECT" ]]; then
     SCAN_SCRIPT="$CLAUDE_PLUGIN_ROOT/hooks/scripts/t2_prefix_scan.py"
     T2_OUT=$(python3 "$SCAN_SCRIPT" "$PROJECT" 2>/dev/null)
@@ -117,13 +131,14 @@ if [[ $SKIP_T2_SCAN -eq 0 ]] && command -v git &> /dev/null; then
   fi
 fi
 
-# Active beads
-if command -v bd &> /dev/null; then
-  ACTIVE=$(bd list --status=in_progress 2>/dev/null | head -1)
-  if [[ -n "$ACTIVE" ]]; then
-    echo "Active Bead: $ACTIVE"
-  fi
-fi
+# nexus-cnzei.2 (S7): the old "Active Bead" line named the first
+# `bd list --status=in_progress` row MACHINE-WIDE -- with several sessions
+# or worktree agents live, that is almost always a PEER's bead, not this
+# dispatch's. It carried no dispatch-specific signal (the relay in the
+# dispatch prompt is the actual source of the bead this agent should act
+# on), so it is dropped outright rather than fixed to filter by something
+# this hook cannot determine (no per-dispatch bead id is in the
+# SubagentStart payload).
 
 # Catalog link context for files mentioned in the task (always, even for code-nav agents)
 if command -v nx &> /dev/null; then
@@ -179,7 +194,7 @@ cat <<'ORCH'
 
 | Directive | Rule |
 |-----------|------|
-| Completion | SendMessage full result to main BEFORE idling: success/failure/blocked + live background task ids |
+| Completion | Background: SendMessage (ToolSearch first if unloaded) full result to main before idling: success/failure/blocked + live task ids. Foreground: final message IS the hand-back. |
 | Inbox | Re-check inbox right before composing any hand-back; newest directive wins |
 | Git | Shared tree: NEVER git add/commit (hook-ENFORCED; linked worktrees exempt). Hand back diffs+paths; orchestrator commits pathspec-limited |
 ORCH
@@ -259,14 +274,33 @@ PHASE_GATE
 fi
 
 # L1 Knowledge Map (per-repo, RDR-072) — outside the heredoc so $(…) expands
-CONTEXT_DIR="$HOME/.config/nexus/context"
-REPO_HASH=$(echo -n "$(pwd -P)" | shasum -a 1 | cut -c1-8)
-REPO_NAME=$(basename "$(pwd -P)")
-CONTEXT_FILE="$CONTEXT_DIR/${REPO_NAME}-${REPO_HASH}.txt"
-if [ ! -f "$CONTEXT_FILE" ]; then
-  CONTEXT_FILE="$HOME/.config/nexus/context_l1.txt"
+#
+# nexus-cnzei.2 (S6): the cache file's own name is `nx context refresh`'s
+# `hashlib.sha1(str(repo_path.resolve()))` keyed on the MAIN repo's path
+# (nexus/context.py:_context_path_for_repo) -- a worktree-isolated dispatch
+# hashing its OWN `pwd -P` (the worktree path, e.g.
+# `.claude/worktrees/agent-<id>`) can never match that filename, so the
+# lookup missed by construction. Resolved via `--git-common-dir` the same
+# way as the T2 scan above, independently (that block may be skipped for
+# code-nav/review agents while this one still runs).
+COMMON_GIT_DIR_KM=$(git rev-parse --git-common-dir 2>/dev/null)
+REPO_ROOT_KM=""
+if [[ -n "$COMMON_GIT_DIR_KM" ]]; then
+  REPO_ROOT_KM=$(cd "$(dirname "$COMMON_GIT_DIR_KM")" 2>/dev/null && pwd -P)
 fi
-if [ -f "$CONTEXT_FILE" ]; then
+CONTEXT_FILE=""
+if [[ -n "$REPO_ROOT_KM" ]]; then
+  CONTEXT_DIR="$HOME/.config/nexus/context"
+  REPO_HASH=$(echo -n "$REPO_ROOT_KM" | shasum -a 1 | cut -c1-8)
+  REPO_NAME=$(basename "$REPO_ROOT_KM")
+  CONTEXT_FILE="$CONTEXT_DIR/${REPO_NAME}-${REPO_HASH}.txt"
+fi
+# No fallback to the legacy ~/.config/nexus/context_l1.txt global file: it
+# is a single, unrelated cache from whichever repo last ran a repo-path-less
+# `nx context refresh` (nexus/context.py's own docstring: "Legacy
+# single-file path, kept for backward compat"), not this repo's map. Silence
+# here is more honest than a foreign corpus.
+if [[ -n "$CONTEXT_FILE" && -f "$CONTEXT_FILE" ]]; then
   echo ""
   cat "$CONTEXT_FILE"
 fi

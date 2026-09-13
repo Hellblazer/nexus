@@ -159,3 +159,30 @@ mechanize, it matters enough to ship.
   reference in the tuple) plus a matching `## Success Criteria` row. Until
   the pin advances, a session reading this skill sees no size guidance and
   may still try to carry a document-length body in a tuple.
+- `conexus/hooks/scripts/subagent-start.sh` (nexus-cnzei.2): Completion row scopes
+  SendMessage-before-idling to background dispatches (foreground's final message
+  is its own hand-back); T2-scan and Knowledge Map project resolution now use
+  `git rev-parse --git-common-dir` so a worktree-isolated dispatch resolves the
+  MAIN repo, not the worktree's own directory name, and the legacy
+  `~/.config/nexus/context_l1.txt` global fallback is deleted; drops the
+  machine-wide "Active Bead" line. Inert until the pin advances. Bead nexus-cnzei.2.
+- `conexus/hooks/scripts/rdr_hook.py` (nexus-cnzei.2): calls
+  `nexus.logging_setup.configure_logging(mode="hook")` before importing
+  `nexus.catalog`/`nexus.db`, so structlog's default stdout logger factory no
+  longer leaks debug/warning lines into this SessionStart hook's own stdout.
+  Inert until the pin advances. Bead nexus-cnzei.2.
+- `conexus/hooks/scripts/routing/phase_review_close_requires_gate.py`
+  (nexus-cnzei.2): same `configure_logging(mode="hook")` fix ahead of its
+  `nexus.session` import; its deny message no longer hands the
+  `# routing-allow:` escape to the gated subagent as its own move. Inert
+  until the pin advances. Bead nexus-cnzei.2.
+- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`
+  (nexus-cnzei.2): deny messages reword the hand-back instruction to scope
+  SendMessage to background dispatches, and no longer hand the
+  `# routing-allow:` escape to the gated subagent as its own move. Inert
+  until the pin advances. Bead nexus-cnzei.2.
+- `conexus/hooks/scripts/pre_close_verification_hook.sh` (nexus-cnzei.2): the
+  deny/warning messages no longer hand `NX_REVIEW_GATE_OVERRIDE=1` to the
+  closing party as its own move, and the marker-write remedy now names the
+  subagent-hands-back-to-orchestrator alternative. Inert until the pin
+  advances. Bead nexus-cnzei.2.

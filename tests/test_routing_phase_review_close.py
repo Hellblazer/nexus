@@ -328,6 +328,9 @@ def test_sentinel_absent_denies(tmp_env):
     decision = _decision(proc)
     assert decision["permissionDecision"] == "deny"
     assert "/conexus:phase-review-gate" in decision["reason"]
+    # nexus-cnzei.2 (S8): the escape is named, not handed over as this
+    # agent's own move.
+    assert "not yours to reach for" in decision["reason"]
 
 
 def test_sentinel_stale_denies(tmp_env):
@@ -393,6 +396,67 @@ def test_sentinel_corrupt_json_denies(tmp_env):
     )
     decision = _decision(proc)
     assert decision["permissionDecision"] == "deny"
+
+
+# ---------------------------------------------------------------------------
+# nexus-cnzei.2 (S2): configure hook logging before importing nexus.session
+#
+# ``_claude_pid()``'s ``nexus.session`` import is the ONLY nexus import in
+# this whole file, but every existing scenario test above passes
+# NX_FAKE_CLAUDE_PID, which short-circuits BEFORE that import ever runs --
+# so none of them exercise it. These two tests load the script as a module
+# (mirroring tests/hooks/test_rdr_hook.py's fixture pattern) and call
+# ``_claude_pid()`` directly with NX_FAKE_CLAUDE_PID unset, so the real
+# import path executes.
+# ---------------------------------------------------------------------------
+
+
+def _load_phase_review_close_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "phase_review_close_requires_gate_under_test", HOOK_SCRIPT,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_claude_pid_configures_hook_logging_before_importing_nexus_session(
+    monkeypatch,
+) -> None:
+    """Structlog's default logger_factory writes to STDOUT, the same
+    channel this PreToolUse hook's own JSON envelope goes out on -- a
+    debug line from the ``nexus.session`` import landing there ahead of
+    (or beside) that JSON would corrupt the payload the harness parses.
+    ``configure_logging(mode="hook")`` must run before that import, not
+    after it or not at all."""
+    monkeypatch.delenv("NX_FAKE_CLAUDE_PID", raising=False)
+    mod = _load_phase_review_close_module()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "nexus.logging_setup.configure_logging",
+        lambda mode, **kw: calls.append(mode),
+    )
+    mod._claude_pid()
+    assert calls == ["hook"]
+
+
+def test_claude_pid_survives_a_logging_setup_failure(monkeypatch) -> None:
+    """A crash in ``configure_logging`` must never break PID resolution --
+    best-effort, matching this file's existing posture toward its own
+    ``nexus.session`` import (a bare ``except Exception: return
+    os.getppid()`` already wraps it)."""
+    monkeypatch.delenv("NX_FAKE_CLAUDE_PID", raising=False)
+    mod = _load_phase_review_close_module()
+
+    def boom(mode, **kw):
+        raise RuntimeError("logging setup broken")
+
+    monkeypatch.setattr("nexus.logging_setup.configure_logging", boom)
+    pid = mod._claude_pid()
+    assert isinstance(pid, int)
 
 
 # ---------------------------------------------------------------------------

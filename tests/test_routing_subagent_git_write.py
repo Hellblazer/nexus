@@ -555,6 +555,24 @@ class TestNexus3c92mNamedInvocations:
         assert "git show head:" in reason
         assert "diff" in reason
 
+    def test_deny_message_does_not_hand_the_escape_to_the_gated_agent(self, shared_repo):
+        """nexus-cnzei.2 (S8): the `# routing-allow:` escape is named for
+        an operator reading the deny, but the message must not read as an
+        instruction TO THE SUBAGENT to just use it."""
+        out = _decision(_run(_bash("git checkout -- f.py", cwd=str(shared_repo))))
+        reason = out["permissionDecisionReason"]
+        assert "routing-allow" in reason
+        assert "not yours to reach for" in reason
+
+    def test_completion_wording_scopes_sendmessage_to_background(self, shared_repo):
+        """nexus-cnzei.2 (C4): the hand-back instruction in this deny
+        message must not tell a foreground agent to SendMessage before
+        idling -- its own final message already is the hand-back."""
+        out = _decision(_run(_bash("git checkout -- f.py", cwd=str(shared_repo))))
+        reason = out["permissionDecisionReason"]
+        assert "background" in reason.lower()
+        assert "foreground" in reason.lower()
+
 
 class TestNexus3c92mNewlineAndHeredocGap:
     """The CORRECTED root cause (see the module comment above this class):

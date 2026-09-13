@@ -83,6 +83,20 @@ def _claude_pid() -> int:
         except ValueError:
             pass
     try:
+        # nexus-cnzei.2 (S2): bridge structlog to stderr/logfile BEFORE
+        # importing nexus.session below. Structlog's default
+        # PrintLoggerFactory writes to STDOUT, the same channel this
+        # PreToolUse hook's own JSON envelope goes out on, and a debug
+        # line landing there ahead of (or beside) that JSON would corrupt
+        # the payload the harness parses. Best-effort: a logging-setup
+        # failure must not block the PID resolution it protects.
+        try:
+            from nexus.logging_setup import configure_logging  # noqa: PLC0415
+
+            configure_logging(mode="hook")
+        except Exception:  # noqa: BLE001 -- best-effort only
+            pass
+
         from nexus.session import find_immediate_claude_pid
 
         return find_immediate_claude_pid()
@@ -172,8 +186,9 @@ def _redirect_message(rdr_id: str | None, phase: str | None, reason: str) -> str
     return (
         f"Phase-review close blocked: {reason}. Run the gate first:\n"
         f"  /conexus:phase-review-gate {rdr_part} --phase {phase_part}\n"
-        f"Then re-run `bd close ...`. To override, append "
-        f"`# routing-allow: <reason>` (>=8 chars) to the command."
+        f"Then re-run `bd close ...`. An escape (`# routing-allow: <reason>`) "
+        f"exists for this guard, but only on the user's explicit "
+        f"instruction to use it -- it is not yours to reach for."
     )
 
 

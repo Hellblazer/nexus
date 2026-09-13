@@ -132,34 +132,32 @@ _REAL_SESSION_ID = "8154ea0d-6649-4a18-9ef7-ea42818188b0"
 
 
 def _real_guidance_emitter_output() -> str:
-    """The REAL ``nx hook session-start`` emitter output (deterministic:
-    stale-process probe mocked, matching
-    ``TestGuidanceByteBudgetIntegration`` in tests/test_hooks.py). The
-    mailbox-arm block's own availability PROBE is mocked to ``True`` and
-    its text to the REAL rendered instruction (never ``""``) for the same
-    reason ``TestGuidanceByteBudgetIntegration`` mocks it: a budget that
-    measures an emitter with its largest conditional block silently
-    absent, because the ambient probe happened to fail in this run, is
-    not a budget."""
-    from nexus.hooks import session_start
+    """The REAL ``nx hook session-start`` emitter output, via the
+    side-effect-free :func:`nexus.hooks.render_session_start`
+    (nexus-cnzei.2 item 8: no writer to mock any more, the render never
+    calls ``write_claude_session_id`` or any marker/lease writer, so this
+    no longer needs to patch it). Stale-process probe mocked, matching
+    ``TestGuidanceByteBudgetIntegration`` in tests/test_hooks.py; the
+    mailbox-arm text is supplied directly as the REAL rendered
+    instruction (never ``""``) for the same reason
+    ``TestGuidanceByteBudgetIntegration`` does: a budget that measures an
+    emitter with its largest conditional block silently absent is not a
+    budget."""
+    from nexus.hooks import render_session_start
     from nexus.mailbox_arm import mailbox_arm_instruction
 
     class _FakeSkewReport:
         def __init__(self) -> None:
             self.stale: list = []
 
-    with (
-        patch("nexus.hooks.write_claude_session_id"),
-        patch(
-            "nexus.upgrade_finish.detect_stale_processes",
-            return_value=_FakeSkewReport(),
-        ),
-        patch(
-            "nexus.mailbox_arm.arm_block",
-            return_value=mailbox_arm_instruction(_REAL_SESSION_ID),
-        ),
+    with patch(
+        "nexus.upgrade_finish.detect_stale_processes",
+        return_value=_FakeSkewReport(),
     ):
-        return session_start(claude_session_id=_REAL_SESSION_ID)
+        return render_session_start(
+            _REAL_SESSION_ID,
+            mailbox_arm_text=f"\n\n{mailbox_arm_instruction(_REAL_SESSION_ID)}",
+        )
 
 
 def test_combined_sessionstart_total_under_6000_bytes(monkeypatch) -> None:

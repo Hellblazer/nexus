@@ -18,8 +18,10 @@ The test surface pins:
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -379,3 +381,81 @@ def test_main_prints_the_resolution_failure_on_the_verdict_line(rdr_hook_module,
     out = capsys.readouterr().out
     assert "but NOT indexed." in out
     assert "(resolution failed: catalog: ModuleNotFoundError: No module named 'nexus'" in out
+
+
+# nexus-cnzei.2 (S2): a genuine SUBPROCESS run, not an in-process module
+# import. This matters: tests/conftest.py's own ``pytest_configure`` calls
+# ``structlog.configure(wrapper_class=...)`` at session start, which changes
+# the log-LEVEL filter but never the ``logger_factory`` -- so an in-process
+# ``rdr_hook_module.main()`` call still runs under whatever logger_factory
+# some EARLIER test in the same pytest worker happened to leave behind
+# (often already bridged to stdlib logging by an unrelated
+# ``configure_logging()`` call), which can mask exactly the leak this test
+# exists to catch. A real ``python3 rdr_hook.py`` subprocess starts with
+# structlog's untouched, unconfigured default (``PrintLoggerFactory`` ->
+# STDOUT) and shows what an actual `nx hook rdr-preamble` invocation would
+# print for real.
+
+
+def test_subprocess_run_leaks_no_structlog_debug_lines_to_stdout(tmp_path) -> None:
+    """Before this fix: a bare interpreter (no ``configure_logging`` call
+    ahead of the ``nexus.catalog``/``nexus.db`` imports triggered by
+    ``_resolve_rdr_collection``) let structlog's DEFAULT logger_factory
+    print bracketed ``[debug ]``/``[warning ]`` lines -- and even a
+    Rich-rendered traceback -- straight to STDOUT, the exact channel a
+    SessionStart hook's output reaches the model's context on. Confirmed
+    by hand against a pre-fix copy of this script: real output included
+    lines like ``2026-09-13 09:01:23 [debug    ] catalog_reader_service_mode``.
+    After the fix, that structlog output is bridged to stderr (and
+    ``<config>/logs/hook.log``) via ``configure_logging(mode="hook")``, and
+    stdout carries only this hook's own ``RDR: ...`` lines.
+    """
+    root = tmp_path / "repo"
+    rdr_dir = root / "docs" / "rdr"
+    rdr_dir.mkdir(parents=True)
+    (rdr_dir / "rdr-204-example.md").write_text("---\nstatus: draft\n---\n# x\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t",
+         "commit", "-q", "-m", "init"],
+        check=True,
+    )
+
+    home = tmp_path / "home"
+    config_dir = home / ".config" / "nexus"
+    config_dir.mkdir(parents=True)
+
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["NEXUS_CONFIG_DIR"] = str(config_dir)
+    env.pop("NX_SESSION_ID", None)
+    # No live engine at this scratch config dir: `_resolve_rdr_collection`
+    # is EXPECTED to fail resolution here (asserted below as "NOT indexed")
+    # -- that failure path is exactly the one that used to print a
+    # traceback and debug lines straight to stdout.
+
+    proc = subprocess.run(
+        [sys.executable, str(HOOK_PATH)],
+        cwd=str(root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    for leaked_marker in ("[debug", "[warning", "[info", "catalog_reader_service_mode"):
+        assert leaked_marker not in proc.stdout, (
+            f"structlog debug output leaked to stdout: {leaked_marker!r} found\n"
+            f"stdout:\n{proc.stdout}"
+        )
+    # Every non-empty stdout line is this hook's own output, never a bare
+    # structlog/traceback line sitting alongside it.
+    lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    assert lines, "expected at least the RDR: verdict line"
+    assert lines[0].startswith("RDR:")
+    for ln in lines[1:]:
+        assert ln.strip().startswith(("(resolution failed:", "Run:", "RDR-")), (
+            f"unexpected stdout line, possible leak: {ln!r}"
+        )

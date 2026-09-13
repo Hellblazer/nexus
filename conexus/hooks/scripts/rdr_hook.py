@@ -108,6 +108,36 @@ def _resolve_rdr_collection(repo_root: Path) -> str | None:
 _RESOLUTION_FAILURES: list[str] = []
 
 
+def _configure_hook_logging() -> None:
+    """nexus-cnzei.2 (S2): importing ``nexus.*`` below (``make_catalog_reader``,
+    ``make_t3``, ``T2Database``, ...) runs real HTTP-catalog / T2 client
+    initialization, and none of it goes through :func:`nexus.logging_setup.
+    configure_logging`. Structlog's DEFAULT ``PrintLoggerFactory`` writes to
+    STDOUT (not stderr; see that module's own docstring for the
+    corrected history), so every ``structlog.get_logger(...).info(...)``
+    call along that import/init path (observed: ``catalog_reader_service_mode``,
+    ``http_catalog_client.init``, ``data_token_lease_reused``,
+    ``managed_service_probe_ok``) landed on the SAME stdout stream this
+    SessionStart hook's own output goes out on, which is exactly the
+    channel that reaches the model's context. Calling ``configure_logging
+    (mode="hook")`` FIRST bridges structlog through stdlib logging to
+    stderr + ``<config>/logs/hook.log`` instead, before any of that fires.
+
+    Best-effort and silent on failure, matching this file's existing
+    posture toward its own nexus imports (:func:`_log_resolution_error`'s
+    docstring: an interpreter with neither ``nexus`` nor ``structlog``
+    installed is a real, observed case, nexus-4ti7e). A logging-setup
+    failure must never turn into a hook failure, and there is nothing
+    useful to report if the log-plumbing call itself can't run.
+    """
+    try:
+        from nexus.logging_setup import configure_logging  # noqa: PLC0415 -- deferred: only needed once, right before the nexus imports it protects
+
+        configure_logging(mode="hook")
+    except Exception:  # noqa: BLE001 -- best-effort; must never break the hook
+        pass
+
+
 def _hook_log_path() -> Path:
     """Durable failure log beside the lockstep hook's, honouring
     NEXUS_CONFIG_DIR: ``<config>/rdr_hook.log`` (override: NX_RDR_HOOK_LOG)."""
@@ -368,6 +398,7 @@ def main() -> None:
         sys.exit(0)
 
     repo_name = root.name
+    _configure_hook_logging()
     rdr_collection = _resolve_rdr_collection(root)
     indexed = bool(rdr_collection) and _collection_exists(rdr_collection)
 

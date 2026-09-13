@@ -26,6 +26,7 @@ def _run_hook(
     *,
     env_overrides: dict[str, str] | None = None,
     stdin: str = STDIN_PAYLOAD,
+    cwd: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = {
         **os.environ,
@@ -39,6 +40,7 @@ def _run_hook(
         text=True,
         timeout=15,
         env=env,
+        cwd=cwd,
     )
 
 
@@ -59,11 +61,20 @@ class TestSubagentStartHook:
     def test_orchestration_directive_rows_injected(self) -> None:
         """RDR-184 P1.3 (nexus-ccs9v.8): the THREE orchestration directive
         rows — Completion (Gap 1), Inbox (Gap 2), Git (Gap 4) — ride the
-        live injection path into every subagent's initial context."""
+        live injection path into every subagent's initial context.
+
+        nexus-cnzei.2 (C4): the Completion row is now scoped by
+        background/foreground, not a single unconditional instruction.
+        The SubagentStart payload carries no background flag (audit
+        finding), so the wording is a conditional the agent evaluates
+        itself rather than a blanket "always SendMessage before idling"
+        that a foreground agent's own contract (final message IS the
+        hand-back) contradicts."""
         result = _run_hook()
         ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         assert "| Completion |" in ctx
-        assert "SendMessage full result to main BEFORE idling" in ctx
+        assert "Background: SendMessage" in ctx
+        assert "Foreground: final message IS the hand-back" in ctx
         assert "| Inbox |" in ctx
         assert "Re-check inbox right before composing any hand-back" in ctx
         assert "| Git |" in ctx
@@ -189,3 +200,89 @@ class TestSessionIdExport:
         assert result.returncode == 0
         log_contents = log_file.read_text() if log_file.exists() else ""
         assert "NX_SESSION_ID=pre-existing-ambient-value" in log_contents, log_contents
+
+
+class TestNoMachineWideActiveBeadLine:
+    """nexus-cnzei.2 (S7): the old "Active Bead: ..." line named the
+    first `bd list --status=in_progress` row MACHINE-WIDE -- with several
+    sessions or worktree agents live, that is almost always a peer's
+    bead, not this dispatch's. Dropped outright."""
+
+    def test_active_bead_line_never_injected_even_with_a_real_in_progress_bead(
+        self, tmp_path,
+    ) -> None:
+        fake_bin = tmp_path / "fakebin"
+        fake_bin.mkdir()
+        bd_script = fake_bin / "bd"
+        bd_script.write_text(
+            "#!/bin/bash\n"
+            'if [[ "$1" == "list" ]]; then\n'
+            '  echo "in_progress nexus-somepeer Some peer bead"\n'
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n"
+        )
+        bd_script.chmod(0o755)
+
+        result = _run_hook(
+            env_overrides={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+        )
+        assert result.returncode == 0
+        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "Active Bead" not in ctx
+        assert "nexus-somepeer" not in ctx
+
+
+class TestWorktreeProjectResolution:
+    """nexus-cnzei.2 (S6): `--show-toplevel` resolves to the WORKTREE root
+    for a worktree-isolated dispatch, so its basename was the worktree's
+    own directory name, never the project's -- the T2 scan below always
+    ran with the wrong project name, and the Knowledge Map cache lookup
+    (keyed on the MAIN repo's sha1'd path) always missed, falling through
+    to an unrelated global cache. `--git-common-dir` resolves to the same
+    shared .git directory from either the primary checkout or any linked
+    worktree, so its parent directory names the actual project the same
+    way from both."""
+
+    def test_t2_scan_uses_main_repo_name_not_worktree_dir_name(
+        self, tmp_path,
+    ) -> None:
+        main_repo = tmp_path / "the-real-project"
+        main_repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(main_repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(main_repo), "-c", "user.name=t", "-c", "user.email=t@t",
+             "commit", "-q", "--allow-empty", "-m", "init"],
+            check=True,
+        )
+        worktree_dir = tmp_path / "totally-different-worktree-name"
+        subprocess.run(
+            ["git", "-C", str(main_repo), "worktree", "add", "-q", str(worktree_dir), "-b", "wt-branch"],
+            check=True,
+        )
+
+        # Stub CLAUDE_PLUGIN_ROOT/hooks/scripts/t2_prefix_scan.py: record the
+        # PROJECT argument it was called with, print a marker so the "## T2
+        # Memory" section actually renders.
+        plugin_root = tmp_path / "plugin_root"
+        scan_dir = plugin_root / "hooks" / "scripts"
+        scan_dir.mkdir(parents=True)
+        call_log = tmp_path / "scan_calls.log"
+        (scan_dir / "t2_prefix_scan.py").write_text(
+            "import sys\n"
+            f"open({str(call_log)!r}, 'a').write(sys.argv[1] + chr(10))\n"
+            "print('T2-SCAN-MARKER')\n"
+        )
+
+        result = _run_hook(
+            env_overrides={"CLAUDE_PLUGIN_ROOT": str(plugin_root)},
+            cwd=str(worktree_dir),
+        )
+        assert result.returncode == 0, result.stderr
+        logged = call_log.read_text().strip() if call_log.exists() else ""
+        assert logged == "the-real-project", (
+            f"t2_prefix_scan.py was called with PROJECT={logged!r}, "
+            f"expected the MAIN repo's name, not the worktree dir's"
+        )
+        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "T2-SCAN-MARKER" in ctx

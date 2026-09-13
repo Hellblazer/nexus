@@ -1149,9 +1149,11 @@ def _deny_message(agent_type: str, verb_names: str, *,
     )
     return (
         f"{head}\n"
-        f"Hand back your changes as diffs + file paths via SendMessage; the "
-        f"ORCHESTRATOR commits, pathspec-limited (RDR-184 Gap-4, "
-        f"feedback_orchestration_friction).\n"
+        f"Hand back your changes as diffs + file paths -- a background "
+        f"dispatch does that via SendMessage before idling; a foreground "
+        f"one's final message IS the hand-back, no separate SendMessage "
+        f"needed -- so the ORCHESTRATOR commits, pathspec-limited "
+        f"(RDR-184 Gap-4, feedback_orchestration_friction).\n"
         f"Rephrase without the literal git verb, or hand the edit back to "
         f"the orchestrator to run.\n"
         f"Read-only git (status/diff/log/show/blame/rev-parse/ls-files) "
@@ -1163,8 +1165,9 @@ def _deny_message(agent_type: str, verb_names: str, *,
         f"can POSITIVELY PROVE a linked worktree (a linked worktree is "
         f"yours to destroy); an undeterminable worktree state does not "
         f"qualify.\n"
-        f"To override deliberately, append `# routing-allow: <reason>` "
-        f"(>=8 chars)."
+        f"An escape (`# routing-allow: <reason>`) exists for this "
+        f"guard, but only on the user's explicit instruction to use "
+        f"it -- it is not yours to reach for."
     )
 
 
@@ -1201,8 +1204,9 @@ def _spliced_expansion_deny_message(agent_type: str, detail: str, *,
         f"and `git log $REV` are all untouched — a whole-word expansion "
         f"(surrounded by whitespace/quotes/operators, not glued to a word "
         f"character) is never denied by this rule, git-present or not.\n"
-        f"To override deliberately, append `# routing-allow: <reason>` "
-        f"(>=8 chars)."
+        f"An escape (`# routing-allow: <reason>`) exists for this "
+        f"guard, but only on the user's explicit instruction to use "
+        f"it -- it is not yours to reach for."
     )
     return head
 
