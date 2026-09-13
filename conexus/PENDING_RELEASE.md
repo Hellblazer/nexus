@@ -52,3 +52,6 @@ mechanize, it matters enough to ship.
   cross-instance ack line off `tuple_out` back to your address. Inert until
   the pin advances — a session today still sees the pre-RDR-206 rules. Bead
   nexus-h61dl.11.
+- nexus-h61dl.9 — `conexus/hooks/scripts/auto-approve-nx-mcp.sh`: auto-approves
+  `mcp__plugin_conexus_nexus__tuple_renew`. Until the pin advances, a session
+  running a client that registers the tool is prompted on every renew call.
