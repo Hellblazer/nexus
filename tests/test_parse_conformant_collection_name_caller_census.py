@@ -56,6 +56,8 @@ import pathlib
 
 import pytest
 
+from tests._lint_line_anchor import resolve_anchor
+
 pytestmark = pytest.mark.lint
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
@@ -63,21 +65,24 @@ SRC = REPO_ROOT / "src" / "nexus"
 
 _TARGET = "parse_conformant_collection_name"
 
-#: (relative-path, lineno) -> reason the call survives nexus-ft04v.27.
+#: (relative-path, content-anchor) -> reason the call survives
+#: nexus-ft04v.27.
+#:
+#: CONTENT-KEYED, not line-keyed (nexus-vkpr3): the anchor is the calling
+#: line's own stripped source text, resolved to its CURRENT line number
+#: by ``tests._lint_line_anchor.resolve_anchor`` on every run. Several
+#: entries below carried a line-shift retargeting history before the
+#: conversion (e.g. collection_registration_kwargs's entry moved
+#: 1183 -> 1295 -> 1427 -> 1395 -> 1545 across four unrelated edits) --
+#: exactly the churn a content anchor makes structurally impossible,
+#: since an insertion above the site never changes the site's own text.
 #:
 #: nexus-ft04v.26 (THE REPOINT) update: collection_content_type (was
 #: corpus.py:626) and collection_owner (was corpus.py:658) DROPPED --
 #: both now read the catalog row (nexus.mcp_infra.get_collection_row)
 #: instead of parsing, exactly the retirement their old entries here
 #: predicted ("Still parses until nexus-ft04v.26 repoints it at the
-#: catalog row"). collection_registration_kwargs's own entry moved
-#: 1183 -> 1295 -> 1427 -> 1395 (line shift from the surrounding repoint,
-#: three times now -- item 3's local intent/profile split above it, then
-#: the coordinator's 2026-09-09 design correction that shrank
-#: effective_embedding_model_for_writes back to a thin delegation and
-#: moved its profile check to ensure_collection_registered -- same call,
-#: same reason throughout). SIX new
-#: entries added: all mint-time /
+#: catalog row"). SIX new entries added: all mint-time /
 #: re-registration-after-row-deletion sites this SAME bead's row-based
 #: repoint of collection_content_type/collection_owner/collection_model
 #: made necessary -- a name with no catalog row (by construction, since
@@ -86,8 +91,11 @@ _TARGET = "parse_conformant_collection_name"
 #: STRING's own segments (safe: each site first confirms the name is
 #: conformant via is_conformant_collection_name, a pure regex check with
 #: no row lookup).
-ALLOWED_CALLERS: dict[tuple[str, int], str] = {
-    ("src/nexus/corpus.py", 1545): (  # line shifted again (nexus-fryrd docstrings plus the nexus-bd44g nexus-aotql repoint above it, integrated 2026-09-10)
+ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
+    (
+        "src/nexus/corpus.py",
+        ("segments = parse_conformant_collection_name(name)",),
+    ): (
         "collection_registration_kwargs: the write-time registration "
         "derivation used by HttpCatalogClient.register_collection's OWN "
         "bare-call fallback and by ensure_collection_registered (T3 chunk "
@@ -97,12 +105,18 @@ ALLOWED_CALLERS: dict[tuple[str, int], str] = {
         "helpers (diagnostics), so this fallback path never fires for them; "
         "out of nexus-ft04v.27's scope."
     ),
-    ("src/nexus/catalog/collection_name.py", 113): (
+    (
+        "src/nexus/catalog/collection_name.py",
+        ("parsed = parse_conformant_collection_name(name)",),
+    ): (
         "CollectionName.parse: the render path's own parse counterpart. "
         "Pre-existing single caller (http_catalog_client.py's "
         "collection_for) unaffected by this bead."
     ),
-    ("src/nexus/commands/collection.py", 829): (  # line shifted again (nexus-ft04v.32: list_cmd grew the catalog-column rendering above it); before that nexus-ft04v.28 item 4 routed it through ensure_collection_registered
+    (
+        "src/nexus/commands/collection.py",
+        ("parsed = parse_conformant_collection_name(name)",),
+    ): (
         "reindex_cmd: `name`'s catalog row was JUST DELETED by "
         "purge_collection_cascade a few lines above -- this call is what "
         "RECREATES it, so the row-based funnel helpers would raise "
@@ -117,7 +131,10 @@ ALLOWED_CALLERS: dict[tuple[str, int], str] = {
         "RETIRED_SITES entry predates this bead's row-based repoint, "
         "which is what makes this reintroduction necessary here)."
     ),
-    ("src/nexus/commands/catalog_cmds/collections.py", 135): (  # line shifted (nexus-ft04v.28 item 4: routed through ensure_collection_registered)
+    (
+        "src/nexus/commands/catalog_cmds/collections.py",
+        ("parsed = parse_conformant_collection_name(name)",),
+    ): (
         "backfill_collections_cmd: `to_register` names are, by the loop's "
         "own filter, exactly the ones with no catalog row yet -- this "
         "call is what creates one. Same is_conformant_collection_name "
@@ -128,7 +145,10 @@ ALLOWED_CALLERS: dict[tuple[str, int], str] = {
         "call, so a physically-existing T3 collection's real model "
         "survives instead of being recomputed via write-intent."
     ),
-    ("src/nexus/commands/catalog_cmds/collections.py", 364): (  # line shifted (nexus-ft04v.28 item 4: routed through ensure_collection_registered)
+    (
+        "src/nexus/commands/catalog_cmds/collections.py",
+        ("parsed = parse_conformant_collection_name(new)",),
+    ): (
         "rename_collection_cmd: `new` was just confirmed CollectionState."
         "ABSENT above -- it has no catalog row yet by construction. Same "
         "guard and rationale as the backfill site above; not the retired "
@@ -137,7 +157,10 @@ ALLOWED_CALLERS: dict[tuple[str, int], str] = {
         "(nexus-ft04v.28 item 4) preserving the operator-typed segments "
         "rather than recomputing embedding_model via write-intent."
     ),
-    ("src/nexus/catalog/recovery_bundle.py", 392): (
+    (
+        "src/nexus/catalog/recovery_bundle.py",
+        ("parsed = parse_conformant_collection_name(recorded)",),
+    ): (
         "target_collection_for: `recorded` names a collection on the "
         "SOURCE install a recovery bundle is being restored from -- it "
         "may have no catalog row on THIS install at all yet (restoring "
@@ -146,7 +169,10 @@ ALLOWED_CALLERS: dict[tuple[str, int], str] = {
         "CollectionNotRegisteredError for a name this install has never "
         "seen."
     ),
-    ("src/nexus/db/t3.py", 1327): (
+    (
+        "src/nexus/db/t3.py",
+        ("parsed = parse_conformant_collection_name(name)",),
+    ): (
         "T3Database.list_collections()'s _derived_row_fields: class (d) "
         "-- synthesizes a row for a substrate (the retired, TEST-ONLY "
         "Chroma-era client) with no catalog to join against, the same "
@@ -242,20 +268,47 @@ def test_scanner_still_sees_the_live_tree() -> None:
     assert any(SRC.rglob("*.py")), f"SRC does not resolve to python sources: {SRC}"
 
 
+def _resolve_allowed_callers() -> tuple[dict[str, dict[int, tuple[str, ...]]], list[str]]:
+    """Resolve every ``ALLOWED_CALLERS`` content anchor to its CURRENT
+    live line number (nexus-vkpr3). Returns ``(by_file, problems)`` --
+    see ``tests.test_collection_name_parse_census._resolve_excluded_sites``
+    for the identical shape and rationale."""
+    by_file: dict[str, dict[int, tuple[str, ...]]] = {}
+    problems: list[str] = []
+    for (rel, content), _reason in ALLOWED_CALLERS.items():
+        lineno, err = resolve_anchor(REPO_ROOT, rel, content)
+        if err:
+            problems.append(f"{rel} {content!r} -> {err}")
+            continue
+        by_file.setdefault(rel, {})[lineno] = content
+    return by_file, problems
+
+
 def test_allowlisted_sites_are_real_calls_not_stale_entries() -> None:
-    """Every ALLOWED_CALLERS entry must be a genuine call at that exact
-    line -- a stale entry (the line moved, the call was deleted) silently
-    widens what this gate accepts without anyone noticing."""
+    """Every ALLOWED_CALLERS entry's content anchor must resolve to a
+    unique current line, AND that line must be a genuine call -- a stale
+    anchor (STALE: no longer found; AMBIGUOUS: found more than once) or
+    one that resolves to a line no longer flagged by the scanner
+    silently widens what this gate accepts without anyone noticing."""
+    by_file, problems = _resolve_allowed_callers()
+    assert not problems, (
+        f"{len(problems)} ALLOWED_CALLERS anchor(s) failed to resolve:\n  "
+        + "\n  ".join(problems)
+        + "\n\nRetarget with the call's current stripped text if it moved "
+        "(insertions above it do not require this), or drop the entry if "
+        "the call was removed."
+    )
     live = _all_call_sites()
     missing = [
-        f"{rel}:{lineno}"
-        for (rel, lineno) in ALLOWED_CALLERS
+        f"{rel}:{lineno} (anchor {content!r})"
+        for rel, linenos in by_file.items()
+        for lineno, content in linenos.items()
         if lineno not in live.get(rel, [])
     ]
     assert not missing, (
-        f"declared allowlist entr(y/ies) no longer match a real call: "
-        f"{missing}. Either the line moved (update the lineno) or the "
-        f"call was removed (drop the entry -- a lower pin is welcome)."
+        f"declared allowlist entr(y/ies) resolve to a line that is no "
+        f"longer a real call: {missing}. The call was removed -- drop "
+        "the entry (a lower pin is welcome)."
     )
 
 
@@ -270,7 +323,10 @@ def test_direct_callers_are_exactly_the_allowlist() -> None:
     live_set = {
         (rel, lineno) for rel, linenos in live.items() for lineno in linenos
     }
-    allowed_set = set(ALLOWED_CALLERS)
+    by_file, _problems = _resolve_allowed_callers()
+    allowed_set = {
+        (rel, lineno) for rel, linenos in by_file.items() for lineno in linenos
+    }
 
     extra = sorted(f"{rel}:{lineno}" for rel, lineno in (live_set - allowed_set))
     missing = sorted(f"{rel}:{lineno}" for rel, lineno in (allowed_set - live_set))
@@ -289,6 +345,51 @@ def test_direct_callers_are_exactly_the_allowlist() -> None:
         f"{missing}. The call was removed -- drop the stale entry (a lower "
         f"pin is welcome, never an inflated one)."
     )
+
+
+def test_allowlist_anchor_survives_insertion_above_it(tmp_path: pathlib.Path) -> None:
+    """nexus-vkpr3 regression, against THIS file's real scanner
+    (``_scan_file``): inserting a line above an allowlisted call must
+    not silently move the allowlist entry onto a different, unreviewed
+    call of the SAME target function that happens to shift into the old
+    stored line number."""
+    sample = tmp_path / "sample.py"
+    original = (
+        "from nexus.corpus import parse_conformant_collection_name\n"
+        "\n"
+        "def f(decoy_name, allowed_name):\n"
+        "    decoy = parse_conformant_collection_name(decoy_name)\n"
+        "    allowed = parse_conformant_collection_name(allowed_name)\n"
+        "    return decoy, allowed\n"
+    )
+    sample.write_text(original, encoding="utf-8")
+
+    allowed_content = ("allowed = parse_conformant_collection_name(allowed_name)",)
+    lineno, err = resolve_anchor(tmp_path, "sample.py", allowed_content)
+    assert (lineno, err) == (5, "")
+
+    hits_before = _scan_file(sample)
+    assert hits_before == [4, 5]
+
+    # Insert exactly one line above both calls -- enough to shift the
+    # decoy call (originally line 4) onto the allowed entry's OLD
+    # stored line number (5).
+    modified = "# inserted by an unrelated edit\n" + original
+    sample.write_text(modified, encoding="utf-8")
+
+    hits_after = _scan_file(sample)
+    assert hits_after == [5, 6], (
+        "fixture stopped demonstrating the hazard -- the decoy call must "
+        "now sit at the allowed entry's old stored line number (5)"
+    )
+
+    # A stale line-number key (5) would now silently allowlist the DECOY
+    # call. The content anchor instead resolves to the real, shifted
+    # allowed call and nothing else.
+    lineno, err = resolve_anchor(tmp_path, "sample.py", allowed_content)
+    assert err == ""
+    assert lineno == 6
+    assert lineno != 5  # never the decoy's line
 
 
 def test_retired_sites_are_documented() -> None:

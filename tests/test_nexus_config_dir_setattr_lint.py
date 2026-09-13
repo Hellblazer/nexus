@@ -100,6 +100,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._lint_line_anchor import resolve_anchor
+
 pytestmark = pytest.mark.lint
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -214,8 +216,8 @@ def _all_setattr_hits() -> dict[str, list[tuple[int, str]]]:
 # Ratchet exemption set (mirrors tests/test_pipefail_early_exit_consumer_
 # lint.py's `_PIPEFAIL_EARLY_EXIT_EXEMPT` / tests/
 # test_mode_declarations_are_explicit.py's `_MODE_LINT_EXCLUDE_NODEIDS`):
-# "relative/path.py:LINENO" -> may only SHRINK (site converted to
-# `monkeypatch.setenv("NEXUS_CONFIG_DIR", ...)`) or grow with a new,
+# (relative/path.py, content-anchor) -> may only SHRINK (site converted
+# to `monkeypatch.setenv("NEXUS_CONFIG_DIR", ...)`) or grow with a new,
 # individually-documented entry AND a conscious ceiling bump in the same
 # diff. Every entry below is a REAL, confirmed instance deliberately NOT
 # converted, because it deliberately tests the by-value-capture mechanism
@@ -223,7 +225,14 @@ def _all_setattr_hits() -> dict[str, list[tuple[int, str]]]:
 # entries for (a consumer's own unfixed module-level by-value import,
 # see `_MODULE_LEVEL_BY_VALUE_IMPORT_EXEMPT` below, now empty), so every
 # remaining entry here is a genuine mechanism regression pin.
-_SETATTR_EXEMPT: frozenset[str] = frozenset({
+#
+# CONTENT-KEYED, not line-keyed (nexus-vkpr3): the anchor is the exempted
+# call's own stripped source text, resolved to its CURRENT line number by
+# `tests._lint_line_anchor.resolve_anchor` on every run -- see that
+# module's docstring for the defect this closes and why a line number is
+# the wrong key. An insertion above one of these three sites no longer
+# requires retargeting anything.
+_SETATTR_EXEMPT: frozenset[tuple[str, tuple[str, ...]]] = frozenset({
     # test_marker_path_resolves_config_dir_at_call_time: the regression pin
     # for the ORIGINAL gc_purge_marker.py incident. It deliberately patches
     # nexus.config.nexus_config_dir, importlib.reload()s the consumer
@@ -235,14 +244,20 @@ _SETATTR_EXEMPT: frozenset[str] = frozenset({
     # time from one whose module-level import already captured the real
     # (unpoisoned) function; only literally replacing the function object
     # and observing whether the replacement propagates proves the shape.
-    "tests/test_health_service_checks.py:2679",
+    (
+        "tests/test_health_service_checks.py",
+        ('mp.setattr("nexus.config.nexus_config_dir", lambda: poisoned)',),
+    ),
     # test_backfill_state_path_uses_config_module_attr_not_frozen_import:
     # same class, for nexus.commands.t3._backfill_state_path(). Proves the
     # consumer reads nexus.config.nexus_config_dir via module-attribute
     # access (`_config.nexus_config_dir()`) rather than a `from nexus.config
     # import nexus_config_dir` binding captured once at t3.py's own import
     # time -- same reasoning as the entry above.
-    "tests/commands/test_t3_backfill_state_path.py:55",
+    (
+        "tests/commands/test_t3_backfill_state_path.py",
+        ('monkeypatch.setattr(nexus_config_mod, "nexus_config_dir", lambda: fake_dir)',),
+    ),
     # tests/test_nexus_config_dir_call_time_resolution.py's
     # `_poisoned_then_reloaded` helper (nexus-grg79): the SAME regression-
     # pin mechanism as the two entries above, applied to the 4 consumers
@@ -254,20 +269,40 @@ _SETATTR_EXEMPT: frozenset[str] = frozenset({
     # nexus.config.nexus_config_dir at least once, so sharing the helper
     # keeps this ratchet's growth to +1 for 4 new regression pins instead
     # of +4.
-    "tests/test_nexus_config_dir_call_time_resolution.py:66",
+    (
+        "tests/test_nexus_config_dir_call_time_resolution.py",
+        ('mp.setattr("nexus.config.nexus_config_dir", lambda: poisoned)',),
+    ),
 })
 _SETATTR_EXEMPT_CEILING = 3
 
 
+def _resolve_setattr_exempt() -> tuple[dict[str, dict[int, tuple[str, ...]]], list[str]]:
+    """Resolve every ``_SETATTR_EXEMPT`` content anchor to its CURRENT
+    live line number (nexus-vkpr3). Returns ``(by_file, problems)`` --
+    see ``tests._lint_line_anchor.resolve_anchor``'s docstring for STALE
+    vs AMBIGUOUS."""
+    by_file: dict[str, dict[int, tuple[str, ...]]] = {}
+    problems: list[str] = []
+    for rel, content in _SETATTR_EXEMPT:
+        lineno, err = resolve_anchor(REPO_ROOT, rel, content)
+        if err:
+            problems.append(f"{rel} {content!r} -> {err}")
+            continue
+        by_file.setdefault(rel, {})[lineno] = content
+    return by_file, problems
+
+
 def test_no_new_nexus_config_dir_setattr() -> None:
+    exempt_by_file, _problems = _resolve_setattr_exempt()
     hits = _all_setattr_hits()
     flat: list[str] = []
     for rel, entries in sorted(hits.items()):
+        exempt_linenos = set(exempt_by_file.get(rel, {}))
         for lineno, snippet in entries:
-            key = f"{rel}:{lineno}"
-            if key in _SETATTR_EXEMPT:
+            if lineno in exempt_linenos:
                 continue
-            flat.append(f"{key}  {snippet}")
+            flat.append(f"{rel}:{lineno}  {snippet}")
     assert not flat, (
         "The following test sites patch `nexus_config_dir` via setattr/"
         "patch rather than `monkeypatch.setenv(\"NEXUS_CONFIG_DIR\", "
@@ -295,23 +330,86 @@ def test_setattr_exempt_ratchet() -> None:
 
 
 def test_setattr_exempt_entries_are_live() -> None:
-    """Every exempted ``path:lineno`` must still name a real setattr/patch
-    call targeting ``nexus_config_dir`` at that exact line -- a stale entry
-    (file edited, line shifted, site converted without removing the
-    exemption) is a free, unrationalised exclusion slot the exact-equality
-    ratchet above cannot see on its own.
+    """Every exempted content anchor must resolve to a unique current
+    line (nexus-vkpr3: neither STALE nor AMBIGUOUS) that still names a
+    real setattr/patch call targeting ``nexus_config_dir`` -- a stale
+    anchor (file edited, site converted without removing the exemption)
+    is a free, unrationalised exclusion slot the exact-equality ratchet
+    above cannot see on its own.
     """
+    by_file, problems = _resolve_setattr_exempt()
+    assert not problems, (
+        f"{len(problems)} `_SETATTR_EXEMPT` anchor(s) failed to resolve:\n  "
+        + "\n  ".join(problems)
+        + "\n\nRetarget with the call's current stripped text if it moved "
+        "(insertions above it do not require this), or delete the entry "
+        "and lower `_SETATTR_EXEMPT_CEILING` if the site was converted."
+    )
     live = _all_setattr_hits()
     live_keys = {
         f"{rel}:{lineno}" for rel, entries in live.items() for lineno, _ in entries
     }
-    dead = sorted(e for e in _SETATTR_EXEMPT if e not in live_keys)
+    resolved_keys = {
+        f"{rel}:{lineno}" for rel, linenos in by_file.items() for lineno in linenos
+    }
+    dead = sorted(e for e in resolved_keys if e not in live_keys)
     assert not dead, (
-        f"{len(dead)} `_SETATTR_EXEMPT` entries no longer resolve to a "
-        f"live nexus_config_dir setattr/patch call:\n  " + "\n  ".join(dead)
-        + "\n\nRetarget if the line moved, or delete the entry and lower "
+        f"{len(dead)} `_SETATTR_EXEMPT` entries resolve to a line that no "
+        f"longer names a live nexus_config_dir setattr/patch call:\n  "
+        + "\n  ".join(dead)
+        + "\n\nDelete the entry and lower "
         "`_SETATTR_EXEMPT_CEILING` if the site was converted to setenv."
     )
+
+
+def test_setattr_exempt_anchor_survives_insertion_above_it(tmp_path: Path) -> None:
+    """nexus-vkpr3 regression, against THIS file's real scanner
+    (``_setattr_hits``): inserting a line above an exempted setattr call
+    must not silently move the exemption onto a different, unreviewed
+    setattr call that happens to shift into the old stored line number."""
+    sample = tmp_path / "sample.py"
+    original = (
+        "def test_decoy(mp):\n"
+        '    mp.setattr("nexus.config.nexus_config_dir", lambda: decoy_dir)\n'
+        "\n"
+        "def test_exempted(mp):\n"
+        '    mp.setattr("nexus.config.nexus_config_dir", lambda: poisoned)\n'
+    )
+    sample.write_text(original, encoding="utf-8")
+
+    exempted_content = (
+        'mp.setattr("nexus.config.nexus_config_dir", lambda: poisoned)',
+    )
+    lineno, err = resolve_anchor(tmp_path, "sample.py", exempted_content)
+    assert (lineno, err) == (5, "")
+
+    hits_before = _setattr_hits(sample)
+    assert [ln for ln, _ in hits_before] == [2, 5]
+
+    # Insert exactly enough lines above both calls to shift the decoy
+    # call (originally line 2) onto the exempted entry's OLD stored line
+    # number (5) -- the shift is derived from the fixture's own line
+    # numbers, never hardcoded, since a hardcoded offset is exactly the
+    # arithmetic hazard this whole ledger conversion exists to avoid.
+    shift = lineno - hits_before[0][0]
+    assert shift > 0
+    modified = "\n".join(f"# inserted {i}" for i in range(shift)) + "\n" + original
+    sample.write_text(modified, encoding="utf-8")
+
+    hits_after = _setattr_hits(sample)
+    linenos_after = [ln for ln, _ in hits_after]
+    assert linenos_after[0] == 5, (
+        "fixture stopped demonstrating the hazard -- the decoy call must "
+        "now sit at the exempted entry's old stored line number (5)"
+    )
+
+    # A stale line-number key (5) would now silently exempt the DECOY
+    # call. The content anchor instead resolves to the real, shifted
+    # exempted call and nothing else.
+    lineno, err = resolve_anchor(tmp_path, "sample.py", exempted_content)
+    assert err == ""
+    assert lineno == 5 + shift
+    assert lineno != 5  # never the decoy's (post-shift) line
 
 
 # ── Sweep 2: src/nexus/ module-level by-value imports ──────────────────────

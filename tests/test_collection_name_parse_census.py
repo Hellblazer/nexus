@@ -263,6 +263,8 @@ import pathlib
 
 import pytest
 
+from tests._lint_line_anchor import resolve_anchor
+
 pytestmark = pytest.mark.lint
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
@@ -273,35 +275,54 @@ SRC = REPO_ROOT / "src" / "nexus"
 #: unrelated string. Per RDR-204 Phase 3 item 1's four pattern classes.
 _TYPE_PREFIXES = frozenset({"code__", "docs__", "rdr__", "knowledge__", "quarantine-"})
 
-#: (relative-path, lineno) -> one-line reason, for sites the raw AST scan
-#: WOULD flag but which the RDR-204 Phase 3 item 1 exclusion rule (``mcp__``
-#: tool names, ``rdr-`` document ids) removes from the pin. Every entry here
-#: is independently verified as a real raw match by
-#: ``test_excluded_sites_are_real_matches_not_omissions`` — an exclusion
-#: that no longer matches anything is a stale entry, not a quieter gate.
-_EXCLUDED_SITES: dict[tuple[str, int], str] = {
-    # Line moved 7887 -> 7900 (nexus-ft04v.21's funnel of this file's other
-    # three sites) -> 7934 (nexus-ft04v.26's THE REPOINT: _resolve_corpus_target/
-    # _group_collections_by_model rewritten, _collection_family_prefix added)
-    # -> 8317 (nexus-em75s.10's eight tuple_* MCP tools inserted above it; +10 at the Phase 2 fix round)
-    # -> 8501 (nexus-abyi9's T1 handoff re-lease consecutive-failure backoff inserted above it; +173).
-    # -> 8528 (RDR-206 fda0b6e18 +6 above it; RDR-169 Gap 2 remainder None-content coercion in the four combined-query tools, +21 above it).
-    # -> 8630 (RDR-206 Phase 2, nexus-h61dl.9: tuple_renew tool, the tuple_ack reply object with its validator, and the lease_s refuse-not-cap docstrings, +102 above it).
-    # -> 8644 (nexus-473mx ac5767e6e: memory_put's ttl default docstring, +14 above it).
-    ("src/nexus/mcp/core.py", 8644): (
+#: (relative-path, content-anchor) -> one-line reason, for sites the raw
+#: AST scan WOULD flag but which the RDR-204 Phase 3 item 1 exclusion rule
+#: (``mcp__`` tool names, ``rdr-`` document ids) removes from the pin.
+#:
+#: CONTENT-KEYED, not line-keyed (nexus-vkpr3): the anchor is the
+#: exempted line's own stripped source text, resolved to its CURRENT line
+#: number by ``tests._lint_line_anchor.resolve_anchor`` on every run — see
+#: that module's docstring for why. A line-number key silently re-targets
+#: onto whatever different code now sits at the stored number the moment
+#: anything is inserted above it; this file's entries were themselves
+#: retargeted by line-shift arithmetic several times before the
+#: conversion (7887 -> 7900 -> 7934 -> 8317 -> 8501 -> 8528 -> 8630 ->
+#: 8644 for the mcp/core.py entry alone) — exactly the churn a content
+#: anchor makes structurally impossible, since the anchor's own text does
+#: not move. Every entry here is independently verified as a real raw
+#: match by ``test_excluded_sites_are_real_matches_not_omissions`` — an
+#: anchor that no longer resolves (STALE) or resolves ambiguously is a
+#: stale judgement call, not a quieter gate.
+_EXCLUDED_SITES: dict[tuple[str, tuple[str, ...]], str] = {
+    (
+        "src/nexus/mcp/core.py",
+        (
+            'bare = raw_tool.rsplit("__", 1)[-1] if '
+            'raw_tool.startswith("mcp__") else raw_tool',
+        ),
+    ): (
         "mcp__ tool name: `raw_tool.rsplit(\"__\", 1)[-1] if "
         'raw_tool.startswith("mcp__")` strips an MCP tool-name prefix for '
         "planner-step normalization, not a collection name."
     ),
-    ("src/nexus/plans/bundle.py", 230): (
+    (
+        "src/nexus/plans/bundle.py",
+        ('tool = tool.rsplit("__", 1)[-1]',),
+    ): (
         "mcp__ tool name: `_extract_tool_name`'s own docstring says it "
         '"strips any mcp__...__ prefix" from a plan step\'s tool identifier.'
     ),
-    ("src/nexus/plans/cost_estimate.py", 447): (
+    (
+        "src/nexus/plans/cost_estimate.py",
+        ('tool = tool.rsplit("__", 1)[-1]',),
+    ): (
         "mcp__ tool name: `_extract_tool`, the documented local copy of "
         "bundle._extract_tool_name, strips the same mcp__...__ prefix."
     ),
-    ("src/nexus/plans/runner.py", 2377): (
+    (
+        "src/nexus/plans/runner.py",
+        ('t = t.rsplit("__", 1)[-1]',),
+    ): (
         "mcp__ tool name: strips an mcp__...__ prefix from a resolved plan "
         "step's tool identifier before dispatch, guarded by the same "
         '`startswith("mcp__")` check as the other three sites.'
@@ -723,12 +744,36 @@ def _raw_collection_name_parse_sites() -> dict[str, list[tuple[int, str]]]:
     return found
 
 
+def _resolve_excluded_sites() -> tuple[dict[str, dict[int, tuple[str, ...]]], list[str]]:
+    """Resolve every ``_EXCLUDED_SITES`` content anchor to its CURRENT
+    live line number (nexus-vkpr3). Returns ``(by_file, problems)``:
+    ``by_file`` maps path -> {resolved lineno: content anchor}; a
+    ``problems`` entry (STALE or AMBIGUOUS) means the anchor did not
+    resolve at all -- callers must not silently treat that as "nothing
+    to exclude here", `test_excluded_sites_are_real_matches_not_omissions`
+    fails loud on any non-empty `problems`."""
+    by_file: dict[str, dict[int, tuple[str, ...]]] = {}
+    problems: list[str] = []
+    for (rel, content), _reason in _EXCLUDED_SITES.items():
+        lineno, err = resolve_anchor(REPO_ROOT, rel, content)
+        if err:
+            problems.append(f"{rel} {content!r} -> {err}")
+            continue
+        by_file.setdefault(rel, {})[lineno] = content
+    return by_file, problems
+
+
 def _collection_name_parse_sites() -> dict[str, list[tuple[int, str]]]:
     """Raw matches under SRC with `_EXCLUDED_SITES` filtered out -- this is
-    what the pin counts."""
+    what the pin counts. An anchor that fails to resolve excludes
+    nothing (fail-safe toward MORE reported violations, never fewer) --
+    `test_excluded_sites_are_real_matches_not_omissions` is what makes a
+    resolution failure loud in its own right."""
+    excluded_by_file, _problems = _resolve_excluded_sites()
     result: dict[str, list[tuple[int, str]]] = {}
     for rel, hits in _raw_collection_name_parse_sites().items():
-        kept = [(lineno, cls) for lineno, cls in hits if (rel, lineno) not in _EXCLUDED_SITES]
+        excluded_linenos = set(excluded_by_file.get(rel, {}))
+        kept = [(lineno, cls) for lineno, cls in hits if lineno not in excluded_linenos]
         if kept:
             result[rel] = kept
     return result
@@ -802,34 +847,101 @@ def test_scanner_still_sees_the_live_tree() -> None:
 
 
 def test_excluded_sites_are_real_matches_not_omissions() -> None:
-    """Every _EXCLUDED_SITES entry must be a genuine raw hit at that exact
-    line. An exclusion that stops matching (the line moved, the code
-    changed) is a stale entry masquerading as a live judgement call --
+    """Every _EXCLUDED_SITES entry's content anchor must resolve to a
+    unique CURRENT line (nexus-vkpr3: neither STALE -- the anchor text no
+    longer occurs -- nor AMBIGUOUS -- it occurs more than once), and that
+    resolved line must be a genuine raw hit. Either failure means the
+    entry is a stale judgement call masquerading as a live exclusion --
     this is what tells a later reader "excluded" apart from "forgotten"."""
+    by_file, problems = _resolve_excluded_sites()
+    assert not problems, (
+        f"{len(problems)} _EXCLUDED_SITES anchor(s) failed to resolve:\n  "
+        + "\n  ".join(problems)
+        + "\n\nRetarget with the line's current stripped text if it moved "
+        "(insertions above it do not require this -- the anchor tracks "
+        "the content, not the number), or delete the entry if the code "
+        "changed."
+    )
     raw = _raw_collection_name_parse_sites()
     missing = [
-        f"{rel}:{lineno}"
-        for (rel, lineno) in _EXCLUDED_SITES
+        f"{rel}:{lineno} (anchor {content!r})"
+        for rel, linenos in by_file.items()
+        for lineno, content in linenos.items()
         if lineno not in {ln for ln, _cls in raw.get(rel, [])}
     ]
     assert not missing, (
-        f"declared exclusion(s) no longer match any raw site: {missing}. "
-        "Either the line moved (update the lineno) or the code changed and "
-        "the exclusion should be deleted -- a stale exclusion silently "
-        "widens the census's blind spot without lowering the pin."
+        f"declared exclusion(s) resolve to a live line the raw scan no "
+        f"longer flags: {missing}. The code changed shape -- delete the "
+        "exclusion, or investigate why the scanner stopped matching it."
     )
 
 
 def test_excluded_sites_do_not_reach_the_pin() -> None:
-    """The filter actually removes what it claims to: no excluded
-    (rel, lineno) pair survives into the pinned census."""
+    """The filter actually removes what it claims to: no excluded,
+    content-resolved line survives into the pinned census."""
     live = _collection_name_parse_sites()
+    by_file, _problems = _resolve_excluded_sites()
     leaked = [
         f"{rel}:{lineno}"
-        for (rel, lineno) in _EXCLUDED_SITES
+        for rel, linenos in by_file.items()
+        for lineno in linenos
         if lineno in {ln for ln, _cls in live.get(rel, [])}
     ]
     assert not leaked, f"excluded site(s) still counted toward the pin: {leaked}"
+
+
+def test_excluded_site_anchor_survives_insertion_above_it(tmp_path: pathlib.Path) -> None:
+    """nexus-vkpr3 regression, against THIS file's real scanner
+    (``_scan_tree``) and the real ``resolve_anchor`` primitive: inserting
+    a line above an excluded site must not silently move the exclusion
+    onto a different, unreviewed raw hit that happens to shift into the
+    old stored line number.
+
+    Fixture mirrors an ``_EXCLUDED_SITES`` entry's own shape (the mcp__
+    tool-name strip) with a genuine, DIFFERENT raw hit ("decoy") placed
+    directly above it -- a plain ``split("__")`` call the scanner also
+    flags, which is exactly the shape a stale line-number key could
+    silently swallow after a shift."""
+    sample = tmp_path / "sample.py"
+    original = (
+        "def f(raw_tool, other_name):\n"
+        '    decoy = other_name.split("__", 1)\n'
+        '    bare = raw_tool.rsplit("__", 1)[-1] if '
+        'raw_tool.startswith("mcp__") else raw_tool\n'
+        "    return decoy, bare\n"
+    )
+    sample.write_text(original, encoding="utf-8")
+
+    victim_content = (
+        'bare = raw_tool.rsplit("__", 1)[-1] if '
+        'raw_tool.startswith("mcp__") else raw_tool',
+    )
+    lineno, err = resolve_anchor(tmp_path, "sample.py", victim_content)
+    assert (lineno, err) == (3, "")
+
+    hits_before = dict(_scan_tree(sample))
+    assert hits_before[2] == "split"  # the decoy
+    assert hits_before[3] == "rsplit"  # VICTIM
+
+    # Insert exactly one line above both sites -- enough to shift the
+    # decoy (originally line 2) onto VICTIM's OLD stored line number (3).
+    modified = "# inserted by an unrelated edit\n" + original
+    sample.write_text(modified, encoding="utf-8")
+
+    hits_after = dict(_scan_tree(sample))
+    assert hits_after[3] == "split", (
+        "fixture stopped demonstrating the hazard -- the decoy must now "
+        "sit at VICTIM's old stored line number (3)"
+    )
+    assert hits_after[4] == "rsplit"
+
+    # A stale line-number key (3) would now silently exclude the DECOY
+    # split() call under the mcp__ rationale. The content anchor instead
+    # resolves to VICTIM's real, shifted location and nothing else.
+    lineno, err = resolve_anchor(tmp_path, "sample.py", victim_content)
+    assert err == ""
+    assert lineno == 4
+    assert lineno != 3  # never the decoy's line
 
 
 def test_rdr_id_parse_is_not_a_scanner_hit() -> None:
