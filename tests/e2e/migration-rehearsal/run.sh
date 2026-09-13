@@ -689,6 +689,25 @@ else
   echo "[1-2/3] --no-build: reusing existing wheel + native binary"
 fi
 
+# nexus-xihsm (critic follow-up, nexus-vpl9c riders): the release-workflow
+# SHAPE check was landing unwired -- run by nobody, the exact rot class it
+# exists to close. --shakeout is where the just-built native candidate +
+# freshly generated jOOQ sources are already sitting on THIS host checkout
+# (see lib/shakeout_shape_check.sh's header for why this cannot live inside
+# rehearse_shakeout.sh instead). Scoped to --shakeout only: every other leg
+# either builds nothing here (COLD/HOLE_PUNCH/PACKAGE_UPGRADE/ERA_HOP/
+# ACQUIRE/STRANDED) or has its own pre-tag posture already.
+if [ "$SHAKEOUT" = 1 ]; then
+  if [ -n "$ARTIFACTS" ]; then
+    _shakeout_shape_bin="$ARTIFACTS/native/nexus-service"
+  else
+    _shakeout_shape_bin="$PWD/service/target/nexus-service"
+  fi
+  # shellcheck source=lib/shakeout_shape_check.sh disable=SC1091
+  source "$HERE/lib/shakeout_shape_check.sh"
+  shakeout_release_workflow_shape_check "$_shakeout_shape_bin" || exit 1
+fi
+
 # nexus-nyry9.13 (2026-08-21): --acquire is a cold-acquire leg too — it stages
 # NO local native binary (see the ACQUIRE staging branch below), so it must be
 # excluded here exactly like the other runtime-acquire legs. Without this, the
