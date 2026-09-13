@@ -3217,7 +3217,7 @@ def _collect_quota_report() -> dict:
     # cloud schema would suggest.
     # nexus-spujb: token windows come from the one per-model table the
     # chunkers enforce, so doctor cannot report a window they do not apply.
-    from nexus.embed_window import MODEL_MAX_TOKENS  # noqa: PLC0415 — deferred; doctor loads per-check dependencies lazily
+    from nexus.embed_window import MODEL_MAX_TOKENS, window_status  # noqa: PLC0415 — deferred; doctor loads per-check dependencies lazily
 
     if is_local_mode():
         from nexus.db.local_ef import (  # noqa: PLC0415 — circular-dep avoidance (nexus.db.local_ef)
@@ -3226,14 +3226,19 @@ def _collect_quota_report() -> dict:
         )
         _ef = LocalEmbeddingFunction()
         _local_token = local_model_token()
+        _local_caps: dict = {
+            "max_tokens": MODEL_MAX_TOKENS.get(_local_token, 0),
+            "embedding_dims": _ef.dimensions,
+        }
+        # nexus-ajvjx: a small-window model whose tokenizer the client cannot
+        # load gets no chunk-size check (nexus-spujb warns and skips rather
+        # than refusing to index), so the report carries that fact.
+        _window = window_status(_local_token)
+        if _window is not None:
+            _local_caps["window"] = _window
         voyage_limits = {
             "mode": "local",
-            "models": {
-                _local_token: {
-                    "max_tokens": MODEL_MAX_TOKENS.get(_local_token, 0),
-                    "embedding_dims": _ef.dimensions,
-                },
-            },
+            "models": {_local_token: _local_caps},
             "target_rpm": 0,
             "api_key_set": False,
         }
@@ -3342,6 +3347,16 @@ def _format_quota_report(report: dict) -> str:
             f"    {model:20} tokens={caps['max_tokens']:>6,}  "
             f"dims={caps['embedding_dims']}"
         )
+        window = caps.get("window")
+        if window is not None and not window["enforced"]:
+            # nexus-ajvjx: the visible backstop for nexus-spujb's
+            # warn-and-skip when the tokenizer is missing.
+            lines.append(
+                f"  {_WARN} {model}: tokenizer not found at "
+                f"{window['tokenizer_path']}, so chunks are not checked against "
+                f"its {window['max_tokens']}-token window and text past it is "
+                "left out of the vector; re-provision the local model (nx init)"
+            )
     lines.append("")
 
     # ── Cross-encoder (RDR-109 Phase 3) ──────────────────────────────────

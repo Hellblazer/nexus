@@ -80,6 +80,23 @@ def has_small_window(model: str) -> bool:
     return max_tokens is not None and max_tokens < SAFE_CHUNK_BYTES
 
 
+def window_status(model: str) -> dict | None:
+    """For a small-window model: its token window, whether chunks are
+    checked against it, and the tokenizer file that decides that
+    (nexus-ajvjx, for ``nx doctor``). ``None`` for a model with no window
+    to enforce."""
+    if not has_small_window(model):
+        return None
+    from nexus.db.local_ef import _MODEL_TOKENS  # noqa: PLC0415 — deferred; local_ef is only needed for the alias
+
+    token = _MODEL_TOKENS.get(model, model)
+    return {
+        "max_tokens": MODEL_MAX_TOKENS[token],
+        "enforced": window_for_model(token) is not None,
+        "tokenizer_path": str(_tokenizer_path(token)),
+    }
+
+
 @functools.cache
 def window_for_model(model: str) -> TokenWindow | None:
     """The token window chunks for *model* must fit, or ``None`` when the
