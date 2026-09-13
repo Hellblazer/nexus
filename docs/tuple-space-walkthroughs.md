@@ -1,6 +1,6 @@
 # Tuple Space Walkthroughs
 
-> Status: design of record from RDR-205 (accepted). The engine (Phase 1) and client surface (Phase 2 — `nx tuple`, the eight `tuple_*` MCP tools, the doctor rows) have both shipped: `/v1/tuples` on `engine-service-v0.1.114` (Phase 3, deployed to the managed cloud since 2026-09-11), and the client in conexus 7.41.0, which also bumps the pinned local-mode engine floor to the same tag. A local install on 7.41.0 or later has the route live; an install on an older release stays pinned below the floor and a local-mode call 404s until it upgrades.
+> Status: design of record from RDR-205 (accepted) and RDR-206 (accepted), which adds `renew` and reply-in-ack. RDR-205's engine (Phase 1) and client surface (Phase 2 — `nx tuple`, the nine `tuple_*` MCP tools, the doctor rows) have both shipped: `/v1/tuples` on `engine-service-v0.1.114` (Phase 3, deployed to the managed cloud since 2026-09-11), and the client in conexus 7.41.0, which also bumps the pinned local-mode engine floor to the same tag. A local install on 7.41.0 or later has the route live; an install on an older release stays pinned below the floor and a local-mode call 404s until it upgrades. RDR-206's `renew` and reply-in-ack are implemented on both halves as of this writing but not yet in a tagged engine release or a client release; see `docs/wire-contract-pending.md`'s `## Unshipped` entry.
 
 Scenario walkthroughs for the [Tuple Space reference](tuple-space.md). Each section follows one use of the space from the caller's side, drawn as a sequence between the processes involved.
 
@@ -115,7 +115,7 @@ Every claim reaches a terminal transition: ack, nack, expire or dead. `lease_unt
 
 ## Cross-instance request and ack
 
-A request from one instance to another is the same mailbox with an instance name as the address. Both instances on the box mint against one tenant, so `mailbox/conexus-58` is reachable from the nexus session and vice versa. The requester parks an `in` on its own mailbox for the ack. See [What it is not for](tuple-space.md#what-it-is-not-for) for the scope this stays inside.
+A request from one instance to another is the same mailbox with an instance name as the address. Both instances on the box mint against one tenant, so `mailbox/conexus-58` is reachable from the nexus session and vice versa. The requester parks an `in` on its own mailbox for the ack. The peer answers with `ack(reply=...)` (RDR-206): the reply lands in the requester's mailbox and the request is consumed, in one transaction, so there is no longer a separate `out` call that a crash could land between. See [What it is not for](tuple-space.md#what-it-is-not-for) for the scope this stays inside.
 
 ```mermaid
 sequenceDiagram
@@ -126,22 +126,22 @@ sequenceDiagram
 
     N->>E: out mailbox/conexus-58 kind request correlation_id r-41 nonce r-41
     E-->>N: tuple_id
-    loop until ack or the caller's own deadline
+    loop until an ack or the caller's own deadline
         N->>E: in mailbox/nexus-a6 to nexus-a6 claimant=nexus-a6 timeout_s=25
         E-->>N: None at the 25 s cap, probe result, loop
     end
     C->>E: in mailbox/conexus-58 to conexus-58 claimant=conexus-58 lease_s=300
     E-->>C: the request tuple, claim c9
     C->>C: deploy engine, re-gate
-    C->>E: out mailbox/nexus-a6 kind ack correlation_id r-41 nonce ack-r-41
+    C->>E: ack c9 reply: subspace mailbox/nexus-a6, keys {to nexus-a6}, dims {kind ack, correlation_id r-41}
+    Note over E: c9 consumed and the reply written in the SAME transaction (RDR-206); the reply's nonce is the engine's own, hex(request tuple id), never the caller's
     E->>E: signal waiters on mailbox/nexus-a6
     E-->>N: the ack tuple, claim c10
-    C->>E: ack c9
     N->>E: ack c10
     Note over N,C: the unacked-request sweep is rd over every mailbox for kind request with no matching ack
 ```
 
-A wait of minutes is a loop of parked calls, never one long park. Each call parks for at most 25 s because the public edge times out a response that has not started within 30 s; at the cap the engine returns the probe result and the client loops. The `correlation_id` dim is what pairs an ack with its request.
+A wait of minutes is a loop of parked calls, never one long park. Each call parks for at most 25 s because the public edge times out a response that has not started within 30 s; at the cap the engine returns the probe result and the client loops. The `correlation_id` dim is what pairs an ack with its request. Before RDR-206 the peer's ack was `out` followed by a separate `ack c9`; a crash between the two left the reply delivered and the request unconsumed, so it was redelivered and the requester could see a second reply carrying the same `correlation_id`. Writing the reply inside `ack`'s own transaction closes that window: both commit or neither does.
 
 `scripts/check_inbound_relay_acks.py`'s mailbox arm is that unacked-request sweep, addressed by `--mailbox-prefix`/`--tuple-read-max`: it scans every `mailbox/*` subspace for `kind=request` rows with no matching `kind=ack` row at `mailbox/<from>`, distinguished in its findings by a `MAILBOX-UNACKED-REQUEST:` tag, and reports into the same finding list as the older T2-memory ack check (the pre-tuple-space relay convention between the nexus and conexus repos). An empty mailbox tuple space is a legitimate clean state for this arm, not a blindspot; a request younger than `--max-age-days` is a legitimate in-flight handshake and is not reported even unacked.
 
@@ -215,7 +215,7 @@ A run that finds nothing expired is the healthy state. The failure the counts de
 
 ## Where JavaSpaces differs
 
-JavaSpaces, the Jini-era Linda, is the leased and transactional form of this design, and a post-gate research pass compared the two. Four of six points of contact are already met: the pinned key set on take (JavaSpaces places no floor on a template's generality), Postgres as the fixed substrate (the spec permits transient spaces), one engine over HTTP (no multicast lookup, no RMI), and the in-process park where JavaSpaces had leased remote listeners that leaked. Two are not met, and both are accepted for v1 with named candidates for a later version. The comparison table lives in [Prior art](tuple-space.md#prior-art).
+JavaSpaces, the Jini-era Linda, is the leased and transactional form of this design, and a post-gate research pass compared the two. All six points of contact are now met: the pinned key set on take (JavaSpaces places no floor on a template's generality), Postgres as the fixed substrate (the spec permits transient spaces), one engine over HTTP (no multicast lookup, no RMI), the in-process park where JavaSpaces had leased remote listeners that leaked, a holder-renewable lease (`renew`, RDR-206), and take-and-reply in one transaction (`ack`'s optional `reply`, RDR-206). The comparison table lives in [Prior art](tuple-space.md#prior-art).
 
 ```mermaid
 sequenceDiagram
@@ -224,22 +224,14 @@ sequenceDiagram
     participant E as Engine
     participant Q as Requester's mailbox
 
-    rect rgba(127,127,127,0.12)
-    Note over C,E: v1, fixed lease, two calls
     C->>E: in mailbox/[addr] claimant=c lease_s=900
     E-->>C: request, claim c1, lease_until = now + 900 s clamped to expires_at
-    Note over C: work runs. With no renew, past 900 s the claim lapses and the request is re-delivered
-    C->>E: out mailbox/[requester] kind=ack correlation_id=r-41 nonce=ack-r-41
-    Note over C,E: a crash here leaves the request claimed until the lease lapses, then re-delivered
-    C->>E: ack c1
-    end
-
-    rect rgba(127,127,127,0.12)
-    Note over C,Q: candidates for a later version, not designed
-    C->>E: renew c1 lease_s=900, the holder-renewable lease Jini has
-    C->>E: ack c1 carrying the reply out, one transaction
+    Note over C: work runs past 900 s
+    C->>E: renew c1 lease_s=900
+    E-->>C: lease_until extended, clamped to expires_at; no attempt spent
+    C->>E: ack c1 reply subspace=mailbox/[requester] keys {to [requester]} dims {kind ack, correlation_id r-41}
+    Note over C,E: c1 consumed and the reply written in the SAME transaction; a crash before this call leaves the request still claimed, to be re-delivered at lease lapse -- there is no longer a window between a written reply and its ack
     E-->>Q: reply visible only once the ack has committed
-    end
 ```
 
-What the lease scope buys and what it costs: keeping every v1 lease short is why the absence of a renew operation is safe, on an assumption the record names as such: no v1 consumer holds a mailbox claim across work longer than 900 s. Lease-renewal traffic was among Jini's failure causes; this design avoids it by scope, not by construction. The window between `in` and `ack` while the work runs is inherent to any leased take, JavaSpaces included, and is not what either candidate closes.
+What each operation buys, now that both are closed: `renew` lets a consumer keep every v1 lease short and still finish long work, holder-renewable exactly as Jini's leases are, without the renewal *traffic* Jini's own retrospective named as a failure cause — a holder renews only when it is still working, never on a fixed schedule. `ack`'s optional `reply` removes the second call the JavaSpaces comparison flagged: the reply and the request's consumption commit together or not at all, so the crash-between-two-calls window this design used to accept is gone. The window between `in` and the work that follows it is still inherent to any leased take, JavaSpaces included; `renew` narrows how much of that window a lapse can silently swallow, but neither operation removes the window itself.

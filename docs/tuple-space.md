@@ -1,6 +1,6 @@
 # Tuple Space
 
-> Status: design of record from RDR-205 (accepted). Phase 1 (engine) and Phase 2 (client — `nx tuple`, the eight `tuple_*` MCP tools, the doctor rows) have both shipped. `/v1/tuples` shipped on `engine-service-v0.1.114` (Phase 3), deployed to the managed cloud since 2026-09-11. The client shipped in conexus 7.41.0, which also bumps the pinned local-mode engine floor (`REQUIRED_ENGINE_VERSION`, `src/nexus/engine_version.py`) to `v0.1.114` — a local install on 7.41.0 or later has the route live. An install on an older release stays pinned below the floor and a local-mode call 404s (the three `nx doctor` rows report this as informational, not a defect, below that floor).
+> Status: design of record from RDR-205 (accepted) and RDR-206 (accepted), which adds `renew` and an optional reply on `ack`. RDR-205's Phase 1 (engine) and Phase 2 (client — `nx tuple`, the nine `tuple_*` MCP tools, the doctor rows) have both shipped: `/v1/tuples` shipped on `engine-service-v0.1.114` (Phase 3), deployed to the managed cloud since 2026-09-11. The client shipped in conexus 7.41.0, which also bumps the pinned local-mode engine floor (`REQUIRED_ENGINE_VERSION`, `src/nexus/engine_version.py`) to `v0.1.114` — a local install on 7.41.0 or later has the route live. An install on an older release stays pinned below the floor and a local-mode call 404s (the three `nx doctor` rows report this as informational, not a defect, below that floor). RDR-206's `renew` and ack-with-reply are implemented on both the engine and the client as of this writing, but not yet in a tagged engine release or a client release — see the wire ledger's `## Unshipped` entry (`docs/wire-contract-pending.md`) for the exact commits and the paired-release plan.
 
 ## What it is
 
@@ -10,7 +10,7 @@ Two consumers ship with this design and no others: the RDR-184 dispatch ledger (
 
 ## Operations
 
-Ten HTTP routes under `/v1/tuples`. Signatures are the contract; the handler is the implementation.
+Eleven HTTP routes under `/v1/tuples`. Signatures are the contract; the handler is the implementation.
 
 ```text
 out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> tuple_id
@@ -20,7 +20,13 @@ rd (subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0) -> [Tuple]   #
 rdp(subspace, keys_pattern=None, *, n=1, since=None) -> [Tuple]                # probe
 in (subspace, keys_pattern, *, claimant, lease_s, timeout_s=0) -> (Tuple, claim_id) | None
 inp(subspace, keys_pattern, *, claimant, lease_s) -> (Tuple, claim_id) | None
-ack(claim_id, claimant) ; nack(claim_id, claimant)         # ownership checked; nack counts an attempt
+ack(claim_id, claimant, *, reply=None) -> reply_id | None  # ownership checked; reply is {subspace, keys, dims,
+                                                            # body, ttl_seconds}, written and the request
+                                                            # consumed in one transaction (RDR-206)
+nack(claim_id, claimant)                                   # ownership checked; counts an attempt
+renew(claim_id, claimant, lease_s) -> lease_until          # ownership checked; extends a live claim, clamped
+                                                            # to expires_at, refused above the template's
+                                                            # max_lease_seconds; never counts an attempt (RDR-206)
 subspace_list(prefix) -> [{subspace, total, available, claimed, dead, consumed, expired_unpurged,
                            oldest_created_at, newest_created_at}]    # concrete subspaces that exist;
                                                                      # the two timestamps span all rows,
@@ -40,8 +46,9 @@ subspace_stats(subspace) -> {total, available, claimed, dead, consumed, expired_
 | `rdp` | no | yes | is the probe form of `rd` |
 | `in` | yes, up to `timeout_s` | a same-claimant retake within its lease returns the existing claim id, no new update or log row | `inp` |
 | `inp` | no | same same-claimant rule as `in` | is the probe form of `in` |
-| `ack` | no | no: a second `ack` on the same claim is `ClaimNotFound` | none |
+| `ack` | no | no: a second `ack` on the same claim is `ClaimNotFound`; a reply written with it shares that rule, since the reply and the consumption commit in one transaction | none |
 | `nack` | no | no: every call counts an attempt against `max_attempts` | none |
+| `renew` | no | no: a repeat renews again from the new `now`, extending the lease further; a lapsed claim is `ClaimNotFound`, not resurrected | none |
 | `registry` | no | yes | none |
 | `subspace_list` | no | yes | none |
 | `subspace_stats` | no | yes | none |
@@ -163,6 +170,8 @@ A same-claimant retake is idempotent: before the claim statement, `in` reads for
 
 Every claim reaches a terminal transition: `ack`, `nack`, `expire` or `dead`. `ack` sets `consumed_at` and logs `ack`; `nack` releases the claim (`claim_state`, `claimant`, `claim_id` and `lease_until` to NULL) and increments `attempts`. When a claim finds a row whose previous lease has lapsed, the same transaction writes the `expire` row for the previous claim and increments `attempts`; if that brings `attempts` to `max_attempts` the row is dead-lettered there and then and the claim re-runs its select. The re-run is bounded: each pass either claims or dead-letters one row, and the call gives up after `NX_TUPLE_CLAIM_PASSES` passes (default 8, an engine setting distinct from `NX_TUPLE_READ_MAX`) and returns the probe result. `ack` and `nack` are checked against ownership: `ClaimOwnership` if a live claim is held by someone else, `ClaimNotFound` if no live claim matches the id (including a second `ack` on an already-acked claim, or a claim_id whose lease has already lapsed but nobody has re-claimed or swept it yet). The check is enforced on the update itself, as a compare-and-swap on the claim's identity (`id`, `claim_state = 'claimed'`, `claim_id`, `consumed_at IS NULL`), so an `ack` or `nack` that loses the race with the sweep's release between its read and its write fails `ClaimNotFound` and writes no log row, instead of consuming or releasing a row it no longer holds.
 
+`renew(claim_id, claimant, lease_s)` extends a live claim without consuming it and without spending an attempt (RDR-206). The new `lease_until` is `now + lease_s`, clamped to the row's `expires_at` at UPDATE time in SQL — never against a value read earlier, which closes a window a same-tuple refire could otherwise open — so a duration inside the template's cap can still come back shorter than asked, silently. A `lease_s` above the template's `max_lease_seconds` is refused outright with `LeaseTooLong` rather than clamped: renewal changes who decides when work is long, not the cap. `renew` reads through the same `liveClaimRow` predicate as `ack` and `nack`, so a claim whose lease has already lapsed is `ClaimNotFound`, not resurrected — a holder that missed its window learns it lost the claim, exactly as a late `ack` would tell it — and it is checked against ownership the same way, and enforced by the same compare-and-swap, so a renew that loses the race with the sweep's release also fails `ClaimNotFound` and writes no log row. A successful renew writes one `renew` claim-log row and never touches `attempts`: a renew is the holder keeping the message, not a delivery given back, so unlike a nack or a lapsed lease it never counts toward `max_attempts`.
+
 ## Blocking reads
 
 There is one engine JVM and every `out` passes through it, so a per-subspace `Condition` (one lock and condition per subspace key in a concurrent map) is the wake mechanism. The `out` handler signals all waiters on that subspace after the tenant-scoped transaction has committed, never from a transaction listener. A parked call is a loop: open a short transaction, run the equality query, return the connection, then park outside any transaction until the signal or a one-second timer, then repeat. A parked call never holds one of the pooled connections while parked. The waiter is registered before the query, not after, so a commit between query and park is not lost.
@@ -178,6 +187,8 @@ An engine deploy opens a gap of about 25 seconds. The operations are shaped so a
 | `rd`, `rdp` | retry freely | a read takes nothing |
 | `out` | retry freely | the id is derived from caller fields only; the resend is the same row and only refreshes `expires_at` |
 | `in` | retry with the same claimant | a live claim held by this claimant on a matching tuple is returned with its claim id, no new update; otherwise the lease and sweep cover it exactly as a crash after `in` |
+| `ack` with a reply | retry only while the first call's response is genuinely lost, never after a `ClaimNotFound` | the ack and the reply write commit together in one transaction, so a retry after a lost response finds the claim already consumed and answers `ClaimNotFound` rather than writing a second reply; re-send the reply with `out` if it still matters |
+| `renew` | retry freely while the claim is still live | each call renews again from the new `now`; a retry after the claim has lapsed answers `ClaimNotFound` instead of resurrecting it |
 | parked `rd` / `in` | returns the probe result at shutdown | every waiter is signalled on shutdown, so the gap is one retry, not a stall on top of it |
 
 Two more guards live in the client: the request it is about to send is measured against the edge's 8 KB body limit before sending, and its own HTTP timeout sits above `timeout_s` so the engine's cap always fires first.
@@ -194,15 +205,15 @@ Three `nx doctor` rows: oldest unclaimed age per subspace over claimable rows on
 
 Nine typed errors, one base class (`TupleException`) carrying a `code` and the HTTP status `TupleHandler` sends for it, so a new subtype cannot be added without also declaring how it renders. Every error is rendered `{"error": "<code>", "detail": "<message>"}` at its own status; `TupleHandler` catches this base type ahead of the generic 500 ladder.
 
-- `UnknownSubspace` (404): the subspace does not match a registered template, or its address segment is not of the form `[A-Za-z0-9][A-Za-z0-9._-]*` (one segment, no spaces, no empty address; a session id, an agent id, or an instance name such as `nexus-70` all qualify). `subspace_stats` on such a name is this error, never a zero census (engines after v0.1.114).
-- `SchemaViolation` (400): a field and reason, checked before any write; covers a missing pinned key, a missing required dim, an `out` without a nonce on a `keys+nonce` template, and a `ttl_seconds` or `lease_s` at or below zero or a negative `timeout_s`.
+- `UnknownSubspace` (404): the subspace does not match a registered template, or its address segment is not of the form `[A-Za-z0-9][A-Za-z0-9._-]*` (one segment, no spaces, no empty address; a session id, an agent id, or an instance name such as `nexus-70` all qualify). `subspace_stats` on such a name is this error, never a zero census (engines after v0.1.114). A reply's target subspace on `ack` is checked the same way, before the ack's transaction opens.
+- `SchemaViolation` (400): a field and reason, checked before any write; covers a missing pinned key, a missing required dim, an `out` without a nonce on a `keys+nonce` template, a `ttl_seconds` or `lease_s` at or below zero or a negative `timeout_s`, a reply object on `ack` that carries a `nonce` key (the engine sets a reply's nonce itself, to the request's own tuple id, so a caller-supplied one is refused rather than silently dropped), and a reply whose target template is not `keys+nonce` (a keys-only target, such as the RDR-184 ledger, would collapse two replies onto one id).
 - `TakeDisabled` (422): the template's `take.enabled` is false.
 - `TimeoutTooLong` (400): `timeout_s` above the engine's cap.
-- `ClaimNotFound` (404): no live claim with that id.
-- `ClaimOwnership` (403): a live claim held by someone else.
+- `ClaimNotFound` (404): no live claim with that id — including a `renew` on one whose lease has already lapsed, which is not resurrected.
+- `ClaimOwnership` (403): a live claim held by someone else — checked on `renew` the same way as on `ack` and `nack`.
 - `ParkCapExceeded` (429): the per-claimant or global park cap is reached; the caller gets the probe result and backs off.
-- `TtlTooLong` (400): a `ttl_seconds` above the template's `retention_seconds`.
-- `LeaseTooLong` (400): a `lease_s` above the template's `max_lease_seconds`; a lease longer than the row's remaining TTL is clamped, not refused.
+- `TtlTooLong` (400): a `ttl_seconds` above the template's `retention_seconds`, on `out` or on a reply written by `ack`.
+- `LeaseTooLong` (400): a `lease_s` above the template's `max_lease_seconds`, on `in`/`inp` or on `renew`; on `in`/`inp` a lease longer than the row's remaining TTL is clamped, not refused, and `renew` clamps the same way against the row's `expires_at` at update time — but a `lease_s` over the template's cap itself is refused on both, never clamped.
 
 Three refusals outside the nine, all in `TupleHandler` itself: a request against a route with the wrong HTTP method refuses 405 (every write route is POST-only, `registry`/`subspace_list`/`subspace_stats` are GET-only); a malformed or missing required field in the request body refuses 400 (`IllegalArgumentException`, the same mapping every other handler in this package uses); a request with no tenant resolved refuses 500 (`internal: tenant not set` — never reachable through the auth filter on a correctly configured route).
 
@@ -210,15 +221,16 @@ Three refusals outside the nine, all in `TupleHandler` itself: a request against
 
 `nexus.db.t2.http_tuple_store.HttpTupleStore` is a ninth T2 domain store (`db.tuples`), an HTTP client over `/v1/tuples` built the same way every other `Http*Store` is (constructor injection, credential/endpoint self-heal, `RefreshableHttpStoreMixin`'s default idempotent gateway retry on 502/503/504 — no operation here opts out: `rd`/`rdp` are freely retryable, a retried `out` lands on the same tuple by its id formula, and a retried `in`/`inp` shares the identical crash-after-claim ambiguity the lease and sweep already cover). Two things it carries that no other T2 store needs:
 
-- **8 KB pre-send guard.** The edge WAF rejects request bodies over 8 KB. The client measures the exact serialised request `json.dumps` would put on the wire and refuses before sending (`RequestTooLargeError`), rather than letting a request die at the edge with no local signal.
+- **8 KB pre-send guard.** The edge WAF rejects request bodies over 8 KB. The client measures the exact serialised request `json.dumps` would put on the wire and refuses before sending (`RequestTooLargeError`), rather than letting a request die at the edge with no local signal. A reply attached to `ack` can push it over the cap that a bare ack could never reach.
 - **Typed-error mapping.** The engine renders each of the nine errors below as `{"error": "<code>", "detail": "<message>"}` at the error's own HTTP status. Some codes share a status (`UnknownSubspace` and `ClaimNotFound` are both 404), so the client classifies by the `error` field, never the bare status code, and re-raises the matching `TupleError` subclass (`UnknownSubspaceError`, `SchemaViolationError`, `TakeDisabledError`, `TimeoutTooLongError`, `ClaimNotFoundError`, `ClaimOwnershipError`, `ParkCapExceededError`, `TtlTooLongError`, `LeaseTooLongError`) — a code the engine did not name this way passes through as an ordinary `httpx.HTTPStatusError`.
+- **Reply-loss guard (RDR-206).** `ack(claim_id, claimant, reply=...)` raises `ReplyNotWrittenError` — deliberately outside the `TupleError` hierarchy, so it survives a broad `except TupleError` rather than being swallowed by it — when the response carries no `reply_id` after a reply was sent. The request is already consumed at that point, whether the engine predates `renew`/ack-with-reply (no `reply_id` key at all) or a new engine simply wrote nothing (a null `reply_id`); either way a retried ack answers `ClaimNotFound`, not a second attempt to write the reply, so the caller must re-send the reply with `out()` if it still matters.
 
 **HTTP timeout ordering.** A blocking `rd`/`in_` call (`timeout_s > 0`) passes a per-call HTTP timeout of `timeout_s` plus a five-second margin — strictly above the caller's park budget, so the engine's own cap (25 s by default) always returns its probe result before the client's own transport timeout could fire first.
 
 Two access paths sit on top of `HttpTupleStore`:
 
-- **`nx tuple`** — `out`, `rd`, `in`, `ack`, `nack`, `templates`, `list`, `stats`, `watch` (a ping-then-pull mailbox watcher for a Claude Code Monitor; it never claims, preflights before watching, and holds a machine-wide lock per address). See [CLI Reference — nx tuple](cli-reference.md#nx-tuple) for every flag.
-- **Eight `tuple_*` MCP tools** — `tuple_out`, `tuple_rd`, `tuple_in`, `tuple_ack`, `tuple_nack`, `tuple_registry`, `tuple_list`, `tuple_stats` (`rd`/`in`'s own `timeout_s=0` default covers the probe case; there are no separate `tuple_rdp`/`tuple_inp` tools). See [MCP Servers — Tuple space](mcp-servers.md#tuple-space-t2-adjacent-rdr-205) for signatures and the routing rule of thumb.
+- **`nx tuple`** — `out`, `rd`, `in`, `ack`, `nack`, `renew`, `templates`, `list`, `stats`, `watch` (a ping-then-pull mailbox watcher for a Claude Code Monitor; it never claims, preflights before watching, and holds a machine-wide lock per address). `ack` takes `--reply-subspace`/`--reply-key`/`--reply-dim`/`--reply-body`/`--reply-ttl-seconds` (RDR-206); there is no `--reply-nonce` flag, since the engine sets it. See [CLI Reference — nx tuple](cli-reference.md#nx-tuple) for every flag.
+- **Nine `tuple_*` MCP tools** — `tuple_out`, `tuple_rd`, `tuple_in`, `tuple_ack`, `tuple_nack`, `tuple_renew`, `tuple_registry`, `tuple_list`, `tuple_stats` (`rd`/`in`'s own `timeout_s=0` default covers the probe case; there are no separate `tuple_rdp`/`tuple_inp` tools). `tuple_ack` takes an optional `reply` object (RDR-206) with the same fields as `tuple_out` minus the nonce. See [MCP Servers — Tuple space](mcp-servers.md#tuple-space-t2-adjacent-rdr-205) for signatures and the routing rule of thumb.
 
 **Three `nx doctor` rows**, each gated the same way against the engine floor that first serves `/v1/tuples` — an install below that floor reports the check as informational, not a defect, and an install at or above the floor that still 404s reports UNKNOWN and asks you to investigate the engine install:
 
@@ -234,19 +246,19 @@ The build lease (it guards building the engine and must work with the engine dow
 
 ## Prior art
 
-JavaSpaces, the Jini-era Linda, is the leased and transactional form of this design. Four of six points of contact are already met; two are not.
+JavaSpaces, the Jini-era Linda, is the leased and transactional form of this design. All six points of contact are now met.
 
-| Point of contact | JavaSpaces | RDR-205 | Status |
+| Point of contact | JavaSpaces | This design | Status |
 | --- | --- | --- | --- |
 | Take template | null-as-wildcard, no floor on generality | every pinned key required by equality | covered, stricter |
 | Durability | spec permits transient spaces | Postgres only; claims re-earned by lease lapse after restore | covered, stronger |
 | Discovery and transport | multicast lookup, RMI | one engine, HTTP and JSON | covered by construction |
 | `notify` | leased remote listener registration | in-process park, caps four and sixteen, `ParkCapExceeded` | covered, different failure mode |
-| Lease renewal | renew and cancel by the holder | fixed lease, max 900 s on the mailbox | accepted for v1; `renew` a later candidate |
-| Take and reply | one transaction under 2PC | two calls; window bounded by the lease | accepted for v1; ack with reply a later candidate |
+| Lease renewal | renew and cancel by the holder | `renew(claim_id, claimant, lease_s)`: relative duration, clamped to the tuple's `expires_at`, refused above the template's `max_lease_seconds`, refused rather than resurrected on a lapsed claim | closed by RDR-206; no cancel operation — a holder that wants to give up a claim early calls `nack` |
+| Take and reply | one transaction under 2PC | `ack`'s optional `reply`: written and the request consumed in one transaction, no 2PC | closed by RDR-206 |
 
-Two gaps are accepted for v1, each named as what it is rather than argued as settled. The first is an assumption the record does not argue: that no v1 consumer holds a mailbox claim across work longer than the template's `max_lease_seconds` of 900 seconds, so the absence of a renew operation is safe by scope rather than by construction. The second is that `in` and the `out` that answers it are two calls rather than one transaction, so a consumer that crashes after its `in` and before its answering `out` sees the request re-delivered at lease lapse and repeats the work; the window is bounded by the lease and visible in the claim log, and no reply is lost, since none was written. Both a `renew` operation on a live claim and an `ack` that carries an optional reply `out` in the ack's own transaction are named as candidates for a later version, not scheduled and not designed here.
+Both gaps RDR-205 left open for its first version are closed by RDR-206. The first was an assumption the record did not argue: that no v1 consumer holds a mailbox claim across work longer than the template's `max_lease_seconds` of 900 seconds. `renew` ends that dependency: a consumer still working extends its own claim before the lease lapses, so the cap can stay short without a long task losing its claim silently. The second was that `in` and the `out` that answers it are two calls rather than one transaction, so a consumer that crashed between them left the reply either lost or, worse, duplicated once the request was redelivered. `ack`'s optional `reply` closes that window by writing the reply and consuming the request in the same transaction: both commit or neither does, so a crash between the old two calls can no longer happen because there is no longer a gap between them. See [RDR-206](rdr/rdr-206-tuple-claim-renew-and-reply-in-ack.md) for the design, its research, and its gate history.
 
 ## Where the decisions live
 
-The design, its research, its alternatives and its gate history are recorded in [RDR-205](rdr/rdr-205-linda-tuple-space-over-postgres.md).
+The design, its research, its alternatives and its gate history are recorded in [RDR-205](rdr/rdr-205-linda-tuple-space-over-postgres.md) and, for `renew` and ack-with-reply, [RDR-206](rdr/rdr-206-tuple-claim-renew-and-reply-in-ack.md).

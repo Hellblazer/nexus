@@ -445,7 +445,8 @@ nx tuple rd ledger/<span class="ph">&lt;SESSION-ID&gt;</span> -n 300</pre><butto
 <li><strong>Waiting happens inside the engine.</strong> A waiting read waits on a signal for its subspace, which the engine sends after commit. The client does not poll, the wait holds no connection, and each wait is bounded so the client's own timeouts never fire first.</li>
 <li><strong>Templates are delivered with the engine.</strong> They are files the engine loads and checks at start. A client can ask the engine for the templates and their digest and detect a mismatch instead of guessing.</li>
 </ul>
-<p>Two limits are known and accepted for now. A claim cannot be extended, so a mailbox claim lasts at most fifteen minutes, and a task that needs more time loses its claim. A reply is a separate <code>out</code> from the take operation that claimed the request, so a reader that crashes between the two sees the request again when the lease ends and repeats the work, and no reply is lost because none was sent. RDR-205 names both as later candidates.</p>
+<p>A claim can be extended. A holder that is still working calls <code>tuple_renew</code> before its lease ends. The engine moves the lease forward, never past the tuple's own expiry and never past the template's own cap on lease length. Renewing does not count as one of the three failed take operations a message can survive.</p>
+<p>A reply can travel with the ack that closes a take operation, instead of as a separate call. <code>tuple_ack</code> takes an optional reply. The engine writes the reply and consumes the take operation together, in one transaction, so a crash between the two can no longer happen: either both take effect or neither does.</p>
 </div></details>
 </section>
 
