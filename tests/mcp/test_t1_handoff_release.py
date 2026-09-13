@@ -169,6 +169,80 @@ async def test_borrowed_lease_does_not_start_a_refresh_task(monkeypatch) -> None
     assert "session_id" not in core._OWNED_T1_SESSION
 
 
+@pytest.mark.asyncio
+async def test_resume_into_previously_owned_session_re_mints_not_borrows(
+    monkeypatch,
+) -> None:
+    """nexus-r0d37 DEFECT 1: a /clear (A -> B) followed by a /resume back
+    into A, in the SAME mcp_pid, must not silently borrow A's own
+    now-unrefreshed lease.
+
+    When this process handed off A -> B, it cancelled ITS OWN refresh task
+    for A (the only thing that was ever refreshing A's token) but left A's
+    published lease file on disk -- still 'fresh' per its own stored
+    expiry, with nobody left to renew it. Without the fix, the B -> A
+    handoff back reads that lease, sees it has not technically expired
+    yet, and BORROWS it (mirrors the genuine-sibling-owns-it case this
+    module intentionally never re-mints for) -- so no refresh task starts
+    for A post-resume, and A's token silently runs out its original TTL
+    with nothing renewing it (the observed ~50-minute-later 401 in the
+    bead). The fix must recognize that THIS process was A's sole owner,
+    clear A's now-orphaned lease when abandoning it, and mint fresh (with
+    a live refresh loop) when A is handed back.
+    """
+    from nexus.db import t1 as t1_mod
+
+    monkeypatch.setattr(
+        "nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID,
+    )
+    config_dir = nexus_config_dir()
+
+    mint_calls: list[str] = []
+
+    def _mint(session_id_arg: str, *, context: str = "") -> dict:
+        mint_calls.append(session_id_arg)
+        return _fake_mint(session_id_arg)
+
+    monkeypatch.setattr(t1_mod, "mint_t1_session_token", _mint)
+
+    # This process already owns and is refreshing "sess-a" -- mirrors
+    # _t1_lifespan's Branch 0 mint branch having run at MCP startup.
+    os.environ["NX_T1_SESSION_ID"] = "sess-a"
+    os.environ["NX_T1_SESSION"] = "tok-sess-a"
+    t1_mod.publish_t1_session_lease(
+        "sess-a", "tok-sess-a", config_dir, ttl_seconds=3600,
+    )
+    core._OWNED_T1_SESSION["session_id"] = "sess-a"
+    core._T1_SESSION_REFRESH_TASK = MagicMock()
+
+    # /clear: A -> B.
+    write_handoff_marker(
+        _MCP_PID, new_session_id="sess-b", claude_pid=_CLAUDE_PID,
+        config_dir=config_dir,
+    )
+    log = MagicMock()
+    await core._t1_handoff_tick(_MCP_PID, log)
+
+    assert os.environ["NX_T1_SESSION_ID"] == "sess-b"
+    assert mint_calls == ["sess-b"]
+    assert core._OWNED_T1_SESSION.get("session_id") == "sess-b"
+
+    # /resume: B -> A, same mcp_pid, same round trip the bead describes.
+    write_handoff_marker(
+        _MCP_PID, new_session_id="sess-a", claude_pid=_CLAUDE_PID,
+        config_dir=config_dir,
+    )
+    await core._t1_handoff_tick(_MCP_PID, log)
+
+    assert os.environ["NX_T1_SESSION_ID"] == "sess-a"
+    # The critical assertion: a SECOND mint for "sess-a" must have
+    # happened -- proving the stale pre-/clear lease was not blindly
+    # borrowed -- and this process must own + refresh it going forward.
+    assert mint_calls == ["sess-b", "sess-a"]
+    assert core._OWNED_T1_SESSION.get("session_id") == "sess-a"
+    assert core._T1_SESSION_REFRESH_TASK is not None
+
+
 # ── no marker present: silent no-op (steady state) ──────────────────────────
 
 

@@ -1027,11 +1027,56 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     # the cancelled task can never race a re-mint against the swap below
     # (mirrors the ordering `_t1_lifespan`'s own teardown already uses:
     # cancel the refresh task before touching session state).
+    #
+    # nexus-r0d37 DEFECT 1: capture ownership of `old_session_id` BEFORE
+    # clearing `_OWNED_T1_SESSION` below. If this process was the one
+    # refreshing it, it is now the ONLY thing that was ever going to
+    # refresh it -- cancelling the task above stops that for good, but
+    # the published lease FILE for `old_session_id` is untouched and
+    # still reads as "fresh" per its own stored `expires_at` (set at an
+    # earlier mint/refresh). Without clearing it here, a LATER handoff
+    # back to `old_session_id` (a `/resume` following this `/clear`, the
+    # exact round trip the bead reports) reads that still-technically-
+    # fresh lease and BORROWS it -- indistinguishable, from
+    # `_lock_guarded_mint_or_borrow`'s point of view, from the genuine
+    # "a live sibling MCP already owns and is refreshing this session"
+    # case that borrowing exists for (see
+    # `test_borrowed_lease_does_not_start_a_refresh_task`). A borrow
+    # never starts a refresh loop (by design: re-minting a session this
+    # process does not own would rotate another owner's live token out
+    # from under it, `_t1_session_refresh_loop`'s own docstring) -- so
+    # the resumed session ends up bound to a token nobody is renewing,
+    # which silently expires once its ORIGINAL, pre-/clear TTL runs out
+    # with no self-heal (the observed 401 roughly an hour after resume).
+    #
+    # Clearing the lease file here is a CLIENT-SIDE-only action -- no
+    # server-side revoke/close_session -- so it does not touch JDR-001's
+    # "old session rows strand and age out via the T1 TTL sweep, never
+    # revoke the token" decision; it only forces the NEXT reader of
+    # `old_session_id` (a resume-back handoff, or an unrelated CLI
+    # invocation) to mint fresh and take real, refreshed ownership again,
+    # exactly as if no lease had ever been published for it. Best-effort:
+    # a failure to clear just leaves an orphaned lease that self-heals
+    # once its own TTL genuinely elapses, same as today.
+    old_session_was_owned = (
+        old_session_id is not None
+        and _OWNED_T1_SESSION.get("session_id") == old_session_id
+    )
     global _T1_SESSION_REFRESH_TASK
     if _T1_SESSION_REFRESH_TASK is not None:
         _T1_SESSION_REFRESH_TASK.cancel()
         _T1_SESSION_REFRESH_TASK = None
     _OWNED_T1_SESSION.clear()
+
+    if old_session_was_owned:
+        try:
+            from nexus.db.t1 import clear_t1_session_lease  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            clear_t1_session_lease(old_session_id, config_dir)
+        except Exception as exc:  # noqa: BLE001 — best-effort; a failed clear just leaves a lease that self-heals via its own TTL, must not crash the handoff
+            log.warning(
+                "t1_handoff_abandoned_lease_clear_failed",
+                mcp_pid=mcp_pid, old_session_id=old_session_id, error=str(exc),
+            )
 
     from nexus import mcp_infra  # noqa: PLC0415 — deferred to avoid import cycle at module load
 
