@@ -9,7 +9,7 @@ historical patterns beyond any single project's post-mortem corpus.
 ## How to file
 
 1. Copy this template into a new T2 entry:
-   `mcp__plugin_conexus_nexus__memory_put(project="rdr_process", title="<project>-incident-<slug>", ttl=0, tags="rdr-audit,incident,<project>,<drift_class>", content=<filled-in template>)`
+   `mcp__plugin_conexus_nexus__memory_put(project="rdr_process", title="<project>-incident-<slug>", tags="rdr-audit,incident,<project>,<drift_class>", content=<filled-in template>)` — omit `ttl`; these filings are permanent by default.
 
 2. Title convention: `<project>-incident-<short-slug>` where slug is a stable
    handle for the incident (e.g. `art-incident-073-dialog-grounding-dropped`).

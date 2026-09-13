@@ -86,7 +86,7 @@ Conexus Storage Tiers: check before any work, and write your findings back. Read
 - T2 `nx memory`: project decisions, findings, session context. Check before project work.
 - T1 `nx scratch`: this session's discoveries, shared across all sibling agents. Check before duplicating sibling work.
 
-Write path: T1 (immediate, shared with siblings) → `--persist` flag to T2 (survives the session) → `/conexus:knowledge-tidy` to T3 (permanent, cross-project). Findings not stored are findings lost: call `store_put` (T3) or `memory_put` (T2) before returning a result you would want a future session to know.
+Write path: T1 (immediate, shared with siblings) → `--persist` flag to T2 (survives the session) → T3 (permanent, cross-project) via `store_put`, after using `/conexus:knowledge-tidy` (`nx_tidy`, read-only) to consolidate against what is already there. Findings not stored are findings lost: call `store_put` (T3) or `memory_put` (T2) before returning a result you would want a future session to know.
 
 **T2 ttl convention (reversed 2026-09-12, nexus-473mx: omitting `ttl` now means permanent, not 30 days; a clock is something you ask for):**
 

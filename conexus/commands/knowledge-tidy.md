@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash
-description: Persist and organize knowledge into the T3 store using mcp__plugin_conexus_nexus__nx_tidy (RDR-080)
+description: Consolidate knowledge via the read-only mcp__plugin_conexus_nexus__nx_tidy, then persist the organized result into the T3 store with store_put (RDR-080)
 ---
 
 # Knowledge Tidying Request

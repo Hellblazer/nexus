@@ -82,7 +82,7 @@ This invariant was verified in RDR-067 Phase 1b (T2 `nexus_rdr/067-spike-disposi
 
 The skill embeds the pinned canonical prompt from T2 at dispatch time:
 
-1. `mcp__plugin_conexus_nexus__memory_get(project="nexus_rdr", title="067-canonical-prompt-v1")` — loads the v1 prompt (ttl=0 permanent; reference by stable title only — do not pass any runtime numeric id as a parameter)
+1. `mcp__plugin_conexus_nexus__memory_get(project="nexus_rdr", title="067-canonical-prompt-v1")` — loads the v1 prompt (stored with no `ttl`, i.e. permanent; reference by stable title only — do not pass any runtime numeric id as a parameter)
 2. Substitute `{project}` with the derived project name (bare name, for display)
 3. Substitute `{project_path}` with the resolved absolute worktree path (see §Project Worktree Path Resolution) — this MUST be an absolute path with no tilde, no `$HOME`, no relative components. The canonical prompt uses `{project_path}` wherever it Globs evidence files.
 4. Substitute `{transcript_excerpts}` with the pre-step block (empty if fast path)
@@ -111,7 +111,6 @@ Do NOT inline the canonical prompt text into this skill file — the prompt is t
    mcp__plugin_conexus_nexus__memory_put(
      project="rdr_process",
      title="audit-<project>-<YYYY-MM-DD>",
-     ttl=0,
      tags="rdr-audit,<project>,audit",
      content=<full subagent output with next_expected_fire timestamp header>
    )
@@ -338,7 +337,7 @@ Full audit output conforming to the canonical prompt's output-format contract:
 - [ ] Canonical prompt loaded from T2 `nexus_rdr/067-canonical-prompt-v1` and substituted
 - [ ] deep-research-synthesizer dispatched with the substituted prompt
 - [ ] Subagent output parsed for verdict category, incident count, confidence, drift distribution
-- [ ] Full output persisted by the skill body to T2 `rdr_process/audit-<project>-<YYYY-MM-DD>` with `ttl=0`
+- [ ] Full output persisted by the skill body to T2 `rdr_process/audit-<project>-<YYYY-MM-DD>` permanently (no `ttl`)
 - [ ] Compact summary surfaced to the user with T2 record id
 - [ ] Discrepancy check against prior audits completed, any contradiction flagged
 
@@ -346,7 +345,7 @@ Full audit output conforming to the canonical prompt's output-format contract:
 
 When the audit subagent reads T2 `rdr_process`, it ingests both prior audit outputs and individual incident filings from sibling projects. Sibling projects file cross-project incidents using the template at `conexus/resources/rdr_process/INCIDENT-TEMPLATE.md` (Phase 3). The template has 6 frontmatter fields (`project`, `rdr`, `incident_date`, `drift_class`, `caught_by`, `outcome`) and 8 required narrative sections covering what was meant, what shipped, the gap, decision point, mechanism, what caught it, cost, and lessons.
 
-Filings land in T2 as `rdr_process/<project>-incident-<slug>` with `ttl=0` (permanent). The audit subagent picks them up via `memory_list(project="rdr_process")` + `memory_search(project="rdr_process", query="<project>")`. The template's `drift_class` enum values exactly match the sub-pattern taxonomy in the canonical prompt, so the subagent can classify filed incidents directly without translation.
+Filings land in T2 as `rdr_process/<project>-incident-<slug>` with no `ttl` (permanent). The audit subagent picks them up via `memory_get(project="rdr_process", title="")` (lists all titles) + `memory_search(project="rdr_process", query="<project>")`. The template's `drift_class` enum values exactly match the sub-pattern taxonomy in the canonical prompt, so the subagent can classify filed incidents directly without translation.
 
 See the template file for the full schema and `## How to file` instructions.
 
@@ -355,7 +354,7 @@ See the template file for the full schema and `## How to file` instructions.
 Outputs generated across the audit flow:
 
 - **T1 scratch**: link-context entry via scratch tool: action="put", content='{"targets": [...], "source_agent": "deep-research-synthesizer"}', tags="link-context" — seeded before dispatch, consumed by the auto-linker when findings are stored. Also: ephemeral transcript excerpt staging during the pre-step, via scratch tool with tags="rdr-audit-transcripts,session-<project>-<date>".
-- **T2 memory** (persisted by the skill body, NOT the subagent): full audit output via memory_put tool: project="rdr_process", title="audit-<project>-<YYYY-MM-DD>", ttl=0 (permanent), tags="rdr-audit,<project>,audit". Includes a `next_expected_fire` timestamp header for Phase 2b `status` subcommand use.
+- **T2 memory** (persisted by the skill body, NOT the subagent): full audit output via memory_put tool: project="rdr_process", title="audit-<project>-<YYYY-MM-DD>", no `ttl` (permanent), tags="rdr-audit,<project>,audit". Includes a `next_expected_fire` timestamp header for Phase 2b `status` subcommand use.
 - **T3 knowledge** (deferred to Phase 5): cross-project aggregated audit evidence is out of scope for Phase 2a. Phase 5 may promote accumulated T2 audits to T3 as a project-agnostic pattern library. For Phase 2a, all audit output stays in T2 `rdr_process`.
 
 ## Phase 1b Signals Folded In

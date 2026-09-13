@@ -46,3 +46,75 @@ mechanize, it matters enough to ship.
   line for the same nexus-473mx ttl reversal. Inert until the pin advances.
 - `conexus/skills/nexus/SKILL.md` (nexus-x5kfm): rewrote the memory_put example comment for the
   same nexus-473mx ttl reversal. Inert until the pin advances.
+- `conexus/agents/_shared/CONTEXT_PROTOCOL.md` (nexus-cnzei.3): dropped a stale `ttl=30`
+  from the memory_put write-back example. Inert until the pin advances.
+- `conexus/agents/_shared/ERROR_HANDLING.md` (nexus-cnzei.3): rewrote the T2/T3 TTL sections —
+  removed the nonexistent `expires_at=""` field and the retired "coerces ttl<=0 to NULL" claim.
+  Inert until the pin advances.
+- `conexus/agents/architect-planner.md` (nexus-cnzei.3): dropped `ttl=30` from the memory_put
+  write-back bullet; fixed the `query(topic=...)` example (query has no topic parameter). Inert
+  until the pin advances.
+- `conexus/agents/code-review-expert.md` (nexus-cnzei.3): same two fixes as
+  architect-planner.md above. Inert until the pin advances.
+- `conexus/agents/codebase-deep-analyzer.md` (nexus-cnzei.3): same two fixes as
+  architect-planner.md above. Inert until the pin advances.
+- `conexus/agents/debugger.md` (nexus-cnzei.3): same two fixes as architect-planner.md above.
+  Inert until the pin advances.
+- `conexus/agents/deep-analyst.md` (nexus-cnzei.3): same two fixes as architect-planner.md
+  above. Inert until the pin advances.
+- `conexus/agents/deep-research-synthesizer.md` (nexus-cnzei.3): same two fixes as
+  architect-planner.md above. Inert until the pin advances.
+- `conexus/agents/developer.md` (nexus-cnzei.3): same two fixes as architect-planner.md above.
+  Inert until the pin advances.
+- `conexus/agents/strategic-planner.md` (nexus-cnzei.3): same two fixes as architect-planner.md
+  above. Inert until the pin advances.
+- `conexus/agents/substantive-critic.md` (nexus-cnzei.3): same two fixes as
+  architect-planner.md above. Inert until the pin advances.
+- `conexus/agents/test-validator.md` (nexus-cnzei.3): same two fixes as architect-planner.md
+  above. Inert until the pin advances.
+- `conexus/commands/knowledge-tidy.md` (nexus-cnzei.3): fixed the frontmatter description —
+  nx_tidy is read-only; store_put is the T3 write. Inert until the pin advances.
+- `conexus/commands/rdr-audit.md` (nexus-cnzei.3): dropped `ttl=0` (now rejected with a 400)
+  from the memory_put step. Inert until the pin advances.
+- `conexus/resources/rdr_process/INCIDENT-TEMPLATE.md` (nexus-cnzei.3): dropped `ttl=0` from
+  the filing example; these entries are permanent by omission. Inert until the pin advances.
+- `conexus/skills/analyze/SKILL.md` (nexus-cnzei.3): removed the `plan_save(...) for
+  multi-agent pipeline outcomes` bullet — pipeline plans do not belong in the plan library.
+  Inert until the pin advances.
+- `conexus/skills/architecture/SKILL.md` (nexus-cnzei.3): dropped the string-typed
+  `ttl="30d"` from the T2 execution-plan write-back (memory_put's ttl is int|None; execution
+  plans are now permanent by omission). Inert until the pin advances.
+- `conexus/skills/debug/SKILL.md` (nexus-cnzei.3): same plan_save fix as analyze/SKILL.md
+  above. Inert until the pin advances.
+- `conexus/skills/deep-analysis/SKILL.md` (nexus-cnzei.3): same plan_save fix as
+  analyze/SKILL.md above. Inert until the pin advances.
+- `conexus/skills/document/SKILL.md` (nexus-cnzei.3): same plan_save fix as analyze/SKILL.md
+  above. Inert until the pin advances.
+- `conexus/skills/knowledge-tidying/SKILL.md` (nexus-cnzei.3): same plan_save fix as
+  analyze/SKILL.md above. Inert until the pin advances.
+- `conexus/skills/nexus/SKILL.md` (nexus-cnzei.3): fixed the nx_tidy/nx_enrich_beads/
+  nx_plan_audit example calls and descriptions (each requires real args; nx_tidy is
+  read-only). Inert until the pin advances.
+- `conexus/skills/nexus/reference.md` (nexus-cnzei.3): fixed the nx_tidy/nx_enrich_beads/
+  nx_plan_audit section, the memory_put ttl table row and examples, and the store_put ttl
+  example. Inert until the pin advances.
+- `conexus/skills/query/SKILL.md` (nexus-cnzei.3): same plan_save fix as analyze/SKILL.md
+  above. Inert until the pin advances.
+- `conexus/skills/rdr-audit/SKILL.md` (nexus-cnzei.3): dropped every `ttl=0` (canonical-prompt
+  load note, audit persistence call, checklist item, incident-filing note, PRODUCE line); also
+  fixed a `memory_list` reference to the real `memory_get(title="")` listing call. Inert until
+  the pin advances.
+- `conexus/skills/research-synthesis/SKILL.md` (nexus-cnzei.3): same plan_save fix as
+  analyze/SKILL.md above. Inert until the pin advances.
+- `conexus/skills/research/SKILL.md` (nexus-cnzei.3): same plan_save fix as analyze/SKILL.md
+  above. Inert until the pin advances.
+- `conexus/skills/strategic-planning/SKILL.md` (nexus-cnzei.3): fixed the string-typed
+  `ttl="30d"` on the continuation-state write-back to an integer `ttl=14` (memory_put's ttl is
+  int|None; kept as a deliberate expiring row, not cargo-culted). Inert until the pin advances.
+- `conexus/skills/substantive-critique/SKILL.md` (nexus-cnzei.3): dropped the string-typed
+  `ttl="30d"` from the T2 critique-findings write-back (now permanent by omission). Inert
+  until the pin advances.
+- `conexus/skills/using-nx-skills/SKILL.md` (nexus-cnzei.3): fixed the plan_save bullet (same
+  as analyze/SKILL.md) and the write-path line that attributed the T3 persist step to
+  `/conexus:knowledge-tidy` itself rather than the `store_put` call after it. Inert until the
+  pin advances.

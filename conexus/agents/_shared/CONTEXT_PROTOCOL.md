@@ -410,7 +410,7 @@ Common titles under `{repo}`:
 ### Memory Tools
 ```
 # Write to memory
-mcp__plugin_conexus_nexus__memory_put( content="content", project="{project}", title="findings.md", ttl=30
+mcp__plugin_conexus_nexus__memory_put( content="content", project="{project}", title="findings.md"
 
 # Read from memory
 mcp__plugin_conexus_nexus__memory_get( project="{project}", title="findings.md"

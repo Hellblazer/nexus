@@ -67,10 +67,12 @@ This file documents common error handling patterns for agents.
   guidance for a condition that no longer exists.)
 
 **TTL expiry edge case (permanent entries)**:
-- The `expires_at` field for permanent entries is `""` (empty string), not NULL
-- The mandatory TTL guard is: `ttl_days > 0 AND expires_at != "" AND expires_at < now`
-- The `expires_at != ""` guard is MANDATORY — permanent entries use `""` which sorts before ISO timestamps
-- A 2-condition guard (without `!= ""`) would incorrectly delete permanent entries
+- `memory_put`'s `ttl` is `int | None`. `None` (the default — omit the parameter) means
+  PERMANENT; the row is never swept. There is no `expires_at` field visible at the MCP/HTTP
+  layer, no empty-string sentinel, and no SQL guard for a caller to write — this is a service
+  behind `HttpMemoryStore`/`POST /v1/memory/put`, not a table an agent touches directly.
+- `ttl=0` and any negative `ttl` are REJECTED with a 400 by the engine (RDR-194 D5,
+  nexus-tk070.p6a) — there is no coercion of `0` to permanent, or to anything else.
 
 **Memory entry not found**:
 - Error: memory_get returns "Not found"
@@ -78,28 +80,19 @@ This file documents common error handling patterns for agents.
 - Fallback: Use memory_search tool for fuzzy retrieval
 
 **TTL format errors**:
-- Valid ttl parameter values for memory_put: integer days (e.g., `ttl=30`)
-- Permanent is a NULL ttl — omit the parameter, or pass `ttl=0` and let the API coerce it
-- **Do not carry "0 means permanent" outside `memory_put`.** In the store itself, `0` means
-  EXPIRE IMMEDIATELY: `expire()` selects `WHERE ttl IS NOT NULL` and computes
-  `effective_ttl = ttl * (1 + log(access_count + 1))`, so a stored `0` is swept on the next
-  pass. Only NULL is excluded by that filter. `memory_put` (MCP and the engine's
-  `POST /v1/memory/put`) coerces `ttl <= 0` to NULL for you — the ETL import endpoints
-  deliberately do NOT, because they carry source values verbatim. A raw write that stores a
-  literal `0` is a self-deleting row (nexus-cg13x: this destroyed
-  `nexus/deployed-engine-version` repeatedly, each write returning 200 with a row id and each
-  immediate read-back passing, the row gone once a sweep ran).
+- Valid `ttl` values for `memory_put`: omit for permanent, or a positive integer number of
+  days for a row meant to expire (extended on read: `effective_ttl = ttl * (1 + ln(access_count
+  + 1))`, nexus-473mx). `ttl=30` for every write is the retired default, not a convention to
+  reproduce — pass an explicit TTL only when the content genuinely should expire.
+- `ttl<=0` (including `ttl=0`) is refused outright — pass no `ttl` at all instead.
 
 ### T3 Store Errors
 
-**TTL guard pattern (MANDATORY)**:
-```
-# Always use 3-condition guard — 2-condition guard deletes permanent entries!
-# CORRECT (3 conditions):
-ttl_days > 0 AND expires_at != "" AND expires_at < now
-# WRONG (2 conditions — deletes permanent entries):
-ttl_days > 0 AND expires_at < now
-```
+**TTL model (T3 has no `expires_at` column)**: both `T3Database.put` and `HttpVectorClient.put`
+compute expiry as `indexed_at + ttl_days`, so there is no stored expiry timestamp to guard in
+SQL. `ttl_days=0` is rejected outright by both (RDR-194 D5, nexus-tk070.p6b) — never coerced to
+permanent. `store_put`'s `ttl` parameter is a string (`"permanent"`, `"Nd"`, `"Nw"`), not the
+integer-or-None shape `memory_put`/`plan_save` use.
 
 **ChromaDB connectivity failure**:
 - Error: search or store_put fails with connection error

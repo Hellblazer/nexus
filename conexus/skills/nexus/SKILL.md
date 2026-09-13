@@ -48,10 +48,10 @@ mcp__plugin_conexus_nexus__operator_verify(claim="X uses attention", evidence="S
 mcp__plugin_conexus_nexus__operator_groupby(items='[{"id":"a", ...}, ...]', key="dataset used"
 mcp__plugin_conexus_nexus__operator_aggregate(groups='[{"key_value":"...", "items":[...]}]', reducer="count"
 
-# Background hygiene — call and let run (long-lived claude -p subprocesses)
-mcp__plugin_conexus_nexus__nx_tidy()                                     # T2 memory consolidation
-mcp__plugin_conexus_nexus__nx_enrich_beads()                             # design-notes auto-fill
-mcp__plugin_conexus_nexus__nx_plan_audit()                               # plan library quality sweep
+# Background hygiene — call and let run (claude -p subprocesses); each requires real args
+mcp__plugin_conexus_nexus__nx_tidy(topic="chromadb quotas", collection="<subject>")   # read-only T3 consolidation report for one collection
+mcp__plugin_conexus_nexus__nx_enrich_beads(bead_description="<title + description>")  # enriches ONE bead's description
+mcp__plugin_conexus_nexus__nx_plan_audit(plan_json='{"steps": [...]}')                # audits ONE plan against the codebase
 
 # Memory (T2)
 mcp__plugin_conexus_nexus__memory_put(content="content", project="{repo}", title="file.md", ttl=None)   # ttl=None (or omit) for a record of record: permanent, since 2026-09-12 (nexus-473mx); pass ttl=N (days) for a session finding that should expire
@@ -78,7 +78,7 @@ mcp__plugin_conexus_nexus__plan_save(query="...", plan_json="{...}", verb="resea
 - **`traverse`** — walk the typed link graph from known tumblers. `link_types` XOR `purpose`; depth ≤ 3.
 - **`store_get_many`** — batch-hydrate chunk IDs from `search(structured=True)` or `traverse`. Safe past the 300-record write cap.
 - **Operators** — content transforms; take raw text, return structured JSON. Use after retrieval to summarize/extract/rank/compare/generate.
-- **`nx_tidy` / `nx_enrich_beads` / `nx_plan_audit`** — background hygiene; slow (claude -p). Call and move on.
+- **`nx_tidy`** — read-only report on ONE T3 collection (`topic` + `collection` required); does not write. For T2 consolidation use `memory_consolidate` instead. **`nx_enrich_beads`** / **`nx_plan_audit`** — enrich/audit the ONE bead or plan passed in as an argument, not a sweep of beads or the plan library. All three: slow (claude -p), call and move on.
 
 ## Catalog (T3 metadata — document registry + typed link graph)
 

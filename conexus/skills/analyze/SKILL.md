@@ -15,7 +15,7 @@ effort: medium
    - `mcp__plugin_conexus_nexus__scratch(action="put", ..., tags="<topic>")` for sibling agents downstream THIS session (T1, narrowest scope, cheapest write).
    - `mcp__plugin_conexus_nexus__memory_put(...)` for project-scoped decisions, future sessions same project (T2).
    - `mcp__plugin_conexus_nexus__store_put(...)` for permanent cross-project knowledge, future sessions everywhere (T3).
-   - `mcp__plugin_conexus_nexus__plan_save(...)` for multi-agent pipeline outcomes (so future callers hit plan-match).
+   - Retrieval pipelines grow the plan library on their own through `nx_answer`; only `plan_save` a genuinely reusable retrieval plan with a required `verb`. Implementation, pipeline, and phased-execution plans do not go here — beads and T2 memory.
 
 # analyze
 
