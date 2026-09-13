@@ -2,7 +2,7 @@
 """Installation simulation tests for the conexus plugin.
 
 Simulates what happens when Claude Code installs the plugin from GitHub:
-  1. Clone the repo (simulated via `git clone --local`)
+  1. Clone the repo (simulated with a clone of the local checkout)
   2. Set CLAUDE_PLUGIN_ROOT to the `conexus/` subdirectory of the clone
   3. Validate that all referenced files are present in that installed location
 
@@ -30,13 +30,18 @@ def installed_plugin(tmp_path_factory) -> Path:
       git clone <github-url> ~/.claude/plugins/cache/<org>/<repo>/<version>/
       CLAUDE_PLUGIN_ROOT = <install_path>/<source>   # source from marketplace.json
 
-    We replicate this using `git clone --local` so no network is needed.
+    We replicate this with a clone of the local checkout, so no network is needed.
     Returns the path that would be CLAUDE_PLUGIN_ROOT.
     """
     clone_root = tmp_path_factory.mktemp("plugin-install")
-    # git clone --local simulates a real clone: only committed, tracked files are copied
+    # A clone simulates a real install: only committed, tracked files arrive.
+    # No explicit --local (nexus-jz9n3): git hard-links objects for a local
+    # path and falls back to copying when the link fails, but an EXPLICIT
+    # --local turns that failure fatal. With TMPDIR on another volume than
+    # the checkout (the shared /Volumes/SanHell TMPDIR on Sam's Mac) every
+    # link is cross-device, so --local failed all 24 cases at setup.
     result = subprocess.run(
-        ["git", "clone", "--local", str(REPO_ROOT), str(clone_root)],
+        ["git", "clone", str(REPO_ROOT), str(clone_root)],
         capture_output=True,
         text=True,
     )
