@@ -2180,8 +2180,7 @@ class TestQueryCatalogRouting:
         t3.put(collection=collection, content=content, title="t")
         result = query(question=content.split(":")[0] if ":" in content else content[:20], **kwargs)
         assert result.startswith("Error:")
-        assert "service mode" in result
-        assert "pgvector" in result
+        assert "HttpVectorClient-backed" in result
 
     def test_catalog_params_without_catalog(self, t3, monkeypatch):
         import nexus.mcp.core as mod
@@ -2199,7 +2198,7 @@ class TestQueryCatalogRouting:
         loud reject, not a dance-produced 'no documents found'."""
         result = query(question="anything", **kwargs)
         assert result.startswith("Error:")
-        assert "service mode" in result
+        assert "HttpVectorClient-backed" in result
 
 
 # ── Cluster output (RDR-056) ────────────────────────────────────────────────

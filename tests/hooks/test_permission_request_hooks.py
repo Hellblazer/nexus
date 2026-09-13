@@ -40,6 +40,16 @@ def _parse_decision(output: str) -> str | None:
     return data["hookSpecificOutput"]["decision"]["behavior"]
 
 
+# nexus-cnzei.5: destructiveHint tools deliberately EXCLUDED from
+# auto-approval — see auto-approve-nx-mcp.sh's own header comment for the
+# rationale on each. A tool landing here must also gain a
+# test_*_requires_manual_approval case below, so the exemption from
+# test_every_registered_conexus_tool_is_auto_approved is never silent.
+_MANUAL_APPROVAL_REQUIRED = {
+    "mcp__plugin_conexus_nexus__daemon_uninstall",
+}
+
+
 def _registered_conexus_tools() -> list[str]:
     """Full ``mcp__plugin_conexus_<server>__<tool>`` names for every tool the
     conexus MCP servers register.
@@ -49,7 +59,9 @@ def _registered_conexus_tools() -> list[str]:
     where a new tool ships without a hook entry and therefore prompts the user
     (the operator_filter/check/verify/groupby/aggregate gap, 2026-05-27).
     sequential-thinking is an external npx server (not introspectable here), so
-    its single tool is appended as a known constant.
+    its single tool is appended as a known constant. Excludes
+    ``_MANUAL_APPROVAL_REQUIRED`` — those are asserted NOT auto-approved
+    instead (see ``TestDestructiveToolsRequireManualApproval``).
     """
     import importlib
 
@@ -62,7 +74,7 @@ def _registered_conexus_tools() -> list[str]:
         for tool in mcp._tool_manager._tools:  # FastMCP registry
             names.append(f"mcp__plugin_conexus_{server}__{tool}")
     names.append("mcp__plugin_conexus_sequential-thinking__sequentialthinking")
-    return sorted(names)
+    return sorted(n for n in names if n not in _MANUAL_APPROVAL_REQUIRED)
 
 
 # ── conexus plugin hook ───────────────────────────────────────────────────────────
@@ -109,6 +121,57 @@ class TestNxPermissionHook:
         data = json.loads(output)
         assert "hookSpecificOutput" in data
         assert data["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
+
+
+class TestDestructiveToolsRequireManualApproval:
+    """nexus-cnzei.5: a destructive tool with a trivial self-gate (confirm=true
+    satisfied by the calling agent itself, not a human) must stay behind the
+    normal Claude Code permission prompt — never silently allowed.
+    """
+
+    def test_registry_names_at_least_one_tool(self) -> None:
+        """Non-vacuity: this exemption set must name something real, or the
+        drift guard above would be silently exempting nothing."""
+        assert _MANUAL_APPROVAL_REQUIRED
+
+    @pytest.mark.parametrize("tool_name", sorted(_MANUAL_APPROVAL_REQUIRED))
+    def test_registered_tool_is_not_auto_approved_on_permissionrequest(
+        self, tool_name: str
+    ) -> None:
+        output = _run_hook(NX_SCRIPT, tool_name)
+        assert output == "", (
+            f"{tool_name} is in _MANUAL_APPROVAL_REQUIRED but auto-approve-nx-mcp.sh "
+            f"still approves it on PermissionRequest — the case-statement removal "
+            f"regressed."
+        )
+
+    @pytest.mark.parametrize("tool_name", sorted(_MANUAL_APPROVAL_REQUIRED))
+    def test_registered_tool_is_not_auto_approved_on_pretooluse(
+        self, tool_name: str
+    ) -> None:
+        output = _run_pretooluse(NX_SCRIPT, tool_name)
+        assert output == "", (
+            f"{tool_name} is in _MANUAL_APPROVAL_REQUIRED but auto-approve-nx-mcp.sh "
+            f"still approves it on PreToolUse — the case-statement removal "
+            f"regressed."
+        )
+
+    def test_exempted_tools_are_still_actually_registered(self) -> None:
+        """A name in _MANUAL_APPROVAL_REQUIRED that no longer exists on any
+        server would silently stop exempting anything real — catch a rename
+        or deletion here rather than the drift guard quietly widening."""
+        import importlib
+
+        all_registered: set[str] = set()
+        for module, server in (
+            ("nexus.mcp.core", "nexus"),
+            ("nexus.mcp.catalog", "nexus-catalog"),
+        ):
+            mcp = importlib.import_module(module).mcp
+            for tool in mcp._tool_manager._tools:
+                all_registered.add(f"mcp__plugin_conexus_{server}__{tool}")
+        missing = _MANUAL_APPROVAL_REQUIRED - all_registered
+        assert not missing, f"exempted tool(s) no longer registered: {missing}"
 
 
 # ── sn plugin hook ───────────────────────────────────────────────────────────
