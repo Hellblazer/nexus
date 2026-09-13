@@ -5474,20 +5474,27 @@ _TUPLE_WATCH_COVERING_PREFIXES = ("nx tuple watch", "nx tuple", "nx")
 
 
 def _bash_rule_covers_tuple_watch(rule: object) -> bool:
-    """True when *rule* is a ``Bash(<prefix>:*)`` permission pattern whose
-    prefix is one of :data:`_TUPLE_WATCH_COVERING_PREFIXES` (bead
-    nexus-rml7o, MM-3.4 critic finding S5).
+    """True when *rule* is a permission pattern that covers ``nx tuple
+    watch`` -- either a ``Bash(<prefix>:*)`` pattern whose prefix is one of
+    :data:`_TUPLE_WATCH_COVERING_PREFIXES`, or the bare ``"Bash"`` rule
+    (nexus-rml7o, MM-3.4 critic finding S5; bare-``Bash`` recognition added
+    in the nexus-rml7o review pass). Used for BOTH ``permissions.allow`` and
+    ``permissions.deny`` matching -- whether a rule covers the command is
+    the same question regardless of which list it sits in.
 
     Conservative by design, per the bead's own instruction: only the exact
-    documented entry or a genuinely broader ancestor prefix in the SAME
-    ``:*``-suffixed form counts. A rule that merely CONTAINS the command as
-    a substring (``Bash(echo nx tuple watch:*)``), a string-prefix that is
-    not a whitespace boundary (``Bash(nx t:*)``), or a rule with no
-    trailing ``:*`` at all, does not -- this exists to confirm a named
-    gap, not to guess at coverage from an unfamiliar pattern shape.
+    documented entry, a genuinely broader ancestor prefix in the SAME
+    ``:*``-suffixed form, or the bare rule counts. A rule that merely
+    CONTAINS the command as a substring (``Bash(echo nx tuple watch:*)``),
+    a string-prefix that is not a whitespace boundary (``Bash(nx t:*)``),
+    or a rule with no trailing ``:*`` at all (other than the bare form),
+    does not -- this exists to confirm a named gap, not to guess at
+    coverage from an unfamiliar pattern shape.
     """
     if not isinstance(rule, str):
         return False
+    if rule == "Bash":
+        return True
     if not (rule.startswith("Bash(") and rule.endswith(":*)")):
         return False
     prefix = rule[len("Bash("):-len(":*)")]
@@ -5495,7 +5502,8 @@ def _bash_rule_covers_tuple_watch(rule: object) -> bool:
 
 
 def _claude_settings_path() -> Path:
-    """Resolve ``~/.claude/settings.json``, honouring ``CLAUDE_CONFIG_DIR``.
+    """Resolve the USER ``~/.claude/settings.json``, honouring
+    ``CLAUDE_CONFIG_DIR``.
 
     Nothing else in this codebase resolves the Claude settings path via
     that variable today, but Claude Code itself honours it to relocate the
@@ -5507,89 +5515,141 @@ def _claude_settings_path() -> Path:
     return base / "settings.json"
 
 
-def _check_tuple_watch_permission(settings_path: Path | None = None) -> list[HealthResult]:
-    """Informational doctor row (bead nexus-rml7o, MM-3.4 critic finding S5):
-    does a ``permissions.allow`` rule in ``~/.claude/settings.json`` cover
-    ``nx tuple watch``?
+def _claude_settings_paths(cwd: Path | None = None) -> list[tuple[str, Path]]:
+    """Every settings file Claude Code consults for permissions, in the
+    order this row checks them (nexus-rml7o review pass, T2
+    nexus/cleanup-batch-cre-pass-2026-09-13): USER
+    (``~/.claude/settings.json``, honouring ``CLAUDE_CONFIG_DIR``),
+    PROJECT (``<root>/.claude/settings.json``), and PROJECT-LOCAL
+    (``<root>/.claude/settings.local.json``) -- ``root`` being the git
+    top-level of *cwd* (default: the current working directory), falling
+    back to *cwd* itself outside a git repository.
 
-    A Claude Code ``Monitor``'s ``command`` runs under the same permission
-    machinery as ``Bash`` (:mod:`nexus.mailbox_arm`'s arm instruction,
-    MM-3.1), so arming the mailbox watcher with no covering rule MAY raise
-    a permission prompt in a session nobody is present to approve. This
-    row never claims that prompt WILL happen: during the RDR-206 live
-    verification (T2 ``nexus/rdr-206-live-verification-7.44.0-2026-09-13``)
-    arming raised no prompt at all with no rule present, most likely
-    because that session ran in auto mode. So the detail only says the
-    rule is absent and names what it is for -- never a certainty about a
-    prompt that this check cannot actually observe.
-
-    Read-only: this NEVER writes ``settings.json``. A missing file, a
-    directory in its place, unreadable bytes, or unparseable JSON are all
-    reported the same way an absent rule is -- "not configured", never a
-    crash and never a reason to fail ``nx doctor``.
-
-    Always informational, per the bead's own severity note: ``ok=True``
-    when a covering rule is present, ``ok=False, warn=True`` (soft, never
-    fatal) whenever it cannot confirm one.
+    Only the user check existed before this pass; project settings can
+    carry their own ``permissions.allow``/``.deny`` and this row was blind
+    to them.
     """
-    label = _TUPLE_WATCH_PERMISSION_LABEL
-    path = settings_path if settings_path is not None else _claude_settings_path()
-    hint = f"add {_TUPLE_WATCH_DOCUMENTED_RULE!r} to permissions.allow in {path}"
-    prompt_note = (
-        "MAY raise a permission prompt with nobody present to approve (not "
-        "guaranteed -- an auto-mode session raised none during the RDR-206 "
-        "live verification)"
-    )
+    from nexus.indexer_utils import find_repo_root  # noqa: PLC0415 — deferred: rare/branch-local path
+    base = cwd if cwd is not None else Path.cwd()
+    root = find_repo_root(base) or base
+    return [
+        ("user", _claude_settings_path()),
+        ("project", root / ".claude" / "settings.json"),
+        ("project-local", root / ".claude" / "settings.local.json"),
+    ]
 
+
+def _read_permission_rules(path: Path) -> tuple[list, list] | None:
+    """*(allow, deny)* lists from *path*'s ``permissions`` block, or
+    ``None`` when *path* cannot be read as a JSON object at all (missing, a
+    directory, unreadable bytes, malformed JSON, or not a JSON object) --
+    the caller treats that exactly like a file with no matching rules,
+    never a crash.
+    """
     try:
         raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return [HealthResult(
-            label=label, ok=False, warn=True,
-            detail=(
-                f"not configured -- {path} does not exist, so no permissions.allow rule "
-                f"covers '{_TUPLE_WATCH_COMMAND}'. Arming it as a Monitor {prompt_note}. {hint}."
-            ),
-        )]
-    except OSError as exc:
-        return [HealthResult(
-            label=label, ok=False, warn=True,
-            detail=(
-                f"not configured -- {path} unreadable ({exc}); could not check the "
-                f"'{_TUPLE_WATCH_COMMAND}' allowlist entry."
-            ),
-        )]
-
+    except OSError:
+        return None
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    permissions = data.get("permissions")
+    if not isinstance(permissions, dict):
+        return [], []
+    allow = permissions.get("allow")
+    deny = permissions.get("deny")
+    return (
+        allow if isinstance(allow, list) else [],
+        deny if isinstance(deny, list) else [],
+    )
+
+
+def _check_tuple_watch_permission(
+    settings_paths: list[tuple[str, Path]] | None = None,
+) -> list[HealthResult]:
+    """Informational doctor row (bead nexus-rml7o, MM-3.4 critic finding S5,
+    revised in the nexus-rml7o review pass -- T2
+    nexus/cleanup-batch-cre-pass-2026-09-13 and
+    nexus/cleanup-batch-critic-pass-2026-09-13): does a ``permissions.allow``
+    rule across every settings file Claude Code consults
+    (:func:`_claude_settings_paths`) cover ``nx tuple watch``, and does a
+    ``permissions.deny`` rule anywhere override it?
+
+    This row makes NO claim about whether arming raises a permission prompt,
+    in either direction. An earlier version claimed an auto-mode session
+    raised no prompt during the RDR-206 live verification as evidence that
+    an absent rule is harmless -- that claim was FALSE (T2
+    nexus/rdr-206-live-verification-correction-2026-09-13): that session's
+    own ``~/.claude/settings.json`` carries ``Bash(nx:*)``, which covers
+    ``nx tuple watch``, so the absence of a prompt that session observed
+    proved nothing about the no-rule case. The row now reports only
+    whether a covering rule is present, which file supplied it, and (the
+    dangerous direction: reporting covered while actually blocked) whether
+    a ``permissions.deny`` rule anywhere wins over it.
+
+    Read-only: this NEVER writes any settings file. A file that cannot be
+    read (missing, a directory, unreadable bytes, malformed JSON) is
+    treated as carrying no rules at all -- never a crash, never a reason
+    to fail ``nx doctor``.
+
+    Precedence: a matching ``permissions.deny`` rule in ANY of the three
+    files wins over a matching ``permissions.allow`` rule in any of them
+    (Claude Code's own deny-always-wins semantics), reported as "denied"
+    naming the denying file. Absent a deny, the FIRST file in
+    :func:`_claude_settings_paths`'s order (user, then project, then
+    project-local) that carries a covering allow rule is reported, named.
+    Absent both, the row reports "not configured", naming the entry to add.
+
+    Always informational, per the bead's own severity note: ``ok=True``
+    only when a covering allow rule stands unchallenged by any deny;
+    ``ok=False, warn=True`` (soft, never fatal) for a deny override or no
+    covering rule at all.
+    """
+    label = _TUPLE_WATCH_PERMISSION_LABEL
+    paths = settings_paths if settings_paths is not None else _claude_settings_paths()
+    hint_path = paths[0][1] if paths else _claude_settings_path()
+    hint = f"add {_TUPLE_WATCH_DOCUMENTED_RULE!r} to permissions.allow in {hint_path}"
+    all_paths_str = ", ".join(str(p) for _, p in paths)
+
+    covering: tuple[str, Path] | None = None
+    denying: tuple[str, Path] | None = None
+    for name, path in paths:
+        rules = _read_permission_rules(path)
+        if rules is None:
+            continue
+        allow, deny = rules
+        if denying is None and any(_bash_rule_covers_tuple_watch(r) for r in deny):
+            denying = (name, path)
+        if covering is None and any(_bash_rule_covers_tuple_watch(r) for r in allow):
+            covering = (name, path)
+
+    if denying is not None:
+        name, path = denying
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=(
-                f"not configured -- {path} is not valid JSON ({exc}); could not check the "
-                f"'{_TUPLE_WATCH_COMMAND}' allowlist entry."
+                f"denied -- {path} ({name}) carries a permissions.deny rule covering "
+                f"'{_TUPLE_WATCH_COMMAND}', which wins over any permissions.allow rule. "
+                f"Arming it as a Monitor will be refused by this rule."
             ),
         )]
 
-    rules: list = []
-    if isinstance(data, dict):
-        permissions = data.get("permissions")
-        if isinstance(permissions, dict):
-            allow = permissions.get("allow")
-            if isinstance(allow, list):
-                rules = allow
-
-    if any(_bash_rule_covers_tuple_watch(r) for r in rules):
+    if covering is not None:
+        name, path = covering
         return [HealthResult(
             label=label, ok=True,
-            detail=f"{path} permissions.allow covers '{_TUPLE_WATCH_COMMAND}'",
+            detail=f"{path} ({name}) permissions.allow covers '{_TUPLE_WATCH_COMMAND}'",
         )]
 
     return [HealthResult(
         label=label, ok=False, warn=True,
         detail=(
-            f"not configured -- no permissions.allow rule in {path} covers "
-            f"'{_TUPLE_WATCH_COMMAND}'. Arming it as a Monitor {prompt_note}. {hint}."
+            f"not configured -- no permissions.allow rule across {all_paths_str} covers "
+            f"'{_TUPLE_WATCH_COMMAND}'. Arming it as a Monitor goes through the same "
+            f"permission machinery as Bash; {hint}."
         ),
     )]
 
