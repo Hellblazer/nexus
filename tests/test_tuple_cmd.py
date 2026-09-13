@@ -16,10 +16,20 @@ import sys
 import uuid
 from pathlib import Path
 
+from datetime import datetime, timezone
+
 from click.testing import CliRunner
 
 from nexus.commands.tuple_cmd import tuple_group
-from nexus.db.t2.http_tuple_store import HttpTupleStore, ParkCapExceededError
+from nexus.db.t2.http_tuple_store import (
+    ClaimNotFoundError,
+    ClaimOwnershipError,
+    HttpTupleStore,
+    LeaseTooLongError,
+    ParkCapExceededError,
+    ReplyNotWrittenError,
+    SchemaViolationError,
+)
 from nexus.tuple_watch import (
     WatchConfig,
     acquire_watch_locks,
@@ -183,6 +193,248 @@ class TestKvParsing:
     def test_out_rejects_malformed_key(self, t2_service_env) -> None:
         out = _invoke(["out", "mailbox/x", "--key", "no-equals-sign"])
         assert out.exit_code != 0
+
+
+# ── nx tuple renew and nx tuple ack --reply-* (RDR-206 Phase 2, nexus-h61dl.10) ──
+#
+# HttpTupleStore.renew and ack(reply=) already landed (nexus-h61dl.8); these
+# tests cover only the CLI's own wiring: flag parsing, pass-through to the
+# client, and rendering the result. The client's own contract (the two
+# ceilings, the transaction atomicity, the reply nonce) is pinned in
+# tests/db/test_http_tuple_store.py and is not re-pinned here.
+
+
+def _claimed_mailbox(claimant: str = "c1", lease_s: int = 60) -> tuple[str, str]:
+    """Write and claim a mailbox request through the real store; returns
+    (address, claim_id)."""
+    addr = _uniq("addr")
+    store = HttpTupleStore()
+    store.out(f"mailbox/{addr}", {"to": addr}, {"from": "sender"}, "hi", nonce=_uniq("nonce"))
+    _row, claim_id = store.in_(f"mailbox/{addr}", {"to": addr}, claimant=claimant, lease_s=lease_s)
+    return addr, claim_id
+
+
+class TestTupleRenewRoundTrip:
+    def test_renew_prints_a_lease_until_later_than_the_original(self, t2_service_env) -> None:
+        _addr, claim_id = _claimed_mailbox(lease_s=30)
+        res = _invoke(["renew", "--claim-id", claim_id, "--claimant", "c1", "--lease-s", "300"])
+        assert res.exit_code == 0, res.output
+        printed = [ln for ln in res.output.splitlines() if ln.strip()][-1].strip()
+        after = datetime.fromisoformat(printed)
+        assert after.tzinfo is not None
+        # the claim is still live and ackable afterwards -- a renew that had
+        # somehow released or consumed it would fail this
+        ack = _invoke(["ack", claim_id, "--claimant", "c1"])
+        assert ack.exit_code == 0, ack.output
+
+    def test_renew_of_an_unknown_claim_prints_claim_not_found_not_a_traceback(
+        self, t2_service_env,
+    ) -> None:
+        res = _invoke(["renew", "--claim-id", uuid.uuid4().hex, "--claimant", "c1", "--lease-s", "60"])
+        assert res.exit_code == 1
+        assert "ClaimNotFoundError" in res.output
+        assert "Traceback" not in res.output
+
+    def test_renew_by_the_wrong_claimant_is_claim_ownership(self, t2_service_env) -> None:
+        _addr, claim_id = _claimed_mailbox(claimant="c1")
+        res = _invoke(["renew", "--claim-id", claim_id, "--claimant", "someone-else", "--lease-s", "60"])
+        assert res.exit_code == 1
+        assert "ClaimOwnershipError" in res.output
+
+    def test_renew_above_the_template_cap_is_refused_not_capped(self, t2_service_env) -> None:
+        _addr, claim_id = _claimed_mailbox()
+        res = _invoke(["renew", "--claim-id", claim_id, "--claimant", "c1", "--lease-s", str(900 + 1)])
+        assert res.exit_code == 1
+        assert "LeaseTooLongError" in res.output
+
+    def test_renew_missing_required_options_is_a_usage_error(self, t2_service_env) -> None:
+        res = _invoke(["renew", "--claim-id", "x", "--lease-s", "60"])  # no --claimant
+        assert res.exit_code != 0
+        assert "claimant" in res.output.lower()
+
+
+class TestTupleRenewUnitPassThrough:
+    """Fast, no engine: proves the CLI prints exactly what the store returns
+    and does not recompute a lease of its own -- the mutation this exists to
+    catch is a CLI that prints ``now() + lease_s`` locally instead of the
+    engine's (possibly clipped) answer."""
+
+    def test_cli_prints_exactly_the_stores_return_value(self, monkeypatch) -> None:
+        sentinel = datetime(2030, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+        captured: dict[str, tuple] = {}
+
+        def _fake_renew(self, claim_id, claimant, lease_s):
+            captured["args"] = (claim_id, claimant, lease_s)
+            return sentinel
+
+        monkeypatch.setattr(HttpTupleStore, "renew", _fake_renew)
+        res = _invoke(["renew", "--claim-id", "claim-1", "--claimant", "me", "--lease-s", "30"])
+        assert res.exit_code == 0, res.output
+        assert captured["args"] == ("claim-1", "me", 30)
+        assert res.output.strip() == sentinel.isoformat()
+
+    def test_typed_errors_print_the_typed_message_not_a_traceback(self, monkeypatch) -> None:
+        for exc_cls, code in (
+            (ClaimNotFoundError, "ClaimNotFound"),
+            (ClaimOwnershipError, "ClaimOwnership"),
+            (LeaseTooLongError, "LeaseTooLong"),
+        ):
+            def _fake_renew(self, claim_id, claimant, lease_s, _exc=exc_cls, _code=code):
+                raise _exc(_code)
+
+            monkeypatch.setattr(HttpTupleStore, "renew", _fake_renew)
+            res = _invoke(["renew", "--claim-id", "c", "--claimant", "m", "--lease-s", "60"])
+            assert res.exit_code == 1
+            assert exc_cls.__name__ in res.output
+            assert "Traceback" not in res.output
+
+
+class TestTupleAckReplyUnitPassThrough:
+    """Fast, no engine: the mutation this catches is a CLI that parses the
+    --reply-* flags but never builds/forwards a ReplySpec, or forwards the
+    wrong fields."""
+
+    def test_full_reply_flag_set_builds_and_forwards_a_replyspec(self, monkeypatch) -> None:
+        captured: dict[str, object] = {}
+
+        def _fake_ack(self, claim_id, claimant, reply=None):
+            captured["claim_id"] = claim_id
+            captured["claimant"] = claimant
+            captured["reply"] = reply
+            return "ab" * 32
+
+        monkeypatch.setattr(HttpTupleStore, "ack", _fake_ack)
+        res = _invoke([
+            "ack", "claim-1", "--claimant", "me",
+            "--reply-subspace", "mailbox/x",
+            "--reply-key", "to=x",
+            "--reply-dim", "from=y",
+            "--reply-body", "hello",
+            "--reply-ttl-seconds", "60",
+        ])
+        assert res.exit_code == 0, res.output
+        assert captured["claim_id"] == "claim-1"
+        assert captured["claimant"] == "me"
+        reply = captured["reply"]
+        assert reply is not None
+        assert reply.subspace == "mailbox/x"
+        assert reply.keys == {"to": "x"}
+        assert reply.dims == {"from": "y"}
+        assert reply.body == "hello"
+        assert reply.ttl_seconds == 60
+        assert "ab" * 32 in res.output
+
+    def test_no_reply_flags_passes_none_and_confirmation_is_unchanged(self, monkeypatch) -> None:
+        captured: dict[str, object] = {}
+
+        def _fake_ack(self, claim_id, claimant, reply=None):
+            captured["reply"] = reply
+            return None
+
+        monkeypatch.setattr(HttpTupleStore, "ack", _fake_ack)
+        res = _invoke(["ack", "claim-1", "--claimant", "me"])
+        assert res.exit_code == 0, res.output
+        assert captured["reply"] is None
+        assert res.output.strip() == "Acked claim claim-1"
+
+    def test_a_reply_flag_without_reply_subspace_is_a_usage_error(self, monkeypatch) -> None:
+        called = []
+        monkeypatch.setattr(HttpTupleStore, "ack", lambda *a, **kw: called.append(1))
+        for argv in (
+            ["ack", "claim-1", "--claimant", "me", "--reply-body", "hi"],
+            ["ack", "claim-1", "--claimant", "me", "--reply-key", "to=x"],
+            ["ack", "claim-1", "--claimant", "me", "--reply-dim", "from=y"],
+            ["ack", "claim-1", "--claimant", "me", "--reply-ttl-seconds", "60"],
+        ):
+            res = _invoke(argv)
+            assert res.exit_code != 0, res.output
+            assert "--reply-subspace" in res.output
+        assert called == [], "a usage error must never reach the store"
+
+    def test_a_reply_key_without_equals_fails_like_out(self, monkeypatch) -> None:
+        called = []
+        monkeypatch.setattr(HttpTupleStore, "ack", lambda *a, **kw: called.append(1))
+        res = _invoke([
+            "ack", "claim-1", "--claimant", "me",
+            "--reply-subspace", "mailbox/x", "--reply-key", "no-equals-sign",
+        ])
+        assert res.exit_code != 0
+        assert called == []
+
+    def test_reply_not_written_error_prints_a_clear_message_not_a_traceback(
+        self, monkeypatch,
+    ) -> None:
+        def _fake_ack(self, claim_id, claimant, reply=None):
+            raise ReplyNotWrittenError(
+                "the engine acked without writing the reply: the request "
+                "HAS BEEN CONSUMED and the reply was NOT written."
+            )
+
+        monkeypatch.setattr(HttpTupleStore, "ack", _fake_ack)
+        res = _invoke([
+            "ack", "claim-1", "--claimant", "me",
+            "--reply-subspace", "mailbox/x", "--reply-key", "to=x",
+        ])
+        assert res.exit_code == 1
+        assert "ReplyNotWrittenError" in res.output
+        assert "HAS BEEN CONSUMED" in res.output
+        assert "NOT written" in res.output
+        assert "Traceback" not in res.output
+
+
+class TestTupleAckReplyAgainstTheRealEngine:
+    def test_ack_with_a_full_reply_flag_set_writes_the_reply_and_prints_its_id(
+        self, t2_service_env,
+    ) -> None:
+        reply_addr = _uniq("replyto")
+        _addr, claim_id = _claimed_mailbox()
+        res = _invoke([
+            "ack", claim_id, "--claimant", "c1",
+            "--reply-subspace", f"mailbox/{reply_addr}",
+            "--reply-key", f"to={reply_addr}",
+            "--reply-dim", "from=worker",
+            "--reply-body", "done",
+        ])
+        assert res.exit_code == 0, res.output
+        assert "Acked claim" in res.output
+        reply_line = [ln for ln in res.output.splitlines() if ln.startswith("reply_id=")]
+        assert len(reply_line) == 1, res.output
+        reply_id = reply_line[0].split("=", 1)[1]
+        assert len(reply_id) == 64
+        int(reply_id, 16)
+
+        rows = HttpTupleStore().rd(f"mailbox/{reply_addr}", {"to": reply_addr})
+        assert [r.body for r in rows] == ["done"]
+        assert rows[0].id == reply_id
+
+    def test_ack_with_no_reply_flags_confirmation_line_is_unchanged(self, t2_service_env) -> None:
+        _addr, claim_id = _claimed_mailbox()
+        res = _invoke(["ack", claim_id, "--claimant", "c1"])
+        assert res.exit_code == 0, res.output
+        last_line = [ln for ln in res.output.splitlines() if ln.strip()][-1].strip()
+        assert last_line == f"Acked claim {claim_id}"
+
+    def test_ack_with_a_reply_to_a_keys_only_subspace_is_a_schema_violation(
+        self, t2_service_env,
+    ) -> None:
+        session = _uniq("sess")
+        store = HttpTupleStore()
+        store.out(f"ledger/{session}", {"agent_id": "a1", "kind": "start"}, None, None)
+        _addr, claim_id = _claimed_mailbox()
+
+        res = _invoke([
+            "ack", claim_id, "--claimant", "c1",
+            "--reply-subspace", f"ledger/{session}",
+            "--reply-key", "agent_id=a1",
+            "--reply-key", "kind=done",
+        ])
+        assert res.exit_code == 1
+        assert "SchemaViolationError" in res.output
+
+        # the refusal happened before the transaction opened: the request is
+        # still claimed and still ackable by the same claimant
+        follow_up = _invoke(["ack", claim_id, "--claimant", "c1"])
+        assert follow_up.exit_code == 0, follow_up.output
 
 
 # ── nx tuple watch (MM-1.1, bead nexus-6konb.2) ─────────────────────────────

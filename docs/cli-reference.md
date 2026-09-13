@@ -3627,14 +3627,21 @@ Destructive (claiming) read from `SUBSPACE`. Unlike `rd`, every key the template
 ### nx tuple ack
 
 ```
-nx tuple ack CLAIM_ID --claimant ID
+nx tuple ack CLAIM_ID --claimant ID [--reply-subspace SUBSPACE] [--reply-key KEY=VALUE ...] [--reply-dim KEY=VALUE ...] [--reply-body TEXT] [--reply-ttl-seconds N]
 ```
 
 Consume a claimed tuple. The row is invisible to `rd`/`in` after this.
 
+With `--reply-subspace`, the engine writes a reply into that subspace in the same transaction that consumes the claim (RDR-206), and the confirmation gains a `reply_id=` line carrying the reply's tuple id. Without any `--reply-*` flag the confirmation is unchanged. `--reply-subspace` must resolve to a `keys+nonce` template — a keys-only target (e.g. the ledger) is refused as `SchemaViolation` before the transaction opens, so the request is left still claimed and still ackable. There is no `--reply-nonce` flag: the engine sets the reply's nonce itself, to the request's tuple id. Every other `--reply-*` flag requires `--reply-subspace`; using one without it is a usage error, not a silently dropped flag.
+
 | Flag | Description |
 |------|-------------|
 | `--claimant ID` | Must match the identity that made the claim (required) |
+| `--reply-subspace SUBSPACE` | Write a reply into this subspace as part of the ack's own transaction |
+| `--reply-key KEY=VALUE` | A pinned key field for the reply (repeatable; requires `--reply-subspace`) |
+| `--reply-dim KEY=VALUE` | A dimension field for the reply (repeatable; requires `--reply-subspace`) |
+| `--reply-body TEXT` | Reply payload (requires `--reply-subspace`) |
+| `--reply-ttl-seconds N` | Explicit TTL for the reply, capped at its template's retention ceiling (requires `--reply-subspace`) |
 
 ### nx tuple nack
 
@@ -3647,6 +3654,20 @@ Release a claim back to available. Counts an attempt toward the template's `max_
 | Flag | Description |
 |------|-------------|
 | `--claimant ID` | Must match the identity that made the claim (required) |
+
+### nx tuple renew
+
+```
+nx tuple renew --claim-id ID --claimant ID --lease-s N
+```
+
+Extend a live claim held by `--claimant` before its lease lapses (RDR-206). Prints the engine's new `lease_until` — never a locally computed one, because a duration inside the template's `max_lease_seconds` cap can still be silently clipped to the tuple's own expiry. A `--lease-s` above the cap is refused as `LeaseTooLong`, not capped. Refused on a lapsed claim as `ClaimNotFound` rather than resurrecting it, and on a claim held by another claimant as `ClaimOwnership`. Never touches `attempts`, and writes one claim-log row with transition `renew`.
+
+| Flag | Description |
+|------|-------------|
+| `--claim-id ID` | The claim id returned by `nx tuple in` (required) |
+| `--claimant ID` | Must match the identity that made the claim (required) |
+| `--lease-s N` | New lease length from now, refused above the template's `max_lease_seconds` and silently clipped to the tuple's own expiry (required) |
 
 ### nx tuple templates
 

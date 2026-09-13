@@ -7,7 +7,9 @@ Subcommands:
   out        -- write a tuple.
   rd         -- non-destructive read (probe by default; --timeout-s blocks).
   in         -- destructive (claiming) read (probe by default; --timeout-s blocks).
-  ack        -- consume a claimed tuple.
+  ack        -- consume a claimed tuple, optionally writing a reply in the
+                same transaction (--reply-* flags, RDR-206).
+  renew      -- extend a live claim's lease before it lapses (RDR-206).
   nack       -- release a claim back to available.
   templates  -- the boot-loaded template registry (digest, sources, templates).
   list       -- concrete subspaces that exist.
@@ -162,14 +164,89 @@ def tuple_in_cmd(
 @tuple_group.command(name="ack")
 @click.argument("claim_id")
 @click.option("--claimant", required=True, help="Must match the identity that made the claim.")
-def tuple_ack_cmd(claim_id: str, claimant: str) -> None:
-    """Consume a claimed tuple. The row is invisible to rd/in after this."""
+@click.option(
+    "--reply-subspace", "reply_subspace", default=None,
+    help=(
+        "Write a reply into this subspace in the same transaction that "
+        "consumes the claim (RDR-206). Must resolve to a keys+nonce "
+        "template (SchemaViolation on a keys-only target, e.g. the "
+        "ledger). Required by every other --reply-* flag."
+    ),
+)
+@click.option("--reply-key", "reply_keys", multiple=True, metavar="KEY=VALUE",
+              help="A pinned key field for the reply (repeatable). Requires --reply-subspace.")
+@click.option("--reply-dim", "reply_dims", multiple=True, metavar="KEY=VALUE",
+              help="A dimension field for the reply (repeatable). Requires --reply-subspace.")
+@click.option("--reply-body", "reply_body", default=None,
+              help="Reply payload. Requires --reply-subspace.")
+@click.option("--reply-ttl-seconds", "reply_ttl_seconds", type=int, default=None,
+              help="Explicit TTL for the reply, capped at its template's retention "
+                   "ceiling. Requires --reply-subspace.")
+def tuple_ack_cmd(
+    claim_id: str,
+    claimant: str,
+    reply_subspace: str | None,
+    reply_keys: tuple[str, ...],
+    reply_dims: tuple[str, ...],
+    reply_body: str | None,
+    reply_ttl_seconds: int | None,
+) -> None:
+    """Consume a claimed tuple. The row is invisible to rd/in after this.
+
+    With --reply-subspace, the engine writes the reply as it consumes the
+    claim, in one transaction, and prints the reply's tuple id. There is no
+    --reply-nonce flag: the engine sets the reply's nonce itself, to the
+    request's tuple id, and refuses a caller-supplied one.
+    """
+    any_reply_flag = bool(reply_keys) or bool(reply_dims) or reply_body is not None or (
+        reply_ttl_seconds is not None
+    )
+    if reply_subspace is None:
+        if any_reply_flag:
+            raise click.UsageError(
+                "--reply-key/--reply-dim/--reply-body/--reply-ttl-seconds require "
+                "--reply-subspace"
+            )
+        reply = None
+    else:
+        from nexus.db.t2.records import ReplySpec  # noqa: PLC0415 — deferred: CLI startup cost
+        reply_key_map = _parse_kv_pairs(reply_keys, option_name="--reply-key")
+        reply_dim_map = _parse_kv_pairs(reply_dims, option_name="--reply-dim") or None
+        reply = ReplySpec(
+            subspace=reply_subspace, keys=reply_key_map, dims=reply_dim_map,
+            body=reply_body, ttl_seconds=reply_ttl_seconds,
+        )
     try:
-        _store().ack(claim_id, claimant)
+        reply_id = _store().ack(claim_id, claimant, reply=reply)
     except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
         _print_tuple_error(e)
         raise SystemExit(1) from e
     click.echo(f"Acked claim {claim_id}")
+    if reply_id:
+        click.echo(f"reply_id={reply_id}")
+
+
+@tuple_group.command(name="renew")
+@click.option("--claim-id", "claim_id", required=True,
+              help="The claim id returned by nx tuple in.")
+@click.option("--claimant", required=True, help="Must match the identity that made the claim.")
+@click.option("--lease-s", "lease_s", type=int, required=True,
+              help="New lease length from now, refused above the template's "
+                   "max_lease_seconds and silently clipped to the tuple's own expiry.")
+def tuple_renew_cmd(claim_id: str, claimant: str, lease_s: int) -> None:
+    """Extend a live claim held by CLAIMANT before its lease lapses.
+
+    Prints the engine's new lease_until -- never a locally computed one,
+    because a duration inside the template's cap can still be clipped to the
+    tuple's own expiry. Refused on a lapsed claim (ClaimNotFound) rather than
+    resurrecting it; never touches attempts.
+    """
+    try:
+        lease_until = _store().renew(claim_id, claimant, lease_s)
+    except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
+        _print_tuple_error(e)
+        raise SystemExit(1) from e
+    click.echo(lease_until.isoformat())
 
 
 @tuple_group.command(name="nack")
