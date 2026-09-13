@@ -5668,14 +5668,27 @@ def _check_beads_prime() -> list[HealthResult]:
 
     Otherwise reports one of the four :class:`~nexus.beads_prime.PrimeStatus`
     states. ``absent`` and ``managed-stale`` are soft warnings naming
-    ``nx init`` / ``nx upgrade`` as the fix (both install/refresh it).
-    ``user-authored`` is reported OK and explicitly left alone, per the
-    bead's own instruction -- this row must never suggest overwriting a
-    hand-written file. Read-only except for the detection probe itself
-    (``shutil.which`` + a filesystem glob); never writes.
+    ``nx init`` / ``nx upgrade`` as the fix (both install/refresh it), and
+    also name the SAME undo/opt-out text (``nexus.beads_prime.UNDO_HINT``)
+    the CLI one-liner prints on an actual write, so a user who never saw
+    that line (or is reading this row cold) still learns it here (critic
+    fix round: disclosure previously lived in only one of the three
+    surfaces). ``user-authored`` is reported OK and explicitly left alone,
+    per the bead's own instruction -- covers BOTH a file with no marker at
+    all AND one whose marker's recorded hash no longer matches its body
+    (a human edit under an intact marker) -- this row must never suggest
+    overwriting a hand-written file either way. Read-only except for the
+    detection probe itself (``shutil.which`` + a filesystem glob); never
+    writes.
     """
     try:
-        from nexus.beads_prime import PrimeStatus, beads_detected, status, user_prime_path  # noqa: PLC0415 — deferred to avoid module-load cost
+        from nexus.beads_prime import (  # noqa: PLC0415 — deferred to avoid module-load cost
+            UNDO_HINT,
+            PrimeStatus,
+            beads_detected,
+            status,
+            user_prime_path,
+        )
         # ``which=shutil.which`` (this module's OWN import, not
         # nexus.beads_prime's) so a test that patches
         # ``nexus.health.shutil.which`` — the existing convention the "bd
@@ -5707,13 +5720,13 @@ def _check_beads_prime() -> list[HealthResult]:
         return [HealthResult(
             label=_BEADS_PRIME_LABEL, ok=False, warn=True,
             detail=f"stale at {path}",
-            fix_suggestions=["run `nx upgrade` to refresh it"],
+            fix_suggestions=[f"run `nx upgrade` to refresh it. {UNDO_HINT}"],
         )]
     # ABSENT
     return [HealthResult(
         label=_BEADS_PRIME_LABEL, ok=False, warn=True,
         detail=f"not installed (would be {path})",
-        fix_suggestions=["run `nx init` or `nx upgrade` to install it"],
+        fix_suggestions=[f"run `nx init` or `nx upgrade` to install it. {UNDO_HINT}"],
     )]
 
 

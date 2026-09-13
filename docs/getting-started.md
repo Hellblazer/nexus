@@ -269,6 +269,19 @@ collection that has vanished, and rollback, which is always yours to invoke.
 
 After `/plugin update`, run both steps so the CLI matches the plugin.
 
+### Beads (`bd`) task tracking (optional)
+
+If `bd` (or its Claude Code plugin) is on this machine, both `nx init` and
+`nx upgrade` install or refresh a small, generic `PRIME.md` at `bd`'s
+machine-wide user config path — the fallback it reads when a repo has no
+`.beads/PRIME.md` of its own (which always wins when present). This
+applies to **every beads repo on this machine**, not just this one, and
+`bd` 1.2.x still appends its own `bd remember` memories after this file —
+installing it does not stop that. It never overwrites a file you edited by
+hand. Opt out with `--no-beads-prime` on either command, or persistently
+with `nx config set beads_prime.manage false`; deleting the file restores
+`bd`'s own default. See [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md#nx-init) § nx init for the full contract.
+
 ### Upgrading from a pre-PG install
 
 An install still on ChromaDB (5.x, or 6.x that never migrated) must hop

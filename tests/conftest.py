@@ -2252,6 +2252,56 @@ def _isolate_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _fence_beads_prime_user_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Fence ``nexus.beads_prime``'s user-level PRIME.md path to a per-test
+    tmp dir for EVERY test (nexus-cnzei.8 CRE fix round, ship-blocker).
+
+    This module's own ``install_fence`` (``tests/_fence_home.py``, wired at
+    ``pytest_sessionstart`` above) shadows only ``.config/nexus`` -- every
+    OTHER top-level HOME entry (``Library`` on macOS, every other
+    ``.config/<x>`` on Linux) is symlinked straight through to the REAL
+    filesystem. ``nexus.beads_prime.user_prime_path()`` resolves to exactly
+    one of those un-shadowed locations by construction
+    (``~/Library/Application Support/beads/PRIME.md`` on macOS,
+    ``~/.config/beads/PRIME.md`` on Linux) -- the fence's one shadow never
+    covers it. A test that invokes ``nx init``/``nx upgrade`` (directly or
+    via ``CliRunner``) with no per-test stub, on a box with ``bd`` on
+    ``PATH``, writes for real into the operator's machine-wide beads
+    PRIME.md. Confirmed: ``tests/test_init_service_binary.py`` did exactly
+    this before this fixture existed (code review of commit 2fc27ad33,
+    reproduced end-to-end against scratch dirs only).
+
+    Patches the MODULE ATTRIBUTE ``nexus.beads_prime.user_prime_path`` --
+    every production call site (``install()``'s default arg,
+    ``health._check_beads_prime``'s deferred import, ``beads_prime.py``'s
+    own ``install_and_describe``) resolves this name fresh at call time via
+    the module namespace, so the patch reaches all of them, in every test
+    file, without a per-file stub to remember. Only the NO-ARGS call is
+    fenced: a call with an explicit ``platform=``/``home=``/``environ=``
+    kwarg (every case in ``TestUserPrimePath`` and
+    ``TestConftestHomeFence.test_explicit_args_bypass_the_fence``)
+    delegates to the REAL function, so those tests keep exercising the
+    genuine per-platform resolution logic against their own injected
+    fixtures rather than this fixture's fixed tmp path.
+
+    ``tests/test_beads_prime.py::TestConftestHomeFence`` is the guard test
+    that fails loud if this fixture is ever removed, narrowed, or bypassed.
+    """
+    import nexus.beads_prime as bp
+
+    real_user_prime_path = bp.user_prime_path
+    fenced_path = tmp_path / "beads-prime-fence" / "PRIME.md"
+
+    def _fenced_user_prime_path(**kwargs):
+        if kwargs:
+            return real_user_prime_path(**kwargs)
+        return fenced_path
+
+    monkeypatch.setattr(bp, "user_prime_path", _fenced_user_prime_path)
+    return fenced_path
+
+
+@pytest.fixture(autouse=True)
 def _reset_aspect_worker_singleton() -> None:
     """Reset the module-level aspect_worker singleton around every test.
 

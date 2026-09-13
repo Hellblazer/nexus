@@ -55,6 +55,7 @@ class TestCheckBeadsPrime:
         assert r.warn is True
         assert r.fatal is False
         assert any("nx upgrade" in s for s in r.fix_suggestions)
+        assert any("machine-wide" in s and "--no-beads-prime" in s for s in r.fix_suggestions)
 
     def test_absent_is_soft_warn_with_init_or_upgrade_fix(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         _patch(monkeypatch, detected=True, status=bp.PrimeStatus.ABSENT, path=tmp_path / "PRIME.md")
@@ -65,6 +66,7 @@ class TestCheckBeadsPrime:
         assert r.warn is True
         assert r.fatal is False
         assert any("nx init" in s and "nx upgrade" in s for s in r.fix_suggestions)
+        assert any("machine-wide" in s and "beads_prime.manage" in s for s in r.fix_suggestions)
 
     def test_check_failure_degrades_to_soft_warn_never_crashes(
         self, monkeypatch: pytest.MonkeyPatch

@@ -24,8 +24,17 @@ _log = structlog.get_logger()
 @click.option("--auto", "auto_mode", is_flag=True, help="Quiet mode for hook invocation (exit 0 always).")
 @click.option("--skip-t3", is_flag=True, help="Skip T3 upgrade steps (e.g., cross-collection projection backfill). Useful for fast T2-only migrations.")
 @click.option("--yes", "assume_yes", is_flag=True, help="Assume yes to the billed re-embed consent prompt (equivalent to NX_ASSUME_YES=1). Nothing else prompts.")
+@click.option(
+    "--no-beads-prime",
+    "no_beads_prime",
+    is_flag=True,
+    default=False,
+    help="Do not install/refresh the user-level beads PRIME.md this run "
+    "(nexus-cnzei.8). Explicit decline always wins; for a standing "
+    "opt-out use `nx config set beads_prime.manage false`.",
+)
 def upgrade(
-    dry_run: bool, auto_mode: bool, skip_t3: bool, assume_yes: bool
+    dry_run: bool, auto_mode: bool, skip_t3: bool, assume_yes: bool, no_beads_prime: bool
 ) -> None:
     """Run pending database migrations and upgrade steps.
 
@@ -135,7 +144,7 @@ def upgrade(
         # beads is detected. Same gating as the git-hooks refresh above — a
         # filesystem write, not under --auto, never under --dry-run.
         if not auto_mode and not dry_run:
-            _install_beads_prime_best_effort()
+            _install_beads_prime_best_effort(no_beads_prime=no_beads_prime)
     except Exception:
         if auto_mode:
             _log.warning("upgrade_auto_error", exc_info=True)
@@ -638,17 +647,21 @@ def _emit_name_vs_embed_dim_advisory() -> None:
     )
 
 
-def _install_beads_prime_best_effort() -> None:
+def _install_beads_prime_best_effort(*, no_beads_prime: bool = False) -> None:
     """Install/refresh the user-level ``beads`` PRIME.md when beads is
     detected on this machine (nexus-cnzei.8). Mirrors ``nx init``'s helper
     of the same name — best-effort, never fails the upgrade. ``nx doctor``'s
     "Beads PRIME.md (user-level)" row is the durable, always-visible signal
     if this ever fails silently.
+
+    *no_beads_prime* is ``--no-beads-prime``'s value: an explicit decline
+    that always wins. A persisted ``beads_prime.manage: false`` is
+    consulted inside ``install_and_describe`` itself either way.
     """
     from nexus.beads_prime import install_and_describe  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     try:
-        message = install_and_describe()
+        message = install_and_describe(disabled=no_beads_prime)
     except Exception as exc:  # noqa: BLE001 — best-effort upgrade step; never fails the upgrade
         click.echo(f"Beads PRIME.md install skipped ({exc}).", err=True)
         _log.warning("upgrade_beads_prime_failed", error=str(exc))

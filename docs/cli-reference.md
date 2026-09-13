@@ -2218,6 +2218,7 @@ nx init --service             # DEPRECATED — plain `nx init` now does this by 
 | `--yes` / `-y` | Accept the service-autostart registration non-interactively (local mode). The autostart unit is installed as the **sole** starter; `nx init` waits for it to come up rather than also starting a session supervisor. |
 | `--no-autostart` | Do not register the autostart unit; start a session supervisor only (local mode). Takes precedence over `--yes`. |
 | `--service` | **DEPRECATED** (RDR-174 P3.1) — plain `nx init` now provisions the local service backend by default; the flag still works (and prints a deprecation notice) but will be removed in a future release. Provisions the local Postgres + pgvector cluster the RDR-152 service backend uses, locks the embedder to bge-768, acquires + verifies the native service binary, fetches the bge-768 ONNX, and starts the service. Idempotent. The binary + PG bundle are acquired automatically from the wheel's pinned engine tag (override: `NEXUS_SERVICE_TAG` env or a prior `nx daemon service install-binary`). |
+| `--no-beads-prime` | Skip installing/refreshing the user-level beads PRIME.md this run (nexus-cnzei.8) — see below. Explicit decline always wins, like `--no-autostart`. For a standing opt-out (every future run, every command) use `nx config set beads_prime.manage false` instead. |
 
 **First-run ladder convergence (nexus-9xfx5):** once the backend is serving,
 `nx init` converges the upgrade ladder as its final step, so a virgin box's
@@ -2335,19 +2336,44 @@ bge-data-after-a-keyed-write case, not just the engine-restart case.
 
 **Beads PRIME.md (user-level)** (nexus-cnzei.8). Runs unconditionally,
 independent of the local/managed/cloud dispatch above: when `bd` is on
-`PATH` or the beads Claude Code plugin is installed, `nx init` installs or
-refreshes a generic, conexus-managed `PRIME.md` at the OS user config
-directory `bd` falls back to when a repo has no `.beads/PRIME.md` of its
-own (macOS `~/Library/Application Support/beads/PRIME.md`; Linux
+`PATH` or the beads Claude Code plugin is installed (either of its two real
+layouts — a marketplace checkout under `plugins/marketplaces/<name>/plugins/
+beads/`, or the version-pinned `plugins/cache/<name>/beads/<version>/`),
+`nx init` installs or refreshes a generic, conexus-managed `PRIME.md` at the
+OS user config directory `bd` falls back to when a repo has no
+`.beads/PRIME.md` of its own (macOS
+`~/Library/Application Support/beads/PRIME.md`; Linux
 `$XDG_CONFIG_HOME/beads/PRIME.md` or `~/.config/beads/PRIME.md`; Windows
-`%AppData%/beads/PRIME.md`). This file is machine-wide — it affects every
-beads repo on the box, not only the current one — and never overwrites a
-hand-authored file already at that path. Best-effort: a failure prints a
-one-line warning and never fails `nx init`. Prints one line naming the
-action taken (`installed`, `updated`, `up to date`, or `left alone
-(user-authored)`) and the path when beads is detected; silent when it is
-not. `nx doctor`'s "Beads PRIME.md (user-level)" row reports the durable
-state. See `docs/contributing.md` § Git Workflow for the full contract.
+`%AppData%/beads/PRIME.md`).
+
+The first line of the installed file is a marker,
+`<!-- conexus-managed beads PRIME v<N> sha256:<hex> -->`, recording a hash
+of the body as installed. A body edited by hand while the marker line is
+left intact no longer matches that recorded hash, and is treated exactly
+like a file with no marker at all — reported `left alone (user-authored)`,
+never silently overwritten on the next run (this was a ship-blocker fixed
+before release: staleness used to be decided by a bare byte-compare against
+the current template, so a hand-edited-but-still-marked file looked
+"stale" and got clobbered). Replacing an existing managed file first backs
+up its previous content to a single rolling `PRIME.md.bak` sibling
+(overwritten each time, not timestamped). An installed file whose marker
+version is NEWER than this install's packaged template (a downgrade) is
+left alone rather than regressed backward.
+
+This file is **machine-wide** — it affects every beads repo on the box, not
+only the current one — and beads 1.2.x still **appends its own `bd
+remember` memories** after this file's text; installing it does not stop
+that. A repo-level `.beads/PRIME.md` always wins when one exists. Opt out
+with `--no-beads-prime` for one run, or persist the decision with
+`nx config set beads_prime.manage false`; deleting the installed file
+restores `bd`'s own default until the next un-declined `nx init`/
+`nx upgrade`. Best-effort: a failure prints a one-line warning and never
+fails `nx init`. On a write, the printed line names the path and repeats
+this same undo/disclosure text; a no-op (`up to date`, `left alone (...)`)
+prints a shorter line; nothing prints when beads is not detected at all.
+`nx doctor`'s "Beads PRIME.md (user-level)" row reports the durable state
+and names the same fix/undo. See `docs/contributing.md` § Git Workflow for
+the full contract.
 
 ---
 
@@ -2572,11 +2598,15 @@ The `--fix` flag first reclaims the catalog garbage the sweep counted (deletes e
 all) when neither `bd` nor the beads Claude Code plugin is detected on this
 machine. Otherwise reports the state of the machine-wide, conexus-managed
 `PRIME.md` [`nx init`/`nx upgrade` install](#nx-init): OK when up to date,
-OK ("user-authored, left alone") for a hand-written file at that path —
-never a suggestion to overwrite it — and a soft warning naming `nx init` or
-`nx upgrade` as the fix when the file is missing or stale (marker present
-but content out of date). Never fatal; read-only except for the detection
-probe itself.
+OK ("user-authored, left alone") for a hand-written file at that path OR
+one whose marker's recorded body hash no longer matches its actual body (a
+hand edit under an intact marker) — never a suggestion to overwrite either
+— and a soft warning naming `nx init` or `nx upgrade` as the fix, plus the
+same undo text `nx init` prints on a write (delete the file, `--no-beads-
+prime`, or `nx config set beads_prime.manage false`), when the file is
+missing or genuinely stale (marker hash matches its own body, but that
+body predates the currently-packaged template). Never fatal; read-only
+except for the detection probe itself.
 
 ```
 nx doctor --check-schema          # Report where the T2 schema lives
@@ -3357,6 +3387,7 @@ nx upgrade --yes                  # Unattended: pre-approve the billed re-embed 
 | `--auto` | Quiet mode for the SessionStart hook. The engine install is skipped (hook timeout budget); exit 0 always |
 | `--skip-t3` | Skip T3 upgrade steps for a fast T2-only run. Also suppresses the precondition stage's engine install and process cycle (verdicts are still reported) |
 | `--yes` | Assume yes to the **billed re-embed** consent prompt only (equivalent to `NX_ASSUME_YES=1`) — the unattended channel for a walk that would otherwise block on the cost preview. Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic |
+| `--no-beads-prime` | Skip installing/refreshing the user-level beads PRIME.md this run (nexus-cnzei.8) — see [`nx init`](#nx-init). For a standing opt-out use `nx config set beads_prime.manage false` instead |
 
 **Plugin update (nexus-2uwag).** After the ladder, `nx upgrade` reads
 Claude Code's plugin registry (`~/.claude/plugins/installed_plugins.json`)
