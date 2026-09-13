@@ -88,6 +88,46 @@ else
     ok "clean commit ${c3} is NOT flagged"
 fi
 
+# ── Test Z (nexus-5h3df, conexus-7rzd ruling): the repo-root .gitignore ──
+# ── and CLAUDE.md are always in scope, and nothing else rides along ─────
+echo "Test Z: repo-root .gitignore and CLAUDE.md are always allowed, nothing else is"
+REPO2="$WORKDIR/root-config-repo"
+mkdir -p "$REPO2/src" "$REPO2/sub"
+git -C "$REPO2" init -q -b main
+git -C "$REPO2" config user.email "test@example.invalid"
+git -C "$REPO2" config user.name "commit_scope_audit_test"
+echo "base" >"$REPO2/src/base.txt"
+git -C "$REPO2" add src/base.txt
+git -C "$REPO2" commit -q -m "base"
+z0="$(git -C "$REPO2" rev-parse HEAD)"
+
+echo "x" >"$REPO2/src/d.txt"
+echo "*.log" >"$REPO2/.gitignore"
+echo "# guide" >"$REPO2/CLAUDE.md"
+git -C "$REPO2" add src/d.txt .gitignore CLAUDE.md
+git -C "$REPO2" commit -q -m "root configs ride along"
+z1="$(git -C "$REPO2" rev-parse HEAD)"
+OUT="$(cd "$REPO2" && bash "$AUDIT" "${z0}..${z1}" "src" 2>&1)"
+RC=$?
+if [[ $RC -eq 0 ]]; then
+    ok "src/ plus the root .gitignore and CLAUDE.md is in scope with allowlist 'src'"
+else
+    bad "root .gitignore/CLAUDE.md flagged (rc=$RC): $OUT"
+fi
+
+echo "y" >"$REPO2/sub/.gitignore"
+echo "all:" >"$REPO2/Makefile"
+git -C "$REPO2" add sub/.gitignore Makefile
+git -C "$REPO2" commit -q -m "nested .gitignore and another root config"
+z2="$(git -C "$REPO2" rev-parse HEAD)"
+OUT="$(cd "$REPO2" && bash "$AUDIT" "${z1}..${z2}" "src" 2>&1)"
+RC=$?
+if [[ $RC -eq 1 && "$OUT" == *"sub/.gitignore"* && "$OUT" == *"Makefile"* ]]; then
+    ok "a nested .gitignore and a root Makefile are still flagged"
+else
+    bad "expected sub/.gitignore and Makefile flagged (rc=$RC): $OUT"
+fi
+
 # ── Test B: a fully in-scope range must exit 0 (non-vacuous positive) ────
 echo "Test B: clean sub-range (c1 only) exits 0, no flags"
 OUT_CLEAN="$(cd "$REPO" && bash "$AUDIT" "${c1}" "src" 2>&1)"
