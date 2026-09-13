@@ -230,6 +230,68 @@ class TupleRepositoryTest {
         assertThat(rows).isEmpty();
     }
 
+    // ── ledger dims: commit / t2_ref / verify (bead nexus-d9k5h) ─────────────
+
+    @Test
+    void out_ledgerWithCommitT2RefVerifyDims_succeeds_readBack() {
+        Map<String, String> keys = Map.of("agent_id", "agent-dims-1", "kind", "report");
+        repo.out(TENANT_A, "ledger/session-dims-1", keys,
+                Map.of("agent_type", "developer", "commit", "abc1234",
+                        "t2_ref", "nexus/8zoyp-d9k5h-engine-riders-2026-09-13", "verify", "present"),
+                null, null, null);
+
+        var rows = repo.rdp(TENANT_A, "ledger/session-dims-1", keys, 10, null);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).dims())
+                .containsEntry("commit", "abc1234")
+                .containsEntry("t2_ref", "nexus/8zoyp-d9k5h-engine-riders-2026-09-13")
+                .containsEntry("verify", "present");
+    }
+
+    /**
+     * Bead nexus-d9k5h: none of {@code commit}/{@code t2_ref}/{@code verify} is
+     * {@code required: true}, so a ledger row written the OLD way -- carrying only
+     * {@code agent_type}, as every pre-existing row does -- must still write and
+     * read unchanged.
+     */
+    @Test
+    void out_ledgerWithoutNewDims_stillSucceeds_readBack() {
+        Map<String, String> keys = Map.of("agent_id", "agent-dims-2", "kind", "start");
+        repo.out(TENANT_A, "ledger/session-dims-2", keys, Map.of("agent_type", "developer"),
+                null, null, null);
+
+        var rows = repo.rdp(TENANT_A, "ledger/session-dims-2", keys, 10, null);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).dims()).containsEntry("agent_type", "developer");
+        assertThat(rows.get(0).dims()).doesNotContainKeys("commit", "t2_ref", "verify");
+    }
+
+    @Test
+    void out_ledgerVerifyOutsideAllowedSet_schemaViolation_namesVerify_noRowWritten() {
+        Map<String, String> keys = Map.of("agent_id", "agent-dims-3", "kind", "report");
+        assertThatThrownBy(() -> repo.out(TENANT_A, "ledger/session-dims-3", keys,
+                Map.of("agent_type", "developer", "verify", "maybe"), null, null, null))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("verify");
+
+        var rows = repo.rdp(TENANT_A, "ledger/session-dims-3", keys, 10, null);
+        assertThat(rows).isEmpty();
+    }
+
+    @Test
+    void out_ledgerCommitDimOver256Bytes_tooLarge_namesDimsCommit_noRowWritten() {
+        Map<String, String> keys = Map.of("agent_id", "agent-dims-4", "kind", "report");
+        String over = "x".repeat(257);
+        assertThatThrownBy(() -> repo.out(TENANT_A, "ledger/session-dims-4", keys,
+                Map.of("agent_type", "developer", "commit", over), null, null, null))
+                .isInstanceOf(dev.nexus.service.db.TooLargeException.class)
+                .satisfies(e -> assertThat(((dev.nexus.service.db.TooLargeException) e).field())
+                        .isEqualTo("dims.commit"));
+
+        var rows = repo.rdp(TENANT_A, "ledger/session-dims-4", keys, 10, null);
+        assertThat(rows).isEmpty();
+    }
+
     /**
      * RDR-205 Phase 1 review (nexus-em75s.7, the RDR-110 C3 class recurring):
      * {@code computeId}'s ORIGINAL join delimited each field with a fixed separator

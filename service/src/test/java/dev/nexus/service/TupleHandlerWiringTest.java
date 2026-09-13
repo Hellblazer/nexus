@@ -152,6 +152,14 @@ class TupleHandlerWiringTest {
         var agentType = (Map<String, Object>) ledgerDims.get("agent_type");
         assertThat(agentType.get("type")).isEqualTo("string");
 
+        // Bead nexus-d9k5h: commit/t2_ref/verify are visible over the wire the
+        // same way agent_type always has been, so a caller can learn verify's
+        // allowed-value set without a separate out-of-band contract.
+        assertThat(ledgerDims).containsKeys("commit", "t2_ref", "verify");
+        var verify = (Map<String, Object>) ledgerDims.get("verify");
+        assertThat(verify.get("type")).isEqualTo("string");
+        assertThat((java.util.List<String>) verify.get("values")).containsExactly("present", "absent");
+
         var keyValues = (Map<String, Object>) ledger.get("key_values");
         assertThat(keyValues).containsEntry("kind", java.util.List.of("start", "report"));
         assertThat(keyValues).doesNotContainKey("agent_id");

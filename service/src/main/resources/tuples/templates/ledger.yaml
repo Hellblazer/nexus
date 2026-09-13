@@ -13,6 +13,24 @@
 # 2150 rows across 37 subspaces) found every ledger body empty. 0 means
 # null or "" both pass; any non-empty body is refused rather than silently
 # accepted and then never read by anything.
+#
+# commit / t2_ref / verify (bead nexus-d9k5h, engine half of nexus-cnzei.6):
+# optional string dims for a checkable agent report -- commit is a short or
+# full sha, t2_ref is a "project/title" T2 pointer, verify is present/absent
+# only. None is `required: true`, so an existing ledger row written before
+# this bead (or by a hook that never sets them) still reads unchanged --
+# TupleRepository's dimension validation only rejects a dim NAME it does not
+# recognise or a required dim that is missing, never the ABSENCE of an
+# optional one. Every dim value, these three included, already goes through
+# the generic 256-byte-per-value cap (TupleLimits.MAX_FIELD_VALUE_BYTES,
+# checked as "dims.<name>") and the generic per-dimension `values` allow-list
+# check (TupleRepository's dimension-validation loop) with no template-
+# specific code needed for either -- both are declared here, not implemented
+# here. The hook projector and the orchestrator checker that will actually
+# SET these dims land in nexus-cnzei.6, which must tolerate an engine
+# without them (a below-floor engine simply never declares the dims, so an
+# `out` carrying them 400s as SchemaViolation, same as any other
+# not-yet-declared dim would).
 name: ledger/<session_id>
 
 keys:
@@ -23,6 +41,13 @@ keys:
 dimensions:
   agent_type:
     type: string
+  commit:
+    type: string
+  t2_ref:
+    type: string
+  verify:
+    type: string
+    values: [present, absent]
 
 id_from: keys
 
