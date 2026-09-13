@@ -1743,14 +1743,17 @@ class TestRdrGateLoopRemedies:
             assert "RDR-204" not in text, f"{path}: incident narrative in a skill"
 
     def test_t2_ttl_convention_in_the_write_back_skills(self) -> None:
-        """nexus-um2h1: every skill that prescribes memory_put states the
-        lifetime convention. A session that follows the skill and omits ttl
-        wrote a 30-day entry, and the skills said nothing about it."""
+        """nexus-um2h1, updated for nexus-473mx: every skill that prescribes
+        memory_put states the lifetime convention. The convention reversed
+        2026-09-12 (nexus-473mx) — omitting ttl is now permanent, not a
+        30-day default — so a skill must name that reversal rather than the
+        retired omitted-ttl trap; stating the old trap after the reversal
+        would be actively wrong, not merely silent."""
         for name in ("using-nx-skills", "knowledge-tidying", "nexus"):
             text = (SKILLS_DIR / name / "SKILL.md").read_text()
             assert "ttl=None" in text, f"{name}: no ttl=None prescription"
-            assert "never means permanent" in text or "never make" in text, (
-                f"{name}: the omitted-ttl trap is not named"
+            assert "nexus-473mx" in text, (
+                f"{name}: the ttl-default reversal is not named"
             )
 
     def test_fix_step_has_its_own_surface(self) -> None:

@@ -1935,7 +1935,7 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 | `expire` | Remove expired entries |
 | `promote ID --collection NAME` | Promote entry to T3 by ID |
 
-**`put` flags:** `--tags`, `--ttl` (default: `30d`), `--merge` (canonical-fact merge: fold into an existing high-overlap entry instead of creating a duplicate, non-destructive), `--merge-threshold FLOAT` (word-set Jaccard threshold for `--merge`, default: `0.5`)
+**`put` flags:** `--tags`, `--ttl` (default: `permanent`, reversed 2026-09-12 by nexus-473mx — a caller now asks for a clock explicitly; `--ttl 0` is rejected, not coerced), `--merge` (canonical-fact merge: fold into an existing high-overlap entry instead of creating a duplicate, non-destructive), `--merge-threshold FLOAT` (word-set Jaccard threshold for `--merge`, default: `0.5`)
 
 **`list` flags:** `--project NAME` (filter by project), `-a` / `--agent NAME` (filter by agent name)
 

@@ -225,14 +225,14 @@ ul.plain li{margin:3px 0}
 <p>Every Nexus tool works on one of three stores, and the stores differ in one thing only: how long the data lives.</p>
 <div class="tiers">
   <div class="tier" style="--tc:var(--t1)"><small>T1 · lives for one session</small><b>Scratch</b><p>Notes for the current session. Nexus deletes them when the session ends, unless you promote them.</p></div>
-  <div class="tier" style="--tc:var(--t2)"><small>T2 · lives for one project</small><b>Memory</b><p>Facts and decisions about a project. Each entry has a project name and a title. An entry lives 30 days by default, and each read makes it live longer. You can also make it permanent.</p></div>
+  <div class="tier" style="--tc:var(--t2)"><small>T2 · lives for one project</small><b>Memory</b><p>Facts and decisions about a project. Each entry has a project name and a title, and stays forever by default. You can give a temporary finding a shorter lifetime instead, and each read stretches it further.</p></div>
   <div class="tier" style="--tc:var(--t3)"><small>T3 · lives permanently</small><b>Knowledge</b><p>Indexed code, documents, PDFs, and notes. Claude finds them with semantic search.</p></div>
 </div>
 <p class="arrowrow">Data moves in one direction only: scratch to memory, then memory to knowledge.</p>
 <figure class="fig"><svg viewBox="0 0 680 230" role="img" aria-label="Three stores by lifetime. Scratch lives one session, memory one project, knowledge permanently. Entries move only forward: scratch to memory by promote or at session end, memory to knowledge by promote. Indexing and storing write to knowledge directly. The catalog registers every knowledge document and its links."><defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor" stroke="none"/></marker></defs>
 <text x="100" y="18" class="sm" text-anchor="middle">one session</text><text x="340" y="18" class="sm" text-anchor="middle">one project</text><text x="580" y="18" class="sm" text-anchor="middle">permanent</text>
 <rect class="box" x="10" y="34" width="180" height="76" rx="6"/><text x="100" y="60" text-anchor="middle" font-weight="600">Scratch</text><text x="100" y="80" text-anchor="middle" class="lbl">Claude and its agents</text><text x="100" y="96" text-anchor="middle" class="lbl">deleted at session end</text>
-<rect class="box" x="255" y="34" width="170" height="76" rx="6"/><text x="340" y="60" text-anchor="middle" font-weight="600">Memory</text><text x="340" y="80" text-anchor="middle" class="lbl">facts and decisions</text><text x="340" y="96" text-anchor="middle" class="lbl">30 days, longer on each read</text>
+<rect class="box" x="255" y="34" width="170" height="76" rx="6"/><text x="340" y="60" text-anchor="middle" font-weight="600">Memory</text><text x="340" y="80" text-anchor="middle" class="lbl">facts and decisions</text><text x="340" y="96" text-anchor="middle" class="lbl">permanent by default</text>
 <rect class="box" x="490" y="34" width="180" height="76" rx="6"/><text x="580" y="60" text-anchor="middle" font-weight="600">Knowledge</text><text x="580" y="80" text-anchor="middle" class="lbl">code, documents, notes</text><text x="580" y="96" text-anchor="middle" class="lbl">found by semantic search</text>
 <line x1="190" y1="72" x2="253" y2="72" marker-end="url(#a1)"/><text x="222" y="62" text-anchor="middle" class="lbl">promote</text><text x="222" y="128" text-anchor="middle" class="lbl">or marked, at session end</text><path d="M222 118 L222 84" class="dash"/>
 <line x1="425" y1="72" x2="488" y2="72" marker-end="url(#a1)"/><text x="457" y="62" text-anchor="middle" class="lbl">promote</text>
@@ -389,7 +389,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 
 <h3>How it fills</h3>
 <p>Spend a session with Claude on a real task: fix a bug, add a feature, investigate a question. As it works, Claude records what it decided and what it found, and if you close the session with <code>/conexus:continuation</code> (<a href="#l2">lesson 2</a>), the state of the work is recorded too. Helper agents that Claude starts write their results to the same store.</p>
-<p>Each entry has a project name and a title, and lives 30 days by default. Each time Claude reads it, it lives longer, so facts that stay useful stay and facts that nobody reads expire.</p>
+<p>Each entry has a project name and a title, and stays forever unless Claude gives it a shorter lifetime. When it does, each time Claude reads the entry, that lifetime stretches further, so facts that stay useful stick around and facts that nobody reads still expire.</p>
 
 <h3>How you notice it</h3>
 <p>Start a new session on the same project the next day, and Claude already knows what was decided. You see it in how it answers: it refers to yesterday's decision without you repeating it. To check directly, ask in any words you like, for example:</p>

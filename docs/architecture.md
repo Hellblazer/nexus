@@ -75,13 +75,15 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     └── Storage tiers ([RDR-120](rdr/rdr-120-storage-substrate-split.md) substrate split; service-mediated)
           T1: nexus-service HTTP (HttpScratchStore; session scratch, shared across agent processes; PG-only, no in-process opt-out — nexus-4lkmz)
           T2: nexus-service over Postgres (the write arbiter)
-                Eight domain stores + the catalog, all HTTP clients behind T2Database
+                Nine domain stores behind T2Database, all HTTP clients, plus
+                the catalog (reached separately via HttpCatalogClient)
                 Transport: HTTP to the nexus-service
                 (the SQLite + FTS5 `nx daemon t2` daemon is RETIRED — it
                  arbitrated a single SQLite writer; Postgres does that now)
                 memory · plans · taxonomy · telemetry · document_aspects ·
-                aspect_queue · document_highlights · catalog
-                (chash_index RETIRED — table dropped by RDR-187, v0.1.51)
+                aspect_queue · document_highlights · tuples · chash_index
+                (chash_index's PG table RETIRED — dropped by RDR-187, v0.1.51;
+                 the class remains a client-side shim)
           T3: Postgres 17 + pgvector behind the native nexus-service ── nx daemon service start
               Same service in BOTH modes; embedding is server-side
               (bge-768 in local mode, Voyage in managed-cloud mode).
@@ -631,7 +633,7 @@ discover_for_collection()          # taxonomy_cmd.py
   │  fetch ids + texts + embeddings from T3 (page_size=250)
   │  fall back to the local ONNX embedder (bge-768) re-embed only when T3 embeddings absent
   ▼
-CatalogTaxonomy.discover_topics()  # db/t2/catalog_taxonomy.py
+HttpTaxonomyStore.discover_topics()  # db/t2/http_taxonomy_store.py
   │  sklearn HDBSCAN on N×D float32
   │  c-TF-IDF labels (CountVectorizer + TfidfTransformer)
   │  persist: topics, topic_assignments → T2 (engine Postgres via HttpTaxonomyStore)
@@ -639,7 +641,7 @@ CatalogTaxonomy.discover_topics()  # db/t2/catalog_taxonomy.py
   ▼
 taxonomy_assign_hook()             # mcp_infra.py  (fires on every store_put)
   │  fetch new doc's T3 embedding
-  │  CatalogTaxonomy.assign_single(): ANN query against taxonomy__centroids
+  │  HttpTaxonomyStore.assign_single(): ANN query against taxonomy__centroids
   │  nearest centroid → topic_id → INSERT OR IGNORE topic_assignments
   ▼
 search_cross_corpus()              # search_engine.py
@@ -655,7 +657,7 @@ search_cross_corpus()              # search_engine.py
 
 ### Storage
 
-**T2 tables** (engine Postgres via `HttpTaxonomyStore`, owned by `CatalogTaxonomy`):
+**T2 tables** (engine Postgres via `HttpTaxonomyStore`; `CatalogTaxonomy` is the retired pre-RDR-158 name):
 
 | Table | Purpose |
 |-------|---------|
@@ -1072,7 +1074,7 @@ Phase 2 consequences:
 - **Telemetry no longer interferes with search**: MCP relevance-log
   writes run on the telemetry connection, so `memory_search` is not
   blocked by access-tracking hooks.
-- **Cluster rebuilds don't freeze memory**: `CatalogTaxonomy.discover_topics`
+- **Cluster rebuilds don't freeze memory**: `HttpTaxonomyStore.discover_topics`
   runs on the taxonomy connection. The long numpy clustering phase holds
   no T2 locks, so interactive memory operations continue during the
   bulk of the rebuild. (The initial embedding-fetch snapshot still briefly

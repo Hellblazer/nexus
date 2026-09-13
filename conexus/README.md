@@ -342,7 +342,7 @@ The nexus core server exposes 38 MCP tools and the nexus-catalog server exposes 
 
 **Resource management**:
 - T1 and T3 use thread-safe lazy singletons (expensive to initialize, reused across the session)
-- T2 uses per-call context managers (SQLite WAL, microsecond open)
+- T2 uses per-call context managers (`T2Database`, HTTP client to the engine's Postgres — the SQLite-backed version retired at RDR-158 P4)
 - All errors return `"Error: {message}"` strings — no exceptions surface as framework errors
 
 **Agent frontmatter**: Agents do NOT declare a `tools:` field — Claude Code has a confirmed bug (GitHub #13605, #21560, #25200) where explicit `tools:` in plugin-defined agents filters out MCP tools. Agents inherit all tools from the parent session. The PermissionRequest hook provides runtime enforcement. Agent body text references MCP tool syntax (not CLI commands). See RDR-035.
