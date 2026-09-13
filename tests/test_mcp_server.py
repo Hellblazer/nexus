@@ -742,15 +742,30 @@ def test_memory_get_by_title(t2_path):
     assert "retrievable content" in memory_get(project="testproj", title="doc.md")
 
 
-def test_memory_get_shows_default_ttl_of_30_days(t2_path):
-    """nexus-sv152: omitting ttl on memory_put stores a 30-day row, and
-    memory_get is the surface that says so."""
-    memory_put(content="expires", project="ttlproj", title="default.md")
-    assert "TTL: 30 days" in memory_get(project="ttlproj", title="default.md")
+def test_memory_get_shows_permanent_for_an_omitted_ttl(t2_path):
+    """nexus-473mx (Sam, 2026-09-12): omitting ttl stores a PERMANENT row,
+    and memory_get is the surface that says so.
+
+    Was test_memory_get_shows_default_ttl_of_30_days, asserting "TTL: 30
+    days", under nexus-sv152. Reversed rather than deleted: the old
+    assertion was correct for the old default, and a reader who finds it in
+    git history should see at the replacement that the default moved on
+    purpose."""
+    memory_put(content="kept", project="ttlproj", title="default.md")
+    assert "TTL: permanent" in memory_get(project="ttlproj", title="default.md")
+
+
+def test_memory_get_shows_the_days_for_an_explicit_ttl(t2_path):
+    """The other half of the reversal: a caller who ASKS for a clock still
+    gets it, and memory_get still renders the days. Without this, the test
+    above is equally satisfied by a tool that ignores ttl entirely."""
+    memory_put(content="expires", project="ttlproj", title="clocked.md", ttl=30)
+    assert "TTL: 30 days" in memory_get(project="ttlproj", title="clocked.md")
 
 
 def test_memory_get_shows_permanent_for_explicit_none_ttl(t2_path):
-    """nexus-sv152: only an explicit ttl=None yields a permanent row."""
+    """An explicit ttl=None still yields a permanent row — unchanged by
+    nexus-473mx, which only moved what SILENCE means."""
     memory_put(content="forever", project="ttlproj", title="perm.md", ttl=None)
     assert "TTL: permanent" in memory_get(project="ttlproj", title="perm.md")
 

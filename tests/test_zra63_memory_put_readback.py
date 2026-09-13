@@ -62,6 +62,12 @@ def _fake_t2(*, put_id: object, resolve):
     return _ctx
 
 
+#: sentinel so a test can OMIT ttl (the nexus-473mx default path) as
+#: distinct from passing None explicitly — the two now mean the same thing,
+#: and a test that cannot tell them apart cannot pin that they do.
+_OMIT = object()
+
+
 def _entry(content: str, row_id: object = 42) -> dict:
     return {
         "id": row_id, "project": "p", "title": "t",
@@ -69,10 +75,13 @@ def _entry(content: str, row_id: object = 42) -> dict:
     }
 
 
-def _call(monkeypatch: pytest.MonkeyPatch, *, put_id, resolve, content="findings"):
+def _call(monkeypatch: pytest.MonkeyPatch, *, put_id, resolve, content="findings",
+          ttl: object = _OMIT):
     import nexus.mcp.core as core
     monkeypatch.setattr(core, "_t2_ctx", _fake_t2(put_id=put_id, resolve=resolve))
-    return core.memory_put(content=content, project="p", title="t")
+    if ttl is _OMIT:
+        return core.memory_put(content=content, project="p", title="t")
+    return core.memory_put(content=content, project="p", title="t", ttl=ttl)
 
 
 # ── the falsifier: break the store SILENTLY, the check must trip ────────────
@@ -144,13 +153,30 @@ def test_unverified_says_both_directions_are_open(monkeypatch):
 # ── the happy path's existing contract is unchanged ────────────────────────
 
 def test_verified_write_returns_the_original_string_exactly(monkeypatch):
-    """Existing callers parse this line; verification must not reword it."""
+    """Existing callers parse this line; verification must not reword it.
+
+    nexus-473mx moved what an OMITTED ttl means (30 days -> permanent), so
+    the rendered value changed here. The SHAPE this test exists to protect —
+    "Stored: [id] project/title (ttl: ...)" — is unchanged, which is the
+    contract callers parse."""
     out = _call(
         monkeypatch, put_id=42,
         resolve=lambda p, t: (_entry("findings"), []),
         content="findings",
     )
-    assert out == "Stored: [42] p/t (ttl: 30 days)"  # nexus-sv152: the stored ttl rides the confirmation
+    assert out == "Stored: [42] p/t (ttl: permanent)"
+
+
+def test_an_explicit_ttl_still_rides_the_confirmation(monkeypatch):
+    """nexus-sv152's actual contract — the STORED ttl appears on the
+    confirmation line — survives the default flip, and is pinned separately
+    so the test above cannot pass by the tool ignoring ttl altogether."""
+    out = _call(
+        monkeypatch, put_id=42,
+        resolve=lambda p, t: (_entry("findings"), []),
+        content="findings", ttl=30,
+    )
+    assert out == "Stored: [42] p/t (ttl: 30 days)"
 
 
 def test_empty_content_is_still_rejected_before_any_write(monkeypatch):
