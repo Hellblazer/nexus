@@ -6,7 +6,10 @@
 """
 from __future__ import annotations
 
+from typing import Annotated
+
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
 from nexus.mcp_infra import (
     get_catalog_writer as _get_catalog_writer,
@@ -82,26 +85,30 @@ def _file_path_matches(entry_path: str, wanted: str) -> bool:
     structured_output=False,
 )
 def catalog_search(
-    query: str = "",
-    content_type: str = "",
-    author: str = "",
-    corpus: str = "",
-    owner: str = "",
-    file_path: str = "",
-    limit: int = 20,
-    offset: int = 0,
+    query: Annotated[str, Field(description="Free-text query, matched by full-text search.")] = "",
+    content_type: Annotated[str, Field(description="Exact content_type filter (e.g. \"code\", \"paper\", \"rdr\").")] = "",
+    author: Annotated[str, Field(description="Author substring filter, case-insensitive.")] = "",
+    corpus: Annotated[str, Field(description="Exact corpus filter.")] = "",
+    owner: Annotated[str, Field(description="Owner tumbler or registered owner name.")] = "",
+    file_path: Annotated[str, Field(description="File path filter (absolute or repo-relative; both forms match).")] = "",
+    limit: Annotated[int, Field(description="Page size.")] = 20,
+    offset: Annotated[int, Field(description="Entries to skip, for pagination.")] = 0,
 ) -> list[dict]:
-    """Find documents by metadata (title, author, corpus, file path).
+    """Find catalog documents by metadata: title, author, corpus, owner, or file path.
 
-    Results are paged. When results are truncated, a ``_pagination`` entry appears
-    at the end with ``next_offset``. Pass that value as ``offset`` to get the next page.
+    Use this (the catalog server's `search`) to discover WHICH
+    documents and collections exist before reading content; use the
+    nexus server's `search`/`query` tools for semantic content search
+    within those collections.
 
-    Returns catalog entries with tumbler, physical_collection, and metadata — NOT document
-    content. Use the ``search`` tool for semantic content search within collections.
-    Use catalog_search first to discover WHICH collections to search, then search for content.
+    Returns catalog entries with tumbler, physical_collection, and
+    metadata — never document content. A truncated page appends a
+    `_pagination` entry with `next_offset`.
 
-    Filters: query (free-text), author, corpus, owner, file_path, content_type (exact match).
-    At least one filter required."""
+    Constraints:
+    - At least one of `query`/`content_type`/`author`/`corpus`/`owner`/
+      `file_path` is required.
+    """
     cat, err = _require_catalog()
     if err:
         return [{"error": err}]
@@ -194,13 +201,15 @@ def catalog_search(
     structured_output=False,
 )
 def catalog_show(
-    tumbler: str = "",
-    title: str = "",
+    tumbler: Annotated[str, Field(description="Document or owner tumbler (e.g. \"1.2.5\" or \"1.2\").")] = "",
+    title: Annotated[str, Field(description="Exact or best-matching document title. Ignored when tumbler is set.")] = "",
 ) -> dict:
-    """Show a document's full metadata, physical collection, and all links to/from it.
+    """Show one catalog entry's full metadata and its links to/from other entries.
 
-    Pass tumbler (e.g. "1.2.5") or title. Returns all metadata plus links_from and links_to
-    arrays — useful for discovering a document's connections without a separate catalog_links call.
+    Use `links` instead when you only need the link graph, not the
+    entry's own metadata. Returns all metadata plus `links_from` and
+    `links_to` arrays in one call, or `{"kind": "owner", ...}` when
+    `tumbler` names an owner prefix rather than a document.
     """
     cat, err = _require_catalog()
     if err:
@@ -252,15 +261,18 @@ def catalog_show(
     structured_output=False,
 )
 def catalog_list(
-    owner: str = "",
-    content_type: str = "",
-    limit: int = 50,
-    offset: int = 0,
+    owner: Annotated[str, Field(description="Owner tumbler filter; \"\" lists across every owner.")] = "",
+    content_type: Annotated[str, Field(description="Exact content_type filter; \"\" for every type.")] = "",
+    limit: Annotated[int, Field(description="Page size.")] = 50,
+    offset: Annotated[int, Field(description="Entries to skip, for pagination.")] = 0,
 ) -> list[dict]:
-    """List catalog entries with optional filters.
+    """List catalog entries, optionally filtered by owner or content_type.
 
-    Results are paged. When truncated, a ``_pagination`` entry appears at the end
-    with ``next_offset``. Pass that as ``offset`` to get the next page."""
+    Use `search` (this server) instead when you need a free-text or
+    author/corpus/file_path filter. Returns a paged list of catalog
+    entries; a truncated page appends a `_pagination` entry with
+    `next_offset`.
+    """
     cat, err = _require_catalog()
     if err:
         return [{"error": err}]
@@ -299,6 +311,10 @@ def catalog_list(
         return [{"error": str(e)}]
 
 
+# HISTORY (RDR-096 P3.1): source_uri is the persistent URI identity. Omit
+# to auto-derive file://<abspath> from file_path; pass an explicit URI
+# (a custom scheme, https://, nx-scratch://) to store verbatim. Malformed
+# URIs raise at register-time.
 @mcp.tool(
     name="register",
     title="Register Document in Catalog",
@@ -306,23 +322,29 @@ def catalog_list(
     structured_output=False,
 )
 def catalog_register(
-    title: str,
-    owner: str,
-    content_type: str = "paper",
-    author: str = "",
-    year: int = 0,
-    file_path: str = "",
-    source_uri: str = "",
-    corpus: str = "",
-    physical_collection: str = "",
-    meta: str = "",
+    title: Annotated[str, Field(description="Document title.")],
+    owner: Annotated[str, Field(description="Owner tumbler this document is registered under.")],
+    content_type: Annotated[str, Field(description="Content type (e.g. \"paper\", \"code\", \"rdr\", \"knowledge\").")] = "paper",
+    author: Annotated[str, Field(description="Author name.")] = "",
+    year: Annotated[int, Field(description="Publication year; 0 = unknown.")] = 0,
+    file_path: Annotated[str, Field(
+        description="On-disk path (absolute or repo-relative). A known repo root relativizes an absolute path automatically.",
+    )] = "",
+    source_uri: Annotated[str, Field(
+        description="Explicit persistent URI identity. Omit to auto-derive file://<abspath> from file_path.",
+    )] = "",
+    corpus: Annotated[str, Field(description="Corpus label for grouping and routing.")] = "",
+    physical_collection: Annotated[str, Field(
+        description="Backing T3 collection name; may be empty for a ghost (catalog-only) entry.",
+    )] = "",
+    meta: Annotated[str, Field(description="Optional extra metadata as a JSON object string.")] = "",
 ) -> dict:
-    """Register a document. Assigns tumbler. Ghost elements: physical_collection can be empty.
+    """Register a new document in the catalog, assigning it a tumbler.
 
-    RDR-096 P3.1: ``source_uri`` is the persistent URI identity. Omit
-    to auto-derive ``file://<abspath>`` from ``file_path``; pass an
-    explicit URI (``chroma://``, ``https://``, ``nx-scratch://``) to
-    store verbatim. Malformed URIs raise at register-time.
+    Use `update` instead once a document is already registered and only
+    its metadata needs to change. Returns `{"tumbler": ..., "title": ...}`,
+    or `{"error": ...}` naming why registration was refused (e.g. an
+    ephemeral worktree/tempdir path with no owning repo_root).
     """
     cat, err = _require_catalog()
     if err:
@@ -414,15 +436,21 @@ def catalog_register(
     structured_output=False,
 )
 def catalog_update(
-    tumbler: str,
-    title: str = "",
-    author: str = "",
-    year: int = 0,
-    corpus: str = "",
-    physical_collection: str = "",
-    meta: str = "",
+    tumbler: Annotated[str, Field(description="Document tumbler to update.")],
+    title: Annotated[str, Field(description="New title; omit (\"\") to leave unchanged.")] = "",
+    author: Annotated[str, Field(description="New author; omit (\"\") to leave unchanged.")] = "",
+    year: Annotated[int, Field(description="New publication year; 0 leaves it unchanged.")] = 0,
+    corpus: Annotated[str, Field(description="New corpus label; omit (\"\") to leave unchanged.")] = "",
+    physical_collection: Annotated[str, Field(description="New backing T3 collection name; omit (\"\") to leave unchanged.")] = "",
+    meta: Annotated[str, Field(description="New extra metadata as a JSON object string; omit (\"\") to leave unchanged.")] = "",
 ) -> dict:
-    """Update a catalog entry's metadata."""
+    """Update one or more fields on an already-registered catalog entry.
+
+    Use `register` instead for a document that has no tumbler yet. Only
+    fields passed as non-empty/non-zero are changed. Returns
+    `{"tumbler": ..., "updated": [<field names>]}`, or an error if no
+    field was given to update.
+    """
     cat, err = _require_catalog()
     if err:
         return {"error": err}
@@ -462,19 +490,24 @@ def catalog_update(
     structured_output=False,
 )
 def catalog_link(
-    from_tumbler: str,
-    to_tumbler: str,
-    link_type: str,
-    created_by: str = "user",
-    from_span: str = "",
-    to_span: str = "",
+    from_tumbler: Annotated[str, Field(description="Source document's tumbler or exact title.")],
+    to_tumbler: Annotated[str, Field(description="Target document's tumbler or exact title.")],
+    link_type: Annotated[str, Field(
+        description="Link type: a built-in (cites, implements, implements-heuristic, supersedes, relates, quotes, comments) or a custom string.",
+    )],
+    created_by: Annotated[str, Field(description="Who or what created this link.")] = "user",
+    from_span: Annotated[str, Field(description="Optional span identifier anchoring the link to a location within the source.")] = "",
+    to_span: Annotated[str, Field(description="Optional span identifier anchoring the link to a location within the target.")] = "",
 ) -> dict:
-    """Create a relationship between two documents. Accepts tumblers or titles for both endpoints.
+    """Create a relationship between two catalog documents.
 
-    Built-in link types: cites, implements, implements-heuristic, supersedes, relates, quotes, comments.
-    Custom types are also accepted. created_by identifies who/what created this link.
-    Duplicate links are merged with co_discovered_by tracking. Returns {created: true/false}.
-    Raises error if either endpoint doesn't exist (pass allow_dangling via Python API to bypass).
+    Use `links` afterward to read the graph back. Returns
+    `{"from", "to", "type", "created": bool}` — `created=False` means the
+    link already existed and was merged (co-discovery tracking), not an
+    error.
+
+    Constraints:
+    - Both endpoints must already exist in the catalog, or the call errors.
     """
     cat, err = _require_catalog()
     if err:
@@ -525,16 +558,16 @@ def catalog_link(
     structured_output=False,
 )
 def catalog_links(
-    tumbler: str,
-    direction: str = "both",
-    link_type: str = "",
-    depth: int = 1,
+    tumbler: Annotated[str, Field(description="Document tumbler or exact title to start from.")],
+    direction: Annotated[str, Field(description="Traversal direction: \"out\", \"in\", or \"both\".")] = "both",
+    link_type: Annotated[str, Field(description="Restrict to this link type; \"\" follows every type.")] = "",
+    depth: Annotated[int, Field(description="BFS depth; 1 (default) returns direct neighbors only.")] = 1,
 ) -> dict:
-    """Links to/from a catalog entry. Accepts tumbler or title. depth controls BFS depth (default 1 = direct neighbors).
+    """Walk the catalog link graph from one entry, live documents only.
 
-    Returns {"nodes": [CatalogEntry dicts], "edges": [CatalogLink dicts]}.
-    Note: only returns links whose endpoints are live documents (deleted nodes excluded).
-    Use catalog_link_query to see all links including those to deleted documents.
+    Use `link_query` instead for an admin/audit view that also includes
+    links to deleted (orphaned) documents. Returns
+    `{"nodes": [entry dicts], "edges": [link dicts]}`.
     """
     cat, err = _require_catalog()
     if err:
@@ -569,26 +602,23 @@ def catalog_links(
     structured_output=False,
 )
 def catalog_link_query(
-    from_tumbler: str = "",
-    to_tumbler: str = "",
-    link_type: str = "",
-    created_by: str = "",
-    direction: str = "both",
-    tumbler: str = "",
-    created_at_before: str = "",
-    limit: int = 50,
-    offset: int = 0,
+    from_tumbler: Annotated[str, Field(description="Filter to links from this tumbler; \"\" for any source.")] = "",
+    to_tumbler: Annotated[str, Field(description="Filter to links to this tumbler; \"\" for any target.")] = "",
+    link_type: Annotated[str, Field(description="Filter to this link type; \"\" for any type.")] = "",
+    created_by: Annotated[str, Field(description="Filter to links created by this identity; \"\" for any creator.")] = "",
+    direction: Annotated[str, Field(description="Traversal direction when tumbler is set: \"out\", \"in\", or \"both\".")] = "both",
+    tumbler: Annotated[str, Field(description="Filter to links touching this tumbler, in either direction (per `direction`).")] = "",
+    created_at_before: Annotated[str, Field(description="ISO timestamp; only links created before this time.")] = "",
+    limit: Annotated[int, Field(description="Page size.")] = 50,
+    offset: Annotated[int, Field(description="Entries to skip, for pagination.")] = 0,
 ) -> list[dict]:
-    """Query links by any combination of filters. For admin/audit use.
+    """Query the raw link table by any combination of filters, for admin or audit use.
 
-    Results are paged. When truncated, a ``_pagination`` entry appears at the end
-    with ``next_offset``. Pass that as ``offset`` to get the next page.
-
-    NOT a retrieval step — use catalog_links (or the `traverse` MCP tool) for graph traversal.
-    Use for: audit by creator, find all links of a type, count generator output.
-    created_at_before: ISO timestamp — only links created before this time.
-    Note: returns ALL matching links including orphans (links to deleted documents).
-    Use catalog_links for live-documents-only graph traversal.
+    Use `links` instead for graph traversal — this tool returns ALL
+    matching links, including orphans pointing at deleted documents,
+    which `links` deliberately excludes. Returns a paged list of link
+    records; a truncated page appends a `_pagination` entry with
+    `next_offset`.
     """
     cat, err = _require_catalog()
     if err:
@@ -618,12 +648,16 @@ def catalog_link_query(
     structured_output=False,
 )
 def catalog_resolve(
-    tumbler: str = "",
-    owner: str = "",
-    corpus: str = "",
+    tumbler: Annotated[str, Field(description="Document tumbler, dotted form (e.g. \"1.2.3\").")] = "",
+    owner: Annotated[str, Field(description="Owner tumbler or registered owner name, dotted form (e.g. \"1.2\").")] = "",
+    corpus: Annotated[str, Field(description="Corpus label.")] = "",
 ) -> list[str]:
-    """Resolve to physical ChromaDB collection names.
-    Returns collection names usable with the `search` tool."""
+    """Resolve a tumbler, owner, or corpus to its physical T3 collection name(s).
+
+    Use `search`/`query` (nexus server) with the returned collection names
+    to search their content. Returns a sorted list of distinct physical
+    collection names; entries with no physical_collection are skipped.
+    """
     cat, err = _require_catalog()
     if err:
         return [f"Error: {err}"]
@@ -682,7 +716,10 @@ def catalog_resolve(
     structured_output=False,
 )
 def catalog_stats() -> dict:
-    """Catalog health summary: owner/document/link counts by type."""
+    """Get catalog-wide health counts: owners, documents, links, collections, chunks.
+
+    Returns `{owners, documents, links, collections, chunks, by_link_type}`.
+    """
     cat, err = _require_catalog()
     if err:
         return {"error": err}
