@@ -27,9 +27,10 @@ subsume the per-tier features that drifted apart:
 - **Atomic publish.** Every write is temp-file + ``os.replace`` so a
   concurrent reader sees either the old or the new record, never a torn
   one.
-- **Scope-keyed election.** A per-scope ``fcntl.flock`` serializes the
-  generation read-increment-write, so concurrent siblings converge to
-  exactly one owner per scope with strictly increasing generations.
+- **Scope-keyed election.** A per-scope advisory file lock
+  (:func:`nexus._locking.lock_fd`) serializes the generation
+  read-increment-write, so concurrent siblings converge to exactly one
+  owner per scope with strictly increasing generations.
 
 The TTL/heartbeat defaults reuse the RDR-140 T2 constants
 (``heartbeat_interval`` = ``_REASSERT_INTERVAL`` = 1.0,
@@ -46,7 +47,6 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import fcntl
 import json
 import os
 import re
@@ -59,6 +59,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Optional, Protocol, TypeVar
 
 import structlog
+
+from nexus import _locking
 
 _log = structlog.get_logger(__name__)
 
@@ -315,7 +317,7 @@ class ServiceRegistry:
         fd = self._timed(phases, "elect_open", _open)
         try:
             if budget is None:
-                self._timed(phases, "elect_flock", lambda: fcntl.flock(fd, fcntl.LOCK_EX))
+                self._timed(phases, "elect_flock", lambda: _locking.lock_fd(fd, blocking=True))
             else:
                 self._timed(
                     phases, "elect_flock", lambda: self._flock_within(fd, scope_key, budget)
@@ -323,7 +325,7 @@ class ServiceRegistry:
             yield
         finally:
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                _locking.unlock_fd(fd)
             finally:
                 os.close(fd)
 
@@ -331,7 +333,7 @@ class ServiceRegistry:
         deadline = self._monotonic() + budget
         while True:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _locking.lock_fd(fd, blocking=False)
                 return
             except BlockingIOError:
                 now = self._monotonic()

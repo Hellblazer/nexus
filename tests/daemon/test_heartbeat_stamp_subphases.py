@@ -143,15 +143,20 @@ def test_a_stalled_flock_is_named_as_the_flock(tmp_path: Path, mono) -> None:
     reg = _registry(tmp_path, mono)
     record = _published(reg)
 
-    real_flock = sr_mod.fcntl.flock
+    # Patches the shared advisory-lock primitive rather than ``fcntl.flock``
+    # directly: the election acquire routes through nexus._locking now, so
+    # the module has no ``fcntl`` attribute left to patch (Windows-
+    # portability port). Same shape as before — a module-object attribute
+    # patch, undone in the finally — and only ACQUIRES are charged, because
+    # releases go through ``unlock_fd`` and never reach this callable.
+    real_lock_fd = sr_mod._locking.lock_fd
 
-    def charge_flock(fd, op, _real=real_flock):
-        if op & sr_mod.fcntl.LOCK_EX:
-            mono.charge = 2.0
-        return _real(fd, op)
+    def charge_lock_fd(fd, *, blocking, _real=real_lock_fd):
+        mono.charge = 2.0
+        return _real(fd, blocking=blocking)
 
     monkey = pytest.MonkeyPatch()
-    monkey.setattr(sr_mod.fcntl, "flock", charge_flock)
+    monkey.setattr(sr_mod._locking, "lock_fd", charge_lock_fd)
     try:
         reg.heartbeat(record)
     finally:
