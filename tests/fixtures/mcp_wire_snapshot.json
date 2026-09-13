@@ -1,0 +1,2015 @@
+{
+  "nexus": {
+    "collection_list": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {},
+        "type": "object"
+      },
+      "qualname": "collection_list"
+    },
+    "daemon_uninstall": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "confirm": {
+            "default": false,
+            "type": "boolean"
+          },
+          "remove_data": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "qualname": "daemon_uninstall"
+    },
+    "memory_consolidate": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "confirm_destructive": {
+            "default": false,
+            "type": "boolean"
+          },
+          "delete_ids": {
+            "default": "",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "type": "boolean"
+          },
+          "idle_days": {
+            "default": 30,
+            "type": "integer"
+          },
+          "keep_id": {
+            "default": 0,
+            "type": "integer"
+          },
+          "limit": {
+            "default": 50,
+            "type": "integer"
+          },
+          "merged_content": {
+            "default": "",
+            "type": "string"
+          },
+          "min_similarity": {
+            "default": 0.7,
+            "type": "number"
+          },
+          "project": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "project"
+        ],
+        "type": "object"
+      },
+      "qualname": "memory_consolidate"
+    },
+    "memory_delete": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "project": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "title"
+        ],
+        "type": "object"
+      },
+      "qualname": "memory_delete"
+    },
+    "memory_get": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "project": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "type": "object"
+      },
+      "qualname": "memory_get"
+    },
+    "memory_put": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "agent": {
+            "default": "",
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "session": {
+            "default": "",
+            "type": "string"
+          },
+          "tags": {
+            "default": "",
+            "type": "string"
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "content",
+          "project",
+          "title"
+        ],
+        "type": "object"
+      },
+      "qualname": "memory_put"
+    },
+    "memory_search": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "limit": {
+            "default": 20,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer"
+          },
+          "project": {
+            "default": "",
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "qualname": "memory_search"
+    },
+    "nx_answer": {
+      "is_async": true,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "bindings": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "budget_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "budget_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "context": {
+            "default": "",
+            "type": "string"
+          },
+          "continuation": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "dimensions": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "force_dynamic": {
+            "default": false,
+            "type": "boolean"
+          },
+          "max_steps": {
+            "default": 6,
+            "type": "integer"
+          },
+          "min_confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "question": {
+            "type": "string"
+          },
+          "scope": {
+            "default": "",
+            "type": "string"
+          },
+          "structured": {
+            "default": false,
+            "type": "boolean"
+          },
+          "trace": {
+            "default": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "type": "object"
+      },
+      "qualname": "nx_answer"
+    },
+    "nx_answer_report": {
+      "is_async": true,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "continuation_id": {
+            "type": "string"
+          },
+          "final_text_excerpt": {
+            "default": "",
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "continuation_id",
+          "ok"
+        ],
+        "type": "object"
+      },
+      "qualname": "nx_answer_report"
+    },
+    "nx_enrich_beads": {
+      "is_async": true,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "bead_description": {
+            "type": "string"
+          },
+          "context": {
+            "default": "",
+            "type": "string"
+          },
+          "timeout": {
+            "default": 300.0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "bead_description"
+        ],
+        "type": "object"
+      },
+      "qualname": "nx_enrich_beads"
+    },
+    "nx_plan_audit": {
+      "is_async": true,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "budget_rounds": {
+            "default": 0,
+            "type": "integer"
+          },
+          "context": {
+            "default": "",
+            "type": "string"
+          },
+          "plan_json": {
+            "type": "string"
+          },
+          "round_number": {
+            "default": 1,
+            "type": "integer"
+          },
+          "timeout": {
+            "default": 600.0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "plan_json"
+        ],
+        "type": "object"
+      },
+      "qualname": "nx_plan_audit"
+    },
+    "nx_tidy": {
+      "is_async": true,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "collection": {
+            "default": "knowledge",
+            "type": "string"
+          },
+          "timeout": {
+            "default": 600.0,
+            "type": "number"
+          },
+          "topic": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic"
+        ],
+        "type": "object"
+      },
+      "qualname": "nx_tidy"
+    },
+    "operator_aggregate": {
+      "is_async": true,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "aspect_field": {
+            "default": "",
+            "type": "string"
+          },
+          "groups": {
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "reducer": {
+            "type": "string"
+          },
+          "source": {
+            "default": "auto",
+            "type": "string"
+          },
+          "timeout": {
+            "default": 300.0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "groups",
+          "reducer"
+        ],
+        "type": "object"
+      },
+      "qualname": "operator_aggregate"
+    },
+    "operator_check": {
+      "is_async": true,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "check_instruction": {
+            "type": "string"
+          },
+          "items": {
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "timeout": {
+            "default": 300.0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "items",
+          "check_instruction"
+        ],
+        "type": "object"
+      },
+      "qualname": "operator_check"
+    },
+    "operator_compare": {
+      "is_async": true,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "focus": {
+            "default": "",
+            "type": "string"
+          },
+          "items": {
+            "default": "",
+            "type": "string"
+          },
+          "items_a": {
+            "default": "",
+            "type": "string"
+          },
+          "items_b": {
+            "default": "",
+            "type": "string"
+          },
+          "label_a": {
+            "default": "A",
+            "type": "string"
+          },
+          "label_b": {
+            "default": "B",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "timeout": {
+            "default": 300.0,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "qualname": "operator_compare"
+    },
+    "operator_extract": {
+      "is_async": true,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "fields": {
+            "type": "string"
+          },
+          "inputs": {
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "timeout": {
+            "default": 300.0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "inputs",
+          "fields"
+        ],
+        "type": "object"
+      },
+      "qualname": "operator_extract"
+    },
+    "operator_filter": {
+      "is_async": true,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "aspect_field": {
+            "default": "",
+            "type": "string"
+          },
+          "criterion": {
+            "type": "string"
+          },
+          "items": {
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "source": {
+            "default": "auto",
+            "type": "string"
+          },
+          "timeout": {
+            "default": 300.0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "items",
+          "criterion"
+        ],
+        "type": "object"
+      },
+      "qualname": "operator_filter"
+    },
+    "operator_generate": {
+      "is_async": true,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "cited": {
+            "default": false,
+            "type": "boolean"
+          },
+          "context": {
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "template": {
+            "type": "string"
+          },
+          "timeout": {
+            "default": 300.0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "template",
+          "context"
+        ],
+        "type": "object"
+      },
+      "qualname": "operator_generate"
+    },
+    "operator_groupby": {
+      "is_async": true,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "aspect_field": {
+            "default": "",
+            "type": "string"
+          },
+          "items": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "source": {
+            "default": "auto",
+            "type": "string"
+          },
+          "timeout": {
+            "default": 300.0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "items",
+          "key"
+        ],
+        "type": "object"
+      },
+      "qualname": "operator_groupby"
+    },
+    "operator_rank": {
+      "is_async": true,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "criterion": {
+            "type": "string"
+          },
+          "items": {
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "timeout": {
+            "default": 300.0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "items",
+          "criterion"
+        ],
+        "type": "object"
+      },
+      "qualname": "operator_rank"
+    },
+    "operator_summarize": {
+      "is_async": true,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "cited": {
+            "default": false,
+            "type": "boolean"
+          },
+          "content": {
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "timeout": {
+            "default": 300.0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "qualname": "operator_summarize"
+    },
+    "operator_verify": {
+      "is_async": true,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "claim": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "timeout": {
+            "default": 300.0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "claim",
+          "evidence"
+        ],
+        "type": "object"
+      },
+      "qualname": "operator_verify"
+    },
+    "plan_delete": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "plan_id": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "plan_id"
+        ],
+        "type": "object"
+      },
+      "qualname": "plan_delete"
+    },
+    "plan_save": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "outcome": {
+            "default": "success",
+            "type": "string"
+          },
+          "plan_json": {
+            "type": "string"
+          },
+          "project": {
+            "default": "",
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "scope_tags": {
+            "default": "",
+            "type": "string"
+          },
+          "tags": {
+            "default": "",
+            "type": "string"
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "verb": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "plan_json"
+        ],
+        "type": "object"
+      },
+      "qualname": "plan_save"
+    },
+    "plan_search": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "limit": {
+            "default": 5,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer"
+          },
+          "project": {
+            "default": "",
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "qualname": "plan_search"
+    },
+    "query": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "author": {
+            "default": "",
+            "type": "string"
+          },
+          "content_type": {
+            "default": "",
+            "type": "string"
+          },
+          "corpus": {
+            "default": "knowledge",
+            "type": "string"
+          },
+          "depth": {
+            "default": 1,
+            "type": "integer"
+          },
+          "follow_links": {
+            "default": "",
+            "type": "string"
+          },
+          "limit": {
+            "default": 10,
+            "type": "integer"
+          },
+          "question": {
+            "type": "string"
+          },
+          "structured": {
+            "default": false,
+            "type": "boolean"
+          },
+          "subtree": {
+            "default": "",
+            "type": "string"
+          },
+          "where": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "type": "object"
+      },
+      "qualname": "query"
+    },
+    "scratch": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "agent": {
+            "default": "",
+            "type": "string"
+          },
+          "content": {
+            "default": "",
+            "type": "string"
+          },
+          "entry_id": {
+            "default": "",
+            "type": "string"
+          },
+          "limit": {
+            "default": 10,
+            "type": "integer"
+          },
+          "query": {
+            "default": "",
+            "type": "string"
+          },
+          "tags": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "qualname": "scratch"
+    },
+    "scratch_manage": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "entry_id": {
+            "type": "string"
+          },
+          "project": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "entry_id"
+        ],
+        "type": "object"
+      },
+      "qualname": "scratch_manage"
+    },
+    "search": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "cluster_by": {
+            "default": "",
+            "type": "string"
+          },
+          "corpus": {
+            "default": "knowledge,code,docs",
+            "type": "string"
+          },
+          "limit": {
+            "default": 10,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "structured": {
+            "default": false,
+            "type": "boolean"
+          },
+          "threshold": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "topic": {
+            "default": "",
+            "type": "string"
+          },
+          "where": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "qualname": "search"
+    },
+    "search_aspect_scoped": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "corpus": {
+            "default": "knowledge,code,docs",
+            "type": "string"
+          },
+          "field": {
+            "default": "",
+            "type": "string"
+          },
+          "limit": {
+            "default": 10,
+            "type": "integer"
+          },
+          "min_confidence": {
+            "default": 0.0,
+            "type": "number"
+          },
+          "pattern": {
+            "default": "",
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "structured": {
+            "default": false,
+            "type": "boolean"
+          },
+          "where": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "qualname": "search_aspect_scoped"
+    },
+    "search_graph_hop": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "corpus": {
+            "default": "knowledge,code,docs",
+            "type": "string"
+          },
+          "depth": {
+            "default": 1,
+            "type": "integer"
+          },
+          "direction": {
+            "default": "both",
+            "type": "string"
+          },
+          "limit": {
+            "default": 10,
+            "type": "integer"
+          },
+          "link_type": {
+            "default": "",
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "seeds": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "structured": {
+            "default": false,
+            "type": "boolean"
+          },
+          "where": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "seeds"
+        ],
+        "type": "object"
+      },
+      "qualname": "search_graph_hop"
+    },
+    "search_metadata_scoped": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "author": {
+            "default": "",
+            "type": "string"
+          },
+          "content_type": {
+            "default": "",
+            "type": "string"
+          },
+          "corpus": {
+            "default": "knowledge,code,docs",
+            "type": "string"
+          },
+          "limit": {
+            "default": 10,
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "structured": {
+            "default": false,
+            "type": "boolean"
+          },
+          "subtree": {
+            "default": "",
+            "type": "string"
+          },
+          "where": {
+            "default": "",
+            "type": "string"
+          },
+          "year": {
+            "default": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "qualname": "search_metadata_scoped"
+    },
+    "search_topic_scoped": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "corpus": {
+            "default": "knowledge,code,docs",
+            "type": "string"
+          },
+          "limit": {
+            "default": 10,
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "structured": {
+            "default": false,
+            "type": "boolean"
+          },
+          "topic": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "topic"
+        ],
+        "type": "object"
+      },
+      "qualname": "search_topic_scoped"
+    },
+    "store_get": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "collection": {
+            "default": "knowledge",
+            "type": "string"
+          },
+          "doc_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "doc_id"
+        ],
+        "type": "object"
+      },
+      "qualname": "store_get"
+    },
+    "store_get_many": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "collections": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ],
+            "default": "knowledge"
+          },
+          "ids": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ]
+          },
+          "limit_per_source": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "max_chars_per_doc": {
+            "default": 4000,
+            "type": "integer"
+          },
+          "structured": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ids"
+        ],
+        "type": "object"
+      },
+      "qualname": "store_get_many"
+    },
+    "store_list": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "collection": {
+            "default": "knowledge",
+            "type": "string"
+          },
+          "docs": {
+            "default": false,
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 20,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "qualname": "store_list"
+    },
+    "store_put": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "agent": {
+            "default": "",
+            "type": "string"
+          },
+          "category": {
+            "default": "",
+            "type": "string"
+          },
+          "collection": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "session": {
+            "default": "",
+            "type": "string"
+          },
+          "tags": {
+            "default": "",
+            "type": "string"
+          },
+          "ttl": {
+            "default": "permanent",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content",
+          "collection"
+        ],
+        "type": "object"
+      },
+      "qualname": "store_put"
+    },
+    "traverse": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "depth": {
+            "default": 1,
+            "type": "integer"
+          },
+          "direction": {
+            "default": "both",
+            "type": "string"
+          },
+          "link_types": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "purpose": {
+            "default": "",
+            "type": "string"
+          },
+          "seeds": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "required": [
+          "seeds"
+        ],
+        "type": "object"
+      },
+      "qualname": "traverse"
+    },
+    "tuple_ack": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "claim_id": {
+            "type": "string"
+          },
+          "claimant": {
+            "type": "string"
+          },
+          "reply": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "claim_id",
+          "claimant"
+        ],
+        "type": "object"
+      },
+      "qualname": "tuple_ack"
+    },
+    "tuple_in": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "claimant": {
+            "type": "string"
+          },
+          "keys_pattern": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "lease_s": {
+            "type": "integer"
+          },
+          "subspace": {
+            "type": "string"
+          },
+          "timeout_s": {
+            "default": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "subspace",
+          "keys_pattern",
+          "claimant",
+          "lease_s"
+        ],
+        "type": "object"
+      },
+      "qualname": "tuple_in"
+    },
+    "tuple_list": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "prefix": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "qualname": "tuple_list"
+    },
+    "tuple_nack": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "claim_id": {
+            "type": "string"
+          },
+          "claimant": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "claim_id",
+          "claimant"
+        ],
+        "type": "object"
+      },
+      "qualname": "tuple_nack"
+    },
+    "tuple_out": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "dims": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "keys": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "nonce": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "subspace": {
+            "type": "string"
+          },
+          "ttl_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "subspace",
+          "keys"
+        ],
+        "type": "object"
+      },
+      "qualname": "tuple_out"
+    },
+    "tuple_rd": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "keys_pattern": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "n": {
+            "default": 1,
+            "type": "integer"
+          },
+          "since_created_at": {
+            "default": "",
+            "type": "string"
+          },
+          "since_id": {
+            "default": "",
+            "type": "string"
+          },
+          "subspace": {
+            "type": "string"
+          },
+          "timeout_s": {
+            "default": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "subspace"
+        ],
+        "type": "object"
+      },
+      "qualname": "tuple_rd"
+    },
+    "tuple_registry": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {},
+        "type": "object"
+      },
+      "qualname": "tuple_registry"
+    },
+    "tuple_renew": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "claim_id": {
+            "type": "string"
+          },
+          "claimant": {
+            "type": "string"
+          },
+          "lease_s": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "claim_id",
+          "claimant",
+          "lease_s"
+        ],
+        "type": "object"
+      },
+      "qualname": "tuple_renew"
+    },
+    "tuple_stats": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "subspace": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subspace"
+        ],
+        "type": "object"
+      },
+      "qualname": "tuple_stats"
+    }
+  },
+  "nexus-catalog": {
+    "link": {
+      "is_async": false,
+      "module": "nexus.mcp.catalog",
+      "parameters": {
+        "properties": {
+          "created_by": {
+            "default": "user",
+            "type": "string"
+          },
+          "from_span": {
+            "default": "",
+            "type": "string"
+          },
+          "from_tumbler": {
+            "type": "string"
+          },
+          "link_type": {
+            "type": "string"
+          },
+          "to_span": {
+            "default": "",
+            "type": "string"
+          },
+          "to_tumbler": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "from_tumbler",
+          "to_tumbler",
+          "link_type"
+        ],
+        "type": "object"
+      },
+      "qualname": "catalog_link"
+    },
+    "link_query": {
+      "is_async": false,
+      "module": "nexus.mcp.catalog",
+      "parameters": {
+        "properties": {
+          "created_at_before": {
+            "default": "",
+            "type": "string"
+          },
+          "created_by": {
+            "default": "",
+            "type": "string"
+          },
+          "direction": {
+            "default": "both",
+            "type": "string"
+          },
+          "from_tumbler": {
+            "default": "",
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "type": "integer"
+          },
+          "link_type": {
+            "default": "",
+            "type": "string"
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer"
+          },
+          "to_tumbler": {
+            "default": "",
+            "type": "string"
+          },
+          "tumbler": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "qualname": "catalog_link_query"
+    },
+    "links": {
+      "is_async": false,
+      "module": "nexus.mcp.catalog",
+      "parameters": {
+        "properties": {
+          "depth": {
+            "default": 1,
+            "type": "integer"
+          },
+          "direction": {
+            "default": "both",
+            "type": "string"
+          },
+          "link_type": {
+            "default": "",
+            "type": "string"
+          },
+          "tumbler": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tumbler"
+        ],
+        "type": "object"
+      },
+      "qualname": "catalog_links"
+    },
+    "list": {
+      "is_async": false,
+      "module": "nexus.mcp.catalog",
+      "parameters": {
+        "properties": {
+          "content_type": {
+            "default": "",
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer"
+          },
+          "owner": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "qualname": "catalog_list"
+    },
+    "register": {
+      "is_async": false,
+      "module": "nexus.mcp.catalog",
+      "parameters": {
+        "properties": {
+          "author": {
+            "default": "",
+            "type": "string"
+          },
+          "content_type": {
+            "default": "paper",
+            "type": "string"
+          },
+          "corpus": {
+            "default": "",
+            "type": "string"
+          },
+          "file_path": {
+            "default": "",
+            "type": "string"
+          },
+          "meta": {
+            "default": "",
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "physical_collection": {
+            "default": "",
+            "type": "string"
+          },
+          "source_uri": {
+            "default": "",
+            "type": "string"
+          },
+          "year": {
+            "default": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "title",
+          "owner"
+        ],
+        "type": "object"
+      },
+      "qualname": "catalog_register"
+    },
+    "resolve": {
+      "is_async": false,
+      "module": "nexus.mcp.catalog",
+      "parameters": {
+        "properties": {
+          "corpus": {
+            "default": "",
+            "type": "string"
+          },
+          "owner": {
+            "default": "",
+            "type": "string"
+          },
+          "tumbler": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "qualname": "catalog_resolve"
+    },
+    "search": {
+      "is_async": false,
+      "module": "nexus.mcp.catalog",
+      "parameters": {
+        "properties": {
+          "author": {
+            "default": "",
+            "type": "string"
+          },
+          "content_type": {
+            "default": "",
+            "type": "string"
+          },
+          "corpus": {
+            "default": "",
+            "type": "string"
+          },
+          "file_path": {
+            "default": "",
+            "type": "string"
+          },
+          "limit": {
+            "default": 20,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer"
+          },
+          "owner": {
+            "default": "",
+            "type": "string"
+          },
+          "query": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "qualname": "catalog_search"
+    },
+    "show": {
+      "is_async": false,
+      "module": "nexus.mcp.catalog",
+      "parameters": {
+        "properties": {
+          "tumbler": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "qualname": "catalog_show"
+    },
+    "stats": {
+      "is_async": false,
+      "module": "nexus.mcp.catalog",
+      "parameters": {
+        "properties": {},
+        "type": "object"
+      },
+      "qualname": "catalog_stats"
+    },
+    "update": {
+      "is_async": false,
+      "module": "nexus.mcp.catalog",
+      "parameters": {
+        "properties": {
+          "author": {
+            "default": "",
+            "type": "string"
+          },
+          "corpus": {
+            "default": "",
+            "type": "string"
+          },
+          "meta": {
+            "default": "",
+            "type": "string"
+          },
+          "physical_collection": {
+            "default": "",
+            "type": "string"
+          },
+          "tumbler": {
+            "type": "string"
+          },
+          "year": {
+            "default": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tumbler"
+        ],
+        "type": "object"
+      },
+      "qualname": "catalog_update"
+    }
+  }
+}
