@@ -36,6 +36,11 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(__file__))
 import _lib  # noqa: E402
 
+# Shared hook-logging bridge lives one directory up, alongside this script's
+# sibling _endpoint_resolve.py (nexus-cnzei.2 fix round 2).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _hook_logging  # noqa: E402
+
 RULE_NAME = "phase_review_close_requires_gate"
 
 _BD_CLOSE_RE = re.compile(
@@ -83,19 +88,23 @@ def _claude_pid() -> int:
         except ValueError:
             pass
     try:
-        # nexus-cnzei.2 (S2): bridge structlog to stderr/logfile BEFORE
-        # importing nexus.session below. Structlog's default
+        # nexus-cnzei.2 (S2, fix round 2): bridge structlog to stderr/logfile
+        # BEFORE importing nexus.session below, via the SHARED helper (was a
+        # hand-duplicated local try/except; see _hook_logging.py's docstring
+        # for the class-level defect this closes). Structlog's default
         # PrintLoggerFactory writes to STDOUT, the same channel this
-        # PreToolUse hook's own JSON envelope goes out on, and a debug
-        # line landing there ahead of (or beside) that JSON would corrupt
-        # the payload the harness parses. Best-effort: a logging-setup
-        # failure must not block the PID resolution it protects.
-        try:
-            from nexus.logging_setup import configure_logging  # noqa: PLC0415
-
-            configure_logging(mode="hook")
-        except Exception:  # noqa: BLE001 -- best-effort only
-            pass
+        # PreToolUse hook's own JSON envelope goes out on, and a debug line
+        # landing there ahead of (or beside) that JSON would corrupt the
+        # payload the harness parses.
+        #
+        # _hook_logging.configure_hook_logging() carries its OWN internal
+        # best-effort catch (never raises); the outer `except Exception:
+        # return os.getppid()` below is a SEPARATE, independent guarantee --
+        # it also covers a total absence of _hook_logging itself and the
+        # `nexus.session` import/call that follows. See
+        # test_claude_pid_survives_a_logging_setup_failure, which asserts
+        # the outer catch specifically by bypassing the inner one.
+        _hook_logging.configure_hook_logging()
 
         from nexus.session import find_immediate_claude_pid
 

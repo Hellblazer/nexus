@@ -57,6 +57,70 @@ def test_readme_exists():
 
 
 # ---------------------------------------------------------------------------
+# nexus-cnzei.2 (S8 sibling, critic Significant): the authoring template's
+# deny example must not teach a future routing-hook author the pre-fix
+# wording -- a new hook copy-pasting the template would otherwise
+# reintroduce the exact "escape hint handed to the gated subagent as its
+# own move" defect S8 fixed in the two live hooks that carry the escape
+# token today.
+# ---------------------------------------------------------------------------
+
+#: The phrase common to the README template and every live deny message
+#: that offers the `# routing-allow:` escape. Keeping this ONE literal
+#: string, asserted against every site, is what makes future divergence
+#: between the doc and the hooks impossible to land silently: change the
+#: wording in one place without the others and this test names exactly
+#: which site fell behind.
+#:
+#: Deliberately SHORT (5 words): each site wraps its f-string concatenation
+#: across physical lines differently, and this test reads RAW FILE TEXT
+#: (not the executed, concatenated runtime string) -- a longer phrase that
+#: happens to straddle a line break in even one file would silently never
+#: match there, which is a false negative this test must not have.
+_ROUTING_ALLOW_OWNERSHIP_PHRASE = "not yours to reach for"
+
+#: Live hook scripts (relative to routing/) whose deny message offers the
+#: `# routing-allow:` escape and must therefore carry the same ownership
+#: phrase as the authoring template.
+_LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE = (
+    "phase_review_close_requires_gate.py",
+    "subagent_git_write_requires_orchestrator.py",
+)
+
+
+def test_readme_template_deny_example_does_not_hand_over_the_escape():
+    text = README_PATH.read_text(encoding="utf-8")
+    assert "# routing-allow:" in text, (
+        "README no longer mentions the escape token at all -- if the escape "
+        "mechanism was removed, update this test; if not, the template "
+        "regressed"
+    )
+    assert _ROUTING_ALLOW_OWNERSHIP_PHRASE in text, (
+        f"routing/README.md's authoring template does not carry the phrase "
+        f"{_ROUTING_ALLOW_OWNERSHIP_PHRASE!r} -- a new routing hook authored "
+        f"by copying this template would offer the `# routing-allow:` "
+        f"escape as the gated subagent's own move, exactly the wording "
+        f"defect nexus-cnzei.2 (S8) fixed in the live hooks below"
+    )
+
+
+@pytest.mark.parametrize("filename", _LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE)
+def test_live_hook_deny_wording_matches_the_readme_template(filename: str) -> None:
+    """Parity check, not a duplicate of the README's own test: if the
+    README's phrase and a live hook's phrase ever diverge (one gets fixed,
+    the other doesn't -- exactly how S8 shipped inconsistently the first
+    time), this fails and names which file fell behind."""
+    hook_path = README_PATH.parent / filename
+    assert hook_path.exists(), f"missing: {hook_path}"
+    hook_text = hook_path.read_text(encoding="utf-8")
+    assert _ROUTING_ALLOW_OWNERSHIP_PHRASE in hook_text, (
+        f"{filename} offers the `# routing-allow:` escape but its deny "
+        f"message no longer carries {_ROUTING_ALLOW_OWNERSHIP_PHRASE!r} -- "
+        f"it has diverged from routing/README.md's authoring template"
+    )
+
+
+# ---------------------------------------------------------------------------
 # JSON envelope shape — allow / deny / warn
 # ---------------------------------------------------------------------------
 
