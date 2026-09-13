@@ -72,7 +72,7 @@ destroyed is EXPIRY, which is not a promote at all. An RDR that inherits the
 | RDR | Status | Relationship |
 | --- | --- | --- |
 | RDR-057 Progressive Formalization Across Memory Tiers | closed | **Origin.** It created the expiry this RDR questions, and it named this RDR as the precondition for revisiting the cut. Its stated rationale for cutting — "No failure mode analysis" — has expired: the analysis is below. That is the strongest evidence for reopening, and it is the reason this is a new RDR rather than an amendment. |
-| RDR-131 T2 Session Rollup Summaries (MemTree-Lite) | draft | **Adjacent draft.** It specifies the `memory_summaries` shape that design (a) below would consume. Scope boundary: RDR-131 owns WHAT a rollup is and how it is produced for context injection; RDR-207 owns WHETHER expiry may delete a row that no rollup covers. RDR-131 can ship without RDR-207 (summaries with no gate); RDR-207's design (a) cannot ship without RDR-131's shape, so it sequences after. |
+| RDR-131 T2 Session Rollup Summaries (MemTree-Lite) | draft (stub) | **Adjacent draft, and thinner than it looks.** 123 lines from a single 2026-05-27 stub commit, no beads, nothing implemented, and its own rationale/alternatives/test-plan sections read "to be completed during research". It SKETCHES the `memory_summaries` shape design (a) would consume rather than specifying it. Scope boundary: RDR-131 owns WHAT a rollup is and how it is produced for context injection; RDR-207 owns WHETHER expiry may delete a row that no rollup covers. RDR-131 can ship without RDR-207 (summaries with no gate); RDR-207's design (a) cannot ship without RDR-131's shape, so it sequences after. |
 | RDR-132 Scope-Routed T1 to T2 Promotion | draft | **Adjacent draft.** Concerns the T1→T2 boundary and namespace scoping; RDR-207 concerns the T2-expiry boundary. They meet only in §RF-8's table, which both should fill in for their own row. No sequencing dependency. |
 | RDR-194 Post-RDR-187 FK Census (§A14, "One TTL Semantics") | closed | **Precedent.** It already ruled that unit-less TTL naming is half the reason `0` reads as "no TTL", and unified the semantics rather than accepting a half-measure. RDR-207's out-of-scope item (the `ttl=30`-by-omission default) is the same family of defect at the API surface rather than the schema, so that fix has precedent here rather than needing to argue from first principles. |
 | RDR-128 T2 Single-Writer Enforcement | closed | **Context, not overlap.** Its P3 routes the session-end flush and TTL sweep through the T2 daemon because the detached SessionEnd grandchild can outlive the MCP lifespan. That routing is why failure mode 1 below is about execution context rather than about correctness. |
@@ -122,6 +122,8 @@ April. The ratio is immune to the creation-rate growth that also occurred.
 
 **Verified — storage is not the constraint** and should not be argued as one:
 the whole table is 71 MB for 5,854 rows.
+
+**Superseded within hours of filing — read the next paragraph before acting on the numbers above.** On 2026-09-12, after this RDR was filed, every remaining TTL-bearing row in tenant `nexus` was swept to `ttl_days=NULL` under Sam's authorization: 2,269 rows, on top of the 105 below. The tenant's T2 memory is now entirely permanent (total 5,857 unchanged, ttl-bearing 2,269 to 0, verified post-commit in a fresh connection). So "2,269 remain, 175 past 0.75" describes the state at filing and nothing since. The exposure is stopped; the DEFECT is not fixed, because the population regenerates — `memory_put` still defaults to `ttl=30` on omission, and 1,183 of the swept rows carried exactly that. Reversal records with the exact id-to-ttl mapping are in T2 as `conexus/ttl-full-sweep-reversal-record-2026-09-12` parts 1 and 2, both permanent. Reversal is a decision to discard rather than a rollback: many rows were already past their effective TTL and would delete at the next session end.
 
 **Documented — the tourniquet already applied.** 105 rows past ratio 0.90 were
 swept to `ttl_days=NULL` on 2026-09-12 under Sam's explicit authorization
@@ -194,8 +196,10 @@ label.
 Three candidate designs for the decision. This RDR does not recommend one
 blind; the choice is the decision it exists to record.
 
-- **(a) Mark-and-gate.** A separate rollup job (RDR-131's `memory_summaries`
-  shape is the existing draft) writes summaries and marks source rows.
+- **(a) Mark-and-gate.** A separate rollup job (RDR-131 sketches a
+  `memory_summaries` shape in one sentence; it is a stub, not a
+  specification, so this candidate requires that design to be written)
+  writes summaries and marks source rows.
   `expire()` gains a predicate: delete only what is marked. Rows nobody
   summarized accumulate rather than vanish — visible, and fixable.
 - **(b) Quarantine instead of delete.** Expiry moves rows to a cold state
@@ -274,3 +278,4 @@ Not run. Filed as draft.
 | Date | Change |
 | --- | --- |
 | 2026-09-12 | Filed as draft. Text relayed from conexus; prior-art scan, house-format sections, and the failure-mode-5 correction added on filing. Lifecycle transitions are Sam's; nothing here is accepted. |
+| 2026-09-12 | Research Findings amended hours after filing: the full tenant sweep to permanent landed, so the "2,269 remain" measurement is now historical. Recorded rather than edited away — a record that quietly drops a number a reader would re-measure teaches them to distrust the rest of it, and the measurement is still the evidence for why the boundary needs deciding. Also corrected the RDR-131 characterisation: it is a 123-line never-researched stub whose design sections read "to be completed during research", not an existing specification of the `memory_summaries` shape, so candidate (a) requires that design to be WRITTEN rather than merely sequenced behind RDR-131. |
