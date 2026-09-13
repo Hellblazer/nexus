@@ -39,15 +39,14 @@ conexus/evals/
       <grader-name>.md          YAML frontmatter (type: + type-specific fields)
 ```
 
-12 cases, each named `p<NN>-...` (positive/disambiguation) or
+11 cases, each named `p<NN>-...` (positive/disambiguation) or
 `n<NN>-...` (negative/absorption). Numbering is historical and has gaps —
-n03, p07 and p08 were dropped, see below.
+n03, p03, p07 and p08 were dropped, see below.
 
 | Case | Target skill | Shape | Graders |
 |---|---|---|---|
 | p01-using-nx-skills-generic-turn | using-nx-skills | positive | tool_used |
 | p02-code-review-before-pr | code-review | positive | tool_used |
-| p03-test-authoring-lint-bucket | test-authoring | positive | tool_used |
 | p04-rdr-create-schema-decision | rdr-create | positive | tool_used |
 | p05-query-rdr-synthesis | query | positive (reduce-from-many) | tool_used |
 | p06-orchestration-agent-choice | orchestration | positive | tool_used |
@@ -55,7 +54,7 @@ n03, p07 and p08 were dropped, see below.
 | p10-test-validation-coverage-check | test-validation | positive + disambig. vs debugging | tool_used ×2 |
 | n01-plan-absorption-dinner | strategic-planning / plan-first / architecture | negative (absorption) | tool_used `0..0` |
 | n02-query-absorption-single-fact | query | negative (absorption) | tool_used `0..0` |
-| n04-test-authoring-absorption-figurative-test | test-authoring / test-validation | negative (absorption) | tool_used `0..0` |
+| n04-test-authoring-absorption-figurative-test | test-validation | negative (absorption) | tool_used `0..0` |
 | n05-debugging-absorption-detective-novels | debugging / debug | negative (absorption) | tool_used `0..0` |
 
 Every grader is `tool_used`. There are no `llm` graders left — they could
@@ -87,6 +86,18 @@ corpus.** A suite that ships inside the conexus plugin tests the conexus
 plugin's own surface. If `release`/`engine-release` coverage is wanted,
 it belongs in a separate repo-local suite with its own invocation.
 
+### Dropped: p03 (nexus-cnzei.6, 2026-09-13)
+
+Same reason as n03/p07/p08 above, one skill later: `test-authoring` moved
+to `.claude/skills/test-authoring/` — it was nexus-repo-specific content
+(this repo's own test suite, dev-loop layers, `tests/AGENTS.md`) shipping
+to every conexus plugin user for no benefit outside this repo. p03's
+positive `tool_used` grader on `conexus:test-authoring` would now fail the
+same way p07/p08 did (the sandbox never loads a repo-local skill), so it
+was deleted rather than left to discover that the hard way. n04's negative
+grader kept its `test-validation` half; the `test-authoring` alternative
+in its regex is gone too, for the same reason.
+
 ### Hazard: worktrees pollute discovery
 
 Point the runner at a directory containing git worktrees and it walks
@@ -98,7 +109,7 @@ stale copy, which was on `develop` and still carried the pre-fix
 
 Target `conexus/` specifically, never a parent that contains
 `.claude/worktrees/`. Verify by checking `suite.root` and the case count
-in the JSON report: this corpus is 12 cases with 12 unique names. It is
+in the JSON report: this corpus is 11 cases with 11 unique names. It is
 read-only — nothing was written into any worktree — but a run scored
 against a stale corpus is a wrong answer delivered confidently.
 
@@ -135,8 +146,8 @@ CLAUDE_CODE_WALNUT_SPIRE=1 claude plugin eval \
   partial as though it were a run.
 
 - **Cost.** ~$0.45/case-run measured ($6.12 and $7.80 for 15 case-runs,
-  when the corpus was 15). At 12 cases, `--runs 3 --ablation none` is 36
-  case-runs, so budget **~$16** and set the ceiling above it, not at it.
+  when the corpus was 15). At 11 cases, `--runs 3 --ablation none` is 33
+  case-runs, so budget **~$15** and set the ceiling above it, not at it.
 
 - **Do not set `--threshold` yet.** The two structural failures (p07,
   p08) are gone, but no `--runs 3` baseline exists — every number this
@@ -207,7 +218,7 @@ authored against the documented format only, never against a live run:
 
    (`criteria` *was* the right field name for `llm`; that half of the
    guess was correct.)
-3. **`case.yaml` context scaffolds.** None of these 12 cases use one —
+3. **`case.yaml` context scaffolds.** None of these 11 cases use one —
    every prompt is judged answerable from the plugin's own skill
    descriptions with no repo state dependency. If a real run shows a
    skill firing (or not) differently depending on ambient repo context

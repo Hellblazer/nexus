@@ -44,18 +44,28 @@ def test_eval_corpus_population_is_real():
     files = _frontmatter_files()
     prompts = [p for p in files if p.name == "prompt.md"]
     graders = [p for p in files if p.parent.name == "graders"]
-    # 12 cases / 14 graders since nexus-dkotg dropped n03, p07 and p08. Those
-    # three targeted .claude/skills/release and .claude/skills/engine-release,
-    # which are repo-local and NOT part of the shipped conexus plugin. The eval
-    # sandbox runs in a temp HOME, so it never loaded them: p07/p08 reported
-    # "Skill called 0x" in every run of all three full runs, and n03 passed
-    # VACUOUSLY -- its claim was never tested, which is also why nobody noticed
-    # the claim is contestable (the release skill's own checklist step 4 is
-    # "Update both changelogs", and n03's prompt asks for release notes).
-    # A $2.43 probe confirmed relocating them does not help: targeting
-    # `.claude` resolves a plugin, not the repo-local skills dir.
-    assert len(prompts) >= 12, f"only {len(prompts)} prompt files found"
-    assert len(graders) >= 14, f"only {len(graders)} grader files found"
+    # 11 cases / 13 graders since nexus-dkotg dropped n03, p07 and p08, and
+    # nexus-cnzei.6 dropped p03. All four targeted a skill that is repo-local
+    # and NOT part of the shipped conexus plugin: n03/p07/p08 targeted
+    # .claude/skills/release and .claude/skills/engine-release; p03 targeted
+    # test-authoring, moved to .claude/skills/test-authoring/ by nexus-cnzei.6
+    # (it was nexus-repo-specific content — this repo's own test suite,
+    # dev-loop layers, tests/AGENTS.md — shipping to every conexus plugin user
+    # for no benefit outside this repo). The eval sandbox runs in a temp HOME,
+    # so it never loads a repo-local skill: p07/p08 reported "Skill called 0x"
+    # in every run of all three full runs, and n03 passed VACUOUSLY -- its
+    # claim was never tested, which is also why nobody noticed the claim is
+    # contestable (the release skill's own checklist step 4 is "Update both
+    # changelogs", and n03's prompt asks for release notes). A $2.43 probe
+    # confirmed relocating them does not help: targeting `.claude` resolves a
+    # plugin, not the repo-local skills dir. p03's own grader (a positive
+    # `tool_used` match on `conexus:test-authoring`) would fail the same way,
+    # so it was deleted outright rather than left to fail vacuously; n04's
+    # negative-absorption grader kept its test-validation half and dropped the
+    # test-authoring alternative (same skill, no longer reachable through the
+    # plugin's own Skill-tool surface at all).
+    assert len(prompts) >= 11, f"only {len(prompts)} prompt files found"
+    assert len(graders) >= 13, f"only {len(graders)} grader files found"
 
 
 @pytest.mark.parametrize(

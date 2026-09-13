@@ -14,7 +14,7 @@ T2 `nexus/directive-test-suite-architecture`. This skill is the routing card.
 
 | Need | Command | Notes |
 |------|---------|-------|
-| Default dev loop | `uv run pytest -n auto` | ~13min for 11.6k tests. THE loop. |
+| Default dev loop | `uv run pytest -n auto` | ~13min parallel (auto-capped to this box's SysV shared-memory budget, AGENTS.md). THE loop. |
 | Debugging interleaving/isolation | `uv run pytest` (serial) | ~14min; only when parallelism masks the signal |
 | Repo-structure invariants | `uv run pytest -m lint` | O(repo) meta-tests; PR-gated by CI `test-lint`; run when touching `conexus/`, RDR frontmatter, storage-boundary/hook invariants |
 | Real-substrate depth | `uv run pytest -m integration` | Nightly local-service gate territory |

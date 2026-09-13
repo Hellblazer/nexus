@@ -477,3 +477,13 @@ instead — same strategy nexus-cnzei.4 used for the "debug"/"research"/"review"
   architecture/SKILL.md's own stated Pipeline Position (strategic-planner before
   architect-planner) and registry.yaml's `architect-planner` predecessor, which the old wording
   contradicted (injection audit C5). Inert until the pin advances.
+- `conexus/skills/test-authoring/SKILL.md` (nexus-cnzei.6): DELETED — moved to
+  `.claude/skills/test-authoring/SKILL.md` (repo-local, not shipped in the plugin). It was
+  entirely nexus-repo-specific (this repo's own test suite, dev-loop layers, tests/AGENTS.md)
+  shipping to every conexus plugin user for no benefit outside this repo (injection audit S6).
+  `conexus/registry.yaml`'s `standalone_skills.test-authoring` entry removed to match.
+  `conexus/README.md`'s skill count and table row, and `conexus/evals/`'s p03 case (which
+  positively tested this skill triggering — now impossible from the plugin's own surface,
+  same reason nexus-dkotg dropped n03/p07/p08 for release/engine-release) also updated. Inert
+  until the pin advances (the DELETION half; the .claude/skills/ addition is repo-local and
+  active immediately, not gated by the plugin pin at all).

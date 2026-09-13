@@ -344,15 +344,12 @@ rdr_skills:
 # no predecessors/successors (not part of agent pipelines).
 
 standalone_skills:
-  test-authoring:
-    description: "Reference card for the nexus test suite — dev-loop layer routing (-n auto / -m lint / integration / scenario journeys) and test-authoring directives from the 2026-08-05 compression arc"
-    triggers:
-      - "writing or restructuring tests in the nexus repo"
-      - "choosing how to run the nexus test suite"
-      - "scenario-merge vs parametrize decision"
-      - "where a new T2 store contract test belongs"
-      - "test consolidation proposal"
-    tools: []
+  # nexus-cnzei.6: test-authoring MOVED to .claude/skills/test-authoring/ —
+  # it is entirely nexus-repo-specific (this repo's own test suite, dev-loop
+  # layers, tests/AGENTS.md) and was shipping to every conexus plugin user
+  # for no benefit outside this repo (injection audit S6). Repo-local skills
+  # like this one, plus release/ and engine-release/, live in .claude/skills/
+  # and are not part of the plugin's registry.
 
   query:
     description: "Use when a question needs multi-step retrieval via mcp__plugin_conexus_nexus__nx_answer"
