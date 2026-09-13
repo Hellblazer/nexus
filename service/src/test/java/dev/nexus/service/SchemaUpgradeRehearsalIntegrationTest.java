@@ -196,6 +196,35 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * ({@code uv run python scripts/gen_rehearsal_hop_manifest.py}) and
      * re-deriving the data leg's seed coverage — the Python seed-coverage
      * lint (nexus-gm38i) fails loudly until both are done.
+     *
+     * <p><strong>2026-09-13 rotation check (nexus-t1qbs): NOT rotated, and
+     * cannot be until the divergence point moves.</strong> The deployed
+     * engine has advanced to {@code engine-service-v0.1.117}; this pin was
+     * checked against the two structural facts above and both fail. {@code
+     * git diff engine-service-v0.1.117 HEAD -- service/src/main/resources/
+     * db/changelog} is EMPTY — v0.1.117's changelog tree is byte-identical
+     * to HEAD's, so it cannot serve as an "old" tree at all (a hop from it
+     * applies zero changesets). More generally, {@code catalog-013-chash-
+     * checks-validate.xml} first shipped at {@code engine-service-v0.1.33}
+     * (commit {@code e1cd25f1}, verified via {@code git cat-file -e
+     * <tag>:<path>}: v0.1.32 lacks it, v0.1.33 has it) — so EVERY tag from
+     * v0.1.33 through the current v0.1.117 already contains both catalog-013
+     * and catalog-014, and none of them can pass this test's own
+     * preconditions ({@code changesetApplied(..., "catalog-013-2", ...)
+     * .isFalse()} for the schema leg; the data leg's coverage-vacuity guard
+     * for the row-DML changesets). {@code engine-service-v0.1.17} therefore
+     * remains the only tag on the "previously-deployed" side of this
+     * project's tag history that predates the divergence-injection point,
+     * and stays pinned here rather than rotating to a tag that would make
+     * the rehearsal vacuous. The ROTATION POLICY above is not wrong, it is
+     * just inert for this particular injection point: it can fire again
+     * only once a NEW guard-bearing changeset newer than catalog-013/014 is
+     * chosen as the injection point for a future generation of this
+     * rehearsal (at which point OLD_TAG would move forward to whatever tag
+     * predates THAT changeset, not necessarily v0.1.17). No manifest/seed-
+     * coverage regeneration was needed for this check (OLD_TAG did not
+     * change); {@code uv run pytest tests/test_rehearsal_seed_coverage_lint.py}
+     * and this class both stayed green throughout.
      */
     private static final String OLD_TAG = "engine-service-v0.1.17";
 
