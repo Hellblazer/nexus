@@ -8,14 +8,14 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 | Server | Entry point | Tools | Purpose |
 |---|---|---|---|
-| `nexus` | `nx-mcp` | 46 | Storage tiers, retrieval, operators, orchestration, diagnostics |
+| `nexus` | `nx-mcp` | 47 | Storage tiers, retrieval, operators, orchestration, diagnostics |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`) or the `.mcpb` extension. No separate install.
 
 **Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started § Install](getting-started.md#install) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
-## `nexus` — retrieval + storage (46 tools)
+## `nexus` — retrieval + storage (47 tools)
 
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
@@ -228,7 +228,7 @@ Pass `offset=N` back to the same tool to fetch the next page. Default page size:
 
 ## Permission auto-approval
 
-The plugin installs a `PermissionRequest` hook that auto-approves any tool call matching `mcp__plugin_conexus_.*`. This covers both servers plus the bundled `sequential-thinking` server. Dangerous system operations (force-push, `bd delete`, deploys) are not matched and stay behind the normal confirmation flow.
+The plugin installs a `PermissionRequest` hook that auto-approves tool calls matching `mcp__plugin_conexus_.*` against an explicit per-tool allowlist, not a blanket wildcard pass-through: `mcp__plugin_conexus_nexus__daemon_uninstall` is deliberately excluded, since it can tear down the storage-service autostart unit and, with `remove_data=true`, irreversibly delete the entire nexus config directory. This covers both servers plus the bundled `sequential-thinking` server. Dangerous system operations (force-push, `bd delete`, deploys) are not matched and stay behind the normal confirmation flow.
 
 To enforce stricter permission boundaries on a custom agent, narrow the matcher in `conexus/hooks/hooks.json`.
 
