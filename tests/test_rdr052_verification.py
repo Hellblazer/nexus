@@ -84,14 +84,14 @@ class TestPathRouting:
         t3.put(collection="rdr__nexus", content="catalog first query routing", title="rdr-chunk")
         result = query(question="chunking", subtree="1.1")
         assert result.startswith("Error:")
-        assert "service mode" in result
+        assert "HttpVectorClient-backed" in result
 
     def test_follow_links_on_non_service_t3_is_loud_rejected(self, t3, catalog):
         t3.put(collection="knowledge__delos", content="schema data exchange", title="delos-chunk")
         t3.put(collection="knowledge__transformers", content="attention heads layers", title="trans-chunk")
         result = query(question="schema mappings", follow_links="cites")
         assert result.startswith("Error:")
-        assert "service mode" in result
+        assert "HttpVectorClient-backed" in result
 
     def test_no_catalog_params_backward_compat(self, t3):
         t3.put(collection="knowledge__test", content="vector database embeddings", title="vec-chunk")
@@ -105,7 +105,7 @@ class TestPathRouting:
     def test_catalog_params_on_non_service_t3_is_loud_rejected(self, t3, catalog, kw):
         result = query(question="anything", **kw)
         assert result.startswith("Error:")
-        assert "service mode" in result
+        assert "HttpVectorClient-backed" in result
 
     def test_subtree_document_level_returns_error(self, t3, catalog):
         result = query(question="anything", subtree="1.1.42")
@@ -142,7 +142,7 @@ class TestReferenceQuestions:
             t3.put(collection=col, content=content, title=title)
         result = query(question=question, **kw)
         assert result.startswith("Error:")
-        assert "service mode" in result
+        assert "HttpVectorClient-backed" in result
 
 
 # ── Templates and Plans ─────────────────────────────────────────────────────
@@ -249,7 +249,7 @@ class TestFollowLinksFallback:
         t3.put(collection="knowledge__delos", content="schema data exchange", title="fb-chunk")
         result = query(question="xyzzy_nonexistent_topic_12345", follow_links="cites", corpus="knowledge__delos")
         assert result.startswith("Error:")
-        assert "service mode" in result
+        assert "HttpVectorClient-backed" in result
         assert "No documents found matching catalog filters" not in result
 
 

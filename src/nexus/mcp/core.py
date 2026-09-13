@@ -8920,8 +8920,8 @@ NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX: str = "[continuation completed"
 # Latency (re-measured nexus-h33x8.6 DO 1-3 from the nx_answer_runs T2
 # table, executed plans only, n=142; corrects an earlier docstring that
 # overstated the fast end ~45x by counting zero-step error rows as
-# successes): p50 80.1s, p95 217.1s, p99 316.7s, mean 97.7s; 88.7% take
-# >= 30s. Each operator step spawns a `claude -p` subprocess with a
+# successes): p50 80.1s, p95 217.1s, p99 316.7s, mean 97.7s; 0.7% finish
+# under 5s, 88.7% take >= 30s, 33.8% take >= 2min. Each operator step spawns a `claude -p` subprocess with a
 # 300-second timeout and an ~11s substrate bootstrap floor; a plan-match
 # miss adds an inline-planner round trip (also up to 300s) on top. The
 # single-step `query()` fast path (mean ~2s) fires only for a matched plan

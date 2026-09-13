@@ -4462,16 +4462,35 @@ class TestNxAnswerLatencyDocstringPinned:
         # whitespace before matching rather than pinning to the exact
         # wrap points, which would make this test as brittle as the
         # drift it exists to catch.
-        doc = " ".join((nx_answer.__doc__ or "").split())
+        # nexus-cnzei.5 moved the exact figures out of the tool description
+        # (which Claude Code truncates at 2048 chars) into the module comment
+        # above nx_answer; the description keeps the rounded p50/p95. Pin
+        # both, so neither the comment nor the description can drift alone.
+        import inspect
+
+        import nexus.mcp.core as core_mod
+
+        comments = " ".join(
+            line.strip().lstrip("#").strip()
+            for line in inspect.getsource(core_mod).splitlines()
+            if line.strip().startswith("#")
+        )
+        comments = " ".join(comments.split())
         for needle in (
             "n=142", "p50 80.1s", "p95 217.1s", "p99 316.7s", "mean 97.7s",
             "0.7% finish under 5s", "88.7% take >= 30s", "33.8% take >= 2min",
         ):
+            assert needle in comments, (
+                f"nx_answer latency comment drifted -- expected {needle!r}; "
+                "re-derive from `nx answer-runs --json` (executed-only rows) "
+                "and update the comment, the description's rounded figures "
+                "and this pin together"
+            )
+        doc = " ".join((nx_answer.__doc__ or "").split())
+        for needle in ("p50 ~80s", "p95 ~217s"):
             assert needle in doc, (
-                f"nx_answer docstring drifted -- expected {needle!r} in the "
-                "latency paragraph; re-derive from `nx answer-runs --json` "
-                "(executed-only rows) and update both the docstring and "
-                "this pin together"
+                f"nx_answer description lost its rounded latency {needle!r}; "
+                "a caller must learn from the tool text that it is slow"
             )
 
 
