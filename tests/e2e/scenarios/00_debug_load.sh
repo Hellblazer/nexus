@@ -185,9 +185,9 @@ for agent in \
     "strategic-planner" \
     "developer" \
     "code-review-expert" \
-    "plan-auditor" \
+    "architect-planner" \
     "deep-analyst" \
-    "knowledge-tidier"; do
+    "substantive-critic"; do
     if echo "$agents_out" | grep -qiE "$agent"; then
         pass "agent visible: $agent"
     else

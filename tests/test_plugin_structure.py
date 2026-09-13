@@ -42,7 +42,12 @@ _STANDALONE_SKILLS = {
     "cli-controller", "nexus",
     "brainstorming-gate", "orchestration",
     "using-nx-skills", "writing-nx-skills",
-    "rdr-list", "rdr-show", "rdr-create",
+    "rdr-show", "rdr-create",
+    # rdr-list has no skill any more (nexus-cnzei.4 fix round): skills/rdr-list
+    # was deleted, not the command — its content depended on the command's
+    # bash-injected data having already run, and two live E2E scenarios
+    # (tests/cc-validation/scenarios/19, 23) test the command's actual
+    # injected content, not a skill.
     "sequential-thinking",
     "serena-code-nav", "catalog",
     "receiving-review", "git-worktrees", "finishing-branch",
@@ -1279,18 +1284,47 @@ class TestPluginRootRefs:
 # <name>/SKILL.md) sharing the same <name> is a real collision: Claude Code's
 # listing shows only one entry per name, so the other is shadowed and
 # unreachable by name — the audit behind nexus-cnzei.4 found 17 such pairs.
-# Most were resolved by deleting the redundant command or renaming the skill.
-# Nine remain, deliberately: the rdr-gate/rdr-fix/rdr-accept trio is one half
-# of an actively byte-pinned four-surface consistency system
-# (TestRdrGateLoopRemedies below), rdr-audit's command carries subcommand
-# logic its own dedicated test file (test_rdr_audit_skill.py) requires to
-# exist, and rdr-list's command is a real fixture in an E2E bash-injection
-# scenario (tests/cc-validation/scenarios/19, 23). Deleting or renaming any of
-# these nine without the matching multi-file surgery those tests demand is a
-# bigger, separate piece of work — tracked as a follow-up under nexus-cnzei.6.
+# Thirteen were resolved (deleting the redundant command, deleting a skill
+# that depended on its command having already run, or renaming the skill).
+# Four remain, each independently pinned by its own test infrastructure:
+#
+# - rdr-gate: TestRdrGateLoopRemedies (below) pins verbatim clauses
+#   byte-for-byte across GATE_SKILL and GATE_CMD.
+# - rdr-fix: same TestRdrGateLoopRemedies class pins FIX_SKILL/FIX_CMD; the
+#   gate/fix/accept trio cross-references each other's clauses.
+# - rdr-accept: same class pins ACCEPT_SKILL/ACCEPT_CMD.
+# - rdr-audit: tests/test_rdr_audit_skill.py requires commands/rdr-audit.md
+#   to exist and carry specific subcommand (schedule/unschedule/list/status/
+#   history) behavior the skill does not replicate.
+#
+# Resolving any of these four without the matching multi-file surgery those
+# tests demand is a bigger, separate piece of work — tracked as a follow-up
+# under nexus-cnzei.6.
 _KNOWN_COMMAND_SKILL_COLLISIONS = frozenset({
-    "rdr-accept", "rdr-audit", "rdr-close", "rdr-create", "rdr-fix",
-    "rdr-gate", "rdr-list", "rdr-research", "rdr-show",
+    "rdr-accept", "rdr-audit", "rdr-fix", "rdr-gate",
+})
+
+# nexus-cnzei.4 fix round: identifiers with NO surviving file anywhere in the
+# plugin under that exact name — not "a command was deleted" (most deleted
+# commands, e.g. architecture/deep-analysis/rdr-create, have a same-named
+# skill that IS the survivor, so the bare name stays live and must NOT be
+# flagged) but "this exact string names nothing real any more." Verified
+# empirically: an earlier, broader draft of this set that also listed every
+# deleted command name (including "upgrade" and "rdr-create") false-positived
+# on tests/e2e/migration-rehearsal/rehearse_era_hop.sh's and
+# upgrade-shakeout.sh's unrelated `nx upgrade` CLI-verb checks and
+# 00_debug_load.sh's own (correct, unrelated) skills/rdr-create/SKILL.md
+# packaging check. The three verb skills renamed off "debug"/"research"/
+# "review" are excluded for the same reason — those remain valid words as
+# live command names. See
+# TestOneEntryPointPerName.test_retired_names_absent_from_e2e_and_cc_validation_fixtures.
+_RETIRED_NAMES = frozenset({
+    # Deleted agents (RDR-080 stubs) — no skill, no command, nothing survives.
+    "knowledge-tidier", "plan-auditor", "plan-enricher",
+    # Deleted command, merged into the differently-named knowledge-tidying
+    # skill — "knowledge-tidy" itself (unlike architecture, rdr-create, etc.)
+    # has no surviving same-named file.
+    "knowledge-tidy",
 })
 
 
@@ -1339,6 +1373,38 @@ class TestOneEntryPointPerName:
         assert not offenders, (
             "References to a /conexus:<name> that resolves to no skill, "
             "command, or registered entry point:\n" + "\n".join(sorted(offenders))
+        )
+
+    def test_retired_names_absent_from_e2e_and_cc_validation_fixtures(self) -> None:
+        """nexus-cnzei.4 fix round: tests/e2e/scenarios/00_debug_load.sh:188,190
+        hardcoded a positive-presence check for the deleted plan-auditor and
+        knowledge-tidier agents — missed by the collision/reference sweeps
+        above because they only scan ALL_MD_FILES (agents/skills/commands
+        markdown), never shell fixtures. `_RETIRED_NAMES` is a closed set of
+        the exact identifiers this bead deleted outright (agent names whose
+        .md file is gone, command basenames whose .md file is gone) — NOT the
+        three verb skills renamed off "debug"/"research"/"review", since
+        those remain valid words as commands and would flood this check with
+        unrelated prose matches. Checked as a quoted string literal
+        (`"name"` or `'name'`), the shape every hit found so far actually
+        used, to avoid flagging a retired name inside unrelated prose."""
+        offenders: list[str] = []
+        shell_files = sorted((REPO_ROOT / "tests" / "e2e").rglob("*.sh"))
+        cc_validation_dir = REPO_ROOT / "tests" / "cc-validation"
+        if cc_validation_dir.is_dir():
+            shell_files += sorted(p for p in cc_validation_dir.rglob("*") if p.is_file())
+        for path in shell_files:
+            try:
+                text = path.read_text()
+            except UnicodeDecodeError:
+                continue
+            for name in _RETIRED_NAMES:
+                if f'"{name}"' in text or f"'{name}'" in text:
+                    offenders.append(f"{path.relative_to(REPO_ROOT)}: {name!r}")
+        assert not offenders, (
+            "Retired agent/command name(s) referenced in an E2E or "
+            "cc-validation fixture (the file, not this test, needs updating "
+            "to a still-live name):\n" + "\n".join(sorted(offenders))
         )
 
 
