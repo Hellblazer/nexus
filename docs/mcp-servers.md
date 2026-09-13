@@ -25,10 +25,10 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 |---|---|
 | `search` | Semantic chunk search over T3 collections. Supports `topic` for topic-scoped search, `cluster_by="semantic"` for topic grouping, automatic same-topic distance boost |
 | `query` | Document-level catalog-aware retrieval (scope by `author`, `content_type`, `subtree`, `follow_links`, `depth`). Link-aware + topic-aware ranking |
-| `search_metadata_scoped` | Combined-query (service mode): catalog-metadata-scoped vector search in one SQL statement (`content_type`, `author`, `year`, `subtree`, chunk-metadata `where`) |
-| `search_graph_hop` | Combined-query (service mode): BFS over `catalog_links` from seed tumblers + vector rank in one statement (`link_type`, `depth` ≤ 3, `direction`); `where` chunk-metadata equality filter applied post-BFS (catalog-012, equality-only — operator syntax rejected loudly) |
-| `search_topic_scoped` | Combined-query (service mode): topic-label-scoped chunk search via `topic_assignments` join |
-| `search_aspect_scoped` | Combined-query (service mode): vector rank + `document_aspects` predicate (`field`, `pattern`, `min_confidence`, chunk-metadata `where`) in one statement — retires the `search` + `operator_filter(source="aspects")` two-step for selective aspect predicates. Requires the doc's aspects row to carry a non-NULL `doc_id` (backfilled by exact `source_uri` match; legacy rows with no match are excluded, not a bug) |
+| `search_metadata_scoped` | Combined-query, requires an HttpVectorClient-backed T3 (every current local or cloud install): catalog-metadata-scoped vector search in one SQL statement (`content_type`, `author`, `year`, `subtree`, chunk-metadata `where`) |
+| `search_graph_hop` | Combined-query, requires an HttpVectorClient-backed T3: BFS over `catalog_links` from seed tumblers + vector rank in one statement (`link_type`, `depth` ≤ 3, `direction`); `where` chunk-metadata equality filter applied post-BFS (catalog-012, equality-only — operator syntax rejected loudly) |
+| `search_topic_scoped` | Combined-query, requires an HttpVectorClient-backed T3: topic-label-scoped chunk search via `topic_assignments` join |
+| `search_aspect_scoped` | Combined-query, requires an HttpVectorClient-backed T3: vector rank + `document_aspects` predicate (`field`, `pattern`, `min_confidence`, chunk-metadata `where`) in one statement — retires the `search` + `operator_filter(source="aspects")` two-step for selective aspect predicates. Requires the doc's aspects row to carry a non-NULL `doc_id` (backfilled by exact `source_uri` match; legacy rows with no match are excluded, not a bug) |
 | `store_put` | Write a document into a T3 collection. Fires post-store hooks: batch chain auto-assigns to nearest topic; document-grain chain enqueues aspect extraction on `knowledge__*` (RDR-089) |
 | `store_get` | Retrieve a document by id from a T3 collection |
 | `store_get_many` | Batch hydration: given N ids, return N contents (with `missing` for not-found). Handles 300+ ids beyond the per-request 300-record limit |
@@ -169,6 +169,34 @@ Some operations are intentionally not exposed as MCP tools — they are destruct
 
 The Python functions still exist in `src/nexus/mcp/core.py` and `src/nexus/mcp/catalog.py`; they just lack the `@mcp.tool()` decorator.
 
+## Choosing a retrieval tool
+
+Nine tools all answer some form of "find me relevant content"; each tool's
+own description names its nearest sibling, but this table is the single
+place to compare all of them at once.
+
+| You know... | Use |
+|---|---|
+| The exact id or title | `store_get` / `store_get_many` |
+| Metadata that resolves to a tumbler (owner, file path) | `nexus-catalog` `search` / `show` |
+| Only a text fragment to match | `search` |
+| You need to know WHICH DOCUMENTS match, not which passages | `query` |
+| A scope by `content_type`/`author`/`year`/`subtree` | `search_metadata_scoped` |
+| A scope by an extracted aspect field (`problem_formulation`, etc.) | `search_aspect_scoped` |
+| A scope by a topic label | `search(topic=...)`; only reach for `search_topic_scoped` when you need the structured chunk-hash ids directly |
+| Neighbours of known documents, ranked by content relevance | `search_graph_hop`; use `traverse` (or `nexus-catalog` `links`) instead when you only need the unranked reachable id set |
+| An answer that must be reduced/synthesized from many documents | `nx_answer` (minutes, not seconds — see its own description) |
+| A prior session's notes or working state | `scratch` (T1, this session only) |
+| A durable per-project note or decision | `memory_search` / `memory_get` (T2) |
+| Permanent cross-project knowledge | `store_get` / `search` against the `knowledge` corpus (T3) |
+
+`search`'s `corpus="knowledge"` and `query`'s `corpus="knowledge"` both mean
+every `knowledge__*` subject collection. `store_get`, `store_list`,
+`store_get_many`, and `nx_tidy` instead default `collection="knowledge"` to
+the single `knowledge__knowledge` placeholder collection used for untitled
+MCP notes — pass the actual subject collection name to read a titled note
+with those four tools.
+
 ## Routing rule of thumb
 
 | Task | Server | Tool |
@@ -196,7 +224,7 @@ Three tools return paged results and accept `offset`: `search`, `store_list`, `m
 --- showing 41-57 of 57. (end)
 ```
 
-Pass `offset=N` back to the same tool to fetch the next page. Default page size: 20 for list-style tools; `n_results` for `search`.
+Pass `offset=N` back to the same tool to fetch the next page. Default page size: 20 for list-style tools; `search`'s page-size parameter is `limit` (default 10).
 
 ## Permission auto-approval
 
