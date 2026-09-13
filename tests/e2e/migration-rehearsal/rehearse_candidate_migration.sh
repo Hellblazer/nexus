@@ -60,7 +60,7 @@
 # checksum/row-count integrity (Liquibase's own checksum re-validation,
 # plus this leg's EXACT row-invariant asserts).
 #
-# It structurally CANNOT catch two classes, by construction of what this
+# It structurally CANNOT catch four classes, by construction of what this
 # leg seeds:
 #   (a) CROSS-SHARD PK COLLISION (the vectors-004/taxonomy-007-style
 #       "cross-shard (tenant_id, collection, ...) collision" DO $$ guard
@@ -77,6 +77,17 @@
 #       pinned at the JAVA layer instead:
 #       SchemaMigratorIntegrationTest::rdr180Rewrite_leavesPlannerStatsFresh
 #       (service/src/test/java/dev/nexus/service/SchemaMigratorIntegrationTest.java).
+#   (c) SCHEDULED TUPLE-SWEEP EXECUTION: the sweep runs on a 6h interval
+#       with a 6h initial delay and never fires inside this leg, so its
+#       per-arm isolation and per-row savepoint recovery are not exercised
+#       here. Covered by NexusServiceTupleSweepTest and
+#       NexusServiceTupleSweepIsolationTest in the Java suite.
+#   (d) TUPLE-TABLE SCAN DURATION AT LIVE VOLUME: Stage 3h seeds about 20
+#       tuple rows; the live estate carried about 2150 ledger rows across
+#       37 subspaces on 2026-09-13. tuples-003's DELETE and VALIDATE and
+#       tuples-004's consumed-body UPDATE scan the whole table, so their
+#       lock duration at real volume is measured by the pre-deploy walk
+#       against a PITR fork of production, not here.
 #
 # Row invariants captured span T3 (chunks, catalog manifest/documents,
 # taxonomy centroids/assignments) — the chunk-migration surface this leg
@@ -103,8 +114,9 @@
 # RLS is ENABLE+FORCE on both tuple-space tables; and the candidate can
 # still claim and ack a surviving row. Consumed-body-NULL is asserted
 # against the nexus-8zoyp contract even when that changeset is not yet
-# stacked in the tree this leg builds from — see Stage 3h's own header for
-# why, and this leg's PASSED line names whether that assert actually held.
+# stacked in the tree this leg builds from, and counts the row with its
+# NULL body (1:1) so a deleted row fails instead of reading as an empty
+# body. The PASSED and FAILED lines name tuple_tenants=1|2.
 # The scheduled sweep itself (6h interval, 6h initial delay) cannot fire
 # inside this leg's wall-clock budget, so "the candidate can run the
 # sweep" is asserted structurally (the dead-lettered row's claim_state/
@@ -631,9 +643,9 @@ payload = {
     "subspace": f"mailbox/{addr}", "keys": {"to": addr},
     "dims": {"from": sender}, "body": body, "nonce": nonce,
 }
-# noqa: SLF001 -- deliberate bypass of out()'s client-side 4096-byte
-# pre-check (nexus-58vc9); see this stage's header for why.
-r = store._post("/out", payload)
+# Deliberate bypass of out()'s client-side 4096-byte pre-check
+# (nexus-58vc9); see this stage's header for why.
+r = store._post("/out", payload)  # noqa: SLF001
 print(f"RESULT:ID={r['id']}")
 PYEOF
   ); then
@@ -876,12 +888,16 @@ for TUPLE_LABEL in "${TUPLE_TENANT_IDS[@]}"; do
   # changeset is NOT in this worktree (see this leg's own header) -- this
   # assert is written against that contract regardless, and is expected to
   # FAIL here until nexus-8zoyp's changeset is stacked in this tree.
-  CONSUMED_BODY_POST="$(diag_sql "SELECT body FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-consumed-${TUPLE_LABEL}'")"
-  [ -z "$CONSUMED_BODY_POST" ] && ok "tenant $TUPLE_LABEL: the consumed(no-reply) row's body is NULL after the walk (nexus-8zoyp contract)" \
-    || bad "tenant $TUPLE_LABEL: the consumed(no-reply) row's body is non-empty after the walk (nexus-8zoyp contract) -- expected to hold only once nexus-8zoyp's changeset is stacked in this tree"
-  CONSUMED_REPLY_BODY_POST="$(diag_sql "SELECT body FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-consumed-reply-${TUPLE_LABEL}'")"
-  [ -z "$CONSUMED_REPLY_BODY_POST" ] && ok "tenant $TUPLE_LABEL: the consumed(with-reply) row's body is NULL after the walk (nexus-8zoyp contract)" \
-    || bad "tenant $TUPLE_LABEL: the consumed(with-reply) row's body is non-empty after the walk (nexus-8zoyp contract) -- expected to hold only once nexus-8zoyp's changeset is stacked in this tree"
+  # rows:null-bodies, so a deleted row reads 0:0 and fails instead of
+  # passing as an empty body would.
+  CONSUMED_BODY_POST="$(diag_sql "SELECT count(*) || ':' || count(*) FILTER (WHERE body IS NULL) FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-consumed-${TUPLE_LABEL}'")"
+  [ "$CONSUMED_BODY_POST" = "1:1" ] && ok "tenant $TUPLE_LABEL: the consumed(no-reply) row survives the walk with a NULL body (nexus-8zoyp contract)" \
+    || bad "tenant $TUPLE_LABEL: the consumed(no-reply) row reads rows:null-bodies='$CONSUMED_BODY_POST' after the walk, expected 1:1 (nexus-8zoyp contract)"
+  # rows:null-bodies, so a deleted row reads 0:0 and fails instead of
+  # passing as an empty body would.
+  CONSUMED_REPLY_BODY_POST="$(diag_sql "SELECT count(*) || ':' || count(*) FILTER (WHERE body IS NULL) FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-consumed-reply-${TUPLE_LABEL}'")"
+  [ "$CONSUMED_REPLY_BODY_POST" = "1:1" ] && ok "tenant $TUPLE_LABEL: the consumed(with-reply) row survives the walk with a NULL body (nexus-8zoyp contract)" \
+    || bad "tenant $TUPLE_LABEL: the consumed(with-reply) row reads rows:null-bodies='$CONSUMED_REPLY_BODY_POST' after the walk, expected 1:1 (nexus-8zoyp contract)"
 
   # Unconsumed and dead-lettered bodies: intact.
   CLAIMED_BODY_POST="$(diag_sql "SELECT body FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-claimed-${TUPLE_LABEL}'")"
@@ -1030,10 +1046,10 @@ fi
 
 say "RESULT"
 if [ "$FAILS" -eq 0 ]; then
-  printf '\033[32mCANDIDATE-MIGRATION REHEARSAL PASSED\033[0m — floor %s store (chunks=%s, manifests=%s, docs=%s, centroids=%s, topic_assignments=%s) -> candidate boot, changeset delta=%s, invariants EXACT\n' \
-    "$FLOOR_TAG" "$CHUNKS_PRE" "$MANIFEST_PRE" "$DOCS_PRE" "$CENTROIDS_PRE" "$TOPIC_ASSIGN_PRE" "$DELTA"
+  printf '\033[32mCANDIDATE-MIGRATION REHEARSAL PASSED\033[0m — floor %s store (chunks=%s, manifests=%s, docs=%s, centroids=%s, topic_assignments=%s, tuple_tenants=%s) -> candidate boot, changeset delta=%s, invariants EXACT\n' \
+    "$FLOOR_TAG" "$CHUNKS_PRE" "$MANIFEST_PRE" "$DOCS_PRE" "$CENTROIDS_PRE" "$TOPIC_ASSIGN_PRE" "${#TUPLE_TENANT_IDS[@]}" "$DELTA"
   exit 0
 else
-  printf '\033[31mCANDIDATE-MIGRATION REHEARSAL FAILED\033[0m — %d check(s) failed\n' "$FAILS"
+  printf '\033[31mCANDIDATE-MIGRATION REHEARSAL FAILED\033[0m — %d check(s) failed (tuple_tenants=%s)\n' "$FAILS" "${#TUPLE_TENANT_IDS[@]}"
   exit 1
 fi

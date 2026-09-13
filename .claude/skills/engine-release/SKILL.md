@@ -167,16 +167,18 @@ gone with its claim-log history surviving at `tuple_id=NULL`
 untouched; unconsumed and dead-lettered bodies are untouched;
 `chk_tuples_body_size` is VALIDATED; RLS is ENABLE+FORCE on both
 tuple-space tables; and the candidate can still claim and ack a surviving
-row. The consumed-body-NULL assert is written against the nexus-8zoyp
-contract even on a tree where that changeset is not yet stacked — expect
-it red until nexus-8zoyp lands. The scheduled sweep itself (6h interval,
+row. The consumed-body assert counts the row together with its NULL body
+(`1:1`), so a changeset that deleted consumed rows instead of clearing
+their bodies fails rather than reading as an empty body. The PASSED and
+FAILED lines name how many tenants the tuple population covered
+(`tuple_tenants=1|2`). The scheduled sweep itself (6h interval,
 6h initial delay) cannot fire inside this leg's wall-clock budget, so
 "the candidate can run the sweep" is asserted structurally (the
 dead-lettered row's `claim_state`/`attempts` shape matches what the
 sweep's own release/purge arms key their `WHERE` clauses on), not by
 observing a scheduled pass execute.
 
-It structurally CANNOT catch two classes, by construction of what this leg
+It structurally CANNOT catch four classes, by construction of what this leg
 seeds:
 - **Cross-shard PK collision** (the "cross-shard collision" `DO $$` guards
   that vectors-004/taxonomy-007-style changesets carry) — this leg seeds
@@ -188,6 +190,16 @@ seeds:
   class is pinned at the JAVA layer instead:
   `SchemaMigratorIntegrationTest::rdr180Rewrite_leavesPlannerStatsFresh`
   (`service/src/test/java/dev/nexus/service/SchemaMigratorIntegrationTest.java`).
+- **Scheduled tuple-sweep execution** (6h interval, 6h initial delay): the
+  sweep never fires inside this leg, so its per-arm isolation and per-row
+  savepoint recovery are not exercised here. Covered by
+  `NexusServiceTupleSweepTest` and `NexusServiceTupleSweepIsolationTest` in
+  the Java suite.
+- **Tuple-table scan duration at live volume**: Stage 3h seeds about 20
+  tuple rows, against about 2150 live ledger rows across 37 subspaces
+  (2026-09-13). tuples-003's DELETE and VALIDATE and tuples-004's
+  consumed-body UPDATE scan the whole table; their lock duration at real
+  volume is the PITR-fork walk's to measure, not this leg's.
 
 This is strictly stronger than the `--guided` gate it replaces. It performs the
 same native-image build — the `-Ob` quick build has the SAME reachability
