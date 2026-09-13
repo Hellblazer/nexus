@@ -37,6 +37,7 @@ from nexus.corpus import (
     split_candidate_collection_name,
     t3_collection_name,
 )
+from nexus.db.t2.records import ReplySpec
 from nexus.db.t3 import verify_collection_deep
 from nexus.migration.banner import degrade_loud_when_migrating
 from nexus.filters import parse_where_str as _parse_where_str
@@ -5953,24 +5954,28 @@ def plan_delete(plan_id: int) -> str:
 
 
 
-# ── Tuple space tools (RDR-205 Phase 2 Step 2, bead nexus-em75s.10) ──────────
-# Eight MCP tools over nexus.db.t2.http_tuple_store.HttpTupleStore
+# ── Tuple space tools (RDR-205 Phase 2 Step 2, bead nexus-em75s.10; ─────────
+# RDR-206 Phase 2 added tuple_renew and tuple_ack's reply argument, bead
+# nexus-h61dl.9) ─────────────────────────────────────────────────────────
+# Nine MCP tools over nexus.db.t2.http_tuple_store.HttpTupleStore
 # (nexus-em75s.9). ``structured_output=False`` is declared explicitly on
-# EVERY one of the eight tools below, regardless of return-annotation
+# EVERY one of the nine tools below, regardless of return-annotation
 # shape (nexus-em75s.12 review fix — this comment previously claimed it
 # was set only where the annotation is a union or a list, which the code
 # never did: ``tuple_out``/``tuple_ack``/``tuple_nack`` return a bare
-# ``str`` and ``tuple_registry``/``tuple_stats`` a bare ``dict``, and both
-# carry the same explicit ``structured_output=False``). The real rule is
-# the nexus-r90ao registration census (``tests/test_mcp_wire_shapes.py``):
-# every ``@mcp.tool()`` must declare ``structured_output=`` explicitly, so
-# a future signature edit to a union/list return can never silently
-# reintroduce FastMCP's auto-wrap with no test noticing — see
-# ``tuple_registry``'s and ``tuple_stats``'s own inline comments below,
-# and the ``search`` tool's docstring above, for the full nexus-6jlki/
-# nexus-r90ao auto-wrap rule this declares against. ``rd``/``in_`` cover
-# their own non-blocking probe case via ``timeout_s=0`` (the default):
-# there are no separate ``tuple_rdp``/``tuple_inp`` tools.
+# ``str`` and ``tuple_registry``/``tuple_stats``/``tuple_renew`` a bare
+# ``dict``, and all of them carry the same explicit
+# ``structured_output=False``).
+# The real rule is the nexus-r90ao registration census
+# (``tests/test_mcp_wire_shapes.py``): every ``@mcp.tool()`` must declare
+# ``structured_output=`` explicitly, so a future signature edit to a
+# union/list return can never silently reintroduce FastMCP's auto-wrap
+# with no test noticing — see ``tuple_registry``'s and ``tuple_stats``'s
+# own inline comments below, and the ``search`` tool's docstring above,
+# for the full nexus-6jlki/nexus-r90ao auto-wrap rule this declares
+# against. ``rd``/``in_`` cover their own non-blocking probe case via
+# ``timeout_s=0`` (the default): there are no separate
+# ``tuple_rdp``/``tuple_inp`` tools.
 
 
 def _tuple_row_to_dict(row: Any) -> dict[str, Any]:
@@ -6149,20 +6154,62 @@ def tuple_in(
     annotations={"readOnlyHint": False, "destructiveHint": True},
     structured_output=False,
 )
-def tuple_ack(claim_id: str, claimant: str) -> str:
-    """Consume a claimed tuple (``ack``). The row is invisible to
-    ``tuple_rd``/``tuple_in`` after this.
+def tuple_ack(
+    claim_id: str,
+    claimant: str,
+    reply_subspace: str = "",
+    reply_keys: dict[str, str] | None = None,
+    reply_dims: dict[str, str] | None = None,
+    reply_body: str | None = None,
+    reply_ttl_seconds: int | None = None,
+) -> str:
+    """Consume a claimed tuple (``ack``), optionally writing a reply in the
+    same transaction (RDR-206).
+
+    Pass ``reply_subspace`` to write a reply as the request is consumed —
+    both commit together or not at all. Without it, behaviour is
+    unchanged from before RDR-206. There is no reply-nonce argument: the
+    engine sets the reply's nonce itself to the request's own tuple id, so
+    the same request never produces two colliding replies.
+
+    The reply's target must resolve to a ``keys+nonce`` template (e.g. a
+    mailbox address); a ``keys``-only target (e.g. the RDR-184 ledger) is
+    refused. A reply that fails validation (``UnknownSubspace``,
+    ``TtlTooLong``, ``SchemaViolation``) leaves the request still claimed
+    and still ackable — nothing is written on either side.
 
     Args:
         claim_id: The claim id returned by ``tuple_in``.
         claimant: Must match the identity that made the claim.
+        reply_subspace: The concrete subspace to reply into. Leave empty
+            for a plain ack with no reply.
+        reply_keys: The reply's pinned key fields (required, non-empty,
+            when ``reply_subspace`` is set).
+        reply_dims: Optional dimension fields for the reply.
+        reply_body: Optional reply payload.
+        reply_ttl_seconds: Optional explicit TTL for the reply, capped at
+            its template's retention ceiling.
     """
     try:
-        _t2_index_write(
-            lambda db: db.tuples.ack(claim_id, claimant), op="tuple_ack",
+        reply = (
+            ReplySpec(
+                subspace=reply_subspace,
+                keys=reply_keys or {},
+                dims=reply_dims,
+                body=reply_body,
+                ttl_seconds=reply_ttl_seconds,
+            )
+            if reply_subspace
+            else None
         )
-        return f"Acked claim {claim_id}"
-    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        reply_id = _t2_index_write(
+            lambda db: db.tuples.ack(claim_id, claimant, reply=reply), op="tuple_ack",
+        )
+        msg = f"Acked claim {claim_id}"
+        if reply_id:
+            msg += f" with reply {reply_id}"
+        return msg
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged). Deliberately broad: ReplyNotWrittenError (nexus-h61dl.9) is NOT a TupleError by design, and must still land here rather than raise through the wire.
         return _mcp_tool_error("tuple_ack", e)
 
 
@@ -6187,6 +6234,42 @@ def tuple_nack(claim_id: str, claimant: str) -> str:
         return f"Nacked claim {claim_id}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("tuple_nack", e)
+
+
+@mcp.tool(
+    title="Renew Tuple Claim",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
+)
+def tuple_renew(claim_id: str, claimant: str, lease_s: int) -> dict:
+    """Extend a live claim's lease (``renew``, RDR-206) before it lapses.
+
+    Returns ``{"lease_until": "<ISO-8601>"}`` — the engine's own new
+    ``lease_until``, verbatim, never recomputed locally. Two ceilings
+    apply and they differ: a *lease_s* above the template's
+    ``max_lease_seconds`` is REFUSED (``LeaseTooLong``), while a duration
+    inside that cap is silently clipped to the tuple's own expiry — so
+    the returned instant can be earlier than ``now + lease_s``.
+
+    Renewing does not touch ``attempts``: a renew is the holder keeping
+    the message, not a delivery given back. Refused on a lapsed claim
+    (``ClaimNotFound``) rather than resurrecting it — a holder that
+    missed its window learns it lost the claim.
+
+    Args:
+        claim_id: The claim id returned by ``tuple_in``.
+        claimant: Must match the identity that made the claim.
+        lease_s: New lease length in seconds from now, capped at the
+            template's ``max_lease_seconds`` and clipped to the tuple's
+            remaining expiry.
+    """
+    try:
+        lease_until = _t2_index_write(
+            lambda db: db.tuples.renew(claim_id, claimant, lease_s), op="tuple_renew",
+        )
+        return {"lease_until": lease_until.isoformat()}
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return {"error": _mcp_tool_error("tuple_renew", e)}
 
 
 @mcp.tool(

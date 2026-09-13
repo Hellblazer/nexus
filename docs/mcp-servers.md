@@ -61,7 +61,7 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 | `plan_delete` | Delete a plan-library entry by id (cleanup counterpart to `plan_save`) |
 | `traverse` | Walk the catalog link graph from seed tumblers with typed link filters or a named purpose. Depth capped at 3. Returns `{tumblers, ids, collections}` for downstream retrieval |
 
-### Tuple space (T2-adjacent, RDR-205)
+### Tuple space (T2-adjacent, RDR-205, RDR-206)
 
 `nexus.db.t2.http_tuple_store.HttpTupleStore` (`db.tuples`) over the engine's `/v1/tuples`. See [Tuple Space](tuple-space.md) for the full reference and [Tuple Space Walkthroughs](tuple-space-walkthroughs.md) for scenario diagrams.
 
@@ -70,8 +70,9 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 | `tuple_out` | Write a tuple (`out`). Idempotent by construction — the id derives from the template's `id_from` fields only, so a retry lands on the same tuple |
 | `tuple_rd` | Non-destructive read (`rd`). A probe when `timeout_s=0` (default); parks up to `timeout_s` seconds (capped by the engine) when nothing matches. Returns dead-lettered rows too |
 | `tuple_in` | Destructive (claiming) read (`in`). Every key in `keys_pattern` must be pinned. Returns `{tuple, claim_id}` on a claim, `None` on a probe miss; ack or nack the claim afterward |
-| `tuple_ack` | Consume a claimed tuple (`ack`) |
+| `tuple_ack` | Consume a claimed tuple (`ack`), optionally writing a reply in the same transaction (`reply_subspace`/`reply_keys`/`reply_dims`/`reply_body`/`reply_ttl_seconds` — RDR-206). Without a reply, unchanged. The reply's target must resolve to a `keys+nonce` template (a `keys`-only target is refused); no reply-nonce argument exists, the engine sets it itself |
 | `tuple_nack` | Release a claim back to available (`nack`); counts an attempt toward the template's `max_attempts` |
+| `tuple_renew` | Extend a live claim's lease before it lapses (`renew`, RDR-206). Returns `{lease_until}`, the engine's own value, never recomputed locally. A `lease_s` above the template cap is refused (`LeaseTooLong`); inside the cap it is clipped to the tuple's expiry. Does not count as an attempt; refused on a lapsed claim rather than resurrecting it |
 | `tuple_registry` | The boot-loaded template set: `{digest, sources, templates}` |
 | `tuple_list` | Concrete subspaces that exist, optionally filtered by prefix |
 | `tuple_stats` | The census for one subspace |

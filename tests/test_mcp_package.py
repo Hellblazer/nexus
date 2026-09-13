@@ -52,9 +52,10 @@ def test_core_registered_tools():
         # DELETED at nexus-lgdel: the chash-rekey upgrade rung it steered
         # operators toward no longer exists.
         # RDR-205 Phase 2 Step 2 (bead nexus-em75s.10): the eight Linda
-        # tuple-space tools over HttpTupleStore (nexus-em75s.9).
+        # tuple-space tools over HttpTupleStore (nexus-em75s.9). RDR-206
+        # Phase 2 (bead nexus-h61dl.9) added the ninth, tuple_renew.
         "tuple_out", "tuple_rd", "tuple_in", "tuple_ack", "tuple_nack",
-        "tuple_registry", "tuple_list", "tuple_stats",
+        "tuple_renew", "tuple_registry", "tuple_list", "tuple_stats",
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 
@@ -104,9 +105,10 @@ def test_init_reexports_all():
         "operator_filter", "operator_check", "operator_verify",
         "operator_groupby", "operator_aggregate",
         "nx_answer", "nx_tidy", "nx_enrich_beads", "nx_plan_audit",
-        # RDR-205 Phase 2 Step 2 (bead nexus-em75s.10)
+        # RDR-205 Phase 2 Step 2 (bead nexus-em75s.10); RDR-206 Phase 2
+        # (bead nexus-h61dl.9) added tuple_renew.
         "tuple_out", "tuple_rd", "tuple_in", "tuple_ack", "tuple_nack",
-        "tuple_registry", "tuple_list", "tuple_stats",
+        "tuple_renew", "tuple_registry", "tuple_list", "tuple_stats",
         # demoted
         "store_delete", "collection_info", "collection_verify",
     ]:
