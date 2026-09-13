@@ -847,6 +847,12 @@ print(h.hexdigest())
   fi
   cp "$HERE/Dockerfile.package-upgrade" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_package_upgrade.sh" "$STAGE/"
+  # nexus-wo6sc: the rehearse script SOURCES lib/heartbeat_stall_note.sh, so
+  # the library has to travel with it. Staged for the same reason the main
+  # Dockerfile COPYs lib/ — without it the source fails inside the container
+  # and the stall attribution is silently absent from exactly the failure
+  # report it exists to annotate (measured 2026-09-13, battery at ef6d9c466).
+  cp -R "$HERE/lib" "$STAGE/lib"
 elif [ "$STRANDED" = 1 ]; then
   # nexus-8nlj4: the WORKING-TREE wheel travels in under its OWN subdirectory
   # (real PEP 427 filename preserved — see the --package-upgrade rationale
