@@ -1228,6 +1228,15 @@ class TestRemintSingleFlight:
                 for t in threads:
                     t.join(timeout=30)
 
+                # Non-vacuity (hddw2 critic pass): timed_out is only set inside the
+                # gate's wait, so a gate that never engaged (a path or bearer match
+                # gone stale) would leave it False and this test would pass on
+                # scheduling luck again. Every held request must have arrived.
+                assert gate._count >= gate.n, (
+                    f"the arrival gate saw {gate._count} of {gate.n} stale-bearer "
+                    f"requests: they never reached it, so this run proved nothing "
+                    f"about concurrent 401s"
+                )
                 assert not gate.timed_out, (
                     f"arrival gate timed out after {gate.timeout}s: only "
                     f"{gate.arrived_at_timeout}/{self.THREADS} concurrent "

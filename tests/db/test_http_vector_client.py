@@ -3283,6 +3283,7 @@ class TestRemintSingleFlightT3:
         coalesces the whole 7-way cold-start race to exactly one actual
         mint call, so the published token is always ``t3-minted-1``.
         """
+        import urllib.error
         import nexus.db.http_vector_client as hv
 
         threads_n = 7
@@ -3305,9 +3306,12 @@ class TestRemintSingleFlightT3:
             def call() -> None:
                 barrier.wait(timeout=10)
                 try:
-                    hv._request("GET", "/v1/x", tenant="acme", timeout=5, body=None)
-                except Exception:  # noqa: BLE001 — every call 401s by construction; the COUNT is the assertion
-                    pass
+                    # 30s, not 5: the arrival gate may hold this call up to
+                    # its own 15s timeout, and a client that gives up first
+                    # never reaches the 401 path under test (hddw2 CRE pass).
+                    hv._request("GET", "/v1/x", tenant="acme", timeout=30, body=None)
+                except urllib.error.HTTPError:
+                    pass  # every call 401s by construction; the COUNT is the assertion
                 except BaseException as exc:  # noqa: BLE001 — surfaced below, never swallowed
                     failures.append(exc)
 
@@ -3317,6 +3321,15 @@ class TestRemintSingleFlightT3:
             for t in threads:
                 t.join(timeout=30)
 
+            # Non-vacuity (hddw2 critic pass): timed_out is only set inside the
+            # gate's wait, so a gate that never engaged (a path or bearer match
+            # gone stale) would leave it False and this test would pass on
+            # scheduling luck again. Every held request must have arrived.
+            assert gate._count >= gate.n, (
+                f"the arrival gate saw {gate._count} of {gate.n} stale-bearer "
+                f"requests: they never reached it, so this run proved nothing "
+                f"about concurrent 401s"
+            )
             assert not gate.timed_out, (
                 f"arrival gate timed out after {gate.timeout}s: only "
                 f"{gate.arrived_at_timeout}/{threads_n} concurrent requests "
