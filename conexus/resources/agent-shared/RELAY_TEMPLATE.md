@@ -4,15 +4,7 @@ All agent dispatches follow this standardized structure. **Relays are constructe
 
 ## Every Report Ends With a VERIFY Block (MANDATORY)
 
-An agent's hand-back on this relay is not accepted on prose alone (bead nexus-cnzei.6: a 2026-09-13 measurement found reports arriving on time but making false claims — a docs agent reported changing a CLI default it had not touched, and an implementation agent's gate record omitted the one test that would have caught its own NameError). Every Deliverable therefore closes with a VERIFY block, one line per claim — the convention orchestration/SKILL.md's "VERIFY Line Convention" section owns:
-
-```
-VERIFY: commit=<sha>
-VERIFY: <exact command> => rc=<code> <count> passed
-VERIFY: t2=<project>/<title>
-```
-
-An agent with nothing checkable to claim says so explicitly rather than omitting the block. The orchestrator re-runs the reported command and confirms the reported commit before accepting the round (`scripts/check_agent_verify_claims.py`) — never trusts the block's own claims unchecked.
+An agent's hand-back on this relay is not accepted on prose alone (bead nexus-cnzei.6: a 2026-09-13 measurement found reports arriving on time but making false claims — a docs agent reported changing a CLI default it had not touched, and an implementation agent's gate record omitted the one test that would have caught its own NameError). Every Deliverable therefore closes with a VERIFY block, one line per claim, in the exact shape and with the exact checked/not-checked scope that `conexus/skills/orchestration/SKILL.md`'s "VERIFY Line Convention" section owns — read it there rather than here; this file states only that the requirement applies to every relay, not what it says.
 
 ## Required Fields
 

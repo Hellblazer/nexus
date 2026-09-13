@@ -193,14 +193,29 @@ class _MockTupleEngine:
                     return
                 dims = parsed.get("dims") if isinstance(parsed, dict) else None
                 status = engine.status
-                if engine.reject_extra_dims and isinstance(dims, dict) and (
-                    set(dims) & engine.reject_extra_dims
-                ):
+                response_body = b"{}"
+                rejected = (
+                    (set(dims) & engine.reject_extra_dims)
+                    if engine.reject_extra_dims and isinstance(dims, dict) else set()
+                )
+                if rejected:
                     status = 400
+                    # The REAL engine's SchemaViolationException/TupleHandler
+                    # shape for an undeclared dimension -- see
+                    # tuple_ledger_project.py's _UNDECLARED_DIM_DETAIL_RE,
+                    # which this mock's body must match for the fallback
+                    # tests below to exercise the real detection logic
+                    # rather than a bare-status shortcut (fix round 1, CRE
+                    # finding 2).
+                    field = sorted(rejected)[0]
+                    response_body = json.dumps({
+                        "error": "SchemaViolation",
+                        "detail": f"field '{field}': not a declared dimension for this template",
+                    }).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(b"{}")
+                self.wfile.write(response_body)
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -1186,6 +1201,156 @@ def test_report_kind_falls_back_to_legacy_dims_when_engine_refuses_new_dims(
     assert second["dims"] == {"agent_type": AGENT_TYPE}
     log = _log_path(tmp_path / "state").read_text()
     assert "SCHEMA_FALLBACK kind=report" in log
+
+
+def test_report_kind_generic_400_is_not_mistaken_for_a_schema_violation(
+    tmp_path: Path, mock_engine,
+) -> None:
+    """Fix round 1, CRE finding 2: a bare HTTP 400 with a body that is
+    NOT the undeclared-dim shape (a different SchemaViolation reason, or
+    no recognisable body at all) must never trigger the legacy-dims
+    retry -- one POST only, plain SKIP, exit 0."""
+    engine = mock_engine(status=400)  # every request gets a bare {} 400
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    transcript = _write_transcript(tmp_path, [
+        _assistant_text_entry("VERIFY: commit=abc1234"),
+    ])
+
+    proc = _run(
+        "report", tmp_path=tmp_path,
+        stdin=_payload(agent_transcript_path=str(transcript)),
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1, "a non-schema-violation 400 must never be retried"
+    log = _log_path(tmp_path / "state").read_text()
+    assert "SKIP kind=report" in log
+    assert "SCHEMA_FALLBACK" not in log
+
+
+def test_report_kind_retry_that_also_gets_a_400_degrades_without_raising(
+    tmp_path: Path, mock_engine,
+) -> None:
+    """The retry's OWN 400 (bead nexus-cnzei.6 fix round 1, coordinator's
+    ask): even when the fallback body (agent_type alone) is ALSO refused
+    as an undeclared dim by a genuinely broken engine, the script must
+    still degrade to a logged SKIP and exit 0 -- never raise, never
+    block the hook."""
+    engine = mock_engine(
+        status=200,
+        reject_extra_dims=frozenset({"agent_type", "commit", "t2_ref", "verify"}),
+    )
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    transcript = _write_transcript(tmp_path, [
+        _assistant_text_entry("VERIFY: commit=abc1234"),
+    ])
+
+    proc = _run(
+        "report", tmp_path=tmp_path,
+        stdin=_payload(agent_transcript_path=str(transcript)),
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 2, "the retry must still be attempted exactly once"
+    log = _log_path(tmp_path / "state").read_text()
+    assert "SCHEMA_FALLBACK kind=report" in log
+    assert "SKIP kind=report" in log
+
+
+def test_start_kind_400_has_nothing_to_strip_and_degrades_without_raising(
+    tmp_path: Path, mock_engine,
+) -> None:
+    """A start-kind row's dims are always just {agent_type} (len<=1) --
+    a 400 on it, even an undeclared-dim-shaped one, has nothing left to
+    retry with and must re-raise straight to the outer skip handler:
+    ONE POST, logged SKIP, exit 0, never a crash or a second attempt."""
+    engine = mock_engine(status=200, reject_extra_dims=frozenset({"agent_type"}))
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    proc = _run(
+        "start", tmp_path=tmp_path,
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1, "a start-kind 400 has nothing to strip -- no retry"
+    log = _log_path(tmp_path / "state").read_text()
+    assert "SKIP kind=start" in log
+    assert "SCHEMA_FALLBACK" not in log
+
+
+# ── Case-insensitive commit=/t2= keys (fix round 1, CRE finding 3) ───────────
+
+
+def test_verify_commit_key_is_case_insensitive(tmp_path: Path, mock_engine) -> None:
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    transcript = _write_transcript(tmp_path, [
+        _assistant_text_entry("VERIFY: Commit=abc1234"),
+    ])
+    proc = _run(
+        "report", tmp_path=tmp_path,
+        stdin=_payload(agent_transcript_path=str(transcript)),
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert engine.requests[0]["dims"]["commit"] == "abc1234"
+
+
+def test_verify_t2_key_is_case_insensitive(tmp_path: Path, mock_engine) -> None:
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    transcript = _write_transcript(tmp_path, [
+        _assistant_text_entry("VERIFY: T2=nexus/notes"),
+    ])
+    proc = _run(
+        "report", tmp_path=tmp_path,
+        stdin=_payload(agent_transcript_path=str(transcript)),
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert engine.requests[0]["dims"]["t2_ref"] == "nexus/notes"
+
+
+# ── _is_undeclared_dim_violation (fix round 1, CRE finding 2) ────────────────
+
+
+def test_is_undeclared_dim_violation_true_for_the_real_engine_shape() -> None:
+    module = _load_module_directly()
+    body = json.dumps({
+        "error": "SchemaViolation",
+        "detail": "field 'commit': not a declared dimension for this template",
+    }).encode("utf-8")
+    assert module._is_undeclared_dim_violation(body) is True
+
+
+def test_is_undeclared_dim_violation_false_for_a_different_schema_violation() -> None:
+    module = _load_module_directly()
+    body = json.dumps({
+        "error": "SchemaViolation",
+        "detail": "field 'ttl_seconds': must be positive",
+    }).encode("utf-8")
+    assert module._is_undeclared_dim_violation(body) is False
+
+
+def test_is_undeclared_dim_violation_false_for_non_schema_error() -> None:
+    module = _load_module_directly()
+    body = json.dumps({"error": "UnknownSubspace", "detail": "no such subspace"}).encode("utf-8")
+    assert module._is_undeclared_dim_violation(body) is False
+
+
+def test_is_undeclared_dim_violation_false_for_unparseable_body() -> None:
+    module = _load_module_directly()
+    assert module._is_undeclared_dim_violation(b"not json at all") is False
+    assert module._is_undeclared_dim_violation(b"") is False
 
 
 def test_oversized_t2_ref_dim_is_dropped_but_row_still_written(

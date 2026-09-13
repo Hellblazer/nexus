@@ -396,3 +396,31 @@ pinned by TestRdrGateLoopRemedies and test_rdr_audit_skill.py; both files stay.
   ledger tuple's `commit`/`t2_ref`/`verify` dims (engine support: nexus-d9k5h,
   engine-service-v0.1.118); an engine that refuses the new dims (HTTP 400) is retried once
   with the legacy dims-only body, so the row is never dropped. Inert until the pin advances.
+
+nexus-cnzei.6 fix round 1 (review pass): both reviewers found no ship-blockers but nothing
+lands until fixed. Coverage below, per file.
+
+- `conexus/hooks/scripts/tuple_ledger_project.py` (nexus-cnzei.6 fix round 1, CRE findings
+  2/3): the legacy-dims retry now reads the HTTP 400 response BODY and only treats it as the
+  below-floor undeclared-dimension case when the body matches the engine's exact
+  `SchemaViolationException` shape for an unknown dimension — a generic 400 (a different
+  schema violation, or no recognisable body) is a plain skip, never retried. `commit=`/`t2=`
+  VERIFY keys are now case-insensitive. Inert until the pin advances.
+- `conexus/hooks/scripts/expectations.sh` (nexus-cnzei.6 fix round 1, item 3; copied
+  byte-identical to `tests/e2e/lib/expectations.sh`): `expectations_census` gained
+  `_expectations_census_verify_absent`, printed after the existing SPACE_* lines — a
+  `VERIFY_ABSENT_COUNT`/`VERIFY_UNVERIFIABLE`/`VERIFY_FALLBACK` line, gated on the connected
+  engine's ledger template actually declaring the `verify` dimension (the DESIGN's own
+  promise, undelivered in the original commit — critic Significant a). Never affects
+  `expectations_census`'s own exit code. Inert until the pin advances.
+- `conexus/skills/orchestration/SKILL.md` (nexus-cnzei.6 fix round 1, item 2 second half):
+  the "VERIFY Line Convention" section now states plainly what the checker confirms (commit
+  exists and touches named paths; `t2_ref` exists in T2; a VERIFY block is present) and what
+  it does not (whether a claimed command ran, passed, or was the right one) — the coordinator
+  still reads the command lines. Also documents the checker's UNVERIFIABLE branch. Inert
+  until the pin advances.
+- `conexus/resources/agent-shared/RELAY_TEMPLATE.md` (nexus-cnzei.6 fix round 1, critic
+  observation): the "Every Report Ends With a VERIFY Block" section no longer repeats the
+  three-line shape and explanatory prose verbatim — it points at
+  `conexus/skills/orchestration/SKILL.md`'s "VERIFY Line Convention" section as the one copy.
+  Inert until the pin advances.

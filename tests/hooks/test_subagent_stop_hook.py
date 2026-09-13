@@ -1540,10 +1540,13 @@ class TestCensusSpaceBacked:
         """An ``nx`` whose ``tuple`` verb fails with a MULTI-LINE error (a
         Click usage block, which is exactly what every installed client
         older than the tuple CLI prints) still yields ONE SPACE_FALLBACK
-        line as the census's last line. Found live by the Phase 4 review
-        (nexus-em75s.22): the raw error was interpolated verbatim, so the
-        last line was ``Error: No such command 'tuple'.`` and every caller
-        keying on the SPACE_ tail broke on a real install."""
+        line (found live by the Phase 4 review, nexus-em75s.22: the raw
+        error was interpolated verbatim, so the whole multi-line block
+        became the last line and every caller keying on the SPACE_ tail
+        broke on a real install) and, since bead nexus-cnzei.6 fix round
+        1, ONE VERIFY_FALLBACK line from the same broken ``nx`` -- neither
+        collapses the OTHER's line, and the multi-line sanitization
+        (shared ``tr`` idiom) applies to both."""
         _expect_row(tmp_path, name=self.TYPE, mode="background", session_id=self.SID)
         self._write_ledger_row(tmp_path, self.SID)
         old_bin = tmp_path / "old-nx-bin"
@@ -1565,13 +1568,16 @@ class TestCensusSpaceBacked:
             env_overrides={"PATH": f"{old_bin}{os.pathsep}/usr/bin:/bin"},
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        # _run_census appends its own RC= trailer; the census's OWN last
-        # line is the one before it.
         lines = [line for line in proc.stdout.rstrip().splitlines() if not line.startswith("RC=")]
-        assert lines[-1].startswith("SPACE_FALLBACK\treason=nx tuple list --prefix ledger/ failed (rc=2): "), lines[-1]
-        assert "No such command 'tuple'" in lines[-1]
-        assert "Usage: nx" in lines[-1]
-        assert sum(1 for line in lines if line.startswith("SPACE_")) == 1
+        space_lines = [line for line in lines if line.startswith("SPACE_")]
+        verify_lines = [line for line in lines if line.startswith("VERIFY_")]
+        assert len(space_lines) == 1, space_lines
+        assert len(verify_lines) == 1, verify_lines
+        assert space_lines[0].startswith("SPACE_FALLBACK\treason=nx tuple list --prefix ledger/ failed (rc=2): "), space_lines[0]
+        assert "No such command 'tuple'" in space_lines[0]
+        assert "Usage: nx" in space_lines[0]
+        assert verify_lines[0].startswith("VERIFY_FALLBACK\treason=nx tuple templates --json failed (rc=2): "), verify_lines[0]
+        assert "No such command 'tuple'" in verify_lines[0]
         assert "BLINDSPOT\tchecked=1 recognized=1 unrecognized=0" in proc.stdout
 
     def test_engine_unreachable_names_the_real_failure(self, tmp_path: Path) -> None:
@@ -1718,6 +1724,149 @@ class TestCensusSpaceBacked:
             f"census took {elapsed:.1f}s against a {bound_s}s bound -- "
             "the wall-clock deadline did not fire"
         )
+
+
+class TestCensusVerifyAbsent:
+    """bead nexus-cnzei.6 fix round 1, item 3: expectations_census's
+    verify=absent count -- the DESIGN's own promise ("the census counts
+    verify=absent as a finding, not a pass") that shipped in the
+    original commit without the actual wiring. Gated on the connected
+    engine's ledger template declaring the ``verify`` dimension (critic
+    Critical 2's false-positive concern: a below-floor engine strips it
+    from every row, so counting would report a finding on 100% of good
+    reports)."""
+
+    SID = "verify-census-sess"
+
+    def _write_ledger_row(
+        self, tmp_path: Path, sid: str, ts: str = "2026-09-01T00:00:00Z"
+    ) -> Path:
+        """``expectations_census`` returns immediately (RC=0, no output
+        at all) when the session's ``.expectations`` TSV does not exist
+        yet -- every test here needs one row to get past that guard
+        before any SPACE_/VERIFY_ line is ever printed."""
+        f = _expectations_file(tmp_path, sid)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a") as fh:
+            fh.write(f"{ts}\tSTART\tsome-agent\tgeneral-purpose\n")
+        return f
+
+    def _tuple_out(
+        self, fake_bin: Path, subspace: str, *, agent_id: str, kind: str,
+        dims: dict[str, str],
+    ) -> None:
+        env = {
+            **os.environ,
+            "NX_ALLOW_PROD_WRITE": (
+                "test fixture seeding the t2_service_env throwaway tuple-"
+                "space test tenant, never production (nexus-cnzei.6)"
+            ),
+        }
+        args = [
+            str(fake_bin / "nx"), "tuple", "out", subspace,
+            "--key", f"agent_id={agent_id}", "--key", f"kind={kind}",
+        ]
+        for k, v in dims.items():
+            args += ["--dim", f"{k}={v}"]
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=30, env=env)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    def _path_env(self, fake_bin: Path) -> dict[str, str]:
+        return {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+    def test_no_nx_binary_names_a_fallback_reason(self, tmp_path: Path) -> None:
+        self._write_ledger_row(tmp_path, self.SID)
+        proc = _run_census(tmp_path, self.SID, env_overrides={"PATH": "/usr/bin:/bin"})
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "VERIFY_FALLBACK\treason=PATH has no nx" in proc.stdout
+
+    def test_engine_without_verify_dim_is_unverifiable_not_a_count(self, tmp_path: Path) -> None:
+        """A below-floor engine's registry (no ``verify`` in the ledger
+        template's declared dimensions): UNVERIFIABLE, never a
+        fabricated count -- the exact false-positive class critic
+        Critical 2 named for the checker script, mirrored here."""
+        fake_bin = tmp_path / "old-engine-bin"
+        fake_bin.mkdir()
+        shim = fake_bin / "nx"
+        shim.write_text(
+            "#!/bin/sh\n"
+            'case "$1 $2" in\n'
+            '  "tuple templates")\n'
+            "    echo '{\"digest\":\"x\",\"sources\":[\"resources\"],"
+            '"templates":[{"name":"ledger/<session_id>",'
+            "\"dimensions\":{\"agent_type\":{}}}]}'\n"
+            "    ;;\n"
+            '  "tuple list")\n'
+            "    echo '[]'\n"
+            "    ;;\n"
+            "  *)\n"
+            '    echo "unexpected invocation: $*" >&2\n'
+            "    exit 1\n"
+            "    ;;\n"
+            "esac\n"
+        )
+        shim.chmod(0o755)
+        self._write_ledger_row(tmp_path, self.SID)
+        proc = _run_census(tmp_path, self.SID, env_overrides=self._path_env(fake_bin))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "VERIFY_UNVERIFIABLE\treason=" in proc.stdout
+        assert "VERIFY_ABSENT_COUNT" not in proc.stdout
+
+    def test_engine_with_verify_dim_counts_absent_rows(
+        self, tmp_path: Path, t2_service_env: str,
+    ) -> None:
+        """A floor-crossed engine (this worktree's real dev jar already
+        declares ``verify`` -- nexus-d9k5h): the census counts rows whose
+        verify dim is not "present", including a row with NO verify dim
+        at all, but never counts a row that IS present."""
+        fake_bin = _fake_nx_dir(tmp_path)
+        sid = "verify-count-sess"
+        self._write_ledger_row(tmp_path, sid)
+        self._tuple_out(
+            fake_bin, f"ledger/{sid}", agent_id="agent-good", kind="report",
+            dims={"agent_type": "developer", "verify": "present"},
+        )
+        self._tuple_out(
+            fake_bin, f"ledger/{sid}", agent_id="agent-bad", kind="report",
+            dims={"agent_type": "developer", "verify": "absent"},
+        )
+        self._tuple_out(
+            fake_bin, f"ledger/{sid}", agent_id="agent-missing", kind="report",
+            dims={"agent_type": "developer"},
+        )
+        proc = _run_census(tmp_path, sid, env_overrides=self._path_env(fake_bin))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "VERIFY_ABSENT_COUNT\tn=2" in proc.stdout
+        assert "VERIFY_UNVERIFIABLE" not in proc.stdout
+        assert "VERIFY_FALLBACK" not in proc.stdout
+
+    def test_all_present_counts_zero(self, tmp_path: Path, t2_service_env: str) -> None:
+        fake_bin = _fake_nx_dir(tmp_path)
+        sid = "verify-allpresent-sess"
+        self._write_ledger_row(tmp_path, sid)
+        self._tuple_out(
+            fake_bin, f"ledger/{sid}", agent_id="agent-1", kind="report",
+            dims={"agent_type": "developer", "verify": "present"},
+        )
+        proc = _run_census(tmp_path, sid, env_overrides=self._path_env(fake_bin))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "VERIFY_ABSENT_COUNT\tn=0" in proc.stdout
+
+    def test_never_affects_the_overall_exit_code(self, tmp_path: Path) -> None:
+        """The new VERIFY_* line is a report, not a verdict -- confirms
+        expectations_census's own rc contract (documented in its own
+        header, unchanged by this fix round) is unaffected even when
+        this check falls back (no nx binary at all here)."""
+        _expect_row(tmp_path, name="general-purpose", mode="background", session_id=self.SID)
+        f = _expectations_file(tmp_path, self.SID)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a") as fh:
+            fh.write("2026-09-01T00:00:00Z\tSTART\tagent-x\tgeneral-purpose\n")
+            fh.write("2026-09-01T00:00:05Z\tREPORTED\tagent-x\n")
+        proc = _run_census(tmp_path, self.SID, env_overrides={"PATH": "/usr/bin:/bin"})
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "VERIFY_FALLBACK" in proc.stdout
+        assert "BLINDSPOT\tchecked=1 recognized=1 unrecognized=0" in proc.stdout
 
 
 class TestPluginWiring:

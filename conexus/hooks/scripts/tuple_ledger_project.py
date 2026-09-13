@@ -79,13 +79,20 @@ the agent has produced any output to parse. See ``_extract_verify_dims``.
 HARD REQUIREMENT (nexus-cnzei.6 item 2): the cloud engine can be older
 than ``engine-service-v0.1.118`` (the first tag whose ``ledger.yaml``
 declares these three dims -- nexus-d9k5h). Such an engine answers an
-``out`` naming an undeclared dim with HTTP 400 (``SchemaViolation``).
-``main()`` catches that specific status (``_SchemaViolation``, raised
-only for 400) on the FIRST attempt and retries once with the legacy
-dims-only body (``agent_type`` alone) -- the row is written either way,
-never dropped. A 400 on a body that already carries no extra dims (the
-``kind=="start"`` case, or a genuine unrelated schema problem) has
-nothing left to strip and is re-raised as a plain skip.
+``out`` naming an undeclared dim with HTTP 400 (``SchemaViolation``) --
+whose JSON body is ``{"error": "SchemaViolation", "detail": "field
+'<name>': not a declared dimension for this template"}``
+(``SchemaViolationException``/``TupleRepository.validateOutShape``).
+``main()`` reads that body (fix round 1, CRE finding 2: a bare ``status
+== 400`` is not proof of an undeclared-dim refusal specifically -- other
+schema violations, e.g. a bad ``ttl_seconds``, are 400 too) and treats it
+as the below-floor case ONLY when the body matches that exact shape
+(``_is_undeclared_dim_violation``). On a match, it retries once with the
+legacy dims-only body (``agent_type`` alone) -- the row is written either
+way, never dropped. A 400 on a body that already carries no extra dims
+(the ``kind=="start"`` case, or a genuine unrelated schema problem) has
+nothing left to strip and is re-raised as a plain skip; a 400 that is NOT
+an undeclared-dim refusal is likewise a plain skip, never retried.
 
 Every failure path -- unresolvable endpoint, no fresh data-token lease,
 transport failure, a non-2xx response -- appends one line to a
@@ -256,11 +263,15 @@ def _extract_fields(raw_payload: str) -> tuple[str, str, str, str]:
 #: bullet or a fenced block); trailing whitespace stripped.
 _VERIFY_LINE_RE = re.compile(r"(?im)^[ \t]*VERIFY:[ \t]*(.+?)[ \t]*$")
 
-#: ``VERIFY: commit=<sha>`` -- a short (7+) or full (40) hex sha.
-_COMMIT_VALUE_RE = re.compile(r"^commit=([0-9a-fA-F]{7,40})$")
+#: ``VERIFY: commit=<sha>`` -- a short (7+) or full (40) hex sha. Key
+#: case-insensitive (fix round 1, CRE finding 3): ``Commit=``/``COMMIT=``
+#: must not silently produce ``verify=present`` with no ``commit`` dim,
+#: indistinguishable from a deliberate "nothing to check" report.
+_COMMIT_VALUE_RE = re.compile(r"^commit=([0-9a-fA-F]{7,40})$", re.IGNORECASE)
 
 #: ``VERIFY: t2=<project>/<title>`` -- a T2 pointer, kept verbatim.
-_T2_REF_VALUE_RE = re.compile(r"^t2=(\S.*)$")
+#: Key case-insensitive, same reasoning as ``_COMMIT_VALUE_RE``.
+_T2_REF_VALUE_RE = re.compile(r"^t2=(\S.*)$", re.IGNORECASE)
 
 
 def _content_blocks(entry: dict[str, Any]) -> list[dict[str, Any]]:
@@ -412,6 +423,35 @@ def _build_opener(is_local_supervisor: bool) -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(*handlers)
 
 
+#: The exact ``detail`` shape ``SchemaViolationException``/
+#: ``TupleRepository.validateOutShape`` produce for an UNKNOWN dimension
+#: name specifically (as opposed to any other schema violation -- a bad
+#: ``ttl_seconds``, a missing required key, an out-of-set value -- every
+#: one of which is also a 400 but must never trigger the legacy-dims
+#: retry, fix round 1, CRE finding 2). Java source:
+#: ``throw new SchemaViolationException(unknownDims.first(), "not a
+#: declared dimension for this template")`` -- rendered by
+#: ``TupleHandler`` as ``{"error": "SchemaViolation", "detail": "field
+#: '<name>': <reason>"}``.
+_UNDECLARED_DIM_DETAIL_RE = re.compile(r"^field '.+': not a declared dimension for this template$")
+
+
+def _is_undeclared_dim_violation(body: bytes) -> bool:
+    """True iff *body* is the engine's JSON refusal of an undeclared
+    dimension name -- never true for any other 400 shape (a non-JSON
+    body, a different ``error`` code, or a SchemaViolation for a
+    different reason, e.g. an out-of-set dimension VALUE, a missing
+    required key, or a bad ``ttl_seconds``)."""
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict) or data.get("error") != "SchemaViolation":
+        return False
+    detail = data.get("detail")
+    return isinstance(detail, str) and _UNDECLARED_DIM_DETAIL_RE.match(detail) is not None
+
+
 def _post_via_urllib(
     base_url: str, token: str, body: dict[str, Any], *, is_local_supervisor: bool
 ) -> None:
@@ -455,6 +495,10 @@ def _post_via_urllib(
                 outcome["status"] = resp.status
         except urllib.error.HTTPError as exc:
             outcome["status"] = exc.code
+            try:
+                outcome["body"] = exc.read()
+            except OSError:
+                outcome["body"] = b""
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             outcome["error"] = exc
 
@@ -472,7 +516,15 @@ def _post_via_urllib(
     if status is None:
         raise _Skip(f"transport failure posting to {url}: no response received")
     if status == 400:
-        raise _SchemaViolation(f"engine returned HTTP 400 posting to {url}")
+        # nexus-cnzei6-fix1: NOT named `body` -- that name is already this
+        # function's own `body: dict[str, Any]` REQUEST payload parameter,
+        # and shadowing it with the response's raw bytes here is exactly
+        # the kind of same-name/different-type reuse that reads fine at a
+        # glance and fails a type checker (and a future reader) outright.
+        error_body: bytes = outcome.get("body") or b""
+        if _is_undeclared_dim_violation(error_body):
+            raise _SchemaViolation(f"engine returned HTTP 400 (undeclared dim) posting to {url}")
+        raise _Skip(f"engine returned HTTP 400 posting to {url}: {error_body[:200]!r}")
     if not (200 <= status < 300):
         raise _Skip(f"engine returned HTTP {status} posting to {url}")
 
