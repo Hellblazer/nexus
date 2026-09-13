@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Markdown indexing no longer drops the end of long paragraphs (nexus-2s91y).**
+  The markdown chunker cut any non-code paragraph longer than about 1,690
+  characters and never stored the rest, in every mode, so search could not find
+  that text. It now splits the paragraph across chunks. The 12 KB byte cap in the
+  markdown and PDF chunkers now splits an oversized chunk instead of truncating
+  it, which had been dropping the end of large code blocks. Collections indexed
+  before this release keep the truncated text until reindexed with `--force`
+  through whichever command built them: `nx index repo`, `nx index md` or
+  `nx index rdr`.
+
 ## [7.44.0] - 2026-09-13
 
 Paired with engine-service-v0.1.117.

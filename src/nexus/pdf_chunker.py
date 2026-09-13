@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 import structlog
 
+from nexus.chunker import split_text_to_byte_cap
 from nexus.db.limits import SAFE_CHUNK_BYTES
 from nexus.md_chunker import classify_section_type
 
@@ -283,11 +284,21 @@ class PDFChunker:
                 break
             start = next_start
 
-        # Byte cap post-pass: truncate any chunk that exceeds the storage limit.
+        # Byte cap post-pass: split, never truncate (nexus-2s91y), then
+        # renumber so chunk_index stays dense.
+        capped: list[TextChunk] = []
         for c in chunks:
-            if len(c.text.encode()) > SAFE_CHUNK_BYTES:
-                c.text = c.text.encode()[:SAFE_CHUNK_BYTES].decode("utf-8", errors="ignore")
-        return chunks
+            if len(c.text.encode()) <= SAFE_CHUNK_BYTES:
+                capped.append(c)
+                continue
+            capped.extend(
+                TextChunk(text=piece, chunk_index=c.chunk_index, metadata=dict(c.metadata))
+                for piece in split_text_to_byte_cap(c.text, SAFE_CHUNK_BYTES)
+            )
+        for i, c in enumerate(capped):
+            c.chunk_index = i
+            c.metadata["chunk_index"] = i
+        return capped
 
     @staticmethod
     def _table_header(text: str, table_start: int) -> str:

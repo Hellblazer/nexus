@@ -46,6 +46,23 @@ def test_pdf_chunker_byte_cap_enforced() -> None:
         )
 
 
+def test_pdf_chunker_byte_cap_splits_without_losing_text() -> None:
+    """nexus-2s91y: the byte cap used to cut an oversized chunk's tail off,
+    and the overlap window did not recover it. Multi-byte text makes the
+    split land near UTF-8 boundaries, which must not drop a character."""
+    from nexus.db.limits import SAFE_CHUNK_BYTES
+    markers = [f"é{i:05d}" for i in range(3000)]
+    chunks = PDFChunker(chunk_chars=20_000).chunk(" ".join(markers), {})
+
+    joined = " ".join(c.text for c in chunks)
+    missing = [m for m in markers if m not in joined]
+    assert not missing, f"{len(missing)} markers dropped, first {missing[:3]}"
+    for c in chunks:
+        assert len(c.text.encode()) <= SAFE_CHUNK_BYTES
+    assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
+    assert [c.metadata["chunk_index"] for c in chunks] == list(range(len(chunks)))
+
+
 # ── nexus-nd3e: default overlap must be 300 chars (20% of 1500) ─────────────
 
 

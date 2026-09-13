@@ -9,6 +9,7 @@ from typing import Any
 import structlog
 import yaml
 
+from nexus.chunker import split_text_to_byte_cap, split_text_to_char_cap
 from nexus.db.limits import SAFE_CHUNK_BYTES
 
 _log = structlog.get_logger()
@@ -173,11 +174,31 @@ class SemanticMarkdownChunker:
                 chunks = self._naive_chunking(text, metadata)
         else:
             chunks = self._naive_chunking(text, metadata)
-        # Byte cap post-pass: truncate any chunk that exceeds the storage limit.
+        return self._split_oversized_chunks(chunks)
+
+    @staticmethod
+    def _split_oversized_chunks(chunks: list[MarkdownChunk]) -> list[MarkdownChunk]:
+        """Byte cap post-pass: split any chunk over the storage limit, then
+        renumber. It used to truncate, which dropped the end of a code block
+        the section splitter had deliberately kept whole (nexus-2s91y)."""
+        out: list[MarkdownChunk] = []
         for c in chunks:
-            if len(c.text.encode()) > SAFE_CHUNK_BYTES:
-                c.text = c.text.encode()[:SAFE_CHUNK_BYTES].decode("utf-8", errors="ignore")
-        return chunks
+            if len(c.text.encode()) <= SAFE_CHUNK_BYTES:
+                out.append(c)
+                continue
+            out.extend(
+                MarkdownChunk(
+                    text=piece,
+                    chunk_index=c.chunk_index,
+                    metadata=dict(c.metadata),
+                    header_path=c.header_path,
+                )
+                for piece in split_text_to_byte_cap(c.text, SAFE_CHUNK_BYTES)
+            )
+        for i, c in enumerate(out):
+            c.chunk_index = i
+            c.metadata["chunk_index"] = i
+        return out
 
     # ── semantic path ─────────────────────────────────────────────────────────
 
@@ -340,7 +361,22 @@ class SemanticMarkdownChunker:
         section_end_char = section.get("end_char", 0)
         current_end_char = section_start_char
 
+        # nexus-2s91y: split an oversized part into max_chars pieces before
+        # packing. This used to truncate the part to max_chars and never store
+        # the rest. Preserved code blocks stay whole here; the byte cap
+        # post-pass in chunk() splits them only past the storage limit.
+        parts: list[dict] = []
         for part in section["content_parts"]:
+            keep_whole = self.preserve_code_blocks and part.get("is_code_block", False)
+            if len(part["content"]) > self.max_chars and not keep_whole:
+                parts.extend(
+                    {**part, "content": piece}
+                    for piece in split_text_to_char_cap(part["content"], self.max_chars)
+                )
+            else:
+                parts.append(part)
+
+        for part in parts:
             part_text = part["content"]
             part_tokens = len(part_text) / _CHARS_PER_TOKEN
             part_end_char = part.get("end_char", current_end_char)
@@ -349,13 +385,6 @@ class SemanticMarkdownChunker:
                 current_tokens += part_tokens
                 current_end_char = part_end_char
             else:
-                is_code = part.get("is_code_block", False)
-                if self.preserve_code_blocks and is_code:
-                    # Emit code blocks atomically — never truncate, even if oversized.
-                    pass
-                elif len(part_text) > self.max_chars:
-                    # Truncate oversized non-code parts to prevent unbounded chunk sizes.
-                    part_text = part_text[: self.max_chars]
                 if current_parts:
                     emitted_text = "\n\n".join(current_parts)
                     chunks.append(

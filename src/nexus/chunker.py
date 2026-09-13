@@ -193,6 +193,52 @@ def _line_chunk(
     return chunks
 
 
+def _natural_cut(head: str) -> int:
+    """Where to end a piece of *head*: after its last newline, sentence end or
+    space when one falls in the back half, else at the end of *head*."""
+    floor = len(head) // 2
+    for sep in ("\n", ". ", " "):
+        idx = head.rfind(sep)
+        if idx >= floor:
+            return idx + len(sep)
+    return len(head)
+
+
+def split_text_to_char_cap(text: str, max_chars: int) -> list[str]:
+    """Split *text* into pieces of at most *max_chars* characters.
+
+    ``"".join(pieces) == text``: nothing is dropped (nexus-2s91y, where a
+    truncating cap lost the tail of every long markdown paragraph).
+    """
+    pieces: list[str] = []
+    rest = text
+    while len(rest) > max_chars:
+        cut = _natural_cut(rest[:max_chars])
+        pieces.append(rest[:cut])
+        rest = rest[cut:]
+    if rest:
+        pieces.append(rest)
+    return pieces
+
+
+def split_text_to_byte_cap(text: str, max_bytes: int) -> list[str]:
+    """Split *text* into pieces of at most *max_bytes* UTF-8 bytes.
+
+    ``"".join(pieces) == text``: the byte window backs off to a whole
+    character rather than cutting through one (nexus-2s91y).
+    """
+    pieces: list[str] = []
+    rest = text
+    while len(rest.encode()) > max_bytes:
+        head = rest.encode()[:max_bytes].decode("utf-8", errors="ignore") or rest[0]
+        cut = _natural_cut(head)
+        pieces.append(rest[:cut])
+        rest = rest[cut:]
+    if rest:
+        pieces.append(rest)
+    return pieces
+
+
 def _enforce_byte_cap(
     chunks: list[dict[str, Any]],
     max_bytes: int = _CHUNK_MAX_BYTES,
