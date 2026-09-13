@@ -685,20 +685,55 @@ class TestRenew:
 
 
 class TestRenewAgainstAnOldEngine:
-    def test_unknown_route_404_stays_a_bare_http_error(self, monkeypatch) -> None:
-        """An engine predating ``/renew`` answers 404 with no ``error`` field.
-        That must surface as a bare ``httpx.HTTPStatusError`` -- loud, and
-        never a silent no-op that would let a caller believe its lease was
-        extended while the claim quietly lapses underneath it."""
-        store = HttpTupleStore()
+    """An engine predating ``/renew`` must produce a LOUD failure, never a
+    silent no-op that would let a caller believe its lease was extended
+    while the claim quietly lapses underneath it.
 
+    The first version of this test posted a bare ``text="Not Found"`` body,
+    which is NOT what an old engine sends. It passed, but through the
+    json-parse-failed branch of ``_raise_typed`` rather than the branch the
+    real response takes — the same defect class as an assertion satisfied by
+    clock skew: right answer, wrong reason, and no coverage of the path that
+    actually runs. ``engine-service-v0.1.116`` answers the unknown route
+    from its switch default with a real JSON body carrying a real ``error``
+    field whose VALUE is unrecognised, so the miss happens at the code
+    lookup, not at the parse. Both shapes are now driven."""
+
+    @staticmethod
+    def _engine_404(monkeypatch, **response_kw) -> None:
         def _404(*_a, **_k):
             request = httpx.Request("POST", "http://engine/v1/tuples/renew")
-            response = httpx.Response(404, text="Not Found", request=request)
+            response = httpx.Response(404, request=request, **response_kw)
             raise httpx.HTTPStatusError("404", request=request, response=response)
 
         monkeypatch.setattr(refreshable.RefreshableHttpStoreMixin, "_post", _404)
+
+    def test_the_real_v0_1_116_body_stays_a_bare_http_error(self, monkeypatch) -> None:
+        """The shape an old engine actually sends: valid JSON, an ``error``
+        field, an unrecognised code. Exercises the code-lookup miss."""
+        self._engine_404(monkeypatch, json={"error": "unknown tuples op: /renew"})
+        store = HttpTupleStore()
         with pytest.raises(httpx.HTTPStatusError):
+            store.renew("claim-1", "c1", 60)
+
+    def test_an_unparseable_404_body_also_stays_a_bare_http_error(
+        self, monkeypatch,
+    ) -> None:
+        """The other branch: a proxy or edge answering with non-JSON."""
+        self._engine_404(monkeypatch, text="Not Found")
+        store = HttpTupleStore()
+        with pytest.raises(httpx.HTTPStatusError):
+            store.renew("claim-1", "c1", 60)
+
+    def test_a_recognised_code_in_a_404_still_maps_to_its_typed_error(
+        self, monkeypatch,
+    ) -> None:
+        """Guards the boundary from the other side: the fall-through must be
+        driven by the code being UNRECOGNISED, not by the status being 404.
+        ClaimNotFound is a 404 too, and it must still map."""
+        self._engine_404(monkeypatch, json={"error": "ClaimNotFound", "detail": "gone"})
+        store = HttpTupleStore()
+        with pytest.raises(ClaimNotFoundError):
             store.renew("claim-1", "c1", 60)
 
 

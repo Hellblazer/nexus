@@ -583,11 +583,18 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         Never touches ``attempts``, and is refused on a lapsed claim
         (:class:`ClaimNotFoundError`) rather than resurrecting it.
 
-        Against an engine predating ``/renew`` the unknown route's 404
-        carries no ``error`` field, so it surfaces as a bare
-        ``httpx.HTTPStatusError`` -- loud by design. A silent no-op here
-        would let a caller believe its lease was extended while the claim
-        lapses underneath it.
+        Against an engine predating ``/renew`` the unknown route answers
+        404 with ``{"error": "unknown tuples op: /renew"}`` (the route
+        switch's default branch, verified at ``engine-service-v0.1.116``).
+        The body DOES carry an ``error`` field; its value is simply not one
+        of the nine recognised codes, so ``_raise_typed`` finds no class for
+        it and re-raises the bare ``httpx.HTTPStatusError`` -- loud by
+        design. A silent no-op here would let a caller believe its lease was
+        extended while the claim lapses underneath it. (An earlier version
+        of this docstring said the body carries no ``error`` field. Wrong
+        about the body, right about the outcome, and the distinction matters
+        to anyone changing ``_raise_typed``: it is the CODE LOOKUP that
+        misses here, not the JSON parse.)
         """
         if not claim_id:
             raise ValueError("claim_id must not be empty")
