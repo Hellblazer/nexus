@@ -1453,6 +1453,16 @@ public final class TupleRepository {
      * lettered), not a silently substituted value. The savepoint is the shared
      * mechanism between the two call sites; whether to swallow or rethrow is each
      * caller's own policy.
+     *
+     * <p>Round-2 review finding (CRE pass 2, 2026-09-13): a row this rolls back is
+     * bounded by its own {@code expires_at}, NOT by {@code attempts} -- the
+     * {@code UPDATE ... SET attempts = ...} inside {@link #releaseOrDeadLetter} is
+     * itself part of what this savepoint rolls back on failure, so a row that fails
+     * on EVERY tick never advances {@code attempts} and can never reach {@code
+     * max_attempts} that way. It is reaped only by the independent {@link
+     * #purgeExpiredTuplesBatch} arm once its {@code expires_at} passes -- a raw
+     * DELETE immune to whatever made this row's release throw -- never by hitting a
+     * dead-letter threshold it can no longer count toward.
      */
     private static <T> T withRowSavepoint(DSLContext ctx, Callable<T> body) {
         Connection conn = ctx.configuration().connectionProvider().acquire();

@@ -1127,6 +1127,28 @@ class TupleRepositoryTest {
         return id;
     }
 
+    /** Raw-SQL read via a superuser connection (bypasses RLS), for asserting a
+     *  row's post-sweep state directly rather than through the repo's own API. */
+    private String claimStateOf(byte[] id) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .select(dev.nexus.service.jooq.nexus.Tables.TUPLES.CLAIM_STATE)
+                    .from(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(id))
+                    .fetchOne(dev.nexus.service.jooq.nexus.Tables.TUPLES.CLAIM_STATE);
+        }
+    }
+
+    private int attemptsOf(byte[] id) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .select(dev.nexus.service.jooq.nexus.Tables.TUPLES.ATTEMPTS)
+                    .from(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(id))
+                    .fetchOne(dev.nexus.service.jooq.nexus.Tables.TUPLES.ATTEMPTS);
+        }
+    }
+
     @Test
     void purgeExpiredTuplesBatch_respectsBatchSize_multipleCallsDrainTheRest() throws Exception {
         String tenant = "tuple-tenant-purge-batch-" + UUID.randomUUID();
@@ -1175,6 +1197,107 @@ class TupleRepositoryTest {
         assertThat(result.scanned()).isEqualTo(1);
         assertThat(result.released()).isEqualTo(1);
         assertThat(result.deadLettered()).isZero();
+    }
+
+    /**
+     * Round-2 verification (CRE pass 2, 2026-09-13): the CatalogRepository#
+     * withSavepointFailOpen precedent this bead's {@code withRowSavepoint} mirrors
+     * has a test that forces a REAL SQL error (a REVOKE'd privilege) and proves the
+     * fail-open mechanism -- {@code CatalogManifestSweepRepositoryTest#
+     * writeManifestMany_sweepTrue_deletePermissionDenied_failsOpen_...}. Nothing in
+     * this bead's own tree had an equivalent for {@code withRowSavepoint} until
+     * this test. A REVOKE alone cannot isolate ONE row from another in the SAME
+     * table+column (it would refuse every row's release identically) -- an
+     * additional per-row Postgres error path is needed, so this seeds a real
+     * {@code BEFORE UPDATE} trigger that raises for exactly one row's id, a
+     * genuine server-side exception thrown by Postgres itself, not a fabricated
+     * Java one, the same "real error, not a mock" standard the REVOKE precedent
+     * holds to.
+     */
+    @Test
+    void releaseLapsedClaimsBatch_oneRowsReleaseThrowsARealError_theOtherRowStillReleasesAndCommits()
+            throws Exception {
+        String tenant = "tuple-tenant-savepoint-" + UUID.randomUUID();
+        OffsetDateTime now = OffsetDateTime.now(java.time.ZoneOffset.UTC);
+
+        String goodTo = "agent-savepoint-good-" + UUID.randomUUID();
+        byte[] goodId = repo.out(tenant, "mailbox/" + goodTo, Map.of("to", goodTo), Map.of("from", "sender-good"),
+                null, "nonce-savepoint-good", null);
+        String poisonTo = "agent-savepoint-poison-" + UUID.randomUUID();
+        byte[] poisonId = repo.out(tenant, "mailbox/" + poisonTo, Map.of("to", poisonTo),
+                Map.of("from", "sender-poison"), null, "nonce-savepoint-poison", null);
+
+        // Force BOTH rows into an already-lapsed claimed state, exactly like the
+        // single-row test above.
+        try (Connection su = pg.createConnection("")) {
+            var dsl = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            for (var pair : java.util.List.of(
+                    Map.entry(goodId, "worker-savepoint-good"), Map.entry(poisonId, "worker-savepoint-poison"))) {
+                dsl.update(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                        .set(dev.nexus.service.jooq.nexus.Tables.TUPLES.CLAIM_STATE, "claimed")
+                        .set(dev.nexus.service.jooq.nexus.Tables.TUPLES.CLAIMANT, pair.getValue())
+                        .set(dev.nexus.service.jooq.nexus.Tables.TUPLES.CLAIM_ID, "claim-" + pair.getValue())
+                        .set(dev.nexus.service.jooq.nexus.Tables.TUPLES.LEASE_UNTIL, now.minusMinutes(5))
+                        .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(pair.getKey()))
+                        .execute();
+            }
+        }
+
+        // A real, server-side per-row failure: a BEFORE UPDATE trigger that raises
+        // for exactly poisonId's row and no other -- not a REVOKE (which cannot
+        // distinguish one row from another in the same table+column) and not a
+        // fabricated Java exception.
+        String poisonHex = java.util.HexFormat.of().formatHex(poisonId);
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                    "CREATE OR REPLACE FUNCTION nexus_test_poison_tuple_row() RETURNS trigger AS $$ "
+                    + "BEGIN IF OLD.id = decode('" + poisonHex + "', 'hex') THEN "
+                    + "RAISE EXCEPTION 'nexus_test_poison_row: forced failure for row %', OLD.id; "
+                    + "END IF; RETURN NEW; END; $$ LANGUAGE plpgsql");
+            su.createStatement().execute(
+                    "CREATE TRIGGER nexus_test_poison_tuple_row_trigger BEFORE UPDATE ON nexus.tuples "
+                    + "FOR EACH ROW EXECUTE FUNCTION nexus_test_poison_tuple_row()");
+        }
+
+        try {
+            var result = repo.releaseLapsedClaimsBatch(tenant, 300, null);
+
+            // Both rows were selected; only the healthy one actually released.
+            assertThat(result.scanned()).isEqualTo(2);
+            assertThat(result.released()).isEqualTo(1);
+            assertThat(result.deadLettered()).isZero();
+
+            // The good row committed: released, claim cleared.
+            assertThat(claimStateOf(goodId)).isNull();
+
+            // The poisoned row's own update rolled back to the savepoint: it is left
+            // EXACTLY as it was before this call -- still claimed, still lapsed, its
+            // attempts counter UNCHANGED (the attempts UPDATE is itself what the
+            // savepoint undoes) -- ready to be picked up again on a later tick, not
+            // wedged and not silently dead-lettered.
+            assertThat(claimStateOf(poisonId)).isEqualTo("claimed");
+            assertThat(attemptsOf(poisonId)).isZero();
+
+            // A LATER tick, once whatever made the row fail is gone, releases it --
+            // bounded by a later attempt succeeding, not by attempts exhausting
+            // (attempts never advanced above).
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute("DROP TRIGGER nexus_test_poison_tuple_row_trigger ON nexus.tuples");
+            }
+            var secondResult = repo.releaseLapsedClaimsBatch(tenant, 300, null);
+            assertThat(secondResult.scanned()).isEqualTo(1);
+            assertThat(secondResult.released()).isEqualTo(1);
+            assertThat(claimStateOf(poisonId)).isNull();
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute(
+                        "DROP TRIGGER IF EXISTS nexus_test_poison_tuple_row_trigger ON nexus.tuples");
+                su.createStatement().execute("DROP FUNCTION IF EXISTS nexus_test_poison_tuple_row()");
+            }
+        }
     }
 
     @Test

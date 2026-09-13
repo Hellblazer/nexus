@@ -923,6 +923,11 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/ManifestFunctionsTest.java", 14),
         Map.entry("dev/nexus/service/ManifestVerifyTest.java", 13),
         Map.entry("dev/nexus/service/NexusServiceScheduledSweepTest.java", 3),
+        // Round-2 verification (CRE pass 2, 2026-09-13, coordinator-directed): a
+        // REVOKE/GRANT pair (column-level, to isolate arm 1's full-row SELECT from
+        // arm 2's single-column one -- see the class javadoc) plus one restoring
+        // GRANT in the finally block. No jOOQ codegen exists for GRANT/REVOKE.
+        Map.entry("dev/nexus/service/NexusServiceTupleSweepIsolationTest.java", 3),
         Map.entry("dev/nexus/service/OnjvyReadRoutesHandlerTest.java", 1),
         Map.entry("dev/nexus/service/PgBouncerTenantIsolationTest.java", 4),
         Map.entry("dev/nexus/service/PgVectorCombinedQueryContractTest.java", 6),
@@ -1045,6 +1050,13 @@ class RawSqlGateTest {
         // TaxonomyCentroidAnnPlanShapeTest idiom -- 3 bulk INSERT...SELECT generate_series
         // seeding statements, 1 EXPLAIN dispatch in the shared explain() helper, 1 raw
         // count-cardinality JDBC query in seededCardinalityIsReal.
+        // Round-2 verification (CRE pass 2, 2026-09-13, coordinator-directed): the
+        // per-row savepoint test seeds a real per-row Postgres error via a genuine
+        // BEFORE UPDATE trigger (CREATE FUNCTION, CREATE TRIGGER, a mid-test DROP
+        // TRIGGER, then DROP TRIGGER IF EXISTS + DROP FUNCTION IF EXISTS in the
+        // finally block) -- 5 raw statements, no jOOQ codegen for CREATE FUNCTION/
+        // TRIGGER exists.
+        Map.entry("dev/nexus/service/TupleRepositoryTest.java", 5),
         Map.entry("dev/nexus/service/TupleSweepIndexPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/UpdatedAtTriggerTest.java", 7),
         Map.entry("dev/nexus/service/VectorsChashIndexLiquibaseTest.java", 3),
@@ -1393,7 +1405,11 @@ class RawSqlGateTest {
     // TupleSweepIndexPlanShapeTest.java entry above).
     // RDR-205 P1 follow-on (bead nexus-f1pbh): 1134 -> 1135 (+1,
     // GrantsNexusDiagViewAccessIntegrationTest.java's nexusDiagCanSelectTupleTables).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 910;
+    // Round-2 verification (nexus-r7xao, CRE pass 2, 2026-09-13): 910 -> 918
+    // (+8: NexusServiceTupleSweepIsolationTest.java new at 3, TupleRepositoryTest.java
+    // new at 5 -- both genuinely new REVOKE/GRANT/CREATE TRIGGER raw SQL with no jOOQ
+    // codegen equivalent, see the two entries' own comments above).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 918;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

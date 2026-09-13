@@ -131,11 +131,11 @@ _PARK_TIMEOUT_MARGIN_S: float = 5.0
 _ROUTE_PREFIX: str = "/v1/tuples"
 
 
-# ── Typed errors (mirrors dev.nexus.service.db.TupleException's nine subtypes) ──
+# ── Typed errors (mirrors dev.nexus.service.db.TupleException's ten subtypes) ──
 
 
 class TupleError(RuntimeError):
-    """Base of the nine RDR-205 typed tuple-space client errors.
+    """Base of the ten RDR-205 typed tuple-space client errors.
 
     ``code`` matches the engine's ``TupleException#code()`` verbatim
     (e.g. ``"UnknownSubspace"``); the exception's message is the
@@ -700,7 +700,7 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         404 with ``{"error": "unknown tuples op: /renew"}`` (the route
         switch's default branch, verified at ``engine-service-v0.1.116``).
         The body DOES carry an ``error`` field; its value is simply not one
-        of the nine recognised codes, so ``_raise_typed`` finds no class for
+        of the ten recognised codes, so ``_raise_typed`` finds no class for
         it and re-raises the bare ``httpx.HTTPStatusError`` -- loud by
         design. A silent no-op here would let a caller believe its lease was
         extended while the claim lapses underneath it. (An earlier version
