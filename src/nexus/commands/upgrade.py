@@ -130,6 +130,12 @@ def upgrade(
         # `nx upgrade`, where it runs. Advisory: never fails the upgrade.
         if not auto_mode:
             _converge_plugins(dry_run=dry_run)
+
+        # nexus-cnzei.8: install/refresh the user-level beads PRIME.md when
+        # beads is detected. Same gating as the git-hooks refresh above — a
+        # filesystem write, not under --auto, never under --dry-run.
+        if not auto_mode and not dry_run:
+            _install_beads_prime_best_effort()
     except Exception:
         if auto_mode:
             _log.warning("upgrade_auto_error", exc_info=True)
@@ -630,6 +636,25 @@ def _emit_name_vs_embed_dim_advisory() -> None:
         f"(pre-4.32 local-mode data). Run `nx catalog doctor "
         f"--name-vs-embed-dim` for details and remediation."
     )
+
+
+def _install_beads_prime_best_effort() -> None:
+    """Install/refresh the user-level ``beads`` PRIME.md when beads is
+    detected on this machine (nexus-cnzei.8). Mirrors ``nx init``'s helper
+    of the same name — best-effort, never fails the upgrade. ``nx doctor``'s
+    "Beads PRIME.md (user-level)" row is the durable, always-visible signal
+    if this ever fails silently.
+    """
+    from nexus.beads_prime import install_and_describe  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    try:
+        message = install_and_describe()
+    except Exception as exc:  # noqa: BLE001 — best-effort upgrade step; never fails the upgrade
+        click.echo(f"Beads PRIME.md install skipped ({exc}).", err=True)
+        _log.warning("upgrade_beads_prime_failed", error=str(exc))
+        return
+    if message:
+        click.echo(message)
 
 
 def _converge_plugins(*, dry_run: bool) -> None:

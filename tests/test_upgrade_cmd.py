@@ -20,6 +20,13 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 
+import nexus.commands.upgrade as _upgrade_mod
+
+# Captured at import time, BEFORE the autouse _no_real_daemon_nudge fixture
+# replaces the module attribute — TestBeadsPrimeWiring's own-error-handling
+# test needs the real helper, not the per-test Mock.
+_REAL_BEADS_PRIME = _upgrade_mod._install_beads_prime_best_effort
+
 
 @pytest.fixture()
 def runner() -> CliRunner:
@@ -38,6 +45,11 @@ def _no_real_daemon_nudge():
     with (
         patch("nexus.commands.upgrade._cycle_supervised_daemons_to_current") as m,
         patch("nexus.commands.upgrade._converge_preconditions"),
+        # nexus-cnzei.8: the real helper writes the user-level beads
+        # PRIME.md at Path.home()/.../beads/PRIME.md — never from a unit
+        # test. TestBeadsPrimeWiring overrides this stub to exercise the
+        # real helper against an injected path.
+        patch("nexus.commands.upgrade._install_beads_prime_best_effort"),
     ):
         yield m
 
@@ -205,3 +217,69 @@ class TestUpgradeBackfillsInstallModeRecord:
         (cfg / "config.yml").write_text("foo: [1, 2\n")
         result = runner.invoke(main, ["upgrade"])
         assert result.exit_code == 0, result.output
+
+
+class TestBeadsPrimeWiring:
+    """nexus-cnzei.8: ``nx upgrade`` installs/refreshes the user-level beads
+    PRIME.md — a filesystem write, gated the same as the git-hooks refresh
+    (``not auto_mode and not dry_run``). The autouse ``_no_real_daemon_nudge``
+    fixture stubs the real helper for every other test in this file; these
+    tests override that stub to exercise the wiring and the real helper's
+    own error handling."""
+
+    def _record(self, monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+        calls: list[bool] = []
+        monkeypatch.setattr(
+            "nexus.commands.upgrade._install_beads_prime_best_effort",
+            lambda: calls.append(True),
+        )
+        return calls
+
+    def test_plain_upgrade_installs(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        calls = self._record(monkeypatch)
+        result = runner.invoke(main, ["upgrade"])
+        assert result.exit_code == 0, result.output
+        assert calls == [True]
+
+    def test_auto_mode_skips_it(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        calls = self._record(monkeypatch)
+        result = runner.invoke(main, ["upgrade", "--auto"])
+        assert result.exit_code == 0, result.output
+        assert calls == []
+
+    def test_dry_run_skips_it(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        calls = self._record(monkeypatch)
+        result = runner.invoke(main, ["upgrade", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert calls == []
+
+    def test_helper_echoes_message_and_never_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "nexus.beads_prime.install_and_describe",
+            lambda: "Beads PRIME.md: installed (/x/PRIME.md)",
+        )
+        out: list[str] = []
+        monkeypatch.setattr(
+            _upgrade_mod.click, "echo", lambda *a, **k: out.append(a[0] if a else "")
+        )
+        _REAL_BEADS_PRIME()
+        assert any("Beads PRIME.md: installed" in line for line in out)
+
+        def _boom():
+            raise RuntimeError("disk full")
+
+        out.clear()
+        monkeypatch.setattr("nexus.beads_prime.install_and_describe", _boom)
+        _REAL_BEADS_PRIME()  # must not raise
+        assert any("Beads PRIME.md install skipped" in line for line in out)

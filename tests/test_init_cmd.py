@@ -82,6 +82,17 @@ def _stub_plan_seeding(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_beads_prime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """init installs/refreshes the user-level beads PRIME.md
+    (nexus-cnzei.8); the real helper touches ``Path.home()``/
+    ``CLAUDE_CONFIG_DIR``, which unit tests must never do. Unit tests stub
+    it. TestBeadsPrimeWiring overrides this stub with a recorder."""
+    monkeypatch.setattr(
+        "nexus.commands.init._install_beads_prime_best_effort", lambda: None
+    )
+
+
 
 # ── managed mode ──────────────────────────────────────────────────────────────
 
@@ -1545,6 +1556,117 @@ class TestBuiltinPlanSeeding:
         result = CliRunner().invoke(init_cmd, [])
         assert result.exit_code == 0, result.output
         assert calls == [], "no lease → no seeding attempt"
+
+
+# ── nexus-cnzei.8: user-level beads PRIME.md ────────────────────────────────
+
+# Captured at import time, BEFORE the autouse _stub_beads_prime fixture
+# replaces the module attribute — the best-effort test needs the real helper.
+_REAL_BEADS_PRIME = _init_mod._install_beads_prime_best_effort
+
+
+class TestBeadsPrimeWiring:
+    """Unlike the ladder/plan-seed steps, beads-prime install is
+    MODE-INDEPENDENT: it runs before ``_resolve_init_mode`` dispatch, so it
+    must fire on every branch — managed, cloud, local session, and local
+    autostart (including the pending-lease case, unlike the other two
+    best-effort steps)."""
+
+    def _record(self, monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+        calls: list[bool] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._install_beads_prime_best_effort",
+            lambda: calls.append(True),
+        )
+        return calls
+
+    def test_managed_mode_still_installs(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NX_LOCAL", "0")
+        monkeypatch.setenv("NX_SERVICE_URL", "https://m.example")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service",
+            lambda **kw: _fake_caps(),
+        )
+        calls = self._record(monkeypatch)
+        result = CliRunner().invoke(init_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert calls == [True], "managed mode must still install the beads prime file"
+
+    def test_local_session_path_installs(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.setattr(
+            "nexus.commands.init.provision_and_start_service",
+            lambda embedder=None: _FAKE_LEASE,
+        )
+        calls = self._record(monkeypatch)
+        result = CliRunner().invoke(init_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert calls == [True]
+
+    def test_local_autostart_pending_lease_still_installs(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unlike ladder convergence / plan seeding, a pending (not-yet-up)
+        autostart lease does NOT skip this step — it has nothing to do with
+        whether the backend is serving yet."""
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.setattr(
+            "nexus.commands.init._decide_autostart", lambda *a, **kw: True
+        )
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_and_autostart_service",
+            lambda embedder=None: None,
+        )
+        calls = self._record(monkeypatch)
+        result = CliRunner().invoke(init_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert calls == [True]
+
+    def test_helper_echoes_message_from_install_and_describe(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "nexus.beads_prime.install_and_describe",
+            lambda: "Beads PRIME.md: installed (/x/PRIME.md)",
+        )
+        out: list[str] = []
+        monkeypatch.setattr(
+            _init_mod.click, "echo", lambda *a, **k: out.append(a[0] if a else "")
+        )
+        _REAL_BEADS_PRIME()
+        assert any("Beads PRIME.md: installed" in line for line in out)
+
+    def test_helper_silent_when_beads_not_detected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "nexus.beads_prime.install_and_describe", lambda: None
+        )
+        out: list[str] = []
+        monkeypatch.setattr(
+            _init_mod.click, "echo", lambda *a, **k: out.append(a[0] if a else "")
+        )
+        _REAL_BEADS_PRIME()
+        assert out == []
+
+    def test_helper_failure_never_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom():
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr("nexus.beads_prime.install_and_describe", _boom)
+        out: list[str] = []
+        monkeypatch.setattr(
+            _init_mod.click, "echo", lambda *a, **k: out.append(a[0] if a else "")
+        )
+        _REAL_BEADS_PRIME()  # must not raise
+        assert any("Beads PRIME.md install skipped" in line for line in out)
 
     def test_seeding_runs_after_ladder_convergence(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch

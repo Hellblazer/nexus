@@ -510,7 +510,11 @@ def quiet_upgrade():
     with (patch("nexus.commands.upgrade._cycle_supervised_daemons_to_current"),
           patch("nexus.commands.upgrade._converge_preconditions"),
           patch("nexus.commands.upgrade._refresh_all_git_hooks"),
-          patch("nexus.commands.upgrade._migrate_repos_json_to_catalog")):
+          patch("nexus.commands.upgrade._migrate_repos_json_to_catalog"),
+          # nexus-cnzei.8: the real helper writes the user-level beads
+          # PRIME.md at Path.home()/.../beads/PRIME.md — never from a unit
+          # test (this box genuinely has `bd` on PATH).
+          patch("nexus.commands.upgrade._install_beads_prime_best_effort")):
         yield
 
 

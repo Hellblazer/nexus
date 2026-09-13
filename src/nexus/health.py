@@ -5654,6 +5654,69 @@ def _check_tuple_watch_permission(
     )]
 
 
+_BEADS_PRIME_LABEL = "Beads PRIME.md (user-level)"
+
+
+def _check_beads_prime() -> list[HealthResult]:
+    """Informational doctor row (nexus-cnzei.8): the state of the
+    machine-wide, conexus-managed ``beads`` PRIME.md at
+    :func:`nexus.beads_prime.user_prime_path`.
+
+    Returns ``[]`` when beads is not detected on this machine at all
+    (:func:`nexus.beads_prime.beads_detected`) -- nothing to report,
+    mirroring :func:`_check_plugin_name`'s not-applicable-here convention.
+
+    Otherwise reports one of the four :class:`~nexus.beads_prime.PrimeStatus`
+    states. ``absent`` and ``managed-stale`` are soft warnings naming
+    ``nx init`` / ``nx upgrade`` as the fix (both install/refresh it).
+    ``user-authored`` is reported OK and explicitly left alone, per the
+    bead's own instruction -- this row must never suggest overwriting a
+    hand-written file. Read-only except for the detection probe itself
+    (``shutil.which`` + a filesystem glob); never writes.
+    """
+    try:
+        from nexus.beads_prime import PrimeStatus, beads_detected, status, user_prime_path  # noqa: PLC0415 — deferred to avoid module-load cost
+        # ``which=shutil.which`` (this module's OWN import, not
+        # nexus.beads_prime's) so a test that patches
+        # ``nexus.health.shutil.which`` — the existing convention the "bd
+        # (beads, optional)" row above already relies on — reaches this
+        # row's detection too, instead of silently falling through to the
+        # real ambient PATH.
+        detected, _reason = beads_detected(which=shutil.which)
+        if not detected:
+            return []
+        path = user_prime_path()
+        current = status(path)
+    except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`; degraded to WARN, never silent-ok
+        _log.warning("doctor_beads_prime_check_failed", error=str(exc))
+        return [HealthResult(
+            label=_BEADS_PRIME_LABEL, ok=False, warn=True,
+            detail=f"check failed ({exc})",
+        )]
+
+    if current is PrimeStatus.MANAGED_CURRENT:
+        return [HealthResult(
+            label=_BEADS_PRIME_LABEL, ok=True, detail=f"up to date at {path}",
+        )]
+    if current is PrimeStatus.USER_AUTHORED:
+        return [HealthResult(
+            label=_BEADS_PRIME_LABEL, ok=True,
+            detail=f"user-authored at {path} (left alone)",
+        )]
+    if current is PrimeStatus.MANAGED_STALE:
+        return [HealthResult(
+            label=_BEADS_PRIME_LABEL, ok=False, warn=True,
+            detail=f"stale at {path}",
+            fix_suggestions=["run `nx upgrade` to refresh it"],
+        )]
+    # ABSENT
+    return [HealthResult(
+        label=_BEADS_PRIME_LABEL, ok=False, warn=True,
+        detail=f"not installed (would be {path})",
+        fix_suggestions=["run `nx init` or `nx upgrade` to install it"],
+    )]
+
+
 def _check_pending_rungs() -> list[HealthResult]:
     """RDR-185 P0.4 (nexus-n7u38.4): read-only upgrade-ladder surface.
 
@@ -7687,6 +7750,9 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     # informational -- never gated by route_predates_floor, since it reads
     # local Claude Code settings, not the engine.
     results.extend(_check_tuple_watch_permission())
+    # nexus-cnzei.8: read-only informational row; [] when beads is not
+    # detected on this machine at all.
+    results.extend(_check_beads_prime())
     # RDR-185 P0.4: read-only pending-rungs surface (degrades internally).
     results.extend(_check_pending_rungs())
 

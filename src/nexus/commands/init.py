@@ -839,6 +839,30 @@ def _seed_builtin_plans_best_effort() -> None:
         click.echo(f"Seeded {seeded} builtin plan template(s).")
 
 
+def _install_beads_prime_best_effort() -> None:
+    """Install/refresh the user-level ``beads`` PRIME.md when beads is
+    detected on this machine (nexus-cnzei.8).
+
+    Mode-independent (unlike the ladder/plan-seed steps): whether this
+    install is a repo, converts to managed mode, or provisions nothing
+    locally, has no bearing on whether ``beads`` is installed on the box.
+    Best-effort, mirroring the sibling best-effort steps' contract — a
+    detection or write hiccup must never fail an otherwise-successful
+    ``nx init``. ``nx doctor``'s "Beads PRIME.md (user-level)" row is the
+    durable, always-visible signal if this ever fails silently.
+    """
+    from nexus.beads_prime import install_and_describe  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    try:
+        message = install_and_describe()
+    except Exception as exc:  # noqa: BLE001 — best-effort init step; never fails init
+        click.echo(f"\nBeads PRIME.md install skipped ({exc}).", err=True)
+        _log.warning("init_beads_prime_failed", error=str(exc))
+        return
+    if message:
+        click.echo(message)
+
+
 def _converge_ladder_best_effort() -> None:
     """Finish first-run setup with a converged upgrade ladder (nexus-9xfx5).
 
@@ -956,6 +980,11 @@ def init_cmd(
             "works but will be removed in a future release.",
             err=True,
         )
+
+    # nexus-cnzei.8: mode-independent — runs regardless of which branch below
+    # is taken, since whether beads is installed has nothing to do with
+    # local vs managed vs cloud dispatch.
+    _install_beads_prime_best_effort()
 
     # RDR-174 P1.3 dispatch. PRIMARY oracle is the gate-locked mode helper
     # (_resolve_init_mode — service_url-based, NOT is_local_mode which is

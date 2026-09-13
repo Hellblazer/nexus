@@ -2333,6 +2333,22 @@ follow-up in nexus-ddmfg (the engine's voyage-only-mode-flip after
 restart) — that bead's scope now explicitly includes this stale/orphaned
 bge-data-after-a-keyed-write case, not just the engine-restart case.
 
+**Beads PRIME.md (user-level)** (nexus-cnzei.8). Runs unconditionally,
+independent of the local/managed/cloud dispatch above: when `bd` is on
+`PATH` or the beads Claude Code plugin is installed, `nx init` installs or
+refreshes a generic, conexus-managed `PRIME.md` at the OS user config
+directory `bd` falls back to when a repo has no `.beads/PRIME.md` of its
+own (macOS `~/Library/Application Support/beads/PRIME.md`; Linux
+`$XDG_CONFIG_HOME/beads/PRIME.md` or `~/.config/beads/PRIME.md`; Windows
+`%AppData%/beads/PRIME.md`). This file is machine-wide — it affects every
+beads repo on the box, not only the current one — and never overwrites a
+hand-authored file already at that path. Best-effort: a failure prints a
+one-line warning and never fails `nx init`. Prints one line naming the
+action taken (`installed`, `updated`, `up to date`, or `left alone
+(user-authored)`) and the path when beads is detected; silent when it is
+not. `nx doctor`'s "Beads PRIME.md (user-level)" row reports the durable
+state. See `docs/contributing.md` § Git Workflow for the full contract.
+
 ---
 
 ## nx config
@@ -2551,6 +2567,16 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 **Garbage sweep (7.32.0; Sam, 2026-09-05).** Two rows on every run. `Local garbage` reaps, in place, the litter nothing else touches: `t1_mint_<session>.lock` files older than a day whose session holds no lease (706 had accumulated since July), rotated logs (`*.log.N`) older than 14 days, and `operator-timeout-*` / `operator-budget-*` dispatch dumps older than 7. `Catalog garbage` counts orphaned links (an endpoint that resolves to no live document) and tombstoned documents plus stranded chunks past **one** day; a non-zero count is a ⚠ naming `nx doctor --fix`, and an unreachable engine is a ⚠ too, never a clean row. Each litter class this repo produces is a row in `nexus.garbage`; a new class is a new row there, not a new command.
 
 The `--fix` flag first reclaims the catalog garbage the sweep counted (deletes every orphaned link, then runs the one-day `purge-trash`; fails loud on an engine error), then retroactively applies HNSW `search_ef` tuning to all existing local-mode collections. New collections get this automatically. In cloud mode (SPANN), prints a skip message — SPANN defaults are adequate.
+
+**`Beads PRIME.md (user-level)`** (nexus-cnzei.8). Reports `[]` (no row at
+all) when neither `bd` nor the beads Claude Code plugin is detected on this
+machine. Otherwise reports the state of the machine-wide, conexus-managed
+`PRIME.md` [`nx init`/`nx upgrade` install](#nx-init): OK when up to date,
+OK ("user-authored, left alone") for a hand-written file at that path —
+never a suggestion to overwrite it — and a soft warning naming `nx init` or
+`nx upgrade` as the fix when the file is missing or stale (marker present
+but content out of date). Never fatal; read-only except for the detection
+probe itself.
 
 ```
 nx doctor --check-schema          # Report where the T2 schema lives
@@ -3360,6 +3386,12 @@ precondition axis. Unlike the others, this one is never suppressed by
 edits a template, so it is re-derived every time rather than gated behind a
 flag. Failure is non-fatal and reported (a stale plan library degrades
 retrieval; it does not block the upgrade or fail the invocation).
+
+**Beads PRIME.md (user-level)** (nexus-cnzei.8). Same install/refresh as
+[`nx init`](#nx-init) — see there for the full contract — gated the same
+way as the git-hooks refresh: only when `not --auto` and `not --dry-run`.
+Best-effort; a failure prints a one-line warning and never fails the
+upgrade.
 
 **Ladder position is derived, never stored.** How far an install is from current has exactly two answers, by class: DATA-rung state comes solely from the ladder position derived from per-rung completion records; PRECONDITION freshness (package, engine, processes) comes solely from a fresh comparison of on-disk installed state against required, and is deliberately stateless — re-derived at every invocation, never recorded. A rung is recorded complete only when its own verify passed ([RDR-142](rdr/rdr-142-migration-completeness-vs-version-row.md)), so the position never advances past deferred or failed work.
 
