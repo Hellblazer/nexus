@@ -198,7 +198,24 @@ if command -v uv >/dev/null 2>&1 && [ -f "$REPO_ROOT/pyproject.toml" ]; then
   # documented practice on this project) would pass through unisolated and
   # target that URL instead of this script's local native binary, bearing the
   # smoketoken bearer. Explicitly clearing it here closes that leg too.
+  #
+  # NX_SESSION_ID='' CLAUDE_CODE_SESSION_ID='' (nexus-xihsm, found while
+  # building the checkout-shape pre-tag check): get_t1_database() ->
+  # resolve_active_session_id() consults these two env vars (in that order,
+  # nexus-36q84) BEFORE any file-based fallback. This script's OWN throwaway
+  # T1 session ("native-smoke-t1", minted a few lines up) has nothing to do
+  # with whatever session identity happens to be exported in the invoking
+  # shell -- but when this script is run from an interactive Claude Code
+  # session (routine on this project: a human or agent driving the pre-tag
+  # battery by hand, not only GitHub Actions), CLAUDE_CODE_SESSION_ID is set
+  # in every subprocess Claude Code spawns and passes through here
+  # unisolated. The probe then resolves THAT session's lease -- which points
+  # at nothing this freshly-booted engine ever published -- and fails with
+  # T1ServerNotFoundError, misreading as a real regression. GitHub Actions
+  # runners never set either var, so this is invisible there; it bit the
+  # very first live run of this check, off this session's own worktree.
   PY_OUT=$(cd "$REPO_ROOT" && NEXUS_CONFIG_DIR="$T1_PY_TMPDIR" NX_SERVICE_URL='' \
+    NX_SESSION_ID='' CLAUDE_CODE_SESSION_ID='' \
     NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SVCPORT" NX_SERVICE_TOKEN=smoketoken \
     NX_STORAGE_BACKEND=service NATIVE_SMOKE_CLEANUP_ROWS="$NATIVE_SMOKE_CLEANUP_ROWS" \
     $TIMEOUT_CMD uv run python "$REPO_ROOT/service/smoke-probes/t1_real_client.py" 2>&1)

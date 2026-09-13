@@ -159,3 +159,36 @@ def test_native_smoke_script_opts_into_the_prod_write_guard() -> None:
     assert export_at != -1, "native-smoke.sh must export NX_ALLOW_PROD_WRITE with a reason"
     assert first_probe_at != -1
     assert export_at < first_probe_at, "the opt-in must precede the first real-client probe"
+
+
+def test_native_smoke_t1_block_scrubs_ambient_session_identity() -> None:
+    """nexus-xihsm: get_t1_database() -> resolve_active_session_id() consults
+    NX_SESSION_ID then CLAUDE_CODE_SESSION_ID before any file-based fallback
+    (nexus-36q84). This script mints its OWN throwaway T1 session
+    ("native-smoke-t1") a few lines above the T1 real-client block, but an
+    ambient CLAUDE_CODE_SESSION_ID -- set in every subprocess Claude Code
+    spawns, a routine way this script gets run on this project -- passes
+    through unisolated exactly like the NX_SERVICE_URL leak nexus-rxqqd
+    already fixed. Found live: the checkout-shape pre-tag check
+    (scripts/check_release_workflow_shape.py, nexus-xihsm) failed its very
+    first real run this way, off this session's own worktree, with
+    T1ServerNotFoundError against a lease that pointed at nothing this
+    freshly-booted engine ever published."""
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[1] / "service" / "native-smoke.sh"
+    text = script.read_text(encoding="utf-8")
+    t1_block_start = text.find("t1_real_client.py")
+    assert t1_block_start != -1
+    # The scrub must be on the SAME invocation line (or its line-continued
+    # predecessor) as NEXUS_CONFIG_DIR, before the t1_real_client.py call.
+    preamble = text[:t1_block_start]
+    scrub_at = preamble.rfind("NX_SESSION_ID='' CLAUDE_CODE_SESSION_ID=''")
+    config_dir_at = preamble.rfind('NEXUS_CONFIG_DIR="$T1_PY_TMPDIR"')
+    assert scrub_at != -1, (
+        "native-smoke.sh's T1 real-client block no longer scrubs "
+        "NX_SESSION_ID/CLAUDE_CODE_SESSION_ID -- an ambient Claude Code "
+        "session id will leak into get_t1_database() and fail the probe "
+        "against a lease belonging to a different session entirely"
+    )
+    assert config_dir_at != -1 and config_dir_at < scrub_at < t1_block_start
