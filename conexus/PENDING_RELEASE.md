@@ -201,3 +201,82 @@ mechanize, it matters enough to ship.
   closing party as its own move, and the marker-write remedy now names the
   subagent-hands-back-to-orchestrator alternative. Inert until the pin
   advances. Bead nexus-cnzei.2.
+
+- `conexus/commands/architecture.md`, `conexus/commands/deep-analysis.md`,
+  `conexus/commands/substantive-critique.md`, `conexus/commands/enrich-plan.md`,
+  `conexus/commands/upgrade.md`, `conexus/commands/phase-review-gate.md`,
+  `conexus/commands/knowledge-tidy.md` (nexus-cnzei.4): DELETED — each collided under the
+  same name as its own skill (a Skill-tool listing collision that shadowed the skill), or
+  (`knowledge-tidy.md`) duplicated `knowledge-tidying` under a different name. The skill is
+  now the sole entry point for each name; `knowledge-tidy.md`'s fuller nx_tidy → store_put →
+  verify workflow was merged into `conexus/skills/knowledge-tidying/SKILL.md`. Inert until
+  the pin advances.
+- `conexus/agents/knowledge-tidier.md`, `conexus/agents/plan-auditor.md`,
+  `conexus/agents/plan-enricher.md` (nexus-cnzei.4): DELETED outright — these were 40-line
+  RDR-080 stub agents that only redirected to an MCP tool. Callers now call
+  `nx_tidy` / `nx_plan_audit` / `nx_enrich_beads` directly, or use the corresponding pointer
+  skill (registry.yaml changes, outside this ledger's tracked surface, follow suit). Inert
+  until the pin advances.
+- `conexus/skills/debug/SKILL.md` -> `conexus/skills/why-was-this-written/SKILL.md`,
+  `conexus/skills/research/SKILL.md` -> `conexus/skills/design-to-code-trace/SKILL.md`,
+  `conexus/skills/review/SKILL.md` -> `conexus/skills/decision-drift-review/SKILL.md`
+  (nexus-cnzei.4): RENAMED. The bare-verb nx_answer retrieval skills collided under
+  `/conexus:debug` and `/conexus:research` with the debugger/deep-research-synthesizer
+  dispatch commands of the same name, and `/conexus:review` invited confusion with
+  `/conexus:review-code`. The `dimensions={"verb": ...}` value each passes to `nx_answer` is
+  unchanged — only the skill's own name moved. Inert until the pin advances.
+- `conexus/agents/_shared/CONTEXT_PROTOCOL.md`, `conexus/agents/_shared/ERROR_HANDLING.md`,
+  `conexus/agents/_shared/MAINTENANCE.md`, `conexus/agents/_shared/README.md`,
+  `conexus/agents/_shared/RELAY_TEMPLATE.md` -> the same five filenames under
+  `conexus/resources/agent-shared/` (nexus-cnzei.4): MOVED. As a subdirectory of `agents/`,
+  these five reference docs were listed as dispatchable `conexus:_shared:*` agent entries
+  with nothing meaningful to invoke. `src/nexus/commands/agents_cmd.py`'s
+  `compose_worktree_developer` (the mechanism that generates the installed
+  `worktree-developer` agent, outside this ledger's tracked surface) was updated to match.
+  Inert until the pin advances.
+- `conexus/agents/architect-planner.md`, `conexus/agents/code-review-expert.md`,
+  `conexus/agents/codebase-deep-analyzer.md`, `conexus/agents/debugger.md`,
+  `conexus/agents/deep-analyst.md`, `conexus/agents/deep-research-synthesizer.md`,
+  `conexus/agents/developer.md`, `conexus/agents/strategic-planner.md`,
+  `conexus/agents/substantive-critic.md`, `conexus/agents/test-validator.md`
+  (nexus-cnzei.4): relative-link rewrite only (`./_shared/` -> `../resources/agent-shared/`),
+  per the move above — no behavioral content change, except `deep-analyst.md`, which also
+  drops its "Completion Protocol" section's contradiction of its own `<HARD-GATE>` (the
+  former said persist to T2 AND T3; the HARD-GATE says exactly one). Inert until the pin
+  advances.
+- `conexus/commands/analyze-code.md`, `conexus/commands/create-plan.md`,
+  `conexus/commands/debug.md`, `conexus/commands/implement.md`, `conexus/commands/research.md`,
+  `conexus/commands/review-code.md`, `conexus/commands/test-validate.md` (nexus-cnzei.4):
+  relative-link rewrite only (`../agents/_shared/` -> `../resources/agent-shared/`), per the
+  move above — no behavioral content change. Inert until the pin advances.
+- `conexus/skills/analyze/SKILL.md`, `conexus/skills/architecture/SKILL.md`,
+  `conexus/skills/code-review/SKILL.md`, `conexus/skills/codebase-analysis/SKILL.md`,
+  `conexus/skills/composition-probe/SKILL.md`, `conexus/skills/debugging/SKILL.md`,
+  `conexus/skills/deep-analysis/SKILL.md`, `conexus/skills/development/SKILL.md`,
+  `conexus/skills/document/SKILL.md`, `conexus/skills/orchestration/SKILL.md`,
+  `conexus/skills/rdr-audit/SKILL.md`, `conexus/skills/rdr-gate/SKILL.md`,
+  `conexus/skills/rdr-research/SKILL.md`, `conexus/skills/research-synthesis/SKILL.md`,
+  `conexus/skills/strategic-planning/SKILL.md`, `conexus/skills/substantive-critique/SKILL.md`,
+  `conexus/skills/test-validation/SKILL.md` (nexus-cnzei.4): relative-link rewrite only
+  (`../../agents/_shared/` -> `../../resources/agent-shared/`), per the move above; `analyze`
+  and `document` also drop the stale "falls through to /conexus:query" phrasing (nx_answer
+  inline-plans on a miss, it does not hand off to a sibling skill) for "inline-plans on a
+  miss". `rdr-audit/SKILL.md` also fixes a `memory_list` reference (no such MCP tool exists)
+  to `memory_get(project=..., title="")`. Inert until the pin advances.
+- `conexus/skills/using-nx-skills/SKILL.md` (nexus-cnzei.4): routing table updated to the
+  renamed skill names above (`why-was-this-written`, `design-to-code-trace`,
+  `decision-drift-review`, `knowledge-tidying`); description shortened to under 260 chars.
+  Inert until the pin advances.
+- `conexus/skills/writing-nx-skills/SKILL.md` (nexus-cnzei.4): relative-link rewrite; the
+  quality checklist now names the actual CI-checked keyword list (`Triggers:`, `user says`,
+  `workflow`, `process:`) instead of a wider list CI never enforced; the `/conexus:skill-name`
+  cross-reference examples switched to `/conexus:<skill-name>` so they read as placeholders,
+  not a broken reference. Inert until the pin advances.
+- `conexus/skills/plan-first/SKILL.md`, `conexus/skills/test-authoring/SKILL.md`
+  (nexus-cnzei.4): descriptions shortened to under 260 chars (were 422 and 306). Inert until
+  the pin advances.
+- `conexus/skills/knowledge-tidying/SKILL.md` (nexus-cnzei.4): body enriched with the
+  nx_tidy → store_put → verify workflow merged in from the deleted `knowledge-tidy.md`
+  command above. Inert until the pin advances.
+- `conexus/skills/query/SKILL.md` (nexus-cnzei.4): "Verb-scoped shortcuts" section updated
+  to the renamed verb-skill names above. Inert until the pin advances.

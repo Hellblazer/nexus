@@ -13,7 +13,7 @@
         "path": "conexus",
         "ref": "v7.44.0"
       },
-      "description": "Self-hosted three-tier knowledge management with 13 specialized agents, plan-centric retrieval via nx_answer, semantic search, and RDR decision tracking for Claude Code.",
+      "description": "Self-hosted three-tier knowledge management with 10 specialized agents, plan-centric retrieval via nx_answer, semantic search, and RDR decision tracking for Claude Code.",
       "version": "7.44.0"
     },
     {

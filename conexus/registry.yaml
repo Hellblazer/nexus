@@ -159,51 +159,6 @@ agents:
     predecessors: [architect-planner]
     successors: [code-review-expert, test-validator]
 
-  knowledge-tidier:
-    model: haiku
-    version: "3.0"
-    color: mint
-    skill: knowledge-tidying
-    slash_command: /knowledge-tidy
-    description: "STUB — superseded by mcp__plugin_conexus_nexus__nx_tidy MCP tool (RDR-080)"
-    triggers:
-      - "call mcp__plugin_conexus_nexus__nx_tidy directly instead"
-    strengths:
-      - "See nx_tidy MCP tool"
-    typical_runtime: "n/a — stub"
-    predecessors: []
-    successors: []
-
-  plan-auditor:
-    model: sonnet
-    version: "3.0"
-    color: orange
-    skill: plan-validation
-    slash_command: /plan-audit
-    description: "STUB — superseded by mcp__plugin_conexus_nexus__nx_plan_audit MCP tool (RDR-080)"
-    triggers:
-      - "call mcp__plugin_conexus_nexus__nx_plan_audit directly instead"
-    strengths:
-      - "See nx_plan_audit MCP tool"
-    typical_runtime: "n/a — stub"
-    predecessors: []
-    successors: []
-
-  plan-enricher:
-    model: sonnet
-    version: "3.0"
-    color: emerald
-    skill: enrich-plan
-    slash_command: /enrich-plan
-    description: "STUB — superseded by mcp__plugin_conexus_nexus__nx_enrich_beads MCP tool (RDR-080)"
-    triggers:
-      - "call mcp__plugin_conexus_nexus__nx_enrich_beads directly instead"
-    strengths:
-      - "See nx_enrich_beads MCP tool"
-    typical_runtime: "n/a — stub"
-    predecessors: []
-    successors: []
-
   strategic-planner:
     model: opus
     version: "2.1"  # v2.1: Enhanced bead integration and phase decomposition
@@ -395,12 +350,33 @@ standalone_skills:
       - "plan-match-first retrieval"
     tools: []
 
-  upgrade:
-    description: "Guided Chroma-to-service upgrade — preview then run nx migrate-to-service; thin surface over the nexus.migration engine (RDR-159)"
+  enrich-plan:
+    description: "RDR-080 P3 pointer skill — calls mcp__plugin_conexus_nexus__nx_enrich_beads directly, no agent spawn"
     triggers:
-      - "upgrade an existing Chroma store to the nexus service stack"
-      - "migrate permanent vectors off ChromaDB onto PG16+pgvector"
-      - "how to run the guided migration"
+      - "beads need enrichment with execution context"
+      - "file paths, code patterns, constraints, or test commands missing from a bead"
+    tools: []
+
+  knowledge-tidying:
+    description: "RDR-080 P3 pointer skill — calls mcp__plugin_conexus_nexus__nx_tidy (read-only) then store_put to persist the organized result to T3"
+    triggers:
+      - "validated findings need consolidation in the T3 knowledge store"
+    tools: []
+
+  plan-validation:
+    description: "RDR-080 P3 pointer skill — calls mcp__plugin_conexus_nexus__nx_plan_audit directly, no agent spawn"
+    triggers:
+      - "a plan needs validation before implementation"
+      - "catch gaps and codebase misalignment in a plan"
+    tools: []
+
+  upgrade:
+    description: "Guided upgrade — preview via nx upgrade --dry-run and nx doctor, then run nx upgrade; thin surface over the RDR-185 upgrade ladder"
+    triggers:
+      - "upgrade nexus"
+      - "migrate an existing store onto the service stack"
+      - "what upgrade steps does this install need"
+      - "blocked on a migration or holding an old/dormant install"
     tools: [Bash]
 
   serena-code-nav:
@@ -532,16 +508,16 @@ standalone_skills:
       - "before decomposing an agentic pipeline"
     tools: [Read]
 
-  research:
-    description: "Verb skill for design / architecture / planning tasks — dispatches plan_match with dimensions={verb:research}, executes via plan_run with caller bindings"
+  design-to-code-trace:
+    description: "Verb skill for design / architecture / planning tasks — dispatches plan_match with dimensions={verb:research}, executes via plan_run with caller bindings. Renamed off the bare 'research' name (nexus-cnzei.4) which collided with the /conexus:research command's own skill registration."
     triggers:
       - "how does X work"
       - "design context for Y"
       - "trace Z from spec to code"
     tools: [Read]
 
-  review:
-    description: "Verb skill for critique / audit / code-review against a change set — dispatches plan_match with dimensions={verb:review}"
+  decision-drift-review:
+    description: "Verb skill for critique / audit against decision history for a change set — dispatches plan_match with dimensions={verb:review}. Renamed off the bare 'review' name (nexus-cnzei.4) which invited confusion with code review."
     triggers:
       - "review this change set"
       - "did the refactor drift from the RDR"
@@ -556,12 +532,12 @@ standalone_skills:
       - "rank candidates by criterion"
     tools: [Read]
 
-  debug:
-    description: "Verb skill for dev / debug from a failing code path — dispatches plan_match with dimensions={verb:debug}; intentionally flat (no traverse — Serena handles symbol navigation)"
+  why-was-this-written:
+    description: "Verb skill for the design intent behind a failing code path — dispatches plan_match with dimensions={verb:debug}; intentionally flat (no traverse — Serena handles symbol navigation). Renamed off the bare 'debug' name (nexus-cnzei.4) which collided with the /conexus:debug command's own skill registration."
     triggers:
-      - "debug this test failure"
       - "why is this handler failing"
       - "trace the stack of the panic"
+      - "what decision led to this code"
     tools: [Read]
 
   document:
@@ -627,9 +603,8 @@ naming_aliases:
   /debug: debugging                    # Shorter, memorable
   /create-plan: strategic-planning     # Avoids built-in /plan collision
   /research: research-synthesis        # Common usage
-  /knowledge-tidy: knowledge-tidying   # Verb form preference
   /test-validate: test-validation      # Verb form preference
-  /plan-audit: plan-validation         # Action-oriented (stub — use nx_plan_audit MCP tool)
+  /plan-audit: plan-validation         # Action-oriented (RDR-080 pointer skill — nx_plan_audit MCP tool, no agent spawn)
   /analyze-code: codebase-analysis     # Different naming convention
 
 # =============================================================================
@@ -649,11 +624,10 @@ model_summary:
     - substantive-critic
     - deep-research-synthesizer
     - developer
-    - plan-auditor   # stub
-    - plan-enricher  # stub
     - test-validator
-  haiku: # Fast, cheap - utility agents
-    - knowledge-tidier  # stub
+  # knowledge-tidier/plan-auditor/plan-enricher stubs deleted (nexus-cnzei.4);
+  # their functions are the nx_tidy/nx_plan_audit/nx_enrich_beads MCP tools.
+  haiku: [] # Fast, cheap - utility agents (none currently)
 
 # =============================================================================
 # UTILITY COMMANDS
@@ -682,9 +656,9 @@ utility_commands:
     description: "Write a paste-ready continuation prompt under ~/.cache/nexus/continuations/ capturing session state, branch, beads, T2 entries, and next-step pointers"
     disable_model_invocation: false
 
-  upgrade:
-    slash_command: /upgrade
-    description: "Guided Chroma-to-service upgrade — preview via nx migrate-to-service --dry-run, then run the full guided migration (RDR-159)"
+  plan-audit:
+    slash_command: /plan-audit
+    description: "Audit a plan via mcp__plugin_conexus_nexus__nx_plan_audit (RDR-080, no agent spawn); command_file registration moved here after the plan-auditor stub agent was deleted (nexus-cnzei.4) — see naming_aliases for the /plan-audit -> plan-validation skill pairing"
     disable_model_invocation: false
 
 

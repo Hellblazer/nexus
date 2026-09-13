@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-13 agents (10 active + 3 stubs pointing at MCP tools), 43 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
+10 agents, 46 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
 
 New to Nexus? The [install guide](https://hellblazer.github.io/nexus/) covers setup end to end, and [Getting started](https://hellblazer.github.io/nexus/getting-started.html) walks the first search, memory, scratch, and knowledge lessons; [Working with RDRs](https://hellblazer.github.io/nexus/rdr.html) covers the RDR lifecycle. This file is reference — what the plugin ships, not how to use it.
 
@@ -49,8 +49,8 @@ story.
 
 ## What You Get
 
-- **13 agents** (10 active + 3 MCP-tool redirect stubs) matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
-- **43 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
+- **10 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility. The three MCP-tool redirect stubs (`knowledge-tidier`, `plan-auditor`, `plan-enricher`) were deleted (nexus-cnzei.4) — call `nx_tidy` / `nx_plan_audit` / `nx_enrich_beads` directly
+- **46 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
@@ -76,13 +76,15 @@ New to Nexus? Follow [Getting started](https://hellblazer.github.io/nexus/gettin
 ```
 conexus/
 ├── agents/
-│   ├── _shared/             # Shared resources referenced by all agents
+│   └── *.md                 # 10 agent definitions
+├── resources/
+│   ├── agent-shared/        # Shared resources referenced by all agents (not agent-discoverable — nexus-cnzei.4)
 │   │   ├── CONTEXT_PROTOCOL.md  # Standard relay/context exchange protocol
 │   │   ├── ERROR_HANDLING.md    # Common error patterns and recovery
 │   │   ├── MAINTENANCE.md       # How to maintain/update agents
-│   │   ├── README.md            # _shared directory guide (this section)
+│   │   ├── README.md            # agent-shared directory guide (this section)
 │   │   └── RELAY_TEMPLATE.md    # Canonical relay message format
-│   └── *.md                 # 13 agent definitions (10 active + 3 MCP-tool stubs)
+│   └── rdr/                 # RDR templates and post-mortem scaffolding
 ├── commands/
 │   └── *.md                 # Slash commands (/conexus:research, /conexus:create-plan, /conexus:review-code, etc.)
 ├── hooks/
@@ -217,13 +219,15 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 | substantive-critic | substantive-critique | `/conexus:substantive-critique` | sonnet | Constructive critique of plans/designs/code |
 | test-validator | test-validation | `/conexus:test-validate` | sonnet | Test coverage and quality validation |
 
-### Stub agents — redirect to MCP tools (RDR-080)
+### Retired stub agents — call the MCP tool directly (RDR-080, deleted nexus-cnzei.4)
 
-These 40-line stubs remain in the registry so legacy workflows and references
-don't break.  They direct callers to the named MCP tool — you can invoke the
-MCP tool directly and skip the agent spawn entirely.
+`knowledge-tidier`, `plan-auditor`, and `plan-enricher` were 40-line stubs that
+did nothing but redirect to an MCP tool. They were deleted outright rather
+than kept as a redirect layer — the corresponding pointer skills
+(`knowledge-tidying`, `plan-validation`, `enrich-plan`) document the same call
+shape without an agent-dispatch detour.
 
-| Stub agent | Replacement | Call shape |
+| Former stub agent | Replacement | Call shape |
 |------------|-------------|------------|
 | knowledge-tidier | nx_tidy | `mcp__plugin_conexus_nexus__nx_tidy(topic=..., collection="<subject>")` |
 | plan-auditor | nx_plan_audit | `mcp__plugin_conexus_nexus__nx_plan_audit(plan_json=..., context="")` |
@@ -246,8 +250,9 @@ Defined in `registry.yaml`:
 - **architecture**: codebase-deep-analyzer → deep-analyst → strategic-planner → architect-planner
 
 The `nx_plan_audit` / `nx_enrich_beads` / `nx_tidy` MCP-tool steps above replaced the
-`plan-auditor`, `plan-enricher`, and `knowledge-tidier` agents per RDR-080. Callers
-invoke the tool directly instead of dispatching a sub-agent.
+`plan-auditor`, `plan-enricher`, and `knowledge-tidier` agents per RDR-080; those
+three stub agents were deleted at nexus-cnzei.4. Callers invoke the tool
+directly instead of dispatching a sub-agent.
 
 ## Hooks
 
@@ -289,9 +294,17 @@ See `hooks/hooks.json` for exact wiring. Paths below use `$CLAUDE_PLUGIN_ROOT` a
 - `/conexus:deep-analysis` → deep-analyst
 - `/conexus:substantive-critique` → substantive-critic
 
+`/conexus:architecture`, `/conexus:deep-analysis`, `/conexus:substantive-critique`,
+`/conexus:phase-review-gate`, and `/conexus:upgrade` are now served solely by the
+same-named skill — nexus-cnzei.4 deleted the redundant `commands/*.md` wrapper
+for each (it duplicated the skill's own relay and had drifted into a
+self-referential "invoke the X skill" loop). The bash-preamble context these
+commands used to inject is not replaced; the skill's own MCP-tool
+project-context calls cover the same ground.
+
 **MCP-tool pointer commands** (RDR-080 — dispatch the named MCP tool directly):
 - `/conexus:query` → `nx_answer` (multi-step retrieval)
-- `/conexus:knowledge-tidy` → `nx_tidy` *(was → knowledge-tidier agent)*
+- `/conexus:knowledge-tidying` → `nx_tidy` *(was → knowledge-tidier agent; command `/conexus:knowledge-tidy` merged into this skill at nexus-cnzei.4)*
 - `/conexus:plan-audit` → `nx_plan_audit` *(was → plan-auditor agent)*
 - `/conexus:enrich-plan` → `nx_enrich_beads` *(was → plan-enricher agent)*
 - `/conexus:pdf-process` → `nx index pdf` CLI *(was → pdf-chromadb-processor agent)*
@@ -357,7 +370,7 @@ No separate install required — `npx` fetches `@modelcontextprotocol/server-seq
 
 ### Agent Relay Format
 
-When skills delegate to agents, they use a standardized relay format defined in `agents/_shared/RELAY_TEMPLATE.md`:
+When skills delegate to agents, they use a standardized relay format defined in `resources/agent-shared/RELAY_TEMPLATE.md`:
 
 ```markdown
 ## Relay: {agent-name}
