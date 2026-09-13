@@ -623,6 +623,93 @@ class RefreshableHttpStoreMixin:
             "Content-Type": "application/json",
         }
 
+    def _invalidate_data_token_on_401(self, exc: httpx.HTTPStatusError) -> tuple[Any, bool, str, str]:
+        """Apply the nexus-umue1 401 single-flight+futility guard (porting
+        nexus-r0d37 defect 2's T1 fix to the shared ``DataTokenManager``),
+        or fall back to the pre-existing unconditional invalidate when the
+        guard does not apply.
+
+        The guard applies only when a ``mint_token`` credential is
+        configured AND this instance's token is not pinned
+        (``self._token_pinned``) — a pinned instance never touched the
+        manager's cache to begin with (see
+        :meth:`_apply_data_token_override`), so there is nothing here for
+        the guard to coordinate; falling through to the plain
+        ``invalidate()`` call is a harmless no-op in that case exactly as
+        it always has been.
+
+        Returns ``(manager, reminted, key_base_url, key_tenant)``.
+        ``manager`` is ``None`` when the guard did not apply — the caller
+        must not call
+        :meth:`~nexus.db.data_token.DataTokenManager.mark_remint_futile`
+        in that case, since no manager-tracked mint happened for this
+        call. ``reminted`` is ``True`` only when THIS call actually
+        invalidated the manager's cached entry (see
+        :meth:`~nexus.db.data_token.DataTokenManager.invalidate_if_current`)
+        — the caller should mark the key futile if its own retry still
+        401s.
+
+        ``key_base_url``/``key_tenant`` (CRE Significant, nexus-umue1
+        review round 2) are ``self._base_url``/``self._tenant`` CAPTURED
+        HERE, before the caller's subsequent
+        :meth:`_invalidate_and_reresolve` call can reassign
+        ``self._base_url`` (the common not-pinned shape re-resolves it via
+        ``resolve_service_endpoint()``, which has no caching of its own —
+        a coincidental supervisor restart in this exact window would
+        return a different host:port). The caller MUST use these
+        returned values, never ``self._base_url``/``self._tenant`` again,
+        for BOTH ends of this guard's bookkeeping — otherwise a
+        still-401 retry's ``mark_remint_futile`` call could target a key
+        that was never the subject of THIS call's ``invalidate_if_current``
+        (mirrors T3's ``_stale_base_url`` local in
+        ``http_vector_client.py``, which gets this right already).
+
+        Either way the caller proceeds to :meth:`_invalidate_and_reresolve`
+        and retries unconditionally: a skipped invalidate just means the
+        retry resends the current (unchanged) cached token instead of a
+        freshly minted one.
+        """
+        key_base_url = self._base_url
+        key_tenant = self._tenant
+        from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
+
+        manager = get_data_token_manager()
+        if not manager.is_configured() or getattr(self, "_token_pinned", True):
+            manager.invalidate(key_base_url, key_tenant)
+            return None, False, key_base_url, key_tenant
+        sent_bearer = exc.response.request.headers.get("Authorization", "")
+        # invalidate_if_current compares against the RAW token the cache
+        # stores, never the "Bearer "-prefixed header value.
+        sent_token = sent_bearer.removeprefix("Bearer ")
+        reminted = manager.invalidate_if_current(key_base_url, key_tenant, sent_token)
+        return manager, reminted, key_base_url, key_tenant
+
+    def _note_data_token_response(self, resp: httpx.Response) -> None:
+        """Clear the manager's remint-futility flag for this
+        ``(base_url, tenant)`` once ANY response comes back non-401
+        (nexus-umue1, porting nexus-r0d37 defect 2's T1
+        ``_note_bearer_accepted`` to the shared ``DataTokenManager``). A
+        404 counts — the bearer and tenant both resolved, the endpoint
+        merely had nothing there. Scoping the clear to the window where
+        the futility condition can actually hold is what keeps it a
+        rate-limit guard rather than a permanent disabling of a heal that
+        works in other failure modes.
+
+        Skipped for a pinned-token instance (test fixture pattern): it
+        never touches the manager's cache for this key in the first place
+        (see :meth:`_apply_data_token_override`), so clearing here would
+        be a stray write against a key this instance never actually uses.
+        """
+        if resp.status_code == 401:
+            return
+        if getattr(self, "_token_pinned", True):
+            return
+        from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
+
+        manager = get_data_token_manager()
+        if manager.is_configured():
+            manager.clear_remint_futile(self._base_url, self._tenant)
+
     def _invalidate_and_reresolve(self) -> None:
         """Re-resolve credential/endpoint state and update the NON-PINNED
         cached field(s) only.
@@ -931,11 +1018,14 @@ class RefreshableHttpStoreMixin:
                     method=method,
                     path=path,
                 )
-                from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
-
-                get_data_token_manager().invalidate(self._base_url, self._tenant)
+                manager, reminted, key_base_url, key_tenant = self._invalidate_data_token_on_401(exc)
                 self._invalidate_and_reresolve()
-                return self._request_once(method, path, **kwargs)
+                try:
+                    return self._request_once(method, path, **kwargs)
+                except httpx.HTTPStatusError as retry_exc:
+                    if manager is not None and reminted and retry_exc.response.status_code == 401:
+                        manager.mark_remint_futile(key_base_url, key_tenant)
+                    raise
         try:
             return self._once_with_gateway_retry(method, path, **kwargs)
         except (
@@ -962,17 +1052,37 @@ class RefreshableHttpStoreMixin:
                 path=path,
                 reason=type(exc).__name__,
             )
-            # nexus-wrwb7: drop any cached self-minted data token for this
-            # exact (base_url, tenant) BEFORE re-resolving -- otherwise
-            # _apply_data_token_override() inside _invalidate_and_reresolve
-            # would just hand back the same (possibly 401-rejected) cached
-            # token instead of re-minting. Harmless no-op when unconfigured
-            # or nothing was cached.
-            from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
+            is_401 = isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401
+            if is_401:
+                # nexus-umue1: single-flight + futility guard (porting
+                # nexus-r0d37 defect 2) -- see _invalidate_data_token_on_401.
+                # key_base_url/key_tenant are CAPTURED there, before
+                # _invalidate_and_reresolve() below can reassign
+                # self._base_url (CRE Significant, review round 2) -- use
+                # them, never self._base_url/self._tenant again, in the
+                # closing except block's mark_remint_futile call.
+                manager, reminted, key_base_url, key_tenant = self._invalidate_data_token_on_401(exc)
+            else:
+                # nexus-wrwb7: drop any cached self-minted data token for this
+                # exact (base_url, tenant) BEFORE re-resolving -- otherwise
+                # _apply_data_token_override() inside _invalidate_and_reresolve
+                # would just hand back the same (possibly 401-rejected) cached
+                # token instead of re-minting. Harmless no-op when unconfigured
+                # or nothing was cached. Connection-class errors keep this
+                # UNCONDITIONAL invalidate -- the nexus-umue1 guard applies
+                # only to the 401 case (see the module docstring).
+                key_base_url, key_tenant = self._base_url, self._tenant
+                from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
 
-            get_data_token_manager().invalidate(self._base_url, self._tenant)
+                get_data_token_manager().invalidate(key_base_url, key_tenant)
+                manager, reminted = None, False
             self._invalidate_and_reresolve()
-            return self._once_with_gateway_retry(method, path, **kwargs)
+            try:
+                return self._once_with_gateway_retry(method, path, **kwargs)
+            except httpx.HTTPStatusError as retry_exc:
+                if manager is not None and reminted and retry_exc.response.status_code == 401:
+                    manager.mark_remint_futile(key_base_url, key_tenant)
+                raise
 
     def _once_with_gateway_retry(self, method: str, path: str, **kwargs: Any) -> Any:
         """One logical attempt, riding out gateway-transient 502/503/504s.
@@ -1025,6 +1135,7 @@ class RefreshableHttpStoreMixin:
         """
         url = self._base_url + path
         resp = self._client.request(method, url, headers=self._auth_headers(), **kwargs)
+        self._note_data_token_response(resp)
         self._raise_for_status(resp, path)
         if not resp.content:
             return None

@@ -485,6 +485,56 @@ def _keepalive_opener() -> Any:
 #: another's read.
 _response_header_capture = threading.local()
 
+#: nexus-umue1 (porting nexus-r0d37 defect 2's T1 guard): the exact
+#: ``Authorization`` header value :func:`_request_once` sent on its most
+#: recent attempt, thread-local for the same reason as
+#: :data:`_response_header_capture` above -- this client is called from
+#: worker threads, and a shared mutable value would let one thread's sent
+#: bearer leak into another's. Read (and cleared) by :func:`_pop_sent_bearer`
+#: from :func:`_request`'s except block, which needs the EXACT bearer the
+#: failed attempt carried to single-flight the 401 re-mint guard via
+#: ``DataTokenManager.invalidate_if_current`` -- capturing it here, rather
+#: than changing ``_request_once``'s return shape or signature, keeps every
+#: existing test double that replaces ``_request_once`` with its own narrow
+#: callable working unchanged (see :data:`_response_header_capture`'s
+#: docstring for the identical constraint).
+_sent_bearer_capture = threading.local()
+
+
+def _stash_sent_bearer(bearer: str) -> None:
+    """Best-effort: called from :func:`_request_once` right before issuing
+    the request, so :func:`_pop_sent_bearer` can retrieve the EXACT
+    ``Authorization`` value that attempt sent even after the request
+    itself raises (nexus-umue1). Never raises."""
+    _sent_bearer_capture.value = bearer
+
+
+def _pop_sent_bearer() -> str:
+    """The current thread's most recently stashed sent bearer, then clear
+    it -- a pop, not a peek, mirroring :func:`_pop_response_headers`."""
+    value = getattr(_sent_bearer_capture, "value", "")
+    _sent_bearer_capture.value = ""
+    return value
+
+
+def _note_data_token_response(base_url: str, tenant: str, status_code: int) -> None:
+    """Clear the manager's remint-futility flag for ``(base_url, tenant)``
+    once a response (success or error) comes back non-401 (nexus-umue1,
+    porting nexus-r0d37 defect 2's T1 ``_note_bearer_accepted`` to the
+    shared ``DataTokenManager``). A 404 counts -- the bearer and tenant
+    both resolved, the endpoint merely had nothing there. Called from
+    :func:`_request_once` for EVERY response so the futility skip (see
+    ``DataTokenManager.invalidate_if_current``) lasts exactly as long as
+    the condition that set it.
+    """
+    if status_code == 401:
+        return
+    from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
+
+    manager = get_data_token_manager()
+    if manager.is_configured():
+        manager.clear_remint_futile(base_url, tenant)
+
 
 def _stash_response_headers(headers: object) -> None:
     """Best-effort: called from :func:`_request_once` right after a
@@ -536,6 +586,10 @@ def _request_once(
         "Authorization": f"Bearer {token}",
         "X-Nexus-Tenant": tenant,
     }
+    # nexus-umue1: stash the EXACT bearer this attempt is about to send so
+    # a caller catching an exception below can single-flight the 401
+    # re-mint guard on it -- see _sent_bearer_capture's docstring.
+    _stash_sent_bearer(headers["Authorization"])
     # nexus-8hdg9 phase 5: declare the client's embed budget on the routes
     # that carry one (see _REQUEST_DEADLINE_MS_BY_PATH_SUFFIX). Advisory and
     # additive -- an engine that does not know the header ignores it.
@@ -552,13 +606,26 @@ def _request_once(
     # nexus-gbt5u: NOT urlopen — the module-level opener has no socket-options
     # hook, so a sleep-orphaned connection could never be detected. See the
     # transport-section comment above.
-    with _keepalive_opener().open(req, timeout=timeout) as resp:
-        # RDR-204 Phase 3 item 5 (nexus-ft04v.26): stash X-Nexus-Skipped-
-        # Collections (when present) for the caller to read via
-        # _pop_response_headers() -- see that function's docstring for why
-        # this is a thread-local capture rather than a new parameter.
-        _stash_response_headers(resp.headers)
-        return json.loads(resp.read())
+    import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+
+    try:
+        with _keepalive_opener().open(req, timeout=timeout) as resp:
+            # RDR-204 Phase 3 item 5 (nexus-ft04v.26): stash X-Nexus-Skipped-
+            # Collections (when present) for the caller to read via
+            # _pop_response_headers() -- see that function's docstring for why
+            # this is a thread-local capture rather than a new parameter.
+            _stash_response_headers(resp.headers)
+            _note_data_token_response(base_url, tenant, resp.status)
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        # nexus-umue1: clear the futility flag on any non-401 HTTPError too
+        # (e.g. a 404) -- this is the ONLY point that sees status codes
+        # raised as an exception rather than returned as a response, since
+        # urllib raises for every non-2xx status before this function's
+        # normal-return path is ever reached.
+        if exc.code != 401:
+            _note_data_token_response(base_url, tenant, exc.code)
+        raise
 
 
 #: Backoff schedule for gateway-transient HTTP codes (502/503/504). Found by
@@ -1238,6 +1305,7 @@ def _request(
             path=path,
             reason=type(exc).__name__,
         )
+        is_401 = isinstance(exc, urllib.error.HTTPError) and exc.code == 401
         # nexus-wrwb7: drop any cached self-minted data token for the
         # endpoint this failed request just used, BEFORE _invalidate_endpoint
         # clears the module lease cache -- otherwise the retry's
@@ -1245,19 +1313,46 @@ def _request(
         # just hand back the same (possibly 401-rejected) cached token
         # instead of re-minting. Best-effort: a resolution failure here must
         # not block the pre-existing endpoint retry below.
+        #
+        # nexus-umue1 (porting nexus-r0d37 defect 2): for the 401 case
+        # specifically, single-flight + futility-guard the invalidate via
+        # DataTokenManager.invalidate_if_current -- it pops the cache entry
+        # only when it still holds the EXACT bearer this failed attempt
+        # sent, and is skipped entirely while the key is marked futile.
+        # Connection-class errors keep the old unconditional invalidate()
+        # (manager stays None below, so no futility bookkeeping applies).
+        manager = None
+        reminted = False
+        _stale_base_url = ""
         try:
             _stale_base_url, _ = _resolve_endpoint()
             from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
 
-            get_data_token_manager().invalidate(_stale_base_url, tenant)
+            candidate_manager = get_data_token_manager()
+            if is_401 and candidate_manager.is_configured():
+                # invalidate_if_current compares against the RAW token the
+                # cache stores, never the "Bearer "-prefixed header value.
+                sent_token = _pop_sent_bearer().removeprefix("Bearer ")
+                reminted = candidate_manager.invalidate_if_current(
+                    _stale_base_url, tenant, sent_token
+                )
+                manager = candidate_manager
+            else:
+                candidate_manager.invalidate(_stale_base_url, tenant)
         except Exception as data_token_exc:  # noqa: BLE001 — best-effort; the endpoint retry below is what must proceed
             _log.debug("vector_data_token_invalidate_skipped", error=str(data_token_exc))
+            manager, reminted = None, False
         _invalidate_endpoint()
         # nexus-7dsgp: give a not-yet-republished lease a bounded chance to
         # appear before the retry re-reads it — see _wait_for_lease_republication's
         # docstring for the managed-cloud exclusion and budget arithmetic.
         _wait_for_lease_republication()
-        return _once_with_gateway_retry()
+        try:
+            return _once_with_gateway_retry()
+        except urllib.error.HTTPError as retry_exc:
+            if manager is not None and reminted and retry_exc.code == 401:
+                manager.mark_remint_futile(_stale_base_url, tenant)
+            raise
 
 
 #: ``Server`` value AWS's ALB stamps on a response IT generated — a WAF rule
