@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-36 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
+47 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
 RDR-182 consent-gated ``forensics``/``remediate`` pair (nexus-ykzbj.10/.11)
 was deleted at nexus-lgdel — the chash-rekey upgrade rung it steered
 operators toward no longer exists.

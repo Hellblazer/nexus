@@ -121,9 +121,11 @@ away.
 
 ```bash
 tests/e2e/release-battery.sh         # nexus-mfage: every E2E gate below (and 1b, 6, 6b, 6c) in ONE parallel run — artifacts built once, per-leg logs, verdict table, exit 1 on any red; the unit suite still runs SERIAL to it
-uv run pytest                        # unit suite (no API keys)
+scripts/pins-preflight.sh            # step 0: every cheap pin at once
+uv run pytest -n auto && uv run pytest -m lint   # unit suite and the lint bucket (two runs)
 tests/e2e/local-service-gate.sh      # integration incl. the local-service functional gate
 tests/e2e/migration-rehearsal/run.sh --package-upgrade   # ONE-engine convergence MVV (nexus-cfgo9)
+tests/e2e/migration-rehearsal/run.sh --candidate-migration   # REQUIRED when the tree carries a changeset (nexus-z0ylb)
 tests/e2e/fresh-install-mvv.sh       # VIRGIN-journey gate (nexus-nolqs) — see below
 ```
 

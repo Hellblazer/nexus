@@ -263,8 +263,8 @@ Every step below is **required**. Missing any one of them has caused problems in
    convention (`requires-commit: <sha>`); it is no longer a release gate.
 
 1. **Verify the full release test battery passes.** See `AGENTS.md` §
-   Cutting a release, step 1, and `.claude/skills/release/SKILL.md` Step 1
-   for the authoritative, up-to-date command list — it changes independently
+   Cutting a release, step 1, for the authoritative command list (the
+   release skill's Step 1 restates it) — it changes independently
    of this pointer and a copy here would drift.
 
 2. **Audit docs against changes since last release**
