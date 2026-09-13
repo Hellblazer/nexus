@@ -45,4 +45,4 @@ Root cause analysis with hypothesis chain, supporting evidence, proposed fix, an
 - [ ] Regression test recommended to prevent recurrence
 ```
 
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../resources/agent-shared/RELAY_TEMPLATE.md).

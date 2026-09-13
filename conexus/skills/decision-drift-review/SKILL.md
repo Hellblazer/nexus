@@ -1,10 +1,10 @@
 ---
-name: review
-description: Use when critiquing / auditing / reviewing a change set against decision history — tries the review plan library first (catalog lookup → decision-evolution traversal → extract → compare), falls through to /conexus:query if nothing matches
+name: decision-drift-review
+description: Use when critiquing a change set against decision history to check it hasn't drifted from what an RDR decided — not for routine code review, that's /conexus:review-code.
 effort: medium
 ---
 
-# review
+# decision-drift-review
 
 **Call `nx_answer` when a review must align multiple RDRs against a
 change set** (decision-evolution traversal + extract → compare). A

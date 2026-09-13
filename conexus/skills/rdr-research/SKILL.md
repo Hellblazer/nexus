@@ -150,7 +150,7 @@ Research finding with classification, verification method, and source reference 
 
 **Required**: All fields must be present. Agent will validate relay before starting.
 
-For additional optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+For additional optional fields, see [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md).
 
 ## Success Criteria
 

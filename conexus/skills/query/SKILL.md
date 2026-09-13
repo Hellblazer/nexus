@@ -103,11 +103,16 @@ project synthesis — route through `nx_answer`.
 
 ## Verb-scoped shortcuts
 
-The five verb skills (`/conexus:research`, `/conexus:review`, `/conexus:analyze`,
-`/conexus:debug`, `/conexus:document`) each pin a `dimensions={"verb": …}`
-filter so the plan matcher narrows to the right template family.
-Pick the verb that matches the question shape; fall back to this
-plain `/conexus:query` skill when no verb cleanly fits.
+The five verb skills (`/conexus:design-to-code-trace` [verb: research],
+`/conexus:decision-drift-review` [verb: review], `/conexus:analyze`,
+`/conexus:why-was-this-written` [verb: debug], `/conexus:document`) each pin a
+`dimensions={"verb": …}` filter so the plan matcher narrows to the right
+template family — the skill's own name no longer matches its verb string for
+three of the five (nexus-cnzei.4: renamed off the bare verb name to stop
+colliding with, respectively, the `/conexus:research` and `/conexus:debug`
+agent-dispatch commands, and to stop inviting confusion with
+`/conexus:review-code`). Pick the verb that matches the question shape; fall
+back to this plain `/conexus:query` skill when no verb cleanly fits.
 
 ## Anti-patterns
 

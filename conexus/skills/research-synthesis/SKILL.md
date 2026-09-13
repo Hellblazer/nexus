@@ -72,7 +72,7 @@ Research synthesis across multiple sources
 - [ ] Recommendations provided with supporting evidence
 ```
 
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md).
 
 ## Research Methodology
 

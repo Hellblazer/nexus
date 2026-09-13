@@ -1,6 +1,6 @@
 ---
 name: document
-description: Use when authoring or auditing documentation against existing coverage — tries the document plan library first (search prose follow_links=cites + search code → documentation-for traversal → compare), falls through to /conexus:query if nothing matches
+description: Use when authoring or auditing documentation against existing coverage — tries the document plan library first (search prose/code → documentation-for traversal → compare), inline-plans on a miss.
 effort: medium
 ---
 

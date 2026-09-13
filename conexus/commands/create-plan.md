@@ -46,4 +46,4 @@ Phased execution plan with dependency graph, success criteria per phase, test st
 **IMPORTANT**: After planning completes, call `mcp__plugin_conexus_nexus__nx_plan_audit` for validation before implementation (RDR-080 — direct MCP call).
 ```
 
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../resources/agent-shared/RELAY_TEMPLATE.md).

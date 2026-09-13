@@ -78,7 +78,7 @@ Root cause analysis with fix recommendation
 - [ ] Hypothesis chain preserved
 ```
 
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md).
 
 ## Debugging Methodology
 

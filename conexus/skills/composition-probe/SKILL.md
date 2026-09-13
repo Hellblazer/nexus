@@ -191,7 +191,7 @@ Pass/fail result with attribution to the specific failing dependency bead (if fa
 - [ ] Test written to `/tmp/probe-<bead-id>.<ext>` and run via the detected test runner
 ```
 
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md).
 
 ## Success Criteria
 

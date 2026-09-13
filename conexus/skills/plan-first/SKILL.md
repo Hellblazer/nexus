@@ -1,6 +1,6 @@
 ---
 name: plan-first
-description: Use when starting a retrieval task whose answer must be reduced from many documents — route it through `mcp__plugin_conexus_nexus__nx_answer`, which runs the plan-match-first gate internally (match against the plan library, execute on hit, inline-plan on miss). Optionally `plan_search` first to inspect candidate plans. Raw `search`/`query` for file:line, single-fact, or keyword lookups (seconds vs nx_answer's p50 80s).
+description: Use when starting a retrieval task whose answer must be reduced from many documents — routes through nx_answer, which matches the plan library first and inline-plans on a miss. Raw search/query covers file:line or single-fact lookups, in seconds.
 effort: low
 ---
 

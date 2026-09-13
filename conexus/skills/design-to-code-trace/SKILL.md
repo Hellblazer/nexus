@@ -1,6 +1,6 @@
 ---
-name: research
-description: Use when doing design / architecture / planning work that walks from prose (RDRs, docs, knowledge) into the modules implementing a concept
+name: design-to-code-trace
+description: Use when doing design / architecture / planning work that walks from prose (RDRs, docs, knowledge) into the modules implementing a concept — not for open-ended topic research, that's /conexus:research
 effort: medium
 ---
 
@@ -17,7 +17,7 @@ effort: medium
    - `mcp__plugin_conexus_nexus__store_put(...)` for permanent cross-project knowledge, future sessions everywhere (T3).
    - Retrieval pipelines grow the plan library on their own through `nx_answer`; only `plan_save` a genuinely reusable retrieval plan with a required `verb`. Implementation, pipeline, and phased-execution plans do not go here — beads and T2 memory.
 
-# research
+# design-to-code-trace
 
 **Call `nx_answer` for research questions whose answer must be reduced
 from many documents** (design context spanning multiple RDRs/docs,

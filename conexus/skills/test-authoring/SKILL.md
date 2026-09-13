@@ -1,6 +1,6 @@
 ---
 name: test-authoring
-description: Use when writing, restructuring, or consolidating tests in the nexus repo, or when choosing how to run its suite — dev-loop selection (-n auto / -m lint / integration / scenario journeys), scenario-vs-parametrize decisions, contract-suite placement, and the guard/lint invariants that protect the fast loop
+description: Use when writing, restructuring, or consolidating tests in the nexus repo, or choosing how to run its suite — dev-loop layer selection, scenario-vs-parametrize calls, contract-suite placement, and the guard/lint invariants protecting the fast loop.
 effort: low
 ---
 

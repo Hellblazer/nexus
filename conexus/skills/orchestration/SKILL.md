@@ -20,7 +20,7 @@ Reference skill for agent routing and pipeline coordination. See [reference.md](
 
 1. Consult [reference.md](./reference.md) for the routing graph and decision framework
 2. Match the request to the appropriate agent or pipeline
-3. Dispatch the agent directly using the relay format from [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md)
+3. Dispatch the agent directly using the relay format from [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md)
 
 There is no orchestrator agent. The caller (main conversation or skill) dispatches agents directly using the routing tables.
 
@@ -140,7 +140,7 @@ full-review rounds and surface it, rather than celebrating the speed.
 
 ## Scope Discipline (cross-reference)
 
-See [CONTEXT_PROTOCOL.md § Scope](../../agents/_shared/CONTEXT_PROTOCOL.md).
+See [CONTEXT_PROTOCOL.md § Scope](../../resources/agent-shared/CONTEXT_PROTOCOL.md).
 Deliver at the scope intended: a plan or bead graph is a record of intended
 work, not a standing order; goal-met is a stop, not a license to continue; a
 blast radius exploding mid-flight (more than about 20 tests broken by one

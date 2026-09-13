@@ -1,6 +1,6 @@
 ---
 name: using-nx-skills
-description: Use when work matches a conexus skill's territory. Something is broken or two fix attempts have failed; work spans modules or needs design before code; code, tests, or a plan need a quality gate; an answer must be reduced from many documents rather than looked up; prior work in T1/T2/T3 has not been checked; or a validated finding is about to go unstored.
+description: Use when work matches a conexus skill's territory — something broke, two fixes failed, work spans modules or needs design, code/tests/a plan need a quality gate, an answer needs many documents reduced, T1/T2/T3 is unchecked, or a finding is unstored.
 effort: low
 ---
 
@@ -57,12 +57,13 @@ Measured cost (n=142 executed runs, 2026-04 to 2026-08; T2 `nexus/nx-answer-capa
 Two return shapes (RDR-200, landing with the Phase 1 go-live; headless is the only live shape as of this writing). Headless (the default; `continuation` unset or `False`) runs the terminal synthesis server-side in a `claude -p` subprocess and returns a finished answer. The cost figures above describe this shape and nothing here changes it. Continuation (opt-in `continuation=True`, not yet live: nexus-4e75w.4 built and tested the assembly behind a closed go-live gate and nexus-4e75w.5 wires the return path) stops after server-side retrieval and returns an envelope carrying the exact prompt and schema the synthesis would have dispatched, plus evidence provenance, so the calling session performs the reduction in its own context instead of paying a second subprocess. This does not change when to call `nx_answer`. The routing decision below (reduce-from-many-documents versus `search` or `query`) is unaffected, and `nexus-h33x8.6`'s narrowing stands.
 
 - Reduce-from-many-documents questions ("what approaches to X appear in…", "tradeoffs across…", "compare… across the corpus") → `/conexus:query`
-- Design walks from concept to code → `/conexus:research`
-- Critique a change set → `/conexus:review`
+- Design walks from concept to code (retrieval, not a synthesizer dispatch) → `/conexus:design-to-code-trace`
+- Broad topic research across nx store, web, and codebase (dispatches deep-research-synthesizer) → `/conexus:research`
+- Critique a change set against decision history → `/conexus:decision-drift-review`
 - Cross-corpus synthesis or ranking → `/conexus:analyze`
-- Why was this written this way → `/conexus:debug`
+- Why was this written this way (design-intent retrieval, not a debugger dispatch) → `/conexus:why-was-this-written`
 - Documentation gaps → `/conexus:document`
-- 3+ validated findings to keep → `/conexus:knowledge-tidy`
+- 3+ validated findings to keep → `/conexus:knowledge-tidying`
 - PDF to index → `/conexus:pdf-process`
 
 RDR lifecycle: `/conexus:rdr-create` → `/conexus:rdr-research` → `/conexus:rdr-gate` → (`/conexus:rdr-fix` per finding, then re-gate) → `/conexus:rdr-accept` → (implementation phases) → `/conexus:rdr-close`. List and show: `/conexus:rdr-list`, `/conexus:rdr-show NNN`. Audit: `/conexus:rdr-audit`.
@@ -86,7 +87,7 @@ Conexus Storage Tiers: check before any work, and write your findings back. Read
 - T2 `nx memory`: project decisions, findings, session context. Check before project work.
 - T1 `nx scratch`: this session's discoveries, shared across all sibling agents. Check before duplicating sibling work.
 
-Write path: T1 (immediate, shared with siblings) → `--persist` flag to T2 (survives the session) → T3 (permanent, cross-project) via `store_put`, after using `/conexus:knowledge-tidy` (`nx_tidy`, read-only) to consolidate against what is already there. Findings not stored are findings lost: call `store_put` (T3) or `memory_put` (T2) before returning a result you would want a future session to know.
+Write path: T1 (immediate, shared with siblings) → `--persist` flag to T2 (survives the session) → T3 (permanent, cross-project) via `store_put`, after using `/conexus:knowledge-tidying` (`nx_tidy`, read-only) to consolidate against what is already there. Findings not stored are findings lost: call `store_put` (T3) or `memory_put` (T2) before returning a result you would want a future session to know.
 
 **T2 ttl convention (reversed 2026-09-12, nexus-473mx: omitting `ttl` now means permanent, not 30 days; a clock is something you ask for):**
 

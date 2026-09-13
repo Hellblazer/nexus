@@ -146,7 +146,7 @@ Structured code review with severity-rated findings
       concrete production edit that would turn it red
 ```
 
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md).
 
 ## Review Methodology
 
@@ -188,7 +188,7 @@ was honest, it said "1/2", and the gate could not read that. The close would
 have passed with the substantive-critic never dispatched (nexus-e3mak).
 
 `conexus/agents/code-review-expert.md`, `conexus/agents/substantive-critic.md`
-and `conexus/agents/_shared/CONTEXT_PROTOCOL.md` all carry this prohibition; this
+and `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` all carry this prohibition; this
 skill was the last place still teaching the opposite.
 
 What a reviewer does instead:

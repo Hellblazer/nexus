@@ -1,6 +1,6 @@
 ---
 name: analyze
-description: Use when synthesising across prose and code corpora or ranking candidates by a criterion — tries the analyze plan library first (search prose + code → reference-chain traversal → rank → generate), falls through to /conexus:query if nothing matches
+description: Use when synthesising across prose and code corpora or ranking candidates by a criterion — tries the analyze plan library first (search → reference-chain traversal → rank → generate), inline-plans on a miss.
 effort: medium
 ---
 

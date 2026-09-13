@@ -130,7 +130,7 @@ The five subcommands split into two disjoint safety classes:
 - Safe to invoke from any session — interactive, headless `claude -p`, CCR remote agent
 - The skill body **must not modify OS state** — no file writes, no process spawns, no `launchctl load`, no `crontab -e`
 - The skill body **must not modify T2 state** — no `memory_put`, no `memory_delete`, no mutation of any T2 record
-- Invariant verification approach: a session snapshot of OS state (`launchctl list` + `crontab -l`) and T2 state (`memory_list` on `rdr_process`) taken before and after a read-only invocation should be byte-identical
+- Invariant verification approach: a session snapshot of OS state (`launchctl list` + `crontab -l`) and T2 state (`memory_get(project="rdr_process", title="")`, which lists all entries) taken before and after a read-only invocation should be byte-identical
 
 **Print-only**: `schedule`, `unschedule`
 - Safe to invoke from any session; the output is platform-specific install/uninstall instructions printed to stdout for user review
@@ -297,7 +297,7 @@ The root cause is not diagnosed (could be model-level instruction compliance, co
 ## Agent Invocation
 
 Use the Agent tool with standardized relay format.
-See [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md) for required fields and examples.
+See [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md) for required fields and examples.
 
 ```markdown
 ## Relay: deep-research-synthesizer

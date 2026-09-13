@@ -58,8 +58,8 @@ Required sections:
 ### Cross-References
 
 Use explicit markers, not file paths:
-- `**REQUIRED SUB-SKILL:** Use /conexus:skill-name for [purpose]`
-- `**REQUIRED BACKGROUND:** Understand /conexus:skill-name before using this skill`
+- `**REQUIRED SUB-SKILL:** Use /conexus:<skill-name> for [purpose]`
+- `**REQUIRED BACKGROUND:** Understand /conexus:<skill-name> before using this skill`
 
 Never use `@` syntax (force-loads files, burns context).
 
@@ -70,10 +70,10 @@ Agent-delegating skills reference the canonical relay template:
 ## Agent Invocation
 
 Use the Agent tool with standardized relay format.
-See [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md) for required fields and examples.
+See [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md) for required fields and examples.
 ```
 
-Do NOT inline the relay template. One source of truth: `agents/_shared/RELAY_TEMPLATE.md`.
+Do NOT inline the relay template. One source of truth: `resources/agent-shared/RELAY_TEMPLATE.md`.
 
 ### Storage Tier References
 
@@ -118,13 +118,13 @@ This applies to `--description`, `--notes`, `--design`, and any flag that accept
 **CI-enforced (tests will break):**
 - [ ] Frontmatter has `name`, `description`, and `effort` — only these three fields
 - [ ] Description starts with "Use when"
-- [ ] Description has no workflow keywords (first, then, step, next, finally, after, before, workflow, process, pipeline)
+- [ ] Description has none of the CI-checked keywords: `Triggers:`, `user says`, `workflow`, `process:` (the literal `BAD_KEYWORDS` list in `test_frontmatter_valid` — narrower than it once was; don't over-scrub prose that merely mentions a step count)
 - [ ] No YAML comments in frontmatter
 - [ ] Agent-delegating: has **Agent Invocation** heading (or Relay Template heading)
 - [ ] Agent-delegating: has `## Agent-Specific PRODUCE` section
 - [ ] Agent-delegating: mentions `scratch` somewhere in text
 - [ ] Has `## Success Criteria` section
-- [ ] All `../../agents/_shared/` cross-references resolve to existing files
+- [ ] All `../../resources/agent-shared/` cross-references resolve to existing files
 
 **Convention (not CI-enforced but expected):**
 - [ ] `effort` matches skill type (low=reference, medium=workflow, high=analysis)

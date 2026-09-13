@@ -19,8 +19,23 @@ effort: low
 
 # Knowledge Tidying
 
-Calls the `nx_tidy` MCP tool. No agent spawn needed.
+`nx_tidy` is read-only — it consolidates and reports duplicates/contradictions
+in an existing topic but performs no write. Persisting the organized result is
+a separate, explicit `store_put` call.
 
 ```
-mcp__plugin_conexus_nexus__nx_tidy(topic="<topic>", collection="<collection>")
+mcp__plugin_conexus_nexus__nx_tidy(topic="<topic>", collection="<subject>")
 ```
+
+Then store the organized knowledge:
+
+```
+mcp__plugin_conexus_nexus__store_put(
+    content="<knowledge to persist>",
+    collection="<subject>",
+    title="<research-*|decision-*|pattern-*|debug-*>",
+    tags="<meaningful tags>"
+)
+```
+
+Verify searchability: `mcp__plugin_conexus_nexus__search(query="<topic>", corpus="knowledge")`

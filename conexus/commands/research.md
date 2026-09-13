@@ -46,4 +46,4 @@ Comprehensive research synthesis that integrates findings from nx store, web, an
 **IMPORTANT**: After research completes, call `mcp__plugin_conexus_nexus__store_put` to persist findings to nx store (RDR-080 — direct call, no agent spawn).
 ```
 
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../resources/agent-shared/RELAY_TEMPLATE.md).
