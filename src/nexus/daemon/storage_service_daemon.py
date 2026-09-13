@@ -1836,6 +1836,32 @@ class StorageServiceSupervisor:
         finally:
             phases[name] = mono() - t0
 
+    def _merge_stamp_subphases(self, phases: dict[str, float]) -> None:
+        """Fold the registry's stamp sub-phases into this tick's phase map
+        under a ``stamp.`` prefix (nexus-wo6sc).
+
+        The stall this exists for is only ever seen in a log line from a real
+        incident, so the breakdown has to travel with
+        ``storage_service_heartbeat_missed_ttl`` rather than live on the
+        registry object where nobody reading a battery log can reach it. The
+        two readings that decide the cause are ``stamp.write_replace`` (and
+        its sibling syscalls) versus ``stamp.unaccounted``: time inside a call
+        is a stalled filesystem, time inside no call at all is a thread that
+        lost the CPU.
+
+        Best-effort by construction. Tests build bare supervisors via
+        ``object.__new__`` and patch ``heartbeat_tick`` outright, so a missing
+        registry means no breakdown, never a failed tick -- timing must not
+        change the verdict.
+        """
+        sup = getattr(self, "_supervisor", None)
+        sub = getattr(sup, "last_heartbeat_phases", None)
+        if not sub:
+            return
+        for name, seconds in sub.items():
+            phases[f"stamp.{name}"] = seconds
+        phases["stamp.unaccounted"] = getattr(sup, "last_heartbeat_unaccounted", 0.0)
+
     def _heartbeat_once_untimed(self, phases: dict[str, float]) -> tuple[bool, bool]:
         """Re-stamp the lease iff service is alive AND healthy AND PG reachable.
 
@@ -1959,6 +1985,7 @@ class StorageServiceSupervisor:
         # Fully healthy path: reset unhealthy counter + re-stamp lease.
         self._consecutive_unhealthy_heartbeats = 0
         self._timed(phases, "stamp", self._supervisor.heartbeat_tick)
+        self._merge_stamp_subphases(phases)
         if self._supervisor.fenced:
             _log.warning(
                 "storage_service_lease_fenced",

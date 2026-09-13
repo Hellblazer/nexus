@@ -179,14 +179,42 @@ class TestMemoryPutTtlBoundary:
         assert fake_memory_store.calls[-1]["ttl"] == 14
         assert result.startswith("Stored:"), result
 
-    def test_default_ttl_still_thirty_days(
+    def test_omitting_ttl_stores_a_permanent_row(
         self, fake_memory_store: _FakeMemoryStore,
     ) -> None:
-        # Backward compat: omitting ttl entirely must still default to 30,
-        # not silently become permanent as a side effect of the signature
-        # widening to `int | None`.
+        """nexus-473mx (Sam, 2026-09-12): omission means PERMANENT.
+
+        This test previously asserted the opposite, and deliberately —
+        ``test_default_ttl_still_thirty_days`` was added at nexus-tk070.p6a
+        so that widening the signature to ``int | None`` could not silently
+        turn omission into permanence. That guard did its job; what changed
+        is the decision it was guarding, not the guard's correctness. It is
+        REVERSED here rather than deleted so the reversal stays legible: a
+        reader who finds "the default used to be 30" in git history should
+        also find, at the assertion itself, that the change was made on
+        purpose.
+
+        The evidence was a live-store census: 1,183 of 2,269 TTL-bearing
+        rows in the hosted T2 carried exactly 30 — expiry by omission
+        rather than by decision — and the whole tenant had to be swept to
+        permanent to stop the loss. A caller who says nothing about
+        retention has stated no intent, and inferring a 30-day clock from
+        that silence is what put those rows on one.
+        """
         from nexus.mcp.core import memory_put
 
         memory_put(content="x", project="p", title="t")
+
+        assert fake_memory_store.calls[-1]["ttl"] is None
+
+    def test_an_explicit_ttl_is_still_honoured(
+        self, fake_memory_store: _FakeMemoryStore,
+    ) -> None:
+        """The other half of the reversal: a caller who ASKS for a clock
+        still gets exactly the one they asked for. Without this, the change
+        above is also satisfied by a tool that ignores ttl entirely."""
+        from nexus.mcp.core import memory_put
+
+        memory_put(content="x", project="p", title="t", ttl=30)
 
         assert fake_memory_store.calls[-1]["ttl"] == 30

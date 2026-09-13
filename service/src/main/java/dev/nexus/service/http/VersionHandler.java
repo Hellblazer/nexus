@@ -16,6 +16,8 @@ import javax.sql.DataSource;
 import java.io.IOException;
 import java.io.InputStream;
 import java.sql.Connection;
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
 import java.util.Properties;
 
 /**
@@ -28,6 +30,8 @@ import java.util.Properties;
  *  "release_version":"0.1.6",
  *  "build_ref":"a1b2c3d+1690000000-4242",
  *  "nx_answer_steps_supported":true,
+ *  "process_uptime_seconds":420,
+ *  "process_start_time":"2026-09-12T09:00:00Z",
  *  "nx_answer_run_complete_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
@@ -95,6 +99,8 @@ public final class VersionHandler implements HttpHandler {
     private final String releaseVersion;   // RDR-002; null on dev / unstamped
     private final String buildRef;         // nexus-308ph; null (field OMITTED) when blank/absent
     private final EmbedderRouter embedderRouter;   // nullable — mode "unknown"
+    /** Wall-clock millis when this handler was constructed — see {@link #appendProcessUptimeFields}. */
+    private final long processStartMillis = System.currentTimeMillis();
 
     public VersionHandler(DataSource dataSource) {
         this(dataSource, null);
@@ -271,6 +277,97 @@ public final class VersionHandler implements HttpHandler {
         body.append(",\"nx_answer_run_complete_supported\":true");
     }
 
+    /**
+     * How long this engine process has been up, and when it started
+     * (nexus-904y8).
+     *
+     * <p>A post-deploy latency gate has to tell a FIRST-TRAFFIC sample from a
+     * steady-state one: a migration that reads a large table evicts hot index
+     * pages, so the first queries after a swap are slow through no fault of the
+     * build. Measured on engine-service-v0.1.116, that first sample entered the
+     * gate's own trailing baseline, raised its bound by 23%, and manufactured a
+     * false GREEN on the next run. Neither proxy available off-engine works: a
+     * deploy tag's timestamp misses a redeploy that does not change the tag, so
+     * it under-detects; the minimum backend_start over service connections is
+     * disturbed by pool recycling, so it over-detects. Only the engine knows.
+     *
+     * <p>TWO fields, answering different questions. {@code
+     * process_uptime_seconds} is the PREDICATE — answered entirely on this
+     * engine's clock and read at a known moment on the caller's, so a threshold
+     * comparison needs no agreement between the two clocks and a skew cannot
+     * silently shift the exclusion window. {@code process_start_time} is for
+     * CORRELATION against a recorded deploy timestamp, which is what catches a
+     * same-tag redeploy; it necessarily does depend on clock agreement, which is
+     * precisely why it is not the predicate.
+     *
+     * <p>Both additive: no existing field changes shape. As with every new
+     * {@code /version} field, they stay invisible to cloud clients until the
+     * public edge allowlists them (the {@code nx_answer_steps_supported}
+     * precedent, nexus-04sff) — that relay is paired work, not an engine defect.
+     *
+     * <p><b>THE ANCHOR IS HANDLER CONSTRUCTION, NOT PROCESS START, AND THAT IS
+     * DELIBERATE.</b> {@code SchemaMigrator.migrate()} runs before this service is
+     * built ({@code Main.java:108}), so this clock starts AFTER the migration —
+     * which is the event that evicts the cache. For the PREDICATE that is the
+     * better anchor, not a worse one: uptime zero lands exactly at the
+     * cache-cold moment, whereas {@code RuntimeMXBean#getStartTime} would add
+     * the migration's own duration and report a warmer engine than exists,
+     * reproducing the over-admission this field is meant to stop. The obvious
+     * "fix" of switching to true process start is therefore a REGRESSION here;
+     * this paragraph exists so that it is not made silently. The cost falls on
+     * the CORRELATION field: {@code process_start_time} is offset from container
+     * start by the migration's duration, which varies with the size of the
+     * changeset walk, so treat it as accurate to within a migration rather than
+     * to the second when lining it up against a deploy timestamp.
+     *
+     * <p><b>UPTIME IS NECESSARY, NOT SUFFICIENT, FOR A WARM CACHE.</b> Measured
+     * 2026-09-12: cache recovery after an eviction is WORK-driven, not
+     * time-driven. On an idle estate the index served zero blocks for tens of
+     * minutes and warmed only when real traffic arrived, so a HIGH uptime does
+     * not imply a warm cache. Low uptime does reliably imply a recent restart,
+     * which is why this is sound as an EXCLUSION predicate (drop a sample below
+     * the threshold) and unsound as an admission one (a sample above it may
+     * still be the first traffic since the restart). A consumer that needs the
+     * stronger property must measure the work itself. Do NOT add a
+     * work-since-start counter here on that reasoning: the one consumer that
+     * needed it found it could sample the index's own
+     * {@code idx_blks_read}/{@code idx_blks_hit} across the measured window
+     * directly, which is a direct measurement rather than an engine-reported
+     * proxy for one, and it was declined on that basis (2026-09-12).
+     *
+     * <p>One trap worth naming, because it survived several review rounds
+     * before it was caught: a rule that EXCLUDES on low uptime and lets
+     * everything else fall through ADMITS on high uptime by default. The
+     * unsound branch is an absence, not a statement, so there is nothing to
+     * point at when reading the rule. "What does this admit by default" is a
+     * different question from "what does this exclude".
+     */
+    static void appendProcessUptimeFields(StringBuilder body, long startMillis, long nowMillis) {
+        body.append(",\"process_uptime_seconds\":").append(uptimeSeconds(startMillis, nowMillis));
+        body.append(",\"process_start_time\":").append(HttpUtil.jsonString(startTimeIso(startMillis)));
+    }
+
+    /**
+     * Whole seconds of uptime, truncated and never negative.
+     *
+     * <p>Truncated rather than rounded so a gate thresholding on "at least N
+     * seconds up" is never told it has more uptime than it has. Clamped at zero
+     * because a clock stepping backwards (NTP correction, a resumed VM) would
+     * otherwise report a negative, which a threshold comparison reads as
+     * freshly-booted forever; zero is the honest worst case and makes the caller
+     * exclude the sample.
+     */
+    static long uptimeSeconds(long startMillis, long nowMillis) {
+        long elapsed = nowMillis - startMillis;
+        return elapsed <= 0 ? 0L : elapsed / 1000L;
+    }
+
+    /** Process start as an ISO-8601 instant in UTC — UTC so the value is
+     *  comparable across machines, which is its only purpose. */
+    static String startTimeIso(long startMillis) {
+        return DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochMilli(startMillis));
+    }
+
     /** Immutable-for-the-process schema identity (nexus-hubc0). */
     private record SchemaIdentity(String latestId, long count, String error) {}
 
@@ -348,6 +445,8 @@ public final class VersionHandler implements HttpHandler {
         // nexus-nyry9.9 / RDR-203 P2: both flags always present, always true on any
         // engine carrying the corresponding handler.
         appendNxAnswerStepsCapabilityField(body);
+        // nexus-904y8: uptime (predicate) + start instant (correlation).
+        appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {
             body.append(",\"embedding_mode\":")
                 .append(HttpUtil.jsonString(embedderRouter.modeName()))

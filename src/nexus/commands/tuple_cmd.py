@@ -7,7 +7,9 @@ Subcommands:
   out        -- write a tuple.
   rd         -- non-destructive read (probe by default; --timeout-s blocks).
   in         -- destructive (claiming) read (probe by default; --timeout-s blocks).
-  ack        -- consume a claimed tuple.
+  ack        -- consume a claimed tuple, optionally writing a reply in the
+                same transaction (--reply-* flags, RDR-206).
+  renew      -- extend a live claim's lease before it lapses (RDR-206).
   nack       -- release a claim back to available.
   templates  -- the boot-loaded template registry (digest, sources, templates).
   list       -- concrete subspaces that exist.
@@ -56,7 +58,7 @@ def _print_tuple_error(e: Exception) -> None:
 
 @click.group(name="tuple")
 def tuple_group() -> None:
-    """RDR-205 Linda tuple space: out / rd / in / ack / nack / templates / list / stats."""
+    """RDR-205 Linda tuple space: out / rd / in / ack (with an optional reply) / nack / renew / templates / list / stats / watch."""
 
 
 @tuple_group.command(name="out")
@@ -129,7 +131,7 @@ def tuple_rd_cmd(
               help="Every pinned key the template declares, exact match (required).")
 @click.option("--claimant", required=True, help="This caller's identity.")
 @click.option("--lease-s", "lease_s", type=int, required=True,
-              help="Claim lease length, capped at the template's max_lease_seconds.")
+              help="Claim lease length. Refused above the template's max_lease_seconds; clipped to the row's remaining TTL.")
 @click.option("--timeout-s", "timeout_s", type=int, default=0, show_default=True,
               help="Seconds to park when nothing matches immediately; 0 never blocks.")
 @click.option("--json", "json_out", is_flag=True, default=False, help="Output as JSON.")
@@ -162,14 +164,89 @@ def tuple_in_cmd(
 @tuple_group.command(name="ack")
 @click.argument("claim_id")
 @click.option("--claimant", required=True, help="Must match the identity that made the claim.")
-def tuple_ack_cmd(claim_id: str, claimant: str) -> None:
-    """Consume a claimed tuple. The row is invisible to rd/in after this."""
+@click.option(
+    "--reply-subspace", "reply_subspace", default=None,
+    help=(
+        "Write a reply into this subspace in the same transaction that "
+        "consumes the claim (RDR-206). Must resolve to a keys+nonce "
+        "template (SchemaViolation on a keys-only target, e.g. the "
+        "ledger). Required by every other --reply-* flag."
+    ),
+)
+@click.option("--reply-key", "reply_keys", multiple=True, metavar="KEY=VALUE",
+              help="A pinned key field for the reply (repeatable). Requires --reply-subspace.")
+@click.option("--reply-dim", "reply_dims", multiple=True, metavar="KEY=VALUE",
+              help="A dimension field for the reply (repeatable). Requires --reply-subspace.")
+@click.option("--reply-body", "reply_body", default=None,
+              help="Reply payload. Requires --reply-subspace.")
+@click.option("--reply-ttl-seconds", "reply_ttl_seconds", type=int, default=None,
+              help="Explicit TTL for the reply, capped at its template's retention "
+                   "ceiling. Requires --reply-subspace.")
+def tuple_ack_cmd(
+    claim_id: str,
+    claimant: str,
+    reply_subspace: str | None,
+    reply_keys: tuple[str, ...],
+    reply_dims: tuple[str, ...],
+    reply_body: str | None,
+    reply_ttl_seconds: int | None,
+) -> None:
+    """Consume a claimed tuple. The row is invisible to rd/in after this.
+
+    With --reply-subspace, the engine writes the reply as it consumes the
+    claim, in one transaction, and prints the reply's tuple id. There is no
+    --reply-nonce flag: the engine sets the reply's nonce itself, to the
+    request's tuple id, and refuses a caller-supplied one.
+    """
+    any_reply_flag = bool(reply_keys) or bool(reply_dims) or reply_body is not None or (
+        reply_ttl_seconds is not None
+    )
+    if reply_subspace is None:
+        if any_reply_flag:
+            raise click.UsageError(
+                "--reply-key/--reply-dim/--reply-body/--reply-ttl-seconds require "
+                "--reply-subspace"
+            )
+        reply = None
+    else:
+        from nexus.db.t2.records import ReplySpec  # noqa: PLC0415 — deferred: CLI startup cost
+        reply_key_map = _parse_kv_pairs(reply_keys, option_name="--reply-key")
+        reply_dim_map = _parse_kv_pairs(reply_dims, option_name="--reply-dim") or None
+        reply = ReplySpec(
+            subspace=reply_subspace, keys=reply_key_map, dims=reply_dim_map,
+            body=reply_body, ttl_seconds=reply_ttl_seconds,
+        )
     try:
-        _store().ack(claim_id, claimant)
+        reply_id = _store().ack(claim_id, claimant, reply=reply)
     except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
         _print_tuple_error(e)
         raise SystemExit(1) from e
     click.echo(f"Acked claim {claim_id}")
+    if reply_id:
+        click.echo(f"reply_id={reply_id}")
+
+
+@tuple_group.command(name="renew")
+@click.option("--claim-id", "claim_id", required=True,
+              help="The claim id returned by nx tuple in.")
+@click.option("--claimant", required=True, help="Must match the identity that made the claim.")
+@click.option("--lease-s", "lease_s", type=int, required=True,
+              help="New lease length from now, refused above the template's "
+                   "max_lease_seconds and silently clipped to the tuple's own expiry.")
+def tuple_renew_cmd(claim_id: str, claimant: str, lease_s: int) -> None:
+    """Extend a live claim held by CLAIMANT before its lease lapses.
+
+    Prints the engine's new lease_until -- never a locally computed one,
+    because a duration inside the template's cap can still be clipped to the
+    tuple's own expiry. Refused on a lapsed claim (ClaimNotFound) rather than
+    resurrecting it; never touches attempts.
+    """
+    try:
+        lease_until = _store().renew(claim_id, claimant, lease_s)
+    except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
+        _print_tuple_error(e)
+        raise SystemExit(1) from e
+    click.echo(lease_until.isoformat())
 
 
 @tuple_group.command(name="nack")
@@ -276,29 +353,43 @@ def tuple_watch_cmd(
 ) -> None:
     """Watch mailbox/ADDRESS... and print one ping line per newly arrived tuple.
 
-    With no ADDRESS, watches this session's own two mailboxes: the session id,
-    resolved from this process's environment, and the instance name given by
-    --instance. Both are probed by this one process, never by two Monitors.
+    An explicit ADDRESS wins outright: it suppresses every default and watches
+    exactly what you named. With no ADDRESS, watches the session id, read from
+    this process's own environment, and adds the instance mailbox only when
+    --instance supplies that name, since it is in no environment variable. So the
+    no-flag default is ONE mailbox and it says so; omitting --instance warns
+    rather than silently halving the watch. When both are watched, this one
+    process probes them, never two Monitors.
 
     Built to be a Claude Code Monitor source: prints nothing on an empty probe,
     never claims, never prints a body. Re-pings a still-present tuple after
-    --reemit-after, at most --max-emits times. Dead-lettered rows go to stderr
-    once per row; recovery too. Preflights the engine first and prints one SKIP
-    line instead of watching silently if it cannot read the mailbox, and refuses
-    to start when another watcher already holds the address."""
+    --reemit-after, at most --max-emits times. Every line saying mail is not being
+    delivered goes to stdout, the stream a Monitor watches: pings, a dead-lettered
+    row never seen alive, a probe failure and its recovery, the SKIP when the
+    engine cannot be read, the refusal when another watcher holds the address.
+    Only the death of a row already pinged while alive goes to stderr."""
     from nexus import config as _config  # noqa: PLC0415 — deferred: CLI startup cost
     from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred
     from nexus.tuple_watch import (  # noqa: PLC0415 — deferred: CLI startup cost
+        PING_PREFIX,
         WatchConfig,
         acquire_watch_locks,
         preflight,
+        prune_stale_registrations,
         resolve_watch_addresses,
         run_watch,
+        write_instance_registration,
     )
 
     cfg = WatchConfig(interval_s=interval_s, reemit_after_s=reemit_after_s, max_emits=max_emits)
     sd = state_dir or _config.nexus_config_dir()
     report = lambda s: click.echo(s, err=True)  # noqa: E731 — one-liner, matches emit's shape
+
+    # Resolved ONCE, here, and reused below for the registry write: this is the
+    # session id `resolve_watch_addresses` itself resolves at spawn from the process
+    # environment (CLAUDE_CODE_SESSION_ID/NX_SESSION_ID), which is also the identity
+    # `mailbox_drain.py` reads off its own hook payload for the exact same session.
+    session_id_from_env = resolve_active_session_id()
 
     # The ADDRESSES are resolved exactly once, here, and never re-resolved inside the
     # loop: CLAUDE_CODE_SESSION_ID is spawn-time env a long-lived process cannot see
@@ -307,7 +398,7 @@ def tuple_watch_cmd(
     # A moved address is handled by this process dying with its session and the next
     # SessionStart re-arming (MM-3.1/MM-3.2), backed by the lock below.
     resolved = resolve_watch_addresses(
-        addresses, instance=instance, session_id=resolve_active_session_id(),
+        addresses, instance=instance, session_id=session_id_from_env,
     )
     if resolved.error:
         click.echo(resolved.error)
@@ -316,24 +407,63 @@ def tuple_watch_cmd(
         click.echo(notice)
     watched = resolved.addresses
 
-    store = _store()
-    if not preflight(store, watched, config=cfg, emit=click.echo).ok:
-        return
-    locks = acquire_watch_locks(watched, state_dir=sd, emit=click.echo)
-    if not locks.ok:
-        return
+    # EVERY path out of this command says so on stdout before it goes. The shared
+    # one-shot-command error helper writes to stderr, which is right for `nx tuple rd`
+    # and wrong here: this command's whole contract is that a session watching stdout
+    # learns when mail is not being delivered, and the watcher dying is the most
+    # complete form of that. So the setup calls are inside the guard too -- a bug in
+    # preflight or the lock acquisition itself would otherwise reach Click's default
+    # handler as a bare traceback on stderr, with no stdout line at all.
+    locks = None
     try:
+        store = _store()
+        if not preflight(store, watched, config=cfg, emit=click.echo).ok:
+            return
+        locks = acquire_watch_locks(watched, state_dir=sd, emit=click.echo)
+        if not locks.ok:
+            return
+        # PER-SESSION instance registry (nexus-6konb.9 defect fix): written only on
+        # the default resolution path -- an explicit positional ADDRESS suppresses
+        # `instance` entirely in `resolved.addresses` (resolve_watch_addresses'
+        # own contract above), so a positional invocation writes nothing here,
+        # matching what it actually watched. Never keyed by a positional literal:
+        # only by the session id this process resolved from its own environment,
+        # which is what `mailbox_drain.py` reads back per its own payload session id.
+        #
+        # Deliberately keyed on `watched` (what was RESOLVED), not `locks.acquired`
+        # (what was actually LOCKED): nexus-6konb.10 (MM-3.2) decision 3 -- this
+        # registration is written whether or not the instance-name lock was
+        # acquired. The name belongs to the new session regardless of whether a
+        # stale watcher from a prior /clear still holds that address's lock, and
+        # the drain hook must drain it at this session's prompts either way.
+        if instance and session_id_from_env and instance in watched and not addresses:
+            write_instance_registration(sd, session_id_from_env, instance)
+        if session_id_from_env:
+            prune_stale_registrations(sd, session_id_from_env)
+        # Watch exactly what was LOCKED (nexus-6konb.10, MM-3.2): acquire_watch_locks
+        # is partial, so `locks.acquired` can be a strict subset of `watched` when
+        # another watcher already holds one of the requested addresses.
         run_watch(
-            store, watched, config=cfg, state_dir=sd,
+            store, locks.acquired, config=cfg, state_dir=sd,
             iterations=iterations, emit=click.echo, report=report,
+            # An explicit positional ADDRESS is a literal mailbox, not this session's
+            # own, so a /clear does not make it stale and it must not self-stop
+            # (nexus-6konb.13 docs critic). Only the default, session-resolved
+            # watch compares itself against the SessionStart marker.
+            spawn_session_id=None if addresses else session_id_from_env,
         )
     except KeyboardInterrupt:
         return
     except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
+        click.echo(
+            f"{PING_PREFIX} the watcher is exiting and no mailbox is being watched:"
+            f" {type(e).__name__}: {e}",
+        )
         _print_tuple_error(e)
         raise SystemExit(1) from e
     finally:
-        locks.release()
+        if locks is not None:
+            locks.release()
 
 
 def _row_dict(row: Any) -> dict[str, Any]:

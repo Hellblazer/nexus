@@ -293,6 +293,27 @@
                          test JVM rather than an order-dependent side effect. -->
                     <argLine>--enable-preview -Duser.timezone=UTC</argLine>
                     <excludedGroups>${test.excluded.groups}</excludedGroups>
+                    <!-- nexus-9meyc: the BACKSTOP for a wedged fork, and the only
+                         layer needing no cooperation from test code. Three runs hung
+                         on 2026-09-07/08 (28 min, about 1h40, and 30+ min), each at
+                         0% CPU while HOLDING THE SHARED BUILD LEASE, so one hang
+                         blocked every other engine build on the box until an
+                         operator jstack'd and killed it. Each reran clean in seconds
+                         or minutes, so the entire cost was the hang itself.
+                         Two were timeout-less java.net.http reads mid-test, which
+                         TestHttp and its lint address at the source. The third was
+                         not: every class had reported and the fork simply never
+                         exited, so no per-request timeout could have caught it.
+                         This covers both mechanisms.
+                         1800s is derived rather than guessed. The CI Java job
+                         measured 11m08s, 12m49s and 13m28s across three consecutive
+                         runs on 2026-09-12, and that is the WHOLE job including
+                         codegen and the integration group, so a single fork is
+                         strictly less. 30 minutes leaves better than 2x headroom
+                         while bounding a hang at 30 minutes instead of unbounded.
+                         Raise it if a legitimate fork ever approaches it; do not
+                         remove it. -->
+                    <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
                     <!-- nexus-1hj1d: deliberately NO rerunFailingTestsCount.
                          A blanket rerun retries EVERY failing test, so a racy
                          PRODUCT bug would be retried into a green run — the

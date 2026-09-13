@@ -146,9 +146,9 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-128](rdr-128-t2-single-writer-enforcement.md) | T2 Single-Writer Enforcement: One Owner for memory.db, or an Enforced Lock Discipline | Architecture | Closed 2026-05-25 (implemented, shipped 5.1.0) | 2026-05-25 |
 | [RDR-129](rdr-129-t2-daemon-serving-path-cross-store-contention.md) | T2 Daemon Write-Path Hardening: Guaranteed-Single-Daemon Enforcement and Contention-Free Internal Serialization | Architecture | Closed | 2026-05-25 |
 | [RDR-130](rdr-130-command-preambles-via-nx-cli.md) | Command Preambles via the nx CLI: Thin Commands, Tested Logic, No Inlined Bash | Architecture | Accepted 2026-05-26 | 2026-05-26 |
-| [RDR-131](rdr-131-t2-session-rollup-summaries.md) | T2 Session Rollup Summaries (MemTree-Lite): Recency-Windowed Memory Consolidation for Compact Context Injection | Architecture | Draft | 2026-05-27 |
-| [RDR-132](rdr-132-scope-routed-t1-t2-promotion.md) | Scope-Routed T1 to T2 Promotion: Entity / Session / Project Scopes for Targeted Memory Retrieval | Architecture | Draft | 2026-05-27 |
-| [RDR-133](rdr-133-entity-cluster-cross-tier-aggregation.md) | Entity-Cluster Cross-Tier Aggregation: A First-Class Entity Handle Unifying T2 Memory, T3 Catalog, and T3 Chunks | Architecture | Draft | 2026-05-27 |
+| [RDR-131](rdr-131-t2-session-rollup-summaries.md) | T2 Session Rollup Summaries (MemTree-Lite): Recency-Windowed Memory Consolidation for Compact Context Injection | Architecture | Abandoned | 2026-05-27 |
+| [RDR-132](rdr-132-scope-routed-t1-t2-promotion.md) | Scope-Routed T1 to T2 Promotion: Entity / Session / Project Scopes for Targeted Memory Retrieval | Architecture | Abandoned | 2026-05-27 |
+| [RDR-133](rdr-133-entity-cluster-cross-tier-aggregation.md) | Entity-Cluster Cross-Tier Aggregation: A First-Class Entity Handle Unifying T2 Memory, T3 Catalog, and T3 Chunks | Architecture | Abandoned | 2026-05-27 |
 | [RDR-134](rdr-134-taxonomy-aware-recall-in-nx-answer.md) | RDR-070 Phase 5: Taxonomy-Aware Recall in nx_answer — Teach the Composed-Retrieval Path to Read the Taxonomy It Already Has | Architecture | Draft | 2026-05-27 |
 | [RDR-135](rdr-135-windowed-aspect-extraction.md) | Windowed Aspect Extraction with Cross-Window Merge: Stop Whole-Paper Single-Shot Extraction from Degrading on Long Inputs | Architecture | Draft | 2026-05-27 |
 | [RDR-136](rdr-136-messagedisplay-projection-substrate.md) | Display Projection via the MessageDisplay Hook: One-Way Output Mirroring and Routing-Marker Hiding | Architecture | Draft | 2026-05-27 |
@@ -222,6 +222,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-204](rdr-204-embedding-profile-and-collection-authority.md) | Collections Stop Encoding Metadata in Their Names: An Install-Scoped Embedding Profile and catalog_collections as the Authority | Architecture | Closed | 2026-09-06 |
 | [RDR-205](rdr-205-linda-tuple-space-over-postgres.md) | Linda Tuple Space over Postgres: A Coordination Primitive for Agents and Instances | Architecture | Closed | 2026-09-09 |
 | [RDR-206](rdr-206-tuple-claim-renew-and-reply-in-ack.md) | Tuple Space Claim Renewal and Reply-in-Ack: Close the Two Limits RDR-205 Accepted for v1 | Feature | Accepted | 2026-09-11 |
+| [RDR-207](rdr-207-summarization-at-the-t2-expiry-boundary.md) | Summarization at the T2 Expiry Boundary — the Manage Phase RDR-057 Cut | Feature | Draft | 2026-09-12 |
 
 > **Scrapped 2026-05-19 (RDR-110-119 arc).** Bundled the storage-substrate split with new abstractions (tuplespace, ORB, host-trust, surfaces-as-tuples, UI fabric); scope discipline failed across nine RDRs and 67 stranded beads. Files preserved as tombstones per the "never delete RDR files" rule. Postmortem: [docs/postmortem/2026-05-16-rdr110-113-remediation-chain.md](../postmortem/2026-05-16-rdr110-113-remediation-chain.md). Active substrate work continues as [RDR-120](rdr-120-storage-substrate-split.md) with an explicit moratorium on co-shipped consumers. Numbers RDR-114 through RDR-117 are unused on `main` (drafted on feature branches that never merged).
 

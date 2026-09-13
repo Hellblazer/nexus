@@ -191,6 +191,49 @@ def _write_t1_handoff_markers(new_session_id: str) -> None:
         _log.debug("t1_handoff_marker_write_failed", error=str(exc))
 
 
+def _write_tuple_watch_session_marker(new_session_id: str) -> None:
+    """nexus-6konb.12 (MM-3.4 fix 1): tell a live ``nx tuple watch`` Monitor
+    from before this ``/clear``/``/resume`` that the conversation is now a
+    different session, so it can stop itself rather than keep holding its
+    per-address lock on a mailbox nobody watches for any more.
+
+    Replaces the SessionStart arm instruction's old TaskStop rule, which
+    could not work in the first place: the fresh conversation it would run
+    in has no memory of the OLD Monitor's harness task id, so there was
+    never a way for it to discover what to stop. This writes a marker the
+    watcher checks ITSELF instead (see :func:`nexus.tuple_watch.run_watch`),
+    reusing the nexus-d76vc T1-handoff pattern immediately above: writer and
+    reader independently derive the SAME claude ancestor pid via
+    :func:`nexus.session.find_immediate_claude_pid`, from different vantage
+    points, rather than passing it between them.
+
+    Written on EVERY SessionStart source, unlike the T1 handoff marker. The
+    marker is keyed by pid and nothing prunes it, and pids are reused: a new
+    Claude process that inherited a dead one's pid would otherwise read that
+    process's last marker, name a session it is not, and stop its own freshly
+    armed watcher on the first cycle. Writing on ``startup`` (and on
+    ``compact``, where the id is unchanged) overwrites whatever a previous
+    owner of the pid left, so a marker always names the CURRENT process's
+    session. The watcher still only stops on a mismatch, so a same-id write
+    is a no-op for it.
+
+    Best-effort: any failure (no ``ps``, no config dir, disk error) is
+    logged at debug and swallowed -- a SessionStart hook must never fail
+    the session over a mailbox-watch convenience feature.
+    """
+    try:
+        from nexus import config as _nx_config  # noqa: PLC0415 — deferred import; module attribute so a patched nexus.config reaches it (nexus-78blw)
+        from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — deferred import; rare/branch-local path
+        from nexus.tuple_watch import write_session_marker  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+        claude_pid = find_immediate_claude_pid()
+        if claude_pid <= 0:
+            return
+        write_session_marker(_nx_config.nexus_config_dir(), claude_pid, new_session_id)
+    except Exception as exc:  # noqa: BLE001 — best-effort; hook must never crash session-start over a mailbox-watch convenience feature
+        _log.debug("tuple_watch_session_marker_write_failed", error=str(exc))
+
+
 # -- SessionStart -------------------------------------------------------------
 
 def session_start(claude_session_id: str | None = None, source: str | None = None) -> str:
@@ -231,6 +274,9 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
 
     if source in _T1_HANDOFF_SOURCES and session_id and session_id != "unknown":
         _write_t1_handoff_markers(session_id)
+    if session_id and session_id != "unknown":
+        # Every source, not just clear/resume: see the writer's docstring.
+        _write_tuple_watch_session_marker(session_id)
 
     # nexus-gff3g: do NOT claim "T1 scratch initialized" here. This hook only
     # records the session-id; T1 chroma is owned by the MCP server's FastMCP
@@ -244,6 +290,7 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
         f"Nexus ready (session: {session_id})."
         f"{_stale_mcp_host_warning()}"
         f"{_guidance_imperative_block()}"
+        f"{_mailbox_arm_block(session_id)}"
     )
 
 
@@ -283,6 +330,30 @@ def _stale_mcp_host_warning() -> str:
         f"installed conexus {report.installed_version} — if tool calls "
         f"start failing with import errors, run /mcp to reconnect."
     )
+
+
+def _mailbox_arm_block(session_id: str) -> str:
+    """nexus-6konb.9 (MM-3.1): the RDR-205 mailbox-watch arm instruction.
+
+    Emitted on every SessionStart source (startup/resume/clear/compact --
+    unlike :func:`_write_t1_handoff_markers`, there is no reason to gate
+    this on ``source``: a fresh watcher is worth re-arming after a
+    ``/compact`` exactly as much as after ``/clear``, and the underlying
+    ``nx tuple watch`` lock makes a redundant arm harmless). See
+    :mod:`nexus.mailbox_arm` for the instruction text, the bounded+cached
+    tuple-surface availability probe, and why it is silent when that probe
+    fails.
+
+    Never raises — mirrors every other best-effort leg in this module.
+    """
+    try:
+        from nexus.mailbox_arm import arm_block  # noqa: PLC0415 — deferred import, only needed on this path
+
+        text = arm_block(session_id)
+    except Exception as exc:  # noqa: BLE001 — session start must never break on this probe
+        _log.debug("mailbox_arm_block_failed", error=str(exc))
+        return ""
+    return f"\n\n{text}" if text else ""
 
 
 def _guidance_imperative_block() -> str:

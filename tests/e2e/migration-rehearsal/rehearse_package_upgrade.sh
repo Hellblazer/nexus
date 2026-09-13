@@ -54,6 +54,41 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$*"; }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAILS=$((FAILS+1)); }
 note() { printf '       %s\n' "$*"; }
 
+# nexus-wo6sc: attribution for the failure shape where the supervisor is
+# alive and its own heartbeat missed the lease TTL, so every client reads
+# "endpoint not resolvable". Shared with
+# tests/scripts/test_heartbeat_stall_note.py, which drives this same
+# function against fixture logs (RED and GREEN both pinned).
+#
+# FAIL LOUD IF THE LIBRARY IS ABSENT. This script runs under `set -uo
+# pipefail` with no `-e`, so a bare `source` of a missing file printed one
+# stderr line and carried on, leaving _stall_note calling an undefined
+# function — "command not found" instead of the attribution, on the failure
+# path only, where nobody was looking. Measured 2026-09-13: the library was
+# never COPYed into the package-upgrade image at all, so the note had never
+# once run in the environment it was written for, while its unit tests
+# passed against the function directly. An absent dependency must stop the
+# gate, not quietly remove one of its outputs.
+_STALL_NOTE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/heartbeat_stall_note.sh"
+if [ ! -r "$_STALL_NOTE_LIB" ]; then
+  echo "FATAL: $_STALL_NOTE_LIB is missing or unreadable." >&2
+  echo "  The heartbeat-stall attribution (nexus-wo6sc) cannot run without it." >&2
+  echo "  In a container this means lib/ was not staged or not COPYed;" >&2
+  echo "  see run.sh's --package-upgrade branch and Dockerfile.package-upgrade." >&2
+  exit 1
+fi
+# shellcheck source=./lib/heartbeat_stall_note.sh disable=SC1091
+source "$_STALL_NOTE_LIB"
+for _fn in heartbeat_stall_note heartbeat_census; do
+  command -v "$_fn" >/dev/null 2>&1 || {
+    echo "FATAL: sourced $_STALL_NOTE_LIB but $_fn is not defined." >&2
+    exit 1
+  }
+done
+
+# Emit the stall note, if any, indented like the rest of the gate's evidence.
+_stall_note() { heartbeat_stall_note | sed 's/^/       /'; }
+
 # Evidence dump for the convergence leg. `nx daemon restart-stale` drives the
 # stop/start cycle INSIDE the product, so when it reports "still running the
 # old engine" the harness log otherwise shows only the verdict. This prints
@@ -242,6 +277,7 @@ elif [ "$SKEW_PUT_RC" != 0 ]; then
   if printf '%s' "$SKEW_PUT" | grep -qiE "converg|engine"; then
     ok "skew-window T1 put failed LOUD, naming convergence/engine (rc=$SKEW_PUT_RC): $SKEW_PUT"
   else
+    _stall_note
     bad "skew-window T1 put failed (rc=$SKEW_PUT_RC) with no convergence/engine-naming message — opaque, not legible: $SKEW_PUT"
   fi
 elif [ -z "$SKEW_PUT" ]; then
@@ -259,6 +295,7 @@ else
       if printf '%s' "$SKEW_GET" | grep -qiE "converg|engine"; then
         ok "skew-window T1 get failed LOUD, naming convergence/engine (rc=$SKEW_GET_RC): $SKEW_GET"
       else
+        _stall_note
         bad "skew-window T1 get failed (rc=$SKEW_GET_RC) with no convergence/engine-naming message — opaque, not legible: $SKEW_GET"
       fi
     elif ! printf '%s' "$SKEW_GET" | grep -q "$SKEW_MARKER"; then
@@ -387,6 +424,14 @@ if printf '%s' "$PRE_CONTENT" | grep -q "$MARKER"; then
 else
   bad "pre-upgrade T1 row $PRE_ID did NOT survive (got: $PRE_CONTENT)"
 fi
+
+# nexus-wo6sc: the heartbeat census runs on EVERY exit path, pass included.
+# The supervisor log dies with the container, so a passing run that does not
+# report here reports nothing — and "no stall lines in the leg log" then
+# looks identical to "no stalls happened". An unreadable log says so rather
+# than counting as zero.
+say "Heartbeat census (nexus-wo6sc)"
+heartbeat_census | sed 's/^/       /'
 
 say "RESULT"
 if [ "$FAILS" -eq 0 ]; then

@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -389,16 +390,37 @@ def _rewrite_ledger(repo: Path) -> None:
     ledger.write_text("".join(kept), encoding="utf-8")
 
 
+#: Battery steps, each paired with whether it needs the engine substrate
+#: (nexus-ps1gx). Marked per step rather than set globally, because exactly one
+#: step DOES need an engine and blanket-disabling would quietly hollow it out.
+#:
+#: The three pytest legs are substrate-free and are run with
+#: ``NX_TEST_T2_SUBSTRATE=none``. Without it, a cut from a clone that has never
+#: built the engine jar dies at SETUP rather than on any real finding: on
+#: 2026-09-08 the plugin-v7.36.1-1 cut errored 1216 lint tests that way and
+#: refused, leaving a half-created branch behind. The container rehearsal passed
+#: the identical step because its environment already sets the variable, as
+#: ``plugin-release.yml`` does — so the rehearsal could not reproduce the
+#: refusal, which is why this survived to bite a real cut.
+#:
+#: ``release-sandbox.sh smoke`` provisions its own service and MUST keep the
+#: ambient setting; forcing it off would leave the step running while proving
+#: less than it claims.
+_BATTERY: list[tuple[list[str], bool]] = [
+    (["uv", "run", "pytest", "-m", "lint", "-q"], False),
+    (["uv", "run", "pytest", "tests/test_plugin_release_drift_ledger.py", "-q"], False),
+    (["uv", "run", "pytest", "tests/hooks/", "-q"], False),
+    (["./tests/e2e/release-sandbox.sh", "smoke"], True),
+]
+
+
 def _run_real_battery(repo: Path) -> None:
     """The minimal battery, against the branch's own mixed state."""
-    commands = [
-        ["uv", "run", "pytest", "-m", "lint", "-q"],
-        ["uv", "run", "pytest", "tests/test_plugin_release_drift_ledger.py", "-q"],
-        ["uv", "run", "pytest", "tests/hooks/", "-q"],
-        ["./tests/e2e/release-sandbox.sh", "smoke"],
-    ]
-    for command in commands:
-        proc = subprocess.run(command, cwd=repo, text=True)
+    for command, needs_substrate in _BATTERY:
+        env = None
+        if not needs_substrate:
+            env = {**os.environ, "NX_TEST_T2_SUBSTRATE": "none"}
+        proc = subprocess.run(command, cwd=repo, text=True, env=env)
         if proc.returncode != 0:
             raise CutRefused(
                 f"battery failed: {' '.join(command)} (rc {proc.returncode})"

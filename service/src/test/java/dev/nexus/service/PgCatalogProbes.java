@@ -524,6 +524,28 @@ public final class PgCatalogProbes {
             .and(DSL.field(DSL.name("privilege_type"), String.class).eq(privilege)));
     }
 
+    /**
+     * {@code has_function_privilege(role, regprocedure, privilege)} -- the role's
+     * EFFECTIVE access, counting the PUBLIC default and inherited roles.
+     *
+     * <p>The complement of {@link #hasExplicitRoutineGrant}, and the two answer
+     * opposite questions. Use THAT one to prove a grant was actually issued (it
+     * ignores the PUBLIC default, which is why it can catch a DROP that discarded
+     * grants). Use THIS one to prove a role can actually CALL the function,
+     * however that access arises. Picking the wrong one is a measured hazard in
+     * both directions: an earlier draft of the vectors-016 grant test used
+     * has_function_privilege and stayed green with the whole GRANT block deleted,
+     * because PUBLIC already carried it.
+     *
+     * @param signature a regprocedure-parsable signature, e.g.
+     *        {@code "nexus.plain_search_768(nexus.vector, text[], jsonb, text, int)"}
+     */
+    public static boolean canExecuteFunction(DSLContext ctx, String role, String signature) {
+        Field<Boolean> f = DSL.function("has_function_privilege", Boolean.class,
+            DSL.val(role), DSL.val(signature), DSL.inline("EXECUTE"));
+        return Boolean.TRUE.equals(ctx.select(f).fetchOne(f));
+    }
+
     // ── pg_roles ─────────────────────────────────────────────────────────
 
     /** {@code (rolsuper, rolbypassrls, rolinherit)} of one role. */

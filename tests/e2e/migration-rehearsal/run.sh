@@ -142,7 +142,7 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # suite when it drifts. Following the old wording blocked the 7.6.0 release
 # battery (2026-08-10). A prose comment that contradicts a mechanical test
 # loses to the test.
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.116}"
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.117}"
 # nexus-cfgo9: the PACKAGE-UPGRADE leg's starting point — a REAL, already
 # published PyPI release + the engine tag ITS OWN PINNED_SERVICE_TAG
 # resolves to (see CHANGELOG.md's "[6.9.0]" entry: "Ships with (and
@@ -847,6 +847,12 @@ print(h.hexdigest())
   fi
   cp "$HERE/Dockerfile.package-upgrade" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_package_upgrade.sh" "$STAGE/"
+  # nexus-wo6sc: the rehearse script SOURCES lib/heartbeat_stall_note.sh, so
+  # the library has to travel with it. Staged for the same reason the main
+  # Dockerfile COPYs lib/ — without it the source fails inside the container
+  # and the stall attribution is silently absent from exactly the failure
+  # report it exists to annotate (measured 2026-09-13, battery at ef6d9c466).
+  cp -R "$HERE/lib" "$STAGE/lib"
 elif [ "$STRANDED" = 1 ]; then
   # nexus-8nlj4: the WORKING-TREE wheel travels in under its OWN subdirectory
   # (real PEP 427 filename preserved — see the --package-upgrade rationale

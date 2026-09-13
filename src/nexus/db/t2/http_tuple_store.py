@@ -69,12 +69,13 @@ timeout could fire on its own.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any, NoReturn
 
 import httpx
 import structlog
 
-from nexus.db.t2.records import SubspaceCensus, TupleRow
+from nexus.db.t2.records import ReplySpec, SubspaceCensus, TupleRow
 
 # nexus-em75s.9: construction, credential/endpoint refresh-on-401, and the
 # HTTP transport itself (_post/_get) are inherited wholesale from
@@ -187,6 +188,36 @@ _ERROR_CLASSES_BY_CODE: dict[str, type[TupleError]] = {
         LeaseTooLongError,
     )
 }
+
+
+class ReplyNotWrittenError(RuntimeError):
+    """An ``ack`` carrying a reply was answered by an engine that wrote no
+    reply, and the request has already been consumed (nexus-u7blf).
+
+    DELIBERATELY NOT a :class:`TupleError`. That hierarchy is the engine's
+    own refusal codes, and a caller wrapping tuple work in
+    ``except TupleError`` is handling refusals it can retry or report. This
+    is not that: the request is GONE and the reply was never written, so a
+    retried ack answers ``ClaimNotFound``. Escaping a broad
+    ``except TupleError`` is the point — being swallowed by generic
+    tuple-error handling is how this becomes silent again one layer up.
+    Same placement as :class:`RequestTooLargeError`, the module's other
+    client-detected condition.
+
+    The discriminator needs no version probe. The RDR-206 engine ALWAYS
+    emits ``reply_id`` on ``/ack`` — null on a plain ack, hex when a reply
+    was written (``TupleHandler.handleAck``) — while
+    ``engine-service-v0.1.116`` reads the body as a map with
+    ``FAIL_ON_UNKNOWN_PROPERTIES`` false, ignores ``reply`` entirely,
+    consumes the request and answers ``{"acked":true}``. So a falsy
+    ``reply_id`` after a reply was sent means no reply exists, whether the
+    key is absent (old engine) or null (a new engine's own defect).
+
+    Reachability is low: the paired release bumps
+    ``REQUIRED_ENGINE_VERSION`` to the RDR-206 engine, so a released client
+    does not meet an older one. A hand-mixed install does. Silent data loss
+    is refused on its shape, not on its odds.
+    """
 
 
 class RequestTooLargeError(ValueError):
@@ -488,14 +519,92 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
     # ── ack / nack ────────────────────────────────────────────────────────
 
-    def ack(self, claim_id: str, claimant: str) -> None:
+    def ack(
+        self, claim_id: str, claimant: str, reply: ReplySpec | None = None,
+    ) -> str | None:
         """Consume the claimed row; the row is invisible to ``rd``/``in_``
-        after this."""
+        after this. Returns the reply's tuple id when *reply* was written,
+        else ``None``.
+
+        Additive (RDR-206): before this, ``ack`` posted ``/ack`` and
+        discarded the response, so every existing caller keeps seeing
+        ``None`` and every existing request keeps its exact wire shape.
+
+        With *reply*, the engine writes it as it consumes the request, in
+        one transaction, and sets the reply's nonce to ``hex(request tuple
+        id)`` -- see :class:`~nexus.db.t2.records.ReplySpec` for why the
+        spec carries no nonce of its own. A reply whose target cannot be
+        resolved (``UnknownSubspace``) or resolves to a keys-only template
+        (``SchemaViolation``) is refused BEFORE the transaction opens, so
+        the request is left still claimed and still ackable by the same
+        claimant -- a refused reply is not a half-consumed request.
+
+        The 8 KB pre-send guard measures the SERIALISED request, so a reply
+        body can push an ack over a cap a bare ack could never reach; that
+        raises :class:`RequestTooLargeError` before anything is sent.
+        """
         if not claim_id:
             raise ValueError("claim_id must not be empty")
         if not claimant:
             raise ValueError("claimant must not be empty")
-        self._post("/ack", {"claim_id": claim_id, "claimant": claimant})
+        payload: dict[str, Any] = {"claim_id": claim_id, "claimant": claimant}
+        if reply is not None:
+            payload["reply"] = reply.to_payload()
+        r = self._post("/ack", payload) or {}
+        reply_id = r.get("reply_id")
+        if reply is not None and not reply_id:
+            raise ReplyNotWrittenError(
+                "the engine acked without writing the reply: the request "
+                f"claimed by {claimant!r} HAS BEEN CONSUMED and the reply to "
+                f"{reply.subspace!r} was NOT written. Do not retry the ack — "
+                "the claim is gone and a retry answers ClaimNotFound. The "
+                "engine predates RDR-206 ack-with-reply (it returned no "
+                "reply_id); re-send the reply with out() if it still "
+                "matters, or converge the engine to the version this client "
+                "requires."
+            )
+        return reply_id
+
+    def renew(self, claim_id: str, claimant: str, lease_s: int) -> datetime:
+        """Extend a live claim's lease. Returns the engine's new
+        ``lease_until`` as an aware :class:`~datetime.datetime`.
+
+        RETURNS WHAT THE ENGINE SAID; never recomputes it. Two ceilings
+        apply and they are different rules: a *lease_s* above the
+        template's ``max_lease_seconds`` is REFUSED with
+        :class:`LeaseTooLongError`, while a duration inside that cap is
+        silently CLIPPED to the tuple's own expiry (the engine applies
+        ``least(candidate, expires_at)`` in SQL against the live row). So
+        the returned instant can be EARLIER than ``now + lease_s``, and a
+        client that computed it locally would look like a harmless
+        optimisation while disagreeing with the engine in exactly the
+        window RDR-206 Phase 1's whole-phase review was about.
+
+        Never touches ``attempts``, and is refused on a lapsed claim
+        (:class:`ClaimNotFoundError`) rather than resurrecting it.
+
+        Against an engine predating ``/renew`` the unknown route answers
+        404 with ``{"error": "unknown tuples op: /renew"}`` (the route
+        switch's default branch, verified at ``engine-service-v0.1.116``).
+        The body DOES carry an ``error`` field; its value is simply not one
+        of the nine recognised codes, so ``_raise_typed`` finds no class for
+        it and re-raises the bare ``httpx.HTTPStatusError`` -- loud by
+        design. A silent no-op here would let a caller believe its lease was
+        extended while the claim lapses underneath it. (An earlier version
+        of this docstring said the body carries no ``error`` field. Wrong
+        about the body, right about the outcome, and the distinction matters
+        to anyone changing ``_raise_typed``: it is the CODE LOOKUP that
+        misses here, not the JSON parse.)
+        """
+        if not claim_id:
+            raise ValueError("claim_id must not be empty")
+        if not claimant:
+            raise ValueError("claimant must not be empty")
+        r = self._post(
+            "/renew",
+            {"claim_id": claim_id, "claimant": claimant, "lease_s": lease_s},
+        )
+        return datetime.fromisoformat(r["lease_until"])
 
     def nack(self, claim_id: str, claimant: str) -> None:
         """Release the claim; counts an attempt toward the template's

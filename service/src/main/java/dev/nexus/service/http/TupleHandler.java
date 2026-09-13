@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
+import dev.nexus.service.db.SchemaViolationException;
 import dev.nexus.service.db.TupleException;
 import dev.nexus.service.db.TupleRepository;
 import dev.nexus.service.tuples.TemplateRegistry;
@@ -41,8 +42,10 @@ import java.util.Optional;
  *   POST /v1/tuples/rdp             {subspace, keys_pattern?, n?, since?} -&gt; {"tuples": [...]}
  *   POST /v1/tuples/in              {subspace, keys_pattern, claimant, lease_s, timeout_s?} -&gt; {"tuple": ..|null, "claim_id": ..|null}
  *   POST /v1/tuples/inp             {subspace, keys_pattern, claimant, lease_s} -&gt; same shape as /in
- *   POST /v1/tuples/ack             {claim_id, claimant} -&gt; {"acked": true}
+ *   POST /v1/tuples/ack             {claim_id, claimant, reply?{subspace, keys, dims?, body?, ttl_seconds?}}
+ *                                   -&gt; {"acked": true, "reply_id": "&lt;hex&gt;"|null}
  *   POST /v1/tuples/nack            {claim_id, claimant} -&gt; {"nacked": true}
+ *   POST /v1/tuples/renew           {claim_id, claimant, lease_s} -&gt; {"lease_until": "&lt;ISO-8601&gt;"}
  *   GET  /v1/tuples/registry        -&gt; {"digest", "sources", "templates": [...]}
  *   GET  /v1/tuples/subspace_list   ?prefix= -&gt; {"subspaces": [...]}
  *   GET  /v1/tuples/subspace_stats  ?subspace= -&gt; {subspace, total, available, claimed, dead, consumed, expired_unpurged, oldest_created_at, newest_created_at}
@@ -107,6 +110,7 @@ public final class TupleHandler implements HttpHandler {
                 case "/inp" -> handleInp(exchange, tenant, method);
                 case "/ack" -> handleAck(exchange, tenant, method);
                 case "/nack" -> handleNack(exchange, tenant, method);
+                case "/renew" -> handleRenew(exchange, tenant, method);
                 case "/registry" -> handleRegistry(exchange, method);
                 case "/subspace_list" -> handleSubspaceList(exchange, tenant, method);
                 case "/subspace_stats" -> handleSubspaceStats(exchange, tenant, method);
@@ -225,8 +229,50 @@ public final class TupleHandler implements HttpHandler {
             return;
         }
         Map<String, Object> body = readBody(ex);
-        repo.ack(tenant, requireString(body, "claim_id"), requireString(body, "claimant"));
-        HttpUtil.send(ex, 200, "{\"acked\":true}");
+        String claimId = requireString(body, "claim_id");
+        String claimant = requireString(body, "claimant");
+        TupleRepository.ReplySpec reply = parseReply(body.get("reply"));
+        byte[] replyId = repo.ackWithReply(tenant, claimId, claimant, reply);
+        HttpUtil.send(ex, 200, "{\"acked\":true,\"reply_id\":"
+                + (replyId == null ? "null" : HttpUtil.jsonString(HEX.formatHex(replyId)))
+                + "}");
+    }
+
+    /**
+     * The optional {@code reply} object on {@code POST /v1/tuples/ack}: the fields
+     * {@code out} accepts, MINUS the nonce (RDR-206 Phase 1 Step 2).
+     *
+     * <p>A {@code nonce} key here is REFUSED rather than ignored. The engine sets a
+     * reply's nonce to {@code hex(consumed request id)} so a retried ack lands on the
+     * same reply row, and no caller, tool or flag carries one (Sam's decision
+     * 2026-09-11). Silently dropping a supplied nonce would leave a caller believing it
+     * had chosen the reply's identity, which is exactly the kind of ignored input that
+     * only surfaces as a mystery much later. {@code validateOut} cannot catch this: it
+     * checks for a nonce that is MISSING, and nothing there rejects an extra one. This
+     * is also the only layer where "absent" and "explicitly supplied" are still
+     * distinguishable, since the repository is handed a record that has no nonce field
+     * at all.
+     */
+    @SuppressWarnings("unchecked")
+    private TupleRepository.ReplySpec parseReply(Object raw) {
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Map)) {
+            throw new SchemaViolationException("reply", "must be an object");
+        }
+        Map<String, Object> r = (Map<String, Object>) raw;
+        if (r.containsKey("nonce")) {
+            throw new SchemaViolationException("reply.nonce",
+                    "must not be supplied: the engine sets a reply's nonce to the id of the "
+                    + "request it answers, so a retried ack lands on the same reply row");
+        }
+        return new TupleRepository.ReplySpec(
+                requireString(r, "subspace"),
+                stringMap((Map<String, Object>) r.get("keys")),
+                stringMap((Map<String, Object>) r.get("dims")),
+                (String) r.get("body"),
+                numberOrNull(r.get("ttl_seconds")));
     }
 
     private void handleNack(HttpExchange ex, String tenant, String method) throws IOException {
@@ -237,6 +283,26 @@ public final class TupleHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         repo.nack(tenant, requireString(body, "claim_id"), requireString(body, "claimant"));
         HttpUtil.send(ex, 200, "{\"nacked\":true}");
+    }
+
+    /**
+     * {@code POST /v1/tuples/renew} (RDR-206 Phase 1 Step 3). Extends a live claim's
+     * lease; the response carries the resulting deadline, which may be EARLIER than
+     * {@code now + lease_s} because a claim is clamped to its tuple's own expiry.
+     * Serialised by {@code MAPPER}, whose {@code JavaTimeModule} renders it ISO-8601.
+     *
+     * <p>No new typed error: the four this can raise — ClaimNotFound, ClaimOwnership,
+     * LeaseTooLong, SchemaViolation — already exist with their statuses.
+     */
+    private void handleRenew(HttpExchange ex, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) {
+            HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}");
+            return;
+        }
+        Map<String, Object> body = readBody(ex);
+        var leaseUntil = repo.renew(tenant, requireString(body, "claim_id"),
+                requireString(body, "claimant"), requireLong(body, "lease_s"));
+        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(Map.of("lease_until", leaseUntil)));
     }
 
     // ── registry / census ────────────────────────────────────────────────────

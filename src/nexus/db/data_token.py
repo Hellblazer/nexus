@@ -74,7 +74,7 @@ perfectly valid (it just isn't the one on disk any more). That reasoning is
 still correct for the SMALL, near-simultaneous race (bounded to ~2 wasted
 mints, well under `MintRateLimiter`'s burst=5) — a double mint there is an
 efficiency cost, not a correctness bug, and does not by itself justify
-``fcntl.flock``.
+an advisory file lock.
 
 What changed: a scripted fan-out of M>5 TRULY CONCURRENT cold processes
 (parallel ``&`` loops, parallel make, CI legs) is a DIFFERENT race class —
@@ -92,9 +92,10 @@ because 3 of 8 concurrent ``nx`` invocations raised
 though no token data is ever corrupted.
 
 Fix: :meth:`DataTokenManager._mint_guarded`, a per-``(base_url, tenant)``
-NON-BLOCKING ``fcntl.flock`` around mint-on-miss ONLY — mirroring the
-shipped :func:`nexus.db.t1._lock_guarded_mint_or_borrow` precedent, but
-poll-then-re-read rather than block: a losing racer tries a non-blocking
+NON-BLOCKING :func:`nexus._locking.lock_fd` around mint-on-miss ONLY —
+mirroring the shipped :func:`nexus.db.t1._lock_guarded_mint_or_borrow`
+precedent, but poll-then-re-read rather than block: a losing racer tries a
+non-blocking
 exclusive acquire; on failure it re-reads the lease file (the winner will
 have published while holding the lock) and returns the borrowed token the
 instant it appears, without ever itself acquiring the lock. Only the lock
@@ -125,7 +126,7 @@ long-lived multi-tenant process (e.g. an MCP server juggling several
 tenants/endpoints through the process-wide :func:`get_data_token_manager`
 singleton), which is exactly the shape this sharding targets.
 
-Scope boundary — HOST-LOCAL ONLY (nexus-b0svi): the ``fcntl.flock`` guard
+Scope boundary — HOST-LOCAL ONLY (nexus-b0svi): the advisory-lock guard
 above coordinates processes on ONE machine. It provides ZERO coordination
 across DIFFERENT hosts sharing the same ``mint_token`` credential — a
 multi-host fleet racing a cold start (e.g. a CI fleet of separate runners,
@@ -155,7 +156,6 @@ whenever the credential's bound tenant is not literally ``"default"``.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -172,6 +172,7 @@ from uuid import uuid4
 
 import structlog
 
+from nexus import _locking
 from nexus.rate_brake import parse_retry_after
 
 _log = structlog.get_logger(__name__)
@@ -842,7 +843,7 @@ class DataTokenManager:
         try:
             while True:
                 try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # lifecycle-gate-allow: non-blocking mint-on-miss mutex (nexus-nnr26), not a lifecycle election
+                    _locking.lock_fd(lock_fd, blocking=False)  # lifecycle-gate-allow: non-blocking mint-on-miss mutex (nexus-nnr26), not a lifecycle election
                 except BlockingIOError:
                     # A sibling holds the lock — check whether it has
                     # already published before waiting further.
@@ -890,7 +891,7 @@ class DataTokenManager:
                     )
                     return fresh
                 finally:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)  # lifecycle-gate-allow: release the mint-on-miss mutex (nexus-nnr26)
+                    _locking.unlock_fd(lock_fd)  # lifecycle-gate-allow: release the mint-on-miss mutex (nexus-nnr26)
         finally:
             os.close(lock_fd)
 

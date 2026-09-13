@@ -224,9 +224,12 @@ class TestFloorLinearChains:
         for dim in chain.dims.values():
             expected_total *= len(dim.domain)
         assert result.total_combinations == expected_total
-        # 12 named fail leaves + 1 armed/pass leaf, per the guard order in
-        # check_paired_preconditions (nexus-k1c08).
-        assert len(result.reachable) == 13
+        # 13 named fail leaves + 1 armed/pass leaf, per the guard order in
+        # check_paired_preconditions (nexus-k1c08). The 13th is the freshness
+        # step's `future` leaf, added in nexus-h0fo3: a one-sided bound
+        # refuses only what is too old, so a future-dated commit date
+        # satisfied it forever.
+        assert len(result.reachable) == 14
         assert result.unreachable_declared_leaves == ()
 
     def test_paired_preconditions_chain_cells_are_driven(self) -> None:

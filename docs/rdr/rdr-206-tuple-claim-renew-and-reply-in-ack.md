@@ -238,14 +238,16 @@ operations: `ack` and `nack` gain a compare-and-swap on the claim row, so a
 stale ack or nack fails `ClaimNotFound` instead of writing over a row the
 sweep released or another claimant now holds.
 
-1. `renew(claim_id, claimant, lease_s)`: extend a live claim held by this
-   claimant. New `lease_until` is `now + lease_s`, capped at the template's
-   `max_lease_seconds` from now and clamped to the row's `expires_at`. Writes
+1. **`renew(claim_id, claimant, lease_s)`**: extend a live claim held by this
+   claimant. New `lease_until` is `now + lease_s`, clamped to the row's
+   `expires_at`. A `lease_s` above the template's `max_lease_seconds` is
+   REFUSED, not capped — the caller is told rather than quietly given less; see
+   `LeaseTooLong` below. Writes
    one claim-log row with transition `renew`. Errors: `ClaimNotFound` (no live
    claim with that id, including a lapsed one), `ClaimOwnership` (held by
    another claimant), `LeaseTooLong` (above the template cap), `SchemaViolation`
    (`lease_s` at or below zero).
-2. `ack(claim_id, claimant, reply=None)`: as today, plus an optional reply
+2. **`ack(claim_id, claimant, reply=None)`**: as today, plus an optional reply
    object `{subspace, keys, dims, body, ttl_seconds}` (the fields `out`
    accepts, minus `nonce`) that the engine writes with the same validation as
    `out`, in the same transaction that consumes the claim. The engine sets the
@@ -295,13 +297,33 @@ private TuplesRecord consumeClaim(DSLContext ctx, String tenant, String claimId,
     // so ackWithReply cannot ship without the compare-and-swap.
 
 public byte[] ackWithReply(String tenant, String claimId, String claimant, ReplySpec replyOrNull)
-    // withTenant: consumeClaim FIRST (a consumed or foreign claim fails here and nothing
-    // else runs), then, if replyOrNull != null, resolveOrThrow(reply subspace) and
-    // SchemaViolation unless the template's id_from is KEYS_NONCE, then writeOut(ctx, ...)
-    // against that template in the SAME ctx, with nonce = hex(consumed row's id), set here
-    // and never taken from the caller (a nonce key in the reply object was already refused
-    // by the handler). After withTenant returns, signalAll(tenant, replySubspace)
-    // only if a reply was written. Returns the reply id or null.
+    // AMENDED to match what shipped (nexus-h61dl.3/.4 review). This block previously
+    // put resolveOrThrow and the id_from check INSIDE withTenant, after consumeClaim.
+    // The shipped order is the reverse and is stronger, so the document moved rather
+    // than the code: EVERY way the reply can be refused runs BEFORE the transaction
+    // opens, so a refused reply leaves the request still claimed because the ack never
+    // STARTED, not because a rollback restored it. Those two end states are identical
+    // in an assertion and come apart the moment someone splits the transaction or moves
+    // the signal.
+    //
+    // So: if replyOrNull != null, prepareOut(reply subspace/keys/dims/ttl) — which
+    // resolves the template and validates shape and ttl bounds — then SchemaViolation
+    // unless the template's id_from is KEYS_NONCE. Both BEFORE withTenant. Then
+    // withTenant: consumeClaim (a consumed or foreign claim fails here), then
+    // writeOut(ctx, ...) in the SAME ctx, with nonce = hex(consumed row's id), set by
+    // the engine and never taken from the caller (a nonce key in the reply object was
+    // already refused by the handler). After withTenant returns,
+    // signalAll(tenant, replySubspace) only if a reply was written. Returns the reply id
+    // or null.
+    //
+    // The order is observable on exactly one input: a STALE claim and an INVALID reply
+    // together, where the shipped code raises SchemaViolation and the order described
+    // here before would have raised ClaimNotFound. Pinned by
+    // TupleAckWithReplyTest#whenBothTheClaimIsStaleAndTheReplyIsInvalid_theReplyIsRefusedFirst,
+    // written when this amendment landed, because neither neighbouring test supplies
+    // both violations at once — the same blind spot that hid the out() validation-order
+    // swap at Step 2. Reverting to the old order fails that test AND
+    // aRefusedReplyNeverOpensTheTransaction.
 ```
 
 Routes (`TupleHandler`): `POST /v1/tuples/renew` with body
@@ -679,3 +701,6 @@ with execution still owed to Phase 1 Step 2.
 - 2026-09-11: Post-accept amendment — the call-order claim removed: the ack and the reply write share one transaction, so their order inside it is immaterial and is no longer pinned; the atomicity pin stays. Fix check on this change recorded in T2 as `nexus_rdr/206-fix-check-<tip>`, where `<tip>` is the RDR file's commit after this amendment.
 - 2026-09-11: Post-accept amendment (bead nexus-h61dl.1) — the four Significants and the Minors gate round 2 left open, at every site: a reply target must be a `keys+nonce` template, otherwise `SchemaViolation` (T2 `nexus_rdr/206-decision-s1-reply-target-error`); the stray-`nonce`-key and target-shape checks are named as two new branches in `TupleHandler`'s reply parsing and the audit row says so; the framing sentences name the compare-and-swap on `ack`/`nack`; the renew audit row carries `consumed_at IS NULL`; a renew is not an attempt, by decision, with its scenario; the Phase 3 tag window; the RDR-205 quote verbatim; three pin sites in two files; the Risks mitigation and the Key Discoveries citation say atomicity from `TenantScope.stampAndRun`, not order. Fix check on this change recorded in T2 as `nexus_rdr/206-fix-check-<tip>`.
 - 2026-09-11: Post-accept amendment — the reply-target shape check moves to `TupleRepository`'s reply write, after template resolution (the handler has no resolver); the stray-`nonce`-key check stays in the handler; the pseudocode names both; the Gap 1 quote of RDR-205 made verbatim. Fix check on this change recorded in T2 as `nexus_rdr/206-fix-check-<tip>`.
+- 2026-09-12: Post-accept amendment (commit `b1b1e3913`) — the Technical Design pseudocode for `ackWithReply` amended to the order that SHIPPED: `prepareOut` and the `id_from` check run BEFORE `withTenant` opens, not inside it after `consumeClaim`. The document moved rather than the code, because the shipped order is the stronger of the two — every way the reply can be refused runs before anything is consumed, so the request is still claimed because the ack never STARTED rather than because a rollback restored it. The difference is observable on exactly one input, a stale claim together with an invalid reply, where the shipped code raises `SchemaViolation` and the documented order would have raised `ClaimNotFound`; pinned by `TupleAckWithReplyTest#whenBothTheClaimIsStaleAndTheReplyIsInvalid_theReplyIsRefusedFirst`. Reverting to the documented order fails that test AND `aRefusedReplyNeverOpensTheTransaction`, which is what settled which of the two should move. Entry added at the Phase 1 review (nexus-h61dl.6), which found the amendment had landed without one.
+- 2026-09-12: Post-accept amendment (Phase 1 close gate, bead nexus-h61dl.7) — two precision fixes surfaced BY the gate rather than by review. §Approach's two items were labelled with code spans where the cross-walk requires `N. **Label**: description`, so the gate refused to enumerate them at all; it declines to cross-walk a subset, which is the correct behaviour and is why the formatting was worth fixing rather than working around. And §Approach item 1 said the new lease is "capped at the template's `max_lease_seconds`", which reads as clamping, while the same item's own error list gives `LeaseTooLong` for exceeding that cap. The implementation REFUSES, and refusing is the decided behaviour: capping would hand a caller who asked for too long a shorter lease instead of the error it has coming. Reworded to say so. Found while manually reviewing the cross-walk's evidence pointers, which the gate explicitly asks for rather than treating a green as verification.
+- 2026-09-12: Post-accept amendment (Phase 1 review, bead nexus-h61dl.6) — no RDR text change; recorded because the review found a defect the RDR's own mitigation depends on. `renew` computed its lease ceiling in Java from an `expires_at` read by the UNLOCKED `liveClaimRow`, while the compare-and-swap never re-checked that column, so an `out` refire landing in the read-to-update window could leave `lease_until` past the tuple's new expiry. Since `purgeExpiredTuplesBatch` deletes on `expires_at` alone with no claim-state filter, the row could then be hard deleted under a holder just told its lease was extended — defeating "a claim never outlives its tuple", which §Risks names as the mitigation for a holder renewing forever. The ceiling is now applied in SQL against the live row at UPDATE time. Reachable only from the whole-phase view: Step 1 replaced locking with compare-and-swap, Step 3 reused a clamp helper written for `claimOnce`, which reads under `forNoKeyUpdate` + `skipLocked` and so cannot race a refire.

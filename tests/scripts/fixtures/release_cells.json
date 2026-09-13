@@ -21,6 +21,7 @@
         "name": "check_paired_preconditions.age_state",
         "domain": [
           "unavailable",
+          "future",
           "too_old",
           "fresh"
         ],
@@ -88,6 +89,43 @@
           "below_floor"
         ],
         "description": "newest_published_engine()'s outcome (F3): git-unavailable, an empty tag namespace, or a comparison against REQUIRED_ENGINE_VERSION."
+      },
+      {
+        "name": "check_release_arming.armed_at",
+        "domain": [
+          "absent",
+          "unparseable",
+          "future",
+          "stale",
+          "fresh"
+        ],
+        "description": ""
+      },
+      {
+        "name": "check_release_arming.attestation",
+        "domain": [
+          "missing",
+          "unreadable",
+          "present"
+        ],
+        "description": ""
+      },
+      {
+        "name": "check_release_arming.requirement",
+        "domain": [
+          "not_required",
+          "required"
+        ],
+        "description": ""
+      },
+      {
+        "name": "check_release_arming.tag_match",
+        "domain": [
+          "absent",
+          "mismatch",
+          "match"
+        ],
+        "description": ""
       },
       {
         "name": "check_source_ancestry.diff_result",
@@ -192,6 +230,7 @@
       "check_source_ancestry",
       "check_client_lag_ledger",
       "check_paired_preconditions",
+      "check_release_arming",
       "record_deploy_from_gate_report_leg",
       "check_wire_contract_ledger"
     ],
@@ -203,9 +242,9 @@
       "check_composite",
       "precond_main_dispatch"
     ],
-    "reachable_cell_count": 89,
+    "reachable_cell_count": 100,
     "unreachable_declared_leaf_count": 0,
-    "total_combinations_considered": 946
+    "total_combinations_considered": 1324
   },
   "cells": [
     {
@@ -445,6 +484,22 @@
       "note": ""
     },
     {
+      "cell_id": "check_paired_preconditions::battery_tag_future",
+      "function": "check_paired_preconditions",
+      "inputs": {
+        "tag_shape": "valid_prefix",
+        "tag_parse": "parseable",
+        "tag_exists": "true",
+        "tag_published": "true",
+        "version_match": "match",
+        "newest_state": "match",
+        "age_state": "future"
+      },
+      "exit_code": 1,
+      "message_key": "battery_tag_future",
+      "note": ""
+    },
+    {
       "cell_id": "check_paired_preconditions::battery_tag_not_exists",
       "function": "check_paired_preconditions",
       "inputs": {
@@ -570,6 +625,136 @@
       },
       "exit_code": 2,
       "message_key": "battery_published_unavailable",
+      "note": ""
+    },
+    {
+      "cell_id": "check_release_arming::arming_not_required",
+      "function": "check_release_arming",
+      "inputs": {
+        "requirement": "not_required",
+        "attestation": "missing",
+        "tag_match": "absent",
+        "armed_at": "absent"
+      },
+      "exit_code": 0,
+      "message_key": "arming_not_required",
+      "note": ""
+    },
+    {
+      "cell_id": "check_release_arming::arming_ok",
+      "function": "check_release_arming",
+      "inputs": {
+        "requirement": "required",
+        "attestation": "present",
+        "tag_match": "match",
+        "armed_at": "fresh"
+      },
+      "exit_code": 0,
+      "message_key": "arming_ok",
+      "note": ""
+    },
+    {
+      "cell_id": "check_release_arming::arming_absent",
+      "function": "check_release_arming",
+      "inputs": {
+        "requirement": "required",
+        "attestation": "missing",
+        "tag_match": "absent",
+        "armed_at": "absent"
+      },
+      "exit_code": 1,
+      "message_key": "arming_absent",
+      "note": ""
+    },
+    {
+      "cell_id": "check_release_arming::arming_clock_ahead",
+      "function": "check_release_arming",
+      "inputs": {
+        "requirement": "required",
+        "attestation": "present",
+        "tag_match": "match",
+        "armed_at": "future"
+      },
+      "exit_code": 1,
+      "message_key": "arming_clock_ahead",
+      "note": ""
+    },
+    {
+      "cell_id": "check_release_arming::arming_stale",
+      "function": "check_release_arming",
+      "inputs": {
+        "requirement": "required",
+        "attestation": "present",
+        "tag_match": "match",
+        "armed_at": "stale"
+      },
+      "exit_code": 1,
+      "message_key": "arming_stale",
+      "note": ""
+    },
+    {
+      "cell_id": "check_release_arming::arming_tag_absent",
+      "function": "check_release_arming",
+      "inputs": {
+        "requirement": "required",
+        "attestation": "present",
+        "tag_match": "absent",
+        "armed_at": "absent"
+      },
+      "exit_code": 1,
+      "message_key": "arming_tag_absent",
+      "note": ""
+    },
+    {
+      "cell_id": "check_release_arming::arming_tag_mismatch",
+      "function": "check_release_arming",
+      "inputs": {
+        "requirement": "required",
+        "attestation": "present",
+        "tag_match": "mismatch",
+        "armed_at": "absent"
+      },
+      "exit_code": 1,
+      "message_key": "arming_tag_mismatch",
+      "note": ""
+    },
+    {
+      "cell_id": "check_release_arming::arming_timestamp_absent",
+      "function": "check_release_arming",
+      "inputs": {
+        "requirement": "required",
+        "attestation": "present",
+        "tag_match": "match",
+        "armed_at": "absent"
+      },
+      "exit_code": 1,
+      "message_key": "arming_timestamp_absent",
+      "note": ""
+    },
+    {
+      "cell_id": "check_release_arming::arming_timestamp_unparseable",
+      "function": "check_release_arming",
+      "inputs": {
+        "requirement": "required",
+        "attestation": "present",
+        "tag_match": "match",
+        "armed_at": "unparseable"
+      },
+      "exit_code": 1,
+      "message_key": "arming_timestamp_unparseable",
+      "note": ""
+    },
+    {
+      "cell_id": "check_release_arming::arming_unreadable",
+      "function": "check_release_arming",
+      "inputs": {
+        "requirement": "required",
+        "attestation": "unreadable",
+        "tag_match": "absent",
+        "armed_at": "absent"
+      },
+      "exit_code": 2,
+      "message_key": "arming_unreadable",
       "note": ""
     },
     {

@@ -72,7 +72,7 @@ class TaxonomyCentroidHandlerTest {
 
         service = new NexusService(0, TOKEN, svcDs);
         service.start();
-        http = HttpClient.newHttpClient();
+        http = TestHttp.client();
     }
 
     @AfterAll
@@ -238,8 +238,7 @@ class TaxonomyCentroidHandlerTest {
 
     @Test
     void auth_401OnMissingToken() throws Exception {
-        var req = HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/taxonomy/centroids/dimension"))
+        var req = TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/taxonomy/centroids/dimension")
             .header("X-Nexus-Tenant", TENANT)
             .GET().build();
         var resp = http.send(req, HttpResponse.BodyHandlers.ofString());
@@ -249,8 +248,7 @@ class TaxonomyCentroidHandlerTest {
     // ── Helpers ─────────────────────────────────────────────────────────────────
 
     private HttpResponse<String> get(String path, String tenant) throws Exception {
-        var req = HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))
+        var req = TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
             .header("Authorization", "Bearer " + TOKEN)
             .header("X-Nexus-Tenant", tenant)
             .GET().build();
@@ -258,8 +256,7 @@ class TaxonomyCentroidHandlerTest {
     }
 
     private HttpResponse<String> post(String path, String tenant, String body) throws Exception {
-        var req = HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))
+        var req = TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
             .header("Authorization", "Bearer " + TOKEN)
             .header("X-Nexus-Tenant", tenant)
             .header("Content-Type", "application/json")

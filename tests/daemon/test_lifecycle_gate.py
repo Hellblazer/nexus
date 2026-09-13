@@ -122,6 +122,11 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     # lifecycle, no lease, no heartbeat; a plain critical-section around one
     # JSON file.
     "migration/verify_fill_watermark.py",
+    # Surfaced by widening the scan to the nexus._locking spellings — both
+    # predate this gate and were invisible to the old fcntl-literal match,
+    # not newly introduced. Neither is daemon-scope election.
+    "indexer.py",                        # per-repo index PID lock
+    "tuple_watch.py",                    # per-address tuple-watch lock
 })
 
 
@@ -147,15 +152,28 @@ def test_flock_acquire_sites_are_allowlisted() -> None:
 
 
 def _flock_acquire_lines(text: str) -> list[tuple[int, str]]:
-    """Yield (lineno, line) for every flock ACQUIRE in *text*.
+    """Yield (lineno, line) for every advisory-lock ACQUIRE in *text*.
 
     Matches ``fcntl.flock(`` anywhere on the line (not just at line start, so an
     assignment form ``x = fcntl.flock(...)`` is caught — HIGH-2) and excludes
     ``LOCK_UN`` release calls. Gate tests prefer over-matching (a false positive
-    is a visible review prompt) to under-matching (a silent miss)."""
+    is a visible review prompt) to under-matching (a silent miss).
+
+    ALSO matches the :mod:`nexus._locking` spellings. The Windows-portability
+    port moved every raw ``fcntl.flock`` acquire behind ``lock_fd`` /
+    ``lock_file``; had this scan kept looking only for the literal
+    ``fcntl.flock(``, it would have gone quiet across the whole tree and
+    reported a clean sweep while detecting nothing — the exact vacuous-gate
+    failure (nexus-moht0) these gates exist to prevent. Releases
+    (``unlock_fd`` / ``unlock_file``) are excluded, matching the ``LOCK_UN``
+    exclusion above.
+    """
+    acquire_markers = ("fcntl.flock(", "lock_fd(", "lock_file(")
     out: list[tuple[int, str]] = []
     for lineno, line in enumerate(text.splitlines(), 1):
-        if "fcntl.flock(" in line and "LOCK_UN" not in line:
+        if "LOCK_UN" in line or "unlock_fd(" in line or "unlock_file(" in line:
+            continue
+        if any(marker in line for marker in acquire_markers):
             out.append((lineno, line))
     return out
 
@@ -170,6 +188,24 @@ def test_flock_acquire_allowlist_is_non_vacuous(tmp_path: pathlib.Path) -> None:
     assert "LOCK_EX" in hits[0][1]
     # And the release form must NOT be flagged.
     assert _flock_acquire_lines("    fcntl.flock(fd, fcntl.LOCK_UN)\n") == []
+
+    # The nexus._locking spellings the Windows port introduced must be
+    # detected too — otherwise the port would have emptied this gate while
+    # leaving it green.
+    for acquire in (
+        "    _locking.lock_fd(fd, blocking=True)\n",
+        "    lock_file(handle, blocking=False)\n",
+    ):
+        assert len(_flock_acquire_lines(acquire)) == 1, (
+            f"the scan must detect the primitive's acquire form: {acquire!r}"
+        )
+    for release in (
+        "    _locking.unlock_fd(fd)\n",
+        "    unlock_file(handle)\n",
+    ):
+        assert _flock_acquire_lines(release) == [], (
+            f"a release must not be flagged as an acquire: {release!r}"
+        )
 
 
 def test_gate_doc_exists() -> None:

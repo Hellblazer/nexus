@@ -313,7 +313,13 @@ _ABOVE_FLOOR = _a_greater_version(REQUIRED_ENGINE_VERSION)
 _BELOW_FLOOR = _a_lesser_version(REQUIRED_ENGINE_VERSION)
 _FRESH_AGE_HOURS = 1.0
 _STALE_AGE_HOURS = floor._DEFAULT_PAIRED_TAG_MAX_AGE_HOURS + 100.0
+#: A NEGATIVE age: the timestamp sits ahead of now. One hour clears the
+#: 0.25h skew tolerance with room, and prints as a stable "1.0".
+_FUTURE_AGE_HOURS = -1.0
 _PINNED_TAG = floor._pinned_engine_tag()
+#: Resolved at module level because text_normalizers() shadows the name
+#: ``floor`` with the floor VERSION string inside its own body.
+_ARMING_DIR_ABS = _REPO_ROOT / floor._ARMING_DIR
 
 
 def pin_currency_chain() -> GuardChain:
@@ -556,7 +562,7 @@ _BATTERY_VERSION_MATCH = Dimension("version_match", ("mismatch", "match"))
 _BATTERY_NEWEST_STATE = Dimension(
     "newest_state", ("unavailable", "none", "mismatch", "match"),
 )
-_BATTERY_AGE_STATE = Dimension("age_state", ("unavailable", "too_old", "fresh"))
+_BATTERY_AGE_STATE = Dimension("age_state", ("unavailable", "future", "too_old", "fresh"))
 
 
 def paired_preconditions_chain() -> GuardChain:
@@ -591,6 +597,7 @@ def paired_preconditions_chain() -> GuardChain:
         }),
         GuardStep("age_gate", "age_state", {
             "unavailable": Leaf(2, "battery_age_unavailable"),
+            "future": Leaf(1, "battery_tag_future"),
             "too_old": Leaf(1, "battery_too_old"),
             "fresh": CONTINUE,
         }),
@@ -641,6 +648,7 @@ def drive_paired_preconditions(cell: Cell) -> tuple[int, str]:
     }[inputs["tag_published"]]
     age_value = {
         "unavailable": floor._TAGS_UNAVAILABLE,
+        "future": _FUTURE_AGE_HOURS,
         "too_old": _STALE_AGE_HOURS,
         "fresh": _FRESH_AGE_HOURS,
     }[inputs["age_state"]]
@@ -683,6 +691,7 @@ def _classify_paired_preconditions(rc: int, text: str) -> str:
         "newest published engine tag is vnone": "battery_newest_none",
         "unaccounted engine work": "battery_newest_mismatch",
         "could not determine": "battery_age_unavailable",
+        "in the FUTURE": "battery_tag_future",
         "past the": "battery_too_old",
         "paired mode ARMED": "battery_armed",
     }
@@ -690,6 +699,119 @@ def _classify_paired_preconditions(rc: int, text: str) -> str:
         if marker in text:
             return key
     raise AssertionError(f"unclassified check_paired_preconditions output: rc={rc} text={text!r}")
+
+
+_ARMING_REQUIREMENT = Dimension("requirement", ("not_required", "required"))
+_ARMING_ATTESTATION = Dimension("attestation", ("missing", "unreadable", "present"))
+_ARMING_TAG_MATCH = Dimension("tag_match", ("absent", "mismatch", "match"))
+_ARMING_ARMED_AT = Dimension(
+    "armed_at", ("absent", "unparseable", "future", "stale", "fresh")
+)
+
+#: The JSON-decoder message a truncated attestation actually produces. Fixed
+#: text rather than a live json.JSONDecodeError so the frozen text oracle
+#: does not move with CPython's error wording.
+_ARMING_UNREADABLE_REASON = "Expecting value: line 1 column 1 (char 0)"
+
+
+def release_arming_chain() -> GuardChain:
+    steps = (
+        GuardStep("requirement_gate", "requirement", {
+            "not_required": Leaf(0, "arming_not_required"),
+            "required": CONTINUE,
+        }),
+        GuardStep("attestation_gate", "attestation", {
+            "missing": Leaf(1, "arming_absent"),
+            "unreadable": Leaf(2, "arming_unreadable"),
+            "present": CONTINUE,
+        }),
+        GuardStep("tag_gate", "tag_match", {
+            "absent": Leaf(1, "arming_tag_absent"),
+            "mismatch": Leaf(1, "arming_tag_mismatch"),
+            "match": CONTINUE,
+        }),
+        GuardStep("armed_at_gate", "armed_at", {
+            "absent": Leaf(1, "arming_timestamp_absent"),
+            "unparseable": Leaf(1, "arming_timestamp_unparseable"),
+            "future": Leaf(1, "arming_clock_ahead"),
+            "stale": Leaf(1, "arming_stale"),
+            "fresh": CONTINUE,
+        }),
+    )
+    dims = {
+        "requirement": _ARMING_REQUIREMENT,
+        "attestation": _ARMING_ATTESTATION,
+        "tag_match": _ARMING_TAG_MATCH,
+        "armed_at": _ARMING_ARMED_AT,
+    }
+    return GuardChain(
+        "check_release_arming", steps, dims, success=Leaf(0, "arming_ok"),
+    )
+
+
+def _arming_body(inputs: dict[str, str]) -> dict[str, Any]:
+    """The attestation dict for one driven cell.
+
+    The three dated states are built as OFFSETS from now rather than fixed
+    instants, so the printed ``[age]`` is deterministic under the ``%.1f``
+    the message formats it with: 1.0h and 172.0h each sit ~3 minutes from a
+    rounding boundary, and the offset-to-read gap here is one in-process
+    function call.
+    """
+    body: dict[str, Any] = {"armed_by": "conexus-test"}
+    if inputs["tag_match"] == "mismatch":
+        body["engine_tag"] = "engine-service-v9.9.9"
+    elif inputs["tag_match"] == "match":
+        body["engine_tag"] = _PINNED_TAG
+    now = datetime.datetime.now(datetime.timezone.utc)
+    armed_at = inputs["armed_at"]
+    if armed_at == "unparseable":
+        body["armed_at"] = "not-a-timestamp"
+    elif armed_at == "future":
+        body["armed_at"] = (now + datetime.timedelta(hours=1)).isoformat()
+    elif armed_at == "stale":
+        body["armed_at"] = (
+            now - datetime.timedelta(hours=_STALE_AGE_HOURS)
+        ).isoformat()
+    elif armed_at == "fresh":
+        body["armed_at"] = (
+            now - datetime.timedelta(hours=_FRESH_AGE_HOURS)
+        ).isoformat()
+    return body
+
+
+def drive_release_arming(cell: Cell) -> tuple[int, str]:
+    inputs = cell.inputs
+    ledger_label = "empty" if inputs["requirement"] == "not_required" else "blocking"
+    ledger, _ack = _ledger_fixture(ledger_label)
+    read_value: tuple[str, Any] = {
+        "missing": ("missing", ""),
+        "unreadable": ("unreadable", _ARMING_UNREADABLE_REASON),
+        "present": ("present", _arming_body(inputs)),
+    }[inputs["attestation"]]
+    with patch.object(wire_ledger, "parse_ledger", return_value=ledger), \
+         patch.object(floor, "_read_arming_attestation", return_value=read_value):
+        rc, out, err = _capture(floor.check_release_arming, _PINNED_TAG)
+    return rc, _classify_release_arming(rc, out + err)
+
+
+def _classify_release_arming(rc: int, text: str) -> str:
+    markers = {
+        "arming NOT-REQUIRED": "arming_not_required",
+        "no arming attestation exists at": "arming_absent",
+        "arming UNVERIFIABLE": "arming_unreadable",
+        "carries no `engine_tag` field": "arming_tag_absent",
+        "declares engine_tag": "arming_tag_mismatch",
+        "carries no `armed_at` field": "arming_timestamp_absent",
+        "does not parse as an ISO-8601 instant": "arming_timestamp_unparseable",
+        "in the FUTURE": "arming_clock_ahead",
+        "ago, past the": "arming_stale",
+        "release ARMED:": "arming_ok",
+    }
+    for marker, key in markers.items():
+        if marker in text:
+            return key
+    raise AssertionError(f"unclassified check_release_arming output: rc={rc} text={text!r}")
 
 
 _TRACKER_OUTCOME_LABELS = (
@@ -1525,6 +1647,7 @@ def _all_chains() -> list[GuardChain]:
         source_ancestry_chain(),
         client_lag_ledger_chain(),
         paired_preconditions_chain(),
+        release_arming_chain(),
         tracker_outcome_chain(),
         wire_contract_ledger_chain(),
     ]
@@ -1546,9 +1669,9 @@ def _all_results() -> list[EnumerationResult]:
 
 
 #: ``Cell.function`` -> the driver that runs the REAL gated function for one
-#: cell of that function. Every key is one of the 12 functions
+#: cell of that function. Every key is one of the 13 functions
 #: ``build_fixture`` enumerates; the parity harness dispatches through this
-#: map and a 13th function appearing in the fixture with no driver here
+#: map and a 14th function appearing in the fixture with no driver here
 #: fails loudly (``KeyError``), never silently.
 DRIVERS: dict[str, Callable[[Cell], tuple[int, str]]] = {
     "check_pin_currency": drive_pin_currency,
@@ -1556,6 +1679,7 @@ DRIVERS: dict[str, Callable[[Cell], tuple[int, str]]] = {
     "check_client_lag_ledger": drive_client_lag_ledger,
     "check_wire_contract_ledger": drive_wire_contract_ledger,
     "check_paired_preconditions": drive_paired_preconditions,
+    "check_release_arming": drive_release_arming,
     "record_deploy_from_gate_report_leg": drive_tracker_outcome,
     "check_floor_bare": drive_check_floor_bare,
     "check_floor_paired": drive_check_floor_paired_explicit,
@@ -1607,6 +1731,7 @@ def text_normalizers() -> list[tuple[str, str]]:
     above = ".".join(str(p) for p in _a_greater_version(REQUIRED_ENGINE_VERSION))
     below = ".".join(str(p) for p in _BELOW_FLOOR)
     pairs = [
+        (str(_ARMING_DIR_ABS), "<ARMING_DIR>"),
         (str(wire_ledger.DEFAULT_LEDGER_PATH), "<LEDGER_PATH>"),
         (above, "<FLOOR+1>"), (below, "<FLOOR-1>"), (floor, "<FLOOR>"),
     ]

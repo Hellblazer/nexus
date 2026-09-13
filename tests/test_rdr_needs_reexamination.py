@@ -203,9 +203,15 @@ def test_flipping_a_predecessor_marks_nobody(tmp_path, monkeypatch):
 
 
 def test_marker_put_keeps_the_entry_permanent_and_keeps_its_tags(tmp_path, monkeypatch):
-    """The T2 facade's put() defaults ttl to 30 days -- a marker write that
-    forgot ttl=None would expire a permanent RDR record; one that passed
-    tags="" would strip them."""
+    """A marker write must stay permanent and keep its tags.
+
+    Written when the T2 facade's put() defaulted ttl to 30 days, so a marker
+    that forgot ttl=None would expire a permanent RDR record. nexus-473mx
+    reversed that default to permanent, which removes THAT route to the bug
+    — the test is now belt-and-braces rather than the only thing standing
+    between an RDR marker and expiry. Kept, because it still pins the two
+    properties by name: permanent, and tags preserved. The rationale is
+    updated rather than left to assert a default that no longer exists."""
     rdr_dir = _rdr_dir(tmp_path)
     _write_rdr(rdr_dir, 14, "accepted")
     _write_rdr(rdr_dir, 15, "accepted")

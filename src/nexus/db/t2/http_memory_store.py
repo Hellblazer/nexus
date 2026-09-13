@@ -104,7 +104,7 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         title: str,
         content: str,
         tags: str = "",
-        ttl: int | None = 30,
+        ttl: int | None = None,  # nexus-473mx: omission means permanent
         agent: str | None = None,
         session: str | None = None,
     ) -> int:
@@ -603,7 +603,7 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         title: str,
         content: str,
         tags: str = "",
-        ttl: int | None = 30,
+        ttl: int | None = None,  # nexus-473mx: omission means permanent
         agent: str | None = None,
         session: str | None = None,
         min_similarity: float = 0.5,

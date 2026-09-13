@@ -64,7 +64,18 @@ import pathlib
 import re
 import subprocess
 import sys
+import shutil
 import tempfile
+
+import tests._engine_substrate as _substrate
+
+#: Every nested-pytest subprocess in this file bounds a HANG, never performance.
+#: Six numbers in this one module turned out to be load-sensitive bounds on a
+#: shared box, each firing because something else was busy (nexus-61vos); this is
+#: the shared ceiling they collapse into. Far above any load the box realistically
+#: produces, and it exists only so a nested run that never returns cannot hang the
+#: suite.
+_NESTED_PYTEST_HANG_TIMEOUT_S = 300
 import time
 
 import pytest
@@ -1137,12 +1148,22 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard() -> 
     # Engine-boot KILL CONTROL (nexus-vdti6): _engine_substrate.py's
     # ensure_engine() creates a `nexus_t2_substrate_pg_*` temp dir on every
     # boot (tempfile.mkdtemp(prefix=...)). With NX_TEST_T2_SUBSTRATE=none
-    # in effect nothing in the nested run may boot an engine at all -- so
-    # the absence of any NEW such dir after each call is a structural
-    # proof, not a timing guess. A generous 8s ceiling backs it up (a real
-    # engine boot is documented elsewhere in this repo as ~10s minimum for
-    # the JAR+PG combination alone; collecting and running one small file
-    # with no engine involved measured well under 4s locally).
+    # in effect nothing in the nested run may boot an engine at all, and the
+    # check for that is EXACT: the nested run is given its own TMPDIR, so a
+    # glob of that private tree asks what THIS subprocess created instead of
+    # differencing the shared system temp dir against itself. The shared-dir
+    # difference and the 8s ceiling that used to back it up are both gone --
+    # the difference attributed any concurrent cluster on the box to this
+    # probe, and the ceiling bounded LOAD rather than a hang (nexus-61vos).
+    #: A bound on a HANG, not on performance. Every wall-clock number in this
+    #: probe has now bitten once: the shared-tmp set difference, the
+    #: elapsed<8.0 assertion, and a 60s subprocess timeout, all of them firing
+    #: because something else on this shared box was busy (nexus-61vos). This
+    #: one stays because a nested pytest that never returns must not hang the
+    #: suite, but it is far above any load the box realistically produces, and
+    #: if it DOES fire the probe skips loudly rather than failing, because a
+    #: timeout proves nothing whatever about the census's skip semantics.
+    _PROBE_HANG_TIMEOUT_S = _NESTED_PYTEST_HANG_TIMEOUT_S
     _pg_tmp_prefix = "nexus_t2_substrate_pg_"
     _census_nodeid = (
         "tests/test_mode_declarations_are_explicit.py"
@@ -1180,60 +1201,121 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard() -> 
             cwd=_REPO_ROOT,
             capture_output=True,
             text=True,
-            timeout=60,
+            # Generous, and a HANG bound rather than a performance assertion.
+            # It was 60s and that fired under a full suite at -n 4 on a loaded
+            # box, turning contention into a red that named the census
+            # (nexus-61vos). Collection of this file imports the whole test
+            # package; on a busy machine that is slow, not broken.
+            timeout=_PROBE_HANG_TIMEOUT_S,
         )
         return _census_nodeid in probe.stdout
 
     found_shard = False
     for group in range(1, 5):
-        if not _group_contains_census(group):
+        try:
+            in_this_group = _group_contains_census(group)
+        except subprocess.TimeoutExpired as exc:
+            pytest.skip(
+                f"could not run the collection probe for group {group}/4 within "
+                f"{_PROBE_HANG_TIMEOUT_S}s ({exc}). That is contention on this "
+                f"box, not a statement about the census -- skipping loudly "
+                f"rather than reporting a red that names the wrong cause "
+                f"(nexus-61vos).",
+            )
+        if not in_this_group:
             continue  # census landed in a different group -- fine
         found_shard = True
 
-        tmp_before = {
-            p for p in pathlib.Path(tempfile.gettempdir()).glob(f"{_pg_tmp_prefix}*")
-        }
+        # A PRIVATE temp dir for the nested run, so that whether it booted an
+        # engine is an exact question about its own tree rather than a set
+        # difference over the SHARED one (nexus-61vos). The shared-dir version
+        # attributed every cluster created during its window to the nested
+        # subprocess, and on a box where anything else is running -- a sibling
+        # xdist worker in the same suite, another session's gate, a peer's
+        # suite -- that is whatever happened to boot in those few seconds. It
+        # failed that way on 2026-09-12 naming four directories, all of them
+        # this run's own sibling workers, while stating confidently that the
+        # subprocess had booted an engine despite NX_TEST_T2_SUBSTRATE=none.
+        # ``mkdtemp`` honours TMPDIR, and the substrate creates every cluster
+        # through it (tests/_engine_substrate.py), so a cluster booted by the
+        # nested run can only land here.
+        probe_tmp = pathlib.Path(
+            tempfile.mkdtemp(prefix="mode-census-probe-"),
+        )
         started = time.monotonic()
-        proc = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "tests/test_mode_declarations_are_explicit.py",
-                "--deselect",
-                _self_nodeid,
-                "--splits",
-                "4",
-                "--group",
-                str(group),
-                "-q",
-                "-rs",
-                "--no-header",
-            ],
-            cwd=_REPO_ROOT,
-            env={**os.environ, "NX_TEST_T2_SUBSTRATE": "none"},
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        # The timeout on THIS call gets the same loud skip its sibling above gets, and
+        # cleans up the private dir. Both were review findings: it raised an uncaught
+        # ERROR rather than skipping, and it leaked probe_tmp because the cleanup guard
+        # below only wrapped the assertions. The author's own 0.001s falsification could
+        # not expose either, since the FIRST call always times out first.
+        try:
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "tests/test_mode_declarations_are_explicit.py",
+                    "--deselect",
+                    _self_nodeid,
+                    "--splits",
+                    "4",
+                    "--group",
+                    str(group),
+                    "-q",
+                    "-rs",
+                    "--no-header",
+                ],
+                cwd=_REPO_ROOT,
+                env={
+                    **os.environ,
+                    "NX_TEST_T2_SUBSTRATE": "none",
+                    "TMPDIR": str(probe_tmp),
+                },
+                capture_output=True,
+                text=True,
+                timeout=_PROBE_HANG_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired as exc:
+            shutil.rmtree(probe_tmp, ignore_errors=True)
+            pytest.skip(
+                f"the nested run for group {group}/4 did not return within "
+                f"{_PROBE_HANG_TIMEOUT_S}s ({exc}). Contention on this box, not a "
+                f"statement about the census (nexus-61vos)."
+            )
         elapsed = time.monotonic() - started
-        tmp_after = {
-            p for p in pathlib.Path(tempfile.gettempdir()).glob(f"{_pg_tmp_prefix}*")
-        }
-        new_pg_dirs = tmp_after - tmp_before
-        assert not new_pg_dirs, (
-            f"group {group}/4: a new {_pg_tmp_prefix}* dir appeared "
-            f"({new_pg_dirs}) -- something in the nested invocation booted "
-            f"an engine despite NX_TEST_T2_SUBSTRATE=none. That is exactly "
-            f"the class of collision that made this probe fail under real "
-            f"CI (develop run 31061260804)."
-        )
-        assert elapsed < 8.0, (
-            f"group {group}/4: nested invocation took {elapsed:.1f}s -- "
-            f"well over the few-seconds ceiling for a substrate-free "
-            f"single-file run, suggesting something DID pay an engine-boot "
-            f"cost even though no {_pg_tmp_prefix}* dir was left behind."
-        )
+        new_pg_dirs = sorted(probe_tmp.glob(f"{_pg_tmp_prefix}*"))
+        try:
+            assert not new_pg_dirs, (
+                f"group {group}/4: the nested invocation created "
+                f"{[d.name for d in new_pg_dirs]} inside its OWN temp dir "
+                f"({probe_tmp}), so it booted an engine despite "
+                f"NX_TEST_T2_SUBSTRATE=none. Because the dir is private to that "
+                f"subprocess, nothing else on this box can have put it there. "
+                f"That is the class of collision that made this probe fail under "
+                f"real CI (develop run 31061260804)."
+            )
+            # The one case a cluster-dir check alone cannot see is an engine
+            # that booted and was swept before this line ran. The wall-clock
+            # assertion that used to cover it (elapsed < 8.0) is deleted rather
+            # than retuned: wall clock on a shared box is load-sensitive by
+            # construction, so any bound either flakes under a concurrent suite
+            # or is too loose to discriminate, and retuning only defers that.
+            # This replaces it EXACTLY. _boot_semaphore_slot mkdirs the
+            # boot-lock directory on any boot ATTEMPT
+            # (tests/_engine_substrate.py:389), before the cluster is created,
+            # and it is a stable directory that per-cluster cleanup never
+            # removes. Redirected into the private temp dir with everything
+            # else, so its presence is proof of an attempt that survives the
+            # attempt being swept.
+            boot_locks = probe_tmp / "nexus_t2_substrate_boot_locks"
+            assert not boot_locks.exists(), (
+                f"group {group}/4: the nested invocation created {boot_locks}, "
+                f"so it ATTEMPTED an engine boot despite "
+                f"NX_TEST_T2_SUBSTRATE=none, even though no cluster dir "
+                f"survived to be seen. Took {elapsed:.1f}s."
+            )
+        finally:
+            shutil.rmtree(probe_tmp, ignore_errors=True)
 
         output = proc.stdout + proc.stderr
         assert "pytest-split active" in output, (
@@ -1279,23 +1361,37 @@ def test_mode_declarations_census_executes_for_real_under_ci_env_shape() -> None
     1/1 view and does not fire; this test is entirely about the SEPARATE
     substrate-skip path, not the partial-view guard.
     """
-    proc = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/test_mode_declarations_are_explicit.py"
-            "::test_mode_declarations_are_explicit",
-            "-q",
-            "-rs",
-            "--no-header",
-        ],
-        cwd=_REPO_ROOT,
-        env={**os.environ, "GITHUB_ACTIONS": "true", "NX_TEST_T2_SUBSTRATE": "none"},
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "tests/test_mode_declarations_are_explicit.py"
+                "::test_mode_declarations_are_explicit",
+                "-q",
+                "-rs",
+                "--no-header",
+            ],
+            cwd=_REPO_ROOT,
+            env={**os.environ, "GITHUB_ACTIONS": "true", "NX_TEST_T2_SUBSTRATE": "none"},
+            capture_output=True,
+            text=True,
+            # Sixth instance of this file's load-sensitive-bound shape, and the one my
+            # own sweep missed: I scoped that sweep by FILE NAME, to the files I had
+            # touched elsewhere, rather than re-auditing the file this bead is about.
+            # A hang bound, not a performance assertion (nexus-61vos).
+            timeout=_NESTED_PYTEST_HANG_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Sharing the VALUE was only half of it. Every nested subprocess in this file
+        # must also share the hang SEMANTICS: a timeout says the box is wedged, which
+        # is not evidence about the substrate-skip path this test is asking about.
+        pytest.skip(
+            f"the nested census run did not return within "
+            f"{_NESTED_PYTEST_HANG_TIMEOUT_S}s ({exc}). Contention on this box, not a "
+            f"statement about the substrate-skip path (nexus-61vos)."
+        )
     output = proc.stdout + proc.stderr
     assert "service JAR not provisioned" not in output, (
         "the census hit the engine-substrate graceful skip under the "
@@ -1307,3 +1403,106 @@ def test_mode_declarations_census_executes_for_real_under_ci_env_shape() -> None
         f"expected the census to execute and pass for real under this env "
         f"shape, got:\n{output}"
     )
+
+
+def test_the_boot_lock_dir_resolves_under_the_running_process_tmpdir() -> None:
+    """The resolution half of the split-shard probe's boot-lock guard (nexus-61vos).
+
+    The probe looks for ``nexus_t2_substrate_boot_locks`` inside the private TMPDIR it
+    handed the nested run. That is only a guard if a boot attempt actually puts it
+    there, which is a claim about ``_BOOT_SEMAPHORE_DIR`` -- and that constant is
+    evaluated at IMPORT time from ``tempfile.gettempdir()``, so no in-process TMPDIR
+    change can move it and no call that passes ``lock_dir`` explicitly can observe it.
+    A subprocess is the only vantage point: a fresh exec re-imports the module and
+    re-resolves the constant against the environment it was given.
+
+    Deleting the ``tempfile.gettempdir()`` in that constant -- hardcoding ``/tmp``, say
+    -- fails this test and nothing else in the suite, which is the point: without it
+    the probe would be checking a location a boot never touches, and would pass whether
+    or not the nested run booted an engine.
+
+    Cheap by construction: ``_boot_semaphore_slot`` is mkdir plus flock, with no
+    PostgreSQL anywhere in it, so this costs an interpreter start.
+    """
+    private = pathlib.Path(tempfile.mkdtemp(prefix="boot-lock-resolve-"))
+    try:
+        try:
+            probe = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import tests._engine_substrate as s\n"
+                    "with s._boot_semaphore_slot():\n"
+                    "    pass\n"
+                    "print(s._BOOT_SEMAPHORE_DIR)\n",
+                ],
+                cwd=_REPO_ROOT,
+                env={**os.environ, "TMPDIR": str(private)},
+                capture_output=True,
+                text=True,
+                # A hang bound, shared with every other nested subprocess in this file.
+                timeout=_NESTED_PYTEST_HANG_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired as exc:
+            pytest.skip(
+                f"the boot-slot probe did not return within "
+                f"{_NESTED_PYTEST_HANG_TIMEOUT_S}s ({exc}). Contention on this box, not "
+                f"a statement about where _BOOT_SEMAPHORE_DIR resolves (nexus-61vos)."
+            )
+        assert probe.returncode == 0, (
+            f"the boot-slot probe did not run:\n{probe.stdout}\n{probe.stderr}"
+        )
+        resolved = pathlib.Path(probe.stdout.strip())
+        assert resolved == private / "nexus_t2_substrate_boot_locks", (
+            f"_BOOT_SEMAPHORE_DIR resolved to {resolved}, not under the TMPDIR the "
+            f"subprocess was given ({private}). The split-shard probe checks the "
+            f"private tree, so a boot attempt would land somewhere it never looks."
+        )
+        assert resolved.is_dir(), (
+            "the boot attempt resolved the right path but created nothing there"
+        )
+    finally:
+        shutil.rmtree(private, ignore_errors=True)
+
+
+def test_the_boot_lock_guard_sees_a_boot_attempt_under_a_private_tmpdir() -> None:
+    """The boot-lock half of the split-shard probe's structural check, tested end to
+    end rather than by hand (nexus-61vos, review finding 2).
+
+    The probe asserts that a nested run created no boot-lock directory inside its own
+    TMPDIR, which is what catches an engine that booted and was swept before the
+    cluster-dir check could see it. That guard was verified by a one-off manual check
+    when it was written, on the grounds that forcing a real boot is expensive. It is
+    not: ``_boot_semaphore_slot`` is a pure mkdir-plus-flock primitive with no
+    PostgreSQL dependency at all, so the whole mechanism can be exercised directly
+    under a redirected TMPDIR in milliseconds.
+
+    Scope, stated honestly: this passes ``lock_dir`` EXPLICITLY, so it pins only what
+    ``_boot_semaphore_slot`` does with the directory it is handed -- creates it on an
+    attempt, and leaves it behind when the slot is released. It says nothing about
+    where the default comes from, because a caller that names the directory cannot
+    observe the resolution. The resolution is the other half of the probe's guarantee
+    and is pinned separately, in the test below.
+    """
+    private = pathlib.Path(tempfile.mkdtemp(prefix="boot-lock-probe-"))
+    try:
+        lock_dir = private / "nexus_t2_substrate_boot_locks"
+        assert not lock_dir.exists(), "precondition: the private tree starts clean"
+
+        with _substrate._boot_semaphore_slot(lock_dir=lock_dir):
+            assert lock_dir.is_dir(), (
+                "a boot attempt did not create the directory the probe checks for, so "
+                "that guard could never fire"
+            )
+
+        # It persists after the slot is released: per-cluster cleanup never removes it,
+        # which is exactly why it survives a swept boot and the cluster dir does not.
+        assert lock_dir.is_dir(), "the boot-lock directory must outlive the slot"
+
+        # Deliberately NOT asserted here: that nothing landed in the shared temp dir.
+        # With lock_dir passed explicitly that holds however _BOOT_SEMAPHORE_DIR is
+        # written, so such an assertion would read as coverage of the resolution while
+        # being unable to fail. The test below covers it from the only vantage point
+        # that can.
+    finally:
+        shutil.rmtree(private, ignore_errors=True)

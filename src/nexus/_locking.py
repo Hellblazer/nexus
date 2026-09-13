@@ -22,6 +22,20 @@ Two patterns:
   indexer). Non-blocking failures raise ``BlockingIOError`` on both
   platforms so callers handle them with a single except clause.
 
+* :func:`lock_fd` / :func:`unlock_fd` — the same contract against a raw
+  descriptor. The mint/election locks in ``db/t1.py``,
+  ``db/data_token.py`` and ``daemon/service_registry.py`` hold an fd from
+  ``os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)``, never a file
+  object, and each used to call ``fcntl.flock`` on it directly — a
+  module-level ``import fcntl`` that broke the whole CLI on Windows.
+  ``lock_file`` delegates here, so there is one implementation of the
+  platform branch rather than two.
+
+  Windows note: ``msvcrt.locking`` requires write access on the handle,
+  which ``O_WRONLY`` satisfies, and it locks a byte range from the
+  current file position — every caller locks one byte from position 0 of
+  a dedicated lock file, so the ranges coincide across processes.
+
 ``msvcrt.locking(LK_LOCK)`` only retries ten times before raising; we
 loop it for true blocking semantics matching ``fcntl.LOCK_EX``.
 """
@@ -41,7 +55,9 @@ else:
 __all__ = [
     "acquire_directory_lock",
     "release_lock",
+    "lock_fd",
     "lock_file",
+    "unlock_fd",
     "unlock_file",
 ]
 
@@ -92,16 +108,17 @@ def release_lock(fd: int) -> None:
         os.close(fd)
 
 
-def lock_file(file_obj: IO[Any], *, blocking: bool) -> None:
-    """Take an exclusive lock on ``file_obj`` (an open regular file).
+def lock_fd(fd: int, *, blocking: bool) -> None:
+    """Take an exclusive lock on the open descriptor ``fd``.
 
-    Caller retains ownership of ``file_obj`` and is responsible for
-    calling :func:`unlock_file` and closing the file.
+    Caller retains ownership of ``fd`` and is responsible for calling
+    :func:`unlock_fd` and closing it. The lock is released by a close
+    too, on both platforms, which is what makes a holder that dies
+    mid-critical-section safe.
 
     Raises ``BlockingIOError`` if ``blocking=False`` and the lock is
-    contended.
+    contended — the single exception type every call site branches on.
     """
-    fd = file_obj.fileno()
     if sys.platform == "win32":
         if blocking:
             while True:
@@ -117,12 +134,11 @@ def lock_file(file_obj: IO[Any], *, blocking: bool) -> None:
                 raise BlockingIOError(str(e)) from e
     else:
         flag = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
-        fcntl.flock(fd, flag)
+        fcntl.flock(fd, flag)  # lifecycle-gate-allow: the shared advisory-lock primitive itself, not a lifecycle election
 
 
-def unlock_file(file_obj: IO[Any]) -> None:
-    """Release a lock acquired by :func:`lock_file`."""
-    fd = file_obj.fileno()
+def unlock_fd(fd: int) -> None:
+    """Release a lock acquired by :func:`lock_fd`."""
     if sys.platform == "win32":
         try:
             msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
@@ -130,3 +146,20 @@ def unlock_file(file_obj: IO[Any]) -> None:
             pass
     else:
         fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def lock_file(file_obj: IO[Any], *, blocking: bool) -> None:
+    """Take an exclusive lock on ``file_obj`` (an open regular file).
+
+    Caller retains ownership of ``file_obj`` and is responsible for
+    calling :func:`unlock_file` and closing the file.
+
+    Raises ``BlockingIOError`` if ``blocking=False`` and the lock is
+    contended.
+    """
+    lock_fd(file_obj.fileno(), blocking=blocking)
+
+
+def unlock_file(file_obj: IO[Any]) -> None:
+    """Release a lock acquired by :func:`lock_file`."""
+    unlock_fd(file_obj.fileno())

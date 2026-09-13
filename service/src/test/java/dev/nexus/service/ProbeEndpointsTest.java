@@ -131,6 +131,17 @@ class ProbeEndpointsTest {
             // build_ref, so the field must be OMITTED entirely from the live
             // /version body — never "build_ref":null.
             assertThat(ex.bodyString()).doesNotContain("build_ref");
+            // nexus-904y8: both uptime fields must be present on the LIVE body,
+            // not merely constructible by their unit test -- the conexus gate
+            // keys on these exact names, and a field that assembles correctly
+            // in isolation but never reaches the response is the shape this
+            // assertion exists to catch.
+            assertThat(ex.bodyString()).contains("\"process_uptime_seconds\":");
+            assertThat(ex.bodyString()).contains("\"process_start_time\":\"");
+            // A bare number, never quoted: the gate does `uptime >= threshold`,
+            // and a quoted value makes that a string comparison that succeeds
+            // for the wrong reason.
+            assertThat(ex.bodyString()).doesNotContain("\"process_uptime_seconds\":\"");
         }
 
         assertThat(counting.calls.get())

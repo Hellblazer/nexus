@@ -76,6 +76,13 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 #      to a fresh ledger/<random-uuid> subspace (like leg E's T2 write,
 #      not read-only); they are not cleaned up (ledger take is disabled
 #      by design -- they age out at the subspace's normal retention).
+#   H  RDR-206 renew and ack-with-reply through the edge (nexus-zjzt1):
+#      claim a request, renew it and assert lease_until moved forward on
+#      the engine's clock; ack with a reply and assert a 64-hex reply id,
+#      exactly that row at the reply address (read at n=2), and the request
+#      consumed; a reply into a keys-only ledger/ target is refused as
+#      SchemaViolation and the same claimant can still ack plainly. WRITES
+#      two requests and one reply into fresh mailbox/ccpg-* addresses.
 #
 # Applicability: requires a CLOUD-mode box (service_url is a non-loopback
 # https endpoint). On a local-mode box this gate REFUSES (exit 2) rather
@@ -105,15 +112,16 @@ _fail() { echo "CLOUD CLIENT-PATH GATE FAILED: $*" >&2; exit 1; }
 # side — a heredoc that dies mid-leg still counts as a leg that failed to
 # complete, never a leg that quietly did not run.
 #
-# EXPECTED_LEGS=6 (dated 2026-09-11): [A] /version, [B] /health
+# EXPECTED_LEGS=7 (dated 2026-09-13): [A] /version, [B] /health
 # authenticated, [C+D] client probe heredoc (one shell-side entry for the
 # combined python leg), [E] T2 write body carrying shell-substitution text
 # (nexus-cmzib WAF passthrough), [F] RDR-205 tuple-space CA 3 through the
 # edge (nexus-em75s.15), [G] ledger tuple projector hook drive (nexus-g2lln
-# pre-tag proof, nexus-cbo4a). Editing the battery means updating this
+# pre-tag proof, nexus-cbo4a), [H] RDR-206 renew and ack-with-reply through
+# the edge (nexus-zjzt1, 2026-09-13). Editing the battery means updating this
 # constant in the same diff.
 LEGS_RAN=0
-EXPECTED_LEGS=6
+EXPECTED_LEGS=7
 _leg_enter() { LEGS_RAN=$((LEGS_RAN + 1)); echo "[$1] $2"; }
 
 SERVICE_URL="$(uv run python - <<'PY'
@@ -493,6 +501,107 @@ if [ -n "$HOOK_FAIL" ]; then
 else
     echo "  ok [G]: ledger/$HOOK_SID total=$HOOK_TOTAL, kind=start and kind=report rows present for $HOOK_AGENT, no SKIP in the projection log"
 fi
+
+# ── Leg H: RDR-206 renew and ack-with-reply through the edge (nexus-zjzt1) ─
+# conexus's STEP-6 gate reaches none of /v1/tuples, and legs F and G cover
+# RDR-205 only, so without this leg the two RDR-206 routes are live in
+# production with no proof they work through the public edge (the
+# nexus-bwulw class). WRITES: a request and its reply into two fresh
+# mailbox/<ccpg-...> addresses in the live tenant, both consumed or aging out
+# at the template's 7-day retention; a refused reply writes nothing.
+_leg_enter H "RDR-206 renew and ack-with-reply (lease moves, reply lands, keys-only target refused)"
+uv run python - <<'PY' || _leg_fail "H: RDR-206 renew/ack-with-reply probe failed (see above)"
+import sys
+import time
+import uuid
+from datetime import datetime
+from nexus.db.t2.http_tuple_store import (
+    HttpTupleStore,
+    ReplySpec,
+    SchemaViolationError,
+)
+
+bad = False
+store = HttpTupleStore()
+stamp = f"{int(time.time())}-{uuid.uuid4().hex[:6]}"
+asker, answerer = f"ccpg-asker-{stamp}", f"ccpg-answerer-{stamp}"
+req_sub, reply_sub = f"mailbox/{answerer}", f"mailbox/{asker}"
+
+
+def _claim(tag: str) -> tuple[str, str] | None:
+    store.out(req_sub, {"to": answerer}, {"from": asker, "kind": "request"},
+              f"cloud gate {tag}", nonce=f"{stamp}-{tag}")
+    got = store.inp(req_sub, {"to": answerer}, claimant=answerer, lease_s=60)
+    if got is None:
+        print(f"  VIOLATION [H]: the {tag} request was not claimable", file=sys.stderr)
+        return None
+    row, claim_id = got
+    return row.lease_until or "", claim_id
+
+
+try:
+    # [H1] renew moves the lease forward by the engine's own clock.
+    first = _claim("renew")
+    if first is None:
+        bad = True
+    else:
+        before, claim_id = first
+        after = store.renew(claim_id, answerer, 600)
+        prior = datetime.fromisoformat(before.replace("Z", "+00:00"))
+        if (after - prior).total_seconds() < 300:
+            print(f"  VIOLATION [H1]: renew 600s moved the lease {prior} -> {after}, "
+                  "less than 300s forward", file=sys.stderr)
+            bad = True
+        else:
+            print(f"  ok [H1]: renew moved lease_until {prior.isoformat()} -> {after.isoformat()}")
+
+        # [H2] ack with a reply returns a hex reply id and the reply is readable.
+        reply_id = store.ack(claim_id, answerer, reply=ReplySpec(
+            subspace=reply_sub, keys={"to": asker},
+            dims={"from": answerer, "kind": "ack"}, body="cloud gate reply"))
+        rows = store.rdp(reply_sub, {"to": asker}, n=2)
+        census = store.subspace_stats(req_sub)
+        if not (reply_id and len(reply_id) == 64):
+            print(f"  VIOLATION [H2]: ack with reply returned {reply_id!r}, not a 64-hex id",
+                  file=sys.stderr)
+            bad = True
+        elif [r.id for r in rows] != [reply_id]:
+            print(f"  VIOLATION [H2]: reply address holds {[r.id for r in rows]}, "
+                  f"expected exactly [{reply_id}]", file=sys.stderr)
+            bad = True
+        elif census.consumed < 1 or census.claimed != 0:
+            print(f"  VIOLATION [H2]: request census after ack {census}", file=sys.stderr)
+            bad = True
+        else:
+            print(f"  ok [H2]: ack with reply returned {reply_id[:12]}..., exactly that row "
+                  "at the reply address, request consumed")
+
+    # [H3] a reply into a keys-only template (the ledger) is refused before
+    # anything is consumed, so the same claimant can still ack plainly.
+    second = _claim("refused")
+    if second is None:
+        bad = True
+    else:
+        _, claim_id = second
+        try:
+            store.ack(claim_id, answerer, reply=ReplySpec(
+                subspace=f"ledger/ccpg-{stamp}", keys={"agent_id": "ccpg", "kind": "report"}))
+            print("  VIOLATION [H3]: a reply into ledger/ was accepted", file=sys.stderr)
+            bad = True
+        except SchemaViolationError as exc:
+            if store.ack(claim_id, answerer) is not None:
+                print("  VIOLATION [H3]: the follow-up plain ack returned a reply id",
+                      file=sys.stderr)
+                bad = True
+            else:
+                print(f"  ok [H3]: keys-only reply target refused ({exc}); the request "
+                      "stayed claimed and a plain ack then consumed it")
+except Exception as exc:
+    print(f"  VIOLATION [H]: RDR-206 probe raised {exc!r}", file=sys.stderr)
+    bad = True
+
+sys.exit(1 if bad else 0)
+PY
 
 if [ "$LEGS_RAN" -ne "$EXPECTED_LEGS" ]; then
     # Distinct from a violation: "the gate did not run its full battery" is

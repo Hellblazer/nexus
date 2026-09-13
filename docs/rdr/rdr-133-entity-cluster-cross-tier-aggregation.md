@@ -2,7 +2,10 @@
 title: "Entity-Cluster Cross-Tier Aggregation: A First-Class Entity Handle Unifying T2 Memory, T3 Catalog, and T3 Chunks"
 id: RDR-133
 type: Architecture
-status: draft
+status: abandoned
+abandoned_date: 2026-09-12
+abandon_reason: >-
+  Entity-cluster cross-tier aggregation. Nothing shipped: no entity handle exists across T2 memory, the T3 catalog and T3 chunks. Not folded into another RDR. One stub commit ever (ba3566106, 2026-05-27, "stub RDR-131/132/133 from MemForest leverage synthesis"). Never researched: the rationale, alternatives, trade-offs, test plan and finalization gate sections read "to be completed during research" and never got it. No beads, no implementation, no references outside the file itself in 3.5 months. Abandoned as a batch on 2026-09-12 (Sam) because all three sat in identical evidentiary condition and deciding one while leaving two identical siblings would have been arbitrary. The ideas remain recoverable from the T3 synthesis note they came from, research-memforest-nexus-leverage-2026-05-27, and from the MemForest paper at catalog tumbler 1.14.4. Abandoning the container is not a ruling that the idea is wrong; it is a ruling that an unresearched stub is not how it stays alive.
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self

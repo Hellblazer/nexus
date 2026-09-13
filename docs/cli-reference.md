@@ -3620,21 +3620,28 @@ Destructive (claiming) read from `SUBSPACE`. Unlike `rd`, every key the template
 |------|-------------|
 | `--pattern KEY=VALUE` | Every pinned key the template declares, exact match (repeatable, required) |
 | `--claimant ID` | This caller's identity (required) |
-| `--lease-s N` | Claim lease length, capped at the template's `max_lease_seconds` and the row's remaining TTL (required) |
+| `--lease-s N` | Claim lease length: refused above the template's `max_lease_seconds`, clipped to the row's remaining TTL (required) |
 | `--timeout-s SECONDS` | Seconds to park when nothing matches immediately; 0 (default) never blocks |
 | `--json` | Output as JSON |
 
 ### nx tuple ack
 
 ```
-nx tuple ack CLAIM_ID --claimant ID
+nx tuple ack CLAIM_ID --claimant ID [--reply-subspace SUBSPACE] [--reply-key KEY=VALUE ...] [--reply-dim KEY=VALUE ...] [--reply-body TEXT] [--reply-ttl-seconds N]
 ```
 
 Consume a claimed tuple. The row is invisible to `rd`/`in` after this.
 
+With `--reply-subspace`, the engine writes a reply into that subspace in the same transaction that consumes the claim (RDR-206), and the confirmation gains a `reply_id=` line carrying the reply's tuple id. Without any `--reply-*` flag the confirmation is unchanged. `--reply-subspace` must resolve to a `keys+nonce` template — a keys-only target (e.g. the ledger) is refused as `SchemaViolation` before the transaction opens, so the request is left still claimed and still ackable. There is no `--reply-nonce` flag: the engine sets the reply's nonce itself, to the request's tuple id. Every other `--reply-*` flag requires `--reply-subspace`; using one without it is a usage error, not a silently dropped flag.
+
 | Flag | Description |
 |------|-------------|
 | `--claimant ID` | Must match the identity that made the claim (required) |
+| `--reply-subspace SUBSPACE` | Write a reply into this subspace as part of the ack's own transaction |
+| `--reply-key KEY=VALUE` | A pinned key field for the reply (repeatable; requires `--reply-subspace`) |
+| `--reply-dim KEY=VALUE` | A dimension field for the reply (repeatable; requires `--reply-subspace`) |
+| `--reply-body TEXT` | Reply payload (requires `--reply-subspace`) |
+| `--reply-ttl-seconds N` | Explicit TTL for the reply, capped at its template's retention ceiling (requires `--reply-subspace`) |
 
 ### nx tuple nack
 
@@ -3647,6 +3654,20 @@ Release a claim back to available. Counts an attempt toward the template's `max_
 | Flag | Description |
 |------|-------------|
 | `--claimant ID` | Must match the identity that made the claim (required) |
+
+### nx tuple renew
+
+```
+nx tuple renew --claim-id ID --claimant ID --lease-s N
+```
+
+Extend a live claim held by `--claimant` before its lease lapses (RDR-206). Prints the engine's new `lease_until` — never a locally computed one, because a duration inside the template's `max_lease_seconds` cap can still be silently clipped to the tuple's own expiry. A `--lease-s` above the cap is refused as `LeaseTooLong`, not capped. Refused on a lapsed claim as `ClaimNotFound` rather than resurrecting it, and on a claim held by another claimant as `ClaimOwnership`. Never touches `attempts`, and writes one claim-log row with transition `renew`.
+
+| Flag | Description |
+|------|-------------|
+| `--claim-id ID` | The claim id returned by `nx tuple in` (required) |
+| `--claimant ID` | Must match the identity that made the claim (required) |
+| `--lease-s N` | New lease length from now, refused above the template's `max_lease_seconds` and silently clipped to the tuple's own expiry (required) |
 
 ### nx tuple templates
 
@@ -3693,7 +3714,11 @@ nx tuple watch [ADDRESS...] [--instance NAME] [--interval SECONDS] [--reemit-aft
 
 A ping-then-pull mailbox watcher, built to be the source of a Claude Code Monitor: every stdout line it prints is one notification that wakes the watching session. It probes `mailbox/ADDRESS` once per `--interval` with a zero-timeout `rd` (no park slot held), fetching many rows and filtering on `claim_state`, so a dead-lettered row at the head of the address cannot hide newer mail. It never claims, never acks, and never prints a body.
 
-An empty probe prints nothing. A newly seen tuple prints one line carrying the address, sender, kind, correlation id and tuple id, plus the drain instruction; the tuple id is for correlation only, because a mailbox claim is address-wide. At most five such lines per cycle, then one coalesced line naming the rest. A tuple still present after `--reemit-after` is pinged again, up to `--max-emits` times, then it goes silent and is counted. Dead-lettered rows go to stderr once per row; a probe failure goes to stderr once per distinct error, with one more line when the probe recovers. The seen-set is a JSON file per address under `<state-dir>/tuple-watch/`; losing it re-pings and never loses a message.
+An empty probe prints nothing. A newly seen tuple prints one line carrying the address, sender, kind, correlation id and tuple id, plus the drain instruction; the tuple id is for correlation only, because a mailbox claim is address-wide. At most five such lines per cycle, then one coalesced line naming the rest. Beyond that, a rolling budget of eight stdout lines per twenty-second window, shared across every cycle and every watched address, caps a sustained flood: once the window is spent, a whole cycle's new mail collapses to a single line naming the count, so a burst costs at most one line per cycle no matter how many rows arrived, comfortably under the harness's own auto-stop threshold. A tuple still present after `--reemit-after` is pinged again, up to `--max-emits` times, then it goes silent and is counted. A dead-lettered row the watcher never saw alive is announced on stdout and re-announced on the same window as a live row, because it is mail that will never be delivered and you have heard nothing about it; a row that was pinged while alive and later died reports its death on stderr, since that is a status update on a message you already know about. The seen-set is a JSON file per address under `<state-dir>/tuple-watch/`; losing it re-pings and never loses a message.
+
+Each probe reads up to 300 rows, ordered `(created_at, id)` ascending, the same paging cap every other `rd` call in this reference is capped at. An address that never holds more than that is scanned from the top every cycle. The first time a probe comes back full (300 rows, meaning there may be more beyond it), that address permanently switches to a persisted cursor: every following probe resumes strictly after the last row safe to advance past, rather than re-reading the same head every cycle. "Safe to advance past" holds back the newest ten seconds of rows on every advance, because the engine stamps `created_at` before commit and two concurrent `out` calls to the same address can commit slightly out of the order their timestamps suggest, so a handful of the most recent rows are re-probed each cycle rather than risked. A row that ages out of that ten-second margin without ever becoming safe to cursor past is never pinged by this watcher; it is not lost mail, only a missed ping, because `conexus/hooks/scripts/mailbox_drain.py`'s own floor probes the address independently of this cursor on every prompt.
+
+`--instance NAME` also registers NAME as this session's own instance-name mailbox, for `conexus/hooks/scripts/mailbox_drain.py` to read back: it writes `<state-dir>/tuple-watch/addresses.d/<session id>` (one address per line, atomically), keyed to the session id resolved from this process's own environment — never a machine-wide file, so one session can never register (and so drain) another session's instance mailbox. The write is skipped when an explicit ADDRESS is given, since an explicit address suppresses the session-id/instance default outright and `--instance` is not part of what is actually watched.
 
 | Flag | Description |
 |------|-------------|
@@ -3714,7 +3739,23 @@ Before the loop starts it preflights the engine with one registry call and one c
 
 While the loop runs, a failed probe prints one line on stdout rather than going quiet: silence and an empty mailbox look identical. That line repeats at most once per five minutes for the same error, so a sustained outage cannot trip the Monitor's auto-stop, and a changed error (a transport blip becoming an auth failure) reports immediately.
 
-One watcher per address, machine-wide, enforced by a lock file next to the seen-set. A second watcher on an address someone else already holds prints one line naming the holder's process and session and exits, so a re-arm after `/clear` or `/compact` cannot double every ping. The lock is an advisory `flock`, so a holder that dies releases it and the next watcher acquires rather than refusing. Addresses are resolved once at startup and never re-resolved.
+One watcher per address, machine-wide, enforced by a lock file next to the seen-set, scoped to the address, never the session, since `/clear` mints a new session id and a per-session lock would let the very re-arm it exists to catch straight through. Acquisition is per address and partial: when several addresses are requested and one is already held, that address alone is skipped (one line names the holder's process and session), while any address that is free is still watched; only when every requested address is already held does the command exit watching nothing. The lock is an advisory `flock`, so a holder that dies releases it and the next watcher acquires rather than refusing. Addresses are resolved once at startup and never re-resolved.
+
+A watcher does not need to be told to stop. `nx hook session-start` writes a marker naming the conversation's current session id for its Claude process on every SessionStart (startup, `/compact`, `/clear` and `/resume` alike, so a marker left by a dead process that owned the same pid never survives); each probe cycle checks that marker against the session id this watcher itself resolved at spawn, and the moment they differ, it prints one `STOP` line, releases its locks and exits, leaving the address free for the replacement the next SessionStart arm instruction starts. This replaces asking the model to `TaskStop` the old Monitor by hand, which cannot work after a real `/clear`: the fresh conversation running the new arm instruction has no memory of the old Monitor's harness task id to stop. A watcher armed with no session id to compare against (an explicit positional `ADDRESS`, or a session id that failed to resolve at spawn) never self-stops this way.
+
+**Arming via a Claude Code `Monitor` needs a permission allowlist entry** (nexus-6konb.9, MM-3.1): a `Monitor`'s `command` runs under the same permission machinery as `Bash`, so without one, arming raises a permission prompt in exactly the session nobody is present to approve. Add to `~/.claude/settings.json` (never `settings.local.json`):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(nx tuple watch:*)"
+    ]
+  }
+}
+```
+
+This is user-global operator config, not something a hook or the plugin writes on your behalf — `nx hook session-start` (see `nexus.mailbox_arm`) emits the arm instruction itself but never touches `settings.json`.
 
 ## nx service
 

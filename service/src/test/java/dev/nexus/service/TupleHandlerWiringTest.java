@@ -14,7 +14,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -98,7 +97,7 @@ class TupleHandlerWiringTest {
         withoutRegistry = new NexusService(0, TOKEN, svcDs);
         withoutRegistry.start();
 
-        http = HttpClient.newHttpClient();
+        http = TestHttp.client();
     }
 
     @AfterAll
@@ -222,8 +221,7 @@ class TupleHandlerWiringTest {
     }
 
     private HttpResponse<String> get(NexusService svc, String path) throws Exception {
-        var req = HttpRequest.newBuilder()
-                .uri(URI.create("http://127.0.0.1:" + svc.getPort() + path))
+        var req = TestHttp.request("http://127.0.0.1:" + svc.getPort() + path)
                 .header("Authorization", "Bearer " + TOKEN)
                 .header("X-Nexus-Tenant", TENANT)
                 .GET()
@@ -231,9 +229,172 @@ class TupleHandlerWiringTest {
         return http.send(req, HttpResponse.BodyHandlers.ofString());
     }
 
+    // ── RDR-206 Phase 1 Step 2: the ack route's optional reply object ────────
+
+    /** out + in against a fresh mailbox address, returning the claim id. */
+    private String outAndClaim(String to, String claimant) throws Exception {
+        assertThat(post(withRegistry, "/v1/tuples/out", Map.of(
+                "subspace", "mailbox/" + to,
+                "keys", Map.of("to", to),
+                "dims", Map.of("from", "asker"),
+                "body", "the request",
+                "nonce", "nonce-" + to)).statusCode()).isEqualTo(200);
+        var inResp = post(withRegistry, "/v1/tuples/in", Map.of(
+                "subspace", "mailbox/" + to,
+                "keys_pattern", Map.of("to", to),
+                "claimant", claimant,
+                "lease_s", 60));
+        assertThat(inResp.statusCode()).isEqualTo(200);
+        return (String) mapper.readValue(inResp.body(), MAP_T).get("claim_id");
+    }
+
+    @Test
+    void ack_withNoReply_returnsANullReplyId() throws Exception {
+        String to = "ack-noreply-addr";
+        String claimId = outAndClaim(to, "ack-noreply-claimant");
+
+        var resp = post(withRegistry, "/v1/tuples/ack", Map.of(
+                "claim_id", claimId, "claimant", "ack-noreply-claimant"));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var json = mapper.readValue(resp.body(), MAP_T);
+        assertThat(json.get("acked")).isEqualTo(Boolean.TRUE);
+        assertThat(json).as("reply_id is present and null, never absent").containsKey("reply_id");
+        assertThat(json.get("reply_id")).isNull();
+    }
+
+    @Test
+    void ack_withAReply_writesItAndReturnsItsHexId() throws Exception {
+        String to = "ack-reply-addr";
+        String asker = "ack-reply-asker";
+        String claimId = outAndClaim(to, "ack-reply-claimant");
+
+        var resp = post(withRegistry, "/v1/tuples/ack", Map.of(
+                "claim_id", claimId,
+                "claimant", "ack-reply-claimant",
+                "reply", Map.of(
+                        "subspace", "mailbox/" + asker,
+                        "keys", Map.of("to", asker),
+                        "dims", Map.of("from", "answerer"),
+                        "body", "the answer")));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var json = mapper.readValue(resp.body(), MAP_T);
+        assertThat(json.get("acked")).isEqualTo(Boolean.TRUE);
+        String replyId = (String) json.get("reply_id");
+        assertThat(replyId).as("a 64-char lowercase hex id, the same shape out returns")
+                .isNotNull().hasSize(64).matches("[0-9a-f]{64}");
+
+        var rdResp = post(withRegistry, "/v1/tuples/rd", Map.of(
+                "subspace", "mailbox/" + asker,
+                "keys_pattern", Map.of("to", asker)));
+        var tuples = (java.util.List<Map<String, Object>>) mapper.readValue(rdResp.body(), MAP_T)
+                .get("tuples");
+        assertThat(tuples).hasSize(1);
+        assertThat(tuples.get(0).get("body")).isEqualTo("the answer");
+        assertThat(tuples.get(0).get("id")).isEqualTo(replyId);
+    }
+
+    @Test
+    void ack_withAReplyCarryingANonce_isRefusedAndLeavesTheRequestClaimed() throws Exception {
+        String to = "ack-nonce-addr";
+        String asker = "ack-nonce-asker";
+        String claimId = outAndClaim(to, "ack-nonce-claimant");
+
+        // The engine sets a reply's nonce to the id of the request it answers. A caller
+        // supplying one is refused rather than ignored: silently dropping it would leave
+        // the caller believing it had chosen the reply's identity. validateOut cannot
+        // catch this -- it checks for a nonce that is MISSING -- and this is the only
+        // layer where "absent" and "explicitly supplied" are still distinguishable.
+        var resp = post(withRegistry, "/v1/tuples/ack", Map.of(
+                "claim_id", claimId,
+                "claimant", "ack-nonce-claimant",
+                "reply", Map.of(
+                        "subspace", "mailbox/" + asker,
+                        "keys", Map.of("to", asker),
+                        "dims", Map.of("from", "answerer"),
+                        "body", "mine",
+                        "nonce", "i-picked-this")));
+        assertThat(resp.statusCode()).as("SchemaViolation maps to 400").isEqualTo(400);
+        assertThat(resp.body()).contains("reply.nonce");
+
+        // The request must still be there and STILL CLAIMED, i.e. not consumed. Read
+        // through rd rather than the census, because rd shows the row's own claim state
+        // and an ack that had gone through would have removed the row from this read
+        // entirely (a consumed row is invisible to rd).
+        var requestResp = post(withRegistry, "/v1/tuples/rd", Map.of(
+                "subspace", "mailbox/" + to,
+                "keys_pattern", Map.of("to", to)));
+        var requestRows = (java.util.List<Map<String, Object>>) mapper
+                .readValue(requestResp.body(), MAP_T).get("tuples");
+        assertThat(requestRows).as("a refused reply must not have consumed the request")
+                .hasSize(1);
+        assertThat(requestRows.get(0).get("claim_state")).isEqualTo("claimed");
+
+        var rdResp = post(withRegistry, "/v1/tuples/rd", Map.of(
+                "subspace", "mailbox/" + asker,
+                "keys_pattern", Map.of("to", asker)));
+        assertThat((java.util.List<?>) mapper.readValue(rdResp.body(), MAP_T).get("tuples"))
+                .as("no reply row").isEmpty();
+    }
+
+    @Test
+    void ack_withANonObjectReply_isRefused() throws Exception {
+        String to = "ack-badreply-addr";
+        String claimId = outAndClaim(to, "ack-badreply-claimant");
+
+        var resp = post(withRegistry, "/v1/tuples/ack", Map.of(
+                "claim_id", claimId, "claimant", "ack-badreply-claimant",
+                "reply", "not an object"));
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("reply");
+    }
+
+    // ── RDR-206 Phase 1 Step 3: the renew route ──────────────────────────────
+
+    @Test
+    void renew_extendsTheLease_andReturnsAnIso8601Deadline() throws Exception {
+        String to = "renew-ok-addr";
+        String claimId = outAndClaim(to, "renew-ok-claimant");
+
+        var resp = post(withRegistry, "/v1/tuples/renew", Map.of(
+                "claim_id", claimId, "claimant", "renew-ok-claimant", "lease_s", 600));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        String leaseUntil = (String) mapper.readValue(resp.body(), MAP_T).get("lease_until");
+        assertThat(leaseUntil).as("MAPPER's JavaTimeModule renders an instant, not an epoch number")
+                .isNotNull();
+        var parsed = java.time.OffsetDateTime.parse(leaseUntil);
+
+        // The claim's original lease was 60s; a 600s renew must land past that. Compared
+        // against the ORIGINAL deadline rather than against a wall-clock guess, so the
+        // assertion says nothing about how fast this box is.
+        var rdResp = post(withRegistry, "/v1/tuples/rd", Map.of(
+                "subspace", "mailbox/" + to, "keys_pattern", Map.of("to", to)));
+        var rows = (java.util.List<Map<String, Object>>) mapper.readValue(rdResp.body(), MAP_T)
+                .get("tuples");
+        assertThat(rows).hasSize(1);
+        assertThat(java.time.OffsetDateTime.parse((String) rows.get(0).get("lease_until")))
+                .as("the row carries exactly what the route returned").isEqualTo(parsed);
+        assertThat(rows.get(0).get("claim_state")).isEqualTo("claimed");
+    }
+
+    @Test
+    void renew_aboveTheTemplateCap_is400() throws Exception {
+        String to = "renew-cap-addr";
+        String claimId = outAndClaim(to, "renew-cap-claimant");
+
+        // mailbox.yaml caps max_lease_seconds at 900. Refused, never clamped.
+        var resp = post(withRegistry, "/v1/tuples/renew", Map.of(
+                "claim_id", claimId, "claimant", "renew-cap-claimant", "lease_s", 901));
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("LeaseTooLong");
+    }
+
+    @Test
+    void renew_requiresPost() throws Exception {
+        assertThat(get(withRegistry, "/v1/tuples/renew").statusCode()).isEqualTo(405);
+    }
+
     private HttpResponse<String> post(NexusService svc, String path, Object body) throws Exception {
-        var req = HttpRequest.newBuilder()
-                .uri(URI.create("http://127.0.0.1:" + svc.getPort() + path))
+        var req = TestHttp.request("http://127.0.0.1:" + svc.getPort() + path)
                 .header("Authorization", "Bearer " + TOKEN)
                 .header("X-Nexus-Tenant", TENANT)
                 .header("Content-Type", "application/json")

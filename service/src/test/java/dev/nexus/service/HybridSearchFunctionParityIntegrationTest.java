@@ -295,6 +295,24 @@ class HybridSearchFunctionParityIntegrationTest {
         List<String> texts = new ArrayList<>(corpus.values());
         List<Map<String, Object>> metas = new ArrayList<>();
         for (int i = 0; i < ids.size(); i++) metas.add(Map.of());
+        // RDR-204 Phase 1 (nexus-ft04v.7) retired PgVectorRepository's stub-insert, so
+        // upsertChunks now requires the collection to be registered first
+        // (CollectionRegistry.requireRegistered) or it fails loud with
+        // UnregisteredCollectionException. This fixture was never updated when that
+        // landed, and the failure was invisible because this whole class is
+        // @Tag("integration") and the default surefire run excludes that group --
+        // the THIRD fixture in this family with the identical defect (nexus-xrkk4;
+        // the other two were fixed under nexus-4k1vz). Registers every
+        // (tenant, collection) pair this fixture writes to, both tenants.
+        try (Connection reg = pg.createConnection("")) {
+            reg.setAutoCommit(true);
+            DSLContext rctx = DSL.using(reg, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(rctx, TENANT_A, COL_MAIN);
+            PgContainerHelper.insertCollection(rctx, TENANT_A, COL_NARROW);
+            PgContainerHelper.insertCollection(rctx, TENANT_A, COL_CALIB);
+            PgContainerHelper.insertCollection(rctx, TENANT_B, COL_MAIN);
+        }
+
         pgRepo.upsertChunks(TENANT_A, COL_MAIN, ids.stream().map(corpusChash::get).toList(), texts, metas);
 
         try (Connection su = pg.createConnection("")) {

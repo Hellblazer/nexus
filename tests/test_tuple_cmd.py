@@ -11,17 +11,32 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import uuid
+from pathlib import Path
 
+from datetime import datetime, timezone
+
+import pytest
 from click.testing import CliRunner
 
 from nexus.commands.tuple_cmd import tuple_group
-from nexus.db.t2.http_tuple_store import HttpTupleStore, ParkCapExceededError
+from nexus.db.t2.http_tuple_store import (
+    ClaimNotFoundError,
+    ClaimOwnershipError,
+    HttpTupleStore,
+    LeaseTooLongError,
+    ParkCapExceededError,
+    ReplyNotWrittenError,
+    SchemaViolationError,
+)
 from nexus.tuple_watch import (
     WatchConfig,
     acquire_watch_locks,
     lock_path,
     preflight,
+    registration_path,
     resolve_watch_addresses,
     run_watch,
     state_path,
@@ -180,6 +195,248 @@ class TestKvParsing:
     def test_out_rejects_malformed_key(self, t2_service_env) -> None:
         out = _invoke(["out", "mailbox/x", "--key", "no-equals-sign"])
         assert out.exit_code != 0
+
+
+# ── nx tuple renew and nx tuple ack --reply-* (RDR-206 Phase 2, nexus-h61dl.10) ──
+#
+# HttpTupleStore.renew and ack(reply=) already landed (nexus-h61dl.8); these
+# tests cover only the CLI's own wiring: flag parsing, pass-through to the
+# client, and rendering the result. The client's own contract (the two
+# ceilings, the transaction atomicity, the reply nonce) is pinned in
+# tests/db/test_http_tuple_store.py and is not re-pinned here.
+
+
+def _claimed_mailbox(claimant: str = "c1", lease_s: int = 60) -> tuple[str, str]:
+    """Write and claim a mailbox request through the real store; returns
+    (address, claim_id)."""
+    addr = _uniq("addr")
+    store = HttpTupleStore()
+    store.out(f"mailbox/{addr}", {"to": addr}, {"from": "sender"}, "hi", nonce=_uniq("nonce"))
+    _row, claim_id = store.in_(f"mailbox/{addr}", {"to": addr}, claimant=claimant, lease_s=lease_s)
+    return addr, claim_id
+
+
+class TestTupleRenewRoundTrip:
+    def test_renew_prints_a_lease_until_later_than_the_original(self, t2_service_env) -> None:
+        _addr, claim_id = _claimed_mailbox(lease_s=30)
+        res = _invoke(["renew", "--claim-id", claim_id, "--claimant", "c1", "--lease-s", "300"])
+        assert res.exit_code == 0, res.output
+        printed = [ln for ln in res.output.splitlines() if ln.strip()][-1].strip()
+        after = datetime.fromisoformat(printed)
+        assert after.tzinfo is not None
+        # the claim is still live and ackable afterwards -- a renew that had
+        # somehow released or consumed it would fail this
+        ack = _invoke(["ack", claim_id, "--claimant", "c1"])
+        assert ack.exit_code == 0, ack.output
+
+    def test_renew_of_an_unknown_claim_prints_claim_not_found_not_a_traceback(
+        self, t2_service_env,
+    ) -> None:
+        res = _invoke(["renew", "--claim-id", uuid.uuid4().hex, "--claimant", "c1", "--lease-s", "60"])
+        assert res.exit_code == 1
+        assert "ClaimNotFoundError" in res.output
+        assert "Traceback" not in res.output
+
+    def test_renew_by_the_wrong_claimant_is_claim_ownership(self, t2_service_env) -> None:
+        _addr, claim_id = _claimed_mailbox(claimant="c1")
+        res = _invoke(["renew", "--claim-id", claim_id, "--claimant", "someone-else", "--lease-s", "60"])
+        assert res.exit_code == 1
+        assert "ClaimOwnershipError" in res.output
+
+    def test_renew_above_the_template_cap_is_refused_not_capped(self, t2_service_env) -> None:
+        _addr, claim_id = _claimed_mailbox()
+        res = _invoke(["renew", "--claim-id", claim_id, "--claimant", "c1", "--lease-s", str(900 + 1)])
+        assert res.exit_code == 1
+        assert "LeaseTooLongError" in res.output
+
+    def test_renew_missing_required_options_is_a_usage_error(self, t2_service_env) -> None:
+        res = _invoke(["renew", "--claim-id", "x", "--lease-s", "60"])  # no --claimant
+        assert res.exit_code != 0
+        assert "claimant" in res.output.lower()
+
+
+class TestTupleRenewUnitPassThrough:
+    """Fast, no engine: proves the CLI prints exactly what the store returns
+    and does not recompute a lease of its own -- the mutation this exists to
+    catch is a CLI that prints ``now() + lease_s`` locally instead of the
+    engine's (possibly clipped) answer."""
+
+    def test_cli_prints_exactly_the_stores_return_value(self, monkeypatch) -> None:
+        sentinel = datetime(2030, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+        captured: dict[str, tuple] = {}
+
+        def _fake_renew(self, claim_id, claimant, lease_s):
+            captured["args"] = (claim_id, claimant, lease_s)
+            return sentinel
+
+        monkeypatch.setattr(HttpTupleStore, "renew", _fake_renew)
+        res = _invoke(["renew", "--claim-id", "claim-1", "--claimant", "me", "--lease-s", "30"])
+        assert res.exit_code == 0, res.output
+        assert captured["args"] == ("claim-1", "me", 30)
+        assert res.output.strip() == sentinel.isoformat()
+
+    def test_typed_errors_print_the_typed_message_not_a_traceback(self, monkeypatch) -> None:
+        for exc_cls, code in (
+            (ClaimNotFoundError, "ClaimNotFound"),
+            (ClaimOwnershipError, "ClaimOwnership"),
+            (LeaseTooLongError, "LeaseTooLong"),
+        ):
+            def _fake_renew(self, claim_id, claimant, lease_s, _exc=exc_cls, _code=code):
+                raise _exc(_code)
+
+            monkeypatch.setattr(HttpTupleStore, "renew", _fake_renew)
+            res = _invoke(["renew", "--claim-id", "c", "--claimant", "m", "--lease-s", "60"])
+            assert res.exit_code == 1
+            assert exc_cls.__name__ in res.output
+            assert "Traceback" not in res.output
+
+
+class TestTupleAckReplyUnitPassThrough:
+    """Fast, no engine: the mutation this catches is a CLI that parses the
+    --reply-* flags but never builds/forwards a ReplySpec, or forwards the
+    wrong fields."""
+
+    def test_full_reply_flag_set_builds_and_forwards_a_replyspec(self, monkeypatch) -> None:
+        captured: dict[str, object] = {}
+
+        def _fake_ack(self, claim_id, claimant, reply=None):
+            captured["claim_id"] = claim_id
+            captured["claimant"] = claimant
+            captured["reply"] = reply
+            return "ab" * 32
+
+        monkeypatch.setattr(HttpTupleStore, "ack", _fake_ack)
+        res = _invoke([
+            "ack", "claim-1", "--claimant", "me",
+            "--reply-subspace", "mailbox/x",
+            "--reply-key", "to=x",
+            "--reply-dim", "from=y",
+            "--reply-body", "hello",
+            "--reply-ttl-seconds", "60",
+        ])
+        assert res.exit_code == 0, res.output
+        assert captured["claim_id"] == "claim-1"
+        assert captured["claimant"] == "me"
+        reply = captured["reply"]
+        assert reply is not None
+        assert reply.subspace == "mailbox/x"
+        assert reply.keys == {"to": "x"}
+        assert reply.dims == {"from": "y"}
+        assert reply.body == "hello"
+        assert reply.ttl_seconds == 60
+        assert "ab" * 32 in res.output
+
+    def test_no_reply_flags_passes_none_and_confirmation_is_unchanged(self, monkeypatch) -> None:
+        captured: dict[str, object] = {}
+
+        def _fake_ack(self, claim_id, claimant, reply=None):
+            captured["reply"] = reply
+            return None
+
+        monkeypatch.setattr(HttpTupleStore, "ack", _fake_ack)
+        res = _invoke(["ack", "claim-1", "--claimant", "me"])
+        assert res.exit_code == 0, res.output
+        assert captured["reply"] is None
+        assert res.output.strip() == "Acked claim claim-1"
+
+    def test_a_reply_flag_without_reply_subspace_is_a_usage_error(self, monkeypatch) -> None:
+        called = []
+        monkeypatch.setattr(HttpTupleStore, "ack", lambda *a, **kw: called.append(1))
+        for argv in (
+            ["ack", "claim-1", "--claimant", "me", "--reply-body", "hi"],
+            ["ack", "claim-1", "--claimant", "me", "--reply-key", "to=x"],
+            ["ack", "claim-1", "--claimant", "me", "--reply-dim", "from=y"],
+            ["ack", "claim-1", "--claimant", "me", "--reply-ttl-seconds", "60"],
+        ):
+            res = _invoke(argv)
+            assert res.exit_code != 0, res.output
+            assert "--reply-subspace" in res.output
+        assert called == [], "a usage error must never reach the store"
+
+    def test_a_reply_key_without_equals_fails_like_out(self, monkeypatch) -> None:
+        called = []
+        monkeypatch.setattr(HttpTupleStore, "ack", lambda *a, **kw: called.append(1))
+        res = _invoke([
+            "ack", "claim-1", "--claimant", "me",
+            "--reply-subspace", "mailbox/x", "--reply-key", "no-equals-sign",
+        ])
+        assert res.exit_code != 0
+        assert called == []
+
+    def test_reply_not_written_error_prints_a_clear_message_not_a_traceback(
+        self, monkeypatch,
+    ) -> None:
+        def _fake_ack(self, claim_id, claimant, reply=None):
+            raise ReplyNotWrittenError(
+                "the engine acked without writing the reply: the request "
+                "HAS BEEN CONSUMED and the reply was NOT written."
+            )
+
+        monkeypatch.setattr(HttpTupleStore, "ack", _fake_ack)
+        res = _invoke([
+            "ack", "claim-1", "--claimant", "me",
+            "--reply-subspace", "mailbox/x", "--reply-key", "to=x",
+        ])
+        assert res.exit_code == 1
+        assert "ReplyNotWrittenError" in res.output
+        assert "HAS BEEN CONSUMED" in res.output
+        assert "NOT written" in res.output
+        assert "Traceback" not in res.output
+
+
+class TestTupleAckReplyAgainstTheRealEngine:
+    def test_ack_with_a_full_reply_flag_set_writes_the_reply_and_prints_its_id(
+        self, t2_service_env,
+    ) -> None:
+        reply_addr = _uniq("replyto")
+        _addr, claim_id = _claimed_mailbox()
+        res = _invoke([
+            "ack", claim_id, "--claimant", "c1",
+            "--reply-subspace", f"mailbox/{reply_addr}",
+            "--reply-key", f"to={reply_addr}",
+            "--reply-dim", "from=worker",
+            "--reply-body", "done",
+        ])
+        assert res.exit_code == 0, res.output
+        assert "Acked claim" in res.output
+        reply_line = [ln for ln in res.output.splitlines() if ln.startswith("reply_id=")]
+        assert len(reply_line) == 1, res.output
+        reply_id = reply_line[0].split("=", 1)[1]
+        assert len(reply_id) == 64
+        int(reply_id, 16)
+
+        rows = HttpTupleStore().rd(f"mailbox/{reply_addr}", {"to": reply_addr}, n=2)  # n=2: n=1 would hide a duplicate
+        assert [r.body for r in rows] == ["done"]
+        assert rows[0].id == reply_id
+
+    def test_ack_with_no_reply_flags_confirmation_line_is_unchanged(self, t2_service_env) -> None:
+        _addr, claim_id = _claimed_mailbox()
+        res = _invoke(["ack", claim_id, "--claimant", "c1"])
+        assert res.exit_code == 0, res.output
+        last_line = [ln for ln in res.output.splitlines() if ln.strip()][-1].strip()
+        assert last_line == f"Acked claim {claim_id}"
+
+    def test_ack_with_a_reply_to_a_keys_only_subspace_is_a_schema_violation(
+        self, t2_service_env,
+    ) -> None:
+        session = _uniq("sess")
+        store = HttpTupleStore()
+        store.out(f"ledger/{session}", {"agent_id": "a1", "kind": "start"}, None, None)
+        _addr, claim_id = _claimed_mailbox()
+
+        res = _invoke([
+            "ack", claim_id, "--claimant", "c1",
+            "--reply-subspace", f"ledger/{session}",
+            "--reply-key", "agent_id=a1",
+            "--reply-key", "kind=done",
+        ])
+        assert res.exit_code == 1
+        assert "SchemaViolationError" in res.output
+
+        # the refusal happened before the transaction opened: the request is
+        # still claimed and still ackable by the same claimant
+        follow_up = _invoke(["ack", claim_id, "--claimant", "c1"])
+        assert follow_up.exit_code == 0, follow_up.output
 
 
 # ── nx tuple watch (MM-1.1, bead nexus-6konb.2) ─────────────────────────────
@@ -367,15 +624,21 @@ class TestTupleWatch:
 
         lines, reports, clock = [], [], _Clock()
         stats = _run(store, cfg, sd, addr, clock, 1, lines, reports)
-        assert len(lines) == 1
-        assert fresh_id in lines[0]
-        assert dead_id not in lines[0]
+        pings = [line for line in lines if "new mail" in line]
+        assert len(pings) == 1
+        assert fresh_id in pings[0]
+        assert dead_id not in pings[0]
         assert stats.dead_seen == 1
-        assert any(dead_id in r for r in reports)
-        # the dead row is reported once, not once per cycle
+        # The watcher never saw this row alive, so its death is news of mail that will
+        # never be delivered: it belongs on the stream the Monitor reads, not stderr.
+        dead_lines = [line for line in lines if dead_id in line]
+        assert len(dead_lines) == 1
+        assert "never be claimed" in dead_lines[0]
+        assert not [r for r in reports if dead_id in r]
+        # reported once, not once per cycle (the re-emit window has not elapsed)
         clock.advance(cfg.interval_s)
         _run(store, cfg, sd, addr, clock, 2, lines, reports)
-        assert sum(dead_id in r for r in reports) == 1
+        assert sum(dead_id in line for line in lines) == 1
 
     def test_cli_wiring_emits_ping_and_exits_zero(self, t2_service_env, tmp_path) -> None:
         store, _cfg, sd = _watch_env(tmp_path)
@@ -385,7 +648,9 @@ class TestTupleWatch:
             "watch", addr, "--iterations", "2", "--interval", "0", "--state-dir", str(sd),
         ])
         assert res.exit_code == 0, res.output
-        pings = [line for line in res.output.splitlines() if "nx-tuple-watch:" in line]
+        # res.output interleaves stderr, so it cannot carry a claim about WHICH stream a
+        # line reached; res.stdout is the one the Monitor watches.
+        pings = [line for line in res.stdout.splitlines() if "nx-tuple-watch:" in line]
         assert len(pings) == 1
         assert tid in pings[0]
 
@@ -414,9 +679,13 @@ class TestTupleWatch:
         # visibility rule exists to kill. Recovery stays on stderr. No PING is emitted.
         assert not [line for line in lines if "new mail" in line]
         failed = [line for line in lines if "probe failed" in line]
-        recovered = [r for r in reports if "probe recovered" in r]
+        recovered = [line for line in lines if "probe recovered" in line]
         assert len(failed) == 1 and "engine unreachable" in failed[0]
+        # the recovery line shares the outage line's stream: the outage line claims a
+        # CONTINUING condition, so a reader who cannot see the end of it is left
+        # inferring recovery from silence
         assert len(recovered) == 1
+        assert not [r for r in reports if "probe recovered" in r]
 
     def test_sustained_flood_collapses_to_one_line_per_cycle(self, t2_service_env, tmp_path) -> None:
         store, cfg, sd = _watch_env(tmp_path)
@@ -477,6 +746,67 @@ class TestTupleWatch:
         assert sum("probe failed" in line and bad in line for line in lines) == 1
 
 
+# ── nx tuple watch: backlog beyond probe_n (nexus-qw386) ────────────────────
+#
+# MM-1.1 fetches probe_n rows per probe with no ``since`` cursor: past that
+# ceiling (dead rows included, since they stay rd-readable for the full
+# retention window without ever being claimable) the newest mail falls
+# outside the window and is never pinged. probe_n is overridden small here
+# (not the 300 default) so the backlog that exceeds it is a handful of rows,
+# not hundreds, against the real engine substrate.
+
+
+class TestTupleWatchBeyondProbeN:
+    def test_live_backlog_beyond_probe_n_still_pings_new_mail(self, t2_service_env, tmp_path) -> None:
+        store = HttpTupleStore()
+        cfg = WatchConfig(interval_s=1.0, reemit_after_s=600.0, max_emits=3, probe_n=3)
+        sd = tmp_path
+        addr = _uniq("addr")
+        sub = f"mailbox/{addr}"
+        for i in range(cfg.probe_n + 3):  # 6 live rows > probe_n=3
+            _out(store, addr, sender=f"old{i}")
+        fresh_id = _out(store, addr, sender="alice")
+
+        # Non-vacuity: a single probe capped at probe_n cannot see the fresh row at all --
+        # this is the truncation the fix must page past, not something already unreachable.
+        head = store.rd(sub, {"to": addr}, n=cfg.probe_n)
+        assert len(head) == cfg.probe_n
+        assert fresh_id not in [r.id for r in head]
+
+        lines, reports, clock = [], [], _Clock()
+        _run(store, cfg, sd, addr, clock, cfg.probe_n + 3, lines, reports)
+        pings = [line for line in lines if "new mail" in line]
+        assert any(fresh_id in line for line in pings), lines
+
+    def test_dead_backlog_beyond_probe_n_still_pings_new_mail(self, t2_service_env, tmp_path) -> None:
+        store = HttpTupleStore()
+        cfg = WatchConfig(interval_s=1.0, reemit_after_s=600.0, max_emits=3, probe_n=2)
+        sd = tmp_path
+        addr = _uniq("addr")
+        sub = f"mailbox/{addr}"
+        dead_ids = []
+        for i in range(cfg.probe_n + 1):  # 3 dead rows > probe_n=2
+            tid = _out(store, addr, sender=f"poison{i}")
+            for _ in range(3):  # mailbox.yaml max_attempts=3: the third nack dead-letters it
+                claimant = _uniq("c")
+                claimed = store.in_(sub, {"to": addr}, claimant=claimant, lease_s=30)
+                assert claimed is not None and claimed[0].id == tid
+                store.nack(claimed[1], claimant)
+            dead_ids.append(tid)
+        fresh_id = _out(store, addr, sender="alice")
+
+        # Non-vacuity: a single probe capped at probe_n is dead rows only, fresh mail hidden.
+        head = store.rd(sub, {"to": addr}, n=cfg.probe_n)
+        assert len(head) == cfg.probe_n
+        assert all(r.claim_state == "dead" for r in head)
+        assert fresh_id not in [r.id for r in head]
+
+        lines, reports, clock = [], [], _Clock()
+        _run(store, cfg, sd, addr, clock, cfg.probe_n + 3, lines, reports)
+        pings = [line for line in lines if "new mail" in line]
+        assert any(fresh_id in line for line in pings), lines
+
+
 # ── nx tuple watch: preflight, failure visibility, locking (MM-1.2, nexus-6konb.3) ──
 
 
@@ -486,15 +816,9 @@ class _Boom(Exception):
 
 class TestTupleWatchPreflight:
     def test_unreachable_engine_reports_one_skip_line_and_never_loops(self, tmp_path) -> None:
-        probes = []
-
         class _Down:
             def registry(self):
                 raise _Boom("connection refused")
-
-            def rd(self, *a, **kw):
-                probes.append(1)
-                return []
 
         lines, reports = [], []
         result = preflight(_Down(), ["addr-a"], config=WatchConfig(), emit=lines.append)
@@ -503,7 +827,6 @@ class TestTupleWatchPreflight:
         assert len(lines) == 1
         assert "SKIP" in lines[0]
         assert "connection refused" in lines[0]
-        assert probes == []
 
     def test_unreadable_mailbox_is_a_skip_naming_the_address(self, tmp_path) -> None:
         """The PER-ADDRESS branch: the registry answers, the mailbox does not."""
@@ -637,8 +960,10 @@ class TestTupleWatchLock:
     ) -> None:
         addr = _uniq("addr")
         monkeypatch.setenv("NX_SESSION_ID", "session-one")
-        first = acquire_watch_locks([addr], state_dir=tmp_path)
+        held_lines: list[str] = []
+        first = acquire_watch_locks([addr], state_dir=tmp_path, emit=held_lines.append)
         assert first.ok is True
+        assert held_lines == []
         try:
             # A DIFFERENT session id: a per-session lock would let this through,
             # which is exactly the /clear case the machine-wide scope exists for.
@@ -646,6 +971,8 @@ class TestTupleWatchLock:
             lines = []
             second = acquire_watch_locks([addr], state_dir=tmp_path, emit=lines.append)
             assert second.ok is False
+            assert second.acquired == []
+            assert second.refused == [addr]
             assert len(lines) == 1
             assert str(os.getpid()) in lines[0]
             assert "session-one" in lines[0]
@@ -654,8 +981,10 @@ class TestTupleWatchLock:
 
     def test_lock_released_by_a_dead_holder_is_acquired_not_refused(self, tmp_path) -> None:
         addr = _uniq("addr")
-        first = acquire_watch_locks([addr], state_dir=tmp_path)
+        held_lines: list[str] = []
+        first = acquire_watch_locks([addr], state_dir=tmp_path, emit=held_lines.append)
         assert first.ok is True
+        assert held_lines == []
         first.release()  # what a dying process's OS-released flock leaves behind
         lines = []
         second = acquire_watch_locks([addr], state_dir=tmp_path, emit=lines.append)
@@ -673,23 +1002,112 @@ class TestTupleWatchLock:
         finally:
             locks.release()
 
-    def test_refusing_one_address_releases_the_ones_already_taken(self, tmp_path) -> None:
+    def test_partial_acquisition_keeps_the_free_address_and_names_the_held_one(
+        self, tmp_path,
+    ) -> None:
+        """nexus-6konb.10 (MM-3.2): acquire_watch_locks is PARTIAL, not
+        all-or-nothing (MM-1.4 review finding 3, decided here). A held
+        address must not refuse an address that IS free -- a fresh session
+        re-arming after /clear typically finds its instance-name mailbox
+        still held by the stale watcher while its own session-id mailbox
+        is brand new and free, and must watch the free one rather than
+        nothing."""
         free, taken = _uniq("free"), _uniq("taken")
-        holder = acquire_watch_locks([taken], state_dir=tmp_path)
+        holder = acquire_watch_locks([taken], state_dir=tmp_path, emit=lambda _s: None)
         assert holder.ok is True
         try:
-            second = acquire_watch_locks([free, taken], state_dir=tmp_path, emit=lambda _s: None)
-            assert second.ok is False
-            assert second.refused_address == taken
-            # the partial acquisition must not linger: a third watcher gets `free`
-            third = acquire_watch_locks([free], state_dir=tmp_path)
-            assert third.ok is True
-            third.release()
+            lines = []
+            second = acquire_watch_locks([free, taken], state_dir=tmp_path, emit=lines.append)
+            try:
+                assert second.ok is True
+                assert second.acquired == [free]
+                assert second.refused == [taken]
+                assert len(lines) == 1
+                assert taken in lines[0]
+                assert "already watched by" in lines[0]
+                # the acquired address is NOT released on the partial refusal: a
+                # third watcher asking for `free` alone is refused it too.
+                third = acquire_watch_locks([free], state_dir=tmp_path, emit=lambda _s: None)
+                assert third.ok is False
+            finally:
+                second.release()
         finally:
             holder.release()
 
+    def test_every_address_already_held_refuses_as_before(self, tmp_path) -> None:
+        """Only when NOTHING could be acquired does the watcher exit
+        refused, matching the pre-partial-acquisition behaviour."""
+        free_but_also_taken = _uniq("addr")
+        holder = acquire_watch_locks(
+            [free_but_also_taken], state_dir=tmp_path, emit=lambda _s: None,
+        )
+        assert holder.ok is True
+        try:
+            lines = []
+            second = acquire_watch_locks(
+                [free_but_also_taken], state_dir=tmp_path, emit=lines.append,
+            )
+            assert second.ok is False
+            assert second.acquired == []
+            assert second.refused == [free_but_also_taken]
+            assert len(lines) == 1
+        finally:
+            holder.release()
 
-class TestTupleWatchAddressResolution:
+    def test_open_failure_mid_loop_releases_every_lock_already_acquired(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-6konb.12 (MM-3.4 fix 5, code-review Minor): an OSError from
+        ``path.open`` mid-loop (disk full, permission change) must not
+        leak the file handles already acquired for earlier addresses in
+        the same call. Before this fix, ``mkdir``/``open`` sat outside
+        the try/except that guards the flock attempt, so an exception
+        there propagated straight out of ``acquire_watch_locks`` with
+        the earlier addresses' handles still open and no ``WatchLocks``
+        object for the caller to release them through -- the caller's
+        own ``locks`` variable is never assigned when this function
+        raises (see ``tuple_cmd.py``'s ``cmd_watch``), so its
+        ``finally: locks.release()`` never ran for them either.
+
+        Asserted directly on the handle's own ``.closed`` state, captured
+        by this test's OWN reference to it (never via a retry-acquire
+        probe): CPython's prompt refcounting can close an unreferenced
+        file object the instant nothing else holds it, which would make a
+        retry-based check pass on the OLD, unfixed code too whenever
+        nothing else happens to keep the raised exception's frame (and
+        its ``handle`` local) alive long enough to observe the leak --
+        exactly the kind of accidental, GC-timing-dependent pass a fix
+        must never rely on. Holding this test's own reference to the
+        SAME handle the function opened sidesteps that: the handle stays
+        alive as long as this test's ``opened`` list does, so its
+        ``.closed`` state reflects only what ``acquire_watch_locks``
+        itself did before re-raising, on any Python implementation.
+        """
+        first, second = _uniq("first"), _uniq("second")
+        second_path = lock_path(tmp_path, second)
+        real_open = Path.open
+        opened: list = []
+
+        def _tracking_open(self: Path, *a, **kw):
+            if self == second_path:
+                raise OSError("disk full")
+            handle = real_open(self, *a, **kw)
+            opened.append(handle)
+            return handle
+
+        monkeypatch.setattr(Path, "open", _tracking_open)
+        with pytest.raises(OSError):
+            acquire_watch_locks([first, second], state_dir=tmp_path, emit=lambda _s: None)
+
+        assert len(opened) == 1, "only `first`'s handle should ever have been opened"
+        assert opened[0].closed, (
+            "acquire_watch_locks must explicitly release every lock it already "
+            "acquired before re-raising, not leave it to whatever the garbage "
+            "collector eventually does"
+        )
+
+
+class TestWatchAddressIsNeverReResolved:
     def test_the_watched_address_never_re_resolves_mid_run(self, t2_service_env, tmp_path,
                                                            monkeypatch) -> None:
         store, cfg, sd = _watch_env(tmp_path)
@@ -732,9 +1150,9 @@ class TestTupleWatchCliGuards:
             "--state-dir", str(tmp_path),
         ])
         assert res.exit_code == 0, res.output
-        skips = [line for line in res.output.splitlines() if "SKIP" in line]
+        skips = [line for line in res.stdout.splitlines() if "SKIP" in line]
         assert len(skips) == 1, res.output
-        assert not [line for line in res.output.splitlines() if "new mail" in line]
+        assert not [line for line in res.stdout.splitlines() if "new mail" in line]
 
     def test_cli_refuses_when_another_watcher_holds_the_address(
         self, t2_service_env, tmp_path, monkeypatch,
@@ -743,7 +1161,7 @@ class TestTupleWatchCliGuards:
         addr = _uniq("addr")
         _out(store, addr, sender="alice")
         monkeypatch.setenv("NX_SESSION_ID", "holder-session")
-        holder = acquire_watch_locks([addr], state_dir=sd)
+        holder = acquire_watch_locks([addr], state_dir=sd, emit=lambda _s: None)
         assert holder.ok is True
         try:
             monkeypatch.setenv("NX_SESSION_ID", "second-session")
@@ -751,11 +1169,11 @@ class TestTupleWatchCliGuards:
                 "watch", addr, "--iterations", "2", "--interval", "0", "--state-dir", str(sd),
             ])
             assert res.exit_code == 0, res.output
-            refusals = [line for line in res.output.splitlines() if "already watched by" in line]
+            refusals = [line for line in res.stdout.splitlines() if "already watched by" in line]
             assert len(refusals) == 1, res.output
             assert "holder-session" in refusals[0]
             # and it did NOT ping, even though real mail is sitting there
-            assert not [line for line in res.output.splitlines() if "new mail" in line]
+            assert not [line for line in res.stdout.splitlines() if "new mail" in line]
         finally:
             holder.release()
 
@@ -777,6 +1195,246 @@ class TestTupleWatchCliGuards:
             after.release()
 
 
+# ── nx tuple watch: /clear and /resume re-arm path (MM-3.2, nexus-6konb.10) ─
+#
+# Every scenario below crosses session ids on purpose (bead's own scenario
+# list): a per-session lock would pass a same-session test trivially while
+# failing the /clear case that actually matters. "A" below plays the stale
+# watcher a Monitor's survival across /clear leaves running under the OLD
+# session id (T2 nexus/mm-3.2-clear-resume-monitor-survival-measured-
+# 2026-09-13); it is simulated by holding locks directly rather than via a
+# second CLI invocation, since both run in this same test process.
+
+
+class TestClearResumeReArm:
+    def test_new_session_acquires_its_own_mailbox_while_the_instance_name_stays_with_the_old_watcher(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """Scenario (a): watcher A for session S1 holds mailbox/S1 and
+        mailbox/NAME; a new watcher started with session S2 and
+        --instance NAME acquires mailbox/S2, states that mailbox/NAME is
+        held by A (naming it), runs, and writes addresses.d/S2 with
+        NAME."""
+        store, _cfg, sd = _watch_env(tmp_path)
+        s1, s2, name = _uniq("s1"), _uniq("s2"), _uniq("name")
+        monkeypatch.setenv("NX_SESSION_ID", s1)
+        holder = acquire_watch_locks([s1, name], state_dir=sd, emit=lambda _s: None)
+        assert holder.ok is True
+        try:
+            monkeypatch.setenv("NX_SESSION_ID", s2)
+            tid = _out(store, s2, sender="alice")
+            res = _invoke([
+                "watch", "--instance", name, "--iterations", "1", "--interval", "0",
+                "--state-dir", str(sd),
+            ])
+            assert res.exit_code == 0, res.output
+            refusals = [
+                line for line in res.stdout.splitlines() if "already watched by" in line
+            ]
+            assert len(refusals) == 1, res.output
+            assert name in refusals[0]
+            assert s1 in refusals[0], "must name the holder (A's session), not just refuse"
+            pings = [line for line in res.stdout.splitlines() if "new mail" in line]
+            assert len(pings) == 1, res.output
+            assert tid in pings[0]
+            path = registration_path(sd, s2)
+            assert path.is_file(), (
+                "the per-session registry must be written for S2 even though "
+                "NAME's lock was refused (nexus-6konb.10 dev notes bullet 3)"
+            )
+            assert path.read_text(encoding="utf-8").strip() == name
+        finally:
+            holder.release()
+
+    def test_after_the_old_watcher_exits_a_fresh_watch_acquires_both(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """Scenario (b): after A exits, a fresh watcher for S2 acquires
+        both."""
+        store, _cfg, sd = _watch_env(tmp_path)
+        s1, s2, name = _uniq("s1"), _uniq("s2"), _uniq("name")
+        monkeypatch.setenv("NX_SESSION_ID", s1)
+        holder = acquire_watch_locks([s1, name], state_dir=sd, emit=lambda _s: None)
+        assert holder.ok is True
+        holder.release()  # what a dying watcher process's OS-released flock leaves
+        monkeypatch.setenv("NX_SESSION_ID", s2)
+        res = _invoke([
+            "watch", "--instance", name, "--iterations", "1", "--interval", "0",
+            "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        assert "already watched by" not in res.stdout
+        # both addresses are now free for a subsequent watcher too
+        after = acquire_watch_locks([s2, name], state_dir=sd, emit=lambda _s: None)
+        try:
+            assert after.ok is True
+            assert sorted(after.acquired) == sorted([s2, name])
+        finally:
+            after.release()
+
+    def test_all_addresses_held_elsewhere_refuses_and_watches_nothing(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """Scenario (c): all addresses held -> refused exit, as today."""
+        store, _cfg, sd = _watch_env(tmp_path)
+        s1, s2, name = _uniq("s1"), _uniq("s2"), _uniq("name")
+        monkeypatch.setenv("NX_SESSION_ID", s1)
+        holder = acquire_watch_locks([s1, name], state_dir=sd, emit=lambda _s: None)
+        assert holder.ok is True
+        try:
+            monkeypatch.setenv("NX_SESSION_ID", s2)
+            res = _invoke([
+                "watch", s1, name, "--iterations", "2", "--interval", "0",
+                "--state-dir", str(sd),
+            ])
+            assert res.exit_code == 0, res.output
+            refusals = [
+                line for line in res.stdout.splitlines() if "already watched by" in line
+            ]
+            assert len(refusals) == 2, res.output
+            assert not [line for line in res.stdout.splitlines() if "new mail" in line]
+        finally:
+            holder.release()
+
+
+# ── nx tuple watch: stale watcher self-stop (MM-3.4 fix 1, nexus-6konb.12) ──
+#
+# Replaces the model-dependent TaskStop rule the SessionStart arm instruction
+# used to carry: a fresh conversation running that instruction after a real
+# /clear has no memory of the OLD Monitor's harness task id, so there was no
+# way for a model to discover what to stop. Instead the watcher discovers the
+# change itself, from the marker nexus.hooks writes on source=clear/resume
+# (session.<claude_pid>, keyed on the SAME claude ancestor pid both sides
+# independently derive -- the nexus-d76vc pattern). Every scenario below
+# crosses session ids on purpose, per this bead's own non-vacuity rule.
+
+
+class _NeverProbed:
+    """A store that must never be asked to probe. If the stale-watcher check
+    did not fire before the per-address loop, this raises loudly rather than
+    returning empty results that would pass the test silently."""
+
+    def rd(self, *a, **kw):
+        raise AssertionError("run_watch probed an address after it should have stopped")
+
+
+class TestStaleWatcherSelfStops:
+    def test_exits_before_probing_when_the_marker_names_a_different_session(
+        self, tmp_path,
+    ) -> None:
+        from nexus.tuple_watch import write_session_marker
+
+        write_session_marker(tmp_path, 4242, "S2")
+        lines: list[str] = []
+        stats = run_watch(
+            _NeverProbed(), ["addr"], config=WatchConfig(), state_dir=tmp_path,
+            iterations=5, emit=lines.append, report=lambda _s: None,
+            now=lambda: 1_800_000_000.0, sleep=lambda _s: None,
+            claude_pid=4242, spawn_session_id="S1",
+        )
+        assert stats.cycles == 0
+        stop_lines = [line for line in lines if "STOP" in line]
+        assert len(stop_lines) == 1
+        assert "S2" in stop_lines[0]
+        assert "S1" in stop_lines[0]
+
+    def test_stays_when_the_marker_names_its_own_session(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        from nexus.tuple_watch import write_session_marker
+
+        write_session_marker(sd, 4242, "S1")
+        lines, reports, clock = [], [], _Clock()
+        stats = run_watch(
+            store, [_uniq("addr")], config=cfg, state_dir=sd, iterations=3,
+            emit=lines.append, report=reports.append, now=clock.now,
+            sleep=lambda _s: None, claude_pid=4242, spawn_session_id="S1",
+        )
+        assert stats.cycles == 3
+        assert not [line for line in lines if "STOP" in line]
+
+    def test_stays_when_no_marker_is_present(self, t2_service_env, tmp_path) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        lines, reports, clock = [], [], _Clock()
+        stats = run_watch(
+            store, [_uniq("addr")], config=cfg, state_dir=sd, iterations=3,
+            emit=lines.append, report=reports.append, now=clock.now,
+            sleep=lambda _s: None, claude_pid=4242, spawn_session_id="S1",
+        )
+        assert stats.cycles == 3
+        assert not [line for line in lines if "STOP" in line]
+
+    def test_a_marker_for_a_different_claude_pid_never_stops_it(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        """Non-vacuity for the pid-keying: crossing session ids alone is not
+        enough -- the marker must also be keyed to THIS watcher's own claude
+        pid, or one peer conversation's /clear would stop a watcher armed by
+        an unrelated conversation on the same box."""
+        store, cfg, sd = _watch_env(tmp_path)
+        from nexus.tuple_watch import write_session_marker
+
+        write_session_marker(sd, 9999, "S2")  # a DIFFERENT claude pid than 4242
+        lines, reports, clock = [], [], _Clock()
+        stats = run_watch(
+            store, [_uniq("addr")], config=cfg, state_dir=sd, iterations=3,
+            emit=lines.append, report=reports.append, now=clock.now,
+            sleep=lambda _s: None, claude_pid=4242, spawn_session_id="S1",
+        )
+        assert stats.cycles == 3
+        assert not [line for line in lines if "STOP" in line]
+
+    @pytest.mark.parametrize("positional", [True, False])
+    def test_only_the_session_resolved_watch_compares_against_the_marker(
+        self, t2_service_env, tmp_path, monkeypatch, positional,
+    ) -> None:
+        """An explicit positional ADDRESS is a literal mailbox, not the session's
+        own, so a /clear must not stop it: the CLI passes no spawn session id for
+        it. The default watch passes the session id it resolved at spawn."""
+        import nexus.session as session_mod
+        import nexus.tuple_watch as tuple_watch_mod
+
+        captured: dict = {}
+
+        def _fake_run_watch(*args, **kwargs):
+            captured.update(kwargs)
+            return None
+
+        # The watch command imports both names at call time, so patch the modules.
+        monkeypatch.setattr(tuple_watch_mod, "run_watch", _fake_run_watch)
+        monkeypatch.setattr(session_mod, "resolve_active_session_id", lambda: "S1")
+        _store_obj, _cfg, sd = _watch_env(tmp_path)
+        argv = ["watch"] + ([_uniq("addr")] if positional else []) + [
+            "--iterations", "1", "--interval", "0", "--state-dir", str(sd),
+        ]
+        res = _invoke(argv)
+        assert res.exit_code == 0, res.output
+        assert "spawn_session_id" in captured, res.output
+        assert captured["spawn_session_id"] == (None if positional else "S1")
+
+    def test_no_spawn_session_id_never_checks_the_marker(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        """A caller that never resolved a session id (spawn_session_id=None,
+        the default every pre-existing call site still uses) must behave
+        exactly as before this fix: the marker is never even read, matching
+        the "absent leaves it running" contract, even when the marker file
+        on disk names a different session and WOULD say to stop if read."""
+        from nexus.tuple_watch import write_session_marker
+
+        store, cfg, sd = _watch_env(tmp_path)
+        write_session_marker(sd, 4242, "S2")
+        lines, reports, clock = [], [], _Clock()
+        stats = run_watch(
+            store, [_uniq("addr")], config=cfg, state_dir=sd, iterations=1,
+            emit=lines.append, report=reports.append, now=clock.now,
+            sleep=lambda _s: None, claude_pid=4242,
+        )
+        assert stats.cycles == 1
+        assert not [line for line in lines if "STOP" in line]
+
+
 # ── nx tuple watch: two addresses per session (MM-1.3, nexus-6konb.4) ──────
 
 
@@ -788,8 +1446,14 @@ class TestWatchAddressResolution:
     def test_explicit_addresses_are_used_verbatim_with_no_resolution(self) -> None:
         r = resolve_watch_addresses(("a", "b"), instance="", session_id="session-xyz")
         assert r.addresses == ["a", "b"]
-        assert r.notices == []
         assert r.error == ""
+        # nexus-6konb.12 (MM-3.4 fix 3): "session-xyz" is not one of the
+        # explicit addresses, so its own mailbox is a degraded-coverage
+        # branch too and must be stated out loud, like every other one
+        # here -- see test_explicit_positional_warns_the_session_id_mailbox_
+        # is_unwatched below for the dedicated pin.
+        assert len(r.notices) == 1
+        assert "session-xyz" not in r.notices[0]
 
     def test_no_addresses_resolves_the_session_and_adds_the_instance(self) -> None:
         r = resolve_watch_addresses((), instance="nexus-19", session_id="session-xyz")
@@ -831,8 +1495,52 @@ class TestWatchAddressResolution:
         r = resolve_watch_addresses(("only-this",), instance="nexus-19",
                                     session_id="session-xyz")
         assert r.addresses == ["only-this"]
-        assert r.notices == []
         assert r.error == ""
+        # session-xyz is not "only-this", so this is the same degraded-coverage
+        # branch as the test above -- see the dedicated pin below.
+        assert len(r.notices) == 1
+
+    def test_explicit_positional_warns_the_session_id_mailbox_is_unwatched(
+        self,
+    ) -> None:
+        """nexus-6konb.12 (MM-3.4 fix 3, critic Significant 4 / code-review
+        Important 2): every OTHER degraded-coverage branch in this function
+        states the gap out loud; the explicit-positional path was the one
+        silent exception -- a model that deviates from the SessionStart
+        template and types a positional address got no notice at all that
+        its own session-id mailbox went completely unwatched."""
+        r = resolve_watch_addresses(("literal-addr",), instance="",
+                                    session_id="session-xyz")
+        assert r.addresses == ["literal-addr"]
+        assert len(r.notices) == 1
+        assert "WARNING" in r.notices[0]
+        assert "session-id mailbox" in r.notices[0]
+        # never embeds the value (matches this function's other notices, and
+        # what test_cli_explicit_address_wins_over_both_defaults asserts end
+        # to end: neither the session id nor the instance name leaks into
+        # stdout on this path)
+        assert "session-xyz" not in r.notices[0]
+
+    def test_explicit_positional_including_the_session_id_warns_of_nothing(
+        self,
+    ) -> None:
+        """No coverage is actually lost when the session id happens to be
+        one of the explicit addresses, so there is nothing to warn about."""
+        r = resolve_watch_addresses(("session-xyz", "other"), instance="",
+                                    session_id="session-xyz")
+        assert r.addresses == ["session-xyz", "other"]
+        assert r.notices == []
+
+    def test_explicit_positional_with_no_resolvable_session_warns_of_nothing(
+        self,
+    ) -> None:
+        """No session id resolved means there was never a session-id
+        mailbox to lose -- nothing to warn about, matching the default
+        path's own "nothing to watch is a SKIP, not an extra warning"
+        rule for an already-absent session id."""
+        r = resolve_watch_addresses(("literal-addr",), instance="", session_id=None)
+        assert r.addresses == ["literal-addr"]
+        assert r.notices == []
 
 
 class TestWatchTwoAddresses:
@@ -854,7 +1562,12 @@ class TestWatchTwoAddresses:
             _Recording(store), [a, b], config=cfg, state_dir=sd, iterations=3,
             emit=lines.append, report=reports.append, now=clock.now, sleep=lambda _s: None,
         )
-        assert probed == [f"mailbox/{a}", f"mailbox/{b}"] * 3
+        # both every cycle, and the order rotates so a flood on one cannot starve the other
+        assert len(probed) == 6
+        assert set(probed[0:2]) == set(probed[2:4]) == set(probed[4:6]) == {
+            f"mailbox/{a}", f"mailbox/{b}",
+        }
+        assert probed[0] == probed[4] != probed[2]
 
     def test_a_hit_on_either_address_names_which_one_it_arrived_at(
         self, t2_service_env, tmp_path,
@@ -963,10 +1676,10 @@ class TestWatchTwoAddressesCli:
             "--state-dir", str(sd),
         ])
         assert res.exit_code == 0, res.output
-        pings = [line for line in res.output.splitlines() if "new mail" in line]
+        pings = [line for line in res.stdout.splitlines() if "new mail" in line]
         assert len(pings) == 2, res.output
         assert any(id_a in p for p in pings) and any(id_b in p for p in pings)
-        assert not [line for line in res.output.splitlines() if "WARNING" in line]
+        assert not [line for line in res.stdout.splitlines() if "WARNING" in line]
 
     def test_no_instance_flag_warns_once_and_still_watches_the_session(
         self, t2_service_env, tmp_path, monkeypatch,
@@ -979,10 +1692,10 @@ class TestWatchTwoAddressesCli:
             "watch", "--iterations", "1", "--interval", "0", "--state-dir", str(sd),
         ])
         assert res.exit_code == 0, res.output
-        warnings = [line for line in res.output.splitlines() if "WARNING" in line]
+        warnings = [line for line in res.stdout.splitlines() if "WARNING" in line]
         assert len(warnings) == 1, res.output
         assert "--instance" in warnings[0]
-        pings = [line for line in res.output.splitlines() if "new mail" in line]
+        pings = [line for line in res.stdout.splitlines() if "new mail" in line]
         assert len(pings) == 1 and tid in pings[0]
 
     def test_no_addresses_and_no_resolvable_session_skips(self, t2_service_env, tmp_path,
@@ -996,9 +1709,9 @@ class TestWatchTwoAddressesCli:
             "watch", "--iterations", "1", "--interval", "0", "--state-dir", str(tmp_path),
         ])
         assert res.exit_code == 0, res.output
-        skips = [line for line in res.output.splitlines() if "SKIP" in line]
+        skips = [line for line in res.stdout.splitlines() if "SKIP" in line]
         assert len(skips) == 1, res.output
-        assert not [line for line in res.output.splitlines() if "new mail" in line]
+        assert not [line for line in res.stdout.splitlines() if "new mail" in line]
 
     def test_cli_explicit_address_wins_over_both_defaults(self, t2_service_env, tmp_path,
                                                           monkeypatch) -> None:
@@ -1013,13 +1726,51 @@ class TestWatchTwoAddressesCli:
             "--state-dir", str(sd),
         ])
         assert res.exit_code == 0, res.output
-        pings = [line for line in res.output.splitlines() if "new mail" in line]
+        pings = [line for line in res.stdout.splitlines() if "new mail" in line]
         assert len(pings) == 1, res.output
         assert id_named in pings[0]
-        assert inst not in res.output and sess not in res.output
+        assert inst not in res.stdout and sess not in res.stdout
         # and only the named address was locked
         assert lock_path(sd, named).is_file()
         assert not lock_path(sd, inst).exists()
+
+    def test_instance_flag_with_no_positional_writes_the_per_session_registry(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-6konb.9 defect fix: the drain hook (``mailbox_drain.py``)
+        reads ``<config>/tuple-watch/addresses.d/<session id>`` -- this is
+        the write side. Written atomically: no leftover ``.tmp`` sibling
+        once the command has exited."""
+        store, _cfg, sd = _watch_env(tmp_path)
+        sess, inst = _uniq("sess"), _uniq("inst")
+        monkeypatch.setenv("NX_SESSION_ID", sess)
+        res = _invoke([
+            "watch", "--instance", inst, "--iterations", "1", "--interval", "0",
+            "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        path = registration_path(sd, sess)
+        assert path.is_file(), res.output
+        assert path.read_text(encoding="utf-8").strip() == inst
+        assert not path.with_name(path.name + ".tmp").exists()
+
+    def test_positional_address_form_writes_nothing_to_the_registry(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """An explicit positional ADDRESS suppresses the session-id/instance
+        default outright (``resolve_watch_addresses``'s own contract), so
+        `--instance` is not part of what this invocation actually watched
+        and nothing should be registered under this session's id."""
+        store, _cfg, sd = _watch_env(tmp_path)
+        named, inst, sess = _uniq("named"), _uniq("inst"), _uniq("sess")
+        monkeypatch.setenv("NX_SESSION_ID", sess)
+        _out(store, named, sender="wanted")
+        res = _invoke([
+            "watch", named, "--instance", inst, "--iterations", "1", "--interval", "0",
+            "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        assert not registration_path(sd, sess).exists()
 
     def test_cli_instance_equal_to_the_session_id_watches_once(
         self, t2_service_env, tmp_path, monkeypatch,
@@ -1036,8 +1787,331 @@ class TestWatchTwoAddressesCli:
             "--state-dir", str(sd),
         ])
         assert res.exit_code == 0, res.output
-        assert "already watched by" not in res.output
-        pings = [line for line in res.output.splitlines() if "new mail" in line]
+        assert "already watched by" not in res.stdout
+        pings = [line for line in res.stdout.splitlines() if "new mail" in line]
         assert len(pings) == 1, res.output
         assert tid in pings[0]
-        assert not [line for line in res.output.splitlines() if "WARNING" in line]
+        assert not [line for line in res.stdout.splitlines() if "WARNING" in line]
+
+
+# ── Phase 1 review fixes (MM-1.4, nexus-6konb.5) ──────────────────────────
+
+
+class TestDeadLetterReachesTheWatchedStream:
+    """The critical the phase review found: a row dead-lettered before the watcher
+    ever saw it alive is mail that will never be delivered, and the session had
+    heard nothing about it. It must reach stdout and it must heal like a live row."""
+
+    def _dead_row(self, store, addr):
+        sub = f"mailbox/{addr}"
+        tid = _out(store, addr, sender="poison")
+        for _ in range(3):  # mailbox.yaml max_attempts=3
+            claimant = _uniq("c")
+            claimed = store.in_(sub, {"to": addr}, claimant=claimant, lease_s=30)
+            assert claimed is not None
+            store.nack(claimed[1], claimant)
+        return tid
+
+    def test_first_sight_dead_goes_to_stdout_not_stderr(self, t2_service_env, tmp_path) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        addr = _uniq("addr")
+        dead_id = self._dead_row(store, addr)
+        lines, reports, clock = [], [], _Clock()
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert [line for line in lines if dead_id in line]
+        assert not [r for r in reports if dead_id in r]
+
+    def test_a_lost_first_sight_notice_heals_on_the_re_emit_window(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        """Unlike every other notice this module emits, the old dead-letter report had
+        no retry: one stderr line, a write-once set, and nothing if it was missed."""
+        store, cfg, sd = _watch_env(tmp_path)
+        addr = _uniq("addr")
+        dead_id = self._dead_row(store, addr)
+        lines, reports, clock = [], [], _Clock()
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert len([line for line in lines if dead_id in line]) == 1
+        clock.advance(cfg.reemit_after_s + 1)
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert len([line for line in lines if dead_id in line]) == 2
+        # and it is capped like a live row rather than repeating forever
+        for _ in range(4):
+            clock.advance(cfg.reemit_after_s + 1)
+            _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert len([line for line in lines if dead_id in line]) == cfg.max_emits
+
+    def test_a_row_pinged_while_alive_reports_its_death_on_stderr(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        """The other half of the rule: the session already knows this message exists,
+        so its death is a status update, not news of mail it never heard about."""
+        store, cfg, sd = _watch_env(tmp_path)
+        addr = _uniq("addr")
+        sub = f"mailbox/{addr}"
+        tid = _out(store, addr, sender="alice")
+        lines, reports, clock = [], [], _Clock()
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert len([line for line in lines if tid in line]) == 1  # pinged while alive
+        for _ in range(3):
+            claimant = _uniq("c")
+            claimed = store.in_(sub, {"to": addr}, claimant=claimant, lease_s=30)
+            assert claimed is not None
+            store.nack(claimed[1], claimant)
+        clock.advance(cfg.interval_s)
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert len([line for line in lines if tid in line]) == 1  # no new stdout line
+        assert [r for r in reports if tid in r and "never be claimed" in r]
+
+    def test_a_row_pinged_while_alive_never_re_announces_its_death_on_stdout(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        """The death report of a message the session already knows about stays a
+        stderr status update for good: the re-emit window that heals a never-seen
+        dead row must not later repeat THIS one onto stdout."""
+        store, cfg, sd = _watch_env(tmp_path)
+        addr = _uniq("addr")
+        sub = f"mailbox/{addr}"
+        tid = _out(store, addr, sender="alice")
+        lines, reports, clock = [], [], _Clock()
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        for _ in range(3):
+            claimant = _uniq("c")
+            claimed = store.in_(sub, {"to": addr}, claimant=claimant, lease_s=30)
+            assert claimed is not None
+            store.nack(claimed[1], claimant)
+        clock.advance(cfg.interval_s)
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        for _ in range(3):
+            clock.advance(cfg.reemit_after_s + 1)
+            _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        dead_stdout = [line for line in lines if tid in line and "dead-lettered" in line]
+        assert dead_stdout == [], dead_stdout
+
+
+class TestWatchFairnessAcrossAddresses:
+    """The phase review raised starvation of the second address under a sustained
+    asymmetric flood. It does not occur under the current constants, and this pins
+    the invariant that prevents it rather than the rotation that merely insures it:
+    one address can take at most max_lines_per_cycle + 1 of budget_lines, so the
+    other always has room, and once the window saturates both coalesce equally."""
+
+    def test_a_sustained_flood_on_one_address_never_starves_the_other_of_detail(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        loud, quiet = _uniq("loud"), _uniq("quiet")
+        lines, reports, clock = [], [], _Clock()
+
+        class _Flooding:
+            def __init__(self, inner) -> None:
+                self.inner = inner
+
+            def rd(self, subspace, *args, **kw):
+                if subspace == f"mailbox/{loud}":
+                    for i in range(8):
+                        _out(self.inner, loud, sender=f"loud{i}")
+                else:
+                    _out(self.inner, quiet, sender="quiet-sender")
+                return self.inner.rd(subspace, *args, **kw)
+
+        # The window must actually clear between cycles, or every address coalesces and
+        # the test proves nothing about fairness between them.
+        run_watch(
+            _Flooding(store), [loud, quiet], config=cfg, state_dir=sd, iterations=4,
+            emit=lines.append, report=reports.append, now=clock.now,
+            sleep=lambda _s: clock.advance(cfg.budget_window_s + 1),
+        )
+        # Detail means a NAMED SENDER: the coalesced budget line carries the address too,
+        # so matching on the address alone is satisfied by the starvation being tested for.
+        named = [line for line in lines if "from=quiet-sender" in line]
+        assert len(named) >= 2, (
+            f"the quiet address was named in detail on only {len(named)} cycles; "
+            f"one address must never be able to consume the whole budget"
+        )
+
+    def test_saturated_steady_state_stays_under_the_measured_throttle(self) -> None:
+        """The worst sustained case at PRODUCTION defaults, not the fixture's.
+
+        Under joint saturation every watched address emits one coalesced line per
+        cycle forever. That is the accepted single-address tradeoff MM-1.1 shipped,
+        multiplied by the number of addresses, and it must stay under the measured
+        throttle (about 20 events per 20 s, T2
+        nexus/mm-0.1-monitor-auto-stop-threshold-measured-2026-09-12). It currently
+        uses about two thirds of the ceiling with two addresses, so a third watched
+        address or a shorter interval would cross it -- and crossing it gets the
+        Monitor killed, which is silent to the hook that depends on it.
+        """
+        cfg = WatchConfig()
+        measured_throttle_events_per_window = 20.0
+        measured_window_s = 20.0
+        addresses = 2  # the session id and the instance name; MM-1.3's maximum
+        cycles_per_window = measured_window_s / cfg.interval_s
+        steady_state_lines = cycles_per_window * addresses
+        assert steady_state_lines < measured_throttle_events_per_window, (
+            f"a sustained flood on {addresses} addresses at interval={cfg.interval_s}s "
+            f"emits {steady_state_lines:.1f} lines per {measured_window_s:.0f}s against a "
+            f"measured throttle of {measured_throttle_events_per_window:.0f}; the Monitor "
+            f"would be stopped and the hook would never know"
+        )
+
+    def test_one_address_cannot_consume_the_whole_shared_budget(self) -> None:
+        """The arithmetic the test above depends on, pinned directly so a change to
+        either constant fails here and names the reason."""
+        cfg = WatchConfig()
+        most_one_address_can_take = cfg.max_lines_per_cycle + 1  # head lines + coalesced tail
+        assert most_one_address_can_take < cfg.budget_lines, (
+            "one address can now take the entire emit budget in a single cycle, so a "
+            "sustained flood on it would leave every other address permanently coalesced"
+        )
+
+
+class TestWatcherExitAlwaysSpeaks:
+    def test_an_unexpected_failure_says_so_on_stdout_before_exiting(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """A watcher that dies silently is the most complete form of the thing the
+        stream rule exists to prevent, and the shared CLI error helper writes to
+        stderr."""
+        def _explode(*_a, **_kw):
+            raise RuntimeError("resolver blew up")
+
+        monkeypatch.setattr("nexus.tuple_watch.preflight", _explode)
+        res = _invoke([
+            "watch", _uniq("addr"), "--iterations", "1", "--interval", "0",
+            "--state-dir", str(tmp_path),
+        ])
+        assert res.exit_code == 1
+        stdout_lines = [line for line in res.stdout.splitlines() if "the watcher is exiting" in line]
+        assert len(stdout_lines) == 1, res.output
+        assert "resolver blew up" in stdout_lines[0]
+        # and it is genuinely on stdout, not merely present somewhere in the combined
+        # capture: res.output interleaves both streams, so asserting against it would
+        # pass with this line on stderr, which is the thing being ruled out
+        assert "the watcher is exiting" not in res.stderr
+
+
+# ── Disjointness across both components (MM-2.2, nexus-6konb.7) ────────────
+
+
+class TestWatcherAndDrainHookAreDisjoint:
+    """The epic's central contract, tested across BOTH components against the
+    real engine rather than asserted in prose: the watcher pings and never
+    claims, the hook claims and consumes, and they are never two renderers of
+    one row."""
+
+    HOOK = (
+        Path(__file__).resolve().parent.parent
+        / "conexus" / "hooks" / "scripts" / "mailbox_drain.py"
+    )
+
+    def _run_hook(self, addr: str, tmp_path) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        env["NEXUS_CONFIG_DIR"] = str(tmp_path / "hookcfg")
+        env["XDG_STATE_HOME"] = str(tmp_path / "hookstate")
+        return subprocess.run(
+            [sys.executable, str(self.HOOK)],
+            input=json.dumps({"session_id": addr, "hook_event_name": "UserPromptSubmit"}),
+            # Hang bound, not a performance assertion (nexus-61vos): the hook
+            # budgets itself internally and a busy box must not turn that into a
+            # red naming the hook.
+            capture_output=True, text=True, env=env, timeout=300,
+        )
+
+    def test_the_watcher_pings_the_hook_consumes_and_nobody_renders_twice(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        store, cfg, sd = _watch_env(tmp_path)
+        addr = _uniq("sess")
+        tid = _out(store, addr, sender="peer-a", body="deliver me once")
+
+        # 1. the watcher pings it, and does NOT consume it
+        lines, reports, clock = [], [], _Clock()
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert len(lines) == 1 and tid in lines[0]
+        assert "deliver me once" not in lines[0], "the ping must never carry the body"
+        assert store.rd(f"mailbox/{addr}", {"to": addr}, n=5), (
+            "the watcher consumed the row; it must only ping"
+        )
+
+        # 2. the hook consumes it, and renders the body
+        res = self._run_hook(addr, tmp_path)
+        assert res.returncode == 0, res.stderr
+        assert "deliver me once" in res.stdout, res.stderr
+        assert not store.rd(f"mailbox/{addr}", {"to": addr}, n=5), (
+            "the hook rendered the row but did not consume it"
+        )
+
+        # 3. the watcher stops pinging it, because it is gone
+        clock.advance(cfg.reemit_after_s + 1)
+        _run(store, cfg, sd, addr, clock, 1, lines, reports)
+        assert len(lines) == 1, "the watcher re-pinged a row the hook already consumed"
+
+        # 4. and a second prompt delivers nothing: exactly once, across both
+        again = self._run_hook(addr, tmp_path)
+        assert "deliver me once" not in again.stdout
+
+    def test_the_hook_alone_delivers_with_no_watcher_ever_armed(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        """The floor. A session that never armed a Monitor still gets its mail."""
+        store, _cfg, _sd = _watch_env(tmp_path)
+        addr = _uniq("sess")
+        _out(store, addr, sender="peer-b", body="floor delivery")
+        res = self._run_hook(addr, tmp_path)
+        assert res.returncode == 0, res.stderr
+        assert "floor delivery" in res.stdout
+        assert not store.rd(f"mailbox/{addr}", {"to": addr}, n=5)
+
+
+class TestMailboxDrainDoesNotStarveBehindALargeDeadBacklog:
+    """nexus-1kvk3: the engine's ``rd`` orders by created_at ascending, never
+    excludes claimed or dead-lettered rows, and caps a page at the hook's own
+    PROBE_N (20, ``mailbox_drain.py``). A live row ranked behind more than
+    that many dead-lettered rows must still reach this hook -- unlike the
+    ``rd``-only watcher (the sibling starvation, nexus-qw386), this hook
+    claims via ``/v1/tuples/in``, which is not windowed by any probe page."""
+
+    HOOK = (
+        Path(__file__).resolve().parent.parent
+        / "conexus" / "hooks" / "scripts" / "mailbox_drain.py"
+    )
+
+    def _run_hook(self, addr: str, tmp_path) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        env["NEXUS_CONFIG_DIR"] = str(tmp_path / "hookcfg")
+        env["XDG_STATE_HOME"] = str(tmp_path / "hookstate")
+        return subprocess.run(
+            [sys.executable, str(self.HOOK)],
+            input=json.dumps({"session_id": addr, "hook_event_name": "UserPromptSubmit"}),
+            capture_output=True, text=True, env=env, timeout=300,
+        )
+
+    def test_a_live_row_ranked_beyond_probe_n_dead_rows_is_still_drained(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        store, _cfg, _sd = _watch_env(tmp_path)
+        addr = _uniq("addr")
+        sub = f"mailbox/{addr}"
+        # PROBE_N is 20 in mailbox_drain.py; one more than that dead-lettered
+        # ahead of the live row reproduces the starvation the bead names.
+        for i in range(21):
+            tid = _out(store, addr, sender="poison", body=f"dead-{i}")
+            for _ in range(3):  # mailbox.yaml max_attempts=3: the third nack dead-letters it
+                claimant = _uniq("c")
+                claimed = store.in_(sub, {"to": addr}, claimant=claimant, lease_s=30)
+                assert claimed is not None and claimed[0].id == tid
+                store.nack(claimed[1], claimant)
+        live_id = _out(store, addr, sender="alice", body="the live row ranked 22nd")
+
+        res = self._run_hook(addr, tmp_path)
+
+        assert res.returncode == 0, res.stderr
+        assert "the live row ranked 22nd" in res.stdout, (
+            "a live row ranked beyond the probe window was starved behind "
+            "more than PROBE_N dead-lettered rows"
+        )
+        remaining = {r.id for r in store.rd(sub, {"to": addr}, n=50)}
+        assert live_id not in remaining, (
+            "the live row was never claimed, so it is still sitting in the mailbox"
+        )

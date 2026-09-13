@@ -32,7 +32,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * before this step the two updates matched on {@code id} alone, so an {@code ack} or
  * {@code nack} that lost the race with the sweep's release arm wrote over a row the
  * sweep had just released. The race is built deterministically, not with a sleep:
- * {@link TupleRepository#TEST_ONLY_ACK_NACK_READ_TO_UPDATE_DELAY} runs inside the
+ * {@link TupleRepository#TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY} runs inside the
  * ack/nack transaction between the claim read and the update, and the hook installed
  * here lapses the lease and runs the REAL sweep batch in that window. Package-local
  * to {@code dev.nexus.service.db} to reach the package-private seam, the same shape
@@ -85,12 +85,12 @@ class TupleClaimCasTest {
 
     @AfterEach
     void restoreSeam() {
-        TupleRepository.TEST_ONLY_ACK_NACK_READ_TO_UPDATE_DELAY = () -> { };
+        TupleRepository.TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY = () -> { };
     }
 
     @AfterAll
     void stopAll() {
-        TupleRepository.TEST_ONLY_ACK_NACK_READ_TO_UPDATE_DELAY = () -> { };
+        TupleRepository.TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY = () -> { };
         if (svcDs != null) {
             svcDs.close();
         }
@@ -158,7 +158,7 @@ class TupleClaimCasTest {
      */
     private AtomicInteger installSweepInWindow(Seeded s, AtomicReference<TupleRepository.ReleaseBatchResult> sweep) {
         AtomicInteger hookRuns = new AtomicInteger();
-        TupleRepository.TEST_ONLY_ACK_NACK_READ_TO_UPDATE_DELAY = () -> {
+        TupleRepository.TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY = () -> {
             hookRuns.incrementAndGet();
             lapseLease(s.id());
             sweep.set(repo.releaseLapsedClaimsBatch(s.tenant(), 300, null));

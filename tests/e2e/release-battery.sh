@@ -54,6 +54,38 @@ LOGS="$WORK/logs"
 mkdir -p "$LOGS"
 [ -n "$ARTIFACTS" ] || ARTIFACTS="$WORK/artifacts"
 BATTERY_T0=$(date +%s)
+
+# Reap our own Postgres clusters on ANY exit, including SIGINT/SIGTERM
+# (nexus-6qp25). Every leg's sandbox boots its own cluster under $WORK; when
+# this driver is killed mid-flight the legs die but their postmasters are
+# re-parented to init and keep running, holding one SysV shared-memory
+# segment each against kern.sysv.shmmni. Measured 2026-09-12: a battery
+# stopped mid-run left a local-service-gate cluster and a shakedown cluster
+# alive, and a third from an earlier run had been orphaned nearly three days
+# -- consuming budget that a peer's test run then could not get, where
+# exhaustion surfaces as thousands of SETUP errors that read as a code
+# regression rather than as contention.
+#
+# Matches on the postmaster's -D data directory being under OUR $WORK, so it
+# can never touch a peer's cluster, a gate this battery did not start, or the
+# operator's real service. SIGINT is Postgres's fast-shutdown signal.
+_reap_our_clusters() {
+  local rc=$?
+  local pids
+  pids="$(pgrep -f "postgres -D $WORK" 2>/dev/null || true)"
+  if [ -n "$pids" ]; then
+    echo "[battery] reaping $(printf '%s\n' "$pids" | grep -c .) cluster(s) under $WORK" >&2
+    # shellcheck disable=SC2086
+    kill -INT $pids 2>/dev/null || true
+    sleep 2
+    pids="$(pgrep -f "postgres -D $WORK" 2>/dev/null || true)"
+    # shellcheck disable=SC2086
+    [ -n "$pids" ] && kill -KILL $pids 2>/dev/null || true
+  fi
+  return $rc
+}
+trap _reap_our_clusters EXIT INT TERM
+
 echo "RELEASE BATTERY: work=$WORK artifacts=$ARTIFACTS max-parallel=$MAX_PARALLEL tree=$(git rev-parse --short HEAD)$(git diff --quiet && git diff --cached --quiet || printf ' (dirty)')"
 
 # ── leg table ────────────────────────────────────────────────────────────────
