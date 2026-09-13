@@ -262,20 +262,10 @@ Every step below is **required**. Missing any one of them has caused problems in
    Sequencing a remediation behind a commit remains a bead-authoring
    convention (`requires-commit: <sha>`); it is no longer a release gate.
 
-1. **Verify the full release test battery passes**
-   ```bash
-   uv run pytest                                             # unit suite (no API keys)
-   tests/e2e/local-service-gate.sh                           # integration incl. the local-service functional gate
-   tests/e2e/migration-rehearsal/run.sh --package-upgrade    # ONE-engine convergence MVV (nexus-cfgo9)
-   tests/e2e/fresh-install-mvv.sh                             # VIRGIN-journey gate (nexus-nolqs), LOCAL WHEEL layer
-   ```
-   All must pass. Bare `uv run pytest -m integration` is not enough on its
-   own: the local-service round-trip family self-provisions inside
-   `local-service-gate.sh` and otherwise skip-gates silently on an absent
-   service (the 74/516 ambient-degradation class the gate was built to end).
-   Integration is excluded from CI — this battery is your last line of
-   defense before tag-push. See `.claude/skills/release/SKILL.md` Step 1 for
-   the authoritative, up-to-date version of this list.
+1. **Verify the full release test battery passes.** See `AGENTS.md` §
+   Cutting a release, step 1, and `.claude/skills/release/SKILL.md` Step 1
+   for the authoritative, up-to-date command list — it changes independently
+   of this pointer and a copy here would drift.
 
 2. **Audit docs against changes since last release**
    Run `git log --oneline v<prev>..HEAD` and check each feature/fix against the docs:
