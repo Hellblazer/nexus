@@ -501,7 +501,7 @@ class TestRdrAccept:
         # across all three rather than three separate substring checks that
         # could each drift independently (the printed brief once dropped the
         # "(with its fix check)" parenthetical the other two carried).
-        skill = (_PLUGIN_DIR / "skills" / "rdr-accept" / "SKILL.md").read_text()
+        skill = (_PLUGIN_DIR / "skills" / "rdr-accept-checklist" / "SKILL.md").read_text()
         cmd = (_PLUGIN_DIR / "commands" / "rdr-accept.md").read_text()
         assert _disposition_clause(skill) == _disposition_clause(cmd) == _disposition_clause(out)
 
@@ -2190,7 +2190,7 @@ class TestSkillFileGapCoverage:
     def test_gate_skill_lists_heading_variants(self) -> None:
         """rdr-gate SKILL.md must list both Problem and Problem Statement."""
         skill = (
-            Path(__file__).parent.parent / "conexus" / "skills" / "rdr-gate" / "SKILL.md"
+            Path(__file__).parent.parent / "conexus" / "skills" / "rdr-gate-checklist" / "SKILL.md"
         ).read_text()
         assert "Problem / Problem Statement" in skill
 

@@ -424,3 +424,28 @@ lands until fixed. Coverage below, per file.
   three-line shape and explanatory prose verbatim — it points at
   `conexus/skills/orchestration/SKILL.md`'s "VERIFY Line Convention" section as the one copy.
   Inert until the pin advances.
+nexus-cnzei.6: resolved the four rdr-* command/skill name collisions nexus-cnzei.4 deferred
+(rdr-gate, rdr-fix, rdr-accept, rdr-audit). Neither file could be deleted without breaking
+something real: the command carries the load-bearing `!`nx rdr preamble <name>`` bash
+injection and $ARGUMENTS parsing that TestRdrGateLoopRemedies and test_rdr_audit_skill.py
+pin, and the skill carries content those same tests pin elsewhere. Renamed the skill side
+instead — same strategy nexus-cnzei.4 used for the "debug"/"research"/"review" verb skills.
+
+- `conexus/skills/rdr-gate/SKILL.md` -> `conexus/skills/rdr-gate-checklist/SKILL.md`
+  (nexus-cnzei.6): renamed (directory + frontmatter `name:`) to resolve the collision with
+  `commands/rdr-gate.md`. Content unchanged. Inert until the pin advances.
+- `conexus/skills/rdr-fix/SKILL.md` -> `conexus/skills/rdr-fix-checklist/SKILL.md`
+  (nexus-cnzei.6): same rename, same reason, against `commands/rdr-fix.md`. Content
+  unchanged. Inert until the pin advances.
+- `conexus/skills/rdr-accept/SKILL.md` -> `conexus/skills/rdr-accept-checklist/SKILL.md`
+  (nexus-cnzei.6): same rename, same reason, against `commands/rdr-accept.md`. Content
+- `conexus/skills/rdr-audit/SKILL.md` -> `conexus/skills/rdr-audit-checklist/SKILL.md`
+  (nexus-cnzei.6): same rename, same reason, against `commands/rdr-audit.md`. Content
+- `conexus/registry.yaml` (nexus-cnzei.6): `rdr_skills:` keys `rdr-gate`/`rdr-fix`/
+  `rdr-accept`/`rdr-audit` renamed to `rdr-gate-checklist`/`rdr-fix-checklist`/
+  `rdr-accept-checklist`/`rdr-audit-checklist` to match the renamed skill directories;
+  `slash_command:`/`command_file:` values are unchanged (still the unrenamed `/rdr-gate`
+  etc. command). Inert until the pin advances.
+- `conexus/skills/using-nx-skills/SKILL.md` (nexus-cnzei.6): RDR lifecycle line updated to
+  name the skill-side rename instead of "both files real" under the same name. Inert until
+  the pin advances.

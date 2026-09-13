@@ -1,5 +1,5 @@
 ---
-name: rdr-audit
+name: rdr-audit-checklist
 description: Use when auditing a project's RDR lifecycle for silent-scope-reduction frequency, or when inspecting or managing scheduled periodic audits
 effort: high
 ---

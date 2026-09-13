@@ -224,11 +224,18 @@ agents:
 # =============================================================================
 
 rdr_skills:
-  # nexus-cnzei.4 fix round: only rdr-gate/rdr-fix/rdr-accept/rdr-audit still
-  # carry a `command_file:` — those four are a deliberately-kept dual surface
-  # (TestRdrGateLoopRemedies pins verbatim clauses across both files; rdr-audit
-  # has its own dedicated test_rdr_audit_skill.py requiring the command to
-  # exist). Every other name here now has EITHER a command_file (rdr-list —
+  # nexus-cnzei.6: rdr-gate/rdr-fix/rdr-accept/rdr-audit are a deliberately-
+  # kept dual surface — a command (real bash-injected preamble + $ARGUMENTS
+  # parsing, invoked as `/rdr-gate <id>`) and a skill carrying the same
+  # checklist content (TestRdrGateLoopRemedies pins verbatim clauses across
+  # both files; rdr-audit has its own dedicated test_rdr_audit_skill.py
+  # requiring the command to exist). Same name for both used to shadow the
+  # skill in the Skill-tool listing (nexus-cnzei.4's C1); the dict key below
+  # and the skill directory are now the `-checklist` suffixed name
+  # (rdr-gate-checklist etc.) while `slash_command:`/`command_file:` keep
+  # naming the unchanged, unrenamed `/rdr-gate` command — same rename
+  # strategy nexus-cnzei.4 already used for the "debug"/"research"/"review"
+  # verb skills. Every other name here now has EITHER a command_file (rdr-list —
   # its skill was deleted; the command's `!`nx rdr preamble rdr-list`` bash
   # injection is a live, tested E2E fixture, tests/cc-validation/scenarios/19
   # and 23, and the skill was a documentation shell dependent on it having
@@ -254,7 +261,7 @@ rdr_skills:
       - "verify assumption"
     dispatches_to: [deep-research-synthesizer, codebase-deep-analyzer]
 
-  rdr-gate:
+  rdr-gate-checklist:
     slash_command: /rdr-gate
     command_file: commands/rdr-gate.md
     description: "Run finalization gate: structural + assumption + AI critique"
@@ -264,7 +271,7 @@ rdr_skills:
       - "is this RDR ready"
     dispatches_to: [substantive-critic]
 
-  rdr-fix:
+  rdr-fix-checklist:
     slash_command: /rdr-fix
     command_file: commands/rdr-fix.md
     description: "Fix a gated RDR's findings: sites, diff since the gated commit, pre-edit research entry, fix check"
@@ -274,7 +281,7 @@ rdr_skills:
       - "fix RDR"
     dispatches_to: [substantive-critic]
 
-  rdr-accept:
+  rdr-accept-checklist:
     slash_command: /rdr-accept
     command_file: commands/rdr-accept.md
     description: "Accept a gated RDR — verify gate PASSED, update status, optional planning dispatch"
@@ -293,7 +300,7 @@ rdr_skills:
       - "finish RDR"
     dispatches_to: []  # knowledge-tidier superseded by mcp__plugin_conexus_nexus__nx_tidy MCP tool
 
-  rdr-audit:
+  rdr-audit-checklist:
     slash_command: /rdr-audit
     command_file: commands/rdr-audit.md
     description: "Audit a project's RDR lifecycle for silent-scope-reduction base rate, or inspect/manage scheduled periodic audits"

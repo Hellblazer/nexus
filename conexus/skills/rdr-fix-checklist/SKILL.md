@@ -1,5 +1,5 @@
 ---
-name: rdr-fix
+name: rdr-fix-checklist
 description: Use when a gated RDR has findings to fix — prints the findings with their sites, the diff since the gated commit, the pre-edit research title, and the fix rules
 effort: medium
 ---

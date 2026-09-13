@@ -1,5 +1,5 @@
 ---
-name: rdr-gate
+name: rdr-gate-checklist
 description: Use when an RDR appears complete and needs finalization validation — structural, assumption, and AI critique checks
 effort: medium
 ---

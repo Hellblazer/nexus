@@ -1,5 +1,5 @@
 ---
-name: rdr-accept
+name: rdr-accept-checklist
 description: Use when a gated RDR returned PASSED and you want to officially accept it for implementation
 effort: medium
 ---

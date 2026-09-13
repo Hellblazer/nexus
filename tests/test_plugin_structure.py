@@ -1284,25 +1284,25 @@ class TestPluginRootRefs:
 # <name>/SKILL.md) sharing the same <name> is a real collision: Claude Code's
 # listing shows only one entry per name, so the other is shadowed and
 # unreachable by name — the audit behind nexus-cnzei.4 found 17 such pairs.
-# Thirteen were resolved (deleting the redundant command, deleting a skill
-# that depended on its command having already run, or renaming the skill).
-# Four remain, each independently pinned by its own test infrastructure:
+# All 17 are now resolved: deleting the redundant command, deleting a skill
+# that depended on its command having already run, or renaming the skill.
 #
-# - rdr-gate: TestRdrGateLoopRemedies (below) pins verbatim clauses
-#   byte-for-byte across GATE_SKILL and GATE_CMD.
-# - rdr-fix: same TestRdrGateLoopRemedies class pins FIX_SKILL/FIX_CMD; the
-#   gate/fix/accept trio cross-references each other's clauses.
-# - rdr-accept: same class pins ACCEPT_SKILL/ACCEPT_CMD.
-# - rdr-audit: tests/test_rdr_audit_skill.py requires commands/rdr-audit.md
-#   to exist and carry specific subcommand (schedule/unschedule/list/status/
-#   history) behavior the skill does not replicate.
-#
-# Resolving any of these four without the matching multi-file surgery those
-# tests demand is a bigger, separate piece of work — tracked as a follow-up
-# under nexus-cnzei.6.
-_KNOWN_COMMAND_SKILL_COLLISIONS = frozenset({
-    "rdr-accept", "rdr-audit", "rdr-fix", "rdr-gate",
-})
+# The last four (rdr-gate, rdr-fix, rdr-accept, rdr-audit) needed the rename
+# path rather than a delete, because unlike the other 13 pairs the command
+# side carries load-bearing behavior a skill cannot replicate: the `!`nx rdr
+# preamble <name>`` bash injection and $ARGUMENTS parsing that make
+# `/rdr-gate <id>` a real, argument-taking slash command. Deleting the
+# command would break that; deleting the skill would lose content
+# TestRdrGateLoopRemedies (below) and test_rdr_audit_skill.py pin across
+# both files. nexus-cnzei.6 renamed the skill side instead — same strategy
+# nexus-cnzei.4 already used for the "debug"/"research"/"review" verb
+# skills: conexus/skills/rdr-gate/ -> rdr-gate-checklist/ (and
+# rdr-fix-checklist, rdr-accept-checklist, rdr-audit-checklist), each
+# skill's own frontmatter `name:` and registry.yaml's `rdr_skills:` key
+# updated to match, `slash_command:`/`command_file:` left naming the
+# unrenamed `/rdr-gate` etc. command. No collision remains, so this
+# allowlist is empty; it stays as the mechanism for any future one.
+_KNOWN_COMMAND_SKILL_COLLISIONS: frozenset[str] = frozenset()
 
 # nexus-cnzei.4 fix round: identifiers with NO surviving file anywhere in the
 # plugin under that exact name — not "a command was deleted" (most deleted
@@ -1600,12 +1600,12 @@ class TestRdrGateLoopRemedies:
     plugin surfaces that run the loop, so a session inherits them from the
     installed skill rather than from a memory file."""
 
-    GATE_SKILL = SKILLS_DIR / "rdr-gate" / "SKILL.md"
+    GATE_SKILL = SKILLS_DIR / "rdr-gate-checklist" / "SKILL.md"
     GATE_CMD = PLUGIN_DIR / "commands" / "rdr-gate.md"
     RESEARCH_SKILL = SKILLS_DIR / "rdr-research" / "SKILL.md"
-    ACCEPT_SKILL = SKILLS_DIR / "rdr-accept" / "SKILL.md"
+    ACCEPT_SKILL = SKILLS_DIR / "rdr-accept-checklist" / "SKILL.md"
     ACCEPT_CMD = PLUGIN_DIR / "commands" / "rdr-accept.md"
-    FIX_SKILL = SKILLS_DIR / "rdr-fix" / "SKILL.md"
+    FIX_SKILL = SKILLS_DIR / "rdr-fix-checklist" / "SKILL.md"
     FIX_CMD = PLUGIN_DIR / "commands" / "rdr-fix.md"
 
     def test_fix_check_layer_in_gate_skill_and_command(self) -> None:
@@ -1859,7 +1859,7 @@ class TestRdrGateLoopRemedies:
         """Skills are instructions; the why lives in the RDR and T2
         (feedback_no_prose_in_skills). No bead pointers or RDR-204 history in
         the sections the remedies added."""
-        fix_skill = SKILLS_DIR / "rdr-fix" / "SKILL.md"
+        fix_skill = SKILLS_DIR / "rdr-fix-checklist" / "SKILL.md"
         fix_cmd = PLUGIN_DIR / "commands" / "rdr-fix.md"
         for path in (self.GATE_SKILL, self.RESEARCH_SKILL, self.ACCEPT_SKILL):
             text = path.read_text()
@@ -1888,7 +1888,7 @@ class TestRdrGateLoopRemedies:
     def test_fix_step_has_its_own_surface(self) -> None:
         """nexus-zbdm0: the fix step is a command and a skill, and the gate
         skill points at it instead of carrying the rules alone."""
-        fix_skill = SKILLS_DIR / "rdr-fix" / "SKILL.md"
+        fix_skill = SKILLS_DIR / "rdr-fix-checklist" / "SKILL.md"
         fix_cmd = PLUGIN_DIR / "commands" / "rdr-fix.md"
         assert fix_skill.exists() and fix_cmd.exists()
         assert "nx rdr preamble rdr-fix" in fix_cmd.read_text()
@@ -1913,7 +1913,7 @@ class TestRdrGateLoopRemedies:
         lifecycle = (SKILLS_DIR / "using-nx-skills" / "SKILL.md").read_text()
         assert "/conexus:rdr-fix" in lifecycle
         registry = (PLUGIN_DIR / "registry.yaml").read_text()
-        assert "rdr-fix:" in registry and "commands/rdr-fix.md" in registry
+        assert "rdr-fix-checklist:" in registry and "commands/rdr-fix.md" in registry
 
     def test_accept_dispositions_residuals(self) -> None:
         """The disposition rule, and the fix check a sha disposition carries,
@@ -1976,8 +1976,8 @@ class TestRdrGateLoopRemedies:
             SKILLS_DIR / "orchestration" / "SKILL.md",
             SKILLS_DIR / "development" / "SKILL.md",
         ),
-        "rdr-fix": (SKILLS_DIR / "rdr-fix" / "SKILL.md",),
-        "rdr-accept": (SKILLS_DIR / "rdr-accept" / "SKILL.md",),
+        "rdr-fix": (SKILLS_DIR / "rdr-fix-checklist" / "SKILL.md",),
+        "rdr-accept": (SKILLS_DIR / "rdr-accept-checklist" / "SKILL.md",),
         "rdr-close": (SKILLS_DIR / "rdr-close" / "SKILL.md",),
         "the substantive-critique skill": (SKILLS_DIR / "substantive-critique" / "SKILL.md",),
     }
@@ -2022,7 +2022,7 @@ class TestReviewRoundContracts:
     def test_skills_quote_the_table(self) -> None:
         from nexus.tables.review_rounds import blocking_rounds, rule_for
 
-        gate = (SKILLS_DIR / "rdr-gate" / "SKILL.md").read_text()
+        gate = (SKILLS_DIR / "rdr-gate-checklist" / "SKILL.md").read_text()
         n = blocking_rounds("rdr-gate", "any-critical")
         assert f"Rounds 1 and {n}: BLOCKED iff `critical_count > 0`" in gate
         assert f"Round {n + 1} onward: BLOCKED iff `ship_blockers > 0`" in gate
