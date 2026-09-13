@@ -207,9 +207,9 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * applies zero changesets). More generally, {@code catalog-013-chash-
      * checks-validate.xml} first shipped at {@code engine-service-v0.1.33}
      * (commit {@code e1cd25f1}, verified via {@code git cat-file -e
-     * <tag>:<path>}: v0.1.32 lacks it, v0.1.33 has it) — so EVERY tag from
-     * v0.1.33 through the current v0.1.117 already contains both catalog-013
-     * and catalog-014, and none of them can pass this test's own
+     * <tag>:<path>}: v0.1.32 lacks it, v0.1.33 has it; catalog-014 follows
+     * at v0.1.35) — so EVERY tag from v0.1.33 through the current v0.1.117
+     * already contains catalog-013, and none of them can pass this test's own
      * preconditions ({@code changesetApplied(..., "catalog-013-2", ...)
      * .isFalse()} for the schema leg; the data leg's coverage-vacuity guard
      * for the row-DML changesets). {@code engine-service-v0.1.17} therefore
