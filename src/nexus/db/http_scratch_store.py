@@ -200,6 +200,10 @@ class HttpScratchStore:
         import threading  # noqa: PLC0415 — stdlib, deferred; ctor-only
 
         self._refresh_lock = threading.Lock()
+        # nexus-r0d37 defect 2: set when a data-token re-mint healed the
+        # bearer and the retry still 401'd; cleared by the next non-401
+        # response. See _remint_data_token_and_rebuild.
+        self._remint_futile = False
         _log.info(
             "http_scratch_store.init",
             base_url=self._base_url,
@@ -282,7 +286,7 @@ class HttpScratchStore:
             return f"Bearer {token}"
         return static_headers.get("Authorization", "")
 
-    def _remint_data_token_and_rebuild(self) -> bool:
+    def _remint_data_token_and_rebuild(self, sent_bearer: str = "") -> bool:
         """On a 401 that the session-token refresh did not resolve, try
         invalidating + re-minting the self-minted data token (RDR-005 2a)
         and rebuild the client with the fresh header.
@@ -293,6 +297,37 @@ class HttpScratchStore:
         fail loud, never leave the caller with a misleading
         ``SESSION_UNAUTHORIZED_MARKER`` when the real problem is a bad or
         revoked mint credential.
+
+        *sent_bearer* is the ``Authorization`` value the failed request
+        actually carried, and this method is SINGLE-FLIGHTED on it under
+        ``self._refresh_lock`` exactly as
+        :meth:`_refresh_session_token_from_lease` is single-flighted on
+        *sent_token* (nexus-r0d37 defect 2): a caller whose bearer has
+        already been replaced retries on the winner's token instead of
+        invalidating it and minting a competing replacement.
+
+        What each guard is worth, MEASURED (tests/db/test_http_scratch_store
+        .py::TestRemintSingleFlight) rather than reasoned about -- the first
+        reading of this bug had the emphasis wrong. With both guards
+        removed, 7 maximally concurrent callers mint 2, because
+        ``_mint_guarded``'s non-blocking flock coalesces true racers; but 4
+        STAGGERED callers mint 4, one per call, because a caller arriving
+        after the previous one finished is legitimately cold and alone, and
+        its ``invalidate`` deletes the token the previous caller just
+        published (the compare-and-delete matches). Nothing bounds that, and
+        trickling arrivals over a stale-session window are the shape the
+        live incident had: seven scratch calls tripped the managed edge's
+        mint rate limit (429) on 2026-09-13. So ``_remint_futile`` below is
+        what ends the storm; this single-flight takes the concurrent case
+        from 2 mints to 1.
+
+        The second guard is ``self._remint_futile``: once a re-mint has
+        healed the bearer and the retry STILL came back 401, the bearer was
+        never the problem (the live case is a stale T1 session id, which no
+        data token can satisfy), so every later call in that window skips
+        the re-mint and lets the 401 stand with
+        :data:`HEAL_DECLINED_SUFFIX`. Cleared by the next successful
+        response, so the skip lasts exactly as long as the condition does.
         """
         # See _apply_data_token_override's matching getattr for why the
         # default is True (pinned/no-op), not False.
@@ -303,6 +338,34 @@ class HttpScratchStore:
         manager = get_data_token_manager()
         if not manager.is_configured():
             return False
+        # getattr defaults: an instance built via __new__ bypassing __init__
+        # (the tests/test_scratch_cmd_service_errors.py pattern) has neither
+        # attribute -- mirror _current_authorization_header's contract rather
+        # than crash on the error path.
+        if getattr(self, "_remint_futile", False):
+            return False
+        lock = getattr(self, "_refresh_lock", None)
+        if lock is None:
+            return self._invalidate_and_rebuild(manager)
+        with lock:
+            if getattr(self, "_remint_futile", False):
+                return False
+            if sent_bearer and self._current_authorization_header() != sent_bearer:
+                # Another thread re-minted while we waited on the lock (or
+                # mid-request). Retry on its token instead of invalidating
+                # the fresh one and minting a competing replacement -- the
+                # losing-thread branch _refresh_session_token_from_lease
+                # already takes for the session token.
+                return True
+            return self._invalidate_and_rebuild(manager)
+
+    def _invalidate_and_rebuild(self, manager: Any) -> bool:
+        """Invalidate the cached data token, re-mint, and rebuild the client.
+
+        Split out of :meth:`_remint_data_token_and_rebuild` so the guards
+        there read as guards; the body below is unchanged behavior. Callers
+        hold ``self._refresh_lock`` where one exists.
+        """
         manager.invalidate(self._base_url, self._tenant)
         token = manager.bearer_for(self._base_url, self._tenant)
         if token is None:
@@ -315,6 +378,19 @@ class HttpScratchStore:
         self._client = self._build_client()
         _log.warning("http_scratch_store.data_token_remint_on_401")
         return True
+
+    def _note_bearer_accepted(self, resp: httpx.Response) -> None:
+        """Clear the :meth:`_remint_data_token_and_rebuild` futility flag once
+        any response comes back non-401 (nexus-r0d37 defect 2).
+
+        A 404 counts: the bearer and the session both resolved, the entry
+        merely was not there. Scoping the skip to the window where the
+        condition actually holds is what keeps it a rate-limit guard rather
+        than a permanent disabling of a heal that does work in other
+        failure modes.
+        """
+        if resp.status_code != 401 and getattr(self, "_remint_futile", False):
+            self._remint_futile = False
 
     def _rebind_from_lease(self) -> bool:
         """nexus-om64x: on connection-refused (supervisor restarted on a new
@@ -749,7 +825,9 @@ class HttpScratchStore:
                 # bearer (a self-minted data token) may be what actually went
                 # stale. Try re-minting before giving up. The suffix records
                 # WHICH mechanism healed (reviewer fold on nexus-fe96p).
-                healed = self._remint_data_token_and_rebuild()
+                healed = self._remint_data_token_and_rebuild(
+                    request_headers["Authorization"]
+                )
                 heal_suffix = f" {HEAL_REMINT_SUFFIX}" if healed else f" {HEAL_DECLINED_SUFFIX}"
             if healed:
                 try:
@@ -769,11 +847,20 @@ class HttpScratchStore:
                     raise RuntimeError(
                         f"HttpScratchStore: network error on token-refresh retry {path}: {exc}"
                     ) from exc
+        self._note_bearer_accepted(resp)
         if not resp.is_success:
             edge = self._edge_refusal(path, resp)
             if edge is not None:
                 raise RuntimeError(edge)
             if resp.status_code == 401:
+                if heal_suffix.strip() == HEAL_REMINT_SUFFIX:
+                    # nexus-r0d37 defect 2: the bearer was re-minted and the
+                    # retry STILL 401'd, so the bearer was never the cause
+                    # (the live case is a stale T1 session id, which no data
+                    # token can satisfy). Skip the re-mint until a response
+                    # comes back non-401, instead of minting once per call
+                    # for as long as the session stays stale.
+                    self._remint_futile = True
                 raise RuntimeError(
                     f"{SESSION_UNAUTHORIZED_MARKER} on {path}{heal_suffix}: {resp.text[:200]}"
                 )
@@ -832,7 +919,9 @@ class HttpScratchStore:
             else:
                 # nexus-wrwb7: fall back to a data-token re-mint (see _post's
                 # matching comment for the full rationale + suffix split).
-                healed = self._remint_data_token_and_rebuild()
+                healed = self._remint_data_token_and_rebuild(
+                    request_headers["Authorization"]
+                )
                 heal_suffix = f" {HEAL_REMINT_SUFFIX}" if healed else f" {HEAL_DECLINED_SUFFIX}"
             if healed:
                 try:
@@ -846,6 +935,7 @@ class HttpScratchStore:
                     raise RuntimeError(
                         f"HttpScratchStore: network error on token-refresh retry {path}: {exc}"
                     ) from exc
+        self._note_bearer_accepted(resp)
         if resp.status_code == 404:
             return {"found": False}
         if not resp.is_success:
@@ -853,6 +943,14 @@ class HttpScratchStore:
             if edge is not None:
                 raise RuntimeError(edge)
             if resp.status_code == 401:
+                if heal_suffix.strip() == HEAL_REMINT_SUFFIX:
+                    # nexus-r0d37 defect 2: the bearer was re-minted and the
+                    # retry STILL 401'd, so the bearer was never the cause
+                    # (the live case is a stale T1 session id, which no data
+                    # token can satisfy). Skip the re-mint until a response
+                    # comes back non-401, instead of minting once per call
+                    # for as long as the session stays stale.
+                    self._remint_futile = True
                 raise RuntimeError(
                     f"{SESSION_UNAUTHORIZED_MARKER} on {path}{heal_suffix}: {resp.text[:200]}"
                 )

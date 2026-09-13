@@ -162,7 +162,7 @@ def _scratch_store(url: str, monkeypatch):
     # chain must never reach the real lease files or mint against the real
     # engine from a unit test. Pin both heal legs to "did not heal".
     monkeypatch.setattr(store, "_refresh_session_token_from_lease", lambda t: False)
-    monkeypatch.setattr(store, "_remint_data_token_and_rebuild", lambda: False)
+    monkeypatch.setattr(store, "_remint_data_token_and_rebuild", lambda *_: False)
     return store
 
 
@@ -196,7 +196,7 @@ def test_t1_edge_401_short_circuits_the_heal_chain(edge_server, monkeypatch):
     )
     monkeypatch.setattr(
         store, "_remint_data_token_and_rebuild",
-        lambda: heal_calls.append("mint") or False,
+        lambda *_: heal_calls.append("mint") or False,
     )
     for call in (lambda: store._post("/v1/t1/put", {"content": "x"}),
                  lambda: store._post_raw("/v1/t1/get", {"id": "x"})):
