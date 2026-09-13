@@ -1,0 +1,15 @@
+{
+  "armed_at": "2026-09-13T20:43:52.924248Z",
+  "armed_by": "hellblazer@sha256:8a5df547",
+  "engine_tag": "engine-service-v0.1.118",
+  "image_digest": "sha256:bac3aaf793269bb6d34d1c83314c649ea1a959cdce5d47f6da028d4b9249d28a",
+  "redeploy_doc": "conexus-dev-engine-redeploy",
+  "signature_verified": {
+    "image_ref": "conexus/engine:nexus-service-0.1.118@sha256:bac3aaf793269bb6d34d1c83314c649ea1a959cdce5d47f6da028d4b9249d28a",
+    "kms_key": "awskms:///alias/conexus-dev-image-signing",
+    "verified": true
+  },
+  "ssm_param": "/conexus/dev/engine/image-tag",
+  "ssm_param_version": 102,
+  "walk_rehearsed": "deploy-v01118-walk-rehearsal-2026-09-13"
+}
