@@ -642,15 +642,20 @@ class TestMailboxArmIntegration:
             f"arm instruction missing for SessionStart source={source!r}"
         )
 
-    def test_instance_name_interpolated_when_known(self, tmp_path: Path) -> None:
+    def test_a_populated_machine_wide_registry_does_not_reach_the_instruction(
+        self, tmp_path: Path,
+    ) -> None:
         """End-to-end through the real nexus.mailbox_arm module (only the
-        network probe is mocked): a registered instance name reaches the
-        rendered instruction."""
+        network probe is mocked): nexus-6konb.9's defect fix removed the
+        machine-wide registry guess entirely, so a populated
+        <config>/tuple-watch/addresses file must not change anything --
+        the instruction always tells the model to supply --instance
+        itself, from its own ListAgents knowledge."""
         from unittest.mock import patch as _patch
 
         registry = tmp_path / "tuple-watch" / "addresses"
         registry.parent.mkdir(parents=True)
-        registry.write_text("nexus-19\n", encoding="utf-8")
+        registry.write_text("nexus-registered-instance\n", encoding="utf-8")
 
         with (
             _patch("nexus.hooks.write_claude_session_id"),
@@ -658,9 +663,10 @@ class TestMailboxArmIntegration:
             _patch("nexus.mailbox_arm.tuple_surface_available", return_value=True),
         ):
             output = session_start(claude_session_id="s-6konb9-instance-known")
-        assert 'command: "nx tuple watch s-6konb9-instance-known nexus-19"' in output
+        assert "nexus-registered-instance" not in output
+        assert '"nx tuple watch --instance' in output
 
-    def test_degrades_to_session_id_only_when_instance_not_known(
+    def test_command_never_carries_a_bare_positional_session_id(
         self, tmp_path: Path,
     ) -> None:
         from unittest.mock import patch as _patch
@@ -671,8 +677,8 @@ class TestMailboxArmIntegration:
             _patch("nexus.mailbox_arm.tuple_surface_available", return_value=True),
         ):
             output = session_start(claude_session_id="s-6konb9-instance-unknown")
-        assert 'command: "nx tuple watch s-6konb9-instance-unknown"' in output
-        assert "nexus-19" not in output
+        assert 'command: "nx tuple watch s-6konb9-instance-unknown"' not in output
+        assert "omit --instance" in output
 
     def test_emitted_text_includes_timeout_ms_and_persistent_true(
         self, tmp_path: Path,

@@ -35,6 +35,7 @@ from nexus.tuple_watch import (
     acquire_watch_locks,
     lock_path,
     preflight,
+    registration_path,
     resolve_watch_addresses,
     run_watch,
     state_path,
@@ -1350,6 +1351,44 @@ class TestWatchTwoAddressesCli:
         # and only the named address was locked
         assert lock_path(sd, named).is_file()
         assert not lock_path(sd, inst).exists()
+
+    def test_instance_flag_with_no_positional_writes_the_per_session_registry(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-6konb.9 defect fix: the drain hook (``mailbox_drain.py``)
+        reads ``<config>/tuple-watch/addresses.d/<session id>`` -- this is
+        the write side. Written atomically: no leftover ``.tmp`` sibling
+        once the command has exited."""
+        store, _cfg, sd = _watch_env(tmp_path)
+        sess, inst = _uniq("sess"), _uniq("inst")
+        monkeypatch.setenv("NX_SESSION_ID", sess)
+        res = _invoke([
+            "watch", "--instance", inst, "--iterations", "1", "--interval", "0",
+            "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        path = registration_path(sd, sess)
+        assert path.is_file(), res.output
+        assert path.read_text(encoding="utf-8").strip() == inst
+        assert not path.with_name(path.name + ".tmp").exists()
+
+    def test_positional_address_form_writes_nothing_to_the_registry(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """An explicit positional ADDRESS suppresses the session-id/instance
+        default outright (``resolve_watch_addresses``'s own contract), so
+        `--instance` is not part of what this invocation actually watched
+        and nothing should be registered under this session's id."""
+        store, _cfg, sd = _watch_env(tmp_path)
+        named, inst, sess = _uniq("named"), _uniq("inst"), _uniq("sess")
+        monkeypatch.setenv("NX_SESSION_ID", sess)
+        _out(store, named, sender="wanted")
+        res = _invoke([
+            "watch", named, "--instance", inst, "--iterations", "1", "--interval", "0",
+            "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        assert not registration_path(sd, sess).exists()
 
     def test_cli_instance_equal_to_the_session_id_watches_once(
         self, t2_service_env, tmp_path, monkeypatch,

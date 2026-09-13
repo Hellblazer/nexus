@@ -31,24 +31,27 @@ Never emitted when it cannot succeed
 The instance-name mailbox
     The ``ListAgents`` row name (e.g. ``nexus-19``) reaches no environment
     variable anywhere -- :func:`nexus.tuple_watch.resolve_watch_addresses`
-    established that, which is why ``nx tuple watch`` takes it as an
-    explicit ``--instance``-shaped positional literal, never reading it
-    from the process environment. The only persistence point that exists
-    today is the shared registry ``mailbox_drain.py`` already reads,
-    ``<config>/tuple-watch/addresses`` -- one address per line, populated
-    by a human or a future arming action (that file's own docstring: "arming
-    writes to it, and so can a human"). Nothing currently writes to it;
-    this bead only *reads* it. Because the file is machine-wide, not scoped
-    to one session, :func:`known_instance_name` trusts it only when it
-    names exactly ONE candidate that is not this session's own id --
-    zero or several candidates degrade to "not known" (session-id-only)
-    rather than risk arming the wrong mailbox as though it were this
-    session's own.
+    established that -- and it reaches no FILE this module could read
+    either: an earlier version of this module trusted the machine-wide
+    ``<config>/tuple-watch/addresses`` file when it named exactly one
+    candidate distinct from this session's own id, but nothing writes
+    that file, and on a box running several sessions a populated file
+    names several candidates with no way to tell whose instance any of
+    them is (nexus-6konb.9 defect fix, drained by
+    ``conexus/hooks/scripts/mailbox_drain.py``'s PER-SESSION registry
+    instead -- see that module's docstring). So this module reads
+    NOTHING to guess an instance name. The name exists only in the
+    model's own knowledge, from the ``ListAgents`` tool's "This session
+    is <name>" line, and the rendered instruction says so: pass it with
+    ``--instance NAME``, in the non-positional form (an explicit
+    positional address suppresses ``nx tuple watch``'s session-id
+    default outright -- :func:`nexus.tuple_watch.resolve_watch_addresses`
+    -- so the command this module renders never uses one), or omit
+    ``--instance`` entirely when the name is not known.
 """
 from __future__ import annotations
 
 import json
-import re
 import time
 from pathlib import Path
 
@@ -64,14 +67,7 @@ ARM_MARKER = "MAILBOX WATCH"
 #: Shared with :mod:`nexus.tuple_watch` and ``mailbox_drain.py``: one
 #: subdirectory under the config dir for every tuple-watch state file.
 _STATE_SUBDIR = "tuple-watch"
-_REGISTRY_NAME = "addresses"
 _PROBE_CACHE_NAME = "arm-probe-cache.json"
-
-#: Same charset discipline as tuple_watch.py's ``_SAFE_NAME`` and
-#: mailbox_drain.py's ``_valid_address`` -- a registry line becomes a
-#: literal token in a CLI instruction shown to the model, so anything
-#: outside a safe, boring charset is dropped rather than escaped.
-_SAFE_ADDRESS = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 #: Bounded well under this hook's own 10s SessionStart budget (hooks.json:
 #: ``"command": "nx hook session-start", "timeout": 10``) -- the store's
@@ -85,49 +81,8 @@ PROBE_TIMEOUT_S = 2.0
 PROBE_CACHE_TTL_S = 120.0
 
 
-def _registry_path(config_dir: Path) -> Path:
-    return config_dir / _STATE_SUBDIR / _REGISTRY_NAME
-
-
 def _probe_cache_path(config_dir: Path) -> Path:
     return config_dir / _STATE_SUBDIR / _PROBE_CACHE_NAME
-
-
-def _valid_address(address: str) -> bool:
-    return bool(_SAFE_ADDRESS.match(address))
-
-
-def _read_registry(config_dir: Path) -> list[str]:
-    """Addresses registered by arming or by hand, one per line.
-
-    A missing or unreadable file is an empty registry, never a failure --
-    the session-id mailbox never depends on it. Blank lines, ``#``
-    comments, and anything outside the safe charset are dropped.
-    """
-    try:
-        raw = _registry_path(config_dir).read_text(encoding="utf-8")
-    except OSError:
-        return []
-    out: list[str] = []
-    for line in raw.splitlines():
-        entry = line.strip()
-        if not entry or entry.startswith("#"):
-            continue
-        if _valid_address(entry):
-            out.append(entry)
-    return out
-
-
-def known_instance_name(session_id: str, config_dir: Path) -> str:
-    """The instance-name mailbox to arm alongside *session_id*, or ``""``.
-
-    See the module docstring: trusts the shared, unscoped registry only
-    when it names exactly one candidate distinct from ``session_id``.
-    """
-    candidates = [a for a in _read_registry(config_dir) if a != session_id]
-    if len(candidates) == 1:
-        return candidates[0]
-    return ""
 
 
 def _load_probe_cache(path: Path) -> tuple[bool, float] | None:
@@ -199,25 +154,42 @@ def tuple_surface_available(
     return available
 
 
-def mailbox_arm_instruction(session_id: str, instance: str = "") -> str:
-    """The literal arm-instruction text for *session_id* (and *instance*
-    when known). Pure text -- no I/O, no probing -- so tests and MM-3.3's
-    future skill rule can both call it directly.
+def mailbox_arm_instruction(session_id: str) -> str:
+    """The literal arm-instruction text for *session_id*. Pure text -- no
+    I/O, no probing -- so tests and MM-3.3's future skill rule can both
+    call it directly.
+
+    Carries no instance-name literal (nexus-6konb.9 defect fix): that
+    name exists only in the model's own knowledge, from ``ListAgents``'s
+    "This session is <name>" line, never in this process's environment or
+    any file this module could read. The rendered command therefore never
+    uses a positional address either -- an explicit positional suppresses
+    ``nx tuple watch``'s session-id default outright
+    (:func:`nexus.tuple_watch.resolve_watch_addresses`) -- so it is always
+    ``--instance NAME`` or nothing, and the session-id mailbox resolves on
+    its own, from this session's own environment, the moment the watcher
+    spawns.
     """
-    if instance:
-        command = f"nx tuple watch {session_id} {instance}"
-        label = f"{session_id} and {instance}"
-    else:
-        command = f"nx tuple watch {session_id}"
-        label = session_id
     return (
         f"{ARM_MARKER} (RDR-205, nexus-6konb): arm a background watcher ONCE, "
-        f"now, so mail sent to your mailbox ({label}) pings you between prompts "
-        "instead of waiting for your next turn. Call Monitor exactly once this "
+        f"now, so mail sent to your mailboxes pings you between prompts instead "
+        "of waiting for your next turn. Your session-id mailbox "
+        f"({session_id}) is always watched -- it resolves on its own, from "
+        "this session's own environment, the moment the watcher spawns; no "
+        "flag is needed for it. Your instance-name mailbox (the ListAgents "
+        "row, e.g. nexus-19 -- the \"This session is <name>\" line) is "
+        "watched too, but ONLY if you supply it yourself: if you know your "
+        "ListAgents name, pass it with --instance NAME; if you do not, omit "
+        "--instance entirely and only the session-id mailbox is watched. "
+        "NEVER pass the session id or the instance name as a bare positional "
+        "argument -- a positional address suppresses the session-id default "
+        "outright, so the command is always --instance NAME or no arguments "
+        "at all, never a literal address. Call Monitor exactly once this "
         "session:\n\n"
         "    Monitor({\n"
-        f'      command: "{command}",\n'
-        f'      description: "mailbox watch for {label}",\n'
+        '      command: "nx tuple watch --instance <your ListAgents name, '
+        'or omit this flag if you have none>",\n'
+        f'      description: "mailbox watch for {session_id}",\n'
         "      persistent: true,\n"
         "      timeout_ms: 3600000\n"
         "    })\n\n"
@@ -227,10 +199,16 @@ def mailbox_arm_instruction(session_id: str, instance: str = "") -> str:
         "refuses itself (one lock per address) and exits at once, so this is "
         "never a doubled watcher.\n\n"
         "Every line it prints is a PING, never the message: sender, kind and a "
-        "tuple id, nothing more. On a ping, drain the address it names -- "
-        "`nx tuple in mailbox/<address> --pattern to=<address> --claimant "
-        "<your-id> --lease-s 60` -- and handle what comes back yourself. The "
-        "watcher never claims and never acks."
+        "tuple id, nothing more. On a ping, drain the address it names: call "
+        "mcp__plugin_conexus_nexus__tuple_in on that mailbox with a lease, "
+        "handle whatever comes back, then call "
+        "mcp__plugin_conexus_nexus__tuple_ack to consume it (passing its "
+        "reply argument when the message is a request that needs an answer), "
+        "or mcp__plugin_conexus_nexus__tuple_nack if you cannot handle it. An "
+        "unacked claim lapses, its attempts count goes up, and after three "
+        "lapses the message is dead-lettered undelivered -- so a claim you "
+        "cannot finish handling right away still needs an ack or a nack, "
+        "never silence. The watcher itself never claims and never acks."
     )
 
 
@@ -247,5 +225,4 @@ def arm_block(session_id: str | None, *, config_dir: Path | None = None) -> str:
         config_dir = nexus_config_dir()
     if not tuple_surface_available(config_dir):
         return ""
-    instance = known_instance_name(session_id, config_dir)
-    return mailbox_arm_instruction(session_id, instance)
+    return mailbox_arm_instruction(session_id)

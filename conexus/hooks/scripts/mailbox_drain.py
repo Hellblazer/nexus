@@ -30,10 +30,19 @@ paragraph above would otherwise assume it is universal:
   drained only once something has REGISTERED it, because it exists in no
   environment variable anywhere -- MM-1.3 established that, which is why
   ``nx tuple watch`` takes it as an explicit ``--instance`` literal. The
-  registry is ``<config>/tuple-watch/addresses``, one address per line;
-  arming writes to it, and so can a human. Until an address is in there,
-  mail sent to it has no floor. The session id needs no registration: it
-  arrives in this hook's own payload.
+  registry is PER-SESSION (nexus-6konb.9 defect fix, corrected from an
+  earlier machine-wide design): ``nx tuple watch --instance NAME``
+  writes ``<config>/tuple-watch/addresses.d/<session id>`` -- one address
+  per line, keyed to the exact session that armed it, at spawn, from its
+  own environment. This hook reads ONLY the file named by ITS OWN payload
+  session id, never any other session's file and never a machine-wide
+  one: the earlier design read a single shared ``<config>/tuple-
+  watch/addresses`` file for every session, so on a box running more than
+  one session the first one to prompt after arming claimed every other
+  session's instance-addressed mail too. A missing per-session file is an
+  empty registry, never a failure. Until a session's own file exists,
+  mail sent to that instance name has no floor. The session id needs no
+  registration: it arrives in this hook's own payload.
 
 CONTRACT WITH THE PROMPT. stdout is injected context, so an empty mailbox
 prints NOTHING and costs an idle prompt nothing. Every failure -- an
@@ -125,21 +134,24 @@ def _config_dir() -> Path:
     return _ep.default_config_dir()
 
 
-def _registry_path(config_dir: Path) -> Path:
-    return config_dir / "tuple-watch" / "addresses"
+def _session_registry_path(config_dir: Path, session_id: str) -> Path:
+    return config_dir / "tuple-watch" / "addresses.d" / session_id
 
 
 def _seen_path(config_dir: Path, address: str) -> Path:
     return config_dir / "tuple-watch" / f"{address}.drained.json"
 
 
-def _read_registry(config_dir: Path) -> list[str]:
-    """Addresses registered by arming or by hand, one per line. Blank lines and
-    ``#`` comments are ignored; anything unsafe is dropped. A missing or
-    unreadable file is simply an empty registry -- never a failure, since the
-    session-id address does not depend on it."""
+def _read_session_registry(config_dir: Path, session_id: str) -> list[str]:
+    """The instance address(es) THIS session registered for itself via
+    ``nx tuple watch --instance NAME`` (nexus-6konb.9 defect fix), one per
+    line. Blank lines and ``#`` comments are ignored; anything unsafe is
+    dropped. Keyed strictly to *session_id* -- never machine-wide -- so
+    one session can never drain another session's instance-named mailbox.
+    A missing or unreadable file is simply an empty registry -- never a
+    failure, since the session-id address does not depend on it."""
     try:
-        raw = _registry_path(config_dir).read_text(encoding="utf-8")
+        raw = _session_registry_path(config_dir, session_id).read_text(encoding="utf-8")
     except (OSError, ValueError):
         return []
     out: list[str] = []
@@ -652,7 +664,7 @@ def _drain_all() -> int:
     addresses: list[str] = []
     if _valid_address(session_id):
         addresses.append(session_id)
-    addresses.extend(_read_registry(config_dir))
+        addresses.extend(_read_session_registry(config_dir, session_id))
     # First-occurrence dedup: a registry naming this session's own id must not
     # make the hook drain it twice and render the same row in two blocks.
     addresses = list(dict.fromkeys(addresses))

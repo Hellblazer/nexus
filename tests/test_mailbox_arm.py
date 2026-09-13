@@ -7,16 +7,23 @@ engine substrate -- every probe call is monkeypatched. The
 session_start()-integration scenarios (four SessionStart sources, real
 end-to-end absence-when-unavailable, and the timing measurement with the
 engine genuinely absent) live in ``tests/test_hooks.py``.
+
+Defect fix (nexus-6konb.9.1): the instance name exists only in the
+model's own knowledge, never in this module's environment or any file it
+could read, so ``mailbox_arm_instruction`` no longer takes an *instance*
+parameter and this module no longer reads any registry to guess one --
+see ``TestNoRegistryGuessing`` below, and the module docstring's
+"The instance-name mailbox" section.
 """
 from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import patch
 
+import nexus.mailbox_arm as mailbox_arm_module
 from nexus.mailbox_arm import (
     ARM_MARKER,
     arm_block,
-    known_instance_name,
     mailbox_arm_instruction,
     tuple_surface_available,
 )
@@ -26,99 +33,104 @@ from nexus.mailbox_arm import (
 
 
 class TestMailboxArmInstructionText:
-    def test_contains_the_exact_monitor_call_with_session_id_only(self) -> None:
-        text = mailbox_arm_instruction("sess-abc", "")
+    def test_contains_the_monitor_call_shape(self) -> None:
+        text = mailbox_arm_instruction("sess-abc")
         assert "Monitor({" in text
-        assert 'command: "nx tuple watch sess-abc"' in text
         assert "persistent: true" in text
         assert "timeout_ms: 3600000" in text
+        assert '"nx tuple watch --instance' in text
 
-    def test_contains_both_addresses_when_instance_known(self) -> None:
-        text = mailbox_arm_instruction("sess-abc", "nexus-19")
-        assert 'command: "nx tuple watch sess-abc nexus-19"' in text
-        assert "sess-abc" in text
-        assert "nexus-19" in text
+    def test_never_uses_a_bare_positional_address(self) -> None:
+        """The old design embedded the session id (and instance, when
+        guessed) as a bare positional in the command. That form suppresses
+        `nx tuple watch`'s own session-id default outright, so it must
+        never appear -- the rendered command is always `--instance NAME`
+        or no arguments at all."""
+        text = mailbox_arm_instruction("sess-abc")
+        assert 'command: "nx tuple watch sess-abc"' not in text
+        assert 'command: "nx tuple watch sess-abc nexus-19"' not in text
+        assert '"nx tuple watch --instance' in text
 
-    def test_degrades_to_session_id_only_when_instance_not_known(self) -> None:
-        text = mailbox_arm_instruction("sess-abc", "")
-        assert "nexus-19" not in text
-        # exactly one address token in the command, not two
-        assert 'command: "nx tuple watch sess-abc"' in text
+    def test_states_omit_instance_when_name_not_known(self) -> None:
+        text = mailbox_arm_instruction("sess-abc")
+        assert "omit --instance" in text
 
     def test_states_armed_once(self) -> None:
-        text = mailbox_arm_instruction("sess-abc", "")
+        text = mailbox_arm_instruction("sess-abc")
         assert "ONCE" in text or "once" in text
         assert "twice" in text  # the redundant-arm-is-harmless sentence
 
     def test_states_ping_carries_no_body_and_watcher_never_claims(self) -> None:
-        text = mailbox_arm_instruction("sess-abc", "")
+        text = mailbox_arm_instruction("sess-abc")
         assert "never the message" in text
-        assert "tuple_in" in text or "nx tuple in" in text
         assert "never claims" in text
 
     def test_states_redundant_arm_is_harmless(self) -> None:
-        text = mailbox_arm_instruction("sess-abc", "")
+        text = mailbox_arm_instruction("sess-abc")
         assert "harmless" in text
 
     def test_carries_the_arm_marker(self) -> None:
-        assert ARM_MARKER in mailbox_arm_instruction("sess-abc", "")
+        assert ARM_MARKER in mailbox_arm_instruction("sess-abc")
+
+    def test_names_full_mcp_tool_names_for_the_drain(self) -> None:
+        """nexus-6konb.9 defect fix: the drain instruction must name the
+        full MCP tools, including the ack (and nack), not just a bare
+        `nx tuple in` CLI fragment with no mention of ack at all -- an
+        unacked claim lapses and is eventually dead-lettered."""
+        text = mailbox_arm_instruction("sess-abc")
+        assert "mcp__plugin_conexus_nexus__tuple_in" in text
+        assert "mcp__plugin_conexus_nexus__tuple_ack" in text
+        assert "mcp__plugin_conexus_nexus__tuple_nack" in text
+
+    def test_states_reply_argument_for_a_request(self) -> None:
+        text = mailbox_arm_instruction("sess-abc")
+        assert "reply" in text
+
+    def test_states_unacked_claims_lapse_and_dead_letter(self) -> None:
+        text = mailbox_arm_instruction("sess-abc")
+        assert "lapses" in text
+        assert "dead-lettered" in text
 
 
-# ── known_instance_name: the shared, unscoped registry ──────────────────────
+# ── arm_block: the orchestrator hooks.session_start() calls ────────────────
 
 
-class TestKnownInstanceName:
-    def test_no_registry_file_degrades_to_not_known(self, tmp_path: Path) -> None:
-        assert known_instance_name("sess-1", tmp_path) == ""
+class TestArmBlock:
+    def test_absent_when_no_session_id(self, tmp_path: Path) -> None:
+        assert arm_block(None, config_dir=tmp_path) == ""
+        assert arm_block("", config_dir=tmp_path) == ""
+        assert arm_block("unknown", config_dir=tmp_path) == ""
 
-    def test_empty_registry_degrades_to_not_known(self, tmp_path: Path) -> None:
-        reg = tmp_path / "tuple-watch" / "addresses"
-        reg.parent.mkdir(parents=True)
-        reg.write_text("", encoding="utf-8")
-        assert known_instance_name("sess-1", tmp_path) == ""
+    def test_absent_when_tuple_surface_unavailable(self, tmp_path: Path) -> None:
+        with patch("nexus.mailbox_arm.tuple_surface_available", return_value=False):
+            assert arm_block("sess-1", config_dir=tmp_path) == ""
 
-    def test_singleton_candidate_is_known(self, tmp_path: Path) -> None:
-        reg = tmp_path / "tuple-watch" / "addresses"
-        reg.parent.mkdir(parents=True)
-        reg.write_text("nexus-19\n", encoding="utf-8")
-        assert known_instance_name("sess-1", tmp_path) == "nexus-19"
+    def test_present_when_available(self, tmp_path: Path) -> None:
+        with patch("nexus.mailbox_arm.tuple_surface_available", return_value=True):
+            text = arm_block("sess-1", config_dir=tmp_path)
+        assert ARM_MARKER in text
+        assert "sess-1" in text
+        assert '"nx tuple watch --instance' in text
 
-    def test_two_candidates_degrades_to_not_known(self, tmp_path: Path) -> None:
-        reg = tmp_path / "tuple-watch" / "addresses"
-        reg.parent.mkdir(parents=True)
-        reg.write_text("nexus-19\nnexus-20\n", encoding="utf-8")
-        assert known_instance_name("sess-1", tmp_path) == ""
 
-    def test_registry_entry_equal_to_own_session_id_is_excluded(
+class TestNoRegistryGuessing:
+    """nexus-6konb.9 defect fix: the module must not read ANY file to guess
+    an instance name -- the old machine-wide `<config>/tuple-watch/addresses`
+    registry is never consulted, present or absent, junk or clean."""
+
+    def test_a_populated_machine_wide_registry_does_not_change_the_instruction(
         self, tmp_path: Path,
     ) -> None:
-        """A sole entry that is just this session's own id is not a
-        distinct instance name -- excluding it must not leave a bogus
-        singleton behind."""
-        reg = tmp_path / "tuple-watch" / "addresses"
-        reg.parent.mkdir(parents=True)
-        reg.write_text("sess-1\n", encoding="utf-8")
-        assert known_instance_name("sess-1", tmp_path) == ""
+        registry = tmp_path / "tuple-watch" / "addresses"
+        registry.parent.mkdir(parents=True)
+        registry.write_text("nexus-registered-instance\n", encoding="utf-8")
+        with patch("nexus.mailbox_arm.tuple_surface_available", return_value=True):
+            text = arm_block("sess-1", config_dir=tmp_path)
+        assert "nexus-registered-instance" not in text
 
-    def test_comments_and_blank_lines_ignored(self, tmp_path: Path) -> None:
-        reg = tmp_path / "tuple-watch" / "addresses"
-        reg.parent.mkdir(parents=True)
-        reg.write_text("# a comment\n\nnexus-19\n", encoding="utf-8")
-        assert known_instance_name("sess-1", tmp_path) == "nexus-19"
-
-    def test_unsafe_line_is_dropped(self, tmp_path: Path) -> None:
-        reg = tmp_path / "tuple-watch" / "addresses"
-        reg.parent.mkdir(parents=True)
-        reg.write_text("../../etc/passwd\n", encoding="utf-8")
-        assert known_instance_name("sess-1", tmp_path) == ""
-
-    def test_unsafe_line_alongside_a_safe_one_leaves_singleton(
-        self, tmp_path: Path,
-    ) -> None:
-        reg = tmp_path / "tuple-watch" / "addresses"
-        reg.parent.mkdir(parents=True)
-        reg.write_text("rm -rf /\nnexus-19\n", encoding="utf-8")
-        assert known_instance_name("sess-1", tmp_path) == "nexus-19"
+    def test_module_exposes_no_registry_reader(self) -> None:
+        assert not hasattr(mailbox_arm_module, "known_instance_name")
+        assert not hasattr(mailbox_arm_module, "_read_registry")
 
 
 # ── tuple_surface_available: bounded probe + cache ──────────────────────────
@@ -168,35 +180,3 @@ class TestTupleSurfaceAvailable:
         with patch("nexus.mailbox_arm._probe_tuple_surface", return_value=True) as m:
             tuple_surface_available(tmp_path, now=100.0, probe_timeout_s=0.5)
         m.assert_called_once_with(0.5)
-
-
-# ── arm_block: the orchestrator hooks.session_start() calls ────────────────
-
-
-class TestArmBlock:
-    def test_absent_when_no_session_id(self, tmp_path: Path) -> None:
-        assert arm_block(None, config_dir=tmp_path) == ""
-        assert arm_block("", config_dir=tmp_path) == ""
-        assert arm_block("unknown", config_dir=tmp_path) == ""
-
-    def test_absent_when_tuple_surface_unavailable(self, tmp_path: Path) -> None:
-        with patch("nexus.mailbox_arm.tuple_surface_available", return_value=False):
-            assert arm_block("sess-1", config_dir=tmp_path) == ""
-
-    def test_present_with_session_id_only_when_instance_unknown(
-        self, tmp_path: Path,
-    ) -> None:
-        with patch("nexus.mailbox_arm.tuple_surface_available", return_value=True):
-            text = arm_block("sess-1", config_dir=tmp_path)
-        assert ARM_MARKER in text
-        assert 'command: "nx tuple watch sess-1"' in text
-
-    def test_present_with_both_addresses_when_instance_known(
-        self, tmp_path: Path,
-    ) -> None:
-        reg = tmp_path / "tuple-watch" / "addresses"
-        reg.parent.mkdir(parents=True)
-        reg.write_text("nexus-19\n", encoding="utf-8")
-        with patch("nexus.mailbox_arm.tuple_surface_available", return_value=True):
-            text = arm_block("sess-1", config_dir=tmp_path)
-        assert 'command: "nx tuple watch sess-1 nexus-19"' in text

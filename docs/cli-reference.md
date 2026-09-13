@@ -3716,6 +3716,8 @@ A ping-then-pull mailbox watcher, built to be the source of a Claude Code Monito
 
 An empty probe prints nothing. A newly seen tuple prints one line carrying the address, sender, kind, correlation id and tuple id, plus the drain instruction; the tuple id is for correlation only, because a mailbox claim is address-wide. At most five such lines per cycle, then one coalesced line naming the rest. A tuple still present after `--reemit-after` is pinged again, up to `--max-emits` times, then it goes silent and is counted. A dead-lettered row the watcher never saw alive is announced on stdout and re-announced on the same window as a live row, because it is mail that will never be delivered and you have heard nothing about it; a row that was pinged while alive and later died reports its death on stderr, since that is a status update on a message you already know about. The seen-set is a JSON file per address under `<state-dir>/tuple-watch/`; losing it re-pings and never loses a message.
 
+`--instance NAME` also registers NAME as this session's own instance-name mailbox, for `conexus/hooks/scripts/mailbox_drain.py` to read back: it writes `<state-dir>/tuple-watch/addresses.d/<session id>` (one address per line, atomically), keyed to the session id resolved from this process's own environment — never a machine-wide file, so one session can never register (and so drain) another session's instance mailbox. The write is skipped when an explicit ADDRESS is given, since an explicit address suppresses the session-id/instance default outright and `--instance` is not part of what is actually watched.
+
 | Flag | Description |
 |------|-------------|
 | `--interval SECONDS` | Seconds between probes (default 3) |

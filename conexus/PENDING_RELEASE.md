@@ -49,7 +49,15 @@ mechanize, it matters enough to ship.
   rows is no longer starved (claiming was wrongly gated on a probe-page-local
   live count), and a pending row's true absence is no longer guessed from an
   incomplete page — an unresolved id is kept, not guessed away, and the hook
-  says so on stderr when its budget runs out first.
+  says so on stderr when its budget runs out first. Also carries a
+  nexus-6konb.9 fix: the instance-name registry the hook reads is now
+  PER-SESSION (`<config>/tuple-watch/addresses.d/<session id>`, written by
+  `nx tuple watch --instance NAME`), never the earlier machine-wide
+  `<config>/tuple-watch/addresses` file — on a box running more than one
+  session that file let whichever session prompted first drain every other
+  session's instance-addressed mail too. Until the pin advances, a running
+  session's drain hook still reads the old flat file, so the leak this fix
+  closes is still live in production.
 - nexus-h61dl.11 — `conexus/skills/mailbox/SKILL.md`: renew and reply-in-ack
   rules for RDR-206 Phase 2 (renew at half the lease, reply through
   `tuple_ack(reply=...)` in one transaction instead of a separate `tuple_out`

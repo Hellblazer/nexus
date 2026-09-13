@@ -375,13 +375,21 @@ def tuple_watch_cmd(
         WatchConfig,
         acquire_watch_locks,
         preflight,
+        prune_stale_registrations,
         resolve_watch_addresses,
         run_watch,
+        write_instance_registration,
     )
 
     cfg = WatchConfig(interval_s=interval_s, reemit_after_s=reemit_after_s, max_emits=max_emits)
     sd = state_dir or _config.nexus_config_dir()
     report = lambda s: click.echo(s, err=True)  # noqa: E731 — one-liner, matches emit's shape
+
+    # Resolved ONCE, here, and reused below for the registry write: this is the
+    # session id `resolve_watch_addresses` itself resolves at spawn from the process
+    # environment (CLAUDE_CODE_SESSION_ID/NX_SESSION_ID), which is also the identity
+    # `mailbox_drain.py` reads off its own hook payload for the exact same session.
+    session_id_from_env = resolve_active_session_id()
 
     # The ADDRESSES are resolved exactly once, here, and never re-resolved inside the
     # loop: CLAUDE_CODE_SESSION_ID is spawn-time env a long-lived process cannot see
@@ -390,7 +398,7 @@ def tuple_watch_cmd(
     # A moved address is handled by this process dying with its session and the next
     # SessionStart re-arming (MM-3.1/MM-3.2), backed by the lock below.
     resolved = resolve_watch_addresses(
-        addresses, instance=instance, session_id=resolve_active_session_id(),
+        addresses, instance=instance, session_id=session_id_from_env,
     )
     if resolved.error:
         click.echo(resolved.error)
@@ -414,6 +422,17 @@ def tuple_watch_cmd(
         locks = acquire_watch_locks(watched, state_dir=sd, emit=click.echo)
         if not locks.ok:
             return
+        # PER-SESSION instance registry (nexus-6konb.9 defect fix): written only on
+        # the default resolution path -- an explicit positional ADDRESS suppresses
+        # `instance` entirely in `resolved.addresses` (resolve_watch_addresses'
+        # own contract above), so a positional invocation writes nothing here,
+        # matching what it actually watched. Never keyed by a positional literal:
+        # only by the session id this process resolved from its own environment,
+        # which is what `mailbox_drain.py` reads back per its own payload session id.
+        if instance and session_id_from_env and instance in watched and not addresses:
+            write_instance_registration(sd, session_id_from_env, instance)
+        if session_id_from_env:
+            prune_stale_registrations(sd, session_id_from_env)
         run_watch(
             store, watched, config=cfg, state_dir=sd,
             iterations=iterations, emit=click.echo, report=report,

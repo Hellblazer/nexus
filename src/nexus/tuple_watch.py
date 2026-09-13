@@ -512,6 +512,93 @@ def acquire_watch_locks(
     return locks
 
 
+#: Same charset discipline as ``mailbox_drain.py``'s ``_valid_address`` --
+#: this becomes a directory entry name, so anything outside a safe, boring
+#: charset is refused rather than sanitised.
+_SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+#: How long an idle registration is kept before opportunistic pruning may
+#: remove it (nexus-6konb.9 defect fix). Matches the mailbox template's own
+#: retention window (RDR-205, ``mailbox.yaml``'s ``retention_seconds``), so
+#: a registration is never pruned while mail sent under it could still be
+#: sitting in the mailbox unclaimed.
+REGISTRATION_RETENTION_S = 604800.0
+
+
+def registry_dir(state_dir: Path) -> Path:
+    return state_dir / _STATE_SUBDIR / "addresses.d"
+
+
+def registration_path(state_dir: Path, session_id: str) -> Path:
+    return registry_dir(state_dir) / session_id
+
+
+def write_instance_registration(state_dir: Path, session_id: str, instance: str) -> None:
+    """Register *instance* as this SESSION's own instance-name mailbox
+    (nexus-6konb.9 defect fix), so ``mailbox_drain.py`` can drain it for
+    this session, and only this session -- never the machine-wide,
+    unscoped ``<config>/tuple-watch/addresses`` file the drain hook used
+    to read, where a populated file on a box running several sessions
+    handed one session's instance-addressed mail to whichever session's
+    prompt happened to fire first.
+
+    Written atomically (temp file, then rename) so a concurrent reader
+    never observes a partial write. Best-effort: a failure here must
+    never crash the watcher -- it only means this session's
+    instance-addressed mail has no drain floor until the next successful
+    ``nx tuple watch --instance`` run for it.
+
+    A *session_id* outside the safe charset (or an empty *instance*) is a
+    silent no-op: the caller already validated the session id well enough
+    to lock and watch its own mailbox by it, but this becomes a bare
+    filename and a stray path-hostile value must never be trusted with
+    directory writes.
+    """
+    if not instance or not _SAFE_SESSION_ID.match(session_id):
+        return
+    path = registration_path(state_dir, session_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.parent / (path.name + ".tmp")
+        tmp.write_text(instance + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except OSError as e:  # pragma: no cover — best-effort, disk-failure path
+        _log.debug("tuple_watch_registry_write_failed", session_id=session_id, error=str(e))
+
+
+def prune_stale_registrations(
+    state_dir: Path,
+    current_session_id: str,
+    *,
+    retention_s: float = REGISTRATION_RETENTION_S,
+    now: float | None = None,
+) -> None:
+    """Opportunistically remove registrations older than *retention_s*
+    (nexus-6konb.9 defect fix, mtime-keyed).
+
+    Never removes *current_session_id*'s own entry, however old: a
+    long-lived session must never lose its own registration out from
+    under itself. Best-effort and silent on any I/O error -- this is
+    housekeeping, not correctness, since a stale entry only wastes a
+    little disk and is otherwise harmless (nothing keys off a
+    registration's mere presence past this session's own).
+    """
+    t = now if now is not None else time.time()
+    d = registry_dir(state_dir)
+    try:
+        entries = list(d.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name == current_session_id or entry.name.endswith(".tmp"):
+            continue
+        try:
+            if t - entry.stat().st_mtime > retention_s:
+                entry.unlink()
+        except OSError:
+            continue
+
+
 def _probe_once(
     store: Any,
     address: str,
