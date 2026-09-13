@@ -455,3 +455,8 @@ instead — same strategy nexus-cnzei.4 used for the "debug"/"research"/"review"
 - `conexus/skills/using-nx-skills/SKILL.md` (nexus-cnzei.6): RDR lifecycle line updated to
   name the skill-side rename instead of "both files real" under the same name. Inert until
   the pin advances.
+- `conexus/hooks/scripts/subagent-start.sh` (nexus-cnzei.6): the code-nav/code-review
+  agent-purpose classification now also checks the dispatch's own `agent_type` field
+  (`code-review`, `Explore`/`codebase-deep-analyzer`), not only the always-empty `TASK_TEXT`
+  the harness never populates in a real dispatch (injection audit S1). `TASK_TEXT` stays as
+  a fallback OR-condition. Inert until the pin advances.
