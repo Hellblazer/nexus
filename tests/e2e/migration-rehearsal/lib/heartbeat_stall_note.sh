@@ -91,16 +91,29 @@ heartbeat_census() {
     return 0
   fi
 
-  local missed slow
+  # nexus-39etc: a READABLE log is not enough either. A healthy tick logs
+  # nothing, so zero heartbeat lines come equally from a clean run and from
+  # a file nothing ever ticked against (supervisor died early, logged
+  # elsewhere, the file rotated past its start). The supervisor start line
+  # is the denominator: without one, the zero is over nothing.
+  local missed slow starts
   missed="$(grep -c 'storage_service_heartbeat_missed_ttl' "$log" 2>/dev/null || true)"
   slow="$(grep -c 'storage_service_heartbeat_slow' "$log" 2>/dev/null || true)"
-  missed="${missed//[!0-9]/}"; slow="${slow//[!0-9]/}"
-  missed="${missed:-0}"; slow="${slow:-0}"
+  starts="$(grep -c 'storage_service_supervisor_started' "$log" 2>/dev/null || true)"
+  missed="${missed//[!0-9]/}"; slow="${slow//[!0-9]/}"; starts="${starts//[!0-9]/}"
+  missed="${missed:-0}"; slow="${slow:-0}"; starts="${starts:-0}"
 
-  printf 'HEARTBEAT CENSUS: missed_ttl=%s slow=%s (log %s)\n' "$missed" "$slow" "$log"
+  printf 'HEARTBEAT CENSUS: missed_ttl=%s slow=%s supervisor_starts=%s (log %s)\n' \
+    "$missed" "$slow" "$starts" "$log"
 
   if [ "$missed" = "0" ] && [ "$slow" = "0" ]; then
-    printf '  no slow or missed ticks in this run — a real zero, read from a readable log\n'
+    if [ "$starts" = "0" ]; then
+      printf '  MEASURED NOTHING — the log is readable but holds no storage_service_supervisor_started line, so no supervisor demonstrably wrote here. Zero heartbeat lines from this file are not a report of zero stalls: it is the wrong file, a run that never started, or a log rotated past its start. Do not record it as clean.\n'
+      return 0
+    fi
+    # No per-tick line exists to count, so this is the strongest honest
+    # claim: a supervisor ran and wrote here, and logged no slow tick.
+    printf '  no slow or missed ticks in this run — a real zero over %s supervisor start(s) in a readable log (a healthy tick logs nothing, so this is not tick coverage)\n' "$starts"
     return 0
   fi
 
