@@ -95,6 +95,7 @@ if sys.version_info < (3, 12):
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _endpoint_resolve as _ep  # noqa: E402 -- must follow the sys.path insert
+import _tuple_size_limits as _sz  # noqa: E402 -- must follow the sys.path insert
 
 #: Bound on the whole POST round trip -- research 5 measured ~10ms for a
 #: healthy engine; this is a ceiling for a degraded/rate-limiting one, not
@@ -348,11 +349,29 @@ def main(argv: list[str]) -> int:
         _log_skip(session_id, f"SKIP kind={kind} incomplete payload fields")
         return 0
 
+    # Size pre-check (bead nexus-r7xao): mirrors the engine's own per-field
+    # caps. This projection sends no "body" field at all (see the module
+    # docstring's "Wire shape" note), so only subspace/keys/dims can ever be
+    # oversized; a harness-supplied agent_id or subagent_type this long
+    # would be pathological, but the check costs nothing and keeps this
+    # writer honest with the engine's own limits rather than finding out via
+    # a 413 in the log file.
+    subspace = f"ledger/{session_id}"
+    size_reason = (
+        _sz.check_field_size("subspace", subspace, _sz.MAX_SUBSPACE_BYTES)
+        or _sz.check_field_size("keys.agent_id", agent_id, _sz.MAX_FIELD_VALUE_BYTES)
+        or _sz.check_field_size("keys.kind", kind, _sz.MAX_FIELD_VALUE_BYTES)
+        or _sz.check_field_size("dims.agent_type", agent_type, _sz.MAX_FIELD_VALUE_BYTES)
+    )
+    if size_reason is not None:
+        _log_skip(session_id, f"SKIP kind={kind} agent_id={agent_id} oversized: {size_reason}")
+        return 0
+
     config_dir = _ep.default_config_dir()
     try:
         base_url, token, is_local_supervisor = _resolve_endpoint_and_token(config_dir)
         body = {
-            "subspace": f"ledger/{session_id}",
+            "subspace": subspace,
             "keys": {"agent_id": agent_id, "kind": kind},
             "dims": {"agent_type": agent_type},
         }

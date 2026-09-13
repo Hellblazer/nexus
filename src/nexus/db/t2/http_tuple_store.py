@@ -39,7 +39,7 @@ Two things no other T2 domain store needs, both new code (RDR-205
   :func:`_check_request_size` — before any network call, and refuses
   before sending.
 - **Typed-error mapping** (:func:`_raise_typed`): the engine renders
-  each of its nine RDR-205 typed errors (``TupleException`` and its
+  each of its ten RDR-205 typed errors (``TupleException`` and its
   subtypes) as ``{"error": "<code>", "detail": "<message>"}`` at the
   error's own HTTP status. Some codes SHARE a status (``UnknownSubspace``
   and ``ClaimNotFound`` are both 404), so classification reads the
@@ -47,6 +47,18 @@ Two things no other T2 domain store needs, both new code (RDR-205
   that body to the matching :class:`TupleError` subclass; anything the
   engine did not name this way comes through unchanged as the mixin's
   ordinary ``httpx.HTTPStatusError``.
+- **Per-field size pre-checks** (:func:`_check_field_size`, bead
+  nexus-r7xao): the tuple space is a metadata store, not a value store.
+  ``subspace``, every ``keys``/``dims``/``keys_pattern`` value, ``nonce``,
+  ``claimant``, ``claim_id`` and ``body`` are each measured against the
+  same RDR-205 limits the engine enforces (mirrored, not imported, since
+  the two stdlib hooks that also write tuples cannot import ``nexus`` —
+  see ``tests/db/test_tuple_size_limits_parity.py`` for how the three
+  copies are kept equal) and refused with :class:`TooLargeError` before
+  sending. The engine's own ``TooLarge`` typed error maps back to the
+  SAME class (unlike the other nine, this one is raised from both
+  directions), so a caller need not distinguish a local refusal from an
+  engine one.
 
 Retry (RDR-205 §Technical Design "Operations": "The client reuses the
 retry classification in ``nexus.retry`` rather than a new one"): no
@@ -91,6 +103,22 @@ _log = structlog.get_logger(__name__)
 #: rejects request bodies over 8 KB." Measured on the SERIALISED body, not
 #: the tuple body field alone — see :func:`_check_request_size`.
 _MAX_REQUEST_BODY_BYTES: int = 8 * 1024
+
+#: RDR-205 tuple-space per-field size limits (bead nexus-r7xao; Sam's
+#: decision 2026-09-13) — the tuple space is a metadata store, not a value
+#: store. Mirrors ``dev.nexus.service.db.TupleLimits`` verbatim; kept in
+#: parity by ``tests/db/test_tuple_size_limits_parity.py``, which reads the
+#: Java source's constants and compares them to these. The client only
+#: knows the GLOBAL body cap — a template's own (possibly lower)
+#: ``max_body_bytes`` is engine-side knowledge the client has no copy of,
+#: so a body under this cap can still be refused by the engine for a
+#: template with a lower ceiling (the ledger's is 0).
+_MAX_BODY_BYTES: int = 4096
+_MAX_FIELD_VALUE_BYTES: int = 256
+_MAX_SUBSPACE_BYTES: int = 256
+_MAX_NONCE_BYTES: int = 128
+_MAX_CLAIMANT_BYTES: int = 128
+_MAX_CLAIM_ID_BYTES: int = 128
 
 #: Per-call HTTP-timeout margin (seconds) added on top of a caller-supplied
 #: ``timeout_s`` for a blocking ``rd``/``in_`` call, so the request-level
@@ -223,6 +251,56 @@ class ReplyNotWrittenError(RuntimeError):
 class RequestTooLargeError(ValueError):
     """The serialised request body exceeds the edge WAF's 8 KB cap
     (RDR-205 §Technical Environment) — refused before sending."""
+
+
+class TooLargeError(TupleError, RequestTooLargeError):
+    """A tuple-space field, or the whole serialised request, exceeds its
+    RDR-205 size limit (bead nexus-r7xao) — the tuple space is a metadata
+    store, not a value store.
+
+    Raised from TWO places, deliberately the SAME class either way:
+
+    - **Pre-send** (:func:`_check_field_size`, :func:`_check_request_size`):
+      this client's own per-field and whole-request checks, before any
+      network call.
+    - **Post-round-trip** (:func:`_raise_typed`): the engine's own
+      ``TooLarge`` typed error, mapped back from ``{"error": "TooLarge",
+      "detail": "..."}`` at HTTP 413.
+
+    Subclasses BOTH :class:`TupleError` (so it participates in the engine's
+    typed-error code lookup, ``code = "TooLarge"``, and a caller catching
+    ``except TupleError`` sees it) AND the pre-existing
+    :class:`RequestTooLargeError` (so every caller that already wrote
+    ``except RequestTooLargeError`` for the whole-request 8 KB guard keeps
+    catching this too — the pre-send and engine-side refusals are the SAME
+    class, not two that happen to look similar).
+    """
+
+    code = "TooLarge"
+
+
+_ERROR_CLASSES_BY_CODE[TooLargeError.code] = TooLargeError
+
+
+def _check_field_size(field: str, value: str | None, limit: int) -> None:
+    """Refuse *value* before sending when its UTF-8 byte length exceeds
+    *limit*. A ``None`` value is 0 bytes and always passes. Never includes
+    *value* itself in the message (bead nexus-r7xao)."""
+    if value is None:
+        return
+    n = len(value.encode("utf-8"))
+    if n > limit:
+        raise TooLargeError(
+            f"field '{field}' is {n} bytes, exceeding the limit of {limit} bytes -- "
+            "refused before sending"
+        )
+
+
+def _check_pattern_sizes(pattern: dict[str, str] | None) -> None:
+    if not pattern:
+        return
+    for k, v in pattern.items():
+        _check_field_size(f"keys_pattern.{k}", v, _MAX_FIELD_VALUE_BYTES)
 
 
 def _check_request_size(payload: dict[str, Any]) -> None:
@@ -393,9 +471,22 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         Design "Operations"): the id is derived from the template's
         ``id_from`` fields only, so a retry across the deploy gap lands
         on the SAME tuple. Returns the tuple id, lowercase hex.
+
+        Pre-checks (bead nexus-r7xao): ``subspace``, every ``keys``/``dims``
+        value, ``nonce`` and ``body`` against their RDR-205 limits, mirroring
+        the engine's own checks (the GLOBAL body cap only — a template's own
+        lower ``max_body_bytes`` is engine-side knowledge this client has no
+        copy of, so a body under this cap can still be refused engine-side).
         """
         if not subspace:
             raise ValueError("subspace must not be empty")
+        _check_field_size("subspace", subspace, _MAX_SUBSPACE_BYTES)
+        for k, v in (keys or {}).items():
+            _check_field_size(f"keys.{k}", v, _MAX_FIELD_VALUE_BYTES)
+        for k, v in (dims or {}).items():
+            _check_field_size(f"dims.{k}", v, _MAX_FIELD_VALUE_BYTES)
+        _check_field_size("nonce", nonce, _MAX_NONCE_BYTES)
+        _check_field_size("body", body, _MAX_BODY_BYTES)
         payload: dict[str, Any] = {"subspace": subspace, "keys": keys or {}}
         if dims:
             payload["dims"] = dims
@@ -425,6 +516,8 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         if not subspace:
             raise ValueError("subspace must not be empty")
+        _check_field_size("subspace", subspace, _MAX_SUBSPACE_BYTES)
+        _check_pattern_sizes(keys_pattern)
         payload: dict[str, Any] = {"subspace": subspace, "n": n}
         if keys_pattern:
             payload["keys_pattern"] = keys_pattern
@@ -448,6 +541,8 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """Non-destructive, non-blocking probe read."""
         if not subspace:
             raise ValueError("subspace must not be empty")
+        _check_field_size("subspace", subspace, _MAX_SUBSPACE_BYTES)
+        _check_pattern_sizes(keys_pattern)
         payload: dict[str, Any] = {"subspace": subspace, "n": n}
         if keys_pattern:
             payload["keys_pattern"] = keys_pattern
@@ -477,6 +572,9 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             raise ValueError("subspace must not be empty")
         if not claimant:
             raise ValueError("claimant must not be empty")
+        _check_field_size("subspace", subspace, _MAX_SUBSPACE_BYTES)
+        _check_field_size("claimant", claimant, _MAX_CLAIMANT_BYTES)
+        _check_pattern_sizes(keys_pattern)
         payload: dict[str, Any] = {
             "subspace": subspace,
             "keys_pattern": keys_pattern or {},
@@ -502,6 +600,9 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             raise ValueError("subspace must not be empty")
         if not claimant:
             raise ValueError("claimant must not be empty")
+        _check_field_size("subspace", subspace, _MAX_SUBSPACE_BYTES)
+        _check_field_size("claimant", claimant, _MAX_CLAIMANT_BYTES)
+        _check_pattern_sizes(keys_pattern)
         payload: dict[str, Any] = {
             "subspace": subspace,
             "keys_pattern": keys_pattern or {},
@@ -541,12 +642,24 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
         The 8 KB pre-send guard measures the SERIALISED request, so a reply
         body can push an ack over a cap a bare ack could never reach; that
-        raises :class:`RequestTooLargeError` before anything is sent.
+        raises :class:`RequestTooLargeError` before anything is sent. A
+        reply field over its OWN RDR-205 limit (body over 4096 bytes, a key
+        or dim value over 256) raises :class:`TooLargeError` before that,
+        for the same reason (bead nexus-r7xao).
         """
         if not claim_id:
             raise ValueError("claim_id must not be empty")
         if not claimant:
             raise ValueError("claimant must not be empty")
+        _check_field_size("claim_id", claim_id, _MAX_CLAIM_ID_BYTES)
+        _check_field_size("claimant", claimant, _MAX_CLAIMANT_BYTES)
+        if reply is not None:
+            _check_field_size("reply.subspace", reply.subspace, _MAX_SUBSPACE_BYTES)
+            for k, v in (reply.keys or {}).items():
+                _check_field_size(f"reply.keys.{k}", v, _MAX_FIELD_VALUE_BYTES)
+            for k, v in (reply.dims or {}).items():
+                _check_field_size(f"reply.dims.{k}", v, _MAX_FIELD_VALUE_BYTES)
+            _check_field_size("reply.body", reply.body, _MAX_BODY_BYTES)
         payload: dict[str, Any] = {"claim_id": claim_id, "claimant": claimant}
         if reply is not None:
             payload["reply"] = reply.to_payload()
@@ -600,6 +713,8 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             raise ValueError("claim_id must not be empty")
         if not claimant:
             raise ValueError("claimant must not be empty")
+        _check_field_size("claim_id", claim_id, _MAX_CLAIM_ID_BYTES)
+        _check_field_size("claimant", claimant, _MAX_CLAIMANT_BYTES)
         r = self._post(
             "/renew",
             {"claim_id": claim_id, "claimant": claimant, "lease_s": lease_s},
@@ -613,6 +728,8 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             raise ValueError("claim_id must not be empty")
         if not claimant:
             raise ValueError("claimant must not be empty")
+        _check_field_size("claim_id", claim_id, _MAX_CLAIM_ID_BYTES)
+        _check_field_size("claimant", claimant, _MAX_CLAIMANT_BYTES)
         self._post("/nack", {"claim_id": claim_id, "claimant": claimant})
 
     # ── registry / census ────────────────────────────────────────────────

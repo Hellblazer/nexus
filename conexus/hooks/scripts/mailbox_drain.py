@@ -77,6 +77,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _endpoint_resolve as _ep  # noqa: E402
+import _tuple_size_limits as _sz  # noqa: E402
 
 #: Whole-call wall-clock bound per HTTP call. A prompt is waiting on this
 #: hook, so the ceiling is tight: a healthy engine answers a zero-timeout
@@ -455,6 +456,21 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
     was already delivered stays delivered.
     """
     import time  # noqa: PLC0415 — deferred: only this path needs a clock
+
+    # Size pre-check (bead nexus-r7xao): mirrors the engine's own per-field
+    # caps for every field this hook itself constructs from *address* --
+    # subspace, the "to" pattern value, and the claimant string below. An
+    # oversized address is refused here, before any POST, the same as every
+    # other precondition this hook checks before touching the network.
+    claimant = f"mailbox-drain-{address}"
+    size_reason = (
+        _sz.check_field_size("subspace", f"mailbox/{address}", _sz.MAX_SUBSPACE_BYTES)
+        or _sz.check_field_size("keys_pattern.to", address, _sz.MAX_FIELD_VALUE_BYTES)
+        or _sz.check_field_size("claimant", claimant, _sz.MAX_CLAIMANT_BYTES)
+    )
+    if size_reason is not None:
+        _log_skip(f"mailbox/{address}: oversized address, refused before any POST: {size_reason}")
+        return
 
     rows = _probe_page(base_url, token, address, is_local=is_local,
                        deadline=deadline, since=None)

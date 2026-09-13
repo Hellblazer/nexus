@@ -47,12 +47,20 @@ from nexus.db.t2.http_tuple_store import (
     SchemaViolationError,
     TakeDisabledError,
     TimeoutTooLongError,
+    TooLargeError,
     TtlTooLongError,
     TupleError,
     UnknownSubspaceError,
     _ERROR_CLASSES_BY_CODE,
+    _MAX_BODY_BYTES,
+    _MAX_CLAIMANT_BYTES,
+    _MAX_CLAIM_ID_BYTES,
+    _MAX_FIELD_VALUE_BYTES,
+    _MAX_NONCE_BYTES,
     _MAX_REQUEST_BODY_BYTES,
+    _MAX_SUBSPACE_BYTES,
     _PARK_TIMEOUT_MARGIN_S,
+    _check_field_size,
     _check_request_size,
     _raise_typed,
 )
@@ -434,6 +442,180 @@ class TestPreSendGuard:
             refreshable.RefreshableHttpStoreMixin._post = original
 
 
+# ── Per-field size pre-checks (bead nexus-r7xao) ────────────────────────────
+
+
+def _no_send_store() -> HttpTupleStore:
+    """A store whose ``_post``/``_get`` must never be called — every test in
+    this class exercises a check that fires BEFORE any network attempt."""
+    store = HttpTupleStore.__new__(HttpTupleStore)
+    return store
+
+
+class TestCheckFieldSize:
+    """Unit-level boundary proof of :func:`_check_field_size` itself, ahead
+    of the per-method integration proofs below."""
+
+    def test_none_value_always_passes(self) -> None:
+        _check_field_size("body", None, 0)  # must not raise, even at limit 0
+
+    def test_value_at_the_limit_passes(self) -> None:
+        _check_field_size("x", "a" * 10, 10)
+
+    def test_value_one_byte_over_the_limit_refused(self) -> None:
+        with pytest.raises(TooLargeError) as exc_info:
+            _check_field_size("x", "a" * 11, 10)
+        assert "field 'x'" in str(exc_info.value)
+        assert "11 bytes" in str(exc_info.value)
+        assert "limit of 10 bytes" in str(exc_info.value)
+
+    def test_multibyte_character_counts_bytes_not_length(self) -> None:
+        # "é" is 2 bytes UTF-8, 1 char -- a length()-based check would halve
+        # the effective limit and wrongly pass this at the byte boundary.
+        value = "é" * 5  # 10 bytes, 5 chars
+        _check_field_size("x", value, 10)  # exactly at the byte cap -- passes
+        with pytest.raises(TooLargeError):
+            _check_field_size("x", "é" * 6, 10)  # 12 bytes -- over
+
+    def test_never_echoes_the_value(self) -> None:
+        with pytest.raises(TooLargeError) as exc_info:
+            _check_field_size("body", "SECRET" * 100, 10)
+        assert "SECRET" not in str(exc_info.value)
+
+
+class TestOutFieldSizeGuard:
+    def test_subspace_over_cap_refused_before_any_send(self) -> None:
+        store = _no_send_store()
+        with pytest.raises(TooLargeError):
+            store.out("a" * (_MAX_SUBSPACE_BYTES + 1), {"to": "x"})
+
+    def test_key_value_over_cap_refused(self) -> None:
+        store = _no_send_store()
+        with pytest.raises(TooLargeError):
+            store.out("mailbox/x", {"to": "a" * (_MAX_FIELD_VALUE_BYTES + 1)})
+
+    def test_dim_value_over_cap_refused(self) -> None:
+        store = _no_send_store()
+        with pytest.raises(TooLargeError):
+            store.out("mailbox/x", {"to": "x"}, {"from": "a" * (_MAX_FIELD_VALUE_BYTES + 1)})
+
+    def test_nonce_over_cap_refused(self) -> None:
+        store = _no_send_store()
+        with pytest.raises(TooLargeError):
+            store.out("mailbox/x", {"to": "x"}, nonce="n" * (_MAX_NONCE_BYTES + 1))
+
+    def test_body_over_global_cap_refused(self) -> None:
+        store = _no_send_store()
+        with pytest.raises(TooLargeError):
+            store.out("mailbox/x", {"to": "x"}, body="b" * (_MAX_BODY_BYTES + 1))
+
+    def test_body_at_global_cap_reaches_the_transport(self) -> None:
+        """Proves the guard's boundary is INCLUSIVE (a body exactly at the
+        cap is not refused client-side) by getting far enough to hit the
+        (patched-away) transport, rather than asserting an absence."""
+        store = _no_send_store()
+        called = {}
+
+        def _fake_post(self, path, payload, **kwargs):
+            called["payload"] = payload
+            return {"id": "a" * 64}
+
+        original = refreshable.RefreshableHttpStoreMixin._post
+        refreshable.RefreshableHttpStoreMixin._post = _fake_post
+        try:
+            store.out("mailbox/x", {"to": "x"}, body="b" * _MAX_BODY_BYTES)
+        finally:
+            refreshable.RefreshableHttpStoreMixin._post = original
+        assert called.get("payload", {}).get("body") == "b" * _MAX_BODY_BYTES
+
+
+class TestReadAndClaimFieldSizeGuard:
+    def test_rd_subspace_over_cap_refused(self) -> None:
+        store = _no_send_store()
+        with pytest.raises(TooLargeError):
+            store.rd("a" * (_MAX_SUBSPACE_BYTES + 1))
+
+    def test_rd_pattern_value_over_cap_refused(self) -> None:
+        store = _no_send_store()
+        with pytest.raises(TooLargeError):
+            store.rd("mailbox/x", {"to": "a" * (_MAX_FIELD_VALUE_BYTES + 1)})
+
+    def test_rdp_subspace_over_cap_refused(self) -> None:
+        store = _no_send_store()
+        with pytest.raises(TooLargeError):
+            store.rdp("a" * (_MAX_SUBSPACE_BYTES + 1))
+
+    def test_in_claimant_over_cap_refused(self) -> None:
+        store = _no_send_store()
+        with pytest.raises(TooLargeError):
+            store.in_("mailbox/x", {"to": "x"}, claimant="c" * (_MAX_CLAIMANT_BYTES + 1), lease_s=60)
+
+    def test_in_pattern_value_over_cap_refused(self) -> None:
+        store = _no_send_store()
+        with pytest.raises(TooLargeError):
+            store.in_("mailbox/x", {"to": "a" * (_MAX_FIELD_VALUE_BYTES + 1)}, claimant="c", lease_s=60)
+
+    def test_inp_claimant_over_cap_refused(self) -> None:
+        store = _no_send_store()
+        with pytest.raises(TooLargeError):
+            store.inp("mailbox/x", {"to": "x"}, claimant="c" * (_MAX_CLAIMANT_BYTES + 1), lease_s=60)
+
+
+class TestClaimOpsFieldSizeGuard:
+    def test_ack_claim_id_over_cap_refused(self) -> None:
+        store = _no_send_store()
+        with pytest.raises(TooLargeError):
+            store.ack("c" * (_MAX_CLAIM_ID_BYTES + 1), "claimant")
+
+    def test_ack_claimant_over_cap_refused(self) -> None:
+        store = _no_send_store()
+        with pytest.raises(TooLargeError):
+            store.ack("claim-id", "c" * (_MAX_CLAIMANT_BYTES + 1))
+
+    def test_ack_reply_body_over_cap_refused(self) -> None:
+        store = _no_send_store()
+        reply = ReplySpec("mailbox/x", {"to": "x"}, body="b" * (_MAX_BODY_BYTES + 1))
+        with pytest.raises(TooLargeError):
+            store.ack("claim-id", "claimant", reply=reply)
+
+    def test_ack_reply_subspace_over_cap_refused(self) -> None:
+        store = _no_send_store()
+        reply = ReplySpec("a" * (_MAX_SUBSPACE_BYTES + 1), {"to": "x"})
+        with pytest.raises(TooLargeError):
+            store.ack("claim-id", "claimant", reply=reply)
+
+    def test_nack_claim_id_over_cap_refused(self) -> None:
+        store = _no_send_store()
+        with pytest.raises(TooLargeError):
+            store.nack("c" * (_MAX_CLAIM_ID_BYTES + 1), "claimant")
+
+    def test_renew_claimant_over_cap_refused(self) -> None:
+        store = _no_send_store()
+        with pytest.raises(TooLargeError):
+            store.renew("claim-id", "c" * (_MAX_CLAIMANT_BYTES + 1), 60)
+
+
+class TestTooLargeErrorIsBothBaseClasses:
+    """Pins the bead nexus-r7xao contract: a caller catching EITHER the
+    pre-existing ``RequestTooLargeError`` or the shared ``TupleError``
+    hierarchy still catches a size refusal, from either direction."""
+
+    def test_caught_by_request_too_large_error(self) -> None:
+        store = _no_send_store()
+        with pytest.raises(RequestTooLargeError):
+            store.out("a" * (_MAX_SUBSPACE_BYTES + 1), {"to": "x"})
+
+    def test_caught_by_tuple_error(self) -> None:
+        store = _no_send_store()
+        with pytest.raises(TupleError):
+            store.out("a" * (_MAX_SUBSPACE_BYTES + 1), {"to": "x"})
+
+    def test_engine_side_too_large_is_also_a_request_too_large_error(self) -> None:
+        exc = _status_error(413, "TooLarge", "field 'body' is 5000 bytes, exceeding the limit of 4096 bytes")
+        with pytest.raises(RequestTooLargeError):
+            _raise_typed(exc)
+
+
 # ── HTTP timeout ordering (above timeout_s so the server's cap fires first) ──
 
 
@@ -534,7 +716,7 @@ class TestTypedErrorMapping:
     own to exercise against the real substrate."""
 
     @pytest.mark.parametrize("code,cls", sorted(_ERROR_CLASSES_BY_CODE.items()))
-    def test_each_of_the_nine_codes_maps_to_its_class(
+    def test_each_recognised_code_maps_to_its_class(
         self, code: str, cls: type[TupleError],
     ) -> None:
         # The status code itself is irrelevant to _raise_typed's

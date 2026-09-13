@@ -550,6 +550,76 @@ class TuplesBaselineSchemaLiquibaseTest {
         }
     }
 
+    // ── Test 15: tuples-003's body-size CHECK — NOT VALID, and enforced on new rows ──
+
+    /**
+     * RDR-205 amendment (bead nexus-r7xao): {@code chk_tuples_body_size} exists,
+     * is NOT VALID (so a pre-existing legacy row over the cap is tolerated), and
+     * still rejects a NEW insert whose body exceeds 4096 UTF-8 bytes — the
+     * DB-level backstop behind {@code TupleRepository}'s own engine-side check,
+     * proven directly against the table rather than through the repository.
+     */
+    @Test
+    void tuplesBodySizeCheck_existsNotValid_andRejectsAnOversizedNewRow() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(PgCatalogProbes.constraintExists(ctx, "chk_tuples_body_size"))
+                .as("chk_tuples_body_size must exist").isTrue();
+            assertThat(PgCatalogProbes.constraintValidated(ctx, "chk_tuples_body_size"))
+                .as("chk_tuples_body_size must be NOT VALID (a pre-existing legacy row is tolerated)")
+                .isFalse();
+        }
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(false);
+            PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, "tuples-body-size-tenant", true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            OffsetDateTime now = OffsetDateTime.now();
+            String oversized = "x".repeat(4097);
+            var insert = ctx.insertInto(TUPLES)
+                .set(TUPLES.ID, HexFormat.of().parseHex("c0ffee01"))
+                .set(TUPLES.TENANT_ID, "tuples-body-size-tenant")
+                .set(TUPLES.SUBSPACE, "mailbox/body-size-check")
+                .set(TUPLES.TEMPLATE, "mailbox/<address>")
+                .set(TUPLES.KEYS, JSONB.valueOf("{}"))
+                .set(TUPLES.BODY, oversized)
+                .set(TUPLES.EXPIRES_AT, now.plusHours(1))
+                .set(TUPLES.CREATED_AT, now);
+            assertThatCode(insert::execute)
+                .as("a 4097-byte body must be rejected by the DB-level CHECK")
+                .isInstanceOf(org.jooq.exception.DataAccessException.class);
+            su.rollback();
+        }
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(false);
+            PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, "tuples-body-size-tenant", true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            OffsetDateTime now = OffsetDateTime.now();
+            String atCap = "x".repeat(4096);
+            ctx.insertInto(TUPLES)
+                .set(TUPLES.ID, HexFormat.of().parseHex("c0ffee02"))
+                .set(TUPLES.TENANT_ID, "tuples-body-size-tenant")
+                .set(TUPLES.SUBSPACE, "mailbox/body-size-check")
+                .set(TUPLES.TEMPLATE, "mailbox/<address>")
+                .set(TUPLES.KEYS, JSONB.valueOf("{}"))
+                .set(TUPLES.BODY, atCap)
+                .set(TUPLES.EXPIRES_AT, now.plusHours(1))
+                .set(TUPLES.CREATED_AT, now)
+                .execute();
+            su.commit();
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(false);
+                PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, "tuples-body-size-tenant", true);
+                DSL.using(su, SQLDialect.POSTGRES).deleteFrom(TUPLES)
+                    .where(TUPLES.ID.eq(HexFormat.of().parseHex("c0ffee02")))
+                    .execute();
+                su.commit();
+            }
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────
 
     private static Set<String> columnNames(Connection su, String table) throws Exception {

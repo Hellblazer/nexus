@@ -908,3 +908,69 @@ class TestPartialFailureNeverLosesDeliveredMail:
         assert "ambiguous then late" in third.stdout, (
             "a message consumed at the engine was never shown to anyone"
         )
+
+
+# ── Size pre-check (bead nexus-r7xao) ────────────────────────────────────────
+
+
+def _load_module():
+    import importlib.util  # noqa: PLC0415 -- deliberately deferred
+
+    spec = importlib.util.spec_from_file_location("mailbox_drain_probe", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_drain_address_oversized_address_skips_before_any_post(monkeypatch) -> None:
+    """An address long enough to push ``mailbox/<address>`` over the 256-byte
+    subspace cap, or the ``to`` pattern value over the 256-byte field cap, is
+    refused before any POST — the engine is never even asked."""
+    module = _load_module()
+
+    def _forbidden_post(*_a, **_k):  # pragma: no cover — only fires on failure
+        raise AssertionError("_drain_address must not POST for an oversized address")
+
+    monkeypatch.setattr(module, "_post", _forbidden_post)
+
+    skips: list[str] = []
+    monkeypatch.setattr(module, "_log_skip", skips.append)
+
+    module._drain_address(
+        "http://engine.invalid", "token", "a" * 260,
+        is_local=True, config_dir=Path("/nonexistent"),
+        deadline=time.monotonic() + 5, out=module._Out(),
+    )
+
+    assert len(skips) == 1
+    assert "oversized" in skips[0]
+    assert "260 bytes" in skips[0] or "subspace" in skips[0]
+
+
+def test_drain_address_address_at_the_cap_reaches_the_probe(monkeypatch) -> None:
+    """address feeds THREE checks at once: the subspace path segment
+    (``mailbox/`` + address, 256-byte cap), the ``to`` pattern value
+    (256-byte field cap), and the claimant string (``mailbox-drain-`` +
+    address, 128-byte claimant cap). The claimant is the BINDING
+    constraint here (14-char prefix leaves 114 for the address; the other
+    two caps have far more headroom) -- an address of exactly 114 chars
+    makes the claimant exactly 128 bytes. Must reach `_probe_page`,
+    proving the boundary is inclusive."""
+    module = _load_module()
+    calls: list[str] = []
+
+    def _fake_probe_page(base_url, token, address, *, is_local, deadline, since):
+        calls.append(address)
+        return []
+
+    monkeypatch.setattr(module, "_probe_page", _fake_probe_page)
+    monkeypatch.setattr(module, "_read_pending", lambda config_dir, address: [])
+
+    address = "a" * 114
+    assert len(f"mailbox-drain-{address}") == 128
+    module._drain_address(
+        "http://engine.invalid", "token", address,
+        is_local=True, config_dir=Path("/nonexistent"),
+        deadline=time.monotonic() + 5, out=module._Out(),
+    )
+    assert calls == [address]

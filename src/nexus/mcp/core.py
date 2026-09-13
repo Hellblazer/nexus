@@ -6120,16 +6120,30 @@ def tuple_out(
 ) -> str:
     """Write a tuple into the RDR-205 Linda tuple space (``out``).
 
+    The tuple space is a coordination and metadata store, not a value
+    store. Keep ``body`` a short message or signal. Put longer content in
+    T2 (``memory_put``) or T3 (``store_put``) and pass a reference here
+    (a project/title or a document id), not the content itself.
+
     Idempotent by construction: the tuple id is derived from the
     template's ``id_from`` fields only, so a retry lands on the same
     tuple. Returns the tuple id, lowercase hex.
+
+    Size limits (refused with the ``TooLarge`` typed error over any of
+    these, before any write):
+        - ``body``: at most 4096 bytes UTF-8. A template may set a lower
+          cap (the ledger's is 0: null or empty only).
+        - Each ``keys``/``dims`` value: at most 256 bytes UTF-8.
+        - ``subspace``: at most 256 bytes UTF-8.
+        - ``nonce``: at most 128 bytes UTF-8.
 
     Args:
         subspace: The concrete subspace to write into (resolves to a
             registered template — see ``tuple_registry``).
         keys: The template's pinned key fields (required, non-empty).
         dims: Optional dimension fields the template declares.
-        body: Optional tuple payload.
+        body: Optional tuple payload — a short message or signal, not a
+            document (see size limits above).
         nonce: Caller-minted nonce. REQUIRED for any template whose
             ``id_from`` is ``keys+nonce`` (the mailbox) — an ``out`` with
             no nonce on such a template is refused as ``SchemaViolation``;
@@ -6302,9 +6316,16 @@ def tuple_ack(
     The reply's target must resolve to a ``keys+nonce`` template (e.g. a
     mailbox address); a ``keys``-only target (e.g. the RDR-184 ledger) is
     refused. A reply that fails validation (``UnknownSubspace``,
-    ``TtlTooLong``, ``SchemaViolation``, or a malformed ``reply`` object)
-    leaves the request still claimed and still ackable: nothing is written
-    on either side.
+    ``TtlTooLong``, ``SchemaViolation``, ``TooLarge``, or a malformed
+    ``reply`` object) leaves the request still claimed and still ackable:
+    nothing is written on either side.
+
+    The reply's ``body`` is a short message or signal, same size limit as
+    ``tuple_out``: at most 4096 bytes UTF-8 (a template may set lower),
+    ``subspace`` at most 256 bytes, each ``keys``/``dims`` value at most
+    256 bytes. Put longer content in T2 (``memory_put``) or T3
+    (``store_put``) and reply with a reference (project/title or document
+    id), not the content itself.
 
     Args:
         claim_id: The claim id returned by ``tuple_in``.

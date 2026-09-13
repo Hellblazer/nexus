@@ -260,11 +260,29 @@ public final class TupleRepository {
     }
 
     private PreparedOut prepareOut(String subspace, Map<String, String> keys,
-                                   Map<String, String> dims, Long ttlSecondsOrNull,
+                                   Map<String, String> dims, String body, Long ttlSecondsOrNull,
                                    String nonce, boolean nonceDeferred) {
+        // Size checks first (bead nexus-r7xao, RDR-205 amendment): subspace, keys, dims,
+        // nonce, body vs the global cap, body vs the template's own (possibly lower) cap
+        // -- ALL of it before the existing schema validation below, which is what lets
+        // TooLarge fire ahead of validateOutShape's value-echoing SchemaViolation
+        // messages ("value '...' not in [...]") rather than echoing an oversized value
+        // into a log line or a response body.
+        checkFieldSize("subspace", subspace, TupleLimits.MAX_SUBSPACE_BYTES);
         TemplateSchema t = resolveOrThrow(subspace);
         Map<String, String> keysSafe = keys == null ? Map.of() : keys;
         Map<String, String> dimsSafe = dims == null ? Map.of() : dims;
+        for (var e : keysSafe.entrySet()) {
+            checkFieldSize("keys." + e.getKey(), e.getValue(), TupleLimits.MAX_FIELD_VALUE_BYTES);
+        }
+        for (var e : dimsSafe.entrySet()) {
+            checkFieldSize("dims." + e.getKey(), e.getValue(), TupleLimits.MAX_FIELD_VALUE_BYTES);
+        }
+        if (!nonceDeferred) {
+            checkFieldSize("nonce", nonce, TupleLimits.MAX_NONCE_BYTES);
+        }
+        validateBodySize(t, body);
+
         validateOutShape(t, keysSafe, dimsSafe);
         // The nonce check runs HERE, between the shape checks and the ttl checks,
         // because that is where the combined validateOut ran it before this split.
@@ -287,6 +305,45 @@ public final class TupleRepository {
         JSONB dimsJsonb = dimsSafe.isEmpty() ? null : toJsonb(dimsSafe);
         return new PreparedOut(t, subspace, keysSafe, dimsSafe, toJsonb(keysSafe), dimsJsonb,
                 interval(ttlSeconds), interval(t.retentionSeconds()));
+    }
+
+    /** One tuple field's UTF-8 byte length against *limitBytes*; a {@code null} value is
+     *  0 bytes and always passes. Never echoes *value* itself (bead nexus-r7xao). */
+    private static void checkFieldSize(String field, String value, int limitBytes) {
+        int len = TupleLimits.utf8Length(value);
+        if (len > limitBytes) {
+            throw new TooLargeException(field, len, limitBytes);
+        }
+    }
+
+    /** {@code keys_pattern} on {@code rd}/{@code rdp}/{@code in}/{@code inp}: every
+     *  supplied value against the same per-field cap {@code out}'s keys/dims use. */
+    private static void checkPatternSizes(Map<String, String> pattern) {
+        for (var e : pattern.entrySet()) {
+            checkFieldSize("keys_pattern." + e.getKey(), e.getValue(), TupleLimits.MAX_FIELD_VALUE_BYTES);
+        }
+    }
+
+    /**
+     * {@code body} against the template's own {@code max_body_bytes} when it declares
+     * one, else the global {@link TupleLimits#MAX_BODY_BYTES} cap. A template ceiling of
+     * 0 is satisfied by both {@code null} and {@code ""} (both are 0 bytes) and refuses
+     * anything else, with no special-casing needed here.
+     */
+    private static void validateBodySize(TemplateSchema t, String body) {
+        int len = TupleLimits.utf8Length(body);
+        long limit = t.maxBodyBytes() != null ? t.maxBodyBytes() : TupleLimits.MAX_BODY_BYTES;
+        if (len > limit) {
+            throw new TooLargeException("body", len, limit);
+        }
+    }
+
+    /** {@code claim_id}/{@code claimant} on {@code ack}/{@code nack}/{@code renew} (and
+     *  {@code ackWithReply}, which does not otherwise call {@code ack}'s own checks on
+     *  its reply-carrying path). */
+    private static void checkClaimIdentifiers(String claimId, String claimant) {
+        checkFieldSize("claim_id", claimId, TupleLimits.MAX_CLAIM_ID_BYTES);
+        checkFieldSize("claimant", claimant, TupleLimits.MAX_CLAIMANT_BYTES);
     }
 
     /**
@@ -328,7 +385,7 @@ public final class TupleRepository {
     /** {@code out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> id}. */
     public byte[] out(String tenant, String subspace, Map<String, String> keys, Map<String, String> dims,
                        String body, String nonce, Long ttlSecondsOrNull) {
-        PreparedOut prepared = prepareOut(subspace, keys, dims, ttlSecondsOrNull, nonce, false);
+        PreparedOut prepared = prepareOut(subspace, keys, dims, body, ttlSecondsOrNull, nonce, false);
         byte[] id = computeId(tenant, prepared.subspace(), prepared.template(),
                 prepared.keys(), prepared.dims(), nonce, body);
         byte[] result = tenantScope.withTenant(tenant, ctx -> writeOut(ctx, tenant, prepared, body, id));
@@ -516,12 +573,14 @@ public final class TupleRepository {
 
     private List<TupleRow> queryOnce(String tenant, String subspace, Map<String, String> pattern,
                                       int n, ReadCursor since) {
+        checkFieldSize("subspace", subspace, TupleLimits.MAX_SUBSPACE_BYTES);
         // RDR-205 review (nexus-em75s.35, M4): rd/rdp must refuse an unregistered
         // subspace exactly as out() and in()/inp() (via claimOnce) do -- this was
         // the one "Once" helper that never resolved the template, so a probe/read
         // against a bogus subspace silently read back empty instead of raising.
         resolveOrThrow(subspace);
         Map<String, String> patternSafe = pattern == null ? Map.of() : pattern;
+        checkPatternSizes(patternSafe);
         int limit = Math.min(n <= 0 ? 1 : n, readMax);
 
         return tenantScope.withTenant(tenant, ctx -> {
@@ -595,6 +654,10 @@ public final class TupleRepository {
 
     private Optional<ClaimedTuple> claimOnce(String tenant, String subspace, Map<String, String> pattern,
                                               String claimant, long leaseSeconds) {
+        checkFieldSize("subspace", subspace, TupleLimits.MAX_SUBSPACE_BYTES);
+        checkFieldSize("claimant", claimant, TupleLimits.MAX_CLAIMANT_BYTES);
+        Map<String, String> patternSafe = pattern == null ? Map.of() : pattern;
+        checkPatternSizes(patternSafe);
         TemplateSchema t = resolveOrThrow(subspace);
         if (!t.take().enabled()) {
             throw new TakeDisabledException(subspace, t.name());
@@ -606,7 +669,6 @@ public final class TupleRepository {
         if (maxLease != null && leaseSeconds > maxLease) {
             throw new LeaseTooLongException(leaseSeconds, maxLease, t.name());
         }
-        Map<String, String> patternSafe = pattern == null ? Map.of() : pattern;
         for (String k : t.keys()) {
             String v = patternSafe.get(k);
             if (v == null || v.isBlank()) {
@@ -770,6 +832,7 @@ public final class TupleRepository {
 
     /** {@code ack(claim_id, claimant)}. */
     public void ack(String tenant, String claimId, String claimant) {
+        checkClaimIdentifiers(claimId, claimant);
         tenantScope.withTenant(tenant, ctx -> consumeClaim(ctx, tenant, claimId, claimant));
     }
 
@@ -813,11 +876,12 @@ public final class TupleRepository {
      * it is refused rather than documented.
      */
     public byte[] ackWithReply(String tenant, String claimId, String claimant, ReplySpec reply) {
+        checkClaimIdentifiers(claimId, claimant);
         if (reply == null) {
             ack(tenant, claimId, claimant);
             return null;
         }
-        PreparedOut prepared = prepareOut(reply.subspace(), reply.keys(), reply.dims(),
+        PreparedOut prepared = prepareOut(reply.subspace(), reply.keys(), reply.dims(), reply.body(),
                 reply.ttlSeconds(), null, /* nonceDeferred */ true);
         if (prepared.template().idFrom() != TemplateSchema.IdFrom.KEYS_NONCE) {
             throw new SchemaViolationException("reply.subspace",
@@ -842,6 +906,7 @@ public final class TupleRepository {
 
     /** {@code nack(claim_id, claimant)} — releases the claim; counts an attempt. */
     public void nack(String tenant, String claimId, String claimant) {
+        checkClaimIdentifiers(claimId, claimant);
         tenantScope.withTenant(tenant, ctx -> {
             TuplesRecord row = liveClaimRow(ctx, tenant, claimId);
             if (row == null) {
@@ -895,6 +960,7 @@ public final class TupleRepository {
      * @return the new {@code lease_until}, at the precision the row stores.
      */
     public OffsetDateTime renew(String tenant, String claimId, String claimant, long leaseSeconds) {
+        checkClaimIdentifiers(claimId, claimant);
         // Refused before the transaction opens: a non-positive lease needs neither the
         // row nor the template to reject, so there is nothing to roll back. Same
         // placement rule Step 2 settled for reply refusals.

@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.tuples;
 
+import dev.nexus.service.db.TupleLimits;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -20,7 +22,8 @@ final class TemplateSchemaParser {
     }
 
     private static final Set<String> TOP_LEVEL_FIELDS = Set.of(
-            "name", "keys", "dimensions", "id_from", "id_dims", "take", "retention_seconds");
+            "name", "keys", "dimensions", "id_from", "id_dims", "take", "retention_seconds",
+            "max_body_bytes");
 
     private static final Set<String> DIMENSION_FIELDS = Set.of("type", "values", "required");
 
@@ -71,9 +74,33 @@ final class TemplateSchemaParser {
 
         TemplateSchema.Take take = parseTake(source, doc.get("take"));
         long retentionSeconds = requirePositiveLong(source, doc, "retention_seconds");
+        Long maxBodyBytes = parseMaxBodyBytes(source, doc);
 
         return new TemplateSchema(name, nameSegments, keys, keyValues, dimensions, idFrom, idDims, take,
-                retentionSeconds);
+                retentionSeconds, maxBodyBytes);
+    }
+
+    /**
+     * {@code max_body_bytes} (bead nexus-r7xao): optional, {@code 0 <= n <=
+     * TupleLimits.MAX_BODY_BYTES}. A template may only LOWER the global body
+     * cap, never raise it — a value above the global cap or negative fails the
+     * load loudly, the same way every other structural breach in this parser
+     * does, rather than silently clamping to something the template author did
+     * not ask for.
+     */
+    private static Long parseMaxBodyBytes(String source, Map<String, Object> doc) {
+        if (!doc.containsKey("max_body_bytes") || doc.get("max_body_bytes") == null) {
+            return null;
+        }
+        Object raw = doc.get("max_body_bytes");
+        if (!(raw instanceof Long l) || l < 0) {
+            throw breach(source, "max_body_bytes", "must be a non-negative integer");
+        }
+        if (l > TupleLimits.MAX_BODY_BYTES) {
+            throw breach(source, "max_body_bytes",
+                    "must not exceed the global cap of " + TupleLimits.MAX_BODY_BYTES + " bytes (got " + l + ")");
+        }
+        return l;
     }
 
     /** {@code keys} document-shape entries, split from the pinned name order (RDR-205's {@code

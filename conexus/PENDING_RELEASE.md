@@ -135,3 +135,27 @@ mechanize, it matters enough to ship.
   fix as rdr-gate.md above. Inert until the pin advances.
 - `conexus/skills/rdr-gate/SKILL.md` (nexus-cnzei.3, fix round): dropped four
   `ttl="permanent"` sites, same fix as rdr-gate.md above. Inert until the pin advances.
+- nexus-r7xao — `conexus/hooks/scripts/_tuple_size_limits.py`, new: a
+  stdlib-only, no-`nexus`-import mirror of the RDR-205 tuple-space size
+  limits (body 4096 bytes global, key/dim/pattern values 256, subspace 256,
+  nonce/claimant/claim_id 128) for the two hooks below, which cannot import
+  the `nexus` package. Kept equal to the engine's own `TupleLimits.java` and
+  the Python client's constants by `tests/db/test_tuple_size_limits_parity.py`.
+  Until the pin advances, a running session's copies of the two hooks below
+  carry no such module at all and send whatever size the caller gives them.
+- nexus-r7xao — `conexus/hooks/scripts/tuple_ledger_project.py`: pre-checks
+  the ledger tuple's subspace/keys/dims against the new size-limits mirror
+  before posting, SKIPping (logged, exit 0) an oversized field instead of
+  sending it. Until the pin advances, this projection still posts an
+  oversized field and lets the engine be the only thing that refuses it.
+- nexus-r7xao — `conexus/hooks/scripts/mailbox_drain.py`: pre-checks the
+  address-derived subspace/pattern-value/claimant against the same mirror
+  before any `rd`/`in`/`ack` POST for that address, logging a SKIP and
+  returning instead of sending. Until the pin advances, this hook still
+  posts an oversized address and relies solely on the engine's own refusal.
+- nexus-r7xao — `conexus/skills/mailbox/SKILL.md`: a size-limit rule (body
+  at most 4096 bytes, key/dim values at most 256, nonce at most 128 — over
+  the limit is refused with `TooLarge`; longer content goes to T2/T3 with a
+  reference in the tuple) plus a matching `## Success Criteria` row. Until
+  the pin advances, a session reading this skill sees no size guidance and
+  may still try to carry a document-length body in a tuple.

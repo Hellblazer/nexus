@@ -290,9 +290,15 @@ class TupleAckWithReplyTest {
         // replies to the same ledger keys would collide on one id and out's refire clamp
         // would silently discard the second one's body -- the exact failure class RDR-206
         // exists to close, which is why this is refused rather than merely documented.
+        //
+        // body is null, not a literal string (bead nexus-r7xao): ledger/<session_id>'s
+        // own max_body_bytes is 0, so a non-empty body would trip TooLarge (a SIZE check,
+        // run before the existing schema validation this test targets) before ever
+        // reaching the id_from=keys+nonce check below -- null keeps this test isolated to
+        // the ONE thing it is about.
         var keysOnly = new TupleRepository.ReplySpec(
                 "ledger/" + session, Map.of("agent_id", "a1", "kind", "report"),
-                Map.of("agent_type", "developer"), "body", null);
+                Map.of("agent_type", "developer"), null, null);
 
         assertThatExceptionOfType(SchemaViolationException.class)
                 .isThrownBy(() -> repo.ackWithReply(TENANT, claimId, "worker-1", keysOnly));

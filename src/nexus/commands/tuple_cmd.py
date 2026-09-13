@@ -67,7 +67,16 @@ def tuple_group() -> None:
               help="A pinned key field (repeatable).")
 @click.option("--dim", "dims", multiple=True, metavar="KEY=VALUE",
               help="A dimension field (repeatable).")
-@click.option("--body", default=None, help="Tuple payload.")
+@click.option(
+    "--body", default=None,
+    help=(
+        "Tuple payload -- a short message or signal, not a document. At "
+        "most 4096 bytes UTF-8 (a template may set lower; the ledger's is "
+        "0); refused as TooLarge over the limit. Put longer content in T2 "
+        "(memory_put) or T3 (store_put) and pass a reference here "
+        "(project/title or document id)."
+    ),
+)
 @click.option(
     "--nonce", default=None,
     help=(
@@ -177,8 +186,16 @@ def tuple_in_cmd(
               help="A pinned key field for the reply (repeatable). Requires --reply-subspace.")
 @click.option("--reply-dim", "reply_dims", multiple=True, metavar="KEY=VALUE",
               help="A dimension field for the reply (repeatable). Requires --reply-subspace.")
-@click.option("--reply-body", "reply_body", default=None,
-              help="Reply payload. Requires --reply-subspace.")
+@click.option(
+    "--reply-body", "reply_body", default=None,
+    help=(
+        "Reply payload -- a short message or signal, not a document. Same "
+        "limit as out's --body: at most 4096 bytes UTF-8 (a template may "
+        "set lower), refused as TooLarge over it. Put longer content in "
+        "T2 (memory_put) or T3 (store_put) and reply with a reference "
+        "(project/title or document id). Requires --reply-subspace."
+    ),
+)
 @click.option("--reply-ttl-seconds", "reply_ttl_seconds", type=int, default=None,
               help="Explicit TTL for the reply, capped at its template's retention "
                    "ceiling. Requires --reply-subspace.")

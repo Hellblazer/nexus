@@ -35,12 +35,14 @@
 # external, non-throwaway NX_DB_URL -- the mailbox template's own
 # retention_seconds (604800, a week) is what eventually reclaims them, the
 # same as any other mailbox traffic.
+import os
 import uuid
 from datetime import datetime
 
 import httpx
 
-from nexus.db.t2.http_tuple_store import ClaimNotFoundError, HttpTupleStore
+from nexus.db.t2._refreshable_client import DEFAULT_TENANT
+from nexus.db.t2.http_tuple_store import ClaimNotFoundError, HttpTupleStore, TooLargeError
 from nexus.db.t2.records import ReplySpec
 
 tuples = HttpTupleStore()
@@ -124,5 +126,53 @@ except httpx.HTTPStatusError as exc:  # pragma: no cover -- only if _raise_typed
     raise AssertionError(
         f"stale ack raised an unmapped HTTPStatusError instead of ClaimNotFoundError: {exc}"
     ) from exc
+
+# ── typed refusal: the ENGINE's own per-template cap, through the real client ─
+# nexus-r7xao: proves the ENGINE'S OWN size check (a native-image reflection/
+# serialization gap in TooLargeException would show up here exactly as it
+# would for any other TupleException subtype) through HttpTupleStore's typed-
+# error mapping. A single oversized GLOBAL-cap field cannot reach the engine
+# for this: the client mirrors the same 4096-byte body cap and would refuse
+# it locally first (RequestTooLargeError/TooLargeError raised client-side,
+# never sent). The genuine engine-only gap is a template's LOWER
+# max_body_bytes, which the client has no copy of (RDR-205 §Technical
+# Design: "no client carries a copy" of the registry) -- ledger/<session_id>
+# declares max_body_bytes: 0, so even a 1-byte body passes every client-side
+# check and is refused only when the engine itself applies the template's cap.
+oversize_session = f"native-smoke-tuples-oversize-{uuid.uuid4().hex[:12]}"
+try:
+    tuples.out(
+        f"ledger/{oversize_session}",
+        {"agent_id": "native-smoke-oversize-agent", "kind": "start"},
+        {"agent_type": "developer"},
+        "x",
+    )
+    raise AssertionError(
+        "an out() to ledger/<session_id> (max_body_bytes: 0) with a 1-byte "
+        "body must raise TooLargeError from the ENGINE"
+    )
+except TooLargeError:
+    pass
+
+# ── raw over-8KB request: proves the ENGINE'S OWN whole-request cap ─────────
+# Bypasses HttpTupleStore's identical 8 KB client-side pre-check entirely (a
+# raw httpx POST, not the client) so this leg actually reaches the compiled
+# native engine rather than being refused locally before any bytes are sent.
+_raw_base = f"http://{os.environ['NX_SERVICE_HOST']}:{os.environ['NX_SERVICE_PORT']}"
+raw_resp = httpx.post(
+    f"{_raw_base}/v1/tuples/out",
+    content=b'{"subspace":"mailbox/' + oversize_addr.encode() + b'","keys":{"to":"'
+    + (b"x" * 9000) + b'"}}',
+    headers={
+        "Authorization": f"Bearer {os.environ['NX_SERVICE_TOKEN']}",
+        "X-Nexus-Tenant": os.environ.get("NX_SERVICE_TENANT", DEFAULT_TENANT),
+        "Content-Type": "application/json",
+    },
+)
+assert raw_resp.status_code == 413, (
+    f"a raw over-8KB request must be refused 413, got {raw_resp.status_code}: {raw_resp.text!r}"
+)
+raw_body = raw_resp.json()
+assert raw_body.get("error") == "TooLarge", f"expected error=TooLarge, got {raw_body!r}"
 
 print("OK")

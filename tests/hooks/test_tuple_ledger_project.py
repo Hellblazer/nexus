@@ -907,3 +907,62 @@ def test_bearer_never_appears_in_a_spawned_subprocess(tmp_path: Path, mock_engin
 
     assert len(engine.requests) == 1
     assert engine.auth_headers[0] == "Bearer never-in-argv"
+
+
+# ── Size pre-check (bead nexus-r7xao) ────────────────────────────────────────
+
+
+def test_oversized_agent_id_skips_before_any_post(tmp_path: Path, mock_engine) -> None:
+    """An agent_id over the 256-byte keys/dims field cap is refused before
+    any POST -- the engine is never even asked."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    proc = _run(
+        "start", tmp_path=tmp_path,
+        stdin=_payload(agent_id="a" * 257),
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert engine.requests == []
+    log = _log_path(tmp_path / "state").read_text()
+    assert "SKIP kind=start" in log
+    assert "oversized" in log
+    assert "257 bytes" in log
+
+
+def test_agent_id_at_the_cap_is_not_refused_by_the_size_check(tmp_path: Path, mock_engine) -> None:
+    """256 bytes is exactly the field cap -- must reach the engine, proving
+    the boundary is inclusive."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    proc = _run(
+        "start", tmp_path=tmp_path,
+        stdin=_payload(agent_id="a" * 256),
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+
+
+def test_oversized_session_id_subspace_skips_before_any_post(tmp_path: Path, mock_engine) -> None:
+    """A session_id long enough to push ``ledger/<session_id>`` over the
+    256-byte subspace cap is refused before any POST."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    long_session_id = "s" * 260
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    payload = json.dumps({
+        "session_id": long_session_id, "hook_event_name": "SubagentStart",
+        "agent_id": AGENT_ID, "agent_type": AGENT_TYPE,
+    })
+    proc = _run(
+        "start", tmp_path=tmp_path, stdin=payload,
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert engine.requests == []

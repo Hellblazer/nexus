@@ -3585,11 +3585,13 @@ nx tuple out SUBSPACE [--key KEY=VALUE ...] [--dim KEY=VALUE ...] [--body TEXT] 
 
 Write a tuple into `SUBSPACE`. Idempotent by construction: the tuple id is derived from the template's `id_from` fields only (never the insert time), so a retry lands on the same tuple. Prints the tuple id (lowercase hex).
 
+The tuple space is a coordination and metadata store, not a value store: `--body` is at most 4096 bytes UTF-8 (a template may set a lower cap; the ledger's is 0), a `--key`/`--dim` value at most 256 bytes, `SUBSPACE` at most 256 bytes, `--nonce` at most 128 bytes — refused as `TooLarge` over the limit, never echoing the oversized value. Longer content goes in T2 (`nx memory put`) or T3 (`nx store put`), with the tuple carrying a reference.
+
 | Flag | Description |
 |------|-------------|
 | `--key KEY=VALUE` | A pinned key field (repeatable; every key the template requires) |
 | `--dim KEY=VALUE` | A dimension field (repeatable) |
-| `--body TEXT` | Tuple payload |
+| `--body TEXT` | Tuple payload — a short message or signal, at most 4096 bytes UTF-8 (see above) |
 | `--nonce TEXT` | Caller-minted nonce, for templates whose `id_from` includes it |
 | `--ttl-seconds N` | Explicit TTL, capped at the template's retention ceiling (`TtlTooLong` if it isn't) |
 
@@ -3632,7 +3634,7 @@ nx tuple ack CLAIM_ID --claimant ID [--reply-subspace SUBSPACE] [--reply-key KEY
 
 Consume a claimed tuple. The row is invisible to `rd`/`in` after this.
 
-With `--reply-subspace`, the engine writes a reply into that subspace in the same transaction that consumes the claim (RDR-206), and the confirmation gains a `reply_id=` line carrying the reply's tuple id. Without any `--reply-*` flag the confirmation is unchanged. `--reply-subspace` must resolve to a `keys+nonce` template — a keys-only target (e.g. the ledger) is refused as `SchemaViolation` before the transaction opens, so the request is left still claimed and still ackable. There is no `--reply-nonce` flag: the engine sets the reply's nonce itself, to the request's tuple id. Every other `--reply-*` flag requires `--reply-subspace`; using one without it is a usage error, not a silently dropped flag.
+With `--reply-subspace`, the engine writes a reply into that subspace in the same transaction that consumes the claim (RDR-206), and the confirmation gains a `reply_id=` line carrying the reply's tuple id. Without any `--reply-*` flag the confirmation is unchanged. `--reply-subspace` must resolve to a `keys+nonce` template — a keys-only target (e.g. the ledger) is refused as `SchemaViolation` before the transaction opens, so the request is left still claimed and still ackable. There is no `--reply-nonce` flag: the engine sets the reply's nonce itself, to the request's tuple id. Every other `--reply-*` flag requires `--reply-subspace`; using one without it is a usage error, not a silently dropped flag. Same size limits as `out` apply to the reply and are refused as `TooLarge` before the transaction opens, leaving the request still claimed: `--reply-body` at most 4096 bytes UTF-8, `--reply-subspace` at most 256, a `--reply-key`/`--reply-dim` value at most 256.
 
 | Flag | Description |
 |------|-------------|
@@ -3640,7 +3642,7 @@ With `--reply-subspace`, the engine writes a reply into that subspace in the sam
 | `--reply-subspace SUBSPACE` | Write a reply into this subspace as part of the ack's own transaction |
 | `--reply-key KEY=VALUE` | A pinned key field for the reply (repeatable; requires `--reply-subspace`) |
 | `--reply-dim KEY=VALUE` | A dimension field for the reply (repeatable; requires `--reply-subspace`) |
-| `--reply-body TEXT` | Reply payload (requires `--reply-subspace`) |
+| `--reply-body TEXT` | Reply payload — a short message or signal, at most 4096 bytes UTF-8 (requires `--reply-subspace`) |
 | `--reply-ttl-seconds N` | Explicit TTL for the reply, capped at its template's retention ceiling (requires `--reply-subspace`) |
 
 ### nx tuple nack

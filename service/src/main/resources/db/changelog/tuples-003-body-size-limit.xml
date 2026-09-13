@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-205 amendment (bead nexus-r7xao, Sam's decision 2026-09-13): the
+    tuple space is a metadata store, not a value store. The engine-side
+    java checks in TupleRepository (out / ackWithReply) already refuse an
+    over-4096-byte body before any write, but this DB-level CHECK is the
+    backstop for any writer that reaches nexus.tuples without going
+    through TupleRepository: there is none today, and this constraint
+    is what keeps that true even if one is added later without noticing
+    the engine-side check.
+
+    NOT VALID (unlike catalog-021's immediate-validate case, and matching
+    the fk-002/fk-003 NOT VALID precedent's reasoning, though for a
+    different underlying cause): nexus.tuples is a live, already-shipped
+    table (tuples-001-baseline.xml, deployed since engine-service-v0.1.114)
+    that may carry a pre-existing row from before this bead's engine-side
+    check landed, on any install that wrote a tuple in that window. NOT
+    VALID lets the deploy proceed without a full-table scan under an
+    ACCESS EXCLUSIVE lock, and without failing on a legacy oversized row;
+    every NEW insert and update is checked from the moment this changeset
+    applies. No VALIDATE CONSTRAINT follow-up is scheduled here; see the
+    bead for that decision.
+
+    octet_length(), not length(): the column is TEXT, and the limit is on
+    UTF-8 BYTES (a multibyte character does not cost one "length" unit),
+    matching TupleLimits.MAX_BODY_BYTES's own UTF-8 byte-length definition
+    on the Java side.
+
+    Same table for a reply write (RDR-206): ackWithReply's reply is
+    written through writeOut into this same nexus.tuples table, so this
+    one constraint covers both an out() body and a reply body with no
+    second changeset needed.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: body-size CHECK, NOT VALID ─────────────────────────── -->
+    <changeSet id="tuples-003-1" author="nexus-r7xao">
+        <comment>chk_tuples_body_size: nexus.tuples.body capped at 4096 UTF-8 bytes (TupleLimits.MAX_BODY_BYTES) -- the DB-level backstop behind TupleRepository's own engine-side check. NOT VALID: an already-live table may carry a pre-existing legacy row; new writes are checked from this changeset forward.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.tuples
+    ADD CONSTRAINT chk_tuples_body_size
+    CHECK (octet_length(body) &lt;= 4096) NOT VALID;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+ALTER TABLE nexus.tuples DROP CONSTRAINT IF EXISTS chk_tuples_body_size;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

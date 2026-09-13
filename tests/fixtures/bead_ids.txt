@@ -1152,6 +1152,7 @@ nexus-6ee5i
 nexus-6ew6o
 nexus-6f9p
 nexus-6flt7
+nexus-6flt7.1
 nexus-6fvwo
 nexus-6h0e
 nexus-6ha8a
@@ -2781,6 +2782,7 @@ nexus-f9z84
 nexus-fa2lo
 nexus-fadgx
 nexus-fai28
+nexus-fam6l
 nexus-fams8
 nexus-far1c
 nexus-fb6x
@@ -4980,6 +4982,7 @@ nexus-r622a
 nexus-r6u5
 nexus-r7dy
 nexus-r7g3i
+nexus-r7xao
 nexus-r8dw
 nexus-r8egi
 nexus-r8egi.1
@@ -5348,6 +5351,7 @@ nexus-t9rmg.7
 nexus-t9rmg.8
 nexus-t9rmg.8.1
 nexus-t9rmg.9
+nexus-tacsg
 nexus-tafjk
 nexus-tafjk.1
 nexus-taseo
@@ -5615,6 +5619,7 @@ nexus-um47z
 nexus-umm29
 nexus-umoh
 nexus-umue1
+nexus-umue1.1
 nexus-umvh2
 nexus-unp61
 nexus-unp61.1
