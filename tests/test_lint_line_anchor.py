@@ -12,7 +12,7 @@ import pathlib
 
 import pytest
 
-from tests._lint_line_anchor import resolve_anchor
+from tests._lint_line_anchor import resolve_anchor, resolve_ledger
 
 pytestmark = pytest.mark.lint
 
@@ -169,3 +169,139 @@ def test_anchor_survives_a_larger_multi_point_insertion(tmp_path: pathlib.Path) 
 
     lineno, err = resolve_anchor(tmp_path, "after.sh", site_a)
     assert (lineno, err) == (6 + 17, "")
+
+
+# ── mandatory two-line minimum (fix-round finding) ─────────────────────
+
+
+def test_blank_line_between_context_and_target_is_transparently_skipped(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A caller's (nearest-preceding-non-blank-line, target-line) anchor
+    must resolve even when a blank line physically separates the two in
+    the file -- the mandatory two-line convention pairs the target with
+    its nearest NON-BLANK predecessor, not its literally adjacent one."""
+    (tmp_path / "f.sh").write_text(
+        "context line\n"
+        "\n"
+        "\n"
+        'echo "$X" | head -1\n',
+        encoding="utf-8",
+    )
+    lineno, err = resolve_anchor(
+        tmp_path, "f.sh", ("context line", 'echo "$X" | head -1'),
+    )
+    assert (lineno, err) == (4, "")
+
+
+def test_two_line_anchor_closes_the_coincidental_duplicate_mistarget(
+    tmp_path: pathlib.Path,
+) -> None:
+    """THE CRITICAL fix-round finding, reproduced directly: a one-line
+    anchor (the convention 1a147680f used whenever a line was NOT a
+    same-file duplicate at authoring time) is silently wrong in a
+    direction the first version of this module never tested for. If the
+    originally-exempted line is later fixed/removed, and an UNRELATED,
+    never-reviewed violation elsewhere in the file happens to have
+    byte-identical stripped text, a one-line anchor finds exactly that
+    one match and "resolves" to it -- there is nothing STALE about a
+    single match, so the exemption silently reattaches to the wrong
+    code. Widening the anchor to the target line PLUS its nearest
+    preceding non-blank line (the new mandatory default -- see the
+    module docstring's MANDATORY TWO-LINE MINIMUM section) closes this:
+    the new violation's own preceding line differs, so the two-line
+    block does not match anywhere, and resolution correctly reports
+    STALE instead of a silent, wrong resolution.
+    """
+    # The exempted line ("x = head(1)") originally lived here, preceded
+    # by "setup_a()".
+    original = (
+        "def one():\n"
+        "    setup_a()\n"
+        "    x = head(1)\n"      # the ORIGINAL exempted site, line 3
+        "\n"
+        "def two():\n"
+        "    setup_b()\n"
+        "    y = 1\n"
+    )
+    (tmp_path / "f.py").write_text(original, encoding="utf-8")
+
+    one_line_anchor = ("x = head(1)",)
+    two_line_anchor = ("setup_a()", "x = head(1)")
+
+    # Sanity: both anchor shapes resolve to the real, original site.
+    assert resolve_anchor(tmp_path, "f.py", one_line_anchor) == (3, "")
+    assert resolve_anchor(tmp_path, "f.py", two_line_anchor) == (3, "")
+
+    # The original site gets fixed (the early-exit consumer is
+    # eliminated) -- AND, independently, elsewhere in the same file, an
+    # unrelated new violation with byte-IDENTICAL stripped text appears,
+    # preceded by a DIFFERENT line ("setup_b()", not "setup_a()"). This
+    # is a realistic coincidence, not a contrived one: the exact same
+    # snippet ("head -1", "x = head(1)"-shaped text) recurs verbatim
+    # several times across real files in this repo's own ledgers.
+    edited = (
+        "def one():\n"
+        "    setup_a()\n"
+        "    x = fixed_no_pipe()\n"   # original site, now fixed
+        "\n"
+        "def two():\n"
+        "    setup_b()\n"
+        "    x = head(1)\n"           # NEW, unrelated, never-reviewed site
+    )
+    (tmp_path / "f.py").write_text(edited, encoding="utf-8")
+
+    # RED (1a147680f's convention: a one-line anchor for a
+    # not-a-duplicate-at-authoring-time entry): the anchor silently
+    # "resolves" to the NEW, unreviewed site -- no STALE, no AMBIGUOUS,
+    # just a wrong answer presented as a clean one.
+    lineno, err = resolve_anchor(tmp_path, "f.py", one_line_anchor)
+    assert (lineno, err) == (7, ""), (
+        "fixture stopped demonstrating the hazard -- a one-line anchor "
+        "must silently resolve to the new coincidental site here"
+    )
+
+    # GREEN (this fix round's mandatory two-line convention): the SAME
+    # coincidence does not fool the two-line anchor, because the new
+    # site's own preceding line ("setup_b()") does not match the
+    # original site's ("setup_a()") -- the two-line block occurs nowhere
+    # in the edited file, so resolution reports STALE instead of a
+    # silent, wrong resolution.
+    lineno, err = resolve_anchor(tmp_path, "f.py", two_line_anchor)
+    assert lineno is None
+    assert "STALE" in err
+
+
+# ── resolve_ledger ───────────────────────────────────────────────────
+
+
+def test_resolve_ledger_resolves_every_item_and_preserves_payload(
+    tmp_path: pathlib.Path,
+) -> None:
+    (tmp_path / "f.py").write_text("a = 1\nb = 2\nc = 3\n", encoding="utf-8")
+    items = [
+        ("f.py", ("a = 1",), "payload-a"),
+        ("f.py", ("b = 2", ), "payload-b"),
+    ]
+    resolved, problems = resolve_ledger(tmp_path, items)
+    assert problems == []
+    assert sorted(resolved) == [
+        ("f.py", 1, "payload-a"),
+        ("f.py", 2, "payload-b"),
+    ]
+
+
+def test_resolve_ledger_collects_problems_without_raising(
+    tmp_path: pathlib.Path,
+) -> None:
+    (tmp_path / "f.py").write_text("a = 1\n", encoding="utf-8")
+    items = [
+        ("f.py", ("a = 1",), "ok"),
+        ("f.py", ("z = 999",), "stale"),
+        ("missing.py", ("whatever",), "missing"),
+    ]
+    resolved, problems = resolve_ledger(tmp_path, items)
+    assert resolved == [("f.py", 1, "ok")]
+    assert len(problems) == 2
+    assert any("STALE" in p for p in problems)
+    assert any("no such file" in p for p in problems)

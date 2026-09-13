@@ -100,7 +100,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._lint_line_anchor import resolve_anchor
+from tests._lint_line_anchor import resolve_anchor, resolve_ledger
 
 pytestmark = pytest.mark.lint
 
@@ -227,7 +227,10 @@ def _all_setattr_hits() -> dict[str, list[tuple[int, str]]]:
 # remaining entry here is a genuine mechanism regression pin.
 #
 # CONTENT-KEYED, not line-keyed (nexus-vkpr3): the anchor is the exempted
-# call's own stripped source text, resolved to its CURRENT line number by
+# call's own stripped source text PLUS its nearest preceding non-blank
+# line (the mandatory two-line convention -- see
+# `tests._lint_line_anchor`'s MANDATORY TWO-LINE MINIMUM section),
+# resolved to its CURRENT line number by
 # `tests._lint_line_anchor.resolve_anchor` on every run -- see that
 # module's docstring for the defect this closes and why a line number is
 # the wrong key. An insertion above one of these three sites no longer
@@ -246,7 +249,10 @@ _SETATTR_EXEMPT: frozenset[tuple[str, tuple[str, ...]]] = frozenset({
     # and observing whether the replacement propagates proves the shape.
     (
         "tests/test_health_service_checks.py",
-        ('mp.setattr("nexus.config.nexus_config_dir", lambda: poisoned)',),
+        (
+            "with pytest.MonkeyPatch.context() as mp:",
+            'mp.setattr("nexus.config.nexus_config_dir", lambda: poisoned)',
+        ),
     ),
     # test_backfill_state_path_uses_config_module_attr_not_frozen_import:
     # same class, for nexus.commands.t3._backfill_state_path(). Proves the
@@ -256,7 +262,10 @@ _SETATTR_EXEMPT: frozenset[tuple[str, tuple[str, ...]]] = frozenset({
     # time -- same reasoning as the entry above.
     (
         "tests/commands/test_t3_backfill_state_path.py",
-        ('monkeypatch.setattr(nexus_config_mod, "nexus_config_dir", lambda: fake_dir)',),
+        (
+            'fake_dir = tmp_path / "patched-config-dir"',
+            'monkeypatch.setattr(nexus_config_mod, "nexus_config_dir", lambda: fake_dir)',
+        ),
     ),
     # tests/test_nexus_config_dir_call_time_resolution.py's
     # `_poisoned_then_reloaded` helper (nexus-grg79): the SAME regression-
@@ -271,7 +280,10 @@ _SETATTR_EXEMPT: frozenset[tuple[str, tuple[str, ...]]] = frozenset({
     # of +4.
     (
         "tests/test_nexus_config_dir_call_time_resolution.py",
-        ('mp.setattr("nexus.config.nexus_config_dir", lambda: poisoned)',),
+        (
+            "with pytest.MonkeyPatch.context() as mp:",
+            'mp.setattr("nexus.config.nexus_config_dir", lambda: poisoned)',
+        ),
     ),
 })
 _SETATTR_EXEMPT_CEILING = 3
@@ -282,13 +294,10 @@ def _resolve_setattr_exempt() -> tuple[dict[str, dict[int, tuple[str, ...]]], li
     live line number (nexus-vkpr3). Returns ``(by_file, problems)`` --
     see ``tests._lint_line_anchor.resolve_anchor``'s docstring for STALE
     vs AMBIGUOUS."""
+    items = [(rel, content, content) for (rel, content) in _SETATTR_EXEMPT]
+    resolved, problems = resolve_ledger(REPO_ROOT, items)
     by_file: dict[str, dict[int, tuple[str, ...]]] = {}
-    problems: list[str] = []
-    for rel, content in _SETATTR_EXEMPT:
-        lineno, err = resolve_anchor(REPO_ROOT, rel, content)
-        if err:
-            problems.append(f"{rel} {content!r} -> {err}")
-            continue
+    for rel, lineno, content in resolved:
         by_file.setdefault(rel, {})[lineno] = content
     return by_file, problems
 

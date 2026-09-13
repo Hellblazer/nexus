@@ -56,7 +56,7 @@ import pathlib
 
 import pytest
 
-from tests._lint_line_anchor import resolve_anchor
+from tests._lint_line_anchor import resolve_anchor, resolve_ledger
 
 pytestmark = pytest.mark.lint
 
@@ -69,8 +69,11 @@ _TARGET = "parse_conformant_collection_name"
 #: nexus-ft04v.27.
 #:
 #: CONTENT-KEYED, not line-keyed (nexus-vkpr3): the anchor is the calling
-#: line's own stripped source text, resolved to its CURRENT line number
-#: by ``tests._lint_line_anchor.resolve_anchor`` on every run. Several
+#: line's own stripped source text PLUS its nearest preceding non-blank
+#: line (the mandatory two-line convention -- see
+#: ``tests._lint_line_anchor``'s MANDATORY TWO-LINE MINIMUM section),
+#: resolved to its CURRENT line number by
+#: ``tests._lint_line_anchor.resolve_anchor`` on every run. Several
 #: entries below carried a line-shift retargeting history before the
 #: conversion (e.g. collection_registration_kwargs's entry moved
 #: 1183 -> 1295 -> 1427 -> 1395 -> 1545 across four unrelated edits) --
@@ -94,7 +97,10 @@ _TARGET = "parse_conformant_collection_name"
 ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
     (
         "src/nexus/corpus.py",
-        ("segments = parse_conformant_collection_name(name)",),
+        (
+            "if is_conformant_collection_name(name):",
+            "segments = parse_conformant_collection_name(name)",
+        ),
     ): (
         "collection_registration_kwargs: the write-time registration "
         "derivation used by HttpCatalogClient.register_collection's OWN "
@@ -107,7 +113,7 @@ ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
     ),
     (
         "src/nexus/catalog/collection_name.py",
-        ("parsed = parse_conformant_collection_name(name)",),
+        ('"""', "parsed = parse_conformant_collection_name(name)"),
     ): (
         "CollectionName.parse: the render path's own parse counterpart. "
         "Pre-existing single caller (http_catalog_client.py's "
@@ -115,7 +121,10 @@ ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
     ),
     (
         "src/nexus/commands/collection.py",
-        ("parsed = parse_conformant_collection_name(name)",),
+        (
+            "if is_conformant_collection_name(name):",
+            "parsed = parse_conformant_collection_name(name)",
+        ),
     ): (
         "reindex_cmd: `name`'s catalog row was JUST DELETED by "
         "purge_collection_cascade a few lines above -- this call is what "
@@ -133,7 +142,10 @@ ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
     ),
     (
         "src/nexus/commands/catalog_cmds/collections.py",
-        ("parsed = parse_conformant_collection_name(name)",),
+        (
+            "if is_conformant_collection_name(name):",
+            "parsed = parse_conformant_collection_name(name)",
+        ),
     ): (
         "backfill_collections_cmd: `to_register` names are, by the loop's "
         "own filter, exactly the ones with no catalog row yet -- this "
@@ -147,7 +159,10 @@ ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
     ),
     (
         "src/nexus/commands/catalog_cmds/collections.py",
-        ("parsed = parse_conformant_collection_name(new)",),
+        (
+            "if is_conformant_collection_name(new):",
+            "parsed = parse_conformant_collection_name(new)",
+        ),
     ): (
         "rename_collection_cmd: `new` was just confirmed CollectionState."
         "ABSENT above -- it has no catalog row yet by construction. Same "
@@ -159,7 +174,10 @@ ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
     ),
     (
         "src/nexus/catalog/recovery_bundle.py",
-        ("parsed = parse_conformant_collection_name(recorded)",),
+        (
+            "# for a name this install has never seen.",
+            "parsed = parse_conformant_collection_name(recorded)",
+        ),
     ): (
         "target_collection_for: `recorded` names a collection on the "
         "SOURCE install a recovery bundle is being restored from -- it "
@@ -171,7 +189,10 @@ ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
     ),
     (
         "src/nexus/db/t3.py",
-        ("parsed = parse_conformant_collection_name(name)",),
+        (
+            "if is_conformant_collection_name(name):",
+            "parsed = parse_conformant_collection_name(name)",
+        ),
     ): (
         "T3Database.list_collections()'s _derived_row_fields: class (d) "
         "-- synthesizes a row for a substrate (the retired, TEST-ONLY "
@@ -273,13 +294,10 @@ def _resolve_allowed_callers() -> tuple[dict[str, dict[int, tuple[str, ...]]], l
     live line number (nexus-vkpr3). Returns ``(by_file, problems)`` --
     see ``tests.test_collection_name_parse_census._resolve_excluded_sites``
     for the identical shape and rationale."""
+    items = [(rel, content, content) for (rel, content) in ALLOWED_CALLERS]
+    resolved, problems = resolve_ledger(REPO_ROOT, items)
     by_file: dict[str, dict[int, tuple[str, ...]]] = {}
-    problems: list[str] = []
-    for (rel, content), _reason in ALLOWED_CALLERS.items():
-        lineno, err = resolve_anchor(REPO_ROOT, rel, content)
-        if err:
-            problems.append(f"{rel} {content!r} -> {err}")
-            continue
+    for rel, lineno, content in resolved:
         by_file.setdefault(rel, {})[lineno] = content
     return by_file, problems
 

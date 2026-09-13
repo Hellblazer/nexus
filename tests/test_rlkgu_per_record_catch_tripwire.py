@@ -88,7 +88,7 @@ from dataclasses import dataclass
 
 from nexus.errors import PER_RECORD_SURVIVABLE_EXCEPTIONS
 
-from tests._lint_line_anchor import resolve_anchor
+from tests._lint_line_anchor import resolve_anchor, resolve_ledger
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 SRC_ROOT = REPO_ROOT / "src" / "nexus"
@@ -172,17 +172,23 @@ class _LoopAllowlistEntry:
 #: nexus-a1zv2, not resolved here -- this entry's job is only to make the
 #: tripwire's scope claim exhaustive rather than silently inherited.
 #: CONTENT-KEYED, not line-keyed (nexus-vkpr3): the third tuple element
-#: is the call's own stripped source text, resolved to its CURRENT line
-#: number by ``tests._lint_line_anchor.resolve_anchor`` on every run.
-#: This entry set was itself retargeted once by line-shift arithmetic
-#: before the conversion (287/289 -> 303/305, RDR-204 Phase 3 growing
+#: is the call's own stripped source text PLUS its nearest preceding
+#: non-blank line (the mandatory two-line convention -- see
+#: ``tests._lint_line_anchor``'s MANDATORY TWO-LINE MINIMUM section),
+#: resolved to its CURRENT line number by
+#: ``tests._lint_line_anchor.resolve_anchor`` on every run. This entry
+#: set was itself retargeted once by line-shift arithmetic before the
+#: conversion (287/289 -> 303/305, RDR-204 Phase 3 growing
 #: db/embed_migrate.py above both sites) -- a content anchor makes that
 #: retargeting unnecessary, since an insertion above either call changes
 #: neither call's own text.
 _LOOP_ALLOWLIST: dict[tuple[str, str, tuple[str, ...]], _LoopAllowlistEntry] = {
     (
         "db/embed_migrate.py", "_default_reindex",
-        ("count = index_pdf(p, corpus=corpus, collection_name=target_name, force=True)",),
+        (
+            'if p.suffix.lower() == ".pdf":',
+            "count = index_pdf(p, corpus=corpus, collection_name=target_name, force=True)",
+        ),
     ): _LoopAllowlistEntry(
         reason=(
             "unwired module, docstring claims nx init integration "
@@ -191,7 +197,10 @@ _LOOP_ALLOWLIST: dict[tuple[str, str, tuple[str, ...]], _LoopAllowlistEntry] = {
     ),
     (
         "db/embed_migrate.py", "_default_reindex",
-        ("count = index_markdown(p, corpus=corpus, collection_name=target_name, force=True)",),
+        (
+            "else:",
+            "count = index_markdown(p, corpus=corpus, collection_name=target_name, force=True)",
+        ),
     ): _LoopAllowlistEntry(
         reason=(
             "unwired module, docstring claims nx init integration "
@@ -210,14 +219,15 @@ def _resolve_loop_allowlist() -> tuple[
     (path, function, resolved lineno) so callers compare against
     ``_find_loop_call_sites``'s ``_Site`` tuples unchanged; a ``problems``
     entry (STALE or AMBIGUOUS) means the anchor did not resolve at all."""
-    by_key: dict[tuple[str, str, int], _LoopAllowlistEntry] = {}
-    problems: list[str] = []
-    for (rel, func, content), entry in _LOOP_ALLOWLIST.items():
-        lineno, err = resolve_anchor(SRC_ROOT, rel, content)
-        if err:
-            problems.append(f"{rel} {func}() {content!r} -> {err}")
-            continue
-        by_key[(rel, func, lineno)] = entry
+    items = [
+        (rel, content, (func, entry))
+        for (rel, func, content), entry in _LOOP_ALLOWLIST.items()
+    ]
+    resolved, problems = resolve_ledger(SRC_ROOT, items)
+    by_key: dict[tuple[str, str, int], _LoopAllowlistEntry] = {
+        (rel, func, lineno): entry
+        for rel, lineno, (func, entry) in resolved
+    }
     return by_key, problems
 
 

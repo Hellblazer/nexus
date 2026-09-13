@@ -263,7 +263,7 @@ import pathlib
 
 import pytest
 
-from tests._lint_line_anchor import resolve_anchor
+from tests._lint_line_anchor import resolve_anchor, resolve_ledger
 
 pytestmark = pytest.mark.lint
 
@@ -280,23 +280,27 @@ _TYPE_PREFIXES = frozenset({"code__", "docs__", "rdr__", "knowledge__", "quarant
 #: (``mcp__`` tool names, ``rdr-`` document ids) removes from the pin.
 #:
 #: CONTENT-KEYED, not line-keyed (nexus-vkpr3): the anchor is the
-#: exempted line's own stripped source text, resolved to its CURRENT line
-#: number by ``tests._lint_line_anchor.resolve_anchor`` on every run — see
-#: that module's docstring for why. A line-number key silently re-targets
-#: onto whatever different code now sits at the stored number the moment
-#: anything is inserted above it; this file's entries were themselves
-#: retargeted by line-shift arithmetic several times before the
-#: conversion (7887 -> 7900 -> 7934 -> 8317 -> 8501 -> 8528 -> 8630 ->
-#: 8644 for the mcp/core.py entry alone) — exactly the churn a content
-#: anchor makes structurally impossible, since the anchor's own text does
-#: not move. Every entry here is independently verified as a real raw
-#: match by ``test_excluded_sites_are_real_matches_not_omissions`` — an
-#: anchor that no longer resolves (STALE) or resolves ambiguously is a
-#: stale judgement call, not a quieter gate.
+#: exempted line's own stripped source text PLUS its nearest preceding
+#: non-blank line (the mandatory two-line convention -- see
+#: ``tests._lint_line_anchor``'s MANDATORY TWO-LINE MINIMUM section for
+#: why a single line is not enough), resolved to its CURRENT line number
+#: by ``tests._lint_line_anchor.resolve_anchor`` on every run. A
+#: line-number key silently re-targets onto whatever different code now
+#: sits at the stored number the moment anything is inserted above it;
+#: this file's entries were themselves retargeted by line-shift
+#: arithmetic several times before the conversion (7887 -> 7900 -> 7934
+#: -> 8317 -> 8501 -> 8528 -> 8630 -> 8644 for the mcp/core.py entry
+#: alone) — exactly the churn a content anchor makes structurally
+#: impossible, since the anchor's own text does not move. Every entry
+#: here is independently verified as a real raw match by
+#: ``test_excluded_sites_are_real_matches_not_omissions`` — an anchor
+#: that no longer resolves (STALE) or resolves ambiguously is a stale
+#: judgement call, not a quieter gate.
 _EXCLUDED_SITES: dict[tuple[str, tuple[str, ...]], str] = {
     (
         "src/nexus/mcp/core.py",
         (
+            'raw_tool = step.get("tool", "")',
             'bare = raw_tool.rsplit("__", 1)[-1] if '
             'raw_tool.startswith("mcp__") else raw_tool',
         ),
@@ -307,21 +311,21 @@ _EXCLUDED_SITES: dict[tuple[str, tuple[str, ...]], str] = {
     ),
     (
         "src/nexus/plans/bundle.py",
-        ('tool = tool.rsplit("__", 1)[-1]',),
+        ('if tool.startswith("mcp__"):', 'tool = tool.rsplit("__", 1)[-1]'),
     ): (
         "mcp__ tool name: `_extract_tool_name`'s own docstring says it "
         '"strips any mcp__...__ prefix" from a plan step\'s tool identifier.'
     ),
     (
         "src/nexus/plans/cost_estimate.py",
-        ('tool = tool.rsplit("__", 1)[-1]',),
+        ('if tool.startswith("mcp__"):', 'tool = tool.rsplit("__", 1)[-1]'),
     ): (
         "mcp__ tool name: `_extract_tool`, the documented local copy of "
         "bundle._extract_tool_name, strips the same mcp__...__ prefix."
     ),
     (
         "src/nexus/plans/runner.py",
-        ('t = t.rsplit("__", 1)[-1]',),
+        ('if t.startswith("mcp__"):', 't = t.rsplit("__", 1)[-1]'),
     ): (
         "mcp__ tool name: strips an mcp__...__ prefix from a resolved plan "
         "step's tool identifier before dispatch, guarded by the same "
@@ -752,13 +756,10 @@ def _resolve_excluded_sites() -> tuple[dict[str, dict[int, tuple[str, ...]]], li
     resolve at all -- callers must not silently treat that as "nothing
     to exclude here", `test_excluded_sites_are_real_matches_not_omissions`
     fails loud on any non-empty `problems`."""
+    items = [(rel, content, content) for (rel, content) in _EXCLUDED_SITES]
+    resolved, problems = resolve_ledger(REPO_ROOT, items)
     by_file: dict[str, dict[int, tuple[str, ...]]] = {}
-    problems: list[str] = []
-    for (rel, content), _reason in _EXCLUDED_SITES.items():
-        lineno, err = resolve_anchor(REPO_ROOT, rel, content)
-        if err:
-            problems.append(f"{rel} {content!r} -> {err}")
-            continue
+    for rel, lineno, content in resolved:
         by_file.setdefault(rel, {})[lineno] = content
     return by_file, problems
 
