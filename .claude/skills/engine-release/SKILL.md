@@ -97,6 +97,24 @@ closes the "release-workflow-only procedures rot silently" gap for the
 *script's own assertions*, not for signing/codesign/cosign/PG-bundle
 packaging defects, which remain `--acquire`-only by construction (see below).
 
+**Also runs the release-workflow SHAPE check now, automatically (nexus-xihsm).**
+Right after `run.sh`'s own native-build step (the `-Ob` candidate plus jOOQ
+codegen), `--shakeout` calls `scripts/check_release_workflow_shape.py`
+against the just-built REAL native binary (no JVM-jar shim) via
+`tests/e2e/migration-rehearsal/lib/shakeout_shape_check.sh`. This does NOT
+live inside `rehearse_shakeout.sh`: that script runs inside the `--shakeout`
+container, which is a `uv`-tool-installed wheel with no `.git`/`pyproject.toml`
+ancestor by design, so the check's phase (a) non-vacuity assert could only
+ever refuse there, and phase (b) has no `service/mvnw` or JDK in that image
+at all. `run.sh` is the one place both preconditions hold. A failure prints
+`[shakeout] release-workflow SHAPE check: FAILED` and exits `run.sh` nonzero
+before the container ever starts, so it gates `--shakeout`'s own exit code,
+and its verdict line appears in the same terminal output as everything else
+`--shakeout` prints. See AGENTS.md's engine-release section for the full
+contract. Still uncovered even when wired: cosign signing, the
+`promote-release` all-21-assets gate, and mac-arm64's genuine no-Docker
+GitHub-hosted runner, none of which run on a box `--shakeout` builds on.
+
 **`--candidate-migration` — MANDATORY whenever this cut's `service/` delta
 touches `db/changelog/**` (a new or modified Liquibase changeset); optional
 otherwise** (a cut that only touches Java handler/repository code with no
