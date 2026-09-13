@@ -221,7 +221,7 @@ import pytest
 pytestmark = pytest.mark.usefixtures("cloud_mode")
 ```
 
-The `cloud_mode` fixture lives in `tests/conftest.py`. It sets `CHROMA_API_KEY`, `VOYAGE_API_KEY`, `CHROMA_TENANT`, `CHROMA_DATABASE` to test sentinels and monkeypatches `nexus.config.is_local_mode` to return `False`.
+The `cloud_mode` fixture lives in `tests/conftest.py`. It sets `NX_LOCAL=0` and `VOYAGE_API_KEY` to test sentinels and monkeypatches `nexus.config.is_local_mode` to return `False`.
 
 ## Redirecting the config dir in a test: setenv, never setattr
 

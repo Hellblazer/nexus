@@ -816,7 +816,7 @@ A Linda tuple space over Postgres — `out`/`rd`/`rdp`/`in`/`inp`/`ack`/`nack`/`
 
 ### Authentication: static token vs self-minted data tokens (conexus RDR-005 2a)
 
-Every HTTP storage client (T1 `HttpScratchStore`, the eight T2 `Http*Store`
+Every HTTP storage client (T1 `HttpScratchStore`, the nine T2 `Http*Store`
 classes via `RefreshableHttpStoreMixin`, T3 `HttpVectorClient`, and the
 catalog client) presents an `Authorization: Bearer <token>` header on every
 call. By default that token is the static `service_token` credential
