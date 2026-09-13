@@ -109,20 +109,33 @@ _FIXTURE_KNOWLEDGE_MAP = (
 #: mechanical, non-negotiable check the bead calls for.
 _COMBINED_BUDGET_BYTES = 6000
 
-#: nexus-cnzei.6 (injection audit S5): the check above budgets only two of
-#: the emitters a real SessionStart actually fires — it covers ~5.2KB of a
-#: measured ~13.1-13.6KB total (T2 nexus/llm-guidance-audit-injection-
-#: 2026-09-13). The sn plugin's own static session-start-section.md rides
-#: the same SessionStart event unconditionally and was entirely unbudgeted.
-#: bd prime (beads plugin, ~6.5KB) is a THIRD contributor but is not this
-#: repo's surface to pin — it ships from a different plugin this repo does
-#: not own or version. This constant is the two-emitter-plus-sn total; see
-#: test_full_sessionstart_census_under_budget below.
-_FULL_SESSIONSTART_BUDGET_BYTES = 7000
+#: nexus-cnzei.6 fix round (critic Critical 2 / CRE 3): this is NOT a full
+#: SessionStart census and must never be called one — the real total is
+#: ~13.1-13.6KB (T2 nexus/llm-guidance-audit-injection-2026-09-13), and this
+#: constant bounds a specific set of BOUNDED components, some real and some
+#: fixture-sized. See test_sessionstart_bounded_components_under_budget's
+#: own docstring for exactly which is which, with each excluded or
+#: fixture-sized component's approximate real size. Measured 2026-09-13:
+#: guidance 1969B + hook fixture 2778B + sn static 748B + bd-prime 992B =
+#: 6487B, stable (bd-prime and sn are static files; guidance and hook's two
+#: real sub-renders do not touch live-varying state; hook's two fixtures are
+#: fixed strings). ~8% headroom: 6487 * 1.08 ~= 7006, rounded.
+_BOUNDED_SESSIONSTART_BUDGET_BYTES = 7000
 
 _SN_SESSION_START_SECTION = (
     Path(__file__).resolve().parents[2] / "sn" / "hooks" / "scripts" / "session-start-section.md"
 )
+
+#: bd prime's REPO-LEVEL PRIME.md — the file bd actually prints byte-for-
+#: byte in THIS repo, per src/nexus/beads_prime.py's own docstring ("A
+#: repo-level .beads/PRIME.md always wins over this [machine-wide] file --
+#: bd reads repo-level first"). A plain, deterministic file read: this repo
+#: commits this file, so there is nothing live to render and nothing to
+#: mock. This is NOT nexus.beads_prime.load_template() (the generic
+#: machine-wide template nexus-cnzei.8 installs elsewhere) — that function
+#: is real and callable too, but its output is not what a session in THIS
+#: checkout actually sees, since the repo-level file overrides it.
+_BD_PRIME_REPO_FILE = Path(__file__).resolve().parents[2] / ".beads" / "PRIME.md"
 
 
 def _fixture_session_start_hook_output() -> str:
@@ -192,26 +205,58 @@ def test_combined_sessionstart_total_under_6000_bytes(monkeypatch) -> None:
     )
 
 
-def test_full_sessionstart_census_under_budget(monkeypatch) -> None:
-    """nexus-cnzei.6: the SAME two emitters as the combined check above,
-    PLUS sn's static session-start-section.md (a plain file read — no
-    execution, no side effect, safe to include directly). Never imports
-    nexus.hooks.session_start's live path or shells out to `nx hook
-    session-start`: this reuses the same side-effect-free
-    render_session_start() seam the combined check already uses."""
+def test_sessionstart_bounded_components_under_budget(monkeypatch) -> None:
+    """nexus-cnzei.6 fix round (critic Critical 2 / CRE 3): this bounds
+    FOUR components of a real SessionStart, not the whole ~13.1-13.6KB
+    payload (T2 nexus/llm-guidance-audit-injection-2026-09-13). Renamed
+    from ``test_full_sessionstart_census_under_budget`` — that name
+    claimed more than the test measures, which is exactly the defect this
+    fix round exists to close. Per component:
+
+    - guidance (``nx hook session-start``, via the side-effect-free
+      ``render_session_start()``): REAL, ~1969B.
+    - sn's static ``session-start-section.md``: REAL (plain file read),
+      ~748B.
+    - bd prime's repo-level ``.beads/PRIME.md``: REAL (plain file read;
+      this repo commits it, and it wins over the generic machine-wide
+      template bd would otherwise print — see ``_BD_PRIME_REPO_FILE``
+      above), ~992B.
+    - ``session_start_hook.py``'s combined output: PARTIALLY FIXTURE.
+      ``_render_ready_beads``/``_build_capabilities_block`` are real
+      renders of fixture input; the T2-memory block and Knowledge Map are
+      hardcoded fixture STRINGS, not live renders, because both depend on
+      this box's live T2/bead state (see ``_FIXTURE_T2_MEMORY_BLOCK`` and
+      ``_FIXTURE_KNOWLEDGE_MAP`` above for why hardcoding was chosen over
+      flakiness). Approximate real sizes as separately measured 2026-08-20:
+      T2-memory block ~847B (fixture here is ~626B, slightly under);
+      Knowledge Map ~657B (fixture here is sized to match).
+
+    EXCLUDED entirely, not measured here at all: bd prime's own
+    post-PRIME-text ``bd remember`` memory dump (beads 1.2.x appends this
+    unless ``--no-memories`` is passed; not suppressed by this repo's
+    hook), and the three conditional emitters (preflight.py, rdr_hook.py,
+    version_lockstep_hook.py) that carve out to 0B in the common case per
+    the bead's own measured baseline (module docstring above)."""
     assert _SN_SESSION_START_SECTION.exists(), (
         f"{_SN_SESSION_START_SECTION} missing — sn plugin layout changed; "
         "update this census's file list"
+    )
+    assert _BD_PRIME_REPO_FILE.exists(), (
+        f"{_BD_PRIME_REPO_FILE} missing — this repo's repo-level PRIME.md "
+        "was removed; update this test's file list (bd prime would then "
+        "fall through to the generic machine-wide template instead)"
     )
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
     guidance_bytes = len(_real_guidance_emitter_output().encode("utf-8"))
     hook_bytes = len(_fixture_session_start_hook_output().encode("utf-8"))
     sn_bytes = len(_SN_SESSION_START_SECTION.read_bytes())
-    total = guidance_bytes + hook_bytes + sn_bytes
-    assert total < _FULL_SESSIONSTART_BUDGET_BYTES, (
-        f"full SessionStart census {total}B (guidance {guidance_bytes}B + "
+    bd_prime_bytes = len(_BD_PRIME_REPO_FILE.read_bytes())
+    total = guidance_bytes + hook_bytes + sn_bytes + bd_prime_bytes
+    assert total < _BOUNDED_SESSIONSTART_BUDGET_BYTES, (
+        f"bounded SessionStart components {total}B (guidance {guidance_bytes}B + "
         f"session_start_hook.py fixture {hook_bytes}B + sn static "
-        f"{sn_bytes}B) >= budget {_FULL_SESSIONSTART_BUDGET_BYTES}B"
+        f"{sn_bytes}B + bd-prime {bd_prime_bytes}B) >= budget "
+        f"{_BOUNDED_SESSIONSTART_BUDGET_BYTES}B"
     )
 
 
