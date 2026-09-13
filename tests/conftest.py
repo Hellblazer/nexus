@@ -206,8 +206,12 @@ def _gate_on_build_lease() -> None:
     seen by either (the shell lease's own residual, nexus-06fu4).
 
     ``NX_TEST_T2_SUBSTRATE=none`` runs need no engine and are never gated.
+    Neither is ``=sqlite``: ``_pin_t2_substrate`` refuses that value by name
+    without booting anything, and gating it first reported a build in
+    progress instead of the deleted substrate the run asked for
+    (nexus-fam6l).
     """
-    if os.environ.get("NX_TEST_T2_SUBSTRATE") == "none":
+    if os.environ.get("NX_TEST_T2_SUBSTRATE") in ("none", "sqlite"):
         return
     try:
         from tests.db._service_fixture import build_lease_wait_seconds, wait_for_build_lease
