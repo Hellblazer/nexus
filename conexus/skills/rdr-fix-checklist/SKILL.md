@@ -22,6 +22,8 @@ The fix step of the RDR lifecycle: between a gate critique and the next gate. De
 
 Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/rdr`. Use the Step 0 snippet from the rdr-create skill, stored as `RDR_DIR`.
 
+Prose register: `$RDR_DIR/REGISTER.md`, falling back to `$CLAUDE_PLUGIN_ROOT/resources/rdr/REGISTER.md` if the repo copy is not there yet.
+
 ## Behavior
 
 1. Run `nx rdr preamble rdr-fix -- <id>`. It prints the latest gate's outcome and round, every Critical and Significant with its `Sites:` list, the diff range and fix commits since the gated commit, whether a fix-check record exists for the current tip, the research title the pre-edit entry will get, and the rules below.

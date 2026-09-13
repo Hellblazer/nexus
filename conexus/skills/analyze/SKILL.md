@@ -4,7 +4,7 @@ description: Use when synthesising across prose and code corpora or ranking cand
 effort: medium
 ---
 
-**Tier-aware discipline** — apply at session start and before every major step: read widest → narrowest, reuse plans, write back before returning. See [resources/tier-discipline.md](../../resources/tier-discipline.md) for the full checklist (shared across every skill that prescribes it — nexus-cnzei.6).
+**Tier-aware discipline** — before starting, check T3 (`search`), T2 (`memory_search`), and T1 (`scratch` search) widest to narrowest so you don't duplicate work already done; reuse a matching plan via `plan_search` before dispatching multiple agents. Before returning, write findings back at the tier matching their audience (`scratch` for siblings this session, `memory_put` for this project, `store_put` for permanent cross-project knowledge). Full checklist: [resources/tier-discipline.md](../../resources/tier-discipline.md) (shared across every skill that prescribes it — nexus-cnzei.6).
 
 # analyze
 

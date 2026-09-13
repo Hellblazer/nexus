@@ -245,6 +245,7 @@ by hand. The rules it applies (`review-rounds.toml`, contract `rdr-gate`):
   the verdict tool refuses to compute an outcome and names the finding and
   both values.
 - Criterion 6 output is never a finding and never counted.
+- Do not use "Conditional Accept" or other ad-hoc outcomes; the outcome is always exactly PASSED or BLOCKED.
 - Warns only, or all pass → PASSED. Status remains Draft.
 
 **Important**: The AI critique *supplements* but does not *replace* the author completing the Finalization Gate section with written responses. The gate should verify that the Finalization Gate section contains substantive written responses, not just "N/A" or placeholder text.

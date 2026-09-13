@@ -138,7 +138,7 @@ These patterns are stored in the T2 plan library and are returned by `plan_searc
 | Plan-Audit-Implement | strategic-planner → `nx_plan_audit` → developer → code-review-expert → substantive-critic → test-validator | Standard feature development with clear requirements | Requirements defined, no RDR needed |
 | Research-Synthesize | deep-research-synthesizer → `nx_tidy` | Gathering information on unfamiliar topics or comparing approaches | Topic identified |
 | Code Review | code-review-expert → substantive-critic → test-validator | Post-implementation quality gate before merge or PR | Code changes committed |
-| Debug | debugger → developer → test-validator | Test failures or non-deterministic behavior, especially after 2+ failed manual fix attempts | Reproducible failure or clear symptom |
+| Debug | debugger → developer → code-review-expert → substantive-critic → test-validator | Test failures or non-deterministic behavior, especially after 2+ failed manual fix attempts | Reproducible failure or clear symptom |
 
 ## Agent Ecosystem
 

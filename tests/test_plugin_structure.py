@@ -123,6 +123,29 @@ def _collect_shared_links() -> list[tuple[Path, str]]:
     return results
 
 
+#: nexus-cnzei.6 fix round (CRE 4): the 8 skills that dedupe the
+#: tier-aware-discipline preamble into conexus/resources/tier-discipline.md
+#: (see that file's own header) each carry a link to it; nothing pinned
+#: those links resolve, or that the exact set of 8 skills carrying the link
+#: stays 8 (a 9th skill silently re-duplicating the full block inline,
+#: instead of linking, would go unnoticed).
+_TIER_DISCIPLINE_SKILLS = frozenset({
+    "analyze", "design-to-code-trace", "deep-analysis", "document",
+    "knowledge-tidying", "query", "research-synthesis", "why-was-this-written",
+})
+
+
+def _collect_tier_discipline_links() -> list[tuple[Path, str]]:
+    results = []
+    for md_file in sorted(PLUGIN_DIR.rglob("*.md")):
+        if md_file.name == "tier-discipline.md":
+            continue
+        text = md_file.read_text()
+        for match in re.finditer(r"\[([^\]]*)\]\(([^)]*resources/tier-discipline\.md[^)]*)\)", text):
+            results.append((md_file, match.group(2)))
+    return results
+
+
 def _collect_plugin_root_refs() -> list[tuple[str, str]]:
     results = []
     for src_file in sorted(PLUGIN_DIR.rglob("*")):
@@ -736,6 +759,46 @@ class TestSharedRelativePaths:
         resolved = (source_file.parent / raw_path.split("#")[0]).resolve()
         assert resolved.exists(), \
             f"{source_file.relative_to(PLUGIN_DIR)}: link {raw_path!r} -> {resolved} missing"
+
+
+class TestTierDisciplineLinks:
+    """nexus-cnzei.6 fix round (CRE 4)."""
+
+    @pytest.mark.parametrize("source_file,raw_path", [
+        pytest.param(src, rp, id=f"{src.relative_to(PLUGIN_DIR)}->{rp}")
+        for src, rp in _collect_tier_discipline_links()
+    ])
+    def test_tier_discipline_link_resolves(self, source_file: Path, raw_path: str) -> None:
+        resolved = (source_file.parent / raw_path.split("#")[0]).resolve()
+        assert resolved.exists(), \
+            f"{source_file.relative_to(PLUGIN_DIR)}: link {raw_path!r} -> {resolved} missing"
+
+    def test_exactly_the_known_eight_skills_carry_the_link(self) -> None:
+        linking_skill_names = {
+            src.parent.name for src, _ in _collect_tier_discipline_links()
+            if src.parent.parent == SKILLS_DIR
+        }
+        assert linking_skill_names == _TIER_DISCIPLINE_SKILLS, (
+            f"skills linking resources/tier-discipline.md are {sorted(linking_skill_names)}, "
+            f"expected exactly {sorted(_TIER_DISCIPLINE_SKILLS)} — update both together "
+            "when adding or removing a skill that prescribes this preamble"
+        )
+
+    def test_no_skill_reduplicates_the_full_preamble_inline(self) -> None:
+        """A 9th skill re-pasting the full checklist instead of linking to
+        resources/tier-discipline.md would recreate the exact duplication
+        this bead eliminated, silently. This is the one line specific
+        enough to the full block that a legitimate short mention of "search"
+        or "widest" elsewhere would never match it."""
+        offenders = [
+            p for p in skill_skill_mds()
+            if "1. **Read** widest" in p.read_text()
+        ]
+        assert not offenders, (
+            f"these skills re-duplicate the tier-discipline checklist inline "
+            f"instead of linking to resources/tier-discipline.md: "
+            f"{[p.parent.name for p in offenders]}"
+        )
 
 
 # ── Marketplace version sync ─────────────────────────────────────────────────
@@ -1650,40 +1713,51 @@ class TestRdrGateLoopRemedies:
     FIX_SKILL = SKILLS_DIR / "rdr-fix-checklist" / "SKILL.md"
     FIX_CMD = PLUGIN_DIR / "commands" / "rdr-fix.md"
 
-    def test_fix_check_layer_in_gate_skill_and_command(self) -> None:
-        """Remedy 1: a diff-scoped fix check stands between a fix and Layer 3."""
-        for path in (self.GATE_SKILL, self.GATE_CMD):
-            text = path.read_text()
-            assert "Fix check" in text, path
-            assert "with ONLY th" in text and "diff" in text, f"{path}: the fix check reads only the diff"
-            assert "fix-check-" in text, f"{path}: names the T2 title shape"
-            assert "fix_check:" in text, f"{path}: the gate record carries the pointer"
-            # nexus-yjf5l.5 (R2): the fix-check brief goes identifier-level —
-            # every changed identifier's other occurrences are enumerated,
-            # not just the clause carrying it.
-            assert "owning phase" in text and "every other occurrence" in text, (
-                f"{path}: the identifier clause is missing"
-            )
-            # The clause reaches a check stated over the same value under a
-            # different name: the round-3 collision was a caller parameter
-            # against a boot check that never used the parameter's token.
-            assert "under any other name" in text, f"{path}: the clause stops at the same token"
-            # nexus-yjf5l.17: the crosswalk clause needs no bridging gloss —
-            # it walks the diff's own ADDED checks and ADDED parameters
-            # directly, whether or not they share a name.
-            assert "whether or not they share a name" in text, (
-                f"{path}: the crosswalk clause is missing"
-            )
-        skill = self.GATE_SKILL.read_text()
+    def test_fix_check_layer_in_gate_skill(self) -> None:
+        """Remedy 1: a diff-scoped fix check stands between a fix and Layer 3.
+
+        nexus-cnzei.6 fix round (critic Significant 4): rdr-gate-checklist/
+        SKILL.md is now the single source for this procedure; commands/
+        rdr-gate.md points to it instead of carrying an independently
+        re-authored copy (see test_command_points_to_skill_for_procedure
+        below). Pinned on the skill only."""
+        text = self.GATE_SKILL.read_text()
+        assert "Fix check" in text
+        assert "with ONLY th" in text and "diff" in text, "the fix check reads only the diff"
+        assert "fix-check-" in text, "names the T2 title shape"
+        assert "fix_check:" in text, "the gate record carries the pointer"
+        # nexus-yjf5l.5 (R2): the fix-check brief goes identifier-level —
+        # every changed identifier's other occurrences are enumerated,
+        # not just the clause carrying it.
+        assert "owning phase" in text and "every other occurrence" in text, (
+            "the identifier clause is missing"
+        )
+        # The clause reaches a check stated over the same value under a
+        # different name: the round-3 collision was a caller parameter
+        # against a boot check that never used the parameter's token.
+        assert "under any other name" in text, "the clause stops at the same token"
+        # nexus-yjf5l.17: the crosswalk clause needs no bridging gloss —
+        # it walks the diff's own ADDED checks and ADDED parameters
+        # directly, whether or not they share a name.
+        assert "whether or not they share a name" in text, "the crosswalk clause is missing"
         for phrase in ("contradicted by any other line", "enumeration", "universal", "research entry"):
-            assert phrase in skill, f"rdr-gate/SKILL.md: fix-check brief lacks '{phrase}'"
-        assert "never counts toward the round" in skill
+            assert phrase in text, f"rdr-gate-checklist/SKILL.md: fix-check brief lacks '{phrase}'"
+        assert "never counts toward the round" in text
         # nexus-yjf5l.5 (R2): the serial precondition — fix, check, then
         # Layer 1 and Layer 3, never a parallel dispatch against one commit.
-        for path in (self.GATE_SKILL, self.GATE_CMD):
-            assert "dispatched against the same commit in parallel" in path.read_text(), (
-                f"{path}: the serial precondition is missing"
-            )
+        assert "dispatched against the same commit in parallel" in text, (
+            "the serial precondition is missing"
+        )
+
+    def test_command_points_to_skill_for_procedure(self) -> None:
+        """nexus-cnzei.6 fix round (critic Significant 4 / coordinator item
+        4): the command's own content is now the bash-injected preamble +
+        $ARGUMENTS parsing; the procedure itself lives only in the
+        <name>-checklist skill, and the command names it by exact skill
+        name so a reader (or a grep) can follow the pointer."""
+        assert "rdr-gate-checklist" in self.GATE_CMD.read_text()
+        assert "rdr-fix-checklist" in self.FIX_CMD.read_text()
+        assert "rdr-accept-checklist" in self.ACCEPT_CMD.read_text()
 
     def test_fix_check_consensus_rule_in_every_placement(self) -> None:
         """nexus-dxksa: a fix check is three dispatches; a defect counts at
@@ -1701,16 +1775,19 @@ class TestRdrGateLoopRemedies:
         assert _all_consensus_clauses(printed) == [FIX_CHECK_CONSENSUS_CLAUSE]
         assert _all_class_clauses(printed) == [FIX_CHECK_CLASS_CLAUSE]
         assert FIX_CHECK_CONSENSUS_CLAUSE in _FIX_RULES
+        # nexus-cnzei.6 fix round (critic Significant 4): the command files
+        # no longer carry the procedure, so they no longer carry this clause
+        # either — pinned on the three -checklist skills only, plus
+        # RESEARCH_SKILL is untouched by this bead's collapse.
         expected_consensus = {
-            self.GATE_SKILL: 1, self.GATE_CMD: 1, self.FIX_SKILL: 2, self.FIX_CMD: 1,
-            self.ACCEPT_SKILL: 1, self.ACCEPT_CMD: 1,
+            self.GATE_SKILL: 1, self.FIX_SKILL: 2, self.ACCEPT_SKILL: 1,
         }
         for path, count in expected_consensus.items():
             clauses = _all_consensus_clauses(path.read_text())
             assert clauses == [FIX_CHECK_CONSENSUS_CLAUSE] * count, (
                 f"{path}: expected {count} verbatim consensus clause(s), found {clauses}"
             )
-        for path in (self.GATE_SKILL, self.GATE_CMD, self.FIX_SKILL):
+        for path in (self.GATE_SKILL, self.FIX_SKILL):
             assert _all_class_clauses(path.read_text()) == [FIX_CHECK_CLASS_CLAUSE], path
         banned = (
             "any fail", "fails closed", "re-run the fix check on the new diff",
@@ -1733,8 +1810,6 @@ class TestRdrGateLoopRemedies:
         assert "prior:" in skill, "the gate record carries the prior chain the round number is derived from"
         assert "would build the wrong thing" in skill, "RDR-specific ship-blocker definition in the brief"
         assert "Criterion 6 output is never a finding" in skill
-        cmd = self.GATE_CMD.read_text()
-        assert "ship_blockers" in cmd and "residual" in cmd
         critic = (PLUGIN_DIR / "agents" / "substantive-critic.md").read_text()
         assert "may block on `critical_count`" in critic, "the critic contract names the caller's own rule"
 
@@ -1745,16 +1820,12 @@ class TestRdrGateLoopRemedies:
         assert "only when the prior gate was BLOCKED" not in skill
         assert "re-gate after a PASSED result, has no Layer 0" not in skill
         assert "Sites:" in skill
-        cmd = self.GATE_CMD.read_text()
-        assert "i.e. the prior gate was BLOCKED" not in cmd
-        assert "Sites:" in cmd
         critic = (PLUGIN_DIR / "agents" / "substantive-critic.md").read_text()
         assert "- **Sites**:" in critic, "the canonical Issue format carries the Sites line"
         # nexus-yjf5l.3: a finding recorded on the prior round's residuals:
         # lines is dispositioned at accept, not a survivor — Layer 0's sweep
-        # instruction states the exemption in both surfaces.
+        # instruction states the exemption.
         assert "recorded residual" in skill, "Layer 0 must exempt recorded residuals from the sweep"
-        assert "recorded residual" in cmd, "Layer 0 must exempt recorded residuals from the sweep"
 
     def test_gate_round_appends_one_revision_history_line(self) -> None:
         """nexus-yjf5l.12: a gate round appends ONE Revision History line —
@@ -1767,16 +1838,11 @@ class TestRdrGateLoopRemedies:
         instructs appending only the one line `nx rdr preamble rdr-verdict`
         prints."""
         skill = self.GATE_SKILL.read_text()
-        cmd = self.GATE_CMD.read_text()
         assert "Revision History line" in skill, "the one-line form is named"
-        assert "Revision History line" in cmd, "the command mirror names the one-line form"
         # Old wording promised the findings themselves in the RDR file.
         assert "Append gate findings to the RDR's Revision History section" not in skill
         assert 'appends "Gate N residuals"\n  to Revision History' not in skill
         assert "gate findings appended to Revision History" not in skill
-        assert "Revision History for accept to disposition" not in cmd, (
-            "accept dispositions residuals from the gate record's residuals:, not Revision History"
-        )
 
     def test_layer_zero_retirement_rule_stated_identically(self) -> None:
         """R5 follow-on (nexus-yjf5l.11): the sweep covers only the last two
@@ -1792,9 +1858,7 @@ class TestRdrGateLoopRemedies:
             "residual"
         )
         skill = re.sub(r"\s+", " ", self.GATE_SKILL.read_text()).lower()
-        assert clause in skill, "rdr-gate/SKILL.md: the retirement clause is missing or drifted"
-        cmd = re.sub(r"\s+", " ", self.GATE_CMD.read_text()).lower()
-        assert clause in cmd, "rdr-gate.md: the retirement clause is missing or drifted"
+        assert clause in skill, "rdr-gate-checklist/SKILL.md: the retirement clause is missing or drifted"
 
     def test_prior_chain_names_the_previous_rounds_own_critique_id(self) -> None:
         """Follow-on review finding 3 (nexus-yjf5l.13 had no crosswalk pin,
@@ -1806,24 +1870,22 @@ class TestRdrGateLoopRemedies:
         convention as ``test_layer_zero_retirement_rule_stated_identically``."""
         clause = "the previous round's own critique record id, never the latest record's id"
         skill = re.sub(r"\s+", " ", self.GATE_SKILL.read_text()).lower()
-        assert clause in skill, "rdr-gate/SKILL.md: the prior-chain clause is missing or drifted"
-        cmd = re.sub(r"\s+", " ", self.GATE_CMD.read_text()).lower()
-        assert clause in cmd, "rdr-gate.md: the prior-chain clause is missing or drifted"
+        assert clause in skill, "rdr-gate-checklist/SKILL.md: the prior-chain clause is missing or drifted"
 
-    def test_command_and_skill_agree_on_fix_check_scope(self) -> None:
-        cmd = self.GATE_CMD.read_text()
-        assert "research entry" in cmd, "the enumeration rule covers the cited research entry"
+    def test_skill_states_the_fix_check_scope(self) -> None:
+        """nexus-cnzei.6 fix round (critic Significant 4): renamed from
+        test_command_and_skill_agree_on_fix_check_scope — the command no
+        longer carries this content to agree WITH; the skill is the single
+        source, pinned here directly against the printed fix-check brief."""
         skill = self.GATE_SKILL.read_text()
         assert "ship_blockers = critical_count" in skill, "a missing ship_blockers line defaults conservatively"
         assert "Fix check pointer mismatch" in skill
         accept = self.ACCEPT_SKILL.read_text()
         assert "fix_check:" in accept and "not the record's `commit:`" in accept
         assert "no `fix_check:`" in accept, "a skipped fix check blocks accept"
-        assert "mandatory on every re-gate" in skill and "mandatory on every re-gate" in self.GATE_CMD.read_text()
+        assert "mandatory on every re-gate" in skill
         # nexus-yjf5l.5 (R2): the identifier clause must be the SAME sentence
-        # in the skill, the command mirror, and the printed fix-check brief —
-        # one equality across all three rather than three separate substring
-        # checks that could each drift independently.
+        # in the skill and the printed fix-check brief.
         from nexus.commands.rdr import _fix_check_lines
 
         printed = "\n".join(_fix_check_lines(
@@ -1832,36 +1894,27 @@ class TestRdrGateLoopRemedies:
         ))
         canonical = _identifier_clause(printed)
         assert _identifier_clause(skill) == canonical
-        assert _identifier_clause(cmd) == canonical
         # nexus-yjf5l.17 (R2 residual Finding 4 / critique Issue 2): the
-        # equality pin above covered only three of the clause's seven raw
-        # occurrences. The other four live in rdr-fix/SKILL.md (Behavior
-        # step 5, Rules, and the Relay Template — three occurrences) and
-        # commands/rdr-fix.md (one). Pin every one of them, individually,
-        # to the same canonical sentence.
+        # equality pin above covers one occurrence in the gate skill. The
+        # other three live in rdr-fix-checklist/SKILL.md (Behavior step 5,
+        # Rules, and the Relay Template). Pin every one of them,
+        # individually, to the same canonical sentence.
         fix_skill_text = self.FIX_SKILL.read_text()
         fix_skill_clauses = _all_identifier_clauses(fix_skill_text)
         assert len(fix_skill_clauses) == 3, (
-            f"rdr-fix/SKILL.md should carry the identifier clause 3 times "
+            f"rdr-fix-checklist/SKILL.md should carry the identifier clause 3 times "
             f"(Behavior step 5, Rules, Relay Template); found {len(fix_skill_clauses)}"
         )
         assert all(c == canonical for c in fix_skill_clauses), (
-            "rdr-fix/SKILL.md: not every occurrence of the identifier clause matches the canonical sentence"
+            "rdr-fix-checklist/SKILL.md: not every occurrence of the identifier clause matches the canonical sentence"
         )
-        fix_cmd_text = self.FIX_CMD.read_text()
-        fix_cmd_clauses = _all_identifier_clauses(fix_cmd_text)
-        assert len(fix_cmd_clauses) == 1, (
-            f"commands/rdr-fix.md should carry the identifier clause once; found {len(fix_cmd_clauses)}"
-        )
-        assert fix_cmd_clauses[0] == canonical
 
         # nexus-yjf5l.17 (R2 residual Finding 5 / critique Issue "T3-lead
         # paraphrase"): the T3-lead clause pinned the same way, across its
-        # four raw occurrences (rdr.py, rdr-gate/SKILL.md,
-        # commands/rdr-gate.md, and the rdr-fix/SKILL.md Relay Template).
+        # occurrences in rdr.py's printed brief, rdr-gate-checklist/SKILL.md,
+        # and the rdr-fix-checklist/SKILL.md Relay Template.
         t3_canonical = _t3_lead_clause(printed)
         assert _t3_lead_clause(skill) == t3_canonical
-        assert _t3_lead_clause(cmd) == t3_canonical
         assert _t3_lead_clause(fix_skill_text) == t3_canonical
 
         # nexus-yjf5l.17 (residual 1: the cross-identifier reach needs a
@@ -1870,15 +1923,11 @@ class TestRdrGateLoopRemedies:
         # the identifier clause does, one number further in the brief.
         crosswalk_canonical = _crosswalk_clause(printed)
         assert _crosswalk_clause(skill) == crosswalk_canonical
-        assert _crosswalk_clause(cmd) == crosswalk_canonical
         fix_skill_crosswalks = _all_crosswalk_clauses(fix_skill_text)
         assert len(fix_skill_crosswalks) == 3, (
-            f"rdr-fix/SKILL.md should carry the crosswalk clause 3 times; found {len(fix_skill_crosswalks)}"
+            f"rdr-fix-checklist/SKILL.md should carry the crosswalk clause 3 times; found {len(fix_skill_crosswalks)}"
         )
         assert all(c == crosswalk_canonical for c in fix_skill_crosswalks)
-        fix_cmd_crosswalks = _all_crosswalk_clauses(fix_cmd_text)
-        assert len(fix_cmd_crosswalks) == 1
-        assert fix_cmd_crosswalks[0] == crosswalk_canonical
 
     def test_fix_commit_rule_in_research_and_gate_skills(self) -> None:
         """Remedy 5: a fix changes the fact named and nothing else; glosses and
@@ -1958,24 +2007,28 @@ class TestRdrGateLoopRemedies:
         assert "rdr-fix-checklist:" in registry and "commands/rdr-fix.md" in registry
 
     def test_accept_dispositions_residuals(self) -> None:
-        """The disposition rule, and the fix check a sha disposition carries,
-        in the accept skill and its command mirror."""
-        for path in (self.ACCEPT_SKILL, self.ACCEPT_CMD):
-            text = path.read_text()
-            assert "residuals:" in text, path
-            assert "disposition" in text, path
-            assert "bead" in text and "commit" in text, path
-            assert "fix-check-" in text, f"{path}: the T2 title a sha disposition's check goes under"
-            assert "bead id" in text and "needs none" in text, f"{path}: the bead-disposition exemption"
-            # nexus-yjf5l.8: classification determines which disposition
-            # applies — DISCOVER-AT-IMPLEMENTATION takes a bead naming its
-            # Implementation Plan phase; BLOCKS-PLANNING or an unclassified
-            # residual needs an explicit author disposition, never a default.
-            assert "DISCOVER-AT-IMPLEMENTATION" in text, f"{path}: missing the class name"
-            assert "Implementation Plan phase" in text, f"{path}: missing the bead-names-the-phase rule"
-            assert "BLOCKS-PLANNING" in text, f"{path}: missing the class name"
-            assert "unclassified" in text, f"{path}: missing the unclassified-residual case"
-            assert "never defaulted" in text, f"{path}: the disposition must never be defaulted"
+        """The disposition rule, and the fix check a sha disposition carries.
+
+        nexus-cnzei.6 fix round (critic Significant 4): pinned on the
+        rdr-accept-checklist skill only — commands/rdr-accept.md now points
+        to it instead of carrying its own copy (the disposition rule is
+        merged into the skill's own step 1c/Behavior; see the skill's
+        commit history for the merge)."""
+        text = self.ACCEPT_SKILL.read_text()
+        assert "residuals:" in text
+        assert "disposition" in text
+        assert "bead" in text and "commit" in text
+        assert "fix-check-" in text, "the T2 title a sha disposition's check goes under"
+        assert "bead id" in text and "needs none" in text, "the bead-disposition exemption"
+        # nexus-yjf5l.8: classification determines which disposition
+        # applies — DISCOVER-AT-IMPLEMENTATION takes a bead naming its
+        # Implementation Plan phase; BLOCKS-PLANNING or an unclassified
+        # residual needs an explicit author disposition, never a default.
+        assert "DISCOVER-AT-IMPLEMENTATION" in text, "missing the class name"
+        assert "Implementation Plan phase" in text, "missing the bead-names-the-phase rule"
+        assert "BLOCKS-PLANNING" in text, "missing the class name"
+        assert "unclassified" in text, "missing the unclassified-residual case"
+        assert "never defaulted" in text, "the disposition must never be defaulted"
 
     def test_finding_classification_imported_and_scoped(self) -> None:
         """R3 (nexus-yjf5l.7): every gate finding carries a Class alongside
@@ -1995,14 +2048,13 @@ class TestRdrGateLoopRemedies:
             "the Class bullet must read as optional for every consumer other than an RDR gate critique"
         )
         assert "`Ship-blocker: yes` implies `Class: BLOCKS-PLANNING`" in normalized
-        for path in (self.GATE_SKILL, self.GATE_CMD):
-            text = path.read_text()
-            text_normalized = re.sub(r"\s+", " ", text)
-            assert "BLOCKS-PLANNING" in text and "DISCOVER-AT-IMPLEMENTATION" in text, (
-                f"{path}: rdr-gate must name both class strings"
-            )
-            assert "Classification governs disposition, not blocking" in text_normalized, path
-            assert "ship_blockers` stays the sole blocking field" in text_normalized, path
+        text = self.GATE_SKILL.read_text()
+        text_normalized = re.sub(r"\s+", " ", text)
+        assert "BLOCKS-PLANNING" in text and "DISCOVER-AT-IMPLEMENTATION" in text, (
+            "rdr-gate-checklist/SKILL.md must name both class strings"
+        )
+        assert "Classification governs disposition, not blocking" in text_normalized
+        assert "ship_blockers` stays the sole blocking field" in text_normalized
 
     #: nexus-yjf5l.10 (fix for a nexus-yjf5l.9 critique finding): the
     #: Class bullet's "optional for every other consumer" parenthetical

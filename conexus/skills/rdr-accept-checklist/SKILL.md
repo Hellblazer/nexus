@@ -8,6 +8,21 @@ effort: medium
 
 Accepts an RDR after it passes the gate. This is the author/reviewer decision point between gate validation and implementation.
 
+> **PROHIBITION — PLANNING CHAIN INTEGRITY**
+> You MUST NOT create beads, write plans, enrich beads, or perform any planning/enrichment work yourself.
+> You are the **caller only**. Running `bd create`, `bd dep add`, `bd update --description`,
+> or writing plan content in the Planning Chain is a HARD STOP — halt and report the error.
+> Only the dispatched subagent (strategic-planner) and the MCP tool calls (nx_plan_audit, nx_enrich_beads) do this work.
+> Doing it yourself bypasses the audit and enrichment chain, producing unvalidated plans.
+>
+> **SUBAGENT FAILURE**: If any subagent in the chain fails or returns partial results,
+> you MUST NOT compensate by doing the subagent's work yourself. Report the failure,
+> state which step broke, and provide the retry command. "Let me finish this directly"
+> is the exact behavior this prohibition exists to prevent.
+>
+> If the Agent tool is not available (e.g., you are a subagent), report:
+> "Cannot dispatch planning chain — Agent tool unavailable. Run /conexus:rdr-accept from the main conversation."
+
 ## When This Skill Activates
 
 - User says "accept this RDR", "mark as accepted", "approve the RDR"
@@ -20,6 +35,11 @@ Accepts an RDR after it passes the gate. This is the author/reviewer decision po
 
 ## Behavior
 
+0. **T2 idempotency and self-healing** — compare the File Status (RDR frontmatter `status:`) against the T2 metadata status:
+   - **Both show `accepted`**: true no-op. Print "RDR is already accepted (file and T2 agree)" and stop.
+   - **File shows `accepted`, T2 does not**: self-healing — update T2 to match the file, then stop (no further steps).
+   - **T2 shows `accepted`, file shows `draft`**: self-healing — this is the ledger-drift case (RDR-165/166). Run `nx rdr set-status {id} accepted`, then `git add` the updated file + README, then stop.
+   - **File shows `draft` and T2 shows `draft` (or T2 record not found)**: normal flow — proceed to step 1.
 1. **Verify gate result** — read `{id}-gate-latest` from T2. Block if outcome is not PASSED. Block if the record has a `prior:` chain and no `fix_check:` (a skipped fix check), if its `fix_check:` sha is not the record's `commit:` (the gate cited a fix check of an older tree), or if the named `{id}-fix-check-<sha>` record does not exist in T2.
 1b. **Disposition residuals** — for every `residuals:` line in the gate record (findings a round-3-or-later gate recorded instead of blocking), name a disposition: the commit sha that fixed it, or the bead id that carries it. A residual classed `DISCOVER-AT-IMPLEMENTATION` is dispositioned by a bead id, and the bead names the Implementation Plan phase whose steps would hit it. A residual classed `BLOCKS-PLANNING`, or an unclassified residual (every line written before the class field existed), needs an explicit author disposition — a sha (with its fix check) or a bead — and the choice is recorded, never defaulted. Record the dispositions in Revision History: one line, naming each residual's disposition (sha or bead id) — never the finding text itself. A residual with no disposition blocks accept.
 1c. **Fix-check the dispositioning change** — a residual dispositioned by a change to the RDR file carries a fix check on that change. Dispatch substantive-critic with ONLY that diff — the range is `git diff <gated-commit>..HEAD -- <rdr file>`, where `<gated-commit>` is the gate record's `commit:` — and the RDR file, under the same brief the re-gate fix check uses, and store the verdict as `{id}-fix-check-<sha>` in project `<repo>_rdr`, where `<sha>` is the RDR file's tip after the disposition. A residual dispositioned by a bead id changed nothing in the file and needs none. The fix check is three independent dispatches of the fix-check brief on the same range, never one; the caller computes the consensus and stores one verdict naming all three; a defect counts only when at least two of the three raise it, whichever lines each cites, its Class is the one at least two of the three assign, and a three-way class split reads as BLOCKS-PLANNING; a defect one critic alone raises is recorded as an observation and never fails the check; the check fails only on a counted BLOCKS-PLANNING defect; a failed check is fixed once and checked once more, and a second failure ends the loop: its counted defects are written as `residuals:` lines of the gate record (`[<class>] <title> (fix check <sha>)`) for accept to disposition, the check is then closed, and nothing runs a third time. A second failure's counted defects are appended to the gate record's `residuals:` lines and dispositioned under step 1b before the T2 write in step 2.

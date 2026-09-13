@@ -348,8 +348,6 @@ the first line.
   placeholder, not a broken reference. Inert until the pin advances.
 - `conexus/skills/plan-first/SKILL.md` (nexus-cnzei.4): description shortened to under 260
   chars (was 422). Inert until the pin advances.
-- `conexus/skills/test-authoring/SKILL.md` (nexus-cnzei.4): description shortened to under
-  260 chars (was 306). Inert until the pin advances.
 - `conexus/skills/knowledge-tidying/SKILL.md` (nexus-cnzei.4): body enriched with the
   nx_tidy → store_put → verify workflow merged in from the deleted `knowledge-tidy.md`
   command above. Inert until the pin advances.
@@ -506,3 +504,36 @@ instead — same strategy nexus-cnzei.4 used for the "debug"/"research"/"review"
   bead ids) trimmed to a pointer at this repo's own AGENTS.md § Engine-service release, keeping
   only the general shared-mutable-resource principle inline (injection audit S6: repo-only
   content shipping to every conexus plugin user). Inert until the pin advances.
+
+nexus-cnzei.6 fix round (2026-09-13, both reviewers): five more fixes against the
+guidance-consolidation half's own review.
+
+- `conexus/skills/analyze/SKILL.md`, `deep-analysis/SKILL.md`, `design-to-code-trace/SKILL.md`,
+  `document/SKILL.md`, `knowledge-tidying/SKILL.md`, `query/SKILL.md`, `research-synthesis/SKILL.md`,
+  `why-was-this-written/SKILL.md` (nexus-cnzei.6 fix round, critic Significant 3): the
+  tier-aware-discipline summary sentence now names the actual tool calls (`search`,
+  `memory_search`, `scratch` search, `plan_search`, `scratch`/`memory_put`/`store_put`) instead
+  of the vague "read widest -> narrowest" fragment — a link alone was not delivery for a
+  top-level session invoking these skills directly. The full checklist still lives in
+  `resources/tier-discipline.md`. Inert until the pin advances.
+- `conexus/skills/orchestration/reference.md` (nexus-cnzei.6 fix round, CRE 2): the Pipeline
+  Pattern Catalog's Debug row gains `code-review-expert` and `substantive-critic` — it omitted
+  both, contradicting registry.yaml's now-canonical bug pipeline (fixed elsewhere in this same
+  bead). Pre-existing drift, not introduced by this bead, but in the exact file orchestration's
+  Quick Routing table points to as canonical expansion. Inert until the pin advances.
+- `conexus/commands/rdr-gate.md`, `commands/rdr-fix.md`, `commands/rdr-accept.md` (nexus-cnzei.6
+  fix round, critic Significant 4): the Action section's independently re-authored procedure
+  replaced with a pointer at the matching `-checklist` skill; the command's own content is now
+  only the bash-injected preamble and $ARGUMENTS parsing. The two-file duplication (not one
+  paragraph but most of a 330-line procedure, per the critic) was real drift risk even though
+  TestRdrGateLoopRemedies pinned isolated clauses byte-for-byte. Inert until the pin advances.
+- `conexus/skills/rdr-gate-checklist/SKILL.md` (nexus-cnzei.6 fix round): gained the "Do not
+  use Conditional Accept" sentence, merged in from the command before the command's Action
+  section was cut down (nothing lost in the collapse above). Inert until the pin advances.
+- `conexus/skills/rdr-fix-checklist/SKILL.md` (nexus-cnzei.6 fix round): gained the Prose
+  register line, merged in from the command for the same reason. Inert until the pin advances.
+- `conexus/skills/rdr-accept-checklist/SKILL.md` (nexus-cnzei.6 fix round): gained the
+  PROHIBITION — PLANNING CHAIN INTEGRITY callout and the Step 0 T2 idempotency/self-healing
+  behavior, both merged in from the command for the same reason — these were genuinely unique
+  to the command and would have been lost by the collapse above without this merge. Inert until
+  the pin advances.
