@@ -68,6 +68,7 @@ REJECTED: <each rejected alternative + the concrete reason it breaks something, 
 - <lint command>
 - Report the collected test COUNT, not a description.
 - Verification runs FOREGROUND inside the agent's own turn. Never `run_in_background`, never `Monitor`. A dispatched subagent cannot receive Monitor events or background-task-completion notifications; those route to the MAIN loop only. Waiting on either strands the agent (nexus-dn9xs).
+- Close the hand-back with a VERIFY block in the § VERIFY Line Convention shape below — one line per claim, not prose.
 
 ## WRITE-BACK (mandatory, before returning)
 mcp__plugin_conexus_nexus__scratch(action="put", content="<bead> <phase> ...", tags="<bead>,<role>,<phase>")
@@ -104,13 +105,23 @@ To send a directive or other message to a dispatched agent while it works, `tupl
 
 ## VERIFY Line Convention (MANDATORY)
 
-Agent write-backs end with a machine-checkable line, not prose (nexus-pjzz8, T2 [21371] §Q5):
+Every implementation or review hand-back ends with a machine-checkable VERIFY block, one line per claim, never prose (nexus-pjzz8, T2 [21371] §Q5; extended by nexus-cnzei.6 item 1 after a 2026-09-13 measurement: reports arrived on time but made false claims — a docs agent reported changing a CLI default it had not touched, and an implementation agent's gate record omitted the one test that would have caught its own NameError. Delivery was never the gap; verification was).
+
+Three line shapes, any number of lines, in any order:
 
 ```
-VERIFY: <command> => <count> passed
+VERIFY: commit=<sha>
+VERIFY: <exact command> => rc=<code> <count> passed
+VERIFY: t2=<project>/<title>
 ```
 
-The orchestrator re-runs that ONE command once per round, before accepting the round. It never trusts the reported count. Divergence is surfaced, not silently accepted.
+- `commit=<sha>` names the sha the change actually landed on — never "will land on" or a branch name.
+- `<exact command> => rc=<code> <count> passed` names the command verbatim (copy-pasteable, not paraphrased), its exit code, and the count it reported.
+- `t2=<project>/<title>` names a T2 write-back the orchestrator can `memory_get` to confirm.
+
+An agent with nothing checkable to claim (a pure read, a recommendation with no code touched) says so explicitly rather than omitting the block. The RDR-205 ledger's own `verify` dim (`present`/`absent`, filled by `tuple_ledger_project.py` parsing these lines from the transcript — nexus-cnzei.6 item 2) records the omission either way, so an absent block is never silently indistinguishable from "nothing to verify."
+
+The orchestrator re-runs each reported COMMAND once per round, before accepting the round — it never trusts the reported count — and confirms each reported COMMIT exists and touches the paths the brief named, via `scripts/check_agent_verify_claims.py <session_id> --path <touched-path>...` (nexus-cnzei.6 item 3; non-vacuity: it refuses a run that examined zero report rows rather than reading silence as clean). Divergence is surfaced, not silently accepted.
 
 ## Review Rounds (MANDATORY)
 

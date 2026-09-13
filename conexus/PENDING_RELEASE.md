@@ -381,3 +381,18 @@ pinned by TestRdrGateLoopRemedies and test_rdr_audit_skill.py; both files stay.
 - `conexus/skills/using-nx-skills/SKILL.md` (nexus-cnzei.4 fix round): RDR lifecycle line
   gains a note on which of the five rdr-* names now resolve via command-only, skill-only, or
   both. Inert until the pin advances.
+
+- nexus-cnzei.6 (checkable agent reports, item 1): `conexus/skills/orchestration/SKILL.md`'s
+  "VERIFY Line Convention" section and design-of-record brief template's "## VERIFY" step now
+  require a closing VERIFY block (`commit=`/`<command> => rc=... passed`/`t2=` lines) instead
+  of the old single free-form line, and point the orchestrator at
+  `scripts/check_agent_verify_claims.py` before accepting a round. Inert until the pin
+  advances.
+- nexus-cnzei.6 (checkable agent reports, item 1): `conexus/resources/agent-shared/RELAY_TEMPLATE.md`
+  gains an "Every Report Ends With a VERIFY Block" section carrying the same convention. Inert
+  until the pin advances.
+- nexus-cnzei.6 (checkable agent reports, item 2): `conexus/hooks/scripts/tuple_ledger_project.py`'s
+  report path now parses the stopping agent's transcript for VERIFY lines and fills the
+  ledger tuple's `commit`/`t2_ref`/`verify` dims (engine support: nexus-d9k5h,
+  engine-service-v0.1.118); an engine that refuses the new dims (HTTP 400) is retried once
+  with the legacy dims-only body, so the row is never dropped. Inert until the pin advances.

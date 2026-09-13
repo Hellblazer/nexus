@@ -63,6 +63,30 @@ the tuple id is derived from ``(agent_id, kind)`` alone, so a retried
 ``out`` for the same pair lands on the same row -- idempotent by
 construction, no de-dup needed here.
 
+CHECKABLE-REPORT DIMS (bead nexus-cnzei.6 item 2, engine half nexus-d9k5h).
+A ``kind=="report"`` write additionally parses the stopping agent's own
+final hand-back for ``VERIFY:`` lines (the convention in
+``conexus/skills/orchestration/SKILL.md`` "VERIFY Line Convention") and
+fills three optional dims the template declares: ``commit`` (a short or
+full sha, from a ``VERIFY: commit=<sha>`` line), ``t2_ref`` (a
+``project/title`` T2 pointer, from ``VERIFY: t2=<project>/<title>``), and
+``verify`` (``present`` when at least one ``VERIFY:`` line was found,
+``absent`` otherwise -- always set for a report, never omitted, so an
+agent that sent no checkable claims at all is itself a visible finding,
+not a blank cell). ``kind=="start"`` never carries these: it fires before
+the agent has produced any output to parse. See ``_extract_verify_dims``.
+
+HARD REQUIREMENT (nexus-cnzei.6 item 2): the cloud engine can be older
+than ``engine-service-v0.1.118`` (the first tag whose ``ledger.yaml``
+declares these three dims -- nexus-d9k5h). Such an engine answers an
+``out`` naming an undeclared dim with HTTP 400 (``SchemaViolation``).
+``main()`` catches that specific status (``_SchemaViolation``, raised
+only for 400) on the FIRST attempt and retries once with the legacy
+dims-only body (``agent_type`` alone) -- the row is written either way,
+never dropped. A 400 on a body that already carries no extra dims (the
+``kind=="start"`` case, or a genuine unrelated schema problem) has
+nothing left to strip and is re-raised as a plain skip.
+
 Every failure path -- unresolvable endpoint, no fresh data-token lease,
 transport failure, a non-2xx response -- appends one line to a
 log file beside the session's expectations ledger
@@ -77,6 +101,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -137,6 +162,18 @@ class _Skip(Exception):
     reads stderr anyway, but a clean exit keeps the intent explicit)."""
 
 
+class _SchemaViolation(_Skip):
+    """The engine rejected an ``out`` with HTTP 400. For this script's
+    only variable-shaped payload -- the report dims added by
+    nexus-cnzei.6 -- this means an engine older than
+    engine-service-v0.1.118 (nexus-d9k5h) does not yet declare
+    commit/t2_ref/verify as dimensions of the ledger template. Caught
+    exactly once, in main()'s report path, to retry with the legacy
+    dims-only body; every other raise site (a start-kind 400, or a 400
+    on a retry that already carries no extra dims) stays a plain
+    ``_Skip``."""
+
+
 def _default_state_dir() -> Path:
     """Mirrors ``expectations.sh``'s ``_expectations_dir``:
     ``${XDG_STATE_HOME:-$HOME/.local/state}/nexus/orchestration`` -- the
@@ -194,7 +231,7 @@ def _resolve_endpoint_and_token(config_dir: Path) -> tuple[str, str, bool]:
 # ── Payload + POST ───────────────────────────────────────────────────────
 
 
-def _extract_fields(raw_payload: str) -> tuple[str, str, str]:
+def _extract_fields(raw_payload: str) -> tuple[str, str, str, str]:
     try:
         data = json.loads(raw_payload)
     except (json.JSONDecodeError, ValueError):
@@ -204,7 +241,136 @@ def _extract_fields(raw_payload: str) -> tuple[str, str, str]:
     session_id = str(data.get("session_id") or "")
     agent_id = str(data.get("agent_id") or "")
     agent_type = str(data.get("agent_type") or "")
-    return session_id, agent_id, agent_type
+    # SubagentStop's own field name (subagent-stop.sh reads the identical
+    # key as TRANSCRIPT) -- SubagentStart payloads carry no such field, so
+    # this is always "" for kind=="start".
+    transcript_path = str(data.get("agent_transcript_path") or "")
+    return session_id, agent_id, agent_type, transcript_path
+
+
+# ── VERIFY-line extraction (bead nexus-cnzei.6 item 2) ──────────────────────
+
+#: One VERIFY claim per line, in the convention
+#: conexus/skills/orchestration/SKILL.md "VERIFY Line Convention" defines:
+#: ``VERIFY: <claim>``. Leading whitespace tolerated (a claim inside a
+#: bullet or a fenced block); trailing whitespace stripped.
+_VERIFY_LINE_RE = re.compile(r"(?im)^[ \t]*VERIFY:[ \t]*(.+?)[ \t]*$")
+
+#: ``VERIFY: commit=<sha>`` -- a short (7+) or full (40) hex sha.
+_COMMIT_VALUE_RE = re.compile(r"^commit=([0-9a-fA-F]{7,40})$")
+
+#: ``VERIFY: t2=<project>/<title>`` -- a T2 pointer, kept verbatim.
+_T2_REF_VALUE_RE = re.compile(r"^t2=(\S.*)$")
+
+
+def _content_blocks(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    msg = entry.get("message")
+    if not isinstance(msg, dict):
+        return []
+    content = msg.get("content")
+    return content if isinstance(content, list) else []
+
+
+def _final_assistant_text(path: Path) -> str:
+    """Text content of the LAST assistant-role transcript entry, its
+    ``"text"`` content blocks concatenated. For a synchronous dispatch
+    this IS the agent's hand-back the caller reads; a background
+    teammate's real report instead lives inside a SendMessage tool_use
+    (see :func:`_last_send_message_text`) -- there is no reliable
+    transcript-format signal for which dispatch shape produced a given
+    transcript (subagent-stop.sh's own comments document the identical
+    ambiguity for its report check), so both are searched.
+    """
+    last_text = ""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("type") != "assistant":
+                continue
+            parts = [
+                block["text"]
+                for block in _content_blocks(entry)
+                if isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+            ]
+            if parts:
+                last_text = "\n".join(parts)
+    return last_text
+
+
+def _last_send_message_text(path: Path) -> str:
+    """Text of the LAST assistant SendMessage tool_use's ``"content"``
+    input field anywhere in the transcript -- the field name a real
+    SendMessage tool_use call carries (``{"to": ..., "content": ...}``,
+    matching every other transcript-scanning hook in this directory,
+    e.g. subagent-stop-scan.py's own FOUND detection, which this mirrors
+    but returns the payload text from instead of a boolean)."""
+    last = ""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or '"SendMessage"' not in line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("type") != "assistant":
+                continue
+            for block in _content_blocks(entry):
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "tool_use"
+                    and block.get("name") == "SendMessage"
+                ):
+                    tool_input = block.get("input")
+                    if isinstance(tool_input, dict) and isinstance(tool_input.get("content"), str):
+                        last = tool_input["content"]
+    return last
+
+
+def _extract_verify_dims(transcript_path: str) -> dict[str, str]:
+    """Parse ``VERIFY:`` lines out of the stopping agent's final report
+    and return the ledger dims they carry. Never raises: a missing,
+    unreadable, or unparseable transcript, or one with no VERIFY lines
+    at all, reads as ``{"verify": "absent"}`` -- consistent with
+    subagent-stop.sh's fail-open posture toward a transcript it cannot
+    use as evidence. ``verify`` is always present in the return value;
+    ``commit``/``t2_ref`` are present only when a matching line was
+    found (first match wins for each)."""
+    if not transcript_path:
+        return {"verify": "absent"}
+    path = Path(transcript_path)
+    try:
+        if not path.is_file():
+            return {"verify": "absent"}
+        combined = "\n".join(
+            t for t in (_final_assistant_text(path), _last_send_message_text(path)) if t
+        )
+    except OSError:
+        return {"verify": "absent"}
+
+    claims = _VERIFY_LINE_RE.findall(combined)
+    if not claims:
+        return {"verify": "absent"}
+
+    dims: dict[str, str] = {"verify": "present"}
+    for claim in claims:
+        commit_match = _COMMIT_VALUE_RE.match(claim)
+        if commit_match and "commit" not in dims:
+            dims["commit"] = commit_match.group(1)
+            continue
+        t2_match = _T2_REF_VALUE_RE.match(claim)
+        if t2_match and "t2_ref" not in dims:
+            dims["t2_ref"] = t2_match.group(1)
+    return dims
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -305,6 +471,8 @@ def _post_via_urllib(
     status = outcome.get("status")
     if status is None:
         raise _Skip(f"transport failure posting to {url}: no response received")
+    if status == 400:
+        raise _SchemaViolation(f"engine returned HTTP 400 posting to {url}")
     if not (200 <= status < 300):
         raise _Skip(f"engine returned HTTP {status} posting to {url}")
 
@@ -315,7 +483,7 @@ def main(argv: list[str]) -> int:
         return 0
     kind = argv[1]
     raw_payload = sys.stdin.read()
-    session_id, agent_id, agent_type = _extract_fields(raw_payload)
+    session_id, agent_id, agent_type, transcript_path = _extract_fields(raw_payload)
 
     # kind=="report" WITH NO agent_id AT ALL (nexus-aginu): the harness
     # fires SubagentStop for stops this ledger has no tracked agent for
@@ -367,15 +535,48 @@ def main(argv: list[str]) -> int:
         _log_skip(session_id, f"SKIP kind={kind} agent_id={agent_id} oversized: {size_reason}")
         return 0
 
+    # Checkable-report dims (bead nexus-cnzei.6 item 2). Only kind=="report"
+    # has a VERIFY-bearing hand-back to parse -- kind=="start" fires before
+    # the agent has produced any output at all.
+    dims: dict[str, str] = {"agent_type": agent_type}
+    if kind == "report":
+        for name, value in _extract_verify_dims(transcript_path).items():
+            oversize = _sz.check_field_size(f"dims.{name}", value, _sz.MAX_FIELD_VALUE_BYTES)
+            if oversize is not None:
+                _log_skip(session_id, f"SKIP dims.{name} oversized, dropping: {oversize}")
+                continue
+            dims[name] = value
+
     config_dir = _ep.default_config_dir()
     try:
         base_url, token, is_local_supervisor = _resolve_endpoint_and_token(config_dir)
         body = {
             "subspace": subspace,
             "keys": {"agent_id": agent_id, "kind": kind},
-            "dims": {"agent_type": agent_type},
+            "dims": dims,
         }
-        _post_via_urllib(base_url, token, body, is_local_supervisor=is_local_supervisor)
+        try:
+            _post_via_urllib(base_url, token, body, is_local_supervisor=is_local_supervisor)
+        except _SchemaViolation:
+            # Below-floor engine (older than engine-service-v0.1.118): it
+            # does not declare commit/t2_ref/verify yet. Retry once with
+            # the legacy dims-only body so the row is written -- never
+            # dropped (nexus-cnzei.6 item 2 HARD REQUIREMENT). Nothing left
+            # to strip when dims is already just agent_type (kind=="start",
+            # or a report with no extra dims) -- re-raise unchanged there.
+            if len(dims) <= 1:
+                raise
+            _log_skip(
+                session_id,
+                f"SCHEMA_FALLBACK kind={kind} agent_id={agent_id} "
+                "engine refused new dims, retrying with legacy dims only",
+            )
+            fallback_body = {
+                "subspace": subspace,
+                "keys": {"agent_id": agent_id, "kind": kind},
+                "dims": {"agent_type": agent_type},
+            }
+            _post_via_urllib(base_url, token, fallback_body, is_local_supervisor=is_local_supervisor)
     except _Skip as exc:
         _log_skip(session_id, f"SKIP kind={kind} agent_id={agent_id} {exc}")
         return 0

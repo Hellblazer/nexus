@@ -162,8 +162,14 @@ def _write_data_token_lease(
 
 
 class _MockTupleEngine:
-    def __init__(self, status: int = 200) -> None:
+    def __init__(self, status: int = 200, reject_extra_dims: frozenset[str] | None = None) -> None:
         self.status = status
+        # bead nexus-cnzei.6 item 2: simulates a below-floor engine (older
+        # than engine-service-v0.1.118) that has not declared these dim
+        # names yet -- any request whose "dims" carries one of them gets a
+        # 400, exactly the SchemaViolation shape TemplateRegistry/
+        # TupleRepository actually returns for an undeclared dimension.
+        self.reject_extra_dims = reject_extra_dims or frozenset()
         self.requests: list[dict] = []
         self.auth_headers: list[str] = []
         engine = self
@@ -177,14 +183,21 @@ class _MockTupleEngine:
                 body = self.rfile.read(length) if length else b""
                 engine.auth_headers.append(self.headers.get("Authorization", ""))
                 try:
-                    engine.requests.append(json.loads(body.decode("utf-8")))
+                    parsed = json.loads(body.decode("utf-8"))
                 except json.JSONDecodeError:
-                    engine.requests.append({})
+                    parsed = {}
+                engine.requests.append(parsed)
                 if self.path != "/v1/tuples/out":
                     self.send_response(404)
                     self.end_headers()
                     return
-                self.send_response(engine.status)
+                dims = parsed.get("dims") if isinstance(parsed, dict) else None
+                status = engine.status
+                if engine.reject_extra_dims and isinstance(dims, dict) and (
+                    set(dims) & engine.reject_extra_dims
+                ):
+                    status = 400
+                self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(b"{}")
@@ -207,8 +220,8 @@ class _MockTupleEngine:
 def mock_engine():
     engines: list[_MockTupleEngine] = []
 
-    def make(status: int = 200) -> _MockTupleEngine:
-        e = _MockTupleEngine(status=status)
+    def make(status: int = 200, reject_extra_dims: frozenset[str] | None = None) -> _MockTupleEngine:
+        e = _MockTupleEngine(status=status, reject_extra_dims=reject_extra_dims)
         engines.append(e)
         return e
 
@@ -539,7 +552,9 @@ def test_report_kind_tolerates_missing_agent_type(tmp_path: Path, mock_engine) -
     assert len(engine.requests) == 1
     body = engine.requests[0]
     assert body["keys"] == {"agent_id": AGENT_ID, "kind": "report"}
-    assert body["dims"] == {"agent_type": ""}
+    # No agent_transcript_path in this payload -- verify=absent, no
+    # commit/t2_ref (bead nexus-cnzei.6 item 2).
+    assert body["dims"] == {"agent_type": "", "verify": "absent"}
     log = _log_path(tmp_path / "state")
     assert not log.exists() or "SKIP" not in log.read_text()
 
@@ -966,3 +981,272 @@ def test_oversized_session_id_subspace_skips_before_any_post(tmp_path: Path, moc
     )
     assert proc.returncode == 0, proc.stderr
     assert engine.requests == []
+
+
+# ── Checkable-report VERIFY dims (bead nexus-cnzei.6 item 2) ────────────────
+#
+# Real-shaped transcript fixtures -- the same convention
+# test_subagent_stop_hook.py and test_subagent_stop_writes_scan.py use:
+# genuine Claude Code transcript entry shapes (assistant/message/content
+# blocks; a SendMessage tool_use's "content" input field, not a
+# simplified stand-in string), never a copied literal.
+
+
+def _assistant_text_entry(text: str) -> dict:
+    return {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+    }
+
+
+def _sendmessage_entry(content_text: str, *, to: str = "main") -> dict:
+    return {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "sm1",
+                    "name": "SendMessage",
+                    "input": {"to": to, "content": content_text},
+                }
+            ],
+        },
+    }
+
+
+def _write_transcript(tmp_path: Path, entries: list[dict], name: str = "agent_transcript.jsonl") -> Path:
+    p = tmp_path / name
+    p.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
+    return p
+
+
+def test_report_kind_extracts_verify_dims_from_final_assistant_text(
+    tmp_path: Path, mock_engine,
+) -> None:
+    """A real-shaped transcript whose LAST assistant turn is plain text
+    carrying VERIFY lines -- the synchronous-dispatch hand-back shape."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    transcript = _write_transcript(tmp_path, [
+        {"type": "user", "message": {"role": "user", "content": "do the thing"}},
+        _assistant_text_entry(
+            "Implementation complete.\n"
+            "VERIFY: commit=abc1234\n"
+            "VERIFY: uv run pytest tests/hooks/test_x.py => rc=0 3 passed\n"
+            "VERIFY: t2=nexus/impl-notes.md\n"
+        ),
+    ])
+
+    proc = _run(
+        "report", tmp_path=tmp_path,
+        stdin=_payload(agent_transcript_path=str(transcript)),
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+    dims = engine.requests[0]["dims"]
+    assert dims == {
+        "agent_type": AGENT_TYPE,
+        "verify": "present",
+        "commit": "abc1234",
+        "t2_ref": "nexus/impl-notes.md",
+    }
+
+
+def test_report_kind_extracts_verify_dims_from_sendmessage_content(
+    tmp_path: Path, mock_engine,
+) -> None:
+    """The background-teammate shape: the final assistant turn carries no
+    text at all, but an earlier SendMessage tool_use's "content" field is
+    the agent's real report and carries the VERIFY lines."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    transcript = _write_transcript(tmp_path, [
+        {"type": "user", "message": {"role": "user", "content": "do the thing"}},
+        _sendmessage_entry(
+            "Done.\nVERIFY: commit=deadbee\nVERIFY: t2=nexus/checkpoint",
+        ),
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t9", "name": "Bash", "input": {}}]},
+        },
+    ])
+
+    proc = _run(
+        "report", tmp_path=tmp_path,
+        stdin=_payload(agent_transcript_path=str(transcript)),
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+    dims = engine.requests[0]["dims"]
+    assert dims["verify"] == "present"
+    assert dims["commit"] == "deadbee"
+    assert dims["t2_ref"] == "nexus/checkpoint"
+
+
+def test_report_kind_verify_absent_when_no_verify_lines_present(
+    tmp_path: Path, mock_engine,
+) -> None:
+    """A readable transcript with a real final assistant turn, but no
+    ``VERIFY:`` line anywhere -- ``verify=absent``, no commit/t2_ref."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    transcript = _write_transcript(tmp_path, [
+        {"type": "user", "message": {"role": "user", "content": "do the thing"}},
+        _assistant_text_entry("Done, no checkable claims here."),
+    ])
+
+    proc = _run(
+        "report", tmp_path=tmp_path,
+        stdin=_payload(agent_transcript_path=str(transcript)),
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+    assert engine.requests[0]["dims"] == {"agent_type": AGENT_TYPE, "verify": "absent"}
+
+
+def test_report_kind_verify_absent_when_transcript_path_does_not_exist(
+    tmp_path: Path, mock_engine,
+) -> None:
+    """``agent_transcript_path`` present in the payload but naming a file
+    that does not exist -- fails open to ``verify=absent``, same as a
+    missing field entirely; the row is still written."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    proc = _run(
+        "report", tmp_path=tmp_path,
+        stdin=_payload(agent_transcript_path=str(tmp_path / "does-not-exist.jsonl")),
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+    assert engine.requests[0]["dims"] == {"agent_type": AGENT_TYPE, "verify": "absent"}
+
+
+def test_start_kind_never_parses_verify_lines(tmp_path: Path, mock_engine) -> None:
+    """Regression guard: kind=="start" never carries the new dims at all,
+    even when a (nonsensical for this kind) agent_transcript_path with
+    VERIFY lines is present in the payload -- SubagentStart fires before
+    any agent output exists to parse."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    transcript = _write_transcript(tmp_path, [
+        _assistant_text_entry("VERIFY: commit=abc1234"),
+    ])
+
+    proc = _run(
+        "start", tmp_path=tmp_path,
+        stdin=_payload(agent_transcript_path=str(transcript)),
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+    assert engine.requests[0]["dims"] == {"agent_type": AGENT_TYPE}
+
+
+def test_report_kind_falls_back_to_legacy_dims_when_engine_refuses_new_dims(
+    tmp_path: Path, mock_engine,
+) -> None:
+    """HARD REQUIREMENT (bead nexus-cnzei.6 item 2): an engine older than
+    engine-service-v0.1.118 does not declare commit/t2_ref/verify and
+    answers an ``out`` naming them with HTTP 400. The row must still land
+    -- retried once with the legacy dims-only body, never dropped."""
+    engine = mock_engine(status=200, reject_extra_dims=frozenset({"commit", "t2_ref", "verify"}))
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    transcript = _write_transcript(tmp_path, [
+        _assistant_text_entry("VERIFY: commit=abc1234\nVERIFY: t2=nexus/notes"),
+    ])
+
+    proc = _run(
+        "report", tmp_path=tmp_path,
+        stdin=_payload(agent_transcript_path=str(transcript)),
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    # First attempt (rejected) + retry (accepted).
+    assert len(engine.requests) == 2
+    first, second = engine.requests
+    assert set(first["dims"]) == {"agent_type", "verify", "commit", "t2_ref"}
+    assert second["dims"] == {"agent_type": AGENT_TYPE}
+    log = _log_path(tmp_path / "state").read_text()
+    assert "SCHEMA_FALLBACK kind=report" in log
+
+
+def test_oversized_t2_ref_dim_is_dropped_but_row_still_written(
+    tmp_path: Path, mock_engine,
+) -> None:
+    """An oversized VERIFY-derived dim value is dropped (logged), not a
+    reason to skip the whole row -- ``verify`` still lands."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    transcript = _write_transcript(tmp_path, [
+        _assistant_text_entry(f"VERIFY: t2={'x' * 300}"),
+    ])
+
+    proc = _run(
+        "report", tmp_path=tmp_path,
+        stdin=_payload(agent_transcript_path=str(transcript)),
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+    dims = engine.requests[0]["dims"]
+    assert dims == {"agent_type": AGENT_TYPE, "verify": "present"}
+    assert "t2_ref" not in dims
+    log = _log_path(tmp_path / "state").read_text()
+    assert "SKIP dims.t2_ref oversized, dropping" in log
+    assert "SKIP kind=report" not in log
+
+
+def _load_module_directly():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("tuple_ledger_project_verify_unit", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_extract_verify_dims_ignores_a_malformed_commit_value(tmp_path: Path) -> None:
+    """A ``commit=`` line that is not 7-40 hex chars still counts toward
+    ``verify=present`` (a VERIFY claim was made), but is not parsed as a
+    commit dim -- a malformed value must never masquerade as a sha."""
+    module = _load_module_directly()
+    transcript = _write_transcript(tmp_path, [
+        _assistant_text_entry("VERIFY: commit=not-hex!!\nVERIFY: some other claim"),
+    ])
+    assert module._extract_verify_dims(str(transcript)) == {"verify": "present"}
+
+
+def test_extract_verify_dims_first_match_wins_for_commit_and_t2_ref(tmp_path: Path) -> None:
+    """Multiple VERIFY lines of the same shape: the first is kept, not
+    the last -- deterministic and simple, matching the common case of one
+    commit and one t2 line per report."""
+    module = _load_module_directly()
+    transcript = _write_transcript(tmp_path, [
+        _assistant_text_entry(
+            "VERIFY: commit=aaaaaaa\nVERIFY: commit=bbbbbbb\n"
+            "VERIFY: t2=nexus/one\nVERIFY: t2=nexus/two"
+        ),
+    ])
+    assert module._extract_verify_dims(str(transcript)) == {
+        "verify": "present", "commit": "aaaaaaa", "t2_ref": "nexus/one",
+    }
