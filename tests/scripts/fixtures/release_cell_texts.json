@@ -387,6 +387,10 @@
     "err": "TRACKER NOT RECORDED (exit 3): simulated: no_report_for_version\n",
     "out": ""
   },
+  "record_deploy_from_gate_report_leg::tracker_production_write_guard": {
+    "err": "TRACKER NOT RECORDED (exit 3): production-write guard refused the tracker write. Set NX_GATE_REPORT_DIR + a reasoned NX_ALLOW_PROD_WRITE (simulated: refused a WRITE (production-write guard)). This box's nexus resolves from a dev checkout, so the tracker write (an HTTP T2 write) is presumed to target the operator's real, live store -- see NX_ALLOW_PROD_WRITE=\"<why this write is deliberate>\".\n",
+    "out": ""
+  },
   "record_deploy_from_gate_report_leg::tracker_recorded": {
     "err": "",
     "out": "deployed-engine-version recorded from report.json: deployed-engine-version: fake\n"

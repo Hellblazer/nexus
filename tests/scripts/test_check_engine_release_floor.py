@@ -2118,6 +2118,35 @@ def test_choreography_record_deploy_classifies_exception_subclass(capsys: pytest
     assert "TRACKER NOT RECORDED" in err
 
 
+def test_choreography_record_deploy_names_production_write_guard(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """nexus-jzyt3: the tracker WRITE itself (``deploy_tracker.
+    write_deployed_engine_tracker`` -> a T2 HTTP write) can hit
+    ``guard_production_write`` on a dev-checkout box. Before this fix that
+    exception was uncaught here, propagating as a bare traceback whose last
+    line does not start with an ALL-CAPS verdict token --
+    ``tests/e2e/release-preflight.sh``'s ``check()`` then printed "(no
+    verdict line matched)" instead of the actual refusal (observed cutting
+    conexus 7.44.0). Assert it is caught, routed through the choreography
+    (rc == 3, an ALL-CAPS ``TRACKER NOT RECORDED`` verdict), and that the
+    printed text names BOTH inputs required to record from a box like this
+    one: NX_GATE_REPORT_DIR and a reasoned NX_ALLOW_PROD_WRITE."""
+    with patch.object(
+        gate.deploy_tracker, "record_deploy_from_gate_report",
+        side_effect=gate.ProductionWriteGuardError(
+            "STOP: refusing a WRITE to 'https://api.conexus-nexus.com'"
+        ),
+    ):
+        rc = gate.record_deploy_from_gate_report_leg(_pathlib.Path("/fake/dir"), url=None)
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "TRACKER NOT RECORDED" in err
+    assert "NX_GATE_REPORT_DIR" in err
+    assert gate.PROD_WRITE_OPT_IN_ENV in err
+    assert "STOP: refusing a WRITE" in err
+
+
 def test_choreography_record_deploy_refuses_an_unmapped_tracker_subclass() -> None:
     """RDR-201 P2.6 (nexus-j9z30.16): the table's six tracker rows partition
     DeployTrackerError's subclasses exactly. A subclass with no row is a

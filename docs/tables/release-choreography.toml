@@ -403,14 +403,16 @@ guard = { "check_paired_preconditions.tag_shape" = "valid_prefix", "check_paired
 emit = { exit_code = "0", message_key = "battery_armed" }
 
 # --------------------------------------------------------------------
-# record_deploy_from_gate_report_leg (GuardChain, 1 dim, 8 leaves --
-# deploy_tracker.py's own 8-way CLASSIFIED tracker outcome)
+# record_deploy_from_gate_report_leg (GuardChain, 1 dim, 9 leaves --
+# deploy_tracker.py's own 8-way CLASSIFIED tracker outcome plus the
+# production-write guard on the tracker write itself, nexus-jzyt3)
 # --------------------------------------------------------------------
 
 [dimensions."record_deploy_from_gate_report_leg.outcome"]
 domain = [
   "directory_error", "schema_error", "no_report_for_version", "gate_red",
-  "version_mismatch", "live_version_mismatch", "managed_service_error", "ok",
+  "version_mismatch", "live_version_mismatch", "managed_service_error",
+  "production_write_guard", "ok",
 ]
 
 [[row]]
@@ -454,6 +456,12 @@ id = "record_deploy_from_gate_report_leg::tracker_managed_service_error"
 match = { function = "record_deploy_from_gate_report_leg" }
 guard = { "record_deploy_from_gate_report_leg.outcome" = "managed_service_error" }
 emit = { exit_code = "3", message_key = "tracker_managed_service_error" }
+
+[[row]]
+id = "record_deploy_from_gate_report_leg::tracker_production_write_guard"
+match = { function = "record_deploy_from_gate_report_leg" }
+guard = { "record_deploy_from_gate_report_leg.outcome" = "production_write_guard" }
+emit = { exit_code = "3", message_key = "tracker_production_write_guard" }
 
 [[row]]
 id = "record_deploy_from_gate_report_leg::tracker_recorded"

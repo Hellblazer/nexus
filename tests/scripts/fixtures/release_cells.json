@@ -176,6 +176,7 @@
           "version_mismatch",
           "live_version_mismatch",
           "managed_service_error",
+          "production_write_guard",
           "ok"
         ],
         "description": ""
@@ -242,9 +243,9 @@
       "check_composite",
       "precond_main_dispatch"
     ],
-    "reachable_cell_count": 100,
+    "reachable_cell_count": 101,
     "unreachable_declared_leaf_count": 0,
-    "total_combinations_considered": 1324
+    "total_combinations_considered": 1325
   },
   "cells": [
     {
@@ -818,6 +819,16 @@
       "note": ""
     },
     {
+      "cell_id": "record_deploy_from_gate_report_leg::tracker_production_write_guard",
+      "function": "record_deploy_from_gate_report_leg",
+      "inputs": {
+        "outcome": "production_write_guard"
+      },
+      "exit_code": 3,
+      "message_key": "tracker_production_write_guard",
+      "note": ""
+    },
+    {
       "cell_id": "record_deploy_from_gate_report_leg::tracker_schema_error",
       "function": "record_deploy_from_gate_report_leg",
       "inputs": {
@@ -1139,7 +1150,7 @@
       },
       "exit_code": 0,
       "message_key": "main_bare_tracker_delegates",
-      "note": "delegate to record_deploy_from_gate_report_leg; its own 8 leaves are enumerated separately by tracker_outcome_chain"
+      "note": "delegate to record_deploy_from_gate_report_leg; its own 9 leaves are enumerated separately by tracker_outcome_chain"
     },
     {
       "cell_id": "main_dispatch::main_bare_tracker_opt_out",

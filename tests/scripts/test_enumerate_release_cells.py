@@ -242,7 +242,7 @@ class TestFloorLinearChains:
     def test_tracker_outcome_chain_is_non_vacuous_and_exhaustive(self) -> None:
         chain = erc.tracker_outcome_chain()
         result = erc.enumerate_chain(chain)
-        assert len(result.reachable) == 8
+        assert len(result.reachable) == 9
         assert result.unreachable_declared_leaves == ()
 
     def test_tracker_outcome_chain_cells_are_driven(self) -> None:

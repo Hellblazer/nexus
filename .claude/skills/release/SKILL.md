@@ -64,6 +64,27 @@ This gate exists because the engine silently drifted 22 `service/` commits / 4 d
 NX_PAIRED_DEPLOY=engine-service-vX.Y.Z ./tests/e2e/release-preflight.sh
 ```
 
+**CLOUD-MODE BOX, TWO REQUIRED ENV VARS (nexus-jzyt3).** The
+`engine-release-floor` leg's bare form is a POST-TAG VERIFY by design
+(nexus-nx3l5) and needs both of these set on a cloud-mode box, or it reds
+for a reason that is not a release problem:
+
+- `NX_GATE_REPORT_DIR=<conexus checkout>/deploy` — where conexus's STEP-6
+  gate reports live, so the verify can select the report that gated the
+  live version.
+- `NX_ALLOW_PROD_WRITE="<why this write is deliberate>"` — the tracker
+  write this leg performs is an HTTP T2 write, so on a dev checkout it also
+  needs a reasoned opt-in past the production-write guard (nexus-a2qhz), or
+  the leg reds with `TRACKER NOT RECORDED ... refused by the
+  production-write guard`, which names both requirements again in the
+  refusal itself.
+
+Without either, `tests/e2e/release-preflight.sh` used to print
+`[FAIL] engine-release-floor -- (no verdict line matched)` for the
+production-write-guard case specifically — fixed to print the actual
+refusal (see `check_engine_release_floor.py`'s
+`record_deploy_from_gate_report_leg`).
+
 Run this BEFORE step 1 and before any expensive leg. It evaluates every
 seconds-scale, deterministic, release-BLOCKING check in one pass and does NOT
 abort on the first red -- it reports every failure it finds, so one cycle

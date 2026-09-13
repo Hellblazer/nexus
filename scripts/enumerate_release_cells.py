@@ -28,7 +28,7 @@ different ground (critique CRITICAL, T2 nexus/critique-nexus-j9z30-11-2026-09-01
 
 - the gate-report DIRECTORY CONTENTS deploy_tracker.py's discovery logic
   reads (arbitrary file listings / timestamps / JSON bodies) -- this module
-  drives :func:`record_deploy_from_gate_report_leg`'s 8-way CLASSIFIED
+  drives :func:`record_deploy_from_gate_report_leg`'s 9-way CLASSIFIED
   outcome (:func:`tracker_outcome_chain`) by monkeypatching
   ``nexus.deploy_tracker.record_deploy_from_gate_report`` directly to
   raise/return each named outcome, never by writing real report files and
@@ -119,6 +119,7 @@ from nexus.db.managed_endpoint import (
     ManagedServiceIncompatible,
     ManagedServiceUnreachable,
 )
+from nexus.db.service_endpoint import ProductionWriteGuardError
 from nexus.engine_version import REQUIRED_ENGINE_VERSION
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -816,7 +817,8 @@ def _classify_release_arming(rc: int, text: str) -> str:
 
 _TRACKER_OUTCOME_LABELS = (
     "directory_error", "schema_error", "no_report_for_version", "gate_red",
-    "version_mismatch", "live_version_mismatch", "managed_service_error", "ok",
+    "version_mismatch", "live_version_mismatch", "managed_service_error",
+    "production_write_guard", "ok",
 )
 
 
@@ -831,6 +833,7 @@ def tracker_outcome_chain() -> GuardChain:
             "version_mismatch": Leaf(3, "tracker_version_mismatch"),
             "live_version_mismatch": Leaf(3, "tracker_live_version_mismatch"),
             "managed_service_error": Leaf(3, "tracker_managed_service_error"),
+            "production_write_guard": Leaf(3, "tracker_production_write_guard"),
             "ok": Leaf(0, "tracker_recorded"),
         }),
     )
@@ -866,6 +869,8 @@ def drive_tracker_outcome(cell: Cell) -> tuple[int, str]:
             raise error_cls("simulated: " + label)
         if label == "managed_service_error":
             raise ManagedServiceIncompatible("simulated live re-read failure")
+        if label == "production_write_guard":
+            raise ProductionWriteGuardError("simulated: refused a WRITE (production-write guard)")
         return _fake_tracker_write()
 
     with patch.object(deploy_tracker, "record_deploy_from_gate_report", side_effect=fake_record):
@@ -888,6 +893,7 @@ def _classify_tracker_outcome(rc: int, text: str, label: str) -> str:
         "version_mismatch": "tracker_version_mismatch",
         "live_version_mismatch": "tracker_live_version_mismatch",
         "managed_service_error": "tracker_managed_service_error",
+        "production_write_guard": "tracker_production_write_guard",
     }[label]
 
 
@@ -1147,7 +1153,7 @@ def main_dispatch_cells() -> EnumerationResult:
         Cell("main_dispatch",
              {"mode": "bare", "check_floor": "passes", "ancestry": "passes", "tracker": "resolved"},
              0, "main_bare_tracker_delegates",
-             note="delegate to record_deploy_from_gate_report_leg; its own 8 leaves "
+             note="delegate to record_deploy_from_gate_report_leg; its own 9 leaves "
                   "are enumerated separately by tracker_outcome_chain"),
         Cell("main_dispatch",
              {"mode": "bare", "check_floor": "passes", "ancestry": "passes", "tracker": "opt_out"},
