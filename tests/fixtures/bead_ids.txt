@@ -510,6 +510,7 @@ nexus-2r71
 nexus-2rtge
 nexus-2rxzs
 nexus-2rxzs.1
+nexus-2s91y
 nexus-2sa6w
 nexus-2sovp
 nexus-2soxq
@@ -955,6 +956,7 @@ nexus-57lj2
 nexus-57mk
 nexus-57pwo
 nexus-58ui
+nexus-58vc9
 nexus-59611
 nexus-59611.1
 nexus-596jm
@@ -1609,6 +1611,7 @@ nexus-8zfwv
 nexus-8zfwv.1
 nexus-8znyd
 nexus-8zog5
+nexus-8zoyp
 nexus-8zpmf
 nexus-8zpmf.1
 nexus-904y8
@@ -2282,6 +2285,15 @@ nexus-cmtpa
 nexus-cmzib
 nexus-cncue
 nexus-cnls
+nexus-cnzei
+nexus-cnzei.1
+nexus-cnzei.2
+nexus-cnzei.3
+nexus-cnzei.4
+nexus-cnzei.5
+nexus-cnzei.6
+nexus-cnzei.7
+nexus-cnzei.8
 nexus-coeff
 nexus-coq1z
 nexus-cotmr
@@ -2378,6 +2390,7 @@ nexus-d977b.1
 nexus-d9dba
 nexus-d9dw3
 nexus-d9fwj
+nexus-d9k5h
 nexus-d9xt2
 nexus-d9xt2.1
 nexus-db3k
@@ -2783,6 +2796,7 @@ nexus-fa2lo
 nexus-fadgx
 nexus-fai28
 nexus-fam6l
+nexus-fam6l.1
 nexus-fams8
 nexus-far1c
 nexus-fb6x
@@ -5352,6 +5366,7 @@ nexus-t9rmg.8
 nexus-t9rmg.8.1
 nexus-t9rmg.9
 nexus-tacsg
+nexus-tacsg.1
 nexus-tafjk
 nexus-tafjk.1
 nexus-taseo
@@ -5795,6 +5810,7 @@ nexus-vounk
 nexus-vounk.1
 nexus-voy5
 nexus-vpe5f
+nexus-vpl9c
 nexus-vqnls
 nexus-vqnls.1
 nexus-vscgz
@@ -6029,6 +6045,8 @@ nexus-x3z00.1
 nexus-x47yx
 nexus-x4hdl
 nexus-x5da
+nexus-x5kfm
+nexus-x5kfm.1
 nexus-x654o
 nexus-x65c
 nexus-x6eu
