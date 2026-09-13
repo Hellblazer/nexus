@@ -65,11 +65,11 @@ hypothesis testing, alternative comparison, or exploration-with-backtracking.
 Everything that was moved to MCP is a structured-output call disguised as
 an agent.
 
-## The stub-agent pattern
+## The stub-agent pattern (retired nexus-cnzei.4)
 
-For the three agents that were demoted to MCP tools, the plugin keeps a
+For the three agents demoted to MCP tools, the plugin used to keep a
 40-line stub agent file (`conexus/agents/{knowledge-tidier,plan-auditor,plan-enricher}.md`)
-so legacy dispatch references don't break:
+so legacy dispatch references wouldn't break:
 
 ```markdown
 ---
@@ -90,15 +90,16 @@ Call the MCP tool directly:
     mcp__plugin_conexus_nexus__nx_tidy(topic="...", collection="knowledge")
 ```
 
-When a caller dispatches the stub agent via the `Agent` tool, Claude reads
-the stub body as the system prompt, recognises the redirect, and invokes
-the MCP tool on the caller's behalf.  The runtime validation harness
-(`scripts/validate/07-agent-behavior.py` and `09-plugin-runtime.py`) verifies
-this routing actually happens.
+When a caller dispatched the stub agent via the `Agent` tool, Claude read
+the stub body as the system prompt, recognised the redirect, and invoked
+the MCP tool on the caller's behalf.
 
-**Do not add new stub agents**.  Once the six months of compatibility
-headroom elapses, these three will be deleted — new callers should go to
-the MCP tool directly.
+**All three stub files were deleted outright at nexus-cnzei.4** rather than
+kept as a compatibility redirect: they were 40 lines of indirection for a
+one-line call, and the corresponding pointer skill (`knowledge-tidying`,
+`plan-validation`, `enrich-plan`) already documents the same MCP-tool call
+without the agent-dispatch detour. New callers go to the MCP tool, or the
+pointer skill, directly.
 
 ## When you're authoring a new capability
 

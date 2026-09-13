@@ -253,7 +253,7 @@ The `nx_answer` / `nx_tidy` / `nx_plan_audit` / `nx_enrich_beads` / `operator_*`
   - **Check**: the exception carries the first 300 chars of stderr, or the raw stdout snippet — enough to distinguish an auth/CLI problem from a schema-adherence problem.
   - **Fix**: if stderr shows an auth or CLI-not-found error, check that `claude` is on `PATH` for the environment the MCP server process itself runs in (not your interactive shell — see the Desktop-install PATH footgun in `docs/desktop-deployment.md` for the analogous class of bug). If it's a JSON-adherence failure, simplify the schema or the prompt.
   - **Verify**: re-run and confirm a `dict` is returned instead of an exception.
-- **Timeout clamping surprises**: because `_SUBAGENT_TIMEOUT_FLOOR = 300.0` silently raises any caller-supplied timeout below it, a subagent (plan-enricher, plan-auditor) that "already passed a timeout" may not be getting the value it thinks it is.
+- **Timeout clamping surprises**: because `_SUBAGENT_TIMEOUT_FLOOR = 300.0` silently raises any caller-supplied timeout below it, a caller of `nx_enrich_beads` or `nx_plan_audit` that "already passed a timeout" may not be getting the value it thinks it is.
   - **Check**: `subagent_timeout_clamped` in `mcp.log`, with `requested` and `floor` fields.
   - **Note**: this is expected behavior (nexus-7sbf), not a bug — the floor exists specifically to stop agents from re-introducing false-positive timeouts via low overrides.
 
