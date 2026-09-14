@@ -56,7 +56,9 @@ class MemorySchemaLiquibaseTest {
     private static final Set<String> EXPECTED_COLUMNS = Set.of(
         "id", "tenant_id", "project", "title", "session", "agent",
         "content", "tags", "timestamp", "ttl_days", "access_count", "last_accessed",
-        "fts_vector"
+        "fts_vector",
+        // RDR-207 / memory-004-1 (nexus-l3yuc.1): the quarantine stamps.
+        "quarantined_at", "rolled_up_at"
     );
 
     // Service role created by @BeforeAll — plain LOGIN, no superuser, no bypassrls.

@@ -83,6 +83,8 @@ class SchemaMigratorIntegrationTest {
 
     private static final Set<String> EXPECTED_NEXUS_TABLES = Set.of(
         "memory",
+        // RDR-207 / memory-004-2 (nexus-l3yuc.1): rollup summaries, provenance of a mark.
+        "memory_summaries",
         "plans",
         "relevance_log", "search_telemetry", "tier_writes", "nx_answer_runs",
         "hook_failures", "frecency",

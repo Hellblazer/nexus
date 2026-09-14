@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-l3yuc.1 (RDR-207 § Technical Design, "Schema, one Liquibase
+    changeset"; § Implementation Plan Phase 1 step 1; assumption A3):
+    quarantine stamps on nexus.memory and the nexus.memory_summaries table.
+
+    WHY. RDR-207 replaces deletion at the T2 expiry boundary with a
+    quarantine: MemoryRepository.expire() stamps quarantined_at instead of
+    deleting, every read path hides a stamped row, and reap() deletes only a
+    row that also carries rolled_up_at: the mark written in the same
+    transaction as the summary row that covers it. Restoring clears both
+    stamps. The two stamps are the whole state machine; the summaries table
+    is the provenance of what a mark stands for.
+
+    nexus.memory: two nullable TIMESTAMPTZ columns, quarantined_at and
+    rolled_up_at, and a partial index on (tenant_id, quarantined_at) WHERE
+    quarantined_at IS NOT NULL. The quarantined population is small next to
+    the live one and the listQuarantined/reap/rollup readers are the only
+    consumers, so the index covers exactly those rows and nothing else.
+    Existing rows keep both columns NULL: no row is changed, so no
+    DATA EFFECT: line applies (scripts/data_effect_lint.py classifies
+    nullable ADD COLUMN, CREATE TABLE and CREATE INDEX as additive).
+
+    nexus.memory_summaries: id, tenant_id, project, content, source_ids
+    BIGINT[], produced_at, model, produced_by. source_ids is an ARRAY and
+    NOT a foreign key on purpose (RDR-207 § Briefly Rejected): the source
+    rows are meant to be deleted by reap once the summary exists, so the
+    id list is provenance of what was summarized, never a live reference.
+    RDR-194's foreign-key census applies to live references; this is not
+    one. The two CHECKs refuse an empty summary and an empty source list;
+    a summary of nothing is never a valid mark.
+
+    ROW-LEVEL SECURITY IS PER TABLE (RDR-207 research finding 4): the
+    memory-001-3 policy on nexus.memory does not extend to a new table, so
+    the ENABLE + FORCE + tenant_isolation block is copied WHOLE onto
+    nexus.memory_summaries, with only the table name changed. FORCE
+    matters as much as ENABLE: without it the table OWNER (nexus_admin, the
+    Liquibase role) reads every tenant's summaries unfiltered. The test
+    (MemorySummariesRlsTest) reads as the owner and as the service role
+    with a second tenant's GUC stamped and asserts the first tenant's rows
+    are invisible on both legs.
+
+    GRANTS. nexus_svc DML on the table and on memory_summaries_id_seq
+    arrives through the nexus schema DEFAULT PRIVILEGES grants-nexus-svc.xml
+    already carries for tables AND sequences, so no GRANT line here.
+    nexus_diag gets NOTHING on this table, deliberately: it is a CONTENT
+    table (summarized memory content), grants-nexus-diag-4's own header
+    records that nexus.memory is unreadable by nexus_diag under the RDR-182
+    s5 content boundary with default privileges revoked so a new content
+    table cannot become silently readable, and nexus_diag is BYPASSRLS, so
+    a grant would open every tenant's summaries at once. Granting it is
+    Sam's decision, never this changeset's (plan record A6, T2
+    nexus/plan-rdr-207-implementation-2026-09-14).
+
+    D0.6 ROLLBACK: complete and object-for-object: drops the policy, the
+    FORCE and ENABLE flags, the summaries table, the partial index and both
+    columns, so SchemaRollbackRoundTripIntegrationTest's full-chain rollback
+    leaves no survivor. Nothing here is data, so nothing is unrecoverable on
+    rollback.
+
+    D0.1 placement: changelog TAIL, after taxonomy-017-doc-count-posture-
+    tripwire.xml (the current tail) and before the grants-nexus-svc.xml
+    runAlways block, matching the established late-append convention.
+    Three changesets, one file: EXPECT_NEW_CHANGESETS=3 for the
+    candidate-migration rehearsal of this bead.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset memory-004-1: quarantine stamps + partial index ─────────── -->
+    <changeSet id="memory-004-1" author="nexus-l3yuc.1">
+        <comment>
+            nexus.memory gains quarantined_at and rolled_up_at (nullable
+            TIMESTAMPTZ) and a partial index over the quarantined rows.
+            Additive: every existing row keeps both columns NULL.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.memory
+    ADD COLUMN quarantined_at TIMESTAMPTZ,
+    ADD COLUMN rolled_up_at   TIMESTAMPTZ;
+
+-- Partial: only the quarantined population is ever read by this key
+-- (listQuarantined, reap, the rollup producer). Live rows stay out of it.
+CREATE INDEX idx_memory_tenant_quarantined_at
+    ON nexus.memory (tenant_id, quarantined_at)
+    WHERE quarantined_at IS NOT NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+DROP INDEX IF EXISTS nexus.idx_memory_tenant_quarantined_at;
+ALTER TABLE nexus.memory DROP COLUMN IF EXISTS rolled_up_at;
+ALTER TABLE nexus.memory DROP COLUMN IF EXISTS quarantined_at;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset memory-004-2: nexus.memory_summaries ───────────────────── -->
+    <changeSet id="memory-004-2" author="nexus-l3yuc.1">
+        <comment>
+            Create nexus.memory_summaries: one row per rollup summary, its
+            source ids as provenance (BIGINT[], not a foreign key: the
+            sources are meant to be reaped once the summary exists).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.memory_summaries (
+    id           BIGSERIAL    NOT NULL,
+    tenant_id    TEXT         NOT NULL,
+    project      TEXT         NOT NULL,
+    content      TEXT         NOT NULL,
+    source_ids   BIGINT[]     NOT NULL,
+    produced_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    model        TEXT         NOT NULL,
+    produced_by  TEXT,
+    CONSTRAINT memory_summaries_pk PRIMARY KEY (id),
+    CONSTRAINT memory_summaries_content_nonempty_chk CHECK (length(content) > 0),
+    CONSTRAINT memory_summaries_source_ids_nonempty_chk CHECK (cardinality(source_ids) > 0)
+);
+
+CREATE INDEX idx_memory_summaries_tenant_project
+    ON nexus.memory_summaries (tenant_id, project);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.memory_summaries CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset memory-004-3: RLS enable + force + policy (copied from
+            memory-001-3, table name changed; RLS does not inherit) ─────────── -->
+    <changeSet id="memory-004-3" author="nexus-l3yuc.1">
+        <comment>
+            Enable and force RLS on nexus.memory_summaries; create its own
+            tenant_isolation policy (row-level security is per table).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.memory_summaries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.memory_summaries FORCE ROW LEVEL SECURITY;
+
+-- cmd=ALL: covers SELECT, INSERT, UPDATE, DELETE in one policy.
+-- USING predicate: filters rows on reads (SELECT / UPDATE source / DELETE source).
+-- WITH CHECK predicate: validates rows on writes (INSERT / UPDATE target).
+-- current_setting('nexus.tenant', true): missing_ok=true so unset GUC returns NULL
+--   rather than raising an error. NULL != any tenant_id → zero rows match.
+--   This is the fail-closed default: an unstamped connection sees nothing.
+CREATE POLICY tenant_isolation ON nexus.memory_summaries
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.memory_summaries;
+            ALTER TABLE nexus.memory_summaries NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.memory_summaries DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

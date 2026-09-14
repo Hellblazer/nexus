@@ -68,6 +68,16 @@ GRANT USAGE ON SCHEMA nexus_test TO ${adminRole};
 GRANT EXECUTE ON FUNCTION nexus_test.set_force_rls(regclass, boolean) TO ${adminRole};
 
 ALTER TABLE nexus.topic_assignments OWNER TO ${adminRole};
+
+-- nexus-l3yuc.1 (RDR-207 memory-004): MemorySummariesRlsTest reads nexus.memory
+-- and nexus.memory_summaries AS THE OWNER with a second tenant's GUC stamped, so
+-- a missing FORCE ROW LEVEL SECURITY (the flag that makes the owner subject to
+-- the policy) shows up as a cross-tenant read. It also flips FORCE off and on
+-- through nexus_test.set_force_rls to prove the assertion is sensitive, which
+-- only the owner may do. Both tables transfer to ${adminRole} for that reason;
+-- the sequences they own (memory_id_seq, memory_summaries_id_seq) follow.
+ALTER TABLE nexus.memory OWNER TO ${adminRole};
+ALTER TABLE nexus.memory_summaries OWNER TO ${adminRole};
         </sql>
         <rollback>
             <!-- Test-only role/grant/ownership bootstrap; not automated, same as
