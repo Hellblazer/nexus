@@ -1277,11 +1277,17 @@ class TupleRepositoryTest {
     }
 
     /**
-     * A directory entry whose {@code ttl_seconds=1} lapses drops out of {@code rd}
-     * before any purge runs -- {@code queryOnce} filters on {@code expires_at >
-     * now}, no sweep needed. Bounded poll (no fixed sleep): P2.1's release-on-
-     * self-stop depends on this property, so the assertion must observe the real
-     * transition rather than assume a guessed sleep duration covers it.
+     * A freshly-INSERTED directory entry ({@code ttl_seconds=1}, a never-before-
+     * used nonce -- the INSERT path) lapses and drops out of {@code rd} before
+     * any purge runs -- {@code queryOnce} filters on {@code expires_at > now},
+     * no sweep needed. Bounded poll (no fixed sleep). This covers the INSERT
+     * path only; it does NOT exercise a resend shortening an existing row's
+     * expiry -- see {@link
+     * #out_directoryResentWithShorterTtl_expiresAtMovesBackward_thenRdDropsAfterLapse}
+     * for the RESEND path (a live, longer-lived row pulled back by a short-ttl
+     * resend of the SAME id) that P2.1's release-on-self-stop actually depends
+     * on (nexus-galkv.4 gate finding SIGNIFICANT 1, T2
+     * nexus/rdr-208-p1-critique-galkv4-2026-09-14).
      */
     @Test
     void out_directoryTtl1_expiresQuickly_rdDropsEntryAfterLapse() throws Exception {
@@ -1302,6 +1308,64 @@ class TupleRepositoryTest {
             Thread.sleep(100);
         } while (System.nanoTime() < deadlineNanos);
         assertThat(rows).as("entry drops out of rd once ttl_seconds=1 lapses").isEmpty();
+    }
+
+    /**
+     * The genuine RESEND-shortens-expiry property the test above does NOT
+     * cover: a live, longer-lived row (ttl=300, ~5 minutes out) resent with
+     * the SAME id (same name/session_id/nonce) but a short {@code
+     * ttl_seconds=1} pulls {@code expires_at} BACKWARD to ~1s out, not
+     * forward. This is exactly what P2.1's release-on-self-stop needs
+     * (nexus-galkv.9: the watcher re-sends its CURRENT entry with {@code
+     * ttl_seconds=1} on self-stop so a live 300s lease lapses within about a
+     * second instead of riding out its full remaining time).
+     *
+     * <p>Falsification: {@code writeOut}'s ON CONFLICT clause is {@code
+     * .set(TUPLES.EXPIRES_AT, DSL.least(candidateExpiry, ceiling))} --
+     * unconditional on the row's OLD {@code expires_at}. If that were ever
+     * changed to {@code DSL.greatest(oldExpiresAt, DSL.least(candidateExpiry,
+     * ceiling))} (a "leases only extend" reading -- every OTHER directory/
+     * mailbox test in this file would still pass under that change), THIS
+     * test goes red: the second read's {@code expiresAt} would stay near the
+     * ORIGINAL ~300s mark instead of shrinking to ~1s, and the bounded poll
+     * below would time out waiting for a lapse that never comes.
+     */
+    @Test
+    void out_directoryResentWithShorterTtl_expiresAtMovesBackward_thenRdDropsAfterLapse() throws Exception {
+        String name = "session-shrink-" + UUID.randomUUID();
+        String sessionId = "sess-shrink-" + UUID.randomUUID();
+        byte[] id1 = repo.out(TENANT_A, "directory/" + name, Map.of("name", name),
+                Map.of("session_id", sessionId), null, "nonce-dir-shrink", 300L);
+
+        var firstRead = repo.rdp(TENANT_A, "directory/" + name, null, 10, null);
+        assertThat(firstRead).hasSize(1);
+        OffsetDateTime longExpiry = firstRead.get(0).expiresAt();
+        assertThat(longExpiry)
+                .as("baseline: a fresh ttl=300 out sets expires_at ~300s out")
+                .isAfter(OffsetDateTime.now(java.time.ZoneOffset.UTC).plusSeconds(200));
+
+        byte[] id2 = repo.out(TENANT_A, "directory/" + name, Map.of("name", name),
+                Map.of("session_id", sessionId), null, "nonce-dir-shrink", 1L);
+        assertThat(id2).as("same name/session_id/nonce -- the RESEND path, not an insert").isEqualTo(id1);
+
+        var secondRead = repo.rdp(TENANT_A, "directory/" + name, null, 10, null);
+        assertThat(secondRead).hasSize(1);
+        OffsetDateTime shortExpiry = secondRead.get(0).expiresAt();
+        assertThat(shortExpiry)
+                .as("resend with ttl_seconds=1 moves expires_at BACKWARD from the live ~300s row, not forward")
+                .isBefore(OffsetDateTime.now(java.time.ZoneOffset.UTC).plusSeconds(10))
+                .isBefore(longExpiry.minusSeconds(200));
+
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        List<TupleRepository.TupleRow> rows;
+        do {
+            rows = repo.rdp(TENANT_A, "directory/" + name, null, 10, null);
+            if (rows.isEmpty()) {
+                break;
+            }
+            Thread.sleep(100);
+        } while (System.nanoTime() < deadlineNanos);
+        assertThat(rows).as("the shrunk lease lapses within its new ~1s ttl, not the original ~300s one").isEmpty();
     }
 
     /**
