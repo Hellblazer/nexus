@@ -82,6 +82,13 @@ class _FakeChashHandler(FakeT2HandlerBase):
                     count += 1
             self._send(200, {"upserted": count})
 
+        elif pp == "/v1/catalog/collections/upsert":
+            # The rename's pre-registration now targets THIS client's own
+            # endpoint (nexus-w1ip follow-up), so the fake answers the
+            # catalog registration route the way the engine does: an
+            # idempotent upsert of the collection row.
+            self._send(200, {"created": True, "name": body.get("name", "")})
+
         elif pp == "/v1/chash/rename_collection":
             old = body.get("old", "")
             new = body.get("new", "")
@@ -390,6 +397,35 @@ class TestRenameCollection:
 
     def test_rename_collection_no_op_on_absent(self, store):
         assert store.rename_collection(old="no_such", new="target") == 0
+
+    def test_rename_registers_destination_on_this_clients_endpoint(self, store, monkeypatch):
+        """The rename's pre-registration must target THIS client's
+        base_url, bearer and tenant, never the ambient shared catalog
+        client. Before nexus-w1ip the shared client memoised whatever
+        endpoint it first saw, which hid a wrong-engine registration by
+        accident; the endpoint-keyed slot made it visible (lsg red,
+        2026-09-14: rename 422 "not registered" after registering the
+        destination on the substrate engine instead of the pinned one)."""
+        import nexus.corpus as corpus
+
+        captured: dict[str, object] = {}
+
+        def _spy(name, write_fn, *, registrar=None):
+            captured["name"] = name
+            captured["registrar"] = registrar
+            return write_fn()
+
+        monkeypatch.setattr(corpus, "write_with_registration_retry", _spy)
+        store.upsert(chash="c1", collection="old_col")
+        assert store.rename_collection(old="old_col", new="new_col") == 1
+        assert captured["name"] == "new_col"
+        writer = captured["registrar"]()
+        try:
+            assert writer._base_url == store._base_url
+            assert writer._token == store._token
+            assert writer._tenant == store._tenant
+        finally:
+            writer.close()
 
 
 class TestDeleteStale:

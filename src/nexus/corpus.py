@@ -1594,9 +1594,53 @@ def collection_registration_kwargs(name: str) -> dict[str, str]:
 
 
 #: Per-process cache of collection names already registered by
-#: :func:`ensure_collection_registered` — see that function's docstring.
+#: :func:`ensure_collection_registered` through the AMBIENT (default)
+#: registrar — see that function's docstring. Untouched by a scoped
+#: registrar; see :data:`_REGISTERED_COLLECTIONS_SCOPED` for that case.
 _REGISTERED_COLLECTIONS: set[str] = set()
+#: Per-process cache for a registrar bound to an EXPLICIT endpoint/tenant
+#: (nexus-w1ip follow-up, critic review 2026-09-14, gap 1): keyed on
+#: ``((base_url, tenant), name)`` rather than name alone, so a SECOND
+#: store pinned to a SECOND engine registering the SAME name a
+#: DIFFERENT store already registered still calls its own registrar,
+#: instead of short-circuiting behind the first store's cache entry and
+#: 422ing "not registered" on its own engine — the ambient-cache-
+#: collision variant of the bug this whole change fixes. A registrar
+#: with no ``scope`` attribute (every ambient-default caller, unchanged)
+#: uses :data:`_REGISTERED_COLLECTIONS` instead; the two sets are
+#: disjoint partitions of the same idempotent-registration cache, never
+#: merged.
+_REGISTERED_COLLECTIONS_SCOPED: set[tuple[tuple[str, str], str]] = set()
 _REGISTERED_COLLECTIONS_LOCK = threading.Lock()
+
+
+def _registration_cache_contains(scope: "tuple[str, str] | None", name: str) -> bool:
+    """True when *name* is already known-registered in *scope*'s cache
+    partition — :data:`_REGISTERED_COLLECTIONS` for ambient (``scope is
+    None``), :data:`_REGISTERED_COLLECTIONS_SCOPED` otherwise. Caller's
+    responsibility to hold :data:`_REGISTERED_COLLECTIONS_LOCK` for the
+    authoritative (non-fast-path) check."""
+    if scope is None:
+        return name in _REGISTERED_COLLECTIONS
+    return (scope, name) in _REGISTERED_COLLECTIONS_SCOPED
+
+
+def _registration_cache_add(scope: "tuple[str, str] | None", name: str) -> None:
+    """Mark *name* known-registered in *scope*'s cache partition. Caller
+    holds :data:`_REGISTERED_COLLECTIONS_LOCK`."""
+    if scope is None:
+        _REGISTERED_COLLECTIONS.add(name)
+    else:
+        _REGISTERED_COLLECTIONS_SCOPED.add((scope, name))
+
+
+def _registration_cache_discard(scope: "tuple[str, str] | None", name: str) -> None:
+    """Evict *name* from *scope*'s cache partition. Caller holds
+    :data:`_REGISTERED_COLLECTIONS_LOCK`."""
+    if scope is None:
+        _REGISTERED_COLLECTIONS.discard(name)
+    else:
+        _REGISTERED_COLLECTIONS_SCOPED.discard((scope, name))
 
 
 def ensure_collection_registered(
@@ -1633,10 +1677,18 @@ def ensure_collection_registered(
 
     Cheap after the first call: a per-process cache means a hot
     per-chunk write path pays one HTTP round trip per NEW collection,
-    never one per write. The cache is name-keyed only (no tenant
-    dimension) — matching every other ambient-tenant catalog write in
-    this codebase (``make_catalog_writer()`` itself resolves tenant
-    from config, not from a caller-supplied value).
+    never one per write. For the AMBIENT (default) registrar the cache
+    is name-keyed only (no tenant dimension) — matching every other
+    ambient-tenant catalog write in this codebase (``make_catalog_writer()``
+    itself resolves tenant from config, not from a caller-supplied
+    value). A *registrar* that carries a ``scope`` attribute (an
+    ``(base_url, tenant)`` pair — see :class:`~nexus.db.t2.
+    _refreshable_client._EndpointRegistrar`) is cached separately, keyed
+    on ``(scope, name)`` — nexus-w1ip follow-up gap 1: a name-only cache
+    shared across scopes let a SECOND store pinned to a SECOND engine
+    short-circuit behind a FIRST store's registration of the same name,
+    never calling its own registrar and then 422ing "not registered" on
+    its own engine.
 
     *registrar* is a zero-arg factory returning a catalog writer (an
     object with ``register_collection`` and ``close``) — injectable so
@@ -1646,7 +1698,10 @@ def ensure_collection_registered(
     writer with no service running. Defaults to
     :func:`nexus.catalog.factory.make_catalog_writer`, imported here
     (not at module level) to keep this module free of a catalog
-    import cycle.
+    import cycle. Its optional ``scope`` attribute (``getattr(registrar,
+    "scope", None)``, duck-typed — this module never imports
+    ``_EndpointRegistrar``) selects which cache partition above applies;
+    ``None`` (a plain lambda/function, or the default) means ambient.
 
     A 409 from the register call is treated as already-registered
     (idempotent-upsert semantics, RDR-204 Technical Design step 2) —
@@ -1697,10 +1752,11 @@ def ensure_collection_registered(
     other four under nexus-aotql for the same eventual single-authority
     design.
     """
-    if name in _REGISTERED_COLLECTIONS:
+    scope = getattr(registrar, "scope", None)
+    if _registration_cache_contains(scope, name):
         return
     with _REGISTERED_COLLECTIONS_LOCK:
-        if name in _REGISTERED_COLLECTIONS:
+        if _registration_cache_contains(scope, name):
             return
         if kwargs is None:
             kwargs = collection_registration_kwargs(name)
@@ -1732,7 +1788,7 @@ def ensure_collection_registered(
                 )
         finally:
             writer.close()
-        _REGISTERED_COLLECTIONS.add(name)
+        _registration_cache_add(scope, name)
         # RDR-204 Phase 3 (nexus-ft04v.26, fixture-seam round 2):
         # nexus.mcp_infra's collection-row cache (_collections_cache,
         # 60s TTL) is the row source resolve_corpus's bare-corpus fan-out
@@ -1760,7 +1816,7 @@ def ensure_collection_registered(
 
 def discard_cached_registration(name: str) -> None:
     """Evict *name* from :func:`ensure_collection_registered`'s
-    per-process ``_REGISTERED_COLLECTIONS`` cache.
+    per-process AMBIENT ``_REGISTERED_COLLECTIONS`` cache.
 
     RDR-204 Phase 3 fix round (nexus-ft04v.28 item 4): for a caller that
     just deleted *name*'s catalog row OUT-OF-BAND (``purge_collection_
@@ -1772,6 +1828,13 @@ def discard_cached_registration(name: str) -> None:
     ``t3_not_in_projection`` catalog-drift bug that re-registration call
     exists to prevent. A no-op when *name* was never cached (the common
     case: a fresh CLI process's cache starts empty).
+
+    Ambient-only (nexus-w1ip follow-up): every current caller
+    (``commands/collection.py``'s reindex flow, ``commands/catalog_cmds/
+    collections.py``) deletes and re-registers against the ambient
+    catalog client, never a scoped one, so there is no ``scope`` to key
+    a scoped eviction on here. A scoped registrar's own cache partition
+    (:data:`_REGISTERED_COLLECTIONS_SCOPED`) is unaffected by this call.
 
     Mirrors :func:`write_with_registration_retry`'s own inline
     ``_REGISTERED_COLLECTIONS.discard`` on its stale-registration retry
@@ -1846,7 +1909,9 @@ def write_with_registration_retry(
     can be gone by the time a write for it finally happens, and that
     write 422s "collection ... is not registered". Catch exactly that
     shape (:func:`_looks_like_stale_registration_error`), evict the
-    cache entry, register once more, and retry *write_fn* ONE time.
+    cache entry (the partition *registrar*'s ``scope`` selects — see
+    :func:`ensure_collection_registered`), register once more, and
+    retry *write_fn* ONE time.
     Any second failure, or any OTHER exception on the first attempt
     (including a different-shaped 422, e.g. a profile mismatch),
     propagates immediately — this is a narrow one-shot repair, not a
@@ -1879,7 +1944,7 @@ def write_with_registration_retry(
             name=name,
         )
         with _REGISTERED_COLLECTIONS_LOCK:
-            _REGISTERED_COLLECTIONS.discard(name)
+            _registration_cache_discard(getattr(registrar, "scope", None), name)
         ensure_collection_registered(name, registrar=registrar)
         return write_fn()
 

@@ -204,6 +204,7 @@ class HttpChashIndex(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         data = write_with_registration_retry(
             new,
             lambda: self._post("/v1/chash/rename_collection", {"old": old, "new": new}),
+            registrar=self._catalog_registrar,
         )
         return int((data or {}).get("updated", 0))
 

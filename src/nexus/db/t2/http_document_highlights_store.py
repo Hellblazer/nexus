@@ -172,6 +172,7 @@ class HttpDocumentHighlightsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin
         r = write_with_registration_retry(
             new,
             lambda: self._post("/rename_collection", {"old": old, "new": new}),
+            registrar=self._catalog_registrar,
         )
         return int(r.get("updated", 0))
 

@@ -449,6 +449,31 @@ class _ServiceCatalogWriter:
         self.close()
 
 
+def make_catalog_writer_for_endpoint(
+    *, base_url: str, token: str, tenant: str, client: Any | None = None,
+) -> Any:
+    """A catalog writer bound to an EXPLICIT endpoint, bearer and tenant.
+
+    For a store client that was itself constructed against a pinned
+    ``base_url``/``_token`` (the chash integration harness, tenant tooling)
+    and needs to register a collection before a write. The shared writer
+    from :func:`make_catalog_writer` resolves its endpoint from the ambient
+    environment, so a pinned client that used it registered on whichever
+    engine the environment named and then wrote to its own (nexus-w1ip
+    follow-up, 2026-09-14: chash rename 422 "not registered" once the slot's
+    endpoint-key eviction stopped hiding it). Returns a live
+    ``HttpCatalogClient`` the caller must ``close()``; this function and
+    :func:`make_catalog_client_for_migration` are the only authorised
+    construction sites outside the shared slot (seam audit,
+    tests/catalog/test_http_catalog_client.py). *client*, when given, is the
+    caller's own ``httpx.Client`` (a store's pool or a test's mocked
+    transport); the writer then never owns or closes it.
+    """
+    from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+    return HttpCatalogClient(base_url=base_url, tenant=tenant, _token=token, client=client)
+
+
 def make_catalog_client_for_migration(
     *,
     base_url: Optional[str] = None,

@@ -1582,11 +1582,18 @@ def _isolate_collection_registration_cache() -> None:
     ``_restore_structlog_after_test`` above: cheap, and closes the
     door for every future test rather than requiring each file to
     remember its own fixture.
+
+    nexus-w1ip follow-up: also clears ``_REGISTERED_COLLECTIONS_SCOPED``,
+    the sibling cache partition a registrar with a ``scope`` attribute
+    (an explicit endpoint/tenant pin) writes into — the identical
+    cross-test leak risk applies to it.
     """
     import nexus.corpus as _corpus
     _corpus._REGISTERED_COLLECTIONS.clear()
+    _corpus._REGISTERED_COLLECTIONS_SCOPED.clear()
     yield
     _corpus._REGISTERED_COLLECTIONS.clear()
+    _corpus._REGISTERED_COLLECTIONS_SCOPED.clear()
 
 
 @pytest.fixture(autouse=True)

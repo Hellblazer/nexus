@@ -268,6 +268,13 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         body = self._read_body()
 
+        # Stores pre-register a collection on THEIR OWN endpoint before a
+        # write (nexus-w1ip follow-up), so this fake answers the catalog
+        # registration route the way the engine does: idempotent upsert.
+        if path == "/v1/catalog/collections/upsert":
+            self._json(200, {"created": True, "name": body.get("name", "")})
+            return
+
         with _STORE_LOCK:
             if path == "/v1/taxonomy/topics/delete":
                 tid = int(body.get("topic_id", 0))

@@ -369,8 +369,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         tenant: str = DEFAULT_TENANT,
         *,
         _token: str | None = None,
+        client: httpx.Client | None = None,
     ) -> None:
-        super().__init__(base_url=base_url, tenant=tenant, _token=_token)
+        # ``client``: an injected pool this instance must NOT own or close
+        # (the mixin's nexus-m20mf contract); the endpoint-bound registrar
+        # passes its store's own client so a mocked transport or a pinned
+        # pool applies to the registration too (nexus-w1ip follow-up).
+        super().__init__(base_url=base_url, tenant=tenant, _token=_token, client=client)
         #: nexus-5i864: per-instance owner cache for resolve_path (see
         #: ``_owner_for_resolve_path``). Maps owner tumbler_prefix ->
         #: owner dict. HITS ONLY — misses are never cached, because this
@@ -381,8 +386,22 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         _log.debug("http_catalog_client.init", base_url=self._base_url, tenant=tenant)
 
     def close(self) -> None:
-        """Close the keep-alive connection pool (idempotent)."""
-        self._client.close()
+        """Close the keep-alive connection pool (idempotent).
+
+        A no-op when this instance did not construct its own ``httpx.Client``
+        -- an injected ``client=`` (nexus-m20mf P3; the endpoint-bound
+        catalog registrar sharing its store's own pool, nexus-w1ip
+        follow-up) is owned by whoever built it, never by this instance.
+        This override used to close unconditionally, which defeated that
+        contract: ``ensure_collection_registered``'s ``finally: writer.close()``
+        would tear down the STORE's shared client the moment a registration
+        call finished, and the store's own next write then failed with
+        ``RuntimeError: Cannot send a request, as the client has been
+        closed.`` See ``RefreshableHttpStoreMixin.close`` for the full
+        ownership contract this now matches.
+        """
+        if self._owns_client:
+            self._client.close()
         _log.debug("http_catalog_client.closed")
 
     def __enter__(self) -> "HttpCatalogClient":

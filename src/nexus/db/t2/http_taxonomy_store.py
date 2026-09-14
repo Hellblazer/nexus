@@ -530,7 +530,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 "similarity": similarity,
                 "source_collection": source_collection,
                 "assigned_at": assigned_at,
-            }))
+            }), registrar=self._catalog_registrar)
         else:
             self._post("/assignments/assign", {
                 "doc_id": doc_id,
@@ -1051,7 +1051,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 raise
             return r.get("topic_ids", [])
 
-        return write_with_registration_retry(collection_name, _do_persist)
+        return write_with_registration_retry(collection_name, _do_persist, registrar=self._catalog_registrar)
 
     def persist_rebuild_topics(
         self,
@@ -1080,7 +1080,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             )
             return r.get("topic_ids", [])
 
-        return write_with_registration_retry(collection_name, _do_rebuild)
+        return write_with_registration_retry(collection_name, _do_rebuild, registrar=self._catalog_registrar)
 
     def persist_assignments(self, assignments: list[dict[str, Any]]) -> int:
         """Persist pre-computed assignments (mirrors CatalogTaxonomy.persist_assignments).
@@ -1137,7 +1137,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             # retry is safe: the engine's per-row semantics (GREATEST/
             # CASE upsert, centroid DO NOTHING) are idempotent.
             if len(source_collections) == 1:
-                write_with_registration_retry(next(iter(source_collections)), _post_pages)
+                write_with_registration_retry(next(iter(source_collections)), _post_pages, registrar=self._catalog_registrar)
             else:
                 _post_pages()
             return len(assignments)
@@ -2093,7 +2093,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "collection": collection,
             "doc_count": doc_count,
             "discovered_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }))
+        }), registrar=self._catalog_registrar)
 
     def needs_rebalance(self, collection: str, current_count: int) -> bool:
         """Check if collection needs rebalancing (5% growth threshold)."""
@@ -2142,7 +2142,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 "terms": terms,
             })
 
-        return write_with_registration_retry(collection, _do_import)["id"]
+        return write_with_registration_retry(collection, _do_import, registrar=self._catalog_registrar)["id"]
 
     def import_assignment(
         self,
@@ -2346,6 +2346,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         r = write_with_registration_retry(
             new,
             lambda: self._post("/rename_collection", {"old": old, "new": new}),
+            registrar=self._catalog_registrar,
         )
         return {
             "topics": int(r.get("topics", 0)),

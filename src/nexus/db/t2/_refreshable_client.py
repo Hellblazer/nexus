@@ -433,6 +433,85 @@ def _resolve_token_only_with_evidence_gate() -> str:
         return _resolve_token_only(wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S)
 
 
+class _EndpointRegistrar:
+    """Zero-arg catalog-writer factory bound to one store's explicit
+    endpoint, bearer and tenant, exposing that binding as ``scope``.
+
+    ``registrar=self._catalog_registrar`` (below) passes an INSTANCE of
+    this class, not a bare bound method — a bound method has nowhere to
+    hang the extra ``scope`` attribute :func:`nexus.corpus.
+    ensure_collection_registered`'s cache needs to key on (nexus-w1ip
+    follow-up gap 1, critic review 2026-09-14: the cache was NAME-only,
+    so a second store pinned to a SECOND engine registering an
+    already-registered name in the SAME process short-circuited before
+    ever calling ITS OWN registrar, and 422'd "not registered" on its
+    own engine — reproducing this bead's target symptom via cache
+    collision instead of ambient misrouting). ``getattr(registrar,
+    "scope", None)`` is how the corpus-side cache reads it; a plain
+    lambda/function (every ambient-default caller, unchanged) has no
+    ``scope`` attribute and resolves to ``None`` — the ambient cache
+    partition, byte-identical to pre-existing behaviour.
+
+    Holds a REFERENCE to the store, not a snapshot of its
+    ``_base_url``/``_token``/``_tenant`` at construction time — two
+    reasons. First, "never baked once": every existing caller reads
+    those three fields fresh per request (see this mixin's own module
+    docstring); a registrar that froze them at construction would be
+    the one place that didn't. Second, and why ``scope``/``__call__``
+    use ``getattr(..., None)`` rather than direct attribute access: a
+    store built via ``Store.__new__(Store)`` (bypassing ``__init__`` —
+    a common test-double shortcut across this test suite, predating
+    nexus-w1ip) has NO ``_base_url`` at all, and ``self._catalog_
+    registrar`` is evaluated as a plain argument expression at every
+    one of the 13 write-path call sites, unconditionally, on every
+    call — so a hard attribute read here would turn "construct a
+    registrar object" itself into a crash for any such test double,
+    even one that never reaches an actual registration attempt. A
+    missing ``_base_url`` degrades ``scope`` to ``None`` (the ambient
+    cache partition) and ``__call__`` to the ambient default writer —
+    exactly the pre-nexus-w1ip behaviour for a store that was never
+    told its own endpoint, never a crash.
+    """
+
+    __slots__ = ("_store",)
+
+    def __init__(self, store: "RefreshableHttpStoreMixin") -> None:
+        self._store = store
+
+    @property
+    def scope(self) -> "tuple[str, str] | None":
+        """``(base_url, tenant)`` — the cache-partition key for this
+        registrar, distinct from any other endpoint/tenant pair; ``None``
+        (the ambient partition) when the store has no ``_base_url`` of
+        its own yet (see the class docstring)."""
+        base_url = getattr(self._store, "_base_url", None)
+        tenant = getattr(self._store, "_tenant", None)
+        if base_url is None or tenant is None:
+            return None
+        return (base_url, tenant)
+
+    def __call__(self) -> Any:
+        base_url = getattr(self._store, "_base_url", None)
+        if base_url is None:
+            # No endpoint of its own to register against (see class
+            # docstring) -- behave exactly as if no registrar had been
+            # passed at all.
+            from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred; avoids a cycle
+
+            return make_catalog_writer()
+        from nexus.catalog.factory import make_catalog_writer_for_endpoint  # noqa: PLC0415 — deferred; avoids a cycle
+
+        return make_catalog_writer_for_endpoint(
+            base_url=base_url,
+            token=getattr(self._store, "_token", None) or "",
+            tenant=self._store._tenant,
+            # The store's own pool (or a test's mocked transport), never a
+            # second real client to the same host: the writer neither owns
+            # nor closes an injected client (nexus-m20mf contract).
+            client=getattr(self._store, "_client", None),
+        )
+
+
 class RefreshableHttpStoreMixin:
     """Shared self-healing HTTP transport for T2 ``Http*Store`` classes.
 
@@ -804,6 +883,36 @@ class RefreshableHttpStoreMixin:
         )
 
     # ── Public transport (subclasses call these, never self._client directly) ──
+
+    @property
+    def _catalog_registrar(self) -> "_EndpointRegistrar":
+        """A catalog writer factory bound to THIS store's endpoint, bearer
+        and tenant, for a registration that must land on the engine this
+        store writes to.
+
+        ``write_with_registration_retry`` / ``ensure_collection_registered``
+        default to the process-wide shared catalog client, which resolves
+        its endpoint from the ambient environment. A store constructed
+        against an explicit ``base_url``/``_token`` (the chash integration
+        harness, tenant tooling, any second engine) would then register on
+        whichever engine the environment names and write to its own, and
+        the write 422s "not registered". Before nexus-w1ip the shared client
+        memoised whatever endpoint it first saw, which hid this by accident;
+        the slot's endpoint-key eviction made it visible (local-service gate
+        red, 2026-09-14). Every store on this mixin that pre-registers a
+        collection passes ``registrar=self._catalog_registrar``.
+
+        A PROPERTY, not a plain method: it must return an
+        :class:`_EndpointRegistrar` instance (carrying ``.scope`` for the
+        corpus-side cache, nexus-w1ip follow-up gap 1) each time it is
+        read, not a bound method with nowhere to hang that attribute.
+        Cheap and safe to read unconditionally (every one of the 13
+        write-path call sites does, as a plain argument expression) —
+        it stores a reference to THIS store, never a snapshot; see
+        :class:`_EndpointRegistrar`'s own docstring for why it must not
+        read ``self._base_url`` here.
+        """
+        return _EndpointRegistrar(self)
 
     def _post(
         self,
