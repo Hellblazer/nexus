@@ -7,6 +7,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **A store pinned to its own engine registers collections on that engine
+  (nexus-dvgsf).** The chash, aspect-queue, document-aspects, highlights and
+  taxonomy stores, and the catalog client's `write_manifest_many`,
+  registered a collection through the process-wide catalog writer, which
+  resolves the ambient endpoint. A store built against an explicit
+  `base_url` and bearer (a second engine, tenant tooling, the chash
+  integration harness) registered on one engine and wrote to another, and
+  the write failed with 422 "not registered". Registration now uses a writer
+  bound to the store's own endpoint, bearer and tenant, and the per-process
+  registration cache is keyed on all three. `HttpCatalogClient.close()` no
+  longer closes an injected HTTP client it does not own.
 - **`nx collection reindex` refuses a `code__` collection up front (GH #1546,
   nexus-rndy5).** The refusal (this verb has no re-index driver for code;
   use `nx index repo`) sat behind the sourceless-entry scan, which asks for
