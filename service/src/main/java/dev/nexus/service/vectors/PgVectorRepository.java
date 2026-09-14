@@ -3522,6 +3522,20 @@ public final class PgVectorRepository {
      * condition needed no edit for the unification; only the caller's
      * {@code DimTables.CHUNKS.get(dim)} lookup (D1's scope) determines which table/columns
      * {@code ch} carries.
+     *
+     * <p><strong>GH #1546 (nexus-ky9ps):</strong> both manifest matches below are now
+     * scoped to {@code ch}'s OWN collection ({@code
+     * CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(ch.collection())} on the outer join, {@code
+     * m2.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION)} on the inner {@code
+     * noLiveParent} re-check) — mirroring the identical fix applied to {@code
+     * plain_search_<dim>}/{@code text_gated_search_<dim>}'s own inlined SQL (vectors-
+     * 017-1) and {@code nexus.purge_trash} (vectors-017-3). Before this fix, a chash
+     * shared by a chunk row in THIS collection (whose only manifest row here points at a
+     * tombstoned document) and an identical chash under a LIVE document in a completely
+     * DIFFERENT collection would resolve {@code noLiveParent} to {@code false} — the
+     * live manifest row elsewhere satisfied it regardless of collection — so this
+     * predicate never fired and the tombstoned-in-THIS-collection chunk stayed visible
+     * to the get-family reads forever.
      */
     private static org.jooq.Condition liveChunksCondition(DSLContext ctx, DimTables.ChunkTable ch) {
         // nexus-msz9i: the DEAD-SET form, the typed twin of the same rewrite
@@ -3563,6 +3577,7 @@ public final class PgVectorRepository {
                  .on(d2.TENANT_ID.eq(m2.TENANT_ID)
                      .and(d2.TUMBLER.eq(m2.DOC_ID)))
                .where(m2.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                      .and(m2.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION))
                       .and(ChashHex.hex(m2.CHASH).eq(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH)))
                       .and(d2.DELETED_AT.isNull())));
         return DSL.notExists(
@@ -3571,6 +3586,7 @@ public final class PgVectorRepository {
                  .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
                      .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
+                      .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(ch.collection()))
                       .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))
                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())
                       .and(noLiveParent)));

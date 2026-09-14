@@ -208,13 +208,20 @@ class CatalogPurgeTrashTest {
         // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
         // (catalog-025-collection-not-null.xml) — every doc in this fixture
         // is registered under COLLECTION, so stamp the manifest row the same.
+        insertManifestRow(su, docId, chashHex, COLLECTION);
+    }
+
+    /** Explicit-collection sibling (GH #1546 / nexus-ky9ps): the cross-collection
+     * fixture below needs a manifest row stamped with a collection OTHER than the
+     * shared {@link #COLLECTION} constant. */
+    private static void insertManifestRow(Connection su, String docId, String chashHex, String collection) throws Exception {
         try (PreparedStatement ps = su.prepareStatement(
                 "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
                 + "VALUES (?, ?, 0, decode(?, 'hex'), ?)")) {
             ps.setString(1, TENANT);
             ps.setString(2, docId);
             ps.setString(3, chashHex);
-            ps.setString(4, COLLECTION);
+            ps.setString(4, collection);
             ps.execute();
         }
     }
@@ -230,6 +237,23 @@ class CatalogPurgeTrashTest {
                 + "AND embedding_384 IS NOT NULL");
             ps.setString(1, TENANT);
             ps.setString(2, chashHex);
+            var rs = ps.executeQuery();
+            rs.next();
+            return rs.getLong(1);
+        }
+    }
+
+    /** Collection-scoped sibling of {@link #chunks384Count} (GH #1546 / nexus-ky9ps
+     *  cross-collection fixture): {@code nexus.chunks} is keyed (tenant_id, collection,
+     *  chash), so a chash present in two collections needs a per-collection count. */
+    private long chunksCountInCollection(String collection, String chashHex) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var ps = su.prepareStatement(
+                "SELECT count(*) FROM nexus.chunks WHERE tenant_id = ? AND collection = ? "
+                + "AND chash = decode(?, 'hex') AND embedding_384 IS NOT NULL");
+            ps.setString(1, TENANT);
+            ps.setString(2, collection);
+            ps.setString(3, chashHex);
             var rs = ps.executeQuery();
             rs.next();
             return rs.getLong(1);
@@ -565,5 +589,82 @@ class CatalogPurgeTrashTest {
                 + "purgeTrash call actually swept, including but not limited to the "
                 + "two boundary chunks (AT, OUTSIDE) verified individually above")
             .isEqualTo(totalBefore - totalAfter);
+    }
+
+    // ── Cross-collection tombstone leak (GH #1546, nexus-ky9ps) ─────────────────
+    // A chunk row physically stored in COLLECTION shares its chash with a chunk row
+    // physically stored in a SECOND, independent collection (COLLECTION2) whose
+    // manifest row points at a LIVE document. Before the collection-scoped fix,
+    // nexus.purge_trash's Steps 1-3 chunk sweep matched its manifest join on
+    // (tenant_id, chash) ONLY, so the live manifest row in COLLECTION2 protected the
+    // COLLECTION row too, even though COLLECTION's own only manifest row for this
+    // chash points at an agable tombstone. Fresh, self-contained fixture (own docs/
+    // chash), matching the boundary-exact test's own convention above.
+
+    private static final String COLLECTION2 = "knowledge__purge-trash-2__minilm-l6-v2-384__v1";
+    private static final String DOC_CROSS_DEAD = "purge-doc-cross-dead";
+    private static final String DOC_CROSS_LIVE = "purge-doc-cross-live";
+    private static final String CHASH_CROSS = Chash.ofText("purge-chunk-cross-collection").toHex();
+
+    @Test @Order(40)
+    void crossCollectionSameChash_purgeReclaimsFirstCollectionsChunk_leavesSecondCollections() throws Exception {
+        final int olderThanDays = 30;
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION2);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES "
+                + "('" + TENANT + "', '" + DOC_CROSS_DEAD + "', 'Cross Dead', '" + COLLECTION + "'), "
+                + "('" + TENANT + "', '" + DOC_CROSS_LIVE + "', 'Cross Live', '" + COLLECTION2 + "')");
+        }
+
+        // Same chash, physically stored in BOTH collections -- nexus.chunks is keyed
+        // (tenant_id, collection, chash), so these are two independent rows.
+        vecRepo.upsertChunks(TENANT, COLLECTION, List.of(CHASH_CROSS), List.of("cross collection text"), List.of(Map.of()));
+        vecRepo.upsertChunks(TENANT, COLLECTION2, List.of(CHASH_CROSS), List.of("cross collection text"), List.of(Map.of()));
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            insertManifestRow(su, DOC_CROSS_DEAD, CHASH_CROSS, COLLECTION);
+            insertManifestRow(su, DOC_CROSS_LIVE, CHASH_CROSS, COLLECTION2);
+        }
+
+        assertThat(catalogRepo.deleteDocument(TENANT, DOC_CROSS_DEAD)).isEqualTo(1);
+        // Age the tombstone past the grace window; DOC_CROSS_LIVE stays live throughout.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "UPDATE nexus.catalog_documents SET deleted_at = NOW() - interval '60 days' "
+                + "WHERE tenant_id = '" + TENANT + "' AND tumbler = '" + DOC_CROSS_DEAD + "'");
+        }
+
+        assertThat(chunksCountInCollection(COLLECTION, CHASH_CROSS))
+            .as("sanity: cross-collection chunk present in COLLECTION before purge")
+            .isEqualTo(1L);
+        assertThat(chunksCountInCollection(COLLECTION2, CHASH_CROSS))
+            .as("sanity: cross-collection chunk present in COLLECTION2 before purge")
+            .isEqualTo(1L);
+
+        Map<String, Object> executed = catalogRepo.purgeTrash(TENANT, olderThanDays);
+        assertThat(executed.get("dry_run")).isEqualTo(false);
+
+        assertThat(documentExists(DOC_CROSS_DEAD))
+            .as("aged cross-collection tombstone must be physically purged")
+            .isFalse();
+        assertThat(documentExists(DOC_CROSS_LIVE))
+            .as("the second collection's live document must be untouched")
+            .isTrue();
+
+        assertThat(chunksCountInCollection(COLLECTION, CHASH_CROSS))
+            .as("GH #1546 / nexus-ky9ps: this chunk's ONLY manifest row in COLLECTION points at "
+                + "a now-purged tombstone -- an identical chash under a LIVE document in a "
+                + "DIFFERENT collection (COLLECTION2) must not mask that, so purge_trash's chunk "
+                + "sweep must reclaim the COLLECTION row")
+            .isEqualTo(0L);
+        assertThat(chunksCountInCollection(COLLECTION2, CHASH_CROSS))
+            .as("the SAME chash's row in COLLECTION2 is protected by its own live manifest row "
+                + "and must survive untouched")
+            .isEqualTo(1L);
     }
 }

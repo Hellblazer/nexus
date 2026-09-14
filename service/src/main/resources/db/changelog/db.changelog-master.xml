@@ -1332,6 +1332,21 @@
     <include file="db/changelog/vectors-016-combined-query-retention.xml"/>
 
     <!--
+        GH #1546 (bead nexus-ky9ps): scope the dead-set tombstone-filter
+        anti-join (plain_search_*/text_gated_search_*/hybrid_search_*, nine
+        plus three functions) and nexus.purge_trash's own chunk-sweep to the
+        chunk's OWN collection — an identical chash under a live document in
+        a DIFFERENT collection must not mask a tombstoned manifest row in
+        THIS collection. See the included file's own header for the full
+        derivation. Placed immediately after
+        vectors-016-combined-query-retention.xml and before
+        tuples-003-body-size-limit.xml (current tail at authoring time) and
+        before the grants-nexus-svc.xml runAlways block, matching the
+        established late-append convention (D0.1).
+    -->
+    <include file="db/changelog/vectors-017-collection-scoped-tombstone-filter.xml"/>
+
+    <!--
         RDR-205 amendment (bead nexus-r7xao): nexus.tuples.body CHECK
         (octet_length(body) <= 4096), NOT VALID: the DB-level backstop
         behind TupleRepository's own engine-side size checks. See the

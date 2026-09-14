@@ -173,6 +173,14 @@ class PgVectorTombstoneFilterTest {
      * (tenant_id, doc_id, position)} is the manifest PK, so a second row on the same doc
      * must not collide with position 0. */
     private static void insertManifestRow(Connection su, String docId, String chashHex, int position) throws Exception {
+        insertManifestRow(su, docId, chashHex, position, COLLECTION);
+    }
+
+    /** Explicit-collection sibling (GH #1546 / nexus-ky9ps): the cross-collection
+     * fixture below needs a manifest row stamped with a collection OTHER than the
+     * shared {@link #COLLECTION} constant. */
+    private static void insertManifestRow(
+            Connection su, String docId, String chashHex, int position, String collection) throws Exception {
         try (PreparedStatement ps = su.prepareStatement(
                 "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
                 + "VALUES (?, ?, ?, decode(?, 'hex'), ?)")) {
@@ -180,7 +188,7 @@ class PgVectorTombstoneFilterTest {
             ps.setString(2, docId);
             ps.setInt(3, position);
             ps.setString(4, chashHex);
-            ps.setString(5, COLLECTION);
+            ps.setString(5, collection);
             ps.execute();
         }
     }
@@ -338,5 +346,92 @@ class PgVectorTombstoneFilterTest {
                 + "the live, manifest-less, and shared-chash (live+dead manifest rows) chunks")
             .containsExactlyInAnyOrder(CHASH_LIVE, CHASH_ORPHAN, CHASH_SHARED)
             .doesNotContain(CHASH_DEAD);
+    }
+
+    // ── Cross-collection tombstone leak (GH #1546, nexus-ky9ps) ─────────────────
+    // A chunk row physically stored in COLLECTION shares its chash with a chunk row
+    // physically stored in a SECOND, independent collection (COLLECTION2) whose
+    // manifest row points at a LIVE document. Before the collection-scoped fix, the
+    // dead-set anti-join matched its manifest join on (tenant_id, chash) ONLY, so the
+    // live manifest row in COLLECTION2 "protected" the COLLECTION row too, even though
+    // COLLECTION's own only manifest row for this chash points at a tombstoned
+    // document. The fix scopes the anti-join to m.collection = c.collection (and
+    // m2.collection = m.collection), so liveness is decided per-collection.
+    //
+    // Seeded at Order(100), strictly AFTER every earlier @Test in this class (10-90)
+    // has already run its exact-set assertions on COLLECTION — CHASH_CROSS's physical
+    // row in COLLECTION would otherwise inflate those containsExactlyInAnyOrder sets.
+
+    private static final String COLLECTION2 = "knowledge__tomb-search-2__minilm-l6-v2-384__v1";
+    private static final String DOC_CROSS_DEAD = "tomb-doc-cross-dead";
+    private static final String DOC_CROSS_LIVE = "tomb-doc-cross-live";
+    private static final String TEXT_CROSS = "tombstone probe chunk shared across two collections";
+    private static final String CHASH_CROSS = Chash.ofText("tomb-search-chunk-cross-collection").toHex();
+
+    @Test @Order(100)
+    void seedCrossCollectionFixture_secondCollectionHoldsSameChashUnderLiveDoc() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION2);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES "
+                + "('" + TENANT + "', '" + DOC_CROSS_DEAD + "', 'Cross Dead Doc', '" + COLLECTION + "'), "
+                + "('" + TENANT + "', '" + DOC_CROSS_LIVE + "', 'Cross Live Doc', '" + COLLECTION2 + "')");
+        }
+
+        // Same chash, physically stored in BOTH collections -- nexus.chunks is keyed
+        // (tenant_id, collection, chash), so these are two independent rows.
+        vecRepo.upsertChunks(TENANT, COLLECTION, List.of(CHASH_CROSS), List.of(TEXT_CROSS), List.of(Map.of()));
+        vecRepo.upsertChunks(TENANT, COLLECTION2, List.of(CHASH_CROSS), List.of(TEXT_CROSS), List.of(Map.of()));
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            insertManifestRow(su, DOC_CROSS_DEAD, CHASH_CROSS, 0, COLLECTION);
+            insertManifestRow(su, DOC_CROSS_LIVE, CHASH_CROSS, 0, COLLECTION2);
+        }
+
+        int n = catalogRepo.deleteDocument(TENANT, DOC_CROSS_DEAD);
+        assertThat(n).as("deleteDocument tombstoned exactly the cross-collection dead doc").isEqualTo(1);
+    }
+
+    @Test @Order(110)
+    void plainSearch_crossCollectionSameChash_firstCollectionExcludesChunk() {
+        var rows = vecRepo.search(TENANT, QUERY_TEXT, List.of(COLLECTION), 10, null);
+        assertThat(ids(rows))
+            .as("GH #1546 / nexus-ky9ps: a chunk tombstoned in ITS OWN collection must not be "
+                + "resurrected by an identical chash's manifest row protecting it in a DIFFERENT "
+                + "collection (COLLECTION2) -- plain_search_384 must exclude it from COLLECTION's "
+                + "results")
+            .doesNotContain(CHASH_CROSS);
+    }
+
+    @Test @Order(120)
+    void hybridSearch_selectiveBranch_crossCollectionSameChash_firstCollectionExcludesChunk() {
+        var rows = vecRepo.hybridSearch(TENANT, QUERY_TEXT, List.of(COLLECTION), 10, null);
+        assertThat(ids(rows))
+            .as("GH #1546 / nexus-ky9ps: hybridSearch's SELECTIVE (text_gated_search_by_chash) "
+                + "branch must ALSO exclude the cross-collection chunk from COLLECTION's results")
+            .doesNotContain(CHASH_CROSS);
+    }
+
+    @Test @Order(130)
+    void hybridSearch_nonSelectiveHnswFirstBranch_crossCollectionSameChash_firstCollectionExcludesChunk() {
+        var rows = vecRepo.hybridSearch(TENANT, QUERY_TEXT, List.of(COLLECTION), 10, null, 1);
+        assertThat(ids(rows))
+            .as("GH #1546 / nexus-ky9ps: hybridSearch's NON-SELECTIVE (text_gated_search_hnsw_first) "
+                + "branch must ALSO exclude the cross-collection chunk from COLLECTION's results")
+            .doesNotContain(CHASH_CROSS);
+    }
+
+    @Test @Order(140)
+    void search_crossCollectionSameChash_secondCollectionStillReturnsIt() {
+        // Sanity/parity check: the SAME chash's row in COLLECTION2 is protected by its
+        // own live manifest row and must remain visible when COLLECTION2 is searched --
+        // the fix is per-collection scoping, not a blanket exclusion of shared chashes.
+        var rows = vecRepo.search(TENANT, QUERY_TEXT, List.of(COLLECTION2), 10, null);
+        assertThat(ids(rows))
+            .as("COLLECTION2's own row for the shared chash must stay visible in COLLECTION2's "
+                + "own results")
+            .contains(CHASH_CROSS);
     }
 }
