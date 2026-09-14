@@ -126,8 +126,8 @@ release_props_guard_clean() {
     echo "  current bytes:" >&2
     sed 's/^/    /' "$props" >&2
     echo "  Restore it with: git checkout -- $relpath (run from $repo)" >&2
-    echo "  but ONLY after confirming no build is running: check the $lease_name build lease at $lease_dir" >&2
-    echo "  for a live pid/label/command before restoring, or wait for that holder to finish and restore the tree itself." >&2
+    echo "  This process holds the $lease_name build lease right now (that is how it got here) and is about to release it without touching the file -- it does not restore anything for you." >&2
+    echo "  If you restore by hand later, re-check the $lease_name build lease at $lease_dir AT THAT TIME: a live pid/label/command there means a build is genuinely in progress -- wait for it to finish rather than racing its restore." >&2
     return 75
 }
 

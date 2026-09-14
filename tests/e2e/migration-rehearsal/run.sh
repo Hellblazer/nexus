@@ -356,10 +356,20 @@ _guided_restore() {
   fi
   rm -f "$RELEASE_PROPS_SNAPSHOT" 2>/dev/null || true
 }
-# nexus-iws18: snapshot release.properties' actual bytes before any leg can
-# stamp it; _guided_restore puts exactly these back on exit.
-RELEASE_PROPS_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/release.properties.snapshot.XXXXXX")"
-cp "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT"
+# nexus-iexvl: deliberately NOT snapshotted here. Taking the restore
+# baseline this early -- before the "service" build lease is acquired and
+# release_props_guard_clean has passed -- can capture a CONCURRENT
+# stamper's in-flight dirty bytes as "the true baseline"; this script then
+# restores THAT stamp on exit instead of the real one, reintroducing an
+# abandoned stamp after the true clean bytes were already restored. That
+# was the code-review finding on commit 40963aeb5 (a residual instance of
+# the exact incident nexus-iexvl exists to close, reproduced via this
+# code path). RELEASE_PROPS_SNAPSHOT is populated only inside the guided-
+# family stamp block below, by release_props_stamp_under_lease, once the
+# lease is ours and the guard has passed. Declared empty here (never left
+# unset, under `set -u`) so _guided_restore is safely callable from any
+# exit path, including one that fires before the stamp block ever runs.
+RELEASE_PROPS_SNAPSHOT=""
 trap 'diag_exit_guard; _guided_restore' EXIT
 
 [ "$COLD" = 1 ] && [ "$GUIDED" = 1 ] && { echo "--cold and --guided are different flows; pick one" >&2; exit 2; }
@@ -605,27 +615,24 @@ if [ "$GUIDED" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ] || [ "$CANDIDATE_MIGRATION" = 1 
     # manifest above); nothing in this tree is touched.
     echo "[stamp] artifacts already carry release_version=$GUIDED_STAMP_VERSION — no stamp, no rebuild"
   else
-  # nexus-iexvl: acquire the SAME "service" build lease the native-build
-  # step further down uses, HERE, before the stamp is written, and hold it
-  # (via NX_STAMP_LEASE_HELD, checked below) all the way to this script's
-  # own EXIT trap -- never released early. Before this fix the stamp sat
-  # in the tree for the whole span between this write and whatever later
-  # line happened to acquire the lease (the native build, or nothing at
-  # all if the freshness check decided a rebuild was unnecessary), with
-  # the lease completely free that whole time: exactly the window a
-  # concurrent scripts/build-gate-jar.sh observed and, on top of its own
-  # now-fixed ordering bug, reapplied on its own exit.
-  build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" migration-rehearsal-stamp "$LEG"
+  # nexus-iexvl: routed through scripts/lib/release-props-lease.sh's
+  # release_props_stamp_under_lease -- one code path, shared with
+  # build-artifacts.sh and build-gate-jar.sh -- so the SNAPSHOT this leg
+  # restores from is taken only after the "service" lease is ours and
+  # release_props_guard_clean has passed, never before (see the comment
+  # above RELEASE_PROPS_SNAPSHOT's declaration for why "before" is
+  # unsafe). The lease is held via NX_STAMP_LEASE_HELD and released right
+  # after the native build below, not at this whole leg's EXIT -- see the
+  # substantive-critic finding on 40963aeb5: the old wide hold covered
+  # docker image staging, the container run, and the migration walk too,
+  # which stalls every other build or pytest session on the box
+  # (tests/conftest.py's _gate_on_build_lease) for the length of the whole
+  # leg instead of just the ~2-3m compile. This script's own EXIT trap
+  # still runs _guided_restore + build_lease_release as a crash-only
+  # backstop; both are no-ops once the post-build release below has run.
+  RELEASE_PROPS_SNAPSHOT="$(release_props_stamp_under_lease "$RELEASE_PROPS" service "${NX_BUILD_LEASE_WAIT:-3600}" "release_version=$GUIDED_STAMP_VERSION")" || exit $?
   NX_STAMP_LEASE_HELD=1
-  if ! release_props_guard_clean "$RELEASE_PROPS" service; then
-    build_lease_release service
-    NX_STAMP_LEASE_HELD=0
-    exit 75
-  fi
-  echo "[stamp] stamping $RELEASE_PROPS release_version=$GUIDED_STAMP_VERSION (restored on exit)…"
-  grep -v '^release_version=' "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp"
-  printf 'release_version=%s\n' "$GUIDED_STAMP_VERSION" >> "$RELEASE_PROPS.tmp"
-  mv "$RELEASE_PROPS.tmp" "$RELEASE_PROPS"
+  echo "[stamp] stamped $RELEASE_PROPS release_version=$GUIDED_STAMP_VERSION (restored right after the native build)"
   # Force a fresh native build so the stamp is baked in.
   rm -f service/target/nexus-service
   fi
@@ -699,13 +706,14 @@ elif [ "$DO_BUILD" = 1 ]; then
     # --shakeout used to exit 75 the instant a cached gate-jar copy held
     # the lease); rc 75 names the holder only once the bound is exhausted.
     # nexus-iexvl: a guided-family leg already acquired this SAME lease
-    # before stamping above (NX_STAMP_LEASE_HELD=1) and holds it all the
-    # way to this script's own EXIT trap -- re-acquiring here would be
-    # this same process waiting on a lease it already holds itself
+    # before stamping above (NX_STAMP_LEASE_HELD=1) and holds it through
+    # the native build below -- re-acquiring here would be this same
+    # process waiting on a lease it already holds itself
     # (build_lease_acquire_wait would block until NX_BUILD_LEASE_WAIT
-    # expired, then refuse). Every other leg that reaches this branch
-    # (the default, non-stamping rehearse.sh path) never set the flag and
-    # acquires/releases exactly as before.
+    # expired, then refuse). It releases (restore + release) right after
+    # the build, below, not at this whole leg's EXIT. Every other leg
+    # that reaches this branch (the default, non-stamping rehearse.sh
+    # path) never set the flag and acquires/releases exactly as before.
     if [ "$NX_STAMP_LEASE_HELD" = 0 ]; then
       build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" docker-native-build migration-rehearsal
     fi
@@ -717,13 +725,21 @@ elif [ "$DO_BUILD" = 1 ]; then
       -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
       "$GRAAL_IMAGE" \
       -c "./mvnw -B -Pnative -DskipTests -Dnative.image.opt=-Ob -Dnative.image.maxheap=${NATIVE_MAXHEAP} package"
-    # Released here only when THIS block acquired it; a guided-family
-    # stamp's lease stays held (see above) until this script's own EXIT
-    # trap runs _guided_restore and then build_lease_release service, in
-    # that order -- releasing it here too would free it the instant the
-    # native build finishes, reopening the exact window (stamp on disk,
-    # lease free, script still running its e2e phases) nexus-iexvl fixes.
-    [ "$NX_STAMP_LEASE_HELD" = 0 ] && build_lease_release service
+    if [ "$NX_STAMP_LEASE_HELD" = 1 ]; then
+      # nexus-iexvl (critic finding 2 on 40963aeb5): restore + release
+      # right here, the instant the native build that needed the lease is
+      # done -- not at this whole leg's EXIT. The candidate binary just
+      # produced already has the stamp baked in; nothing downstream of
+      # this point (docker image staging, the container run, the
+      # migration walk) re-reads the source-tree release.properties, so
+      # holding the shared lease through all of that only stalls other
+      # builds and pytest sessions on the box for no benefit.
+      release_props_restore_and_release "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT" service
+      RELEASE_PROPS_SNAPSHOT=""
+      NX_STAMP_LEASE_HELD=0
+    else
+      build_lease_release service
+    fi
   else
     # nexus-ndve9: when we DO reuse, say how old the artifact is — the failing
     # shakeout's log recorded only "candidate native binary present", which

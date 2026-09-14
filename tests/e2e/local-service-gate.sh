@@ -356,15 +356,26 @@ if [ -n "${NEXUS_GATE_NO_VOYAGE:-}" ]; then
   passed_by_default local-service-gate "NEXUS_GATE_NO_VOYAGE=1: the voyage/CCE subset is skipped, a green here does not cover it"
 fi
 
-# nexus-iws18: snapshot release.properties' ACTUAL BYTES now, and restore those
-# on every exit path. The old `git checkout -- <path>` reverted to HEAD, which
+# nexus-iws18: restore release.properties' pre-invocation BYTES on every
+# exit path -- the old `git checkout -- <path>` reverted to HEAD, which
 # silently destroyed any UNCOMMITTED edit to that file on every gate run (it
-# bit the nexus-308ph implementer twice mid-verification). Same byte-snapshot
-# shape scripts/build-gate-jar.sh uses; the two stay separate because this
-# gate's restore choreography differs (mid-run _restore_props + EXIT backstop).
+# bit the nexus-308ph implementer twice mid-verification).
+#
+# nexus-iexvl: RELEASE_PROPS_SNAPSHOT is declared but deliberately NOT
+# populated here. Taking the restore baseline this early -- before the
+# "service" build lease is acquired and release_props_guard_clean has
+# passed, in the stamp step below -- can capture a CONCURRENT stamper's
+# in-flight dirty bytes as "the true baseline"; cleanup() would then
+# restore THAT stamp instead of the real one after the true clean bytes
+# were already restored. That was the code-review finding on commit
+# 40963aeb5 (a residual instance of the exact incident nexus-iexvl exists
+# to close, reproduced via this code path). Declared empty here, never
+# left unset under `set -u`, so cleanup() is always safe to call, even
+# from an exit path that fires before the stamp step below ever runs (the
+# native-binary launch path, or NX_GATE_ARTIFACTS, never populate it at
+# all).
 RELEASE_PROPS="$REPO_ROOT/service/src/main/resources/META-INF/nexus/release.properties"
-RELEASE_PROPS_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/release.properties.snapshot.XXXXXX")"
-cp "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT"
+RELEASE_PROPS_SNAPSHOT=""
 
 # shellcheck disable=SC2329  # invoked indirectly via the EXIT trap below
 cleanup() {
@@ -441,7 +452,9 @@ NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx daemon service stop
 #    (step 5b) for no real reason. Stamp/restore release.properties around
 #    the build so the jar always carries exactly these two values.
 JAR="$REPO_ROOT/service/target/nexus-service-1.0-SNAPSHOT.jar"
-# RELEASE_PROPS + its byte snapshot are set once, above cleanup() (nexus-iws18).
+# RELEASE_PROPS is set once, above cleanup() (nexus-iws18); its byte
+# snapshot is taken later, inside the stamp step below, only once the
+# build lease is held and the guard has passed (nexus-iexvl).
 GATE_STAMP="$(python3 -c '
 import re, pathlib
 src = pathlib.Path("src/nexus/engine_version.py").read_text()
@@ -503,7 +516,11 @@ print(jar_freshness_skip_reason() or "")
   fi
   echo "[gate] rebuilding service jar (release_version=$GATE_STAMP build_ref=$GATE_BUILD_REF)..."
   # Pre-invocation bytes, never `git checkout` (nexus-iws18: HEAD is not
-  # what was in the tree when the gate started).
+  # what was in the tree when the gate started). Snapshotted HERE, only now
+  # that the lease is ours and the guard above has passed -- never earlier
+  # (nexus-iexvl; see RELEASE_PROPS_SNAPSHOT's declaration above for why).
+  RELEASE_PROPS_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/release.properties.snapshot.XXXXXX")"
+  cp "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT"
   _restore_props() { cp "$RELEASE_PROPS_SNAPSHOT" "$RELEASE_PROPS"; }
   _restore_props_and_release_lease() { _restore_props; build_lease_release service; }
   sed -e "s/^release_version=.*/release_version=${GATE_STAMP}/" \
