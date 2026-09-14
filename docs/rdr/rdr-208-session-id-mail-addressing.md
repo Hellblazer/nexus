@@ -217,13 +217,16 @@ in Phase 3 ends. `address_kind` keeps `agent` and gains `session`; `instance`
 is retired.
 
 **Directory.** A new template `directory/<name>`: keys `name`; dims
-`session_id` (required); `id_from: keys+nonce`; take disabled; retention 7
-days. The watcher armed with `--instance NAME` writes an entry whose nonce is
-its arm time, with a short `ttl_seconds`, and re-sends the same entry on a
-heartbeat. A re-send has the same id, so it moves the entry's expiry forward
+`session_id` (required); `id_from: keys+nonce` with `id_dims: [session_id]`,
+so two sessions arming one name with the same nonce still write two rows; take
+disabled; retention 7 days. The watcher armed with `--instance NAME` writes an
+entry whose nonce is its arm time, finer than one second and joined with its
+pid, with a short `ttl_seconds`, and re-sends the same entry on a heartbeat. A re-send has the same id, so it moves the entry's expiry forward
 instead of adding a row. Values, decided 2026-09-14: a 300-second TTL, re-sent
 every 60 seconds. An entry stops resolving within one TTL after
-its watcher stops. A re-send cannot move expiry past the entry's `created_at`
+its watcher stops. On a `/clear` self-stop the watcher releases its entry at
+once by re-sending it with `ttl_seconds=1`; on any other exit it leaves the
+entry to lapse, so a `/resume` inside the TTL still finds the name resolving. A re-send cannot move expiry past the entry's `created_at`
 plus the 7-day retention, so a watcher that runs that long writes a fresh entry
 with a new nonce before then.
 
@@ -243,20 +246,28 @@ error naming the name; it is never written to a mailbox nobody reads.
 entry. Until the earlier holder's entry lapses, the name resolves to two
 sessions, and `mailbox_send` refuses it and names both.
 
-**Sending.** A new MCP tool `mailbox_send(to, body, kind, correlation_id)`
-resolves `to`: a session-id shape is used as is; anything else is looked up in
+**Sending.** A new MCP tool
+`mailbox_send(to, body, kind, correlation_id, from_address)` resolves `to`: a
+session-id shape is used as is; an agent-id shape is used as is, with
+`address_kind: agent` and no directory lookup; anything else is looked up in
 the directory; an unresolvable name is an error naming the name, and a name
 held by more than one live session is an error naming every holder. Neither is
 ever a silent write to a mailbox nobody reads. The mailbox and peer-messaging skills
 send through it; raw `tuple_out` to `mailbox/` stays possible and documented
-as the low-level path.
+as the low-level path. The sender's own address (`from`) is the session id in
+the tuple-watch session marker, then `NX_T1_SESSION_ID`; with neither, the call
+is refused. A subagent passes `from_address` to send as its own agent id.
 
 **`/clear`.** On `source=clear`, SessionStart reads the previous session id
 from `tuple-watch/session.<claude pid>` before overwriting it, and writes
 `<config>/tuple-watch/cleared.<new session id>` naming that id. The drain for
-the new session drains the named mailbox and deletes the record when a claim
-returns nothing; a pass interrupted before that keeps the record for the next
-prompt. `/resume` and `/compact` need nothing.
+the new session drains the named mailbox inside its usual budget. It deletes the
+record only when, for every mailbox the record names, the claim loop ended on an
+empty claim, a read shows no live row other than dead-lettered ones, and that
+mailbox's pending file is empty. Any other ending (the budget running out, a
+refused ack, a row still under lease) keeps the record for the next prompt. A
+second `/clear` before that carries the ids the record names forward into its
+own record. `/resume` and `/compact` need nothing.
 
 **Fork.** `/branch` and `--fork-session` mint a new session id, but the parent
 session still exists and can be resumed, so its mailbox stays with it. A forked
@@ -440,8 +451,15 @@ None.
 - Rename: mail to the new name reaches the session; mail to the old name
   arrives within one TTL and is refused after it.
 - `/clear`: SessionStart records the previous id before its output; the drain
-  empties the previous mailbox and deletes the record when a claim returns
-  nothing; an interrupted pass keeps the record.
+  empties the previous mailbox and deletes the record only under the three
+  conditions above; the budget running out, a refused ack or a row under lease
+  keeps it; two `/clear`s before a prompt drain both old mailboxes.
+- Two sessions arming one name with the same nonce write two entries.
+- A `/clear` self-stop releases the watcher's entry within about a second; an
+  ordinary exit leaves it for one TTL.
+- `mailbox_send`: an agent-id `to` skips the directory; a subagent's
+  `from_address` sends as its agent id; with no session marker and no
+  `NX_T1_SESSION_ID` the call is refused.
 - Two processes on one session id, one of which runs `/clear`: each message in
   the old mailbox is delivered exactly once, to one of them.
 - A watcher that stops while its session lives: the name stops resolving
@@ -554,3 +572,4 @@ behavior, the fork rule, and the TTL and heartbeat values.
 - 2026-09-14: Gate round 1 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `3b07bee53`; critique `nexus_rdr/208-gate-critique-2026-09-14`.
 - 2026-09-14: Post-accept amendment: Sam's three gate decisions (T2 `nexus_rdr/208-decision-gate-2026-09-14`), so a name held by two live sessions is refused rather than delivered to the newest; and gate Significants 1 and 2 (a watcher that stops while its session lives; `/clear` with two processes on one session id). Fix check recorded in T2 as `nexus_rdr/208-fix-check-<tip>`.
 - 2026-09-14: Post-accept amendment: the Risks bullet on a stopped watcher states the registry file's 7-day retention instead of "never expired" (observation d1 of fix check `nexus_rdr/208-fix-check-0bfcc6bb7`). Fix check recorded in T2 as `nexus_rdr/208-fix-check-<tip>`.
+- 2026-09-14: Post-accept amendment: six design items from the implementation plan's audit (T2 `nexus/plan-rdr-208-implementation-2026-09-14`): `id_dims` on `session_id`; agent-id routing and `from_address` in `mailbox_send`; `mailbox_send`'s default sender; the watcher's release on a `/clear` self-stop; the three-condition delete rule; chained `/clear`s. Fix check recorded in T2 as `nexus_rdr/208-fix-check-<tip>`.
