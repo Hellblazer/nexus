@@ -116,6 +116,24 @@ PING_PREFIX = "nx-tuple-watch:"
 _STATE_SUBDIR = "tuple-watch"
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
 
+#: Directory entry lease constants (RDR-208 Phase 2 Step 1, bead nexus-galkv.9,
+#: decision 3 -- T2 nexus_rdr/208-decision-gate-2026-09-14): a live holder
+#: writes its ``directory/<name>`` entry with this TTL and re-sends at this
+#: cadence. Overridable through :class:`WatchConfig`'s own fields below, for
+#: tests only -- the CLI never overrides them.
+DIRECTORY_TTL_S: float = 300.0
+DIRECTORY_HEARTBEAT_S: float = 60.0
+
+#: Matches ``directory.yaml``'s own ``retention_seconds`` (RDR-208 Phase 1
+#: Step 1): a re-send can never move an entry's expiry past its OWN
+#: ``created_at`` plus this window (``TupleRepository.writeOut``'s
+#: ``LEAST(candidateExpiry, ceiling)`` clamp), so a lease that outlives it
+#: must mint a fresh nonce and write a brand-new entry before the old one's
+#: ceiling is reached -- see :func:`_directory_heartbeat`'s rotate check.
+#: Not a :class:`WatchConfig` field: the boundary it drives is a property of
+#: the ENGINE template, not something a caller should be able to move.
+DIRECTORY_RETENTION_S: float = 604800.0
+
 
 @dataclass(frozen=True)
 class WatchConfig:
@@ -148,6 +166,12 @@ class WatchConfig:
     # claiming live rows via /v1/tuples/in unbounded by page), so only the PUSH
     # notification is silently dropped, never the mail.
     cursor_safety_lag_s: float = 10.0
+
+    #: RDR-208 Phase 2 Step 1 (bead nexus-galkv.9): the watcher's own
+    #: directory/<name> lease. Test-only overrides -- production always runs
+    #: the module-level DIRECTORY_TTL_S / DIRECTORY_HEARTBEAT_S defaults.
+    directory_ttl_s: float = DIRECTORY_TTL_S
+    directory_heartbeat_s: float = DIRECTORY_HEARTBEAT_S
 
 
 @dataclass
@@ -961,6 +985,130 @@ def _probe_once(
         stats.pinged += len(new_rows)
 
 
+@dataclass
+class _DirectoryLease:
+    """This watcher's own ``directory/<name>`` lease state, tracked across
+    cycles inside :func:`run_watch` (RDR-208 Phase 2 Step 1, bead
+    nexus-galkv.9). Purely in-process -- never persisted to disk, unlike the
+    address seen-set or the instance registration: the lease belongs to the
+    LIVE process, and a fresh process (a restart, or a replacement watcher
+    after a ``/clear``) re-arms from scratch rather than resuming someone
+    else's nonce.
+
+    ``last_error``/``last_error_at`` mirror ``run_watch``'s own per-address
+    ``failing`` dict (same rate-limit shape, same reasoning) but scoped to
+    this ONE lease, since a watcher has at most one directory entry.
+    """
+
+    armed: bool = False
+    nonce: str = ""
+    arm_time: float = 0.0
+    last_send: float = 0.0
+    last_error: str = ""
+    last_error_at: float = 0.0
+
+
+def _directory_nonce(t: float, pid: int) -> str:
+    """Finer than one second and carries the watcher's pid (RDR-208 P2.1
+    audit round-2 residual, not in the original RDR text): two processes on
+    one session id that arm ``directory/<name>`` in the same second would
+    otherwise compute the SAME id (``id_from: keys+nonce`` -- a whole-second
+    nonce plus identical keys collide outright), and one process's later
+    ``/clear`` release would silently drop the OTHER's entry until its next
+    re-send. ``%.6f`` gives microsecond resolution; the pid separates two
+    processes that still land in the same microsecond.
+    """
+    return f"{t:.6f}-{pid}"
+
+
+def _directory_heartbeat(
+    store: Any,
+    name: str,
+    session_id: str,
+    lease: _DirectoryLease,
+    *,
+    config: WatchConfig,
+    t: float,
+    pid: int,
+    emitter: _Emitter,
+) -> None:
+    """One cycle's ``directory/<name>`` lease decision: arm, plain re-send,
+    or re-nonce (RDR-208 Phase 2 Step 1). Mutates *lease* in place, exactly
+    as :func:`_probe_once` mutates its ``_AddressState``. Never raises: a
+    write failure is reported like a probe failure (once per
+    ``error_report_every_s`` window, on stdout -- ``emitter`` is the same
+    budgeted stdout gate the address probes use) and the caller's loop
+    continues untouched; *lease* is left exactly as it was, so the very next
+    cycle retries rather than waiting out a fresh heartbeat window.
+    """
+    due = not lease.armed or t - lease.last_send >= config.directory_heartbeat_s
+    if not due:
+        return
+    # Re-nonce (decision: before arm_time + retention - ttl, mint a fresh
+    # nonce and write a NEW entry). The old row is simply never re-sent again
+    # under its old nonce, so it lapses on its own at its last-set expiry --
+    # nothing here needs to touch it.
+    rotate = lease.armed and t >= lease.arm_time + DIRECTORY_RETENTION_S - config.directory_ttl_s
+    fresh = not lease.armed or rotate
+    nonce = _directory_nonce(t, pid) if fresh else lease.nonce
+    try:
+        store.out(
+            f"directory/{name}", {"name": name}, dims={"session_id": session_id},
+            nonce=nonce, ttl_seconds=int(config.directory_ttl_s),
+        )
+    except Exception as e:  # noqa: BLE001 — reported like a probe failure, never fatal
+        text = f"{type(e).__name__}: {e}"
+        _log.warning("tuple_watch_directory_lease_failed", name=name, error=text)
+        report_due = (
+            not lease.last_error
+            or lease.last_error != text
+            or t - lease.last_error_at >= config.error_report_every_s
+        )
+        if report_due:
+            lease.last_error, lease.last_error_at = text, t
+            emitter.emit_error(
+                f"{PING_PREFIX} directory/{name} lease failed: {text}. The name may not"
+                f" resolve to this session while this lasts; reported at most once per"
+                f" {int(config.error_report_every_s)}s.",
+                t,
+            )
+        return
+    lease.last_error = ""
+    lease.armed = True
+    lease.nonce = nonce
+    if fresh:
+        lease.arm_time = t
+    lease.last_send = t
+
+
+def _release_directory_entry(
+    store: Any, name: str, session_id: str, lease: _DirectoryLease,
+) -> None:
+    """Best-effort release on the marker-mismatch self-stop (RDR-208 Phase 2
+    Step 1, audit round-1 fix): re-send the CURRENT entry -- the nonce in use
+    at stop time, which after a rotation is not the arm-time nonce -- with
+    ``ttl_seconds=1``, so it lapses within about a second
+    (``TupleRepository.writeOut``'s ``LEAST(candidateExpiry, ceiling)`` lets
+    a re-send SHORTEN expiry same as it lets a heartbeat extend it; a ceiling
+    days away never binds a 1-second candidate).
+
+    A no-op when *lease* was never armed (self-stop fired before this
+    watcher ever wrote an entry): nothing to release. Never raises -- a
+    failed release just means the entry rides out its normal TTL, exactly as
+    an unresolvable ``claude_pid`` already leaves it (module docstring,
+    Gate Significant (a)).
+    """
+    if not lease.armed:
+        return
+    try:
+        store.out(
+            f"directory/{name}", {"name": name}, dims={"session_id": session_id},
+            nonce=lease.nonce, ttl_seconds=1,
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort release, never fatal
+        _log.warning("tuple_watch_directory_release_failed", name=name, error=str(e))
+
+
 def run_watch(
     store: Any,
     addresses: Iterable[str],
@@ -974,6 +1122,9 @@ def run_watch(
     sleep: Callable[[float], None] = time.sleep,
     claude_pid: int | None = None,
     spawn_session_id: str | None = None,
+    directory_name: str | None = None,
+    directory_session_id: str | None = None,
+    directory_pid: int | None = None,
 ) -> WatchStats:
     """Probe every address once per ``config.interval_s``; ``iterations=0``
     runs until interrupted. State is reloaded from disk on every cycle so a
@@ -987,6 +1138,20 @@ def run_watch(
     reads; when not given and *spawn_session_id* IS given, it is resolved
     once here via :func:`nexus.session.find_immediate_claude_pid` rather
     than on every cycle.
+
+    *directory_name*/*directory_session_id* (RDR-208 Phase 2 Step 1, bead
+    nexus-galkv.9) arm this session's own ``directory/<name>`` lease when
+    both are given -- ``None``/``""`` (either one) is a silent no-op, never
+    a raise, matching every no-op default elsewhere in this signature: no
+    ``--instance``, a positional ADDRESS, or a caller that predates this
+    parameter all leave the directory untouched. Written on the first cycle
+    (the arm) and re-sent every ``config.directory_heartbeat_s`` seconds
+    thereafter, with a fresh nonce minted before the entry's retention
+    ceiling would otherwise stop it moving; released (``ttl_seconds=1``)
+    on the marker-mismatch self-stop below, but never on a plain exit or
+    SIGTERM (module docstring, Gate Significant (a)). *directory_pid*
+    defaults to this process's own pid (:func:`os.getpid`) -- distinct
+    from *claude_pid*, which names the CLAUDE ancestor, not the watcher.
     """
     addrs = _unique_addresses(addresses)
     if not addrs:
@@ -995,6 +1160,10 @@ def run_watch(
         from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — deferred: CLI startup cost
 
         claude_pid = find_immediate_claude_pid()
+    directory_active = bool(directory_name) and bool(directory_session_id)
+    if directory_active and directory_pid is None:
+        directory_pid = os.getpid()
+    lease = _DirectoryLease()
     stats = WatchStats()
     emitter = _Emitter(config, emit)
     failing: dict[str, tuple[str, float]] = {}  # address -> (error text, last reported at)
@@ -1010,6 +1179,13 @@ def run_watch(
         if spawn_session_id and claude_pid:
             marker = _read_session_marker(state_dir, claude_pid)
             if marker and marker != spawn_session_id:
+                if directory_active:
+                    # RDR-208 P2.1: release the CURRENT entry -- the nonce in
+                    # use at stop time, which after a rotation is not the
+                    # arm-time nonce -- so the name stops resolving to this
+                    # session within about a second instead of riding out a
+                    # full TTL while the new session's watcher re-arms it.
+                    _release_directory_entry(store, directory_name, directory_session_id, lease)
                 emit(
                     f"{PING_PREFIX} STOP: this conversation is now session {marker},"
                     f" not {spawn_session_id} -- the watch for the old session is"
@@ -1017,6 +1193,11 @@ def run_watch(
                     f" name from a fresh ListAgents call.",
                 )
                 return stats
+        if directory_active:
+            _directory_heartbeat(
+                store, directory_name, directory_session_id, lease,
+                config=config, t=t, pid=directory_pid, emitter=emitter,
+            )
         # Rotate which address goes first each cycle. This does NOT fix an observed
         # starvation: with the current constants one address can take at most
         # max_lines_per_cycle + 1 = 6 of the 8-line budget, so the second always has room

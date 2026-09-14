@@ -453,7 +453,14 @@ def tuple_watch_cmd(
         # acquired. The name belongs to the new session regardless of whether a
         # stale watcher from a prior /clear still holds that address's lock, and
         # the drain hook must drain it at this session's prompts either way.
-        if instance and session_id_from_env and instance in watched and not addresses:
+        # RDR-208 Phase 2 Step 1 (bead nexus-galkv.9): the directory lease write
+        # condition mirrors the registration's exactly -- it does NOT depend on
+        # whether the instance lock was acquired either. The name belongs to
+        # this session regardless; a clash is for mailbox_send to refuse, not
+        # for the watcher to hide.
+        session_owns_instance = bool(instance and session_id_from_env and instance in watched and not addresses)
+        directory_name = instance if session_owns_instance else None
+        if session_owns_instance:
             write_instance_registration(sd, session_id_from_env, instance)
         if session_id_from_env:
             prune_stale_registrations(sd, session_id_from_env)
@@ -468,6 +475,8 @@ def tuple_watch_cmd(
             # (nexus-6konb.13 docs critic). Only the default, session-resolved
             # watch compares itself against the SessionStart marker.
             spawn_session_id=None if addresses else session_id_from_env,
+            directory_name=directory_name,
+            directory_session_id=session_id_from_env if directory_name else None,
         )
     except KeyboardInterrupt:
         return

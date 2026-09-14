@@ -1455,6 +1455,85 @@ class TestStaleWatcherSelfStops:
         assert not [line for line in lines if "STOP" in line]
 
 
+# ── nx tuple watch: directory lease CLI wiring (RDR-208 P2.1, nexus-galkv.9) ─
+#
+# The lease logic itself lives in run_watch (see test_tuple_watch_directory_
+# lease.py); these tests only prove the CLI arm path threads directory_name/
+# directory_session_id through on exactly the condition write_instance_
+# registration already uses -- mirroring test_only_the_session_resolved_
+# watch_compares_against_the_marker's monkeypatch pattern just above.
+
+
+class TestDirectoryLeaseCliWiring:
+    def test_instance_given_threads_the_name_and_session_id(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        import nexus.session as session_mod
+        import nexus.tuple_watch as tuple_watch_mod
+
+        captured: dict = {}
+
+        def _fake_run_watch(*args, **kwargs):
+            captured.update(kwargs)
+            return None
+
+        monkeypatch.setattr(tuple_watch_mod, "run_watch", _fake_run_watch)
+        monkeypatch.setattr(session_mod, "resolve_active_session_id", lambda: "S1")
+        _store_obj, _cfg, sd = _watch_env(tmp_path)
+        name = _uniq("nexus")
+        res = _invoke([
+            "watch", "--instance", name, "--iterations", "1", "--interval", "0",
+            "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        assert captured.get("directory_name") == name
+        assert captured.get("directory_session_id") == "S1"
+
+    def test_positional_address_suppresses_the_directory_write(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        import nexus.session as session_mod
+        import nexus.tuple_watch as tuple_watch_mod
+
+        captured: dict = {}
+
+        def _fake_run_watch(*args, **kwargs):
+            captured.update(kwargs)
+            return None
+
+        monkeypatch.setattr(tuple_watch_mod, "run_watch", _fake_run_watch)
+        monkeypatch.setattr(session_mod, "resolve_active_session_id", lambda: "S1")
+        _store_obj, _cfg, sd = _watch_env(tmp_path)
+        name = _uniq("nexus")
+        res = _invoke([
+            "watch", _uniq("addr"), "--instance", name, "--iterations", "1",
+            "--interval", "0", "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        assert captured.get("directory_name") is None
+        assert captured.get("directory_session_id") is None
+
+    def test_no_instance_writes_no_directory_entry(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        import nexus.session as session_mod
+        import nexus.tuple_watch as tuple_watch_mod
+
+        captured: dict = {}
+
+        def _fake_run_watch(*args, **kwargs):
+            captured.update(kwargs)
+            return None
+
+        monkeypatch.setattr(tuple_watch_mod, "run_watch", _fake_run_watch)
+        monkeypatch.setattr(session_mod, "resolve_active_session_id", lambda: "S1")
+        _store_obj, _cfg, sd = _watch_env(tmp_path)
+        res = _invoke(["watch", "--iterations", "1", "--interval", "0", "--state-dir", str(sd)])
+        assert res.exit_code == 0, res.output
+        assert captured.get("directory_name") is None
+        assert captured.get("directory_session_id") is None
+
+
 # ── nx tuple watch: two addresses per session (MM-1.3, nexus-6konb.4) ──────
 
 
