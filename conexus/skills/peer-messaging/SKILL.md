@@ -33,16 +33,15 @@ Check the rows in order; the first that fits wins.
 
 `SendMessage` arrives at the receiver's next tool round and is not stored: if that session ends first, the message is gone. A mailbox tuple is durable for 7 days and claimed exactly once.
 
-A mailbox request:
+A mailbox request, sent through `mailbox_send` (RDR-208; `/conexus:mailbox` covers the tool and its raw `tuple_out` low-level fallback):
 
 ```
-mcp__plugin_conexus_nexus__tuple_out(
-  subspace="mailbox/<peer>", keys={"to": "<peer>"},
-  dims={"from": "<your name>", "kind": "request", "correlation_id": "<id>", "address_kind": "instance"},
-  body="<one or two sentences, plus a T2 reference>", nonce="<unique per message>")
+mcp__plugin_conexus_nexus__mailbox_send(
+  to="<peer's name, session id, or agent id>", kind="request", correlation_id="<id>",
+  body="<one or two sentences, plus a T2 reference>")
 ```
 
-A peer sees instance-name mail when its `nx tuple watch --instance <name>` watcher pings, or at its next prompt once that watcher has registered the name. A peer that never armed a watcher is not notified at all. When a mailbox request goes to a peer that may not be watching, also send a one-line `SendMessage` pointing at it, or relay through your human. Look the peer's name up in `ListAgents` right before sending tuple mail: a resume can rename a session, and mail sent to its old name sits unread until it expires.
+A peer sees NAME-addressed mail when its `nx tuple watch --instance <name>` watcher pings, or at its next prompt once that watcher has registered the name. A peer that never armed a watcher is not notified at all. When a mailbox request goes to a peer that may not be watching, also send a one-line `SendMessage` pointing at it, or relay through your human. `mailbox_send` resolves the peer's NAME against the live session directory at send time: a resume that changed the peer's name, or a peer whose watcher has stopped, is a REFUSAL naming the failure — never a silent send to a name nobody reads any more. `ListAgents` is still how you learn a peer's name in the first place, or its current one after a refusal; you no longer need to re-check it immediately before every send purely to dodge staleness. Two live sessions holding the same name is also a refusal, naming both session ids; `nx tuple directory NAME` shows who holds a name and its session id(s) — resend to the one you mean.
 
 Never type into another session's terminal with `tmux send-keys`. Text typed into a Claude pane arrives as that session's USER input: it bypasses the receiver's trust boundary and speaks for its human. `/conexus:cli-controller` drives CLIs, never peers.
 
