@@ -6,7 +6,145 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.45.0] - 2026-09-14
+
+Paired with engine-service-v0.1.118. Not additive: the tuple size limits below
+narrow what the engine accepts, so the deploy relay was armed before the client
+tag (`docs/release-arming/`, nexus-h0fo3).
+
+### Changed
+- **The tuple space enforces size limits (nexus-r7xao, RDR-205 amendment).** The
+  tuple space holds coordination metadata, not values. The engine now refuses,
+  with a new typed error `TooLarge` (HTTP 413): a `body` over 4096 bytes UTF-8
+  (a template may declare a lower `max_body_bytes`; the ledger template's is 0,
+  so ledger rows carry no body); a `keys`, `dims` or `keys_pattern` value over
+  256 bytes; a `subspace` over 256 bytes; a `nonce`, `claimant` or `claim_id`
+  over 128 bytes; and a whole request body over 8192 bytes on any `/v1/tuples`
+  route, refused before it is parsed. Limits count bytes, not characters. The
+  refusal names the field and the byte counts, never the value. A reply written
+  by `ack` is held to the same limits and refused before the transaction opens,
+  so the request stays claimed. Before this release the engine enforced none of
+  these: a body between 4096 bytes and the edge's 8 KB request cap was accepted
+  and is now refused. `HttpTupleStore` checks the same limits before sending and
+  raises `TooLargeError`, which is both a `TupleError` and the existing
+  `RequestTooLargeError`, so a handler for either still catches it. `nx tuple`,
+  the `tuple_*` MCP tools and the plugin's two tuple-writing hooks apply the same
+  numbers. `TooLarge` is the tenth typed tuple error. Put longer content in T2 or
+  T3 and carry a reference in the tuple.
+- **The v0.1.118 migration deletes existing tuple rows whose body is over 4096
+  bytes (nexus-r7xao).** Changeset `tuples-003-body-size-limit.xml` logs the
+  count of such rows, deletes them (their claim-log rows stay, with `tuple_id`
+  set to NULL), then adds and validates a CHECK constraint on
+  `nexus.tuples.body`. A census of the live store on 2026-09-13 found 2,150
+  ledger rows, all with empty bodies, and 5 mailbox rows with a largest body of
+  3,285 bytes.
+- **An acked tuple's body is cleared (nexus-8zoyp).** `ack` sets `body` to NULL
+  in the statement that consumes the row, with or without a reply; a reply is its
+  own row and keeps its body. A consumed row was already unreadable through `rd`
+  and `in`. Changeset `tuples-004-1` clears the body of rows consumed before this
+  release. Nacked, lapsed and dead-lettered rows keep their bodies.
+- **The store read tools share `search`'s knowledge scope (nexus-mgqs8).**
+  `search` and `query` read `corpus="knowledge"` as every live `knowledge__*`
+  collection, but `store_get`, `store_get_many` and `store_list` read their
+  `collection="knowledge"` default as the single `knowledge__knowledge`
+  placeholder, so a note `search` found came back "Not found" from `store_get`.
+  They now use the same scope. `store_get` finds an id across it and a title in
+  every knowledge collection, and names the collections when a title matches in
+  more than one instead of guessing. `store_list` with the bare name lists the
+  subject collections and their entry counts. A full collection name narrows any
+  of them to one collection; the placeholder stays reachable by its full name.
+  Defaults and parameters are unchanged.
+- **MCP tool descriptions have one fixed shape (nexus-cnzei.5).** Thirteen
+  descriptions ran past the 2048-character cut Claude Code applies (`nx_answer`
+  ran to 15,881 characters), and no parameter carried a schema description, so
+  parameter docs past the cut never reached the model. Every tool on both servers
+  now states its purpose, when to use it instead of a named sibling, what it
+  returns, and two to four constraints, in about 1,200 characters; each
+  parameter's doc is in the wire schema. Corrected claims: the scoped-search tools
+  and `query` do not fail in local mode (the real guard only rejects a test double
+  that is not `HttpVectorClient`-backed); `search`'s `cluster_by` default is
+  empty; `traverse` always returns an empty `ids`. `nx_answer` names the text
+  markers of a degraded answer, `[budget exhausted ...]` and
+  `[non-answer: <shape>]`.
+- **One entry point per plugin name (nexus-cnzei.4, nexus-cnzei.6).** Slash
+  commands that shared a name with a skill are removed, the three stub agents
+  that only redirected to an MCP tool (`knowledge-tidier`, `plan-auditor`,
+  `plan-enricher`) are deleted, and seven skills are renamed. The conexus
+  changelog lists every name.
+- The plugin no longer auto-approves the `daemon_uninstall` MCP tool (it can
+  delete the nexus config directory); every call now asks (nexus-cnzei.5).
+
+### Added
+- **`nx init` and `nx upgrade` manage a user-level beads `PRIME.md`
+  (nexus-cnzei.8).** When `bd` or the beads Claude Code plugin is detected, they
+  install a short, generic, conexus-managed `PRIME.md` at the path `bd prime`
+  falls back to when a repo has no `.beads/PRIME.md` (macOS
+  `~/Library/Application Support/beads/PRIME.md`; Linux
+  `$XDG_CONFIG_HOME/beads/PRIME.md` or `~/.config/beads/PRIME.md`; Windows
+  `%AppData%/beads/PRIME.md`). It is machine-wide and replaces bd's bundled text
+  for every beads repo without its own file; a repo-level `.beads/PRIME.md` still
+  wins. The marker records a hash of the installed body, so a hand-authored or
+  hand-edited file is never overwritten; replacing a stale managed file backs it
+  up to `PRIME.md.bak`. Opt out with `--no-beads-prime` for one run or
+  `nx config set beads_prime.manage false` for good. `nx doctor` reports the
+  file's state and the undo steps; `nx uninstall` removes it only while the hash
+  still matches. beads 1.2.x still appends its own `bd remember` memories after
+  this file.
+- `nx doctor` row `tuples.watch_permission` (nexus-rml7o): whether the user
+  `~/.claude/settings.json` (honouring `CLAUDE_CONFIG_DIR`), the project
+  `.claude/settings.json` or `.claude/settings.local.json` carries a
+  `permissions.allow` rule covering `nx tuple watch` (the documented entry, a
+  broader `Bash(nx tuple:*)` or `Bash(nx:*)`, or bare `Bash`), naming the file. A
+  matching `permissions.deny` in any of them wins and is reported as denied. A
+  missing or denied rule is a soft warning, never a failure; on a box where
+  Claude Code has never run, the row reports not applicable.
+- `nx doctor --check-quotas` names a small-window model whose tokenizer the
+  client cannot find, since chunks in its collections are then not checked
+  against the token window (nexus-ajvjx). Default `nx doctor` output is
+  unchanged.
+- The ledger template accepts optional `commit`, `t2_ref` and `verify`
+  (`present` or `absent`) dims (nexus-d9k5h, engine). The plugin's ledger
+  projection fills them from an agent's closing VERIFY block, and
+  `scripts/check_agent_verify_claims.py` confirms a claimed commit exists and
+  touches the named paths and that a `t2_ref` exists in T2 (nexus-cnzei.6).
+- The `peer-messaging` skill: messaging other Claude sessions and dispatched
+  agents, and sharing one machine (nexus-tacsg).
+
 ### Fixed
+- **The nexus-catalog MCP `search` tool was registered to the wrong function
+  (nexus-cnzei.1).** In 7.19.0 through 7.44.0,
+  `mcp__plugin_conexus_nexus-catalog__search` exposed a private helper,
+  `_file_path_matches(entry_path, wanted)`, which returns true or false, instead
+  of catalog metadata search. Commit 4b756c8c7 (nexus-fhim9, first released in
+  7.19.0) inserted the helper between the `@mcp.tool(name="search", ...)`
+  decorator and `catalog_search`, and Python applied the decorator to the helper.
+  A call with the documented parameters (`query`, `content_type`, `author`,
+  `corpus`, `owner`, `file_path`, `limit`, `offset`) failed argument validation,
+  because the tool required `entry_path` and `wanted`; the tool's advertised
+  description was the helper's docstring. Catalog metadata search was not
+  reachable through MCP in those releases. The other nine catalog tools and the
+  core server were not affected. `search` now takes `query` and the filters above
+  and returns catalog entries. A committed wire-schema snapshot of both servers,
+  a check that no registered tool resolves to a private function, and a
+  subprocess round trip that calls `search` over MCP now fail on this class.
+- **A `/clear` then `/resume` back into a session no longer leaves T1 on a dead
+  token (nexus-r0d37).** The MCP `scratch` tool returned 401 and the CLI reported
+  no session lease: handing off away from a session left its lease file in
+  place, and the handoff back borrowed that orphaned lease, which nothing was
+  renewing. The server now deletes the lease it owns when it hands off away,
+  under the mint lock and only while the file still holds its own token, so a
+  sibling's fresh lease survives and the return mints fresh. A resume into a new
+  process is not covered.
+- **The 401 data-token re-mint is bounded (nexus-r0d37, nexus-umue1).** Seven
+  concurrent `scratch` calls on a stale T1 session drew
+  "data-token mint failed (429) ... rate limit exceeded" from the managed edge,
+  because every 401 invalidated and re-minted the data token with no guard,
+  although no data token can satisfy a stale session id. The re-mint is now
+  single-flighted on the bearer the failed request sent, and skipped while an
+  earlier re-mint healed the bearer and the retry still returned 401. T2 and T3
+  share the guard with a 60-second expiry, since a re-mint is normally the right
+  remedy there; T2 also marks the right endpoint when its base URL changes
+  mid-retry.
 - **Markdown indexing no longer drops the end of long paragraphs (nexus-2s91y).**
   The markdown chunker cut any non-code paragraph longer than about 1,690
   characters and never stored the rest, in every mode, so search could not find
@@ -16,17 +154,66 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before this release keep the truncated text until reindexed with `--force`
   through whichever command built them: `nx index repo`, `nx index md` or
   `nx index rdr`.
-- **Chunks fit their embedding model's token window (nexus-spujb).** bge-base-en-v1.5
-  reads 512 tokens and MiniLM 256; the rest of a longer chunk was silently left
-  out of its vector, so search could not find it. Indexing now splits any chunk
-  over its collection's model window, counted with that model's own tokenizer.
-  In such a collection, `store_put` and `nx store put` store a note longer than
-  the window as several chunks under one catalog document, and `store_get` and
-  `nx store get` return it whole, by id or by title. The 16,384-byte limit is
-  unchanged. Voyage collections are unaffected: the 12 KB chunk cap keeps every
-  chunk inside their 32,000-token window. `nx doctor` reports the windows the
-  chunkers enforce. Collections indexed earlier keep their truncated vectors
-  until reindexed with `--force`.
+- **Chunks fit their embedding model's token window (nexus-spujb).**
+  bge-base-en-v1.5 reads 512 tokens and MiniLM 256; the rest of a longer chunk
+  was silently left out of its vector, so search could not find it. Indexing now
+  splits any chunk over its collection's model window, counted with that model's
+  own tokenizer. In such a collection, `store_put` and `nx store put` store a note
+  longer than the window as several chunks under one catalog document;
+  `store_get` returns it whole by any piece's id or by title, and `nx store get`
+  by any piece's id. The 16,384-byte limit is unchanged. Voyage collections are
+  unaffected: the 12 KB chunk cap keeps every chunk inside their 32,000-token
+  window. `nx doctor --check-quotas` reports the windows the chunkers enforce.
+  Collections indexed earlier keep their truncated vectors until reindexed with
+  `--force`.
+- Pre-1.0 dependencies are capped at their next minor version, since a 0.x
+  minor release can break. `conexus[local]` caps `fastembed` below 0.8: the
+  extra had no upper bound, so a fresh install resolved fastembed 0.8.0, which no
+  gate had exercised. `tokenizers`, `tree-sitter-language-pack`,
+  `llama-index-core` and `voyageai` are capped the same way, with floors raised
+  to the versions this release is tested with; no locked version moved. The
+  dependency-bounds lint and the drift watch now apply the rule to the extras and
+  to 0.x minors (nexus-oqh4s).
+- `nx tuple watch`'s ping line names the MCP drain (`tuple_in`, then
+  `tuple_ack` or `tuple_nack`) instead of an `nx tuple in` command with no ack
+  step (nexus-dyfg8).
+- The SessionStart note about stale MCP servers counts only this session's own
+  MCP siblings, not every `nx-mcp` host on the machine, and asks the user to run
+  `/mcp` (nexus-cnzei.2).
+- The engine's scheduled tuple sweep runs its three arms independently and
+  releases lapsed claims row by row, so one failing row no longer stops the sweep
+  for a tenant (nexus-r7xao).
+
+### Changed (tooling and documentation)
+- Release tooling: `scripts/check_release_workflow_shape.py` runs native-smoke's
+  client probes from a checkout and the release's Maven build with Docker
+  unreachable, and runs automatically inside `--shakeout` (nexus-xihsm);
+  `native-smoke.sh` gains a `/v1/tuples` real-client probe and `--shakeout`
+  Phase B an `nx tuple` verb matrix (nexus-6flt7); `--candidate-migration`
+  populates the tuple space, an over-cap body included, before the walk
+  (nexus-58vc9); the tracker leg names the production-write guard refusal
+  (nexus-jzyt3); `stage_native` fails on a `.so` beside the candidate
+  (nexus-og52j); `local-service-gate.sh` holds the build lease across stamp,
+  package and restore (nexus-56qvf); the heartbeat census names its denominator
+  (nexus-39etc).
+- Documentation: `storage-tiers.md` and sibling pages brought current with the
+  permanent-by-default `memory_put` ttl and nine T2 stores (nexus-x5kfm); flag
+  defaults, doctor checks and MCP tool counts corrected (nexus-04wmv); a
+  retrieval-tool selection guide in `mcp-servers.md` (nexus-cnzei.5); two tuple
+  walkthrough diagrams render on GitHub again (nexus-4mxua).
+- More release tooling: concurrent gates in one checkout no longer leave
+  `release.properties` stamped (nexus-iexvl); the migration-rehearsal scripts no
+  longer write the user's global git config and refuse to run outside their
+  container, and lints refuse a tracked script that writes global git config or
+  a rehearsal script without the guard (nexus-oqh4s); every shell test suite in the repository now
+  runs under pytest (nexus-fcjt7, nexus-q1upi); the MCP description lint checks
+  documented return keys against the code (nexus-w9jxf); five tests that failed
+  only under full-suite load or in isolation are fixed (nexus-rqji3,
+  nexus-dee61, nexus-ujdha, nexus-y4dmz, and the real-config guard's
+  `dropped_writes.jsonl` handling).
+- Documentation: MCP tool, agent and skill counts, the v0.1.118 tuple-space
+  migration notes, note splitting in `nx store` and the store tools, and several
+  stale claims corrected (nexus-oqh4s).
 
 ## [7.44.0] - 2026-09-13
 

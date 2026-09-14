@@ -4,6 +4,96 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.45.0] - 2026-09-14
+
+Paired engine: engine-service-v0.1.118 (`REQUIRED_ENGINE_VERSION` (0, 1, 118)).
+Plugin version aligned with conexus 7.45.0. This pin advance makes live the
+plugin changes `PENDING_RELEASE.md` held:
+
+- One entry point per name (nexus-cnzei.4, nexus-cnzei.6). The plugin now has
+  10 agents, 44 skills and 17 commands.
+  - Commands removed where the same-named skill is now the only entry point:
+    `architecture`, `deep-analysis`, `substantive-critique`, `enrich-plan`,
+    `upgrade`, `phase-review-gate`, `rdr-close`, `rdr-create`, `rdr-research`,
+    `rdr-show`. `/conexus:<name>` still resolves, to the skill.
+  - The `knowledge-tidy` command is merged into the `knowledge-tidying` skill,
+    which now carries the `nx_tidy`, `store_put`, verify workflow. Use
+    `/conexus:knowledge-tidying`.
+  - `rdr-list` keeps its command; its skill, which only formatted the command's
+    output, is deleted.
+  - The stub agents `knowledge-tidier`, `plan-auditor` and `plan-enricher` are
+    deleted. Call `nx_tidy`, `nx_plan_audit` and `nx_enrich_beads` directly.
+  - Skills renamed: `debug` to `why-was-this-written`, `research` to
+    `design-to-code-trace`, `review` to `decision-drift-review` (the verb each
+    passes to `nx_answer` is unchanged); `rdr-gate`, `rdr-fix`, `rdr-accept` and
+    `rdr-audit` to `rdr-gate-checklist`, `rdr-fix-checklist`,
+    `rdr-accept-checklist` and `rdr-audit-checklist`. `/conexus:debug` and
+    `/conexus:research` now reach only the debugger and deep-research-synthesizer
+    commands, and `/conexus:review` no longer exists. `/rdr-gate`, `/rdr-fix`,
+    `/rdr-accept` and `/rdr-audit` stay commands; the first three now point at
+    their checklist skill for the procedure instead of carrying a second copy.
+  - `agents/_shared/` moved to `resources/agent-shared/`, so its five reference
+    files no longer list as dispatchable `conexus:_shared:*` agents.
+  - The `test-authoring` skill moved out of the plugin; it was specific to this
+    repository's test suite.
+- T2 and tool guidance matches the tools (nexus-cnzei.3, nexus-x5kfm). Agents,
+  skills and shared resources teach the nexus-473mx reversal: omit `ttl` on
+  `memory_put` for a permanent entry, and pass a positive integer only for
+  content that should expire. Every `ttl=0`, `ttl=30`, `ttl="30d"` and
+  `ttl="permanent"` example is gone (`memory_put`'s `ttl` is an integer or None).
+  `query` examples no longer pass a `topic` parameter it does not have; `nx_tidy`
+  is described as read-only, with the T3 write a separate `store_put`; skills no
+  longer tell callers to `plan_save` pipeline outcomes; `memory_list` references
+  become `memory_get(title="")`.
+- Hook guidance is actionable (nexus-cnzei.2, nexus-cnzei.6).
+  - `subagent-start.sh` scopes SendMessage-before-idling to background
+    dispatches, resolves the project with `git rev-parse --git-common-dir` so a
+    worktree dispatch reads the main repo's T2 entries and Knowledge Map, drops
+    the global `context_l1.txt` fallback and the machine-wide "Active Bead" line,
+    and classifies agent purpose from the dispatch's `agent_type` (the harness
+    never sends task text).
+  - `rdr_hook.py` and `phase_review_close_requires_gate.py` configure logging
+    through the new `_hook_logging.py` before importing nexus, so log lines no
+    longer leak into hook stdout.
+  - Deny messages from the git-write guard, the phase-review gate and pre-close
+    verification no longer offer the `# routing-allow:` or
+    `NX_REVIEW_GATE_OVERRIDE` escape to the gated subagent as its own move; the
+    pre-close deny tells a subagent to hand the close back to its orchestrator.
+- `auto-approve-nx-mcp.sh` no longer auto-approves
+  `mcp__plugin_conexus_nexus__daemon_uninstall`; its `confirm=true` is a self-gate
+  an agent satisfies, not a human check (nexus-cnzei.5).
+- Tuple size limits in the hooks and the mailbox skill (nexus-r7xao). A new
+  stdlib-only `_tuple_size_limits.py` mirrors the engine's limits (body 4096
+  bytes, key, dim, pattern and subspace values 256, nonce, claimant and claim_id
+  128). `tuple_ledger_project.py` and `mailbox_drain.py` check against it and
+  skip an oversized field with a log line instead of sending it. The mailbox
+  skill states the limits, the `TooLarge` refusal, and that longer content goes
+  to T2 or T3 with a reference in the tuple.
+- Checkable agent reports (nexus-cnzei.6). The orchestration skill and
+  `RELAY_TEMPLATE.md` require a closing VERIFY block (`commit=`, command lines
+  with `rc=`, `t2=`), and the skill says what `scripts/check_agent_verify_claims.py`
+  can and cannot confirm. `tuple_ledger_project.py` fills the ledger row's
+  `commit`, `t2_ref` and `verify` dims from that block; against an engine that
+  refuses them as undeclared dims it retries once with the older body, so the row
+  is never dropped. `expectations_census` prints a VERIFY_ABSENT_COUNT line when
+  the connected engine declares the `verify` dim.
+- Pipelines and routing (nexus-cnzei.6). `registry.yaml` is the one pipeline
+  table; its feature and bug pipelines gain `substantive-critic` after
+  `code-review-expert`, and orchestration's Quick Routing and `reference.md`
+  Debug row match it. `using-nx-skills` orders create-plan before architecture.
+  The tier-aware discipline checklist moved to `resources/tier-discipline.md`;
+  the eight skills that each carried a copy now name the tool calls inline and
+  link to it. Orchestration's build-lease paragraph keeps the principle and
+  drops this repository's own scripts.
+- New `peer-messaging` skill for messaging other sessions and dispatched agents
+  and sharing one machine, routed from `using-nx-skills` and orchestration
+  (nexus-tacsg).
+- `plan-first` and `using-nx-skills` descriptions are under 260 characters, and
+  `writing-nx-skills`' checklist names the keywords CI actually checks
+  (nexus-cnzei.4).
+- `conexus/README.md` states the current MCP tool counts (47 core, 10 catalog)
+  and gains a Tuple space row for the nine `tuple_*` tools (nexus-oqh4s).
+
 ## [7.44.0] - 2026-09-13
 
 Paired engine: engine-service-v0.1.117 (`REQUIRED_ENGINE_VERSION` (0, 1, 117)).
