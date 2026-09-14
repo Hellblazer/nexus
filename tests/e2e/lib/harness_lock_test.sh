@@ -53,17 +53,20 @@ FAIL=0
 ok()  { echo "  [ok] $1"; PASS=$((PASS + 1)); }
 bad() { echo "  [FAIL] $1"; FAIL=$((FAIL + 1)); }
 
-# name -> script path (repo-root relative). `sandbox` and
-# `t2-migration-sqlite` added RDR-184 P0 review guard-surface gap fix
-# (nexus-ccs9v.4/.5): both were unguarded fixed-shared-resource scripts
-# the original Phase-0 audit missed.
+# name -> script path (repo-root relative). `sandbox` added RDR-184 P0
+# review guard-surface gap fix (nexus-ccs9v.4): an unguarded fixed-shared-
+# resource script the original Phase-0 audit missed. `t2-migration-sqlite`
+# was added alongside it at nexus-ccs9v.5 but the harness itself was
+# deleted outright at e3c00252a (RDR-158 P3, the SQLite opt-out backend
+# retirement) — there is no SQLite side to guard any more, so the entry is
+# removed rather than repointed (nexus-fcjt7 round 2: this table's own
+# non-vacuity check had been silently tripping on the stale reference).
 declare -A HARNESS_SCRIPT=(
     [migration-rehearsal]="tests/e2e/migration-rehearsal/run.sh"
     [gc-ab]="tests/e2e/gc-ab/run-ab.sh"
     [release-sandbox]="tests/e2e/release-sandbox.sh"
     [upgrade-shakeout]="tests/e2e/upgrade-shakeout.sh"
     [sandbox]="tests/e2e/sandbox.sh"
-    [t2-migration-sqlite]="tests/e2e/t2-migration-sqlite/run.sh"
 )
 # name -> cheap, side-effect-free positional args (empty for the
 # no-argument scripts; a real, valid, non-mutating mode for the
@@ -76,7 +79,6 @@ declare -A HARNESS_ARGS=(
     [release-sandbox]="reset"
     [upgrade-shakeout]="reset"
     [sandbox]=""
-    [t2-migration-sqlite]=""
 )
 # Per-harness lockdir NAME override — defaults to "$LOCKROOT/$name.lock"
 # when a name has no entry here. `sandbox` deliberately shares
@@ -100,7 +102,7 @@ declare -A HARNESS_LOCKDIR=(
 # harness itself, silently validating nothing.
 LOCKROOT="/tmp/nexus-e2e-locks"
 
-for name in migration-rehearsal gc-ab release-sandbox upgrade-shakeout sandbox t2-migration-sqlite; do
+for name in migration-rehearsal gc-ab release-sandbox upgrade-shakeout sandbox; do
     echo
     echo "=== $name ==="
     script="${HARNESS_SCRIPT[$name]}"
