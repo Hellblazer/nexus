@@ -35,6 +35,7 @@
 # fresh — that is tests/e2e/published-client-write-gate.sh's axis (nexus-
 # 86mx2). Neither substitutes for the other.
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/require_container.sh"
 
 PREV_RELEASE="${PREV_RELEASE:?PREV_RELEASE must be set (e.g. 6.9.0)}"
 PREV_ENGINE_TAG="${PREV_ENGINE_TAG:?PREV_ENGINE_TAG must be set (e.g. engine-service-v0.1.42)}"

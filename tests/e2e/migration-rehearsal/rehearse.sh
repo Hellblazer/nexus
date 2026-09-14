@@ -28,6 +28,7 @@
 # daily-driver surface against Voyage; see run.sh's own header for the
 # tracked gap.
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/require_container.sh"
 
 CHROMA_LOCAL="${CHROMA_LOCAL:-/home/nexus/legacy-chroma}"
 SEED_N="${SEED_N:-12}"

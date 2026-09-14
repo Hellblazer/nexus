@@ -15,7 +15,8 @@ FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    NX_REHEARSAL_IN_CONTAINER=1
 
 # python + curl for the wheel, and the build basics chromadb's ONNX runtime +
 # tokenizers need at install time. No JRE: the native nexus-service binary is

@@ -471,7 +471,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115,<1.0" },
     { name = "fastembed", marker = "extra == 'local'", specifier = ">=0.7.0,<0.8" },
     { name = "httpx", specifier = ">=0.27,<1.0" },
-    { name = "llama-index-core", specifier = ">=0.12.7,<0.15" },
+    { name = "llama-index-core", specifier = ">=0.14.21,<0.15" },
     { name = "markdown-it-py", specifier = ">=4.0.0,<5" },
     { name = "mcp", specifier = ">=1.0,<2" },
     { name = "mineru", extras = ["pipeline"], specifier = ">=3.1.11,<3.1.12" },
@@ -484,7 +484,7 @@ requires-dist = [
     { name = "scikit-learn", specifier = ">=1.3,<2" },
     { name = "sigstore", specifier = ">=3.0,<5" },
     { name = "structlog", specifier = ">=24.0,<26" },
-    { name = "tokenizers", specifier = ">=0.20,<1.0" },
+    { name = "tokenizers", specifier = ">=0.22,<0.23" },
     { name = "torch", marker = "sys_platform == 'linux'", specifier = ">=2.8,<2.9", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "python_full_version < '3.13' and sys_platform != 'linux'", specifier = ">=2.8,<2.9" },
     { name = "torch", marker = "python_full_version >= '3.13' and sys_platform != 'linux'", specifier = ">=2.10,<2.11" },
@@ -492,9 +492,9 @@ requires-dist = [
     { name = "torchvision", marker = "python_full_version < '3.13' and sys_platform != 'linux'", specifier = ">=0.23,<0.24" },
     { name = "torchvision", marker = "python_full_version >= '3.13' and sys_platform != 'linux'", specifier = ">=0.25,<0.26" },
     { name = "tqdm", specifier = ">=4.65,<5" },
-    { name = "tree-sitter-language-pack", specifier = ">=0.7.1,<1.0" },
+    { name = "tree-sitter-language-pack", specifier = ">=0.13.0,<0.14" },
     { name = "uvicorn", specifier = ">=0.41,<1.0" },
-    { name = "voyageai", specifier = ">=0.2,<1.0" },
+    { name = "voyageai", specifier = ">=0.3,<0.4" },
 ]
 provides-extras = ["local"]
 

@@ -30,7 +30,8 @@ FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    NX_REHEARSAL_IN_CONTAINER=1
 
 # ca-certificates (PyPI + GitHub release downloads), git (Catalog.init),
 # python for the /version JSON probe helper + the sidecar-rewrite step +

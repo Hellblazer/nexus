@@ -934,6 +934,33 @@ class TestMarketplaceVersion:
             "(the mcpb version) — a release bump left the dependency pin stale."
         )
 
+    def test_mcpb_manifest_python_constraint_matches_pyproject(self) -> None:
+        """nexus-oqh4s (round 2 of the 7.45.0 audit-fixes bead): a 2026-09-13
+        commit (207f9108d) aligned mcpb/pyproject.toml's requires-python
+        (">=3.12,<3.14") with the root pyproject.toml, but left
+        mcpb/manifest.json's own compatibility.runtimes.python field at the
+        stale ">=3.12" -- the same drift class the commit was fixing, just
+        in the sibling field. Nothing enforced these two mcpb surfaces stay
+        in lock-step, so a future python-floor bump can silently repeat it.
+        This pins them together going forward."""
+        mcpb_manifest = REPO_ROOT / "mcpb" / "manifest.json"
+        mcpb_pyproject = REPO_ROOT / "mcpb" / "pyproject.toml"
+        assert mcpb_manifest.exists()
+        assert mcpb_pyproject.exists()
+        manifest_python = (
+            json.loads(mcpb_manifest.read_text())
+            .get("compatibility", {})
+            .get("runtimes", {})
+            .get("python")
+        )
+        with mcpb_pyproject.open("rb") as f:
+            mcpb_requires_python = tomllib.load(f)["project"]["requires-python"]
+        assert manifest_python == mcpb_requires_python, (
+            f"mcpb/manifest.json compatibility.runtimes.python "
+            f"{manifest_python!r} != mcpb/pyproject.toml requires-python "
+            f"{mcpb_requires_python!r} -- bump both together."
+        )
+
     def test_release_workflow_verifies_mcpb_version(self) -> None:
         """RDR-126 §7 (nexus-2yajx): the release workflow must guard the
         .mcpb manifest version against the tag at release time, as a

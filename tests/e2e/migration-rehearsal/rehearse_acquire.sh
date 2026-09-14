@@ -30,6 +30,7 @@
 #
 # Secret-free: ONNX leg only (bge-768), no Voyage key.
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/require_container.sh"
 
 SERVICE_TAG="${NEXUS_SERVICE_TAG:?NEXUS_SERVICE_TAG must be set to the PUBLISHED tag (e.g. engine-service-v0.1.55)}"
 EXPECT_RELEASE_VERSION="${SERVICE_TAG#engine-service-v}"

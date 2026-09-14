@@ -71,6 +71,7 @@
 # commands (binary positioning, etc.) were left bare on purpose — those
 # SHOULD abort loud.
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/require_container.sh"
 
 # nexus-s71lr: Phase C/D's `nx index repo` calls redirect their whole
 # stdout+stderr into a log file and only tail it (or grep it) AFTER the

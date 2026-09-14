@@ -81,9 +81,23 @@ class TestMajorBumpDetection:
         report = drift.parse_dry_run_output("Update structlog v25.5.0 -> v26.1.0\n")
         assert len(report.major_bumps) == 1
 
-    def test_multiple_minor_and_patch_components_do_not_confuse_leading_component(self):
-        report = drift.parse_dry_run_output("Update rpds-py v0.30.0 -> v0.31.9\n")
+    def test_zero_x_patch_bump_does_not_confuse_the_leading_component(self):
+        """Same 0.x MINOR (0.30), different patch: not a shape change --
+        only a minor (or major) bump counts as crossing the boundary, for a
+        0.x package just as for a >=1.0 one."""
+        report = drift.parse_dry_run_output("Update rpds-py v0.30.0 -> v0.30.9\n")
         assert report.major_bumps == ()
+
+    def test_zero_x_minor_bump_is_flagged_as_major(self):
+        """nexus-oqh4s: under semver a 0.x MINOR bump is licensed to break
+        -- fastembed 0.7.4 -> 0.8.0 was exactly this shape, invisible to
+        the old classifier because it collapsed every 0.x version into the
+        single leading component "0". A minor bump inside 0.x must now
+        cross the same boundary a real major bump does, for every 0.x
+        package, not only ones hand-listed in SHAPE_SENSITIVE."""
+        report = drift.parse_dry_run_output("Update rpds-py v0.30.0 -> v0.31.0\n")
+        assert len(report.major_bumps) == 1
+        assert report.major_bumps[0].name == "rpds-py"
 
 
 class TestShapeSensitiveDetection:

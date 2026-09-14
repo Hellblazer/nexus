@@ -37,6 +37,7 @@
 # the user ran), and the audit at the end fails on any verb but `upgrade` and
 # the read-only `doctor`.
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/require_container.sh"
 
 ERA_RELEASE="${ERA_RELEASE:?ERA_RELEASE must be set (e.g. 6.0.0)}"
 ERA_ENGINE_TAG="${ERA_ENGINE_TAG:?ERA_ENGINE_TAG must be set (e.g. engine-service-v0.1.11)}"

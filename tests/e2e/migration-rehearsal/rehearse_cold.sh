@@ -13,6 +13,7 @@
 #   guided-upgrade        detect -> verify -> migrate -> "VERIFIED and unlocked"
 #   parity + source-intact
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/require_container.sh"
 # ── RETIRED at RDR-155 P4b (2026-07-24) ──────────────────────────────────────
 # This rehearsal drives `nx guided-upgrade` / `nx migrate-to-service` — the
 # Chroma→PG guided-migration verbs DELETED in RDR-155 P4b P2. The journey is

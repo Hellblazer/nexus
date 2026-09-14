@@ -237,7 +237,7 @@ Ten typed errors, one base class (`TupleException`) carrying a `code` and the HT
 - `LeaseTooLong` (400): a `lease_s` above the template's `max_lease_seconds`, on `in`/`inp` or on `renew`; on `in`/`inp` a lease longer than the row's remaining TTL is clamped, not refused, and `renew` clamps the same way against the row's `expires_at` at update time — but a `lease_s` over the template's cap itself is refused on both, never clamped.
 - `TooLarge` (413): a field, or the whole request body, exceeds its size limit (see § Size limits above) — never echoes the oversized value.
 
-Three refusals outside the nine, all in `TupleHandler` itself: a request against a route with the wrong HTTP method refuses 405 (every write route is POST-only, `registry`/`subspace_list`/`subspace_stats` are GET-only); a malformed or missing required field in the request body refuses 400 (`IllegalArgumentException`, the same mapping every other handler in this package uses); a request with no tenant resolved refuses 500 (`internal: tenant not set` — never reachable through the auth filter on a correctly configured route).
+Three refusals outside the ten, all in `TupleHandler` itself: a request against a route with the wrong HTTP method refuses 405 (every write route is POST-only, `registry`/`subspace_list`/`subspace_stats` are GET-only); a malformed or missing required field in the request body refuses 400 (`IllegalArgumentException`, the same mapping every other handler in this package uses); a request with no tenant resolved refuses 500 (`internal: tenant not set` — never reachable through the auth filter on a correctly configured route).
 
 ## Client surface
 

@@ -8,6 +8,7 @@
 # could not do. Auth: ~/.claude/.credentials.json mounted read-only (real billed
 # calls). NOT DinD: PG provisioned in-box by `nx init --service`.
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/require_container.sh"
 FAILS=0
 say()  { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 ok()   { printf '  \033[32mPASS\033[0m %s\n' "$*"; }

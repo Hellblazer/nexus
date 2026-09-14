@@ -38,12 +38,30 @@ pytestmark = pytest.mark.lint
 _REPO_ROOT = pathlib.Path(__file__).parent.parent
 _PYPROJECT = _REPO_ROOT / "pyproject.toml"
 
-#: Package names permitted to ship without an upper-bound specifier, each
-#: with a reason string. Empty by design (nexus-l2ku5 gap-3 closure, 2026-08-14)
-#: -- every runtime dependency was bounded rather than exempted. A future
-#: addition here must carry a genuine reason (e.g. a package with no stable
-#: release cadence to bound against), not "didn't get to it yet".
-_EXEMPTIONS: dict[str, str] = {}
+#: Package names permitted to ship without a semver-safe upper bound (a bare
+#: upper bound is still required -- see ``test_every_runtime_dependency_is_-
+#: bounded_or_exempt``'s own fallback -- this only excuses the STRICTER
+#: same-minor-only rule for a 0.x floor), each with a reason string.
+#: Originally empty by design (nexus-l2ku5 gap-3 closure, 2026-08-14); three
+#: entries added nexus-oqh4s (2026-09-14) when the runtime-dependency check
+#: was tightened to the same semver-aware rule the extras check already
+#: used (tokenizers/tree-sitter-language-pack/llama-index-core/voyageai were
+#: the class this closed and got their caps tightened instead of exempted --
+#: see pyproject.toml's own comments by each). httpx/fastapi/uvicorn are
+#: different: established ASGI-ecosystem libraries with disciplined pre-1.0
+#: versioning (breaking changes are rare and explicitly called out in their
+#: own changelogs, unlike tree-sitter-language-pack's confirmed 1.x rewrite
+#: or fastembed's actual incident), no breakage observed in this repo's
+#: history despite the floor already sitting many minors behind the locked
+#: version for two of them, and a multi-release cadence that would make a
+#: single-minor cap a standing maintenance cost with no evidence it prevents
+#: anything. A future addition here must carry an equally genuine reason,
+#: not "didn't get to it yet".
+_EXEMPTIONS: dict[str, str] = {
+    "httpx": "disciplined pre-1.0 semver, no incident history in this repo (nexus-oqh4s sweep, 2026-09-14)",
+    "fastapi": "disciplined pre-1.0 semver, no incident history in this repo (nexus-oqh4s sweep, 2026-09-14)",
+    "uvicorn": "disciplined pre-1.0 semver, no incident history in this repo (nexus-oqh4s sweep, 2026-09-14)",
+}
 
 #: Non-vacuity floor: proves this lint is actually parsing the real
 #: dependency list, not silently iterating zero entries after a refactor
@@ -138,15 +156,24 @@ def test_dependency_list_is_non_vacuous() -> None:
 
 def test_every_runtime_dependency_is_bounded_or_exempt() -> None:
     """The actual gate: every ``[project.dependencies]`` entry either carries
-    an upper-bound specifier, or is named in ``_EXEMPTIONS`` with a reason.
-    A dependency failing both is exactly the nexus-l2ku5 shape -- an
-    unbounded floor one major release away from resolving something breaking
-    into every fresh install."""
+    a semver-safe upper-bound specifier, or is named in ``_EXEMPTIONS`` with
+    a reason. A dependency failing both is exactly the nexus-l2ku5 shape --
+    an unbounded floor one release away from resolving something breaking
+    into every fresh install.
+
+    Uses ``_has_semver_safe_upper_bound``, not the looser ``_has_upper_bound``
+    (nexus-oqh4s, 2026-09-14): the extras check already used the stricter
+    rule (a 0.x floor's cap must sit at its own next minor, since a 0.x MINOR
+    bump is semver-licensed to break) while this one used the looser "any
+    upper bound exists" check -- a two-tier standard by table location, not
+    by risk shape, that let tree-sitter-language-pack``>=0.7.1,<1.0`` and
+    tokenizers``>=0.20,<1.0`` pass here despite being exactly the class this
+    lint exists to catch."""
     deps = _load_runtime_dependencies()
     unbounded_unexempt = []
     for dep in deps:
         req = Requirement(dep)
-        if _has_upper_bound(dep):
+        if _has_semver_safe_upper_bound(dep):
             continue
         reason = _EXEMPTIONS.get(req.name)
         if reason and reason.strip():
@@ -154,10 +181,11 @@ def test_every_runtime_dependency_is_bounded_or_exempt() -> None:
         unbounded_unexempt.append(dep)
 
     assert not unbounded_unexempt, (
-        "runtime dependencies with no upper bound and no documented "
-        f"exemption: {unbounded_unexempt} -- add a next-major cap "
-        "(`pkg>=X.Y,<NEXT_MAJOR`) in pyproject.toml, or add a reasoned "
-        "entry to _EXEMPTIONS in this file (see nexus-l2ku5)."
+        "runtime dependencies with no semver-safe upper bound and no "
+        f"documented exemption: {unbounded_unexempt} -- for a 0.x floor the "
+        "cap must be the next minor (`pkg>=0.Y.Z,<0.(Y+1)`), for a >=1 "
+        "floor the next major, or add a reasoned entry to _EXEMPTIONS in "
+        "this file (see nexus-l2ku5)."
     )
 
 

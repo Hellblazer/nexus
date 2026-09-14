@@ -123,6 +123,7 @@
 # attempts shape matches what the sweep's own release/purge arms key
 # their WHERE clauses on), not by observing a scheduled pass execute.
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/require_container.sh"
 
 FLOOR_VERSION="${FLOOR_VERSION:?FLOOR_VERSION must be set (e.g. 0.1.75)}"
 FLOOR_TAG="engine-service-v${FLOOR_VERSION}"

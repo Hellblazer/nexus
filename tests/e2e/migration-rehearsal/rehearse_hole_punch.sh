@@ -39,6 +39,7 @@
 # pre-migrate, default 8), CHUNK_K / HOOK_K (rows punched out target-side per
 # table, default 3 each — a SMALL hole, not the whole store).
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/require_container.sh"
 # ── RETIRED at RDR-155 P4b (2026-07-24) ──────────────────────────────────────
 # This rehearsal drives `nx guided-upgrade` / `nx migrate-to-service` — the
 # Chroma→PG guided-migration verbs DELETED in RDR-155 P4b P2. The journey is

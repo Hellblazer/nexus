@@ -82,6 +82,7 @@
 # well under a second, indexed in low tens of seconds on CPU bge-768 —
 # "fast and provably non-vacuous", not "large".
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/require_container.sh"
 FAILS=0
 say()  { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 ok()   { printf '  \033[32mPASS\033[0m %s\n' "$*"; }

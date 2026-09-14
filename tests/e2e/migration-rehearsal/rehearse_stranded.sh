@@ -53,6 +53,7 @@
 # re-running it a second time here at the pin would be redundant cost with
 # no new coverage.
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/require_container.sh"
 
 PIN_RELEASE="${PIN_RELEASE:?PIN_RELEASE must be set (e.g. 6.18.1 — see the STRAND_PIN_RELEASE derivation in run.sh)}"
 CHROMA_LOCAL="${CHROMA_LOCAL:-/home/nexus/legacy-chroma}"
