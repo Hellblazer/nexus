@@ -288,12 +288,13 @@ nx store import myrepo-backup.nxexp --collection code__newname
 
 ## Tuple Space (RDR-205)
 
-The tuple space is the ninth T2-adjacent store (`db.tuples`, `HttpTupleStore`), for cross-agent and cross-instance coordination metadata (a mailbox, a work queue, a dispatch ledger), not for notes or search hits. Two templates ship today:
+The tuple space is the ninth T2-adjacent store (`db.tuples`, `HttpTupleStore`), for cross-agent and cross-instance coordination metadata (a mailbox, a work queue, a dispatch ledger), not for notes or search hits. Three templates ship today:
 
-- **`mailbox/<address>`**: agent/instance messages, 7-day retention.
+- **`mailbox/<address>`**: agent/instance/session messages, 7-day retention.
 - **`ledger/<session_id>`**: read-only session-lifecycle rows (`kind` in `start`/`report`), 90-day retention.
+- **`directory/<name>`** (RDR-208 Phase 1 Step 1): read-only session-directory lease entries, 7-day retention.
 
-Every tuple's `expires_at` is `now + ttl_seconds`, defaulting to and capped at the template's `retention_seconds`: a caller cannot ask for a longer-lived row than the template allows. A resend (`out` on an existing key) only ever moves `expires_at` forward, and never past the row's original `created_at + retention_seconds`. Expired rows are invisible to reads (`expires_at > now` is part of every read predicate); consumed rows stay in place, visible to audits, until the same expiry passes. The engine's sweep runs every 6 hours, deleting expired tuple rows and, alongside them, claim-log rows older than `NX_TUPLE_CLAIM_LOG_TTL_DAYS` (default 180).
+Every tuple's `expires_at` is `now + ttl_seconds`, defaulting to and capped at the template's `retention_seconds`: a caller cannot ask for a longer-lived row than the template allows. A resend (`out` on an existing key) sets `expires_at` from the resend's own `ttl_seconds`, never past the row's original `created_at + retention_seconds`; a resend with a shorter explicit `ttl_seconds` than the row's remaining lifetime moves `expires_at` backward, not just forward. Expired rows are invisible to reads (`expires_at > now` is part of every read predicate); consumed rows stay in place, visible to audits, until the same expiry passes. The engine's sweep runs every 6 hours, deleting expired tuple rows and, alongside them, claim-log rows older than `NX_TUPLE_CLAIM_LOG_TTL_DAYS` (default 180).
 
 This is coordination metadata, not a payload store. See [Tuple Space](tuple-space.md) for the full template contract, claim/ack/nack semantics, and size limits.
 

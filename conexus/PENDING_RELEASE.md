@@ -33,5 +33,5 @@ mechanize, it matters enough to ship.
 ## Awaiting the next release or plugin cut (pinned: v7.45.0)
 
 - `conexus/hooks/scripts/mailbox_drain.py` (nexus-6konb.19): when no live watcher holds this session's own mailbox lock, the UserPromptSubmit drain re-issues the arm instruction from `nx hook mailbox-arm`, at most once every 10 minutes. Against a wheel without that subcommand it prints nothing.
-- `conexus/skills/mailbox/SKILL.md` (nexus-6konb.19, nexus-6konb.20): the arm name comes from a `ListAgents` call at arm time, because a resume changes it; documents the per-turn re-arm.
+- `conexus/skills/mailbox/SKILL.md` (nexus-6konb.19, nexus-6konb.20, nexus-galkv.2): the arm name comes from a `ListAgents` call at arm time, because a resume changes it; documents the per-turn re-arm. Also documents `address_kind` as `{agent, instance, session}` (RDR-208 Phase 1 Step 2), with `instance` retired after RDR-208 Phase 3.
 - `conexus/skills/peer-messaging/SKILL.md` (nexus-6konb.21): senders look the peer's name up in `ListAgents` right before sending tuple mail, because a resume can rename a session and mail to the old name sits unread.
