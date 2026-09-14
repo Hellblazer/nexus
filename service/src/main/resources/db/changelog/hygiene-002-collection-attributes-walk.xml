@@ -137,6 +137,11 @@
             hygiene-001-6 precedent: toggling only the target leaves the
             correlated read yielding zero rows for the non-bypass migrating
             role) -- toggled in this order, restored in reverse (LIFO).
+            DATA EFFECT: UPDATEs catalog_collections.content_type / owner_id /
+            embedding_model / dimension / lifecycle_state for EVERY row (branches
+            A-D backfill the whole table); reversible in effect only (the rollback
+            drops the constraints, does not un-backfill — the backfilled values
+            are correct derived facts, not something to undo).
         </comment>
         <sql splitStatements="true" stripComments="false">
 SET LOCAL lock_timeout = '5s';

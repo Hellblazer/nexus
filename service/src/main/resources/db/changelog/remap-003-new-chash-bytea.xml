@@ -108,6 +108,10 @@
             Precondition verified empty on the live store (cloud-count-2,
             T2 [22670]) — see this file's header for the full gate record
             and the fail-loud behavior on a non-empty legacy install.
+            DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing
+            chash_remap.new_chash value from TEXT to bytea (fails loud on any non-hex
+            row rather than coercing); reversible via the rollback's inverse encode(...,
+            'hex') cast back to TEXT.
         </comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.chash_remap

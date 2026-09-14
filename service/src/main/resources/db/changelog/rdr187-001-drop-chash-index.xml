@@ -55,7 +55,7 @@ DROP VIEW IF EXISTS nexus.diag_chash_conformance;
         <preConditions onFail="MARK_RAN">
             <sqlCheck expectedResult="1">SELECT count(*) FROM information_schema.tables WHERE table_schema = 'nexus' AND table_name = 'chash_index'</sqlCheck>
         </preConditions>
-        <comment>DROP nexus.chash_index — the router is retired; the chunks tables are the chash store. The 292,230 orphaned pointers (post-kmd5b census, 2026-07-20) die here by design. Indexes, the octet CHECK, the collection FK, and the RLS policy die with the table.</comment>
+        <comment>DROP nexus.chash_index — the router is retired; the chunks tables are the chash store. The 292,230 orphaned pointers (post-kmd5b census, 2026-07-20) die here by design. Indexes, the octet CHECK, the collection FK, and the RLS policy die with the table. DATA EFFECT: DROPs nexus.chash_index, discarding all its rows (292,230 measured orphans plus any live duplicate facts); irreversible (the rollback recreates the table's empty schema shape, not the data).</comment>
         <sql>
 DROP TABLE nexus.chash_index;
         </sql>

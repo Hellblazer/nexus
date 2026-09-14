@@ -241,6 +241,10 @@
             `USING decode(doc_id, 'hex')`. ANALYZE in the same pass (D0.5)
             — the PK and doc_id indexes rebuild automatically. See this
             file's header for the full derivation.
+            DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing
+            topic_assignments.doc_id value from TEXT to bytea (guarded by a precheck
+            that fails loud on any non-canonical row rather than coercing it);
+            reversible via the rollback's inverse encode(...,'hex') cast back to TEXT.
         </comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.topic_assignments NO FORCE ROW LEVEL SECURITY;

@@ -183,6 +183,9 @@ ALTER TABLE nexus.catalog_document_chunks
             JdbcExecutor captures from the JDBC Statement's SQLWarning chain and logs
             through its own (SLF4J-backed) logger by default (SHOW_SQL_WARNING_MESSAGES
             defaults true) -- no runAlways, no DDL-in-Python, no bespoke Java capture.
+            DATA EFFECT: DELETEs nexus.catalog_document_chunks rows with no matching
+            nexus.chunks row (dangling manifest bookkeeping); irreversible (a re-index
+            regenerates a real row; no rollback attempts to restore the deleted rows).
         </comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY;

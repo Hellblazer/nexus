@@ -140,6 +140,12 @@
             tenant_id AND lifecycle_state = 'disputed'); re-classification
             copies hygiene-002-1's branch A/B/C rules verbatim, restricted
             to that candidate set only.
+            DATA EFFECT: UPDATEs catalog_collections.content_type / owner_id /
+            embedding_model / dimension / lifecycle_state for the subset of rows
+            hygiene-002-1 misclassified (branch-D signature: content_type='unknown'
+            AND owner_id=tenant_id AND lifecycle_state='disputed'); reversible in
+            effect only — no rollback SQL (the re-filed values are correct derived
+            facts, not something to undo).
         </comment>
         <sql splitStatements="true" stripComments="false">
 SET LOCAL lock_timeout = '5s';

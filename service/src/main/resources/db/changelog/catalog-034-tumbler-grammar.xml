@@ -140,6 +140,11 @@
             2026-08-28 census). RLS toggle-wrapped: catalog_documents is
             FORCE ROW LEVEL SECURITY and the Liquibase role is not
             BYPASSRLS.
+            DATA EFFECT: UPDATEs catalog_documents.deleted_at (tombstones, never
+            physically deletes) for every live row whose tumbler has fewer than
+            three non-empty dot-separated segments (2 rows measured: the phantom
+            1.1/1.2 registrations); intentionally irreversible — no rollback SQL
+            (this changeset records nothing about which rows it touched).
         </comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.catalog_documents NO FORCE ROW LEVEL SECURITY;

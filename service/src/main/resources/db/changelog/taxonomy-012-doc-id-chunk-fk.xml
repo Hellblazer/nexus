@@ -184,6 +184,9 @@ ALTER TABLE nexus.topic_assignments
             Priced as safe: topic assignments are DERIVED data, recomputable by
             re-running assignment (RDR-194 D1), and the writers' own
             ON CONFLICT DO NOTHING makes recomputation idempotent.
+            DATA EFFECT: DELETEs every nexus.topic_assignments row with no matching
+            nexus.chunks row; irreversible (derived, recomputable data — no
+            rollback attempts to restore the deleted rows).
         </comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.topic_assignments NO FORCE ROW LEVEL SECURITY;

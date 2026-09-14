@@ -124,6 +124,9 @@
             go with the table via DROP TABLE's cascade -- no separate DROP INDEX.
             Rollback recreates the exact migration-001-baseline.xml shape, EMPTY
             (D0.6) -- any rows dropped here are unrecoverable.
+            DATA EFFECT: DROPs nexus.migration_jobs (a RAISE NOTICE first logs the
+            pre-drop row count); irreversible — the rollback recreates the table's
+            schema shape EMPTY, not any rows that existed.
         </comment>
         <sql splitStatements="false" stripComments="false">
 DO $$

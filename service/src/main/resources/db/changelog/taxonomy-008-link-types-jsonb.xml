@@ -135,6 +135,9 @@ ALTER TABLE nexus.topic_links
         <comment>
             topic_links.link_types TEXT NOT NULL DEFAULT '[]' -> jsonb NOT NULL DEFAULT
             '[]'::jsonb (DROP DEFAULT -> TYPE ... USING plain cast -> SET DEFAULT).
+            DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing
+            topic_links.link_types value from TEXT to jsonb; reversible via the rollback's
+            inverse ::text cast.
         </comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.topic_links

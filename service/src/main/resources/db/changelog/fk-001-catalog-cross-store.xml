@@ -125,6 +125,10 @@ CREATE INDEX IF NOT EXISTS idx_ta_tenant_doc_id_fk
             Step 3: Drop DEFAULT '' and NOT NULL constraint → column becomes nullable.
             Step 4: Add composite FK (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler).
             NULL doc_id satisfies the FK (no constraint violation); only non-NULL values are checked.
+            DATA EFFECT: UPDATEs nexus.document_aspects.doc_id to NULL for empty-string and
+            orphaned (no matching catalog_documents row) values; the original non-empty orphan
+            values are not recoverable from the rollback, which only restores the blanket
+            doc_id='' default, not the per-row prior value.
         </comment>
         <sql splitStatements="true" stripComments="false">
 -- Step 1: empty-string sentinel → NULL
@@ -173,6 +177,9 @@ ALTER TABLE nexus.document_aspects
             document_highlights.doc_id → catalog_documents (tenant_id, tumbler) ON DELETE CASCADE.
             doc_id is NOT NULL (unique key tenant_id, doc_id). Orphan rows must be deleted.
             Pre-flight: delete highlights whose doc_id has no matching catalog_documents row.
+            DATA EFFECT: DELETEs nexus.document_highlights rows whose doc_id has no matching
+            catalog_documents row; irreversible (the rollback drops the FK and index, not the
+            deleted rows).
         </comment>
         <sql splitStatements="true" stripComments="false">
 -- Pre-flight: delete orphan document_highlights rows
@@ -209,6 +216,9 @@ ALTER TABLE nexus.document_highlights
             also cascades, so the resulting aspects would have no valid parent anyway.
             CASCADE also sidesteps the PG14 limitation where SET NULL on a composite FK nullifies
             all FK columns (including tenant_id which is NOT NULL).
+            DATA EFFECT: UPDATEs empty-string doc_id sentinels to NULL, then DELETEs orphaned
+            nexus.aspect_extraction_queue rows with no matching catalog_documents row; the DELETE
+            is irreversible (the rollback drops the FK and index, not the deleted rows).
         </comment>
         <sql splitStatements="true" stripComments="false">
 -- Step 1: empty-string sentinel → NULL
@@ -266,6 +276,9 @@ ALTER TABLE nexus.aspect_extraction_queue
             Non-atomicity note: the DELETE→ADD CONSTRAINT sequence is non-atomic; this is
             acceptable in the migration context (Liquibase holds databasechangeloglock and the
             migration runs in single-writer mode with no concurrent ETL inserts).
+            DATA EFFECT: DELETEs nexus.catalog_document_chunks rows with no matching
+            catalog_documents parent; irreversible (the rollback drops the FK, not the deleted
+            rows).
         </comment>
         <!-- nexus-msz9i: this FK is a CORRECTNESS DEPENDENCY of the tombstone read filter.
              PgVectorRepository#liveChunksPredicate / #liveChunksCondition use the dead-set

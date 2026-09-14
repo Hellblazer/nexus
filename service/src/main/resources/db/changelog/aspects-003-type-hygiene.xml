@@ -150,6 +150,9 @@
         <comment>
             document_aspects.extras TEXT -> jsonb NULL; document_aspects.salient_sentences
             TEXT -> jsonb NULL (ONE ALTER TABLE, one rewrite).
+            DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing
+            document_aspects.extras / .salient_sentences value from TEXT to jsonb; reversible
+            via the rollback's inverse ::text cast.
         </comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.document_aspects
@@ -178,6 +181,9 @@ ANALYZE nexus.document_aspects;
             aspect_promotion_log.column_added INTEGER -> boolean; aspect_promotion_log.pruned
             INTEGER -> boolean (ONE ALTER TABLE, one rewrite). rows_pruned (a COUNT) is
             untouched -- not a duplicate of the pruned flag.
+            DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing
+            aspect_promotion_log.column_added / .pruned value from INTEGER to boolean;
+            reversible via the rollback's inverse CASE expression back to INTEGER.
         </comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.aspect_promotion_log

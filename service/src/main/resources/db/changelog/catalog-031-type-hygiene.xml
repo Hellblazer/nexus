@@ -100,6 +100,10 @@
             catalog_documents.indexed_at/.bib_enriched_at/.index_started_at TEXT -> timestamptz NULL
             (ONE ALTER TABLE, one rewrite); collection_health_meta DROP/CREATE around it with the
             regex-guard/to_char hacks retired to plain timestamptz comparisons.
+            DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing
+            catalog_documents.indexed_at / .bib_enriched_at / .index_started_at value from TEXT
+            to timestamptz (the ''-sentinel maps to NULL); reversible via the rollback's inverse
+            to_char cast back to TEXT.
         </comment>
         <sql splitStatements="false" stripComments="false">
 DROP VIEW IF EXISTS nexus.collection_health_meta;
@@ -197,6 +201,9 @@ ANALYZE nexus.catalog_documents;
         <comment>
             catalog_links.created_at TEXT -> timestamptz NULL. ''-sentinel maps to NULL
             (nexus-4j80w): NULL is unmatchable by a `created_at &lt; :before` filter for free.
+            DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing
+            catalog_links.created_at value from TEXT to timestamptz; reversible via the
+            rollback's inverse to_char cast back to TEXT.
         </comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.catalog_links
@@ -220,6 +227,9 @@ ANALYZE nexus.catalog_links;
             catalog_collections.legacy_grandfathered INTEGER -> boolean (NOT NULL preserved
             automatically across the TYPE change; only DEFAULT is dropped/re-set since a
             numeric DEFAULT 0 is not valid input for boolean).
+            DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing
+            catalog_collections.legacy_grandfathered value from INTEGER to boolean; reversible
+            via the rollback's inverse CASE expression back to INTEGER.
         </comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.catalog_collections

@@ -181,7 +181,7 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="taxonomy-007-1" author="nexus-jv3ue">
-        <comment>RDR-191 Phase 4 (bead nexus-jv3ue, Hal ruling o8dil.47): create nexus.taxonomy_centroids, copy all rows from taxonomy_centroids_384/768/1024, build all indexes, drop the three sources — ONE transaction, copy-THEN-index. See file header for the full derivation and divergences from the chunks template.</comment>
+        <comment>RDR-191 Phase 4 (bead nexus-jv3ue, Hal ruling o8dil.47): create nexus.taxonomy_centroids, copy all rows from taxonomy_centroids_384/768/1024, build all indexes, drop the three sources — ONE transaction, copy-THEN-index. See file header for the full derivation and divergences from the chunks template. DATA EFFECT: copies every row from taxonomy_centroids_384/768/1024 into the unified nexus.taxonomy_centroids table, then DROPs the three source tables; the copy preserves the data (not destructive), but the source tables and their independent identity are gone — irreversible for the source-table shape (the rollback restores the schema, not the pre-drop table split).</comment>
 
         <!-- Step 0: lock-first + defuse the FORCE RLS DML-blindness trap on
              the three sources (mirrors vectors-004-1 step 0). No restore

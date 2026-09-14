@@ -24,7 +24,7 @@
 
     <!-- ── Changeset 1: merge duplicate root topics ──────────────────────────── -->
     <changeSet id="taxonomy-004-1" author="nexus-slcn7">
-        <comment>Merge duplicate (tenant_id, collection, label) root topics onto the lowest id</comment>
+        <comment>Merge duplicate (tenant_id, collection, label) root topics onto the lowest id. DATA EFFECT: re-points topic_assignments and child topics.parent_id from each duplicate root topic onto the kept (lowest-id) topic, then DELETEs the now-redundant topic_assignments, topic_links, and duplicate nexus.topics rows; irreversible (recomputable co-occurrence/assignment data, documented no-op rollback below).</comment>
         <sql splitStatements="false" stripComments="false">
 DO $$
 BEGIN
