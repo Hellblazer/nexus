@@ -47,6 +47,9 @@ _POPULATION_MARKERS = (
     "seeded dead-letter-candidate mailbox row",
     "seeded the at-cap (4096-byte body) mailbox row",
     "seeded the over-cap (5000-byte body) mailbox row",
+    # A floor from engine-service-v0.1.118 on enforces the 4096-byte cap and
+    # refuses the over-cap seed; that refusal is the asserted outcome.
+    "the floor refuses a 5000-byte body with TooLarge",
     "seeded a ledger start row",
     "seeded a ledger report row",
     "a 4th claim attempt finds nothing",
@@ -54,9 +57,12 @@ _POPULATION_MARKERS = (
 )
 
 #: The non-vacuity count-asserts (nexus-moht0 doctrine): the planned row
-#: counts must be asserted to actually exist BEFORE the swap.
+#: counts must be asserted to actually exist BEFORE the swap. The mailbox
+#: count is 8 when the floor accepted the over-cap row and 7 when it refused it.
 _NON_VACUITY_MARKERS = (
-    "8 mailbox rows planted",
+    "MAILBOX_WANT=$((7 + ${OVERCAP_SEEDED[$TUPLE_LABEL]:-0}))",
+    "mailbox rows planted",
+    "no over-cap row pre-walk (the floor enforces the cap)",
     "2 ledger rows planted",
     "claim-log row(s) exist pre-walk",
 )
@@ -66,6 +72,7 @@ _POST_WALK_MARKERS = (
     "chk_tuples_body_size exists and is VALIDATED",
     "RLS ENABLE+FORCE after the walk",
     "the over-cap row is gone after the walk",
+    "still no over-cap row after the walk",
     "claim-log row(s) survive with tuple_id NULLed",
     "the at-cap row is intact at exactly 4096 bytes after the walk",
     "row survives the walk with a NULL body (nexus-8zoyp contract)",
