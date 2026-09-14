@@ -3790,7 +3790,7 @@ The census for one subspace: `total`, `available`, `claimed`, `dead`, `consumed`
 nx tuple directory NAME [--json]
 ```
 
-Who holds NAME in the RDR-208 session directory (`directory/<name>`). Prints each live entry's `session_id`, `created_at` and `expires_at`, and flags NAME as ambiguous when more than one distinct session holds it — the case `mailbox_send` refuses. Uses the same resolver `mailbox_send` uses, so the two can never disagree about whether NAME is safely addressable.
+Who holds NAME in the RDR-208 session directory (`directory/<name>`). Prints each live entry's `session_id`, `created_at` and `expires_at`, and flags NAME as ambiguous when more than one distinct session holds it (the case `mailbox_send` refuses). Uses the same resolver `mailbox_send` uses, so the two can never disagree about whether NAME is safely addressable.
 
 | Flag | Description |
 |------|-------------|
