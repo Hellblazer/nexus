@@ -220,6 +220,8 @@ Every limit is byte-counted, not character-counted: a multibyte UTF-8 character 
 
 A template's `max_body_bytes` can only LOWER the global cap, never raise it; the registry refuses to load a template declaring one above 4096 or negative. `registry()` reports it per template when one is declared.
 
+The 4096-byte `body` cap was added by the engine-service-v0.1.118 migration, alongside two one-shot cleanups: `tuples-003-2` deletes every existing `nexus.tuples` row whose body already exceeded 4096 UTF-8 bytes (legal before that release), so the new `CHECK` constraint can be validated against a clean table rather than left unproven; `tuples-004-1` clears (sets to NULL) the `body` of every row already consumed at migration time, backfilling the same NULL-on-consume behavior `ack` now applies going forward (see § Claims above). Both are cleanup migrations in the project's warn-and-delete convention — neither is reversible, and neither is expected to matter on an install that never accumulated legacy rows.
+
 ## Errors
 
 Ten typed errors, one base class (`TupleException`) carrying a `code` and the HTTP status `TupleHandler` sends for it, so a new subtype cannot be added without also declaring how it renders. Every error is rendered `{"error": "<code>", "detail": "<message>"}` at its own status; `TupleHandler` catches this base type ahead of the generic 500 ladder.

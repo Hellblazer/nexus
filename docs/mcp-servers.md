@@ -29,9 +29,9 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 | `search_graph_hop` | Combined-query, requires an HttpVectorClient-backed T3: BFS over `catalog_links` from seed tumblers + vector rank in one statement (`link_type`, `depth` ≤ 3, `direction`); `where` chunk-metadata equality filter applied post-BFS (catalog-012, equality-only — operator syntax rejected loudly) |
 | `search_topic_scoped` | Combined-query, requires an HttpVectorClient-backed T3: topic-label-scoped chunk search via `topic_assignments` join |
 | `search_aspect_scoped` | Combined-query, requires an HttpVectorClient-backed T3: vector rank + `document_aspects` predicate (`field`, `pattern`, `min_confidence`, chunk-metadata `where`) in one statement — retires the `search` + `operator_filter(source="aspects")` two-step for selective aspect predicates. Requires the doc's aspects row to carry a non-NULL `doc_id` (backfilled by exact `source_uri` match; legacy rows with no match are excluded, not a bug) |
-| `store_put` | Write a document into a T3 collection. Fires post-store hooks: batch chain auto-assigns to nearest topic; document-grain chain enqueues aspect extraction on `knowledge__*` (RDR-089) |
-| `store_get` | Retrieve a document by id from a T3 collection |
-| `store_get_many` | Batch hydration: given N ids, return N contents (with `missing` for not-found). Handles 300+ ids beyond the per-request 300-record limit |
+| `store_put` | Write a document into a T3 collection. Fires post-store hooks: batch chain auto-assigns to nearest topic; document-grain chain enqueues aspect extraction on `knowledge__*` (RDR-089). A note too large for the collection embedding model's token window is written as several chunk pieces under one title instead of being refused or truncated (nexus-spujb) |
+| `store_get` | Retrieve a document by id from a T3 collection. Reassembles a `store_put`-split note transparently — the caller reads back the whole note, not one piece |
+| `store_get_many` | Batch hydration: given N ids, return N contents (with `missing` for not-found). Handles 300+ ids beyond the per-request 300-record limit. Also reassembles a split note whose piece ids are all passed together |
 | `store_list` | Paginate documents in a T3 collection |
 
 ### Memory (T2)
@@ -79,7 +79,7 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
 **Routing rule of thumb**: `tuple_rd`/`tuple_in` with `timeout_s=0` (the default) are the probe forms — never block. Pass `timeout_s>0` only when the caller intends to wait; a wait of minutes is a loop of parked calls (each capped at 25 s by default), never one long park. There are no separate probe-named tools (`tuple_rdp`/`tuple_inp`) — `timeout_s=0` covers that case on the same tool.
 
-**Failure modes**: the engine renders nine typed errors as `{"error": "<code>", "detail": "..."}`; the two most likely to surface from a tool call are `ParkCapExceeded` (429 — the per-claimant or global park cap is at capacity; back off and retry) and `TimeoutTooLong` (400 — `timeout_s` above the engine's cap). A 502/503/504 during an engine deploy is retried by the client transparently (`rd`/`out` freely, `in` with the same claimant); the deploy gap is a retry, not an error surfaced to the caller. See [Tuple Space § Errors](tuple-space.md#errors) for the full nine.
+**Failure modes**: the engine renders ten typed errors as `{"error": "<code>", "detail": "..."}`; the three most likely to surface from a tool call are `ParkCapExceeded` (429 — the per-claimant or global park cap is at capacity; back off and retry), `TimeoutTooLong` (400 — `timeout_s` above the engine's cap), and `TooLarge` (413 — a `tuple_out`/`tuple_ack` field, e.g. `body`, over the engine's size limit). A 502/503/504 during an engine deploy is retried by the client transparently (`rd`/`out` freely, `in` with the same claimant); the deploy gap is a retry, not an error surfaced to the caller. See [Tuple Space § Errors](tuple-space.md#errors) for the full ten.
 
 ### Operators (LLM-backed, RDR-079)
 

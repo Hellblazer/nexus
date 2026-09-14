@@ -1822,6 +1822,8 @@ echo "# Cache Strategy" | nx store put - --collection distributed-systems --titl
 | `--category LABEL` | Category label |
 | `--ttl TTL` | Time to live (`30d`, `4w`, `permanent`; default: `permanent`) |
 
+A note whose text is too large for the collection's embedding model's token window (small-window local embedders such as bge-base; a Voyage collection never splits, nexus-spujb) is written as several chunk pieces under one title rather than refused or truncated. `put` writes each piece and links them to one catalog document; `get` and the MCP `store_get`/`store_get_many` tools detect a split note by its chunk ids and transparently reassemble the full text, so a caller never has to know the note was split to read it back whole.
+
 **`list` flags:**
 
 | Flag | Description |
@@ -2700,7 +2702,9 @@ nx doctor --check-quotas            # Vector-store limits + embedder caps + rera
 nx doctor --check-quotas --json     # Structured output for dashboards / CI gates
 ```
 
-The `--check-quotas` flag (introduced 4.9.0, nexus-c590) emits a four-section pre-flight report: (1) `vector_store` — the per-request limits from `nexus.db.limits.QUOTAS` (`MAX_QUERY_RESULTS`, `MAX_RECORDS_PER_WRITE`, `MAX_CONCURRENT_*`, document size caps), which remain the authoritative chunking and paging caps, plus a reachability probe of the T3 vector store; (2) `voyage` — per-model token and dimension caps (`voyage-3`, `voyage-code-3`, `voyage-context-3`); (3) `cross_encoder` — the reranker's model info; (4) `retry` — the cumulative accumulator from `nexus.retry.get_retry_stats()`, so transient-error backoffs observed in the current process surface alongside the static limits.
+The `--check-quotas` flag (introduced 4.9.0, nexus-c590) emits a four-section pre-flight report: (1) `vector_store` — the per-request limits from `nexus.db.limits.QUOTAS` (`MAX_QUERY_RESULTS`, `MAX_RECORDS_PER_WRITE`, `MAX_CONCURRENT_*`, document size caps), which remain the authoritative chunking and paging caps, plus a reachability probe of the T3 vector store; (2) `voyage` — per-model token and dimension caps (`voyage-3`, `voyage-code-3`, `voyage-context-3` in cloud mode, the active local embedder in local mode); (3) `cross_encoder` — the reranker's model info; (4) `retry` — the cumulative accumulator from `nexus.retry.get_retry_stats()`, so transient-error backoffs observed in the current process surface alongside the static limits.
+
+For a small-window local embedder (nexus-ajvjx, nexus-spujb), the `voyage` section also reports the model's token window: `max_tokens`, whether chunks are actually checked against it (`enforced`), and the tokenizer file that decides that. When the tokenizer cannot be loaded from disk, `enforced` is `false` and the human-readable report prints a warning line naming the missing tokenizer path — chunks past the model's token window are silently left out of the vector rather than refused, so this line is the visible backstop for that warn-and-skip behavior; the fix is to re-provision the local model (`nx init`).
 
 Exit codes:
 - `0` — the T3 vector store is reachable.
@@ -3498,6 +3502,13 @@ and handling BOTH install shapes — each branch is a no-op when its target is a
   `data_token_lease.*` file under `nexus_config_dir()` unconditionally —
   mode-agnostic (a `mint_token` credential can be configured in either
   local or managed mode), not gated on `--remove-data`.
+- **User-level beads PRIME.md** (nexus-cnzei.8): removes the machine-wide
+  `PRIME.md` at `nexus.beads_prime.user_prime_path()`, but ONLY when it is
+  still exactly what conexus installed (its marker's recorded body hash
+  still matches). A hand-edited or otherwise user-authored file at that
+  path is left in place and reported, never destroyed. Mode-agnostic and
+  unconditional, like the data-token lease sweep, and independent of
+  `--remove-data`.
 
 ```
 nx uninstall                  # DRY RUN (default): preview what would be removed
@@ -3553,7 +3564,7 @@ nx context show
 |------|-------------|
 | `--global` | Generate a single global cache (all collections) instead of per-repo |
 
-The per-repo cache is stored at `~/.config/nexus/context/<repo>-<hash>.txt`. The global cache (via `--global`) is at `~/.config/nexus/context_l1.txt`. Both `show` and the SessionStart/SubagentStart hooks resolve the per-repo path first, falling back to global. The cache is automatically regenerated after `nx taxonomy discover` and `nx index repo`.
+The per-repo cache is stored at `~/.config/nexus/context/<repo>-<hash>.txt`. The global cache (via `--global`) is at `~/.config/nexus/context_l1.txt`. `nx context show` and the SessionStart hook resolve the per-repo path first, falling back to the global file; the SubagentStart hook no longer falls back to it (`subagent-start.sh`) and reads only the per-repo cache. The cache is automatically regenerated after `nx taxonomy discover` and `nx index repo`.
 
 ---
 

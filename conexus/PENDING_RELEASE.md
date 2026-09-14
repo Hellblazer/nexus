@@ -533,3 +533,9 @@ guidance-consolidation half's own review.
   behavior, both merged in from the command for the same reason — these were genuinely unique
   to the command and would have been lost by the collapse above without this merge. Inert until
   the pin advances.
+
+- nexus-oqh4s (7.45.0 pre-release audit fixes): `conexus/README.md`'s MCP tool
+  catalog corrected from "38 tools"/"48 registered tools total" to 47 core +
+  10 catalog = 57, and gained a Tuple space category row (the nine
+  `tuple_*` tools, previously uncounted and undocumented in this table).
+  Inert until the pin advances.

@@ -111,7 +111,7 @@ For simple scoped queries, `query()` with catalog params is a single MCP call �
 
 Individual catalog MCP tools on the `nexus-catalog` server use short names without the `catalog_` prefix (since RDR-062). The 10 registered tools are: `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats`. Full names follow the pattern `mcp__plugin_conexus_nexus-catalog__<tool>` (e.g., `mcp__plugin_conexus_nexus-catalog__search`). Three operations (`unlink`, `link_audit`, `link_bulk`) are demoted — they are plain Python functions not exposed on the MCP surface.
 
-Agents also create links during their work — the debugger creates `relates` links between findings, the developer creates `implements` links to RDRs, and the `nx_tidy` MCP tool (formerly the knowledge-tidier agent, RDR-080) creates `supersedes` links when consolidating documents.
+Agents also create links during their work — the debugger creates `relates` links between findings, and the developer creates `implements` links to RDRs. The `nx_tidy` MCP tool (formerly the knowledge-tidier agent, RDR-080) is read-only: it reports a consolidated summary and suggested actions but performs no writes, `supersedes` links included — a caller acts on its suggestions manually.
 
 ## Link types
 

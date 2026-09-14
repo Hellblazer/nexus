@@ -151,14 +151,18 @@ Markdown files (`.md`, `.markdown`) are chunked using `SemanticMarkdownChunker`,
 the `markdown-it-py` AST parser.
 
 - Headers create section boundaries; the header hierarchy is tracked as `section_title`.
-- Sections that fit within the token budget (512 tokens, ~1690 chars) are emitted as single
+- Sections that fit within the token budget (512 tokens by default) are emitted as single
   chunks.
-- Oversized sections are split at content-part boundaries with the section header repeated.
+- Oversized sections are split at content-part boundaries with the section header repeated;
+  an oversized part is itself split at a natural cut (newline, sentence end or space) rather
+  than truncated, so nothing is dropped (nexus-2s91y).
 - YAML frontmatter is extracted via `parse_frontmatter()` and preserved; character offsets
   in chunk metadata account for the frontmatter length.
 - Chunks carry `chunk_start_char` and `chunk_end_char` instead of line numbers.
-- Fenced code blocks are preserved intact (`preserve_code_blocks=True` by default) — a
-  code block is never split mid-content even if it exceeds the section size limit.
+- Fenced code blocks are preserved intact (`preserve_code_blocks=True` by default) through
+  the section-splitting pass, but a final post-pass still splits ANY chunk — code block
+  included — that exceeds the storage byte cap (`SAFE_CHUNK_BYTES`) or the target embedding
+  model's token window, at a natural cut rather than a truncation (nexus-2s91y, nexus-spujb).
 - Structural markdown-it-py tokens (`paragraph_open`, `list_item_open`, `tr_open`, etc.)
   are filtered via `_STRUCTURAL_TOKEN_TYPES` blocklist so content appears exactly once
   per chunk (no duplication from open/close token pairs).
