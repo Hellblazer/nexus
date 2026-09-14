@@ -750,9 +750,9 @@ def set_test_only_opt_in_reason_for_tests(reason: str | None) -> None:
     """Test-only in-process override for :func:`guard_production_write`'s
     opt-in check — see :data:`_test_only_opt_in_reason`'s docstring.
 
-    ``tests/conftest.py``'s blanket pytest exemption calls this via
-    ``monkeypatch.setattr(service_endpoint, "_test_only_opt_in_reason",
-    "<reason>")`` (still undone per test, same as any other monkeypatch)
+    ``tests/conftest.py``'s blanket pytest exemption sets it via a
+    session-scoped ``MonkeyPatch.setattr(service_endpoint,
+    "_test_only_opt_in_reason", "<reason>")`` (undone at session end)
     instead of setting the real env var — the exemption then never
     appears in ``os.environ`` and cannot leak into a subprocess a test
     spawns. A test that spawns a subprocess needing the REAL guard

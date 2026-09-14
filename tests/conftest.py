@@ -5,6 +5,7 @@ import unittest.mock
 import warnings
 
 import pytest
+from collections.abc import Iterator
 from pathlib import Path
 
 import structlog
@@ -1847,10 +1848,23 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
-@pytest.fixture(autouse=True)
-def _exempt_pytest_from_production_write_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.fixture(autouse=True, scope="session")
+def _exempt_pytest_from_production_write_guard() -> Iterator[None]:
     """nexus-a2qhz: this whole suite's ONE declared exemption from the
     dev-checkout production-write guard.
+
+    Session-scoped (nexus-dvgsf): pytest sets up session-, module- and
+    class-scoped fixtures before any function-scoped autouse fixture of the
+    first test that needs them, so a function-scoped exemption left every
+    wider-scoped fixture's writes unexempted. The module-scoped
+    ``_register_collections`` fixtures in
+    ``tests/db/test_http_aspects_stores_integration.py``,
+    ``tests/db/test_http_taxonomy_store_integration.py`` and
+    ``tests/db/test_l9hd8_aspect_sql_service_integration.py`` errored at
+    setup with ``ProductionWriteGuardError`` for exactly that reason.
+    Session scope is set up before every other scope, so no fixture of any
+    scope writes ahead of the exemption. A test that resets the override
+    with ``monkeypatch`` still gets this value back at its own teardown.
 
     ``guard_production_write`` (``nexus.db.service_endpoint``) refuses
     every write a dev-checkout process makes unless
@@ -1893,13 +1907,15 @@ def _exempt_pytest_from_production_write_guard(monkeypatch: pytest.MonkeyPatch) 
     """
     from nexus.db import service_endpoint
 
-    monkeypatch.setattr(
-        service_endpoint,
-        "_test_only_opt_in_reason",
-        "pytest test suite (tests/conftest.py autouse) — every store this "
-        "suite constructs targets a throwaway test substrate, never "
-        "production; see nexus-a2qhz.",
-    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            service_endpoint,
+            "_test_only_opt_in_reason",
+            "pytest test suite (tests/conftest.py autouse) — every store this "
+            "suite constructs targets a throwaway test substrate, never "
+            "production; see nexus-a2qhz.",
+        )
+        yield
 
 
 @pytest.fixture(autouse=True)
