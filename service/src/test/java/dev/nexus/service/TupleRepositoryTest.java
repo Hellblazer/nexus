@@ -269,10 +269,15 @@ class TupleRepositoryTest {
     @Test
     void out_ledgerVerifyOutsideAllowedSet_schemaViolation_namesVerify_noRowWritten() {
         Map<String, String> keys = Map.of("agent_id", "agent-dims-3", "kind", "report");
+        // nexus-y4dmz: assert the ALLOWED-SET refusal, which only a declared
+        // verify with values [present, absent] produces. An undeclared verify is
+        // refused too, but as "not a declared dimension", so the old
+        // hasMessageContaining("verify") passed with the dim reverted.
         assertThatThrownBy(() -> repo.out(TENANT_A, "ledger/session-dims-3", keys,
                 Map.of("agent_type", "developer", "verify", "maybe"), null, null, null))
                 .isInstanceOf(SchemaViolationException.class)
-                .hasMessageContaining("verify");
+                .hasMessageContaining("field 'verify'")
+                .hasMessageContaining("not in [present, absent]");
 
         var rows = repo.rdp(TENANT_A, "ledger/session-dims-3", keys, 10, null);
         assertThat(rows).isEmpty();
@@ -280,6 +285,15 @@ class TupleRepositoryTest {
 
     @Test
     void out_ledgerCommitDimOver256Bytes_tooLarge_namesDimsCommit_noRowWritten() {
+        // nexus-y4dmz: prepareOut's size check runs before the unknown-dimension
+        // check and ignores the dim's name, so 257 bytes alone is TooLarge
+        // whether or not commit is declared. The 256-byte write at the limit is
+        // what only a declared commit accepts: undeclared, it is refused.
+        Map<String, String> atLimit = Map.of("agent_id", "agent-dims-4a", "kind", "report");
+        repo.out(TENANT_A, "ledger/session-dims-4", atLimit,
+                Map.of("agent_type", "developer", "commit", "x".repeat(256)), null, null, null);
+        assertThat(repo.rdp(TENANT_A, "ledger/session-dims-4", atLimit, 10, null)).hasSize(1);
+
         Map<String, String> keys = Map.of("agent_id", "agent-dims-4", "kind", "report");
         String over = "x".repeat(257);
         assertThatThrownBy(() -> repo.out(TENANT_A, "ledger/session-dims-4", keys,
