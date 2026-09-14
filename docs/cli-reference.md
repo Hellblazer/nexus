@@ -2048,7 +2048,7 @@ nx collection list
 |------|-------------|
 | `--force` | Skip the pre-delete safety check (which verifies the source documents are still present before wiping the collection) |
 
-The `reindex` command performs a pre-delete safety check before wiping the collection: it confirms the original source documents are still accessible. If the check fails, the command aborts unless `--force` is given. After re-indexing, a `verify --deep` probe runs automatically to confirm retrieval health. The command dispatches per collection type (`code__`, `docs__`, `rdr__`, `knowledge__`) to the appropriate indexer.
+The `reindex` command performs a pre-delete safety check before wiping the collection: it confirms the original source documents are still accessible. If the check fails, the command aborts unless `--force` is given. After re-indexing, a `verify --deep` probe runs automatically to confirm retrieval health. The command dispatches per collection type (`docs__`, `rdr__`, `knowledge__`) to the appropriate indexer; a `code__` collection is refused up front, before any scan or delete, because this verb has no re-index driver for code (use `nx index repo <path>`, which re-indexes in place).
 
 
 **Chash resolution (RDR-086 Phase 1.3, table retired at RDR-187).** The
