@@ -1005,6 +1005,13 @@ class RawSqlGateTest {
         // dateExecutedFor/SELECT read both go through the existing typed
         // DSL.table(DSL.name("databasechangelog"))/DSL.field(DSL.name(...), Class)
         // idiom this file already uses for that table, so neither adds a site.
+        // nexus-jl08t follow-up (duplicate-row rework): test 18 was renamed to
+        // reexecutedChangesets_onAgedDatabaseWithDuplicateHistory_countsExactlyTheRunAlwaysSet
+        // and its seeding/assertions rewritten (production's duplicate-row shape,
+        // not a dateexecuted future-stamp), but Phase A/C's raw SQL footprint is
+        // BYTE-IDENTICAL to what earned the 50 -> 56 bump above -- the new
+        // duplicateChangelogRow/captureLogs helpers and every new assertion are
+        // typed jOOQ, so the ceiling stays at 56, not reduced and not raised again.
         Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 56),
         // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 37 -> 39 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).

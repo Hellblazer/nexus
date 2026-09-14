@@ -2021,50 +2021,68 @@ class SchemaMigratorIntegrationTest {
         }
     }
 
-    // ── Test 18: nexus-jl08t — reexecuted_changesets on an AGED database ────────
-    // (a database where every runAlways changeset already has a prior row) that
-    // picks up genuinely new changesets in the same walk — the exact shape
-    // conexus's engine-service-v0.1.118 PITR-fork rehearsal hit: new_changesets=5,
-    // reexecuted_changesets=25, pending_at_start=17, against a changelog that
-    // parses to exactly 12 runAlways changeSet elements (5 grants-nexus-svc.xml,
-    // 5 grants-nexus-diag.xml, 1 staging-001, 1 taxonomy-011 — see AGENTS.md §
-    // Engine-service release).
+    // ── Test 18: nexus-jl08t — reexecuted_changesets on an AGED database with
+    // DUPLICATE changelog history ─────────────────────────────────────────────
+    // conexus-9a's read-only query of production (2026-09-14) found the actual
+    // mechanism behind the v0.1.118 anomaly (new_changesets=5,
+    // reexecuted_changesets=25, pending_at_start=17): databasechangelog has no
+    // uniqueness constraint on (id, author, filename), and production carries
+    // 13 extra rows across exactly two identities, both in grants-nexus-diag.xml
+    // -- grants-nexus-diag-1 (author nexus-ykzbj.8, 6 extra copies) and
+    // grants-nexus-diag-2 (author nexus-9bufb, 7 extra copies), every copy
+    // identical (RERAN, one shared deployment_id, dateexecuted, md5sum).
+    // Liquibase's RERAN path (MarkChangeSetRanGenerator) issues one
+    // UPDATE ... WHERE id=? AND author=? AND filename=? per changeset, with no
+    // row-count limit, so it re-stamps every matching physical row while
+    // Liquibase itself believes it processed one changeset: 12 genuine
+    // runAlways identities + 13 duplicate extra rows = 25. The origin of the
+    // duplicates is not recoverable -- every RERAN overwrites each copy's own
+    // dateexecuted/deployment_id alike -- and conexus will not delete them
+    // without Sam's decision, so SchemaMigrator must count correctly with them
+    // present indefinitely. See AGENTS.md § Engine-service release.
 
     /**
-     * Pins nexus-x0s52's {@code MigrationOutcome} fields against an AGED
-     * database: one where every {@code runAlways} changeset already has a
-     * databasechangelog row (from a prior boot), and N genuinely new
-     * changesets land in THIS walk alongside them — nexus-jl08t's target
-     * shape, reproduced hermetically without a historical changelog snapshot.
+     * Pins nexus-jl08t's identity-based counting against an AGED database
+     * carrying the exact production duplicate shape: one where every
+     * {@code runAlways} changeset already has a databasechangelog row (from a
+     * prior boot), two of those identities each carry several EXTRA
+     * verbatim-duplicate rows, and N genuinely new changesets land in THIS
+     * walk alongside them.
      *
      * <p><strong>How the aged state is built.</strong> Migrate a fresh
      * database to full HEAD (every changeset, including the tuples-003/004
      * family, lands and every {@code runAlways} row gets its first
-     * {@code dateexecuted} stamp). Then REWIND only the tuples-003/004
-     * family: delete their five databasechangelog rows and drop the
-     * CHECK constraint {@code tuples-003-3} added (so re-adding it on the
-     * next walk does not fail as a duplicate). The database is now
-     * structurally identical to "every runAlways changeset has already run
-     * at least once; five ordinary changesets are still pending" — the
-     * v0.1.118 walk's own shape (450 pre-existing rows, 5 new landings, 12
-     * pre-existing runAlways rows) without needing to check out an old
-     * changelog snapshot.
+     * {@code dateexecuted} stamp). Duplicate {@code grants-nexus-diag-1}'s row
+     * 6 times and {@code grants-nexus-diag-2}'s row 7 times (looked up by id,
+     * matching conexus-9a's confirmed production counts exactly). Then REWIND
+     * only the tuples-003/004 family: delete their five databasechangelog rows
+     * and drop the CHECK constraint {@code tuples-003-3} added (so re-adding it
+     * on the next walk does not fail as a duplicate). The database is now
+     * structurally identical to production's own shape at the v0.1.118 walk:
+     * every runAlways changeset already ran at least once, two of those
+     * identities carry duplicate rows, and five ordinary changesets are still
+     * pending.
      *
      * <p><strong>What this pins.</strong> {@code pending_at_start} must equal
-     * the 5 rewound changesets plus the FULL runAlways set (Liquibase's
-     * {@code listUnrunChangeSets()} always includes {@code runAlways}
-     * changesets regardless of prior execution — nexus-x0s52's javadoc).
-     * {@code reexecuted_changesets} must equal EXACTLY the runAlways set's
-     * size — no more. The v0.1.118 anomaly (reexecuted=25 against 12
-     * declared runAlways changesets) is exactly a violation of this last
-     * assertion; if {@code SchemaMigrator} ever regresses to counting extra
-     * rows as "reexecuted" when new changesets land in the same walk as
-     * runAlways re-runs, this test fails with the runAlways count named,
-     * not a bare "25 != 12" surprise read out of a production log.
+     * the 5 rewound changesets plus the FULL runAlways set (unaffected by row
+     * duplication — Liquibase's {@code listUnrunChangeSets()} counts
+     * IDENTITIES, not rows). A RETIRED dateexecuted-clock-window
+     * reconstruction, and independently a non-distinct
+     * {@code COUNT(*) WHERE deployment_id=?} over this walk's own deployment
+     * id, must BOTH reproduce the v0.1.118 anomaly verbatim (25) against this
+     * hermetic duplicate shape — proving the bug is real and that scoping by
+     * deployment_id alone does not fix it. {@code reexecutedChangesets} on the
+     * FIXED {@code MigrationOutcome} must equal EXACTLY the runAlways set's
+     * size (12) — the identity-based counting a duplicate row cannot inflate.
      */
     @Test
     @Order(18)
-    void reexecutedChangesets_onAgedDatabase_countsExactlyTheRunAlwaysSet() throws Exception {
+    void reexecutedChangesets_onAgedDatabaseWithDuplicateHistory_countsExactlyTheRunAlwaysSet()
+            throws Exception {
+        final int diag1ExtraCopies = 6;
+        final int diag2ExtraCopies = 7;
+        final int duplicatedIdentities = 2;
+
         PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
         try {
             final String role = "nexus_admin_jl08t_test";
@@ -2132,8 +2150,26 @@ class SchemaMigratorIntegrationTest {
                         + "changelog XML at HEAD (12: 5 grants-nexus-svc-*, 5 "
                         + "grants-nexus-diag-*, staging-4-svc-grants, taxonomy-011-8)")
                     .hasSize(12);
+                assertThat(runAlwaysIds)
+                    .as("nexus-jl08t: production's two duplicated identities must "
+                        + "both be in the parsed runAlways set, or this seeding "
+                        + "no longer reproduces production's shape")
+                    .contains("grants-nexus-diag-1", "grants-nexus-diag-2");
 
-                // Snapshot every runAlways row's dateexecuted BEFORE the rewind.
+                // Seed the exact production duplicate shape (conexus-9a,
+                // 2026-09-14, read-only query of the live cluster): 6 extra
+                // copies of grants-nexus-diag-1's row and 7 extra of
+                // grants-nexus-diag-2's, found by id, never hard-coded values.
+                try (Connection conn = agedDs.getConnection()) {
+                    duplicateChangelogRow(conn, "grants-nexus-diag-1", diag1ExtraCopies);
+                    duplicateChangelogRow(conn, "grants-nexus-diag-2", diag2ExtraCopies);
+                }
+
+                // Snapshot every runAlways row's dateexecuted BEFORE the rewind
+                // (dateExecutedFor is DISTINCT-based so it tolerates the two
+                // identities that now carry duplicate rows -- every copy of a
+                // given identity was seeded with, and stays on, one shared
+                // dateexecuted value).
                 Map<String, java.sql.Timestamp> beforeRewind = new LinkedHashMap<>();
                 try (Connection conn = agedDs.getConnection()) {
                     for (String id : runAlwaysIds) {
@@ -2160,24 +2196,47 @@ class SchemaMigratorIntegrationTest {
                     rowsBeforeSecondWalk = changelogRowCount(conn);
                 }
 
-                // Phase D: the walk under test.
-                SchemaMigrator.MigrationOutcome outcome = SchemaMigrator.migrate(agedDs);
+                // Captured immediately before Phase D, on the SAME pool
+                // migrate() itself borrows connections from -- reproduces
+                // exactly what the RETIRED dateexecuted-clock-window algorithm
+                // used as its own walkStart.
+                java.sql.Timestamp walkStart;
+                try (Connection conn = agedDs.getConnection()) {
+                    walkStart = dsl(conn).select(DSL.currentTimestamp())
+                        .fetchOne(DSL.currentTimestamp());
+                }
+
+                // Phase D: the walk under test, with SchemaMigrator's own log
+                // output captured so the schema_changelog_duplicate_rows
+                // diagnostic can be asserted directly rather than re-derived.
+                SchemaMigrator.MigrationOutcome[] outcomeHolder =
+                    new SchemaMigrator.MigrationOutcome[1];
+                List<String> logMessages = captureLogs(() ->
+                    outcomeHolder[0] = SchemaMigrator.migrate(agedDs));
+                SchemaMigrator.MigrationOutcome outcome = outcomeHolder[0];
 
                 long rowsAfterSecondWalk;
                 try (Connection conn = agedDs.getConnection()) {
                     rowsAfterSecondWalk = changelogRowCount(conn);
                 }
+                long newChangesetsByRowDelta = rowsAfterSecondWalk - rowsBeforeSecondWalk;
 
-                // ── Assert: new_changesets is exactly the rewound 5 ──────────
-                assertThat(rowsAfterSecondWalk - rowsBeforeSecondWalk)
+                // ── Assert: new_changesets is exactly the rewound 5, both by
+                // row-count delta (unaffected by duplication -- an INSERT for
+                // a genuinely-new changeset adds exactly one row regardless of
+                // what duplicates exist elsewhere) and by the fixed outcome.
+                assertThat(newChangesetsByRowDelta)
                     .as("row-count delta must equal the 5 rewound changesets")
                     .isEqualTo(5L);
                 assertThat(outcome.newChangesets())
-                    .as("nexus-x0s52: new_changesets counts rows that genuinely "
-                        + "landed for the first time")
+                    .as("nexus-x0s52/nexus-jl08t: new_changesets counts changeset "
+                        + "identities that genuinely landed for the first time, "
+                        + "unaffected by duplicate rows elsewhere")
                     .isEqualTo(5L);
 
-                // ── Assert: pending_at_start = new (5) + runAlways (12) ──────
+                // ── Assert: pending_at_start = new (5) + runAlways (12),
+                // unaffected by row duplication (listUnrunChangeSets() counts
+                // identities, never rows).
                 assertThat(outcome.pendingAtStart())
                     .as("nexus-jl08t: listUnrunChangeSets() before the walk counts "
                         + "the 5 genuinely-pending changesets PLUS the full "
@@ -2185,11 +2244,9 @@ class SchemaMigratorIntegrationTest {
                         + "prior execution) -- 5 + 12 = 17 on the v0.1.118 walk")
                     .isEqualTo(5L + runAlwaysIds.size());
 
-                // ── Assert: reexecuted_changesets counts EXACTLY the runAlways
-                // set that pre-existed this walk -- no more, no less. This is
-                // the assertion nexus-jl08t exists to pin: does the walk count
-                // (dateexecuted-bump) anything beyond the runAlways rows when
-                // new changesets land in the SAME walk?
+                // ── Assert: every runAlways row's dateexecuted actually moved
+                // during this walk (sanity check the seeded duplicates are
+                // genuinely re-executed together, not silently skipped).
                 Map<String, java.sql.Timestamp> afterRewalk = new LinkedHashMap<>();
                 try (Connection conn = agedDs.getConnection()) {
                     for (String id : runAlwaysIds) {
@@ -2204,14 +2261,105 @@ class SchemaMigratorIntegrationTest {
                         + "walk that re-executes it")
                     .isEqualTo(runAlwaysIds.size());
 
+                // ── Assert: the RETIRED dateexecuted-clock-window algorithm,
+                // reconstructed independently here against this exact
+                // production duplicate shape, reproduces the v0.1.118 anomaly
+                // verbatim -- 12 genuine runAlways identities + 13 duplicate
+                // extra rows = 25, not 12. This is the "old code" wrong value:
+                // a test that could not produce it would prove nothing.
+                long oldStyleTouched;
+                try (Connection conn = agedDs.getConnection()) {
+                    Field<java.sql.Timestamp> dateExecuted =
+                        DSL.field(DSL.name("dateexecuted"), java.sql.Timestamp.class);
+                    oldStyleTouched = dsl(conn).selectCount()
+                        .from(databaseChangeLog())
+                        .where(dateExecuted.greaterOrEqual(walkStart))
+                        .fetchOne(0, long.class);
+                }
+                long oldStyleReexecuted = oldStyleTouched - newChangesetsByRowDelta;
+                assertThat(oldStyleReexecuted)
+                    .as("nexus-jl08t: the retired dateexecuted-clock-window "
+                        + "algorithm reproduces the v0.1.118 anomaly exactly on "
+                        + "this hermetic duplicate shape")
+                    .isEqualTo((long) runAlwaysIds.size() + diag1ExtraCopies + diag2ExtraCopies);
+
+                // ── Assert: a non-distinct COUNT(*) scoped to THIS walk's own
+                // deployment_id ALSO reproduces the same wrong value -- proving
+                // scoping by deployment_id alone does not fix the bug; the fix
+                // is de-duplicating by changeset identity.
+                String deploymentId;
+                try (Connection conn = agedDs.getConnection()) {
+                    Field<String> idField = DSL.field(DSL.name("id"), String.class);
+                    Field<String> deploymentIdField =
+                        DSL.field(DSL.name("deployment_id"), String.class);
+                    deploymentId = dsl(conn).select(deploymentIdField)
+                        .from(databaseChangeLog())
+                        .where(idField.eq("tuples-003-1"))
+                        .fetchOne(deploymentIdField);
+                }
+                assertThat(deploymentId)
+                    .as("Phase D's walk must stamp a deployment_id on its "
+                        + "newly-landed changesets")
+                    .isNotNull();
+
+                long naiveDeploymentIdReexecuted;
+                try (Connection conn = agedDs.getConnection()) {
+                    Field<String> deploymentIdField =
+                        DSL.field(DSL.name("deployment_id"), String.class);
+                    Field<String> exectypeField = DSL.field(DSL.name("exectype"), String.class);
+                    naiveDeploymentIdReexecuted = dsl(conn).selectCount()
+                        .from(databaseChangeLog())
+                        .where(deploymentIdField.eq(deploymentId))
+                        .and(exectypeField.eq(ChangeSet.ExecType.RERAN.value))
+                        .fetchOne(0, long.class);
+                }
+                assertThat(naiveDeploymentIdReexecuted)
+                    .as("nexus-jl08t: a non-distinct COUNT(*) scoped to this "
+                        + "walk's own deployment_id ALSO reports 25 -- scoping "
+                        + "by deployment_id alone is not sufficient; counting "
+                        + "must de-duplicate by changeset identity")
+                    .isEqualTo((long) runAlwaysIds.size() + diag1ExtraCopies + diag2ExtraCopies);
+
+                // ── Assert: the FIXED reexecuted_changesets counts EXACTLY the
+                // runAlways set that pre-existed this walk -- no more, no less
+                // -- immune to the 13 duplicate rows seeded above. This is the
+                // assertion nexus-jl08t exists to pin.
                 assertThat(outcome.reexecutedChangesets())
                     .as("nexus-jl08t: reexecuted_changesets must count exactly "
-                        + "the runAlways set touched by this walk (12) -- not "
-                        + "more. A value exceeding runAlwaysIds.size() here "
-                        + "reproduces the v0.1.118 anomaly (measured "
-                        + "reexecuted=25 against 12 declared runAlways "
-                        + "changesets) inside a hermetic test.")
+                        + "the runAlways set touched by this walk (12), "
+                        + "de-duplicated by identity -- immune to the 13 extra "
+                        + "physical rows seeded for grants-nexus-diag-1/-2")
                     .isEqualTo((long) runAlwaysIds.size());
+
+                assertThat(outcome.markRanChangesets())
+                    .as("no precondition-skip changesets are exercised by this walk")
+                    .isZero();
+                assertThat(outcome.newChangesets() + outcome.reexecutedChangesets()
+                        + outcome.markRanChangesets())
+                    .as("nexus-jl08t: the three outcome counts must partition "
+                        + "pending_at_start exactly, even with duplicate rows "
+                        + "present")
+                    .isEqualTo((long) outcome.pendingAtStart());
+
+                // ── Assert: the duplicate-row diagnostic fired with the exact
+                // counts (2 identities, 13 extra rows) -- and did not delete or
+                // repair anything (conexus owns that decision, not this walk).
+                assertThat(logMessages)
+                    .as("nexus-jl08t: the walk must log the duplicate-row "
+                        + "diagnostic naming the identities and extra-row count")
+                    .anyMatch(m -> m.contains("event=schema_changelog_duplicate_rows")
+                        && m.contains("identity_count=" + duplicatedIdentities)
+                        && m.contains("extra_rows=" + (diag1ExtraCopies + diag2ExtraCopies)));
+
+                long rowsRemaining;
+                try (Connection conn = agedDs.getConnection()) {
+                    rowsRemaining = changelogRowCount(conn);
+                }
+                assertThat(rowsRemaining)
+                    .as("the walk must not delete or merge the seeded duplicate "
+                        + "rows -- that is a data-hygiene decision for the "
+                        + "database's owner, not something a migration performs")
+                    .isEqualTo(rowsAfterSecondWalk);
             }
         } finally {
             agedPg.stop();
@@ -2287,20 +2435,76 @@ class SchemaMigratorIntegrationTest {
 
     /**
      * {@code databasechangelog.dateexecuted} for a changeset, keyed by ID
-     * alone (nexus-jl08t test 18): every ID used there is a distinct,
-     * file-namespaced string (e.g. {@code grants-nexus-diag-3},
-     * {@code taxonomy-011-8}) with no collision across this project's
-     * changelog, so a bare ID lookup is unambiguous for this purpose.
-     * {@code fetchOne} itself would throw on a genuine collision rather than
-     * silently picking one row.
+     * alone (nexus-jl08t test 18). Two of the IDs used there
+     * ({@code grants-nexus-diag-1}/{@code -2}) carry seeded DUPLICATE
+     * physical rows, so this is DISTINCT rather than a bare {@code fetchOne}
+     * over every row: every copy of a given identity is written by the same
+     * INSERT/UPDATE statement (this test's seeding, or Liquibase's own RERAN
+     * path), so they always share one {@code dateexecuted} value. A genuine
+     * divergence — the copies disagreeing — throws via {@code fetchOne}
+     * rather than silently picking one, since that would mean the walk
+     * touched the duplicates inconsistently.
      */
     private static java.sql.Timestamp dateExecutedFor(Connection conn, String id) throws Exception {
         Field<java.sql.Timestamp> dateExecuted =
             DSL.field(DSL.name("dateexecuted"), java.sql.Timestamp.class);
         Field<String> idField = DSL.field(DSL.name("id"), String.class);
-        return dsl(conn).select(dateExecuted)
+        return dsl(conn).selectDistinct(dateExecuted)
             .from(databaseChangeLog())
             .where(idField.eq(id))
             .fetchOne(dateExecuted);
+    }
+
+    /**
+     * Copies an existing {@code databasechangelog} row {@code extraCopies}
+     * times, reproducing the exact production duplicate shape conexus-9a
+     * confirmed on 2026-09-14 (nexus-jl08t): the identity keeps its ORIGINAL
+     * row plus the requested number of verbatim-identical extras. Copies
+     * every column via a typed jOOQ SELECT / INSERT (no raw SQL string), so
+     * this stays correct if {@code databasechangelog} ever gains a column.
+     */
+    private static void duplicateChangelogRow(Connection conn, String id, int extraCopies) {
+        DSLContext ctx = dsl(conn);
+        Table<?> table = databaseChangeLog();
+        Field<String> idField = DSL.field(DSL.name("id"), String.class);
+        org.jooq.Record row = ctx.selectFrom(table).where(idField.eq(id)).fetchOne();
+        assertThat(row)
+            .as("changeset " + id + " must already have exactly one "
+                + "databasechangelog row before duplication")
+            .isNotNull();
+        Field<?>[] fields = row.fields();
+        Object[] values = row.intoArray();
+        for (int i = 0; i < extraCopies; i++) {
+            ctx.insertInto(table, fields).values(values).execute();
+        }
+    }
+
+    /**
+     * Attaches a {@link ch.qos.logback.core.read.ListAppender} to the ROOT
+     * logger for the duration of {@code body}, then hands back every captured
+     * message. Pattern matches {@code NexusServiceScheduledSweepTest}'s
+     * established use of a root-logger ListAppender to assert on structured
+     * log lines; this variant's {@code body} is a plain {@link Runnable}
+     * (nexus-jl08t test 18 needs to keep the migrate() return value, not
+     * just observe that it ran, so it captures it into an outer array from
+     * inside the lambda instead of needing a value-returning body shape).
+     */
+    private java.util.List<String> captureLogs(Runnable body) {
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            body.run();
+            return logs.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .toList();
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
     }
 }
