@@ -14,6 +14,8 @@ Subcommands:
   templates  -- the boot-loaded template registry (digest, sources, templates).
   list       -- concrete subspaces that exist.
   stats      -- the census for one subspace.
+  directory  -- who holds a name in the RDR-208 session directory (bead
+                nexus-galkv.11; resolver in ``nexus.tuple_directory``).
   watch      -- ping-then-pull mailbox watcher for a Claude Code Monitor
                 (bead nexus-6konb.2; loop in ``nexus.tuple_watch``).
 
@@ -58,7 +60,7 @@ def _print_tuple_error(e: Exception) -> None:
 
 @click.group(name="tuple")
 def tuple_group() -> None:
-    """RDR-205 Linda tuple space: out / rd / in / ack (with an optional reply) / nack / renew / templates / list / stats / watch."""
+    """RDR-205 Linda tuple space: out / rd / in / ack (with an optional reply) / nack / renew / templates / list / stats / directory / watch."""
 
 
 @tuple_group.command(name="out")
@@ -344,6 +346,73 @@ def tuple_stats_cmd(subspace: str, json_out: bool) -> None:
     click.echo(f"expired_unpurged: {c.expired_unpurged}")
     click.echo(f"oldest_created_at: {c.oldest_created_at}")
     click.echo(f"newest_created_at: {c.newest_created_at}")
+
+
+@tuple_group.command(name="directory")
+@click.argument("name")
+@click.option("--json", "json_out", is_flag=True, default=False, help="Output as JSON.")
+def tuple_directory_cmd(name: str, json_out: bool) -> None:
+    """Show who holds NAME in the RDR-208 session directory.
+
+    Prints each live directory/NAME entry's session_id, created_at and
+    expires_at, and flags NAME as ambiguous when more than one distinct
+    session holds it -- the case `mailbox_send` refuses. Uses the SAME
+    resolver `mailbox_send` uses (nexus.tuple_directory.resolve_send_address),
+    so the two can never disagree about whether NAME is safely addressable.
+    """
+    from nexus.tuple_directory import (  # noqa: PLC0415 — deferred: CLI startup cost
+        DirectoryResolutionError, list_directory_entries, resolve_send_address,
+    )
+
+    store = _store()
+    try:
+        rows = list_directory_entries(name, store)
+    except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
+        _print_tuple_error(e)
+        raise SystemExit(1) from e
+
+    entries = [
+        {
+            "session_id": (row.dims or {}).get("session_id"),
+            "created_at": row.created_at,
+            "expires_at": row.expires_at,
+        }
+        for row in rows
+    ]
+    holders = sorted({e["session_id"] for e in entries if e["session_id"]})
+
+    resolved_session: str | None = None
+    ambiguous = False
+    if entries:
+        try:
+            resolved_session, _kind = resolve_send_address(name, store)
+        except DirectoryResolutionError:
+            # entries is non-empty here, so the only way resolve_send_address
+            # can still refuse is the more-than-one-holder branch.
+            ambiguous = True
+
+    if json_out:
+        click.echo(json.dumps({
+            "name": name,
+            "entries": entries,
+            "holders": holders,
+            "ambiguous": ambiguous,
+            "resolved_session_id": resolved_session,
+        }))
+        return
+
+    if not entries:
+        click.echo(f"No live directory entry for {name!r}.")
+        return
+    for e in entries:
+        click.echo(f"  session_id: {e['session_id']}  created_at: {e['created_at']}  expires_at: {e['expires_at']}")
+    if ambiguous:
+        click.echo(
+            f"{name!r} is held by {len(holders)} sessions -- mailbox_send "
+            f"would refuse this name; resend to one of these session ids directly."
+        )
+    else:
+        click.echo(f"{name!r} resolves to session {resolved_session}.")
 
 
 # ── rendering helpers ────────────────────────────────────────────────────────

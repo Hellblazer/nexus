@@ -81,13 +81,34 @@ def looks_like_agent_id(value: str) -> bool:
     return bool(_AGENT_ID_RE.fullmatch(value))
 
 
-def resolve_send_address(to: str, tuples: Any) -> tuple[str, str]:
-    """Resolve `mailbox_send`'s `to` into `(address, address_kind)`.
+def list_directory_entries(name: str, tuples: Any) -> list[Any]:
+    """Every live row of `directory/<name>`, paged with the `since` cursor
+    until a short page. Shared ground truth for :func:`resolve_send_address`
+    and the `nx tuple directory NAME` CLI verb (bead nexus-galkv.11), so the
+    two can never disagree about what counts as a live holder -- one page
+    alone cannot rule out a second holder past the page boundary.
 
     *tuples* is an `HttpTupleStore` (or anything exposing the same `rd`
     signature) -- passed in rather than resolved here so the caller
-    controls which T2 client/transaction this read runs against. A
-    directory read that raises propagates unchanged: nothing about `to`
+    controls which T2 client/transaction this read runs against.
+    """
+    subspace = f"directory/{name}"
+    since: tuple[str, str] | None = None
+    rows: list[Any] = []
+    while True:
+        page = tuples.rd(subspace, {"name": name}, n=MAX_QUERY_RESULTS, since=since)
+        rows.extend(page)
+        if len(page) < MAX_QUERY_RESULTS:
+            break
+        last = page[-1]
+        since = (last.created_at, last.id)
+    return rows
+
+
+def resolve_send_address(to: str, tuples: Any) -> tuple[str, str]:
+    """Resolve `mailbox_send`'s `to` into `(address, address_kind)`.
+
+    A directory read that raises propagates unchanged: nothing about `to`
     was resolved, so the caller never reaches a write.
     """
     if not to:
@@ -98,18 +119,10 @@ def resolve_send_address(to: str, tuples: Any) -> tuple[str, str]:
         return to, "agent"
 
     holders: set[str] = set()
-    subspace = f"directory/{to}"
-    since: tuple[str, str] | None = None
-    while True:
-        rows = tuples.rd(subspace, {"name": to}, n=MAX_QUERY_RESULTS, since=since)
-        for row in rows:
-            session_id = (row.dims or {}).get("session_id")
-            if session_id:
-                holders.add(session_id)
-        if len(rows) < MAX_QUERY_RESULTS:
-            break
-        last = rows[-1]
-        since = (last.created_at, last.id)
+    for row in list_directory_entries(to, tuples):
+        session_id = (row.dims or {}).get("session_id")
+        if session_id:
+            holders.add(session_id)
 
     if not holders:
         raise DirectoryResolutionError(f"no live holder for name {to!r}")

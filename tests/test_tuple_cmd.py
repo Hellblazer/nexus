@@ -192,6 +192,81 @@ class TestTupleTemplatesListStats:
         assert census["available"] == 0
 
 
+class TestTupleDirectoryCmd:
+    """RDR-208 Phase 2 Step 4 (bead nexus-galkv.11): ``nx tuple directory
+    NAME`` -- shows who holds a name, through the SAME resolver
+    ``mailbox_send`` (nexus-galkv.10) uses, so the verb and the tool cannot
+    disagree about whether a name is safely addressable."""
+
+    def _arm(self, name: str, session_id: str) -> None:
+        res = _invoke([
+            "out", f"directory/{name}", "--key", f"name={name}",
+            "--dim", f"session_id={session_id}", "--nonce", _uniq("nonce"),
+        ])
+        assert res.exit_code == 0, res.output
+
+    def test_no_entry_reports_nothing_live(self, t2_service_env) -> None:
+        name = _uniq("name")
+        res = _invoke(["directory", name])
+        assert res.exit_code == 0, res.output
+        assert "No live directory entry" in res.output
+
+    def test_one_holder_prints_the_entry_and_resolves(self, t2_service_env) -> None:
+        name = _uniq("name")
+        sid = str(uuid.uuid4())
+        self._arm(name, sid)
+
+        res = _invoke(["directory", name])
+        assert res.exit_code == 0, res.output
+        assert sid in res.output
+        assert "resolves to session" in res.output
+
+    def test_two_holders_are_flagged(self, t2_service_env) -> None:
+        name = _uniq("name")
+        sid1, sid2 = str(uuid.uuid4()), str(uuid.uuid4())
+        self._arm(name, sid1)
+        self._arm(name, sid2)
+
+        res = _invoke(["directory", name])
+        assert res.exit_code == 0, res.output
+        assert sid1 in res.output
+        assert sid2 in res.output
+        assert "held by" in res.output
+        assert "mailbox_send" in res.output
+
+    def test_json_shape_single_holder(self, t2_service_env) -> None:
+        name = _uniq("name")
+        sid = str(uuid.uuid4())
+        self._arm(name, sid)
+
+        res = _invoke(["directory", name, "--json"])
+        assert res.exit_code == 0, res.output
+        payload = _last_json_line(res.output)
+        assert payload["name"] == name
+        assert payload["holders"] == [sid]
+        assert payload["ambiguous"] is False
+        assert payload["resolved_session_id"] == sid
+        assert len(payload["entries"]) == 1
+        entry = payload["entries"][0]
+        assert entry["session_id"] == sid
+        assert "created_at" in entry
+        assert "expires_at" in entry
+
+    def test_json_shape_ambiguous(self, t2_service_env) -> None:
+        name = _uniq("name")
+        sid1, sid2 = str(uuid.uuid4()), str(uuid.uuid4())
+        self._arm(name, sid1)
+        self._arm(name, sid2)
+
+        res = _invoke(["directory", name, "--json"])
+        assert res.exit_code == 0, res.output
+        payload = _last_json_line(res.output)
+        assert sorted(payload["holders"]) == sorted([sid1, sid2])
+        assert payload["ambiguous"] is True
+        assert payload["resolved_session_id"] is None
+        assert len(payload["entries"]) == 2
+
+
 class TestKvParsing:
     def test_out_rejects_malformed_key(self, t2_service_env) -> None:
         out = _invoke(["out", "mailbox/x", "--key", "no-equals-sign"])
