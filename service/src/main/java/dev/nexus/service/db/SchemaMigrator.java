@@ -184,6 +184,18 @@ public final class SchemaMigrator {
     private SchemaMigrator() { /* static utility */ }
 
     /**
+     * Sentinel value for {@link MigrationOutcome#newChangesets()}, {@link
+     * MigrationOutcome#reexecutedChangesets()}, and {@link
+     * MigrationOutcome#markRanChangesets()} when the walk itself succeeded but
+     * the diagnostic counting that would normally populate those fields could
+     * not complete (nexus-jl08t fix round, T2 [25638] finding 1). {@code
+     * pendingAtStart} is unaffected — it is computed before the counting logic
+     * this sentinel guards and is never itself the cause of a counts-
+     * unavailable outcome.
+     */
+    private static final long COUNTS_UNAVAILABLE = -1L;
+
+    /**
      * What a walk actually did, in truthfully named counts (nexus-x0s52).
      *
      * <p>The old {@code schema_migration_complete} line logged the PRE-update
@@ -243,12 +255,32 @@ public final class SchemaMigrator {
      * values and the fixed one). Grouping by identity before counting
      * removes the row-count amplification entirely: each of the 12
      * {@code runAlways} identities counts once, however many physical copies
-     * carry it. The origin of the duplicate rows themselves cannot be
-     * recovered from a walk's own bookkeeping — every {@code RERAN} update
-     * overwrites each copy's {@code dateexecuted}/{@code orderexecuted}
-     * alike — and de-duplicating or deleting them is a data-hygiene decision
-     * for the database's owner, not something a walk performs; see
-     * {@code migrate()}'s {@code schema_changelog_duplicate_rows} log line.
+     * carry it.
+     *
+     * <p><strong>The duplicate rows' origin is KNOWN, not a mystery
+     * (substantive-critic finding, T2 [25635]).</strong> Commit {@code
+     * 585c8c20e} ("fix(schema): stop DATABASECHANGELOG growing a row per
+     * boot", nexus-ixsxa, 2026-07-27) explains that {@code
+     * grants-nexus-diag-1} (author {@code nexus-ykzbj.8}) and {@code
+     * grants-nexus-diag-2} (author {@code nexus-9bufb}) — the EXACT two
+     * identities production shows duplicated — previously carried {@code
+     * <preConditions onFail="MARK_RAN">} on a {@code runAlways} changeset:
+     * while the precondition kept failing, Liquibase's {@code
+     * MarkChangeSetRanGenerator} issued an INSERT (not an UPDATE) on every
+     * boot, growing one extra row per boot until 585c8c20e converted both to
+     * body-guard {@code RERAN} updates and the growth stopped. {@code
+     * grants-nexus-diag.xml}'s own header (lines 48-76) repeats this.
+     * Historical duplicate rows accumulated before that fix were deliberately
+     * NOT swept — 585c8c20e says so verbatim. What is genuinely unrecoverable
+     * is narrower than "origin unknown": it is which PHYSICAL BOOT produced
+     * which copy — every {@code RERAN} update since then overwrites each
+     * copy's {@code dateexecuted}/{@code deployment_id}/{@code orderexecuted}
+     * alike, erasing whatever once distinguished them, so the boot-by-boot
+     * history is gone even though the mechanism and the affected identities
+     * are on record. De-duplicating or deleting the rows already accumulated
+     * is a data-hygiene decision for the database's owner, not something a
+     * walk performs; see {@code migrate()}'s {@code
+     * schema_changelog_duplicate_rows} log line.
      *
      * <p><strong>Why {@code orderexecuted}, not {@code deployment_id}
      * (nexus-jl08t).</strong> Liquibase's own per-walk {@code deployment_id}
@@ -288,6 +320,22 @@ public final class SchemaMigrator {
      * changeset failed or was skipped without Liquibase ever stamping a row
      * for it — not the retired dateexecuted-clock-window theory this
      * replaces.
+     *
+     * <p><strong>Counts-unavailable sentinel (nexus-jl08t fix round).</strong>
+     * {@code newChangesets}, {@code reexecutedChangesets}, and {@code
+     * markRanChangesets} are each {@link #COUNTS_UNAVAILABLE} ({@code -1})
+     * when the walk itself succeeded (Liquibase's {@code update()} returned
+     * normally, so the migration is committed) but a transient failure in the
+     * diagnostic counting queries that populate these three fields prevented
+     * computing them. {@code pendingAtStart} is always a real count in that
+     * case — it runs before the counting logic this sentinel guards. A
+     * counts-unavailable outcome is never thrown as a {@link
+     * MigrationException}: the identity check above (partition ==
+     * pendingAtStart) does not apply and is skipped, and {@code migrate()}
+     * logs {@code event=schema_migration_count_unavailable} naming the
+     * failure's cause before returning. Callers that need the real counts for
+     * a specific walk should treat a sentinel outcome as "migration
+     * succeeded, counts unknown" rather than retry or fail the boot on it.
      */
     public record MigrationOutcome(
             int pendingAtStart, long newChangesets, long reexecutedChangesets,
@@ -298,10 +346,19 @@ public final class SchemaMigrator {
      * grouped by {@code exectype}, plus how much row-count duplication the
      * walk found (nexus-jl08t). See {@link MigrationOutcome}'s javadoc for
      * why identity de-duplication is required rather than optional.
+     *
+     * @param duplicateChangesetIds each duplicated identity's changeset {@code
+     *      id} paired with its TOTAL physical row count (original plus
+     *      extras), sorted by extra-row count descending so the biggest
+     *      offender leads (substantive-critic finding, T2 [25635] SIGNIFICANT
+     *      (b)) — lets a reader tell the known production baseline ({@code
+     *      grants-nexus-diag-1} x7, {@code -2} x8) from a genuinely new
+     *      identity at a glance, rather than only a bare count.
      */
     private record WalkChangesetCounts(
             long newChangesets, long reexecutedChangesets, long markRanChangesets,
-            long duplicateIdentities, long duplicateExtraRows) {}
+            long duplicateIdentities, long duplicateExtraRows,
+            List<Map.Entry<String, Integer>> duplicateChangesetIds) {}
 
     /**
      * Applies all pending Liquibase changesets from the master changelog to the
@@ -385,11 +442,40 @@ public final class SchemaMigrator {
                 // identity's RERAN update shares one orderexecuted value (confirmed by
                 // conexus-9a's production query), so a plain watermark comparison already
                 // scopes to this walk without needing deployment_id at all.
-                long orderExecutedWatermark = maxOrderExecuted(conn);
+                //
+                // nexus-jl08t fix round (code review, T2 [25638] finding 1): this
+                // watermark read and the post-walk count below are DIAGNOSTIC ONLY --
+                // migrate()'s actual job is liquibase.update(), which either succeeds
+                // (committed) or throws (fatal, unchanged). A transient SQLException in
+                // either diagnostic query must never turn a COMMITTED migration into a
+                // fatal boot failure, so each is caught on its own rather than sharing
+                // this method's outer catch(SQLException), which still wraps a genuine
+                // connection/update failure into a fatal MigrationException exactly as
+                // before. See COUNTS_UNAVAILABLE and MigrationOutcome's javadoc for the
+                // sentinel contract this produces on a diagnostic failure.
+                Long orderExecutedWatermark;
+                try {
+                    orderExecutedWatermark = maxOrderExecuted(conn);
+                } catch (SQLException e) {
+                    log.warn("event=schema_migration_count_unavailable phase=pre_walk_watermark "
+                            + "cause=\"{}\"", e.toString());
+                    orderExecutedWatermark = null;
+                }
 
                 liquibase.update(new Contexts(), new LabelExpression());
 
-                WalkChangesetCounts counts = countThisWalkChangesets(conn, orderExecutedWatermark);
+                if (orderExecutedWatermark == null) {
+                    return countsUnavailableOutcome(pending);
+                }
+
+                WalkChangesetCounts counts;
+                try {
+                    counts = countThisWalkChangesets(conn, orderExecutedWatermark);
+                } catch (SQLException e) {
+                    log.warn("event=schema_migration_count_unavailable phase=post_walk "
+                            + "cause=\"{}\"", e.toString());
+                    return countsUnavailableOutcome(pending);
+                }
 
                 if (counts.duplicateIdentities() > 0) {
                     // nexus-jl08t: confirmed on production 2026-09-14 (conexus-9a,
@@ -400,15 +486,18 @@ public final class SchemaMigrator {
                     // Liquibase's RERAN UPDATE has no row-count limit; the counts
                     // above are already de-duplicated by identity, so they report
                     // what Liquibase actually ran, not the physical row count. The
-                    // duplicates' origin cannot be recovered from a walk's own
-                    // bookkeeping -- each RERAN overwrites every copy's own
+                    // MECHANISM and the affected identities are documented (commit
+                    // 585c8c20e / nexus-ixsxa -- see MigrationOutcome's javadoc);
+                    // what this walk cannot recover is which physical BOOT produced
+                    // which copy -- every RERAN overwrites each copy's own
                     // dateexecuted/deployment_id alike -- and this walk does not
                     // delete or merge them: that is a data-hygiene decision for the
                     // database's owner, not something a migration performs.
                     log.warn("event=schema_changelog_duplicate_rows identity_count={} "
-                            + "extra_rows={} orderexecuted_watermark={}",
+                            + "extra_rows={} orderexecuted_watermark={} identities={}",
                             counts.duplicateIdentities(), counts.duplicateExtraRows(),
-                            orderExecutedWatermark);
+                            orderExecutedWatermark,
+                            formatDuplicateIdentities(counts.duplicateChangesetIds()));
                 }
 
                 long newChangesets = counts.newChangesets();
@@ -454,6 +543,22 @@ public final class SchemaMigrator {
         } catch (LiquibaseException e) {
             throw new MigrationException("Liquibase migration failed", e);
         }
+    }
+
+    /**
+     * Builds the "migration succeeded, counts unknown" outcome and logs
+     * {@code schema_migration_complete} with the {@link #COUNTS_UNAVAILABLE}
+     * sentinel in place of the three fields the caller's diagnostic query
+     * could not compute (nexus-jl08t fix round). Always called AFTER {@code
+     * liquibase.update()} has already returned normally, so the migration
+     * itself is committed regardless of this outcome's counts.
+     */
+    private static MigrationOutcome countsUnavailableOutcome(int pending) {
+        log.info("event=schema_migration_complete new_changesets={} "
+                + "reexecuted_changesets={} pending_at_start={} "
+                + "mark_ran_changesets={} counts_unavailable=true",
+                COUNTS_UNAVAILABLE, COUNTS_UNAVAILABLE, pending, COUNTS_UNAVAILABLE);
+        return new MigrationOutcome(pending, COUNTS_UNAVAILABLE, COUNTS_UNAVAILABLE, COUNTS_UNAVAILABLE);
     }
 
     // ── nexus-x0s52 / nexus-jl08t: truthful walk counts ──────────────────────
@@ -549,12 +654,58 @@ public final class SchemaMigrator {
                 .filter(count -> count > 1).count();
             long duplicateExtraRows = rowsPerIdentity.values().stream()
                 .filter(count -> count > 1).mapToLong(count -> count - 1).sum();
+            // nexus-jl08t fix round (critic finding, T2 [25635] SIGNIFICANT (b)):
+            // named by id, total physical row count, biggest offender first --
+            // migrate()'s log line caps this list so a reader can tell the known
+            // production baseline (grants-nexus-diag-1 x7, -2 x8) from a new
+            // occurrence without cross-referencing a separate record.
+            List<Map.Entry<String, Integer>> duplicateChangesetIds = rowsPerIdentity.entrySet().stream()
+                .filter(e -> e.getValue() > 1)
+                .map(e -> Map.entry(e.getKey().get(0), e.getValue()))
+                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                .toList();
 
             return new WalkChangesetCounts(
-                newChangesets, reexecuted, markRan, duplicateIdentities, duplicateExtraRows);
+                newChangesets, reexecuted, markRan, duplicateIdentities, duplicateExtraRows,
+                duplicateChangesetIds);
         } catch (DataAccessException e) {
             throw new SQLException("countThisWalkChangesets failed", e);
         }
+    }
+
+    /** Cap on how many duplicated identities {@link #formatDuplicateIdentities}
+     * names before folding the rest into a {@code "+N more"} tail. */
+    private static final int DUPLICATE_IDENTITIES_LOG_CAP = 10;
+
+    /**
+     * Renders a walk's duplicated changeset identities as {@code "id xN, id
+     * xN, ... +K more"} (critic finding, T2 [25635] SIGNIFICANT (b)): the
+     * {@code schema_changelog_duplicate_rows} line previously carried only
+     * aggregate counts, so a reader could not tell the known production
+     * baseline ({@code grants-nexus-diag-1} x7, {@code -2} x8) from a
+     * genuinely new duplicated identity without a separate query. Capped at
+     * {@link #DUPLICATE_IDENTITIES_LOG_CAP} entries, largest-copy-count
+     * first, so the line stays bounded even on a box with many duplicated
+     * identities.
+     */
+    private static String formatDuplicateIdentities(List<Map.Entry<String, Integer>> duplicates) {
+        if (duplicates.isEmpty()) {
+            return "(none)";
+        }
+        int shown = Math.min(duplicates.size(), DUPLICATE_IDENTITIES_LOG_CAP);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < shown; i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            Map.Entry<String, Integer> d = duplicates.get(i);
+            sb.append(d.getKey()).append(" x").append(d.getValue());
+        }
+        int remaining = duplicates.size() - shown;
+        if (remaining > 0) {
+            sb.append(" +").append(remaining).append(" more");
+        }
+        return sb.toString();
     }
 
     /**

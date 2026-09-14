@@ -33,6 +33,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
+import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -663,9 +664,19 @@ class SchemaMigratorIntegrationTest {
                 // hinge: before the fix, this throws MigrationException wrapping
                 // the Postgres "constraint ... does not exist" error; after the
                 // fix, it completes cleanly.
-                assertThatCode(() -> SchemaMigrator.migrate(agedDs))
+                SchemaMigrator.MigrationOutcome[] outcomeHolder = new SchemaMigrator.MigrationOutcome[1];
+                assertThatCode(() -> outcomeHolder[0] = SchemaMigrator.migrate(agedDs))
                     .as("migration must not crash-loop when a chash-length CHECK is missing on an aged box")
                     .doesNotThrowAnyException();
+                // nexus-jl08t fix round (code review, T2 [25638] finding 2):
+                // catalog-013-2's precondition-skip is a genuine MARK_RAN row (proven
+                // below via changesetExecType), so this is the cheapest live exercise of
+                // markRanChangesets() at a nonzero value through SchemaMigrator's own
+                // return value -- test 18 exercises the field only at zero.
+                assertThat(outcomeHolder[0].markRanChangesets())
+                    .as("catalog-013-2's precondition-skip must be counted as exactly one "
+                        + "MARK_RAN identity")
+                    .isEqualTo(1L);
 
                 // Phase E (RDR-180 era, RE-DERIVED for RDR-191 unify): the
                 // migration chain now ALSO carries rdr180-2 (drops every
@@ -849,9 +860,17 @@ class SchemaMigratorIntegrationTest {
                 // Phase D: resume the rest of the migration chain (catalog-013-1b
                 // onward, including catalog-013-2's guarded precondition and the
                 // catalog-013-3 defensive re-validate). Must not throw.
-                assertThatCode(() -> SchemaMigrator.migrate(agedDs))
+                SchemaMigrator.MigrationOutcome[] outcomeHolder = new SchemaMigrator.MigrationOutcome[1];
+                assertThatCode(() -> outcomeHolder[0] = SchemaMigrator.migrate(agedDs))
                     .as("migration must not crash-loop when chash_index_chash_len_check is missing on an aged box")
                     .doesNotThrowAnyException();
+                // nexus-jl08t fix round (code review, T2 [25638] finding 2): same
+                // live nonzero exercise of markRanChangesets() as test 5, distinct
+                // migration code path (chash_index diverges here, not chunks_384).
+                assertThat(outcomeHolder[0].markRanChangesets())
+                    .as("catalog-013-2's precondition-skip must be counted as exactly one "
+                        + "MARK_RAN identity")
+                    .isEqualTo(1L);
 
                 // Phase E (RDR-180 era, RE-DERIVED for RDR-191 unify): the
                 // chain now also carries rdr180-2 (drops every len_check —
@@ -2184,8 +2203,10 @@ class SchemaMigratorIntegrationTest {
                 // changeset already ran once -- the "5 new landed, walk
                 // otherwise clean" shape nexus-jl08t investigates.
                 try (Connection conn = agedDs.getConnection()) {
-                    conn.createStatement().execute(
-                        "ALTER TABLE nexus.tuples DROP CONSTRAINT IF EXISTS chk_tuples_body_size");
+                    // nexus-jl08t fix round (code review, T2 [25638] finding 3): typed
+                    // jOOQ DSL -- no raw SQL string needed, unlike CREATE ROLE/GRANT
+                    // above, which have no jOOQ equivalent.
+                    dsl(conn).alterTable(TUPLES).dropConstraintIfExists("chk_tuples_body_size").execute();
                     dsl(conn).deleteFrom(databaseChangeLog())
                         .where(DSL.field(DSL.name("id"), String.class).in(tuplesIds))
                         .execute();

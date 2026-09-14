@@ -3994,9 +3994,21 @@ def _check_migration_state(
     # reapplied grant changesets was reported as a hard FAIL, indistinguishable
     # from real corruption. Only FAILED indicates a changeset that aborted
     # mid-execution and left partial state.
+    # nexus-jl08t sibling sweep (critic finding, T2 [25635] SIGNIFICANT (a)):
+    # the RERAN/other count is a physical ROW count, not a changeset-identity
+    # count. Liquibase's RERAN UPDATE re-stamps every physical row sharing a
+    # duplicated identity (public.databasechangelog carries no uniqueness
+    # constraint on (id, author, filename) — see SchemaMigrator.MigrationOutcome's
+    # javadoc for the confirmed mechanism and the two known production
+    # identities), so on a box carrying those duplicates this over-reports the
+    # RERAN count by the duplicate row total. COUNT(DISTINCT (id, author,
+    # filename)) counts identities, matching what Liquibase itself believes it
+    # re-ran. Purely informational here (only feeds reran_note below; never
+    # gates pass/fail), so this changes the displayed number, not any verdict.
     drift_sql = (
         "SELECT COUNT(*) FILTER (WHERE exectype='FAILED'), "
-        "COUNT(*) FILTER (WHERE exectype NOT IN ('EXECUTED','FAILED')) "
+        "COUNT(DISTINCT (id, author, filename)) "
+        "FILTER (WHERE exectype NOT IN ('EXECUTED','FAILED')) "
         "FROM databasechangelog;"
     )
     proc2 = _run_psql(

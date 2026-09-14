@@ -1011,8 +1011,19 @@ class RawSqlGateTest {
         // not a dateexecuted future-stamp), but Phase A/C's raw SQL footprint is
         // BYTE-IDENTICAL to what earned the 50 -> 56 bump above -- the new
         // duplicateChangelogRow/captureLogs helpers and every new assertion are
-        // typed jOOQ, so the ceiling stays at 56, not reduced and not raised again.
-        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 56),
+        // typed jOOQ, so the ceiling stayed at 56, not reduced and not raised again.
+        // nexus-jl08t fix round (code review, T2 [25638] finding 3): 56 -> 55. The
+        // "ALTER TABLE nexus.tuples DROP CONSTRAINT IF EXISTS chk_tuples_body_size"
+        // site called out above DOES have a jOOQ typed-DSL form after all --
+        // dsl(conn).alterTable(TUPLES).dropConstraintIfExists("chk_tuples_body_size")
+        // .execute(), matching this repo's own established pattern (e.g.
+        // CollectionRegistryFkTest/CollectionRegistryFkExtraTest's identical
+        // alterTable(...).dropConstraintIfExists(...) calls) -- converted. The
+        // NINTH admin/svc bootstrap occurrence (5 sites: CREATE ROLE / GRANT CREATE
+        // ON DATABASE|SCHEMA / GRANT pg_monitor WITH ADMIN OPTION) still has no
+        // jOOQ form and stays raw, so the ceiling drops by exactly the one
+        // converted site: 56 -> 55.
+        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 55),
         // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 37 -> 39 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         // nexus-cbo4a batch 12: 39 -> 16. Converted seed inserts (10 sites: HEAD-schema
@@ -1435,7 +1446,10 @@ class RawSqlGateTest {
     // SchemaUpgradeRehearsalIntegrationTest.java's own 104 -> 111 above).
     // nexus-jl08t: 925 -> 931 (+6, matching SchemaMigratorIntegrationTest.java's
     // own 50 -> 56 above).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 931;
+    // nexus-jl08t fix round: 931 -> 930 (-1, matching
+    // SchemaMigratorIntegrationTest.java's own 56 -> 55 above -- the
+    // ALTER TABLE ... DROP CONSTRAINT site converted to typed jOOQ DSL).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 930;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
