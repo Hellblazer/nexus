@@ -2,6 +2,7 @@ package dev.nexus.service.db;
 
 import dev.nexus.service.jooq.nexus.tables.Memory;
 import dev.nexus.service.jooq.nexus.tables.records.MemoryRecord;
+import dev.nexus.service.jooq.nexus.tables.records.MemorySummariesRecord;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Result;
@@ -17,6 +18,7 @@ import java.util.Optional;
 import java.util.Set;
 
 import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
+import static dev.nexus.service.jooq.nexus.Tables.MEMORY_SUMMARIES;
 import static org.jooq.impl.DSL.*;
 
 /**
@@ -62,6 +64,17 @@ public final class MemoryRepository {
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
                              .withZone(ZoneOffset.UTC);
 
+    /**
+     * RDR-207 (bead nexus-l3yuc.3): the predicate every read path carries. A
+     * quarantined row is invisible exactly as a deleted row was, which keeps the
+     * meaning of the TTL its author set. {@link #listQuarantined} is the one read
+     * that omits it, by name; {@link #mergeMemories} omits it because it must
+     * REFUSE on a quarantined id rather than silently skip it (bead .4).
+     * {@code MemoryRepositoryQuarantineReadPathTest} derives the read-path set by
+     * reflection and fails when any single path drops this.
+     */
+    private static final Condition NOT_QUARANTINED = MEMORY.QUARANTINED_AT.isNull();
+
     private final TenantScope tenantScope;
 
     public MemoryRepository(TenantScope tenantScope) {
@@ -98,7 +111,8 @@ public final class MemoryRepository {
     public List<MemoryRecord> findByProject(String tenant, String project) {
         return tenantScope.withTenant(tenant,
                 ctx -> ctx.selectFrom(MEMORY)
-                          .where(MEMORY.PROJECT.eq(project))
+                          .where(MEMORY.PROJECT.eq(project)
+                              .and(NOT_QUARANTINED))
                           .orderBy(MEMORY.TIMESTAMP.desc())
                           .fetch());
     }
@@ -115,7 +129,8 @@ public final class MemoryRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             var opt = ctx.selectFrom(MEMORY)
                          .where(MEMORY.PROJECT.eq(project)
-                             .and(MEMORY.TITLE.eq(title)))
+                             .and(MEMORY.TITLE.eq(title))
+                             .and(NOT_QUARANTINED))
                          .fetchOptional();
             opt.ifPresent(row -> {
                 trackAccess(ctx, row.getId());
@@ -137,7 +152,8 @@ public final class MemoryRepository {
     public Optional<MemoryRecord> findById(String tenant, long id) {
         return tenantScope.withTenant(tenant, ctx -> {
             var opt = ctx.selectFrom(MEMORY)
-                         .where(MEMORY.ID.eq(id))
+                         .where(MEMORY.ID.eq(id)
+                             .and(NOT_QUARANTINED))
                          .fetchOptional();
             opt.ifPresent(row -> {
                 trackAccess(ctx, row.getId());
@@ -164,7 +180,8 @@ public final class MemoryRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             // 1. Exact match — track access
             var exact = ctx.selectFrom(MEMORY)
-                           .where(MEMORY.PROJECT.eq(project).and(MEMORY.TITLE.eq(title)))
+                           .where(MEMORY.PROJECT.eq(project).and(MEMORY.TITLE.eq(title))
+                               .and(NOT_QUARANTINED))
                            .fetchOptional();
             if (exact.isPresent()) {
                 MemoryRecord row = exact.get();
@@ -179,7 +196,8 @@ public final class MemoryRepository {
                                   .replace("_", "\\_");
             var candidates = ctx.selectFrom(MEMORY)
                                 .where(MEMORY.PROJECT.eq(project)
-                                    .and(MEMORY.TITLE.like(escaped + "%").escape('\\')))
+                                    .and(MEMORY.TITLE.like(escaped + "%").escape('\\'))
+                                    .and(NOT_QUARANTINED))
                                 .orderBy(MEMORY.TITLE.asc())
                                 .fetch();
             if (candidates.size() == 1) {
@@ -384,12 +402,14 @@ public final class MemoryRepository {
             Result<MemoryRecord> rows;
             if (project != null && !project.isBlank()) {
                 rows = ctx.selectFrom(MEMORY)
-                          .where(condition(ftsWhere, val(query), val(project)))
+                          .where(condition(ftsWhere, val(query), val(project))
+                              .and(NOT_QUARANTINED))
                           .orderBy(field("ts_rank(fts_vector, " + ftsQuery(query) + ")", Double.class, val(query)).desc(), MEMORY.ID.asc())
                           .fetch();
             } else {
                 rows = ctx.selectFrom(MEMORY)
-                          .where(condition(ftsWhere, val(query)))
+                          .where(condition(ftsWhere, val(query))
+                              .and(NOT_QUARANTINED))
                           .orderBy(field("ts_rank(fts_vector, " + ftsQuery(query) + ")", Double.class, val(query)).desc(), MEMORY.ID.asc())
                           .fetch();
             }
@@ -423,7 +443,7 @@ public final class MemoryRepository {
      */
     public List<MemoryRecord> listEntries(String tenant, String project, String agent) {
         return tenantScope.withTenant(tenant, ctx -> {
-            Condition where = noCondition();
+            Condition where = NOT_QUARANTINED;
             if (project != null && !project.isBlank()) {
                 where = where.and(MEMORY.PROJECT.eq(project));
             }
@@ -452,7 +472,8 @@ public final class MemoryRepository {
                                    .replace("_", "\\_");
             var rows = ctx.select(MEMORY.PROJECT, max(MEMORY.TIMESTAMP).as("last_updated"))
                           .from(MEMORY)
-                          .where(MEMORY.PROJECT.like(escaped + "%").escape('\\'))
+                          .where(MEMORY.PROJECT.like(escaped + "%").escape('\\')
+                              .and(NOT_QUARANTINED))
                           .groupBy(MEMORY.PROJECT)
                           .orderBy(max(MEMORY.TIMESTAMP).desc())
                           .fetch();
@@ -485,7 +506,8 @@ public final class MemoryRepository {
             var rows = ctx.selectFrom(MEMORY)
                       .where(condition(
                           "fts_vector @@ " + ftsQuery(query) + " AND project LIKE {1} ESCAPE '\\'",
-                          val(query), val(likePattern)))
+                          val(query), val(likePattern))
+                          .and(NOT_QUARANTINED))
                       .orderBy(field("ts_rank(fts_vector, " + ftsQuery(query) + ")", Double.class, val(query)).desc(), MEMORY.ID.asc())
                       .fetch();
             if (rows.isEmpty()) {
@@ -512,7 +534,8 @@ public final class MemoryRepository {
             var rows = ctx.selectFrom(MEMORY)
                       .where(condition(
                           "fts_vector @@ " + ftsQuery(query) + " AND (',' || tags || ',') LIKE {1} ESCAPE '\\'",
-                          val(query), val(likePattern)))
+                          val(query), val(likePattern))
+                          .and(NOT_QUARANTINED))
                       .orderBy(field("ts_rank(fts_vector, " + ftsQuery(query) + ")", Double.class, val(query)).desc(), MEMORY.ID.asc())
                       .fetch();
             if (rows.isEmpty()) {
@@ -529,7 +552,8 @@ public final class MemoryRepository {
     public List<MemoryRecord> getAll(String tenant, String project) {
         return tenantScope.withTenant(tenant,
                 ctx -> ctx.selectFrom(MEMORY)
-                          .where(MEMORY.PROJECT.eq(project))
+                          .where(MEMORY.PROJECT.eq(project)
+                              .and(NOT_QUARANTINED))
                           .orderBy(MEMORY.TIMESTAMP.desc())
                           .fetch());
     }
@@ -556,23 +580,36 @@ public final class MemoryRepository {
     }
 
     /**
-     * Delete TTL-expired entries using heat-weighted effective TTL.
-     *
-     * <p>effective_ttl = base_ttl * (1 + ln(access_count + 1))
-     * Mirrors Python MemoryStore.expire() logic exactly.
-     *
-     * @return list of deleted row IDs
+     * Result of {@link #expire}: {@code deletedIds} is always empty from this engine
+     * on and is kept so an old client keeps reading a valid shape (RDR-207: renaming
+     * it was Briefly Rejected, an old client would read rows as gone that are not);
+     * {@code quarantinedIds} names the rows this sweep stamped.
      */
-    public List<Long> expire(String tenant) {
+    public record ExpireResult(List<Long> deletedIds, List<Long> quarantinedIds) {}
+
+    /**
+     * Quarantine TTL-expired entries using heat-weighted effective TTL
+     * (RDR-207 § Technical Design, bead nexus-l3yuc.2). Nothing is deleted here.
+     *
+     * <p>effective_ttl = base_ttl * (1 + ln(access_count + 1)), computed in Java as
+     * before. A row past it with {@code quarantined_at IS NULL} gets
+     * {@code quarantined_at = now()}; every read path then hides it and only
+     * {@link #reap} (marked rows only) or an explicit delete removes it.
+     *
+     * <p>The {@code quarantined_at IS NULL} restriction on the candidate query is
+     * not optional: without it every session end re-stamps the whole quarantined
+     * population and reports it again in {@code quarantinedIds}.
+     */
+    public ExpireResult expire(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
-            // Fetch candidates: all rows with a non-null TTL
             var candidates = ctx.select(MEMORY.ID, MEMORY.ACCESS_COUNT, MEMORY.TTL_DAYS, MEMORY.TIMESTAMP)
                                 .from(MEMORY)
-                                .where(MEMORY.TTL_DAYS.isNotNull())
+                                .where(MEMORY.TTL_DAYS.isNotNull()
+                                    .and(MEMORY.QUARANTINED_AT.isNull()))
                                 .fetch();
 
-            OffsetDateTime now = OffsetDateTime.now();
-            List<Long> toDelete = new ArrayList<>();
+            OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+            List<Long> toQuarantine = new ArrayList<>();
 
             for (var row : candidates) {
                 long rowId = row.get(MEMORY.ID);
@@ -584,16 +621,177 @@ public final class MemoryRepository {
                 double effectiveTtl = ttl * (1.0 + Math.log(accessCount + 1));
                 double ageDays = (double) java.time.Duration.between(ts, now).toSeconds() / 86400.0;
                 if (ageDays > effectiveTtl) {
-                    toDelete.add(rowId);
+                    toQuarantine.add(rowId);
                 }
             }
 
-            if (!toDelete.isEmpty()) {
-                ctx.deleteFrom(MEMORY)
-                   .where(MEMORY.ID.in(toDelete))
+            if (!toQuarantine.isEmpty()) {
+                ctx.update(MEMORY)
+                   .set(MEMORY.QUARANTINED_AT, now)
+                   .where(MEMORY.ID.in(toQuarantine)
+                       .and(MEMORY.QUARANTINED_AT.isNull()))
                    .execute();
+                log.info("event=memory_quarantined tenant={} count={}", tenant, toQuarantine.size());
             }
-            return toDelete;
+            return new ExpireResult(List.of(), toQuarantine);
+        });
+    }
+
+    /**
+     * Delete every row that is BOTH quarantined and marked rolled-up, returning the
+     * deleted ids (RDR-207). No age horizon for unmarked rows: a horizon would
+     * reintroduce unlabelled destruction (Briefly Rejected). An unmarked quarantined
+     * row stays until it is summarized, restored, or explicitly deleted.
+     */
+    public List<Long> reap(String tenant) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            List<Long> deleted = ctx.deleteFrom(MEMORY)
+                                    .where(MEMORY.QUARANTINED_AT.isNotNull()
+                                        .and(MEMORY.ROLLED_UP_AT.isNotNull()))
+                                    .returning(MEMORY.ID)
+                                    .fetch(MEMORY.ID);
+            if (!deleted.isEmpty()) {
+                log.info("event=memory_reaped tenant={} count={}", tenant, deleted.size());
+            }
+            return deleted;
+        });
+    }
+
+    /**
+     * Restore a quarantined row: clears {@code quarantined_at}, clears
+     * {@code rolled_up_at} and sets {@code ttl_days} to NULL (RDR-207 § Technical
+     * Design, plan record A5). Restoring is a decision to keep the row, so it
+     * becomes permanent and carries no label from its earlier cycle: if it is ever
+     * given a TTL again and re-quarantined, it must be summarized again before a
+     * reap can touch it.
+     *
+     * @return true when a quarantined row with that id was restored; false when no
+     *         quarantined row with that id is visible to the tenant (a live row is
+     *         not a restore target, exactly as a deleted one was not)
+     */
+    public boolean restore(String tenant, long id) {
+        return tenantScope.withTenant(tenant, ctx -> ctx.update(MEMORY)
+                .set(MEMORY.QUARANTINED_AT, (OffsetDateTime) null)
+                .set(MEMORY.ROLLED_UP_AT, (OffsetDateTime) null)
+                .set(MEMORY.TTL_DAYS, (Integer) null)
+                .where(MEMORY.ID.eq(id)
+                    .and(MEMORY.QUARANTINED_AT.isNotNull()))
+                .execute() > 0);
+    }
+
+    /**
+     * RDR-207: a source id handed to {@link #insertSummary} that does not name a row
+     * in that tenant and project. Extends {@link IllegalStateException} so the
+     * handler's existing ladder maps it to 409 (the "id not found in tenant"
+     * precedent, {@code mergeMemories}), as a distinct type so the handler can
+     * carry a discriminating {@code code} the way
+     * {@link DegenerateQueryException} does.
+     */
+    public static final class UnknownSourceIdException extends IllegalStateException {
+        private static final long serialVersionUID = 1L;
+
+        UnknownSourceIdException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Insert one rollup summary and mark every source row {@code rolled_up_at = now()}
+     * in ONE transaction (RDR-207 § Technical Design). Refuses, writing nothing, if
+     * any source id does not exist in that tenant and project. A row already marked
+     * may be covered again; its mark timestamp moves.
+     *
+     * <p>{@code sourceIds} is stored as provenance (BIGINT[]), not a foreign key:
+     * the sources are meant to be reaped once the summary exists.
+     *
+     * @return the id of the inserted summary row
+     * @throws IllegalArgumentException when {@code sourceIds} is empty or {@code content}
+     *         is blank (400; the table's CHECKs refuse both anyway, this names the reason)
+     * @throws UnknownSourceIdException when a source id is not a row of that tenant and
+     *         project (409); the transaction rolls back, so no summary row and no mark
+     */
+    public long insertSummary(String tenant,
+                              String project,
+                              String content,
+                              List<Long> sourceIds,
+                              String model,
+                              String producedBy) {
+        if (sourceIds == null || sourceIds.isEmpty()) {
+            throw new IllegalArgumentException("source_ids must name at least one row");
+        }
+        if (content == null || content.isBlank()) {
+            throw new IllegalArgumentException("content must not be blank");
+        }
+        if (model == null || model.isBlank()) {
+            throw new IllegalArgumentException("model must not be blank");
+        }
+        List<Long> distinctIds = sourceIds.stream().distinct().toList();
+        return tenantScope.withTenant(tenant, ctx -> {
+            int found = ctx.fetchCount(MEMORY,
+                    MEMORY.ID.in(distinctIds).and(MEMORY.PROJECT.eq(project)));
+            if (found != distinctIds.size()) {
+                throw new UnknownSourceIdException(
+                    "insertSummary refused: " + (distinctIds.size() - found) + " of "
+                    + distinctIds.size() + " source id(s) do not exist in project '"
+                    + project + "' for this tenant; nothing written");
+            }
+            OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+            var inserted = ctx.insertInto(MEMORY_SUMMARIES)
+                              .set(MEMORY_SUMMARIES.TENANT_ID, tenant)
+                              .set(MEMORY_SUMMARIES.PROJECT, project)
+                              .set(MEMORY_SUMMARIES.CONTENT, content)
+                              .set(MEMORY_SUMMARIES.SOURCE_IDS, distinctIds.toArray(new Long[0]))
+                              .set(MEMORY_SUMMARIES.PRODUCED_AT, now)
+                              .set(MEMORY_SUMMARIES.MODEL, model)
+                              .set(MEMORY_SUMMARIES.PRODUCED_BY, producedBy)
+                              .returning(MEMORY_SUMMARIES.ID)
+                              .fetchOne();
+            ctx.update(MEMORY)
+               .set(MEMORY.ROLLED_UP_AT, now)
+               .where(MEMORY.ID.in(distinctIds))
+               .execute();
+            long id = inserted != null ? inserted.getId() : -1L;
+            log.info("event=memory_summary_inserted tenant={} project={} id={} sources={}",
+                     tenant, project, id, distinctIds.size());
+            return id;
+        });
+    }
+
+    /**
+     * The ONE read that sees quarantined rows (RDR-207): every quarantined row of
+     * the tenant, or of {@code project} when given, with the FULL record shape plus
+     * both stamps. {@code project} null or blank means the whole tenant; the doctor
+     * row needs the tenant-wide count and enumerating projects would not work,
+     * because {@link #getProjectsWithPrefix} hides projects whose rows are all
+     * quarantined.
+     */
+    public List<MemoryRecord> listQuarantined(String tenant, String project) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Condition where = MEMORY.QUARANTINED_AT.isNotNull();
+            if (project != null && !project.isBlank()) {
+                where = where.and(MEMORY.PROJECT.eq(project));
+            }
+            return ctx.selectFrom(MEMORY)
+                      .where(where)
+                      .orderBy(MEMORY.QUARANTINED_AT.desc(), MEMORY.ID.asc())
+                      .fetch();
+        });
+    }
+
+    /**
+     * Rollup summaries of the tenant, or of {@code project} when given (null or
+     * blank means the whole tenant), newest first.
+     */
+    public List<MemorySummariesRecord> listSummaries(String tenant, String project) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Condition where = noCondition();
+            if (project != null && !project.isBlank()) {
+                where = where.and(MEMORY_SUMMARIES.PROJECT.eq(project));
+            }
+            return ctx.selectFrom(MEMORY_SUMMARIES)
+                      .where(where)
+                      .orderBy(MEMORY_SUMMARIES.PRODUCED_AT.desc(), MEMORY_SUMMARIES.ID.asc())
+                      .fetch();
         });
     }
 
@@ -608,7 +806,8 @@ public final class MemoryRepository {
                       .where(MEMORY.PROJECT.eq(project)
                           .and(condition(
                               "CASE WHEN last_accessed IS NOT NULL THEN last_accessed < {0} ELSE timestamp < {0} END",
-                              val(cutoff))))
+                              val(cutoff)))
+                          .and(NOT_QUARANTINED))
                       .fetch();
         });
     }
@@ -623,6 +822,12 @@ public final class MemoryRepository {
      *
      * <p>Raises {@code IllegalArgumentException} if keepId is in deleteIds.
      * Raises {@code IllegalStateException} if keepId does not exist.
+     *
+     * <p>RDR-207 (bead nexus-l3yuc.4): REFUSES, writing nothing, when the kept id or
+     * any delete id names a quarantined row; the caller restores first. The ids are
+     * explicit and refusal is the safe direction. This method deliberately does NOT
+     * carry the read predicate: with it a quarantined delete id would be skipped
+     * silently and the merge would "succeed".
      */
     public void mergeMemories(String tenant, long keepId, List<Long> deleteIds, String mergedContent) {
         if (deleteIds.contains(keepId)) {
@@ -630,6 +835,18 @@ public final class MemoryRepository {
                 "keepId (" + keepId + ") must not be in deleteIds — would discard the entry meant to be kept");
         }
         tenantScope.withTenant(tenant, ctx -> {
+            List<Long> involved = new ArrayList<>(deleteIds);
+            involved.add(keepId);
+            List<Long> quarantined = ctx.select(MEMORY.ID)
+                                        .from(MEMORY)
+                                        .where(MEMORY.ID.in(involved)
+                                            .and(MEMORY.QUARANTINED_AT.isNotNull()))
+                                        .fetch(MEMORY.ID);
+            if (!quarantined.isEmpty()) {
+                throw new IllegalStateException(
+                    "merge refused: id(s) " + quarantined + " are quarantined; restore them first "
+                    + "(nothing written)");
+            }
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
             int updated = ctx.update(MEMORY)
                              .set(MEMORY.CONTENT,   mergedContent)
@@ -685,9 +902,11 @@ public final class MemoryRepository {
             Set<String> newWords = contentWords(content);
             if (!newWords.isEmpty()) {
                 // Scan all project entries except same-title (identity upsert path)
+                // RDR-207 (bead .3/.4): a quarantined row is never a merge target.
                 var existing = ctx.selectFrom(MEMORY)
                                   .where(MEMORY.PROJECT.eq(project)
-                                      .and(MEMORY.TITLE.ne(title)))
+                                      .and(MEMORY.TITLE.ne(title))
+                                      .and(NOT_QUARANTINED))
                                   .fetch();
                 long bestId = -1L;
                 double bestJaccard = 0.0;
@@ -898,6 +1117,10 @@ public final class MemoryRepository {
                 .set(MEMORY.TIMESTAMP,     excluded(MEMORY.TIMESTAMP))
                 .set(MEMORY.ACCESS_COUNT,  excluded(MEMORY.ACCESS_COUNT))
                 .set(MEMORY.LAST_ACCESSED, excluded(MEMORY.LAST_ACCESSED))
+                // RDR-207 (bead .4): a write naming an existing title is a decision to
+                // keep it, so the conflict branch clears both quarantine stamps.
+                .set(MEMORY.QUARANTINED_AT, (OffsetDateTime) null)
+                .set(MEMORY.ROLLED_UP_AT, (OffsetDateTime) null)
                 .execute();
             log.debug("event=memory_import_batch tenant={} rows={}", tenant, rows.size());
             return rows.size();
@@ -943,6 +1166,10 @@ public final class MemoryRepository {
                         .set(MEMORY.TIMESTAMP,     excluded(MEMORY.TIMESTAMP))
                         .set(MEMORY.ACCESS_COUNT,  excluded(MEMORY.ACCESS_COUNT))
                         .set(MEMORY.LAST_ACCESSED, excluded(MEMORY.LAST_ACCESSED))
+                        // RDR-207 (bead .4): a write naming an existing title is a decision to
+                        // keep it, so the conflict branch clears both quarantine stamps.
+                        .set(MEMORY.QUARANTINED_AT, (OffsetDateTime) null)
+                        .set(MEMORY.ROLLED_UP_AT, (OffsetDateTime) null)
                         .returning(MEMORY.ID)
                         .fetchOne();
 
@@ -990,6 +1217,10 @@ public final class MemoryRepository {
                         .set(MEMORY.AGENT,        agent)
                         .set(MEMORY.TIMESTAMP,    now)
                         .set(MEMORY.TTL_DAYS,          ttlDays)
+                        // RDR-207 (bead .4): a write naming an existing title is a decision to
+                        // keep it, so the conflict branch clears both quarantine stamps.
+                        .set(MEMORY.QUARANTINED_AT, (OffsetDateTime) null)
+                        .set(MEMORY.ROLLED_UP_AT, (OffsetDateTime) null)
                         .returning(MEMORY.ID)
                         .fetchOne();
 
