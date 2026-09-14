@@ -253,6 +253,55 @@ class TestWriteManifestManyCombined:
         assert result["sweep_detail"][0]["reason"] == "sweep_failed"
 
 
+class TestWriteManifestManyReachesGatewayRetryFloor:
+    """nexus-r46u9: prove the REAL client's chunk-carrying write_many call
+    reaches ``RefreshableHttpStoreMixin._once_with_gateway_retry`` with the
+    exact path the embed-write-504 floor classifier matches on
+    (``/v1/catalog/manifest/write_many``, the ``/v1/catalog`` prefix
+    ``HttpCatalogClient._post`` adds), and that a 504 there is floored.
+
+    Every other test in this file monkeypatches ``c._post`` -- a layer
+    ABOVE ``_once_with_gateway_retry`` -- so none of them exercise the
+    floor at all. This one monkeypatches ``_request_once`` (the mixin's
+    lowest transport seam) instead, so the gateway-retry loop genuinely
+    runs.
+    """
+
+    def test_combined_write_504_floors_and_reaches_the_prefixed_path(
+        self, monkeypatch,
+    ) -> None:
+        from nexus.db.t2 import _refreshable_client as mod
+
+        c = _client()
+        c._base_url = "http://fake-svc"  # guard_production_write needs an attribute; the autouse test fixture accepts any value
+        calls: list[tuple[str, str]] = []
+        sleeps: list[float] = []
+
+        def fake_request_once(method: str, path: str, **kw: Any):
+            calls.append((method, path))
+            if len(calls) < 2:
+                request = httpx.Request("POST", "http://fake-svc" + path)
+                response = httpx.Response(504, request=request)
+                raise httpx.HTTPStatusError("504", request=request, response=response)
+            return {"docs": 1, "rows": 1, "failed_doc_ids": [], "chunks_written": 1}
+
+        monkeypatch.setattr(c, "_request_once", fake_request_once, raising=False)
+        monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+
+        result = c.write_manifest_many(
+            [("1.9.18", [{"chash": "a" * 64, "position": 0}])],
+            chunks=[{"chash": "a" * 64, "text": "hi", "metadata": {}}],
+            collection="code__nexus-1-1__model-code__v1",
+        )
+
+        assert result["chunks_written"] == 1
+        assert calls == [
+            ("POST", "/v1/catalog/manifest/write_many"),
+            ("POST", "/v1/catalog/manifest/write_many"),
+        ]
+        assert sleeps == [mod._EMBED_WRITE_504_BACKOFF_FLOOR_S]
+
+
 class TestWriteManifestManyCombinedTimeout:
     """nexus-y9t08: the combined write (``chunks=`` present) performs a
     SYNCHRONOUS server-side embed inside the request. The v7.5.0 regression

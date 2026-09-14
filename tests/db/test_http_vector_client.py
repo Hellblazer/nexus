@@ -2316,7 +2316,14 @@ class TestGatewayTransientRetry:
                              tenant="default", timeout=600, body={})
         assert result == {"ok": True}
         assert len(calls) == 3
-        assert sleeps == list(hv._GATEWAY_RETRY_SLEEPS[:2])
+        if code == 504:
+            # nexus-r46u9: /v1/vectors/upsert-chunks is an embed-write
+            # route, so a 504 (unlike 502/503) floors every scheduled
+            # sleep at _EMBED_WRITE_504_BACKOFF_FLOOR_S -- see
+            # TestEmbedWrite504BackoffFloor for the dedicated coverage.
+            assert sleeps == [hv._EMBED_WRITE_504_BACKOFF_FLOOR_S] * 2
+        else:
+            assert sleeps == list(hv._GATEWAY_RETRY_SLEEPS[:2])
 
     def test_exhausted_retries_raise_original(self, monkeypatch):
         import urllib.error
@@ -2344,6 +2351,127 @@ class TestGatewayTransientRetry:
             hv._request("POST", "/v1/vectors/search",
                         tenant="default", timeout=120, body={})
         assert len(calls) == 1
+
+
+class TestEmbedWrite504BackoffFloor:
+    """nexus-r46u9: a 504 on a server-side-embedding write route floors every
+    gateway-retry sleep at :data:`hv._EMBED_WRITE_504_BACKOFF_FLOOR_S`.
+
+    A Voyage slowdown pushes the engine's embed past the edge's ~30s
+    request-timeout bound; the edge answers 504 while the engine is still
+    finishing the SAME batch. The pre-fix 2s/5s/10s schedule re-sent that
+    batch while the first attempt was still embedding server-side, causing
+    2-3x duplicate re-embeds of one batch (content-addressed, so not
+    corruption, but wasted Voyage cost/time during the exact slowdown that
+    caused the 504). 502/503 and non-embed-write routes are unaffected --
+    those are covered by the pre-existing TestGatewayTransientRetry pins.
+    """
+
+    def _http_error(self, code: int, body: bytes = b'{"error":"gw"}'):
+        import io
+        import urllib.error
+        return urllib.error.HTTPError(
+            url="http://svc/v1/x", code=code, msg="err", hdrs={},
+            fp=io.BytesIO(body),
+        )
+
+    @pytest.mark.parametrize("path", [
+        "/v1/vectors/upsert-chunks",
+        "/v1/vectors/store-put",
+    ])
+    def test_504_on_embed_write_route_floors_every_sleep(self, monkeypatch, path):
+        import nexus.db.http_vector_client as hv
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        def fake_once(*a, **k):
+            calls.append(1)
+            if len(calls) < 3:
+                raise self._http_error(504)
+            return {"ok": True}
+
+        monkeypatch.setattr(hv, "_request_once", fake_once)
+        monkeypatch.setattr(hv.time, "sleep", lambda s: sleeps.append(s))
+        result = hv._request("POST", path, tenant="default", timeout=600, body={})
+        assert result == {"ok": True}
+        assert len(calls) == 3
+        # Both scheduled sleeps (2.0, 5.0) sit below the 30s floor, so both
+        # are raised to it.
+        assert sleeps == [hv._EMBED_WRITE_504_BACKOFF_FLOOR_S] * 2
+
+    def test_504_on_search_route_keeps_default_schedule(self, monkeypatch):
+        """Non-write routes never carry the floor -- confirms path-scoping."""
+        import nexus.db.http_vector_client as hv
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        def fake_once(*a, **k):
+            calls.append(1)
+            if len(calls) < 3:
+                raise self._http_error(504)
+            return {"ok": True}
+
+        monkeypatch.setattr(hv, "_request_once", fake_once)
+        monkeypatch.setattr(hv.time, "sleep", lambda s: sleeps.append(s))
+        result = hv._request("POST", "/v1/vectors/search",
+                             tenant="default", timeout=120, body={})
+        assert result == {"ok": True}
+        assert sleeps == list(hv._GATEWAY_RETRY_SLEEPS[:2])
+
+    def test_503_on_embed_write_route_keeps_default_schedule(self, monkeypatch):
+        """The floor is 504-specific -- confirms status-scoping."""
+        import nexus.db.http_vector_client as hv
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        def fake_once(*a, **k):
+            calls.append(1)
+            if len(calls) < 3:
+                raise self._http_error(503)
+            return {"ok": True}
+
+        monkeypatch.setattr(hv, "_request_once", fake_once)
+        monkeypatch.setattr(hv.time, "sleep", lambda s: sleeps.append(s))
+        result = hv._request("POST", "/v1/vectors/upsert-chunks",
+                             tenant="default", timeout=600, body={})
+        assert result == {"ok": True}
+        assert sleeps == list(hv._GATEWAY_RETRY_SLEEPS[:2])
+
+    def test_floored_wait_logs_dedicated_event(self, monkeypatch):
+        from structlog.testing import capture_logs
+
+        import nexus.db.http_vector_client as hv
+        calls: list[int] = []
+
+        def fake_once(*a, **k):
+            calls.append(1)
+            if len(calls) < 2:
+                raise self._http_error(504)
+            return {"ok": True}
+
+        monkeypatch.setattr(hv, "_request_once", fake_once)
+        monkeypatch.setattr(hv.time, "sleep", lambda s: None)
+        with capture_logs() as logs:
+            hv._request("POST", "/v1/vectors/upsert-chunks",
+                        tenant="default", timeout=600, body={})
+        floor_events = [e for e in logs if e["event"] == "vector_gateway_retry_embed_write_504"]
+        assert len(floor_events) == 1
+        assert floor_events[0]["path"] == "/v1/vectors/upsert-chunks"
+        assert floor_events[0]["attempt"] == 1
+        assert floor_events[0]["sleep_s"] == hv._EMBED_WRITE_504_BACKOFF_FLOOR_S
+
+    def test_exhausted_retries_raise_original_with_floor(self, monkeypatch):
+        """Exhaustion shape (attempt count, final raise) unchanged by the floor."""
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+        calls: list[int] = []
+        monkeypatch.setattr(hv, "_request_once",
+                            lambda *a, **k: (calls.append(1), (_ for _ in ()).throw(self._http_error(504)))[1])
+        monkeypatch.setattr(hv.time, "sleep", lambda s: None)
+        with pytest.raises(urllib.error.HTTPError):
+            hv._request("POST", "/v1/vectors/store-put",
+                        tenant="default", timeout=120, body={})
+        assert len(calls) == 1 + len(hv._GATEWAY_RETRY_SLEEPS)
 
 
 # ── nexus-nf3n7: per-collection upsert paging (CCE 504 avoidance) ──────────────

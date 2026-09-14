@@ -793,7 +793,14 @@ def test_upsert_chunks_504_no_retry_after_escalating_default_real_server(
     ``_vector_with_retry`` — so this test supplies enough 504 responses to
     exhaust THAT budget too (4 attempts) before the brake-tripping outer
     retry gets a chance to see the failure at all. Both layers' sleeps are
-    faked so nothing here actually blocks."""
+    faked so nothing here actually blocks.
+
+    nexus-r46u9: ``/v1/vectors/upsert-chunks`` is a server-side-embedding
+    write route, so the lower layer's three 504 sleeps are each floored at
+    ``_EMBED_WRITE_504_BACKOFF_FLOOR_S`` (30s) instead of the raw
+    2s/5s/10s schedule — the edge's own ~30s request-timeout bound means a
+    504 here is evidence the engine is still finishing the SAME batch, not
+    that it gave up."""
     from nexus.db import http_vector_client as hvc
 
     httpd, handler = upsert_server
@@ -824,9 +831,12 @@ def test_upsert_chunks_504_no_retry_after_escalating_default_real_server(
     assert handler.call_count == 5
     assert test_brake.trips == 1
     assert test_brake.last_retry_after is None  # no Retry-After header -> escalating default
-    # 3 gateway-retry sleeps (2/5/10s, the lower layer exhausting its own
-    # budget) then the outer _vector_with_retry's brake-floored sleep (2.0).
-    assert mock_sleep.call_args_list == [call(2.0), call(5.0), call(10.0), call(2.0)]
+    # 3 gateway-retry sleeps (the lower layer exhausting its own budget,
+    # each floored at 30s -- nexus-r46u9, an embed-write route's 504) then
+    # the outer _vector_with_retry's brake-floored sleep (2.0).
+    from nexus.db import http_vector_client as _hvc
+    floor = _hvc._EMBED_WRITE_504_BACKOFF_FLOOR_S
+    assert mock_sleep.call_args_list == [call(floor), call(floor), call(floor), call(2.0)]
 
 
 def test_upsert_chunks_500_not_retried_real_server(upsert_server, monkeypatch) -> None:

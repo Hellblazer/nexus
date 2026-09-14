@@ -53,13 +53,24 @@ from typing import Any
 import httpx
 import structlog
 
-# nexus-1ytp6: the gateway-transient retry axis is IMPORTED from the T3
-# reference implementation, not redefined -- one source of truth for the
-# schedule its production incident (live 504, 2026-07-04) calibrated.
-# tests/db/test_refreshable_client.py::test_gateway_constants_match_reference
-# additionally pins the two modules' values equal against a future
-# local-redefinition drift.
-from nexus.db.http_vector_client import _GATEWAY_RETRY_CODES, _GATEWAY_RETRY_SLEEPS
+# nexus-1ytp6 / nexus-r46u9: the gateway-transient retry axis (schedule,
+# codes, embed-write 504 floor, and embed-write-path classifier) is
+# IMPORTED from the shared leaf module, not redefined -- one source of
+# truth for the schedule its production incident (live 504, 2026-07-04)
+# calibrated, and (nexus-r46u9) for the floor a second production incident
+# (Voyage slowdown, duplicate re-embeds on the combined write) calibrated.
+# Originally imported from http_vector_client.py directly (the T3
+# reference implementation); moved to nexus.db.gateway_backoff once BOTH
+# this mixin and http_vector_client needed the floor, so neither imports
+# the other. tests/db/test_refreshable_client.py::test_gateway_constants_match_reference
+# additionally pins this module's and http_vector_client's values equal
+# against a future local-redefinition drift.
+from nexus.db.gateway_backoff import (
+    _EMBED_WRITE_504_BACKOFF_FLOOR_S,
+    _GATEWAY_RETRY_CODES,
+    _GATEWAY_RETRY_SLEEPS,
+    _is_embed_server_side_write_path,
+)
 from nexus.db.service_endpoint import (
     DEFAULT_LEASE_WAIT_BUDGET_S,
     discover_lease_with_wait,
@@ -1104,23 +1115,47 @@ class RefreshableHttpStoreMixin:
         branch (content append) are not. RESOLVED (nexus-tjvgf): those
         verbs pass ``idempotent=False`` and never reach this loop — this
         method may assume its caller's operation is retry-safe.
+
+        nexus-r46u9: a 504 on a server-side-embedding write route
+        (:func:`~nexus.db.gateway_backoff._is_embed_server_side_write_path`)
+        floors EVERY scheduled sleep at
+        :data:`~nexus.db.gateway_backoff._EMBED_WRITE_504_BACKOFF_FLOOR_S`
+        (30s) instead of the raw schedule — identical reasoning, floor, and
+        log EVENT NAME to ``http_vector_client._request``'s
+        (``vector_gateway_retry_embed_write_504``, deliberately NOT this
+        module's ``refreshable_http_store.*`` namespace, so the two layers'
+        floored waits are one grep/log-query across both) — see that
+        function's docstring. Applied here because the combined write
+        (``/v1/catalog/manifest/write_many`` with inline ``chunks=``) was
+        the HEADLINE failure mode of the production incident this floor
+        exists for (77 of 101 edge timeouts). The outgoing JSON body
+        (``kwargs.get("json")``) is passed to the classifier so a
+        chunk-carrying write_many page floors and a manifest-only page
+        does not (this client always passes the body; there is no
+        body-unavailable case). 502/503 on any route, and 504 on any non-embed-write
+        route, keep the unfloored schedule (and the unfloored
+        ``refreshable_http_store.gateway_retry`` event name).
         """
+        embed_write_path = _is_embed_server_side_write_path(path, kwargs.get("json"))
         for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
             try:
                 return self._request_once(method, path, **kwargs)
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code not in _GATEWAY_RETRY_CODES or delay is None:
                     raise
+                floored = exc.response.status_code == 504 and embed_write_path
+                sleep_s = max(delay, _EMBED_WRITE_504_BACKOFF_FLOOR_S) if floored else delay
                 _log.warning(
-                    "refreshable_http_store.gateway_retry",
+                    "vector_gateway_retry_embed_write_504" if floored
+                    else "refreshable_http_store.gateway_retry",
                     store=type(self).__name__,
                     method=method,
                     path=path,
                     code=exc.response.status_code,
                     attempt=i + 1,
-                    sleep_s=delay,
+                    sleep_s=sleep_s,
                 )
-                time.sleep(delay)
+                time.sleep(sleep_s)
         raise AssertionError("unreachable")  # loop always returns or raises
 
     def _request_once(self, method: str, path: str, **kwargs: Any) -> Any:
