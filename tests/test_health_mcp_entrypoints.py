@@ -18,7 +18,6 @@ import inspect
 import os
 import stat
 import sys
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -518,65 +517,102 @@ class TestProbeMcpServerAliveVsHung:
         ``subprocess.run`` this would be killed and reported as a failure
         at the base timeout; the fix must recover it.
 
-        Margins are generous (base=1.0s, sleep=2.0s, extended cap=4.0s) so
-        this does not itself flake under a loaded parallel test run (``-n
-        4``) — a narrower margin (0.2s/0.3s/0.8s) was observed to flake
-        under exactly that load, the identical class of timing sensitivity
-        this bead is about."""
+        nexus-rqji3: this used to gate the fake binary's answer behind a
+        fixed real ``sleep 2.0`` and assert only ``ok is True`` against a
+        1.0s base / 4.0s extended-cap margin. Under a loaded ``-n auto``
+        run that margin is a real wall-clock race — the child's own
+        ``sleep`` and the parent's poll loop are both subject to
+        scheduler delay, and a big-enough stall can blow a 2x margin.
+        Timing is now irrelevant to the verdict: the fake binary blocks on
+        a MARKER FILE instead of sleeping, and the marker is created from
+        inside :func:`_probe_mcp_server`'s ``on_timeout`` hook the instant
+        the probe itself confirms (a caught ``TimeoutExpired``) that the
+        base timeout alone was NOT enough. That makes the two facts the
+        extension exists to prove — it engaged, and it was sufficient —
+        direct, deterministic outcomes of the callback firing and the
+        probe still returning ``ok is True``, independent of how many
+        real seconds either side actually took.
+        """
         binary = tmp_path / "nx-mcp"
+        marker = tmp_path / "release"
         _write_fake_binary(
             binary,
             "#!/bin/sh\n"
             "read -r line\n"
-            "sleep 2.0\n"  # longer than the base timeout below (1.0s)...
+            f'while [ ! -f "{marker}" ]; do sleep 0.01; done\n'  # blocks until on_timeout below releases it — not a threshold, just a wait
             'printf \'%s\\n\' \'{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"nexus"}}}\'\n',
         )
 
-        ok, detail = _probe_mcp_server(str(binary), "nexus", timeout=1.0)
+        poll_counts: list[int] = []
 
-        assert ok is True  # ...but well inside the 1.0 * 4 = 4.0s extension
+        def _release_on_first_timeout(poll_count: int) -> None:
+            poll_counts.append(poll_count)
+            if poll_count == 1:
+                marker.touch()  # only NOW does the binary have any chance of answering
+
+        ok, detail = _probe_mcp_server(
+            str(binary), "nexus", timeout=1.0, on_timeout=_release_on_first_timeout
+        )
+
+        # The extension ENGAGED: at least one TimeoutExpired was caught,
+        # proving the base timeout alone did not see a response (the
+        # binary cannot possibly have answered before the marker existed).
+        assert poll_counts, "expected at least one TimeoutExpired before the binary could answer"
+        # ...and it was SUFFICIENT: the probe still recovered afterwards.
+        assert ok is True
         assert "nexus" in detail
 
     def test_genuinely_hung_binary_waits_the_full_extended_cap(
         self, tmp_path: Path
     ) -> None:
         """The truly-hung twin: never answers, stays alive the whole time.
-        Must fail only after roughly the EXTENDED cap (timeout * 4), not
-        the base timeout alone — proving the extension actually ran, not
-        just that some failure eventually happened — and the detail must
-        say the process stayed alive (a hang), not merely "timed out"
-        generically."""
+        Must give up only at the EXTENDED cap (timeout * 4), not the base
+        timeout alone — proving the extension actually ran, not just that
+        some failure eventually happened — and the detail must say the
+        process stayed alive (a hang), not merely "timed out" generically.
+
+        nexus-rqji3: previously proven by an elapsed-time window
+        (``0.4s <= elapsed < 15.0s``); the upper bound is a wall-clock
+        ceiling a starved box can pass. A count of ``on_timeout`` calls is
+        no better: one poll stalled past the whole cap leaves a single
+        count. The verdict names the cap it waited out, and the loop
+        returns it only once monotonic time passes that cap, so the
+        assertion below can neither pass early nor fail under load.
+        """
         binary = tmp_path / "nx-mcp"
         _write_fake_binary(binary, "#!/bin/sh\nsleep 30\n")
 
-        start = time.monotonic()
-        ok, detail = _probe_mcp_server(str(binary), "nexus", timeout=0.2)
-        elapsed = time.monotonic() - start
+        ok, detail = _probe_mcp_server(str(binary), "nexus", timeout=0.5)
 
         assert ok is False
-        assert "timed out" in detail
         assert "alive" in detail
-        # Loose bounds (parallel-CI-load tolerant): clearly PAST the base
-        # 0.2s timeout -- proving the extension engaged at all -- and
-        # nowhere near the fake's 30s sleep, without pinning an exact
-        # multiple of the 0.8s extended cap that a busy box could miss.
-        assert elapsed >= 0.4
-        assert elapsed < 15.0
+        # 0.5 * 4 = 2s; with the extension gone the verdict reads "after 0s".
+        assert "timed out after 2s" in detail, detail
 
     def test_crashing_binary_fails_fast_never_pays_the_extension(
         self, tmp_path: Path
     ) -> None:
         """The OTHER half of the distinction: a crash must still fail on
-        the very first poll, exactly as before nexus-jw44t — proven by
-        elapsed time staying far below the extended cap even with the
-        DEFAULT (8s) base timeout, where the extended cap would be 32s."""
+        the very first poll, exactly as before nexus-jw44t.
+
+        nexus-rqji3: previously proven by an elapsed-time ceiling
+        (``elapsed < 15.0``), which a sufficiently loaded box could in
+        principle still exceed even for a near-instant crash. Proven
+        directly instead: ``on_timeout`` must never fire at all, since a
+        crash exits (and ``communicate()`` returns normally) before any
+        poll can time out — the retry/extension path is never entered.
+        """
         binary = tmp_path / "nx-mcp"
         _write_fake_binary(binary, _CRASHING_MODULE_NOT_FOUND)
 
-        start = time.monotonic()
-        ok, detail = _probe_mcp_server(str(binary), "nexus")  # default timeout=8.0
-        elapsed = time.monotonic() - start
+        poll_counts: list[int] = []
+        ok, detail = _probe_mcp_server(
+            str(binary), "nexus", on_timeout=poll_counts.append
+        )  # default timeout=8.0
 
         assert ok is False
         assert "ModuleNotFoundError" in detail
-        assert elapsed < 15.0  # nowhere near the 32s extended cap for timeout=8.0
+        assert poll_counts == [], (
+            f"a crashing binary must fail on the very first poll — the "
+            f"extension path (on_timeout) must never engage; saw {poll_counts}"
+        )

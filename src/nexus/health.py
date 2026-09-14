@@ -1477,7 +1477,11 @@ def _first_lines(text: str, n: int) -> str:
 
 
 def _probe_mcp_server(
-    binary_path: str, expected_name: str, *, timeout: float = _MCP_PROBE_TIMEOUT_S
+    binary_path: str,
+    expected_name: str,
+    *,
+    timeout: float = _MCP_PROBE_TIMEOUT_S,
+    on_timeout: Callable[[int], None] | None = None,
 ) -> tuple[bool, str]:
     """Spawn *binary_path*, send a JSON-RPC ``initialize`` request on
     stdin, and verify the response's ``result.serverInfo.name`` matches
@@ -1505,6 +1509,20 @@ def _probe_mcp_server(
     fail-fast contract), while a process that is still alive and simply
     slow gets up to ``timeout * _MCP_PROBE_ALIVE_EXTENSION_FACTOR`` before
     the probe gives up and reports it as genuinely hung.
+
+    *on_timeout* (nexus-rqji3), when given, is called with the 1-based
+    poll count each time a ``subprocess.TimeoutExpired`` is caught below —
+    i.e. exactly the moment the probe has just confirmed "still alive, no
+    response yet" and is about to poll again. ``None`` (the default) is a
+    no-op; every production caller (``_check_mcp_entry_points``) leaves it
+    unset. It exists so a test can observe (or act on) the extension
+    actually engaging without inferring it from elapsed wall-clock time,
+    which is what made ``test_slow_but_alive_binary_recovers_within_extension``
+    flake once under a loaded ``-n auto`` run (nexus-jw44t's own class of
+    timing sensitivity, recurring under nexus-rqji3): a fixed real-seconds
+    margin between a fake binary's ``sleep`` and the extended cap can be
+    blown by scheduler delay alone, with the probe's actual logic
+    unaffected.
     """
     try:
         proc = subprocess.Popen(  # noqa: S603 — binary_path resolved via shutil.which, not attacker input
@@ -1539,6 +1557,7 @@ def _probe_mcp_server(
     deadline = time.monotonic() + max_wait
     stdout_text = ""
     stderr_text = ""
+    poll_count = 0
     try:
         while True:
             remaining = deadline - time.monotonic()
@@ -1563,6 +1582,9 @@ def _probe_mcp_server(
                 stdout_text, stderr_text = proc.communicate(timeout=min(poll_interval, remaining))
                 break  # process finished — answered or crashed; checked below
             except subprocess.TimeoutExpired:
+                poll_count += 1
+                if on_timeout is not None:
+                    on_timeout(poll_count)
                 continue  # still alive — poll again, no data lost (documented communicate() retry idiom)
     except OSError as exc:
         return False, f"probe error: {exc!r}"
