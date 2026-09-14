@@ -1070,6 +1070,80 @@ class TestDriftWarningEmission:
         assert events == []
 
 
+class TestFamilyDriftWithMultiEntryModelUsage:
+    """nexus-xepsr (2026-09-14): every live ``claude -p`` dispatch now
+    reports a second, near-zero-cost ``modelUsage`` entry for a side call
+    the CLI makes itself (measured: claude-haiku-4-5 alongside the
+    answering model). ``_parse_dispatch_usage`` now records the
+    HIGHEST-cost entry's canonical id as ``DispatchUsage.model`` (Sam's
+    decision, reversing the earlier code-only 'leave None on >1 entries' rule) so
+    the tripwire sees the ANSWERING model -- previously it was vacuous,
+    since ``model_family_matches`` treats an unknown (``None``) canonical
+    id as a match by design."""
+
+    @staticmethod
+    def _two_entry_result() -> dict:
+        return {
+            "type": "result", "is_error": False,
+            "result": "", "structured_output": {"ok": True},
+            "total_cost_usd": 0.0805, "duration_ms": 1000,
+            "duration_api_ms": 900, "num_turns": 1,
+            "usage": {
+                "input_tokens": 957, "output_tokens": 62,
+                "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+            },
+            "modelUsage": {
+                "claude-opus-5": {
+                    "inputTokens": 52, "outputTokens": 52,
+                    "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                    "costUSD": 0.08, "canonicalModel": "claude-opus-5",
+                },
+                "claude-haiku-4-5": {
+                    "inputTokens": 905, "outputTokens": 10,
+                    "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                    "costUSD": 0.001, "canonicalModel": "claude-haiku-4-5",
+                },
+            },
+        }
+
+    def test_haiku_request_now_drifts_against_the_opus_answering_call(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as dispatch_mod
+        from nexus.operators.dispatch import _parse_dispatch_usage, _warn_on_family_drift
+
+        events: list = []
+        monkeypatch.setattr(
+            dispatch_mod, "_log",
+            type("L", (), {"warning": staticmethod(lambda ev, **kw: events.append((ev, kw)))})(),
+        )
+
+        usage = _parse_dispatch_usage(self._two_entry_result())
+        assert usage.model == "claude-opus-5", (
+            f"expected the higher-cost (answering) entry recorded, got {usage.model!r}"
+        )
+
+        _warn_on_family_drift("haiku", usage, "planner")
+
+        assert events and events[0][0] == "model_family_drift"
+        assert events[0][1]["requested_model"] == "haiku"
+        assert events[0][1]["canonical_model"] == "claude-opus-5"
+
+    def test_opus_request_does_not_drift(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as dispatch_mod
+        from nexus.operators.dispatch import _parse_dispatch_usage, _warn_on_family_drift
+
+        events: list = []
+        monkeypatch.setattr(
+            dispatch_mod, "_log",
+            type("L", (), {"warning": staticmethod(lambda ev, **kw: events.append((ev, kw)))})(),
+        )
+
+        usage = _parse_dispatch_usage(self._two_entry_result())
+
+        _warn_on_family_drift("opus", usage, "planner")
+
+        assert events == []
+
+
 class TestPlannerKillSwitch:
     @pytest.mark.asyncio
     async def test_kill_switch_leaves_planner_bare(self, monkeypatch) -> None:

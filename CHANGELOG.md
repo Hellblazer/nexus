@@ -7,6 +7,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **`claude -p` dispatch usage now records a canonical model id even when
+  the CLI reports two `modelUsage` entries (nexus-xepsr).** Every live
+  dispatch reports a second, near-zero-cost entry for a side call the CLI
+  makes itself (observed: `claude-haiku-4-5` alongside the answering
+  model), and `_parse_dispatch_usage` previously left `DispatchUsage.model`
+  `None` whenever `modelUsage` carried more than one entry -- a rule that
+  was never written into RDR-196's own text and had been mis-cited there
+  as "196-R3" (the RDR's actual `--strict-mcp-config` spike, unrelated to
+  this field; see the RDR's 2026-09-14 CORRECTION block). That made
+  `model` `None` for every real dispatch, which failed
+  `TestClaudeDispatchLiveUsage::test_live_dispatch_records_nonzero_cost`
+  and made the nexus-ek8tr model-family drift tripwire vacuous (an absent
+  canonical id trivially "matches" any requested model). Per Sam's
+  decision, `model` now records the entry with the highest `costUSD` (the
+  answering call, which normally carries the CLI's cached system prompt
+  and so outranks the cheap side call), tie-broken by the highest
+  `outputTokens`, then by the first key in `modelUsage`'s own order;
+  `model_usage` itself is unchanged, still carrying every entry. Fix-round
+  addition (code-review-expert CRITICAL): a `modelUsage` map that is
+  non-empty but whose every entry fails the dict-shape check previously
+  fell into the highest-cost-pick branch and raised `ValueError` on
+  `max()` over an empty dict, breaking `_parse_dispatch_usage`'s
+  documented never-raise-on-a-malformed-payload contract; the 0/1/2+
+  cases are now branched explicitly and `model` stays `None` for the
+  0-entry case with no raise.
+
 - **A session whose mailbox-watch arm instruction never arrived gets it again
   (nexus-6konb.19, nexus-6konb.20).** The SessionStart arm instruction could
   fail to reach a session: at a resume, `nx hook session-start` ran but its

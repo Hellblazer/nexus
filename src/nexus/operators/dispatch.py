@@ -677,11 +677,46 @@ class DispatchUsage:
     """
 
     model: str | None
-    """Canonical model id (196-R3), taken from the single ``modelUsage``
-    entry's ``canonicalModel`` field. ``None`` when ``modelUsage`` is
-    absent/empty, or when it carries more than one model (ambiguous for
-    this single-value convenience field -- callers needing per-model
-    detail read ``model_usage`` directly)."""
+    """Canonical model id. Taken from the sole ``modelUsage`` entry's
+    ``canonicalModel`` field when there is exactly one; when there are
+    two or more, taken from the entry with the HIGHEST ``costUSD`` (ties
+    broken by the highest ``outputTokens``, then by the first key in
+    ``modelUsage``'s own iteration order) -- see ``_parse_dispatch_
+    usage``. ``None`` when ``modelUsage`` is absent/empty, OR when it is
+    non-empty but every entry in it fails the dict-shape check (a
+    malformed payload; nothing survives to rank -- code-review-expert
+    finding on the nexus-xepsr fix round, which corrected an earlier
+    version of this code that called ``max()`` on an empty dict there and
+    raised, breaking this module's documented never-raise-on-a-malformed-
+    payload contract).
+
+    An earlier rule -- pinned only in this dataclass's own docstring and
+    its accompanying unit test, never written into RDR-196's body text --
+    said: leave this ``None`` whenever ``modelUsage`` carried more than
+    one entry, never make a silent pick. That rule is REVERSED here per
+    Sam's decision (nexus-xepsr, 2026-09-14; recorded in RDR-196's
+    Technical Design section as a CORRECTION block dated 2026-09-14,
+    placed beside the 2026-08-20/nexus-nyry9.7 block that first pinned
+    this field's wire semantics -- NOT "196-R3", which is the RDR's
+    ``--strict-mcp-config`` spike and citing it for this rule was itself a
+    mistake in an earlier version of this docstring). Every ``claude -p``
+    dispatch now reports a second, near-zero-cost ``modelUsage`` entry for
+    a side call the CLI makes itself (measured: claude-haiku-4-5 alongside
+    the answering model, ~$0.001), so ">1 entry" stopped meaning
+    "ambiguous bundle" and started meaning "the common case". The
+    answering call's own cost is ordinarily far higher -- it carries the
+    CLI's cached system prompt, measured at ~7,000 cache-creation
+    tokens -- so it reliably outranks the side call, EXCEPT when the
+    answering model is itself haiku-priced; in that case both entries
+    already belong to the requested family, so the nexus-ek8tr drift
+    tripwire below reaches the same (no-drift) verdict regardless of which
+    one wins the pick. Leaving ``model`` permanently ``None`` broke the
+    live-usage cost test (``TestClaudeDispatchLiveUsage::test_live_
+    dispatch_records_nonzero_cost``) and made that tripwire vacuous (an
+    absent canonical id trivially "matches" any request, per
+    ``model_family_matches``'s own vacuous-true rule). Callers needing
+    full per-model detail still read ``model_usage`` directly, which this
+    reversal leaves untouched -- every entry survives."""
 
     cost_usd: float | None  # total_cost_usd
     input_tokens: int | None  # usage.input_tokens
@@ -774,10 +809,44 @@ def _parse_dispatch_usage(final_result: dict[str, Any] | None) -> DispatchUsage:
             )
         if len(model_usage) == 1:
             model = next(iter(model_usage.values())).canonical_model
-        # len(model_usage) > 1: leave `model` None -- ambiguous for this
-        # single-value convenience field. Per-model attribution across a
-        # bundled multi-model dispatch is what `model_usage` is for
-        # (consumed by .p1b's bundle StepRecords).
+        elif len(model_usage) >= 2:
+            # nexus-xepsr (2026-09-14) -- record the HIGHEST-costUSD
+            # entry's canonical id (the answering call), not None. Every
+            # real `claude -p` dispatch now carries a second, near-zero-
+            # cost entry for a side call the CLI makes itself, so ">1
+            # entry" is the common case, not an ambiguous bundle (see
+            # DispatchUsage.model's docstring for the full reversal of
+            # the earlier "leave None" rule -- pinned only in code, never
+            # in RDR-196's own text, and NOT "196-R3" as an earlier
+            # version of this comment wrongly cited; RDR-196's Technical
+            # Design section carries the correction as a 2026-09-14
+            # CORRECTION block). An entry with a missing (None) costUSD
+            # ranks below any entry that has a real one; ties break on
+            # the highest outputTokens, then on the first key in
+            # `model_usage`'s own iteration order (dict max() keeps the
+            # first item when nothing strictly exceeds it, so no explicit
+            # index bookkeeping is needed). Per-model detail across a
+            # bundled multi-model dispatch remains fully available via
+            # `model_usage` itself, untouched by this pick.
+            best_key = max(
+                model_usage,
+                key=lambda k: (
+                    model_usage[k].cost_usd
+                    if model_usage[k].cost_usd is not None
+                    else -1.0,
+                    model_usage[k].output_tokens or 0,
+                ),
+            )
+            model = model_usage[best_key].canonical_model
+        # else: len(model_usage) == 0 -- `modelUsage` was present and
+        # non-empty at the top level, but EVERY entry in it failed the
+        # `isinstance(entry, dict)` filter above (a malformed payload).
+        # `model` stays None -- there is nothing to rank. code-review-
+        # expert CRITICAL finding on this fix round: a prior version of
+        # this code had only `if len == 1: ... else: <the max() branch>`,
+        # so this exact case fell into the max()-on-an-empty-dict branch
+        # and raised ValueError, breaking `_parse_dispatch_usage`'s own
+        # documented contract to never raise on a malformed payload.
     else:
         missing.append("modelUsage")
 

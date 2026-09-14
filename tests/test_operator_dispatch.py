@@ -4173,8 +4173,12 @@ class TestParseDispatchUsage:
         canonical_model is read from canonicalModel, not its key, (b) the
         top-level DispatchUsage fields come from the top-level ``usage``/
         ``total_cost_usd``, not either modelUsage entry, and (c) the
-        single-value ``model`` convenience field stays None -- genuinely
-        ambiguous with two distinct canonical models, not a silent pick."""
+        single-value ``model`` convenience field records the HIGHER-cost
+        entry's canonical id (nexus-xepsr, 2026-09-14: Sam's decision
+        reverses the earlier code-only 'leave None, never a silent pick' rule for
+        the >1-entry case -- see DispatchUsage.model's docstring). Here
+        haiku's 2.0 costUSD outranks sonnet's 1.0, so haiku's canonical id
+        must win, not None."""
         from nexus.operators.dispatch import _parse_dispatch_usage
 
         doctored = dict(_fixture_result_event())
@@ -4204,9 +4208,9 @@ class TestParseDispatchUsage:
 
         assert usage.model_usage["sonnet"].canonical_model == "claude-sonnet-5-20260101"
         assert usage.model_usage["haiku"].canonical_model == "claude-haiku-5-20260101"
-        assert usage.model is None, (
-            "two distinct canonical models is genuinely ambiguous for the "
-            "single-value convenience field -- must not silently pick one"
+        assert usage.model == "claude-haiku-5-20260101", (
+            "the higher-cost entry (2.0 vs 1.0) must win under the "
+            "nexus-xepsr reversal of the earlier code-only 'leave None' rule"
         )
         # The load-bearing anti-cross-wiring assertions: these values exist
         # ONLY at the top level (900/901/9.0), never in either modelUsage
@@ -4217,6 +4221,144 @@ class TestParseDispatchUsage:
         assert usage.output_tokens == 901
         assert usage.cache_creation_input_tokens == 902
         assert usage.cache_read_input_tokens == 903
+
+    def test_highest_cost_entry_wins_with_missing_cost_ranked_last(self) -> None:
+        """nexus-xepsr (2026-09-14): when modelUsage has more than one
+        entry, ``model`` records the HIGHEST-costUSD entry's canonical id
+        (the answering call) -- not None. An entry with a missing (None)
+        costUSD must rank BELOW every entry that has a real cost, never
+        win by virtue of a real entry merely being cheap."""
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        doctored = dict(_fixture_result_event())
+        doctored["modelUsage"] = {
+            "no-cost-entry": {
+                "inputTokens": 999999, "outputTokens": 999999,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                "costUSD": None,
+                "canonicalModel": "claude-mystery-5",
+            },
+            "cheap-entry": {
+                "inputTokens": 1, "outputTokens": 1,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                "costUSD": 0.0001,
+                "canonicalModel": "claude-haiku-4-5",
+            },
+        }
+
+        usage = _parse_dispatch_usage(doctored)
+
+        assert usage.model == "claude-haiku-4-5", (
+            f"an entry with a real (even tiny) cost must outrank a "
+            f"missing-cost entry regardless of token counts: got {usage.model!r}"
+        )
+
+    def test_tie_broken_by_output_tokens_then_first_key(self) -> None:
+        """Equal costUSD: the entry with more outputTokens wins. Equal
+        cost AND tokens: the FIRST key in modelUsage's own iteration
+        order wins (nexus-xepsr)."""
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        doctored = dict(_fixture_result_event())
+        doctored["modelUsage"] = {
+            "first": {
+                "inputTokens": 1, "outputTokens": 5,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                "costUSD": 0.5,
+                "canonicalModel": "claude-a-5",
+            },
+            "second": {
+                "inputTokens": 1, "outputTokens": 50,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                "costUSD": 0.5,
+                "canonicalModel": "claude-b-5",
+            },
+        }
+        usage = _parse_dispatch_usage(doctored)
+        assert usage.model == "claude-b-5", "equal cost -- higher outputTokens must win"
+
+        doctored["modelUsage"] = {
+            "first": {
+                "inputTokens": 1, "outputTokens": 5,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                "costUSD": 0.5,
+                "canonicalModel": "claude-a-5",
+            },
+            "second": {
+                "inputTokens": 1, "outputTokens": 5,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                "costUSD": 0.5,
+                "canonicalModel": "claude-b-5",
+            },
+        }
+        usage = _parse_dispatch_usage(doctored)
+        assert usage.model == "claude-a-5", "equal cost and tokens -- first key must win"
+
+    def test_all_entries_non_dict_yields_no_raise_and_none_model(self) -> None:
+        """code-review-expert CRITICAL (nexus-xepsr fix round): a
+        non-empty ``modelUsage`` dict whose every entry fails the
+        ``isinstance(entry, dict)`` filter leaves the FILTERED
+        ``model_usage`` empty. A prior version of the >=2-entry branch
+        did not guard for that -- ``len(model_usage) == 1`` was False, so
+        it fell into the ``else`` clause that called ``max()`` on an
+        empty dict, which raises ``ValueError``, breaking this function's
+        documented contract to never raise on a malformed payload. This
+        must come back with ``model=None`` and no exception, and (since
+        the top-level ``modelUsage`` key WAS present and non-empty) with
+        no ``dispatch_usage_fields_missing`` warning -- that warning path
+        only fires when the raw value itself is absent/empty/non-dict,
+        which is not this scenario."""
+        from structlog.testing import capture_logs
+
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        doctored = dict(_fixture_result_event())
+        doctored["modelUsage"] = {
+            "claude-opus-5": "not a dict",
+            "claude-haiku-4-5": ["also", "not", "a", "dict"],
+        }
+
+        with capture_logs() as cap:
+            usage = _parse_dispatch_usage(doctored)
+
+        assert usage.model is None
+        assert usage.model_usage == {}
+        assert not any(e.get("event") == "dispatch_usage_fields_missing" for e in cap)
+
+    def test_cheap_answering_call_still_loses_to_a_pricier_side_call(self) -> None:
+        """The selection is purely cost-ranked, not semantically aware of
+        which entry is "the answering call" -- if a bundled dispatch ever
+        reports a genuinely cheaper answering-model entry alongside a
+        pricier one (the inverse of the common shape, where the answering
+        call's cached system prompt keeps its cost well above the CLI's
+        own haiku-priced side call), the pricier entry's canonical id is
+        what gets recorded, exactly as the >1-entry rule says -- there is
+        no special-casing of "the first entry" or "the requested model".
+        """
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        doctored = dict(_fixture_result_event())
+        doctored["modelUsage"] = {
+            "cheap-answering-call": {
+                "inputTokens": 900, "outputTokens": 40,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                "costUSD": 0.0005,
+                "canonicalModel": "claude-haiku-4-5",
+            },
+            "pricier-side-call": {
+                "inputTokens": 30, "outputTokens": 400,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 7000,
+                "costUSD": 0.09,
+                "canonicalModel": "claude-opus-5",
+            },
+        }
+
+        usage = _parse_dispatch_usage(doctored)
+
+        assert usage.model == "claude-opus-5", (
+            f"the higher-cost entry must win regardless of which one is "
+            f"semantically 'the answer': got {usage.model!r}"
+        )
 
 
 class TestClaudeDispatchUsageSink:
