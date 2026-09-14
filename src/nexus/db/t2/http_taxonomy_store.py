@@ -65,7 +65,9 @@ from nexus.errors import SplitConservationViolatedError
 # the source lets the dying module go without touching this one again — the
 # re-point the 2026-06-12 critic note predicted P4 would own.
 from nexus.db.t2.taxonomy_compute import (
+    _NONFINITE_IDS_LOGGED,  # noqa: F401 — re-exported for tests
     PROJECTION_THRESHOLD,
+    _finite_row_mask,
     AssignResult,
     AuditHub,
     AuditReport,
@@ -112,12 +114,33 @@ def _cosine_matrix(a: "np.ndarray", b: "np.ndarray") -> "np.ndarray":
     compute_cross_links run over chroma results, so service-mode similarities
     match the chroma path to float precision. Zero-norm rows are guarded to 1.0
     (same as the oracle).
+
+    Callers gate both inputs through :func:`_finite_row_mask` first, so by
+    contract every row here is finite. The ``errstate`` exists because macOS
+    Accelerate raises spurious FP-state flags (divide by zero / overflow /
+    invalid in matmul) on provably clean input: measured 2026-09-14 on
+    code__1-77 (6,232 x 1024 float32, zero non-finite rows, every norm within
+    1e-7 of 1.0), all three RuntimeWarnings fired and the result was finite
+    (nexus-2fa0w; the same finding taxonomy_compute recorded 2026-07-15 for
+    kmeans++). Those warnings went to stderr through Python's warnings
+    module, where nothing recorded them. Genuinely bad input is excluded and
+    logged upstream, never suppressed here; the output check is the tripwire
+    for the contract being broken.
     """
     an = np.linalg.norm(a, axis=1, keepdims=True)
     an[an == 0] = 1.0
     bn = np.linalg.norm(b, axis=1, keepdims=True)
     bn[bn == 0] = 1.0
-    return (a / an) @ (b / bn).T
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        sim = (a / an) @ (b / bn).T
+    if not bool(np.isfinite(sim).all()):
+        _log.warning(
+            "cosine_nonfinite_similarity",
+            rows=int(a.shape[0]),
+            cols=int(b.shape[0]),
+            nonfinite_cells=int((~np.isfinite(sim)).sum()),
+        )
+    return sim
 
 
 # ── HttpTaxonomyStore ──────────────────────────────────────────────────────────
@@ -836,20 +859,37 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         if q.size == 0 or q.shape[1] != cent.shape[1]:
             return []  # dimension mismatch — oracle short-circuit (SC-10)
 
-        sim = _cosine_matrix(q, cent)  # docs × centroids; 1 - cosine_distance
+        # nexus-2fa0w: a NaN/inf doc row or centroid row is excluded and
+        # logged, never silently argmax'd onto centroid 0.
+        c_ok = _finite_row_mask(
+            cent, collection=collection_name, site="compute_assignments.centroids",
+            ids=[str(m.get("topic_id")) for m in c_metas],
+        )
+        if not bool(c_ok.all()):
+            cent = cent[c_ok]
+            c_metas = [m for m, ok in zip(c_metas, c_ok, strict=True) if ok]
+        q_ok = _finite_row_mask(
+            q, collection=collection_name, site="compute_assignments.docs", ids=doc_ids,
+        )
+        q_idx = np.flatnonzero(q_ok)
+        if cent.shape[0] == 0 or q_idx.size == 0:
+            return []
+
+        sim = _cosine_matrix(q[q_idx], cent)  # kept docs × centroids; 1 - cosine_distance
         nearest_idx = sim.argmax(axis=1)
 
         by = "projection" if cross_collection else "centroid"
         out: list[dict[str, Any]] = []
-        for i, doc_id in enumerate(doc_ids):
-            j = int(nearest_idx[i])
+        for pos, i in enumerate(q_idx):
+            doc_id = doc_ids[int(i)]
+            j = int(nearest_idx[pos])
             topic_id = int(c_metas[j]["topic_id"])
             if by == "projection":
                 out.append({
                     "doc_id": doc_id,
                     "topic_id": topic_id,
                     "assigned_by": by,
-                    "similarity": float(sim[i, j]),
+                    "similarity": float(sim[pos, j]),
                     "source_collection": collection_name,
                 })
             else:
@@ -898,13 +938,28 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         if new_embs.size == 0 or new_embs.shape[1] != other_embs.shape[1]:
             return []
 
-        sim = _cosine_matrix(new_embs, other_embs)
+        # nexus-2fa0w: non-finite centroids on either side are excluded and
+        # logged rather than compared.
+        new_ok = _finite_row_mask(
+            new_embs, collection=collection_name, site="compute_cross_links.new",
+            ids=[str(m.get("topic_id")) for m in new_metas],
+        )
+        other_ok = _finite_row_mask(
+            other_embs, collection=collection_name, site="compute_cross_links.foreign",
+            ids=[str(m.get("topic_id")) for m in other_metas],
+        )
+        new_idx = np.flatnonzero(new_ok)
+        other_idx = np.flatnonzero(other_ok)
+        if new_idx.size == 0 or other_idx.size == 0:
+            return []
+
+        sim = _cosine_matrix(new_embs[new_idx], other_embs[other_idx])
         pairs: list[tuple[int, int]] = []
-        for i, meta in enumerate(new_metas):
-            new_tid = int(meta["topic_id"])
-            for j in range(sim.shape[1]):
-                if float(sim[i, j]) >= PROJECTION_THRESHOLD:
-                    pairs.append((new_tid, int(other_metas[j]["topic_id"])))
+        for pos_i, i in enumerate(new_idx):
+            new_tid = int(new_metas[int(i)]["topic_id"])
+            for pos_j, j in enumerate(other_idx):
+                if float(sim[pos_i, pos_j]) >= PROJECTION_THRESHOLD:
+                    pairs.append((new_tid, int(other_metas[int(j)]["topic_id"])))
         return pairs
 
     # ── Persist (relational -> Java; centroids -> port) (nexus-1di3r.8) ─────────
@@ -1753,10 +1808,25 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             env = self._centroid.get_by_collection(tc)
             ctr_raw.extend(env.get("embeddings") or [])
             ctr_metas.extend(env.get("metadatas") or [])
+        # nexus-2fa0w: non-finite source chunks are neither matched nor
+        # novel; they are reported under ``nonfinite_chunks`` and logged.
+        # Gated BEFORE the no-centroids return so that path cannot label
+        # them novel either (review finding).
+        src_ok = _finite_row_mask(
+            src_embs, collection=source_collection, site="project_against.source",
+            ids=src_ids,
+        )
+        nonfinite_chunks = [d for d, ok in zip(src_ids, src_ok, strict=True) if not ok]
+        total_chunks_fetched = len(src_ids)
+        if nonfinite_chunks:
+            src_ids = [d for d, ok in zip(src_ids, src_ok, strict=True) if ok]
+            src_embs = src_embs[src_ok]
         if not ctr_raw or not ctr_metas:
             return {
                 "matched_topics": [], "novel_chunks": list(src_ids),
-                "total_chunks": len(src_ids), "total_centroids": 0,
+                "chunk_assignments": [],
+                "nonfinite_chunks": nonfinite_chunks,
+                "total_chunks": total_chunks_fetched, "total_centroids": 0,
             }
         ctr_embs = np.array(ctr_raw, dtype=np.float32)
 
@@ -1766,6 +1836,23 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 f"Dimension mismatch: source embeddings {src_embs.shape[1]}d, "
                 f"centroids {ctr_embs.shape[1]}d"
             )
+
+        # Non-finite centroids are dropped from the target set the same way.
+        ctr_ok = _finite_row_mask(
+            ctr_embs, collection=source_collection, site="project_against.centroids",
+            ids=[str(m.get("topic_id")) for m in ctr_metas],
+        )
+        if not bool(ctr_ok.all()):
+            ctr_embs = ctr_embs[ctr_ok]
+            ctr_metas = [m for m, ok in zip(ctr_metas, ctr_ok, strict=True) if ok]
+        if not src_ids or ctr_embs.shape[0] == 0:
+            return {
+                "matched_topics": [], "novel_chunks": [],
+                "chunk_assignments": [],
+                "nonfinite_chunks": nonfinite_chunks,
+                "total_chunks": total_chunks_fetched,
+                "total_centroids": len(ctr_metas),
+            }
 
         # 4-5. Cosine similarity matrix (raw) + ICF-adjusted filter matrix.
         sim = _cosine_matrix(src_embs, ctr_embs)
@@ -1840,7 +1927,8 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "matched_topics": matched_topics,
             "novel_chunks": novel_chunks,
             "chunk_assignments": chunk_assignments,
-            "total_chunks": len(src_ids),
+            "nonfinite_chunks": nonfinite_chunks,
+            "total_chunks": total_chunks_fetched,
             "total_centroids": len(ctr_metas),
         }
 

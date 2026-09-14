@@ -215,6 +215,13 @@ def _run_discover_projection(
                         "service embedding read; collection may be mid-index)"
                     )
                     continue
+                nonfinite = result.get("nonfinite_chunks", [])
+                if nonfinite:
+                    # nexus-2fa0w: excluded by the store (ids in its log).
+                    click.echo(
+                        f"  Projection: {len(nonfinite)} chunk(s) of {col_name} "
+                        "excluded (non-finite embedding)"
+                    )
                 assignments = result.get("chunk_assignments", [])
                 if assignments:
                     _persist_assignments(
@@ -2572,7 +2579,15 @@ def project_cmd(
             click.echo("\nNo matched topics above threshold.")
 
         click.echo(f"\nNovel chunks: {len(novel)} (no centroid match >= {threshold})")
-        covered = total - len(novel)
+        nonfinite = result.get("nonfinite_chunks", [])
+        if nonfinite:
+            # nexus-2fa0w: excluded from both matched and novel; the log
+            # event taxonomy_nonfinite_embeddings names the chunk ids.
+            click.echo(
+                f"Non-finite chunks: {len(nonfinite)} (NaN/inf embedding rows, "
+                "excluded; see taxonomy_nonfinite_embeddings in the log)"
+            )
+        covered = total - len(novel) - len(nonfinite)
         click.echo(f"Total: {len(matched)} matched topics, {covered}/{total} chunks covered")
 
         if persist and result.get("chunk_assignments"):
@@ -2691,9 +2706,11 @@ def _run_backfill(
             matched = len(result["matched_topics"])
             novel = len(result["novel_chunks"])
             chunks = result["total_chunks"]
+            nonfinite = len(result.get("nonfinite_chunks", []))
             click.echo(
                 f"    {matched} matched topics, {novel} novel, "
                 f"{chunks} chunks, {len(result.get('chunk_assignments', []))} assignments"
+                + (f", {nonfinite} non-finite excluded" if nonfinite else "")
             )
             total_novel += novel
 

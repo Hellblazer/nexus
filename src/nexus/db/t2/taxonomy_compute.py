@@ -354,6 +354,24 @@ def compute_split(
     """
     from sklearn.cluster import KMeans  # noqa: PLC0415 — heavy/optional dependency deferred to call time
 
+    # nexus-2fa0w: a split must conserve the parent's assignment set (see
+    # split_topic's conservation refusal), so a NaN/inf row cannot simply
+    # be dropped the way discover/rebuild drop one; refuse the whole split
+    # instead. KMeans would otherwise raise on the row and abort anyway,
+    # but with no record of which chunk was bad.
+    ok = _finite_row_mask(
+        np.asarray(embeddings), collection=collection_name,
+        site="compute_split", ids=fetched_ids,
+    )
+    if not bool(ok.all()):
+        _log.warning(
+            "split_nonfinite_refused",
+            collection=collection_name, topic_id=topic_id,
+            nonfinite_rows=int((~ok).sum()), fetched=len(fetched_ids),
+            detail="a chunk in the topic has a non-finite embedding; the parent is left untouched",
+        )
+        return {"topic_id": topic_id, "collection_name": collection_name, "child_specs": []}
+
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     km = KMeans(n_clusters=k, n_init=10, random_state=42)
@@ -394,6 +412,74 @@ def compute_split(
     }
 
 
+#: How many offending row ids one ``taxonomy_nonfinite_embeddings`` event
+#: names; the counts are always complete, the id list is a sample.
+_NONFINITE_IDS_LOGGED: int = 20
+
+
+def _finite_row_mask(
+    embs: "np.ndarray",
+    *,
+    collection: str,
+    site: str,
+    ids: list[str] | None = None,
+) -> "np.ndarray":
+    """Boolean mask of rows whose every component is finite (nexus-2fa0w).
+
+    A row carrying NaN or inf has a NaN/inf norm, so ``_cosine_matrix``'s
+    zero-norm guard never fires for it and ``argmax`` over its NaN
+    similarity row returns 0: the chunk was silently assigned to the first
+    centroid with no signal anywhere. Callers drop the rows this mask
+    rejects and this function emits ONE structured WARNING per call naming
+    the collection, the call site, the counts, and (a sample of) the
+    offending ids, so a discover that ran on bad vectors is visible in the
+    log instead of reporting success.
+    """
+    mask = np.isfinite(embs).all(axis=1)
+    if not bool(mask.all()):
+        bad = np.flatnonzero(~mask)
+        _log.warning(
+            "taxonomy_nonfinite_embeddings",
+            collection=collection,
+            site=site,
+            nonfinite_rows=int(bad.size),
+            total_rows=int(mask.size),
+            ids=[ids[int(i)] for i in bad[:_NONFINITE_IDS_LOGGED]] if ids is not None else [],
+            ids_truncated=bool(bad.size > _NONFINITE_IDS_LOGGED),
+        )
+    return mask
+
+
+
+def _drop_nonfinite_rows(
+    collection_name: str,
+    doc_ids: list[str],
+    embeddings: np.ndarray,
+    texts: list[str],
+    *,
+    site: str,
+) -> tuple[list[str], np.ndarray, list[str]]:
+    """Drop NaN/inf rows from an aligned (doc_ids, embeddings, texts) triple
+    before clustering (nexus-2fa0w), logging them via :func:`_finite_row_mask`.
+
+    Both clustering entry points (:func:`compute_discovered_topics` and
+    :func:`compute_rebuild_plan`) hand the matrix to :func:`_cluster`, whose
+    HDBSCAN branch has no guard at all and whose kmeans branch only logs
+    before fitting; sklearn raises on NaN, so one bad chunk aborted the
+    whole collection's discover or rebuild.
+    """
+    embs = np.asarray(embeddings)
+    ok = _finite_row_mask(embs, collection=collection_name, site=site, ids=doc_ids)
+    if bool(ok.all()):
+        return doc_ids, embs, texts
+    keep = np.flatnonzero(ok)
+    return (
+        [doc_ids[int(i)] for i in keep],
+        embs[keep],
+        [texts[int(i)] for i in keep],
+    )
+
+
 def compute_discovered_topics(
     collection_name: str,
     doc_ids: list[str],
@@ -413,6 +499,9 @@ def compute_discovered_topics(
     on any no-op condition (``< 5`` docs, all-noise clustering) — the same
     short-circuits the monolithic ``discover_topics`` returned 0 for.
     """
+    doc_ids, embeddings, texts = _drop_nonfinite_rows(
+        collection_name, doc_ids, embeddings, texts, site="compute_discovered_topics",
+    )
     n = len(doc_ids)
     if n < 5:
         return []
@@ -518,6 +607,9 @@ def compute_rebuild_plan(
     the freshly-generated topic_id. Route 3 (unplaceable) is dropped with a
     warning. Empty ``specs`` on ``< 5`` docs / all-noise.
     """
+    doc_ids, embeddings, texts = _drop_nonfinite_rows(
+        collection_name, doc_ids, embeddings, texts, site="compute_rebuild_plan",
+    )
     n = len(doc_ids)
     if n < 5:
         return {"specs": [], "manual_transfers": {}}

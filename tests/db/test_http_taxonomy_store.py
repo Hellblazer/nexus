@@ -20,12 +20,14 @@ from __future__ import annotations
 import json
 import socket
 import threading
+import warnings
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import pytest
+import structlog
 
 # nexus-i711w Stage 2 Phase 0: the twin now imports the compute
 # statics from taxonomy_compute directly, so delegation spies must
@@ -2197,3 +2199,228 @@ class TestSharedClientCentroidFanout:
         assert centroid._owns_client is False
         store.close()
         assert store._client.is_closed
+
+
+# ── nexus-2fa0w: non-finite embedding rows ────────────────────────────────────
+
+
+class TestNonfiniteEmbeddings:
+    """nexus-2fa0w. Observed 2026-09-05: three numpy RuntimeWarnings from
+    ``_cosine_matrix`` during discover on code__1-77, to stderr only. Measured
+    2026-09-14: that collection has zero non-finite rows and unit norms, and
+    the warnings still fire on it (macOS Accelerate FP-state noise, the
+    finding taxonomy_compute already records for kmeans++). The real defect
+    was the OTHER half: a genuinely NaN/inf row has a NaN norm, dodges the
+    zero-norm guard, and ``argmax`` over its NaN similarity row returns 0, so
+    the chunk landed on the first centroid with no signal. Every site now
+    excludes such rows and logs ``taxonomy_nonfinite_embeddings``; the
+    matmul runs under ``errstate`` only because inputs are gated first.
+    """
+
+    _C = [
+        {"collection": "c", "topic_id": 1, "embedding": [1.0, 0.0, 0.0], "label": "A", "doc_count": 1},
+        {"collection": "c", "topic_id": 2, "embedding": [0.0, 1.0, 0.0], "label": "B", "doc_count": 1},
+    ]
+
+    def _store(self, client: HttpTaxonomyStore, records) -> HttpTaxonomyStore:
+        client._centroid_store = _FakeCentroidStore(records)
+        return client
+
+    @staticmethod
+    def _events(logs, name):
+        return [e for e in logs if e["event"] == name]
+
+    def test_cosine_matrix_clean_unit_input_raises_no_runtime_warning(self) -> None:
+        rng = np.random.default_rng(42)
+        a = rng.normal(size=(64, 16)).astype(np.float32)
+        a /= np.linalg.norm(a, axis=1, keepdims=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            sim = _hts._cosine_matrix(a, a[:8])
+        assert sim.shape == (64, 8)
+        assert np.isfinite(sim).all()
+        assert np.allclose(np.diag(sim[:8]), 1.0, atol=1e-5)
+
+    def test_cosine_matrix_nonfinite_output_is_a_logged_tripwire(self) -> None:
+        # Contract violation (a caller skipped the gate): never silent.
+        a = np.array([[float("nan"), 0.0], [1.0, 0.0]], dtype=np.float32)
+        b = np.array([[1.0, 0.0]], dtype=np.float32)
+        with structlog.testing.capture_logs() as logs:
+            sim = _hts._cosine_matrix(a, b)
+        assert np.isnan(sim[0, 0]) and sim[1, 0] == pytest.approx(1.0)
+        ev = self._events(logs, "cosine_nonfinite_similarity")
+        assert len(ev) == 1
+        assert ev[0]["nonfinite_cells"] == 1 and ev[0]["rows"] == 2 and ev[0]["cols"] == 1
+
+    def test_finite_row_mask_logs_counts_and_sampled_ids(self) -> None:
+        n = _hts._NONFINITE_IDS_LOGGED + 5
+        embs = np.full((n + 1, 2), float("nan"), dtype=np.float32)
+        embs[0] = [1.0, 0.0]
+        ids = [f"id{i}" for i in range(n + 1)]
+        with structlog.testing.capture_logs() as logs:
+            mask = _hts._finite_row_mask(embs, collection="c", site="s", ids=ids)
+        assert mask.tolist() == [True] + [False] * n
+        ev = self._events(logs, "taxonomy_nonfinite_embeddings")
+        assert len(ev) == 1
+        assert ev[0]["collection"] == "c" and ev[0]["site"] == "s"
+        assert ev[0]["nonfinite_rows"] == n and ev[0]["total_rows"] == n + 1
+        assert ev[0]["ids"] == ids[1 : 1 + _hts._NONFINITE_IDS_LOGGED]
+        assert ev[0]["ids_truncated"] is True
+
+    def test_finite_row_mask_is_silent_on_clean_input(self) -> None:
+        with structlog.testing.capture_logs() as logs:
+            mask = _hts._finite_row_mask(np.eye(3, dtype=np.float32), collection="c", site="s")
+        assert mask.all()
+        assert self._events(logs, "taxonomy_nonfinite_embeddings") == []
+
+    def test_compute_assignments_excludes_nonfinite_doc_rows_and_logs(self, client) -> None:
+        store = self._store(client, self._C)
+        doc_ids = ["d1", "dbad", "d3"]
+        embs = [[0.9, 0.1, 0.0], [float("nan"), 0.0, 0.0], [0.1, 0.9, 0.0]]
+        with structlog.testing.capture_logs() as logs:
+            out = store.compute_assignments("c", doc_ids, embs)
+        # Pre-fix, dbad argmax'd onto topic 1 with a NaN similarity and no log.
+        assert [(o["doc_id"], o["topic_id"]) for o in out] == [("d1", 1), ("d3", 2)]
+        ev = self._events(logs, "taxonomy_nonfinite_embeddings")
+        assert len(ev) == 1
+        assert ev[0]["site"] == "compute_assignments.docs"
+        assert ev[0]["ids"] == ["dbad"]
+        assert ev[0]["nonfinite_rows"] == 1 and ev[0]["total_rows"] == 3
+        assert self._events(logs, "cosine_nonfinite_similarity") == []
+
+    def test_compute_assignments_excludes_nonfinite_centroid(self, client) -> None:
+        bad = {"collection": "c", "topic_id": 3, "embedding": [float("inf"), 0.0, 0.0],
+               "label": "C", "doc_count": 1}
+        store = self._store(client, [bad, *self._C])
+        with structlog.testing.capture_logs() as logs:
+            out = store.compute_assignments("c", ["d1"], [[1.0, 0.0, 0.0]])
+        # Pre-fix, the inf centroid's similarity was NaN and topic 3 (index 0)
+        # won argmax for every doc.
+        assert [(o["doc_id"], o["topic_id"]) for o in out] == [("d1", 1)]
+        ev = self._events(logs, "taxonomy_nonfinite_embeddings")
+        assert [(e["site"], e["ids"]) for e in ev] == [("compute_assignments.centroids", ["3"])]
+
+    def test_compute_assignments_all_nonfinite_returns_empty(self, client) -> None:
+        store = self._store(client, self._C)
+        assert store.compute_assignments("c", ["dbad"], [[float("nan"), 0.0, 0.0]]) == []
+
+    def test_compute_cross_links_excludes_nonfinite_rows_both_sides(self, client) -> None:
+        others = [
+            {"collection": "o", "topic_id": 20, "embedding": [1.0, 0.0, 0.0], "label": "x", "doc_count": 1},
+            {"collection": "o", "topic_id": 21, "embedding": [float("inf"), 0.0, 0.0], "label": "y", "doc_count": 1},
+        ]
+        store = self._store(client, others)
+        with structlog.testing.capture_logs() as logs:
+            pairs = store.compute_cross_links(
+                "c",
+                [[1.0, 0.0, 0.0], [float("nan"), 0.0, 0.0]],
+                [{"topic_id": 10}, {"topic_id": 11}],
+            )
+        assert pairs == [(10, 20)]
+        ev = self._events(logs, "taxonomy_nonfinite_embeddings")
+        assert sorted((e["site"], tuple(e["ids"])) for e in ev) == [
+            ("compute_cross_links.foreign", ("21",)),
+            ("compute_cross_links.new", ("11",)),
+        ]
+
+    def test_project_against_reports_nonfinite_source_chunks(self, client) -> None:
+        store = self._store(client, [
+            {"collection": "tgt", "topic_id": 7, "embedding": [1.0, 0.0], "label": "T7", "doc_count": 1},
+        ])
+        src = _FakeChromaColl(embeddings={
+            "s1": [1.0, 0.0], "sbad": [float("nan"), 0.0], "s3": [0.0, 1.0],
+        })
+        with structlog.testing.capture_logs() as logs:
+            out = store.project_against("src", ["tgt"], _FakeChromaClient({"src": src}), threshold=0.85)
+        assert out["nonfinite_chunks"] == ["sbad"]
+        assert [a[0] for a in out["chunk_assignments"]] == ["s1"]
+        assert out["novel_chunks"] == ["s3"]
+        assert out["total_chunks"] == 3, "total counts every fetched chunk; nonfinite explains the gap"
+        assert out["total_centroids"] == 1
+        ev = self._events(logs, "taxonomy_nonfinite_embeddings")
+        assert [(e["site"], e["ids"]) for e in ev] == [("project_against.source", ["sbad"])]
+
+    def test_compute_discovered_topics_drops_nonfinite_rows_before_clustering(self) -> None:
+        """Critique finding: discover_topics -> compute_discovered_topics ->
+        _cluster was ungated. Pre-fix, sklearn raised on the NaN row and
+        the whole collection's discovery aborted over one bad chunk."""
+        from nexus.db.t2.taxonomy_compute import compute_discovered_topics
+
+        rng = np.random.default_rng(7)
+        # Two tight clusters of 6 plus one NaN row: 13 docs in, 12 clustered.
+        a = rng.normal([1.0, 0.0, 0.0], 0.01, size=(6, 3))
+        b = rng.normal([0.0, 1.0, 0.0], 0.01, size=(6, 3))
+        embs = np.vstack([a, [[float("nan"), 0.0, 0.0]], b]).astype(np.float32)
+        ids = [f"a{i}" for i in range(6)] + ["bad"] + [f"b{i}" for i in range(6)]
+        texts = ["alpha topic words"] * 6 + ["bad"] + ["beta other terms"] * 6
+        with structlog.testing.capture_logs() as logs:
+            specs = compute_discovered_topics("c", ids, embs, texts)
+        ev = self._events(logs, "taxonomy_nonfinite_embeddings")
+        assert [(e["site"], e["ids"], e["total_rows"]) for e in ev] == [
+            ("compute_discovered_topics", ["bad"], 13),
+        ]
+        assigned = {d for s in specs for d in s["doc_ids"]}
+        assert "bad" not in assigned
+        assert assigned == set(ids) - {"bad"}
+        assert all(np.isfinite(s["centroid"]).all() for s in specs)
+
+    def test_compute_rebuild_plan_drops_nonfinite_rows_before_clustering(self) -> None:
+        """Round-2 critique: the sibling entry point (nx taxonomy rebuild ->
+        rebuild_taxonomy -> compute_rebuild_plan -> _cluster) was ungated."""
+        from nexus.db.t2.taxonomy_compute import compute_rebuild_plan
+
+        rng = np.random.default_rng(11)
+        a = rng.normal([1.0, 0.0, 0.0], 0.01, size=(6, 3))
+        b = rng.normal([0.0, 1.0, 0.0], 0.01, size=(6, 3))
+        embs = np.vstack([a, [[0.0, float("inf"), 0.0]], b]).astype(np.float32)
+        ids = [f"a{i}" for i in range(6)] + ["bad"] + [f"b{i}" for i in range(6)]
+        texts = ["alpha topic words"] * 6 + ["bad"] + ["beta other terms"] * 6
+        with structlog.testing.capture_logs() as logs:
+            plan = compute_rebuild_plan(
+                "c", ids, embs, texts,
+                old_centroids=np.empty((0, 3), dtype=np.float32),
+                old_labels=[], old_review_statuses=[], old_centroid_topic_ids=[],
+                manual_assignments={},
+            )
+        ev = self._events(logs, "taxonomy_nonfinite_embeddings")
+        assert [(e["site"], e["ids"], e["total_rows"]) for e in ev] == [
+            ("compute_rebuild_plan", ["bad"], 13),
+        ]
+        assigned = {d for s in plan["specs"] for d in s["doc_ids"]}
+        assert "bad" not in assigned
+        assert assigned == set(ids) - {"bad"}
+        assert all(np.isfinite(s["centroid"]).all() for s in plan["specs"])
+
+    def test_compute_split_refuses_on_nonfinite_row(self, client) -> None:
+        """A split conserves the parent's assignments (split_topic's own
+        refusal doctrine), so a bad row refuses the split rather than
+        shrinking it. Pre-fix KMeans raised on the NaN with no record."""
+        embs = np.array([[1.0, 0.0], [0.9, 0.1], [float("nan"), 0.0], [0.0, 1.0]], dtype=np.float32)
+        ids = ["d1", "d2", "dbad", "d4"]
+        with structlog.testing.capture_logs() as logs:
+            out = client.compute_split(7, ids, ["t"] * 4, ids, embs, "c", 2)
+        assert out["child_specs"] == []
+        assert out["topic_id"] == 7
+        ev = self._events(logs, "taxonomy_nonfinite_embeddings")
+        assert [(e["site"], e["ids"]) for e in ev] == [("compute_split", ["dbad"])]
+        refused = self._events(logs, "split_nonfinite_refused")
+        assert len(refused) == 1 and refused[0]["nonfinite_rows"] == 1 and refused[0]["fetched"] == 4
+
+    def test_project_against_no_centroids_still_reports_nonfinite(self, client) -> None:
+        # Review finding: the no-centroids early return used to label a NaN
+        # source chunk "novel" because it fired before the gate.
+        store = self._store(client, [])
+        src = _FakeChromaColl(embeddings={"s1": [1.0, 0.0], "sbad": [float("nan"), 0.0]})
+        out = store.project_against("src", ["tgt"], _FakeChromaClient({"src": src}))
+        assert out["novel_chunks"] == ["s1"]
+        assert out["nonfinite_chunks"] == ["sbad"]
+        assert out["total_chunks"] == 2 and out["total_centroids"] == 0
+
+    def test_project_against_clean_input_has_empty_nonfinite_list(self, client) -> None:
+        store = self._store(client, [
+            {"collection": "tgt", "topic_id": 7, "embedding": [1.0, 0.0], "label": "T7", "doc_count": 1},
+        ])
+        src = _FakeChromaColl(embeddings={"s1": [1.0, 0.0]})
+        out = store.project_against("src", ["tgt"], _FakeChromaClient({"src": src}), threshold=0.85)
+        assert out["nonfinite_chunks"] == []
+        assert out["total_chunks"] == 1
