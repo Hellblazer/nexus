@@ -131,6 +131,22 @@ class _Suite:
         return self.path.name
 
 
+
+def _bin_bash_is_pre_4() -> bool:
+    """True when this host's /bin/bash is older than 4, the same probe the
+    suite's own Test F guard uses. There Test F runs its 3 extra assertions,
+    so the floor is 19; on bash 4+ (every Linux CI runner) it is 16. A single
+    floor of 16 would let those 3 assertions stop running on macOS unseen."""
+    bash = Path("/bin/bash")
+    if not bash.exists():
+        return False
+    probe = subprocess.run(
+        [str(bash), "-c", "(( BASH_VERSINFO[0] >= 4 ))"],
+        capture_output=True,
+        check=False,
+    )
+    return probe.returncode != 0
+
 # Floors are the exact passed count measured 2026-09-14 (nexus-fcjt7) --
 # tight enough to catch a suite quietly running fewer assertions than it
 # used to, loose enough that adding a new assertion to one of these suites
@@ -153,8 +169,11 @@ SUITES = [
     # runner included -- Test F degrades to one [skip] line and those 3
     # assertions never execute. 16 is the floor this suite ACTUALLY reports
     # on ubuntu-latest (verified in an ubuntu:24.04 container, nexus-fcjt7
-    # round 2); pinning 19 here would red this gate on every CI run.
-    _Suite("tests/e2e/lib/commit_scope_audit_test.sh", 16),
+    # round 2), so the floor follows the host's /bin/bash, not the OS name.
+    _Suite(
+        "tests/e2e/lib/commit_scope_audit_test.sh",
+        19 if _bin_bash_is_pre_4() else 16,
+    ),
     _Suite("scripts/lib/build-lease_test.sh", 38),
     _Suite("scripts/mvnw-leased_test.sh", 22),
 ]
