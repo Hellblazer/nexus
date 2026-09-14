@@ -358,9 +358,11 @@ it (2026-09-14).
   (`_REARM_INTERVAL_S` and `_REARM_RETRY_S` in
   `conexus/hooks/scripts/mailbox_drain.py`), so a session with no prompts stays
   unresolvable by name until its next one. The per-session registry file this
-  replaces never expired, so mail sent to the name in that window still landed
-  and waited for the next prompt; here the sender gets an error and can resend
-  by session id.
+  replaces kept a name registered until another session's arm pruned it, at
+  least 7 days after the holder's last arm (`REGISTRATION_RETENTION_S` and
+  `prune_stale_registrations` in `src/nexus/tuple_watch.py`), so mail sent to
+  the name in that window still landed and waited for the next prompt; here the
+  sender gets an error and can resend by session id.
 - **Engine and client skew**: a client that sends `address_kind: session` to an
   engine without it gets `SchemaViolation`. The engine deploys before the client
   release that sends it; old clients are unaffected.
@@ -551,3 +553,4 @@ behavior, the fork rule, and the TTL and heartbeat values.
 
 - 2026-09-14: Gate round 1 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `3b07bee53`; critique `nexus_rdr/208-gate-critique-2026-09-14`.
 - 2026-09-14: Post-accept amendment: Sam's three gate decisions (T2 `nexus_rdr/208-decision-gate-2026-09-14`), so a name held by two live sessions is refused rather than delivered to the newest; and gate Significants 1 and 2 (a watcher that stops while its session lives; `/clear` with two processes on one session id). Fix check recorded in T2 as `nexus_rdr/208-fix-check-<tip>`.
+- 2026-09-14: Post-accept amendment: the Risks bullet on a stopped watcher states the registry file's 7-day retention instead of "never expired" (observation d1 of fix check `nexus_rdr/208-fix-check-0bfcc6bb7`). Fix check recorded in T2 as `nexus_rdr/208-fix-check-<tip>`.
