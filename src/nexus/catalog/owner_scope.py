@@ -14,6 +14,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
+
+_log = structlog.get_logger(__name__)
+
 
 class OwnerScopeError(ValueError):
     """The scope names no owner, or more than one."""
@@ -78,7 +82,18 @@ def resolve_owner_scope(cat: Any, raw: str, *, strict: bool = True) -> str:
             # GH #1544: a repo and the curator behind its knowledge__<name>
             # collection legitimately share one name (the constraint is
             # UNIQUE(name, owner_type)). The name a caller has in hand is
-            # the repo's; the curator stays reachable by its tumbler.
+            # the repo's; the curator stays reachable by its tumbler. The
+            # write side is the mirror image and not in conflict:
+            # store_hook's curator lookup filters by owner_type so a
+            # same-named repo cannot capture a knowledge write. Logged so
+            # the choice is never silent (substantive-critic, 2026-09-14).
+            others = [str(t) for t in matches if t is not repo_matches[0]]
+            _log.info(
+                "owner_scope_repo_preferred",
+                name=text,
+                repo=str(repo_matches[0]),
+                other_owners=others,
+            )
             return str(repo_matches[0])
         candidates = ", ".join(str(t) for t in matches)
         raise OwnerScopeError(

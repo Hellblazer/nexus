@@ -125,7 +125,7 @@ retrieval-only plan prices at $0 by construction, so the moment one sat
 inside the band it beat every plan that reduces, and `nx_answer` returned
 a chunk listing as `final_text`. Five of fifteen recent runs on the
 reporting store were degenerate. The chooser now cost-ranks only in-band
-plans that carry a recognized operator step; a retrieval-only plan still
+plans whose terminal step is an answering operator; a retrieval-only plan still
 wins as the top match when it is alone in the band or every in-band plan
 is retrieval-only. The lesson is the one above in a smaller frame: the
 cost axis was tuned against plans that all answered, and nothing asserted

@@ -82,11 +82,12 @@ class TestStep1PlanChoiceWiring:
 
         # Same in-band, different-shape pairing as
         # test_plan_cost_estimate.py::test_two_in_band_candidates_different_shapes_cheaper_wins:
-        # gap 0.75/0.79 <= PLAN_CHOICE_CONFIDENCE_BAND (0.05); expensive
-        # is a priced LLM operator step, cheap is sql-fast-path-eligible
-        # ($0) -- the cheaper candidate must win.
+        # gap 0.75/0.79 <= PLAN_CHOICE_CONFIDENCE_BAND (0.05); both end in
+        # an answering operator (GH #1545): expensive is a priced LLM
+        # operator step, cheap is sql-fast-path-eligible ($0) -- the
+        # cheaper candidate must win.
         expensive = _match(1, 0.75, "search", "operator_generate", name="expensive")
-        cheap = _match(2, 0.79, "search", "operator_filter", name="cheap")
+        cheap = _match(2, 0.79, "search", "operator_aggregate", name="cheap")
         run_result = PlanResult(steps=[{"text": "The final answer."}])
 
         structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
@@ -145,8 +146,8 @@ class TestStep1PlanChoiceWiring:
         assert plan_choice["chosen_plan_id"] == reducing.plan_id
         assert result["plan_id"] == reducing.plan_id
         rows = {row["plan_id"]: row for row in plan_choice["candidates"]}
-        assert rows[query_only.plan_id]["retrieval_only"] is True
-        assert rows[reducing.plan_id]["retrieval_only"] is False
+        assert rows[query_only.plan_id]["non_answering"] is True
+        assert rows[reducing.plan_id]["non_answering"] is False
 
     @pytest.mark.asyncio
     async def test_cost_ranking_failure_falls_back_to_top_confidence_match(self, tmp_path, monkeypatch):

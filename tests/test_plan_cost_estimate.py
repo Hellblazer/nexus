@@ -376,11 +376,12 @@ def test_unknown_operator_has_no_price_at_all() -> None:
 
 def test_two_in_band_candidates_different_shapes_cheaper_wins() -> None:
     # both at confidence 0.80/0.79 -> within the 0.05 band. Different
-    # SHAPES: plan 1 is a single sql-fast-path-eligible operator step
-    # ($0, per the bead's own "operator name -> (llm |
+    # SHAPES, both ending in an answering operator (GH #1545: only those
+    # are cost-ranked): plan 1 is a single sql-fast-path-eligible
+    # operator step ($0, per the bead's own "operator name -> (llm |
     # sql-fast-path-eligible | retrieval)" classification axis); plan 2
     # is a single LLM operator step (static-fallback cost, > 0).
-    cheap = _match(1, 0.79, "search", "operator_filter")
+    cheap = _match(1, 0.79, "search", "operator_aggregate")
     expensive = _match(2, 0.80, "search", "operator_generate")
     matches = [expensive, cheap]  # matcher-ordered: expensive scored higher
     chosen, log = choose_within_band(matches, _empty_table())
@@ -433,7 +434,7 @@ def test_in_band_cheaper_candidate_wins_when_contiguous_from_top() -> None:
     # other AND matches[1] is CONTIGUOUS (position 1, immediately after
     # matches[0]) -> eligible, and the cheaper shape wins.
     top = _match(1, 0.75, "search", "operator_generate")   # priced, expensive shape
-    second = _match(2, 0.79, "search", "operator_filter")  # $0 shape, higher raw confidence
+    second = _match(2, 0.79, "search", "operator_aggregate")  # $0 answering shape, higher raw confidence
     matches = [top, second]
     assert (matches[0].confidence - matches[1].confidence) <= PLAN_CHOICE_CONFIDENCE_BAND
     chosen, log = choose_within_band(matches, _empty_table())
@@ -496,7 +497,7 @@ def test_higher_confidence_candidate_within_band_still_eligible_and_cheaper_wins
     # band stays eligible, and the prefix cost-ranking rule still applies
     # (cheaper shape wins among the eligible prefix).
     top = _match(1, 0.90, "search", "operator_generate")   # priced, expensive shape
-    higher_in_band = _match(2, 0.93, "search", "operator_filter")  # $0 shape, higher raw confidence but within band
+    higher_in_band = _match(2, 0.93, "search", "operator_aggregate")  # $0 answering shape, higher raw confidence but within band
     matches = [top, higher_in_band]
     assert abs(matches[0].confidence - matches[1].confidence) <= PLAN_CHOICE_CONFIDENCE_BAND
     chosen, log = choose_within_band(matches, _empty_table())
@@ -538,8 +539,8 @@ def test_retrieval_only_plan_in_band_never_wins_on_cost() -> None:
     assert chosen.plan_id == 483  # cheapest reducing plan; tie -> earlier position
     by_id = {row["plan_id"]: row for row in log}
     assert by_id[477]["in_band"] is True
-    assert by_id[477]["retrieval_only"] is True
-    assert by_id[483]["retrieval_only"] is False
+    assert by_id[477]["non_answering"] is True
+    assert by_id[483]["non_answering"] is False
 
 
 def test_retrieval_only_top_match_yields_to_an_in_band_reducing_plan() -> None:
@@ -561,7 +562,29 @@ def test_all_in_band_candidates_retrieval_only_falls_back_to_top() -> None:
     other = _match(2, 0.79, "search", "store_get_many")
     chosen, log = choose_within_band([top, other], _empty_table())
     assert chosen.plan_id == 1
-    assert all("retrieval_only" not in row for row in log)
+    assert all("non_answering" not in row for row in log)
+
+
+def test_plan_ending_in_rank_is_non_answering_and_never_admitted_alone() -> None:
+    # Terminal rank classifies as ranking_only downstream (answer_shape), so
+    # it must not count as the answering candidate over a query-only plan.
+    query_only = _match(1, 0.80, "query")
+    ranks = _match(2, 0.79, "search", "operator_rank")
+    chosen, log = choose_within_band([query_only, ranks], _empty_table())
+    assert chosen.plan_id == 1
+    assert all("non_answering" not in row for row in log)
+
+
+def test_plan_whose_summary_feeds_a_terminal_rank_is_non_answering() -> None:
+    # The reduce happened, but PlanResult.final is the last step's output.
+    query_only = _match(1, 0.80, "query")
+    summarized_then_ranked = _match(2, 0.79, "search", "operator_summarize", "operator_rank")
+    answering = _match(3, 0.78, "search", "operator_rank", "operator_generate")
+    chosen, log = choose_within_band([query_only, summarized_then_ranked, answering], _empty_table())
+    assert chosen.plan_id == 3
+    by_id = {row["plan_id"]: row for row in log}
+    assert by_id[2]["non_answering"] is True
+    assert by_id[3]["non_answering"] is False
 
 
 def test_unknown_tool_is_not_a_reduce_step_and_never_wins_unpriced() -> None:
@@ -571,7 +594,7 @@ def test_unknown_tool_is_not_a_reduce_step_and_never_wins_unpriced() -> None:
     misspelled = _match(2, 0.79, "search", "operator_sumarize")
     chosen, log = choose_within_band([query_only, misspelled], _empty_table())
     assert chosen.plan_id == 1
-    assert all("retrieval_only" not in row for row in log)
+    assert all("non_answering" not in row for row in log)
 
 
 def test_choose_within_band_raises_on_empty_matches() -> None:

@@ -609,16 +609,23 @@ def _candidate_log(match: "Match", estimate: PlanCostEstimate, *, in_band: bool)
     }
 
 
-def _has_reduce_step(plan_json: Any) -> bool:
-    """True when at least one step names a recognized operator
-    (:func:`nexus.plans.bundle.is_operator_tool`) -- a step that produces
-    an answer rather than an id list (GH #1545). The file's three-way tool
-    partition (retrieval / recognized operator / unknown) is kept: an
-    unknown or misspelled tool is NOT a reduce step, so it cannot become
-    the sole "reducing" candidate and win over a priced plan while its own
-    estimate is ``usd=None`` (code-review finding, 2026-09-14). Malformed
-    plans count as non-reducing.
+def _ends_in_answer(plan_json: Any) -> bool:
+    """True when the plan's TERMINAL step names an operator whose bare
+    output is an answer (:func:`nexus.plans.answer_shape.is_answering_operator`:
+    summarize, generate, compare, aggregate) -- the same vocabulary
+    ``classify_answer_shape`` applies to ``final_text`` afterwards, so a
+    plan this admits cannot classify as a non-answer shape by construction
+    of its last step (GH #1545). A plan ending in retrieval, hydration, or a
+    partition/judgement operator (extract, rank, filter, check, verify,
+    groupby) is excluded: ``PlanResult.final`` is always the last step's
+    output, so whatever reduced earlier never reaches the caller. An
+    unknown or misspelled tool is not answering either, so it cannot become
+    the sole admitted candidate while its own estimate is ``usd=None``
+    (code-review finding, 2026-09-14). Malformed plans count as
+    non-answering.
     """
+    from nexus.plans.answer_shape import is_answering_operator  # noqa: PLC0415 — deferred: sibling module, avoids an import cycle at load
+
     plan = plan_json
     if isinstance(plan, str):
         try:
@@ -626,14 +633,12 @@ def _has_reduce_step(plan_json: Any) -> bool:
         except (json.JSONDecodeError, TypeError):
             return False
     steps = plan.get("steps") if isinstance(plan, dict) else None
-    if not isinstance(steps, list):
+    if not isinstance(steps, list) or not steps:
         return False
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
-        if is_operator_tool(_extract_tool(step)):
-            return True
-    return False
+    last = steps[-1]
+    if not isinstance(last, dict):
+        return False
+    return is_answering_operator(_extract_tool(last))
 
 
 def choose_within_band(
@@ -697,11 +702,13 @@ def choose_within_band(
     every prefix candidate is unpriceable, ``matches[0]`` is returned --
     the tie resolves to earliest matcher position, i.e. the top match.
 
-    A retrieval-only candidate (no recognized operator step) is excluded from the cost comparison
-    whenever the prefix also holds a reducing candidate (GH #1545): it
-    prices at $0 by construction and would otherwise dominate every plan
-    that produces an answer. It still wins when it is ``matches[0]`` and
-    alone in the band, or when every in-band candidate is retrieval-only.
+    A non-answering candidate (terminal step is not an answering operator,
+    see :func:`_ends_in_answer`) is excluded from the cost comparison
+    whenever the prefix also holds an answering candidate (GH #1545): a
+    retrieval-only plan prices at $0 by construction and would otherwise
+    dominate every plan that produces an answer. It still wins when it is
+    ``matches[0]`` and alone in the band, or when every in-band candidate
+    is non-answering.
 
     ``matches[0].confidence is None`` (the FTS5 fallback sentinel) means
     there is no numeric band to compute -- returns ``matches[0]``
@@ -752,17 +759,17 @@ def choose_within_band(
     if len(prefix) <= 1:
         return matches[0], decision_log
 
-    # GH #1545: a retrieval-only plan (no operator step anywhere) prices at
-    # $0 by construction, so once one sits inside the band it beats every
-    # plan that actually reduces, and nx_answer returns a chunk listing.
-    # Cost-ranking compares only plans with a reduce step; a retrieval-only
-    # plan can still win as matches[0] when it is alone in the band or every
-    # in-band plan is retrieval-only.
-    reducing = [pair for pair in prefix if _has_reduce_step(pair[0].plan_json)]
-    if reducing and len(reducing) < len(prefix):
+    # GH #1545: a retrieval-only plan prices at $0 by construction, so once
+    # one sits inside the band it beats every plan that actually answers,
+    # and nx_answer returns a chunk listing. Cost-ranking compares only
+    # plans whose terminal step is an answering operator; a non-answering
+    # plan can still win as matches[0] when it is alone in the band or
+    # every in-band plan is non-answering.
+    answering = [pair for pair in prefix if _ends_in_answer(pair[0].plan_json)]
+    if answering and len(answering) < len(prefix):
         for row, (m, _est) in zip(decision_log, prefix):
-            row["retrieval_only"] = not _has_reduce_step(m.plan_json)
-        prefix = reducing
+            row["non_answering"] = not _ends_in_answer(m.plan_json)
+        prefix = answering
         if len(prefix) == 1:
             return prefix[0][0], decision_log
 
