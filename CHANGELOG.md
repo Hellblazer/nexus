@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Pinned engine: engine-service-v0.1.119.
+
 ### Fixed
 - **A store pinned to its own engine registers collections on that engine
   (nexus-dvgsf).** The chash, aspect-queue, document-aspects, highlights and
