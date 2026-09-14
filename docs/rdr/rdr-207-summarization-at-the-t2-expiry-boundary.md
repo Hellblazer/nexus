@@ -292,8 +292,9 @@ happened.
   test that inserts a quarantined row and asserts no read returns it.
   **Status**: Verified (finding 4: twelve read entry points, all jOOQ on one
   table). **Method**: Source Search.
-- [ ] A5: `MemoryRepository` has five write entry points, and each reaches
-  an existing row in one of three shapes: an `ON CONFLICT (tenant_id,
+- [ ] A5: `MemoryRepository` has seven write entry points; five reach an
+  existing row in one of three shapes, and the two explicit deletes are
+  named at the end of this item. The shapes: an `ON CONFLICT (tenant_id,
   project, title) DO UPDATE` branch (`upsert`, `importRow`, `importBatch`),
   a content-similarity scan over the project (`putOrMerge`), or explicit ids
   (`mergeMemories`). The rule in the Technical Design is stated per shape,
