@@ -2203,6 +2203,9 @@ class TestCapabilityCensusAndRoutingEventProductionWriteGuard:
         from nexus.db.service_endpoint import ProductionWriteGuardError
 
         monkeypatch.setattr(service_endpoint, "_test_only_opt_in_reason", None)
+        # The operator's shell may carry a real opt-in (a release battery
+        # exports one for its tracker write); the refusal needs none.
+        monkeypatch.delenv(service_endpoint.PROD_WRITE_OPT_IN_ENV, raising=False)
         with pytest.raises(ProductionWriteGuardError):
             client.record_capability_census(
                 session_id="sess-guarded", ts="2026-09-01T00:00:00Z",
@@ -2220,6 +2223,9 @@ class TestCapabilityCensusAndRoutingEventProductionWriteGuard:
         from nexus.db.service_endpoint import ProductionWriteGuardError
 
         monkeypatch.setattr(service_endpoint, "_test_only_opt_in_reason", None)
+        # The operator's shell may carry a real opt-in (a release battery
+        # exports one for its tracker write); the refusal needs none.
+        monkeypatch.delenv(service_endpoint.PROD_WRITE_OPT_IN_ENV, raising=False)
         with pytest.raises(ProductionWriteGuardError):
             client.record_routing_event(rule="r1", outcome="allow")
         assert _REQUEST_COUNT["n"] == 0

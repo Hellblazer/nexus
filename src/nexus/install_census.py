@@ -47,7 +47,7 @@ __all__ = [
 ]
 
 #: The snapshot command, byte-identical to the shell half's ``_nx_ps_snapshot``.
-PS_COMMAND = ("ps", "ax", "-o", "pid=,command=")
+PS_COMMAND = ("ps", "axww", "-o", "pid=,command=")
 
 
 def ps_snapshot() -> str:

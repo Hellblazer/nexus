@@ -6,7 +6,44 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.46.0] - 2026-09-14
+
+Paired with engine-service-v0.1.119. Additive: the directory template and
+`address_kind: session` only widen what the engine accepts, so the engine was
+deployed before the client tag (the additive branch of nexus-1emxn;
+`docs/wire-contract-pending.md`).
+
+Engine fixes carried by engine-service-v0.1.119:
+- The tombstone filter shared by the search functions and `purge_trash`
+  matches manifest rows in the chunk's own collection. Before, a chunk
+  inherited liveness from an identical chunk under a live document in a
+  different collection (GH #1546, nexus-ky9ps). On the managed service, 180
+  chunk rows whose only manifest rows sat in other collections are
+  searchable again (a decided trade-off; the orphan rows are nexus-9la1f).
+- `doc_count` is written only by its triggers, and a recount that cannot see
+  its tenant fails loudly instead of writing zero (nexus-4a8pn).
+- The `schema_migration_complete` log line and `/version`'s
+  `schema_changeset_count` count changesets by identity, so duplicate
+  `databasechangelog` rows no longer inflate them (nexus-jl08t).
+
 ### Fixed
+- **Process probes read the whole command line (`ps -ww`).** On Linux,
+  procps truncates a piped `ps -o command=` to `COLUMNS` when that variable
+  is set, which cut the tail off a long command line. The mailbox watcher's
+  liveness check (new in this release) then read a running `nx tuple watch`
+  as absent, and the orphan-tracker sweep, the install census snapshot and
+  the service registry's command probe could miss what they match on. Every
+  command-column `ps` call now asks for unlimited width.
+- **A 504 on a server-side-embedding write waits out the in-flight embed
+  before resending (nexus-r46u9).** During a slow Voyage window the edge
+  returns 504 at its 30 s bound while the engine keeps embedding; the
+  gateway retry re-sent the same batch after 2 s and 5 s, so each resend
+  was a second full embed and identical batches landed two or three times.
+  On a 504 for `/v1/vectors/upsert-chunks`, `/v1/vectors/store-put`, or a
+  chunk-carrying `/v1/catalog/manifest/write_many`, every retry sleep is now
+  floored so a batch taking up to twice the edge bound finishes before the
+  resend; 502/503 and other routes keep the 2/5/10 s schedule. The floored
+  wait logs `vector_gateway_retry_embed_write_504`.
 - **A store pinned to its own engine registers collections on that engine
   (nexus-dvgsf).** The chash, aspect-queue, document-aspects, highlights and
   taxonomy stores, and the catalog client's `write_manifest_many`,
@@ -99,6 +136,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `instance` is retired after RDR-208 Phase 3. Additive for old clients,
   which never send `session`; a new client sending it to an older engine
   gets `SchemaViolation`, so the engine ships first.
+- **`mailbox_send` MCP tool: mail addressed by session id or by name
+  (RDR-208 Phase 2 Step 2, nexus-galkv.10).** `to` takes a session id, an
+  agent id, or a name. A name is looked up in the session directory at send
+  time: one live holder delivers to that session's mailbox; no holder, or
+  more than one, is refused with the failure named and nothing written. The
+  sender's `from` is the tuple-watch session marker, then
+  `NX_T1_SESSION_ID`; `from_address` overrides it. Auto-approved like the
+  other tuple tools.
+- **The mailbox watcher leases its name in `directory/<name>` (RDR-208
+  Phase 2 Step 1, nexus-galkv.9).** `nx tuple watch --instance NAME` writes a
+  directory entry with a 300 s TTL and re-sends it every 60 s, mints a fresh
+  nonce before the 7-day retention ceiling, and releases the entry within
+  about a second when it stops itself after a `/clear`. A plain exit leaves
+  the entry to lapse, so a `/resume` inside the TTL still resolves the name.
+- **`nx tuple directory NAME` (RDR-208 Phase 2 Step 4, nexus-galkv.11).**
+  Shows each live directory entry for NAME and whether it resolves to one
+  session or is held by several (the case `mailbox_send` refuses); `--json`
+  for scripts. It classifies through the same function as `mailbox_send`.
+- **`/clear` no longer strands mail (RDR-208 Phase 2 Step 3,
+  nexus-galkv.6).** SessionStart records the previous session id at a
+  `/clear`, and the UserPromptSubmit drain empties that session's mailbox
+  once, deleting the record only when every named mailbox is confirmed empty.
 
 ## [7.45.0] - 2026-09-14
 

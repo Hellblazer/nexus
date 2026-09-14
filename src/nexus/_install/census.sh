@@ -42,7 +42,7 @@ _nx_census_here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # $1 optional: "refresh" to retake it.
 _nx_ps_snapshot() {
     if [ "${1-}" = "refresh" ] || [ -z "${_NX_PS_SNAPSHOT+set}" ]; then
-        _NX_PS_SNAPSHOT="$(ps ax -o pid=,command= 2>/dev/null)"
+        _NX_PS_SNAPSHOT="$(ps axww -o pid=,command= 2>/dev/null)"
     fi
     printf '%s\n' "$_NX_PS_SNAPSHOT"
 }
