@@ -2,12 +2,12 @@
 title: "Session-Id Mail Addressing: One Mailbox per Session, Names Resolved at Send Time"
 id: RDR-208
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-09-14
-accepted_date:
+accepted_date: 2026-09-14
 related_issues: [nexus-6konb.21, nexus-6konb]
 related_rdrs: [RDR-205, RDR-206, RDR-105, RDR-184]
 ---
