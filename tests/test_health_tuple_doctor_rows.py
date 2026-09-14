@@ -584,15 +584,62 @@ class TestCheckTupleWatchPermission:
         assert "not applicable" in r.detail
         assert "not configured" not in r.detail
 
-    def test_user_config_dir_absent_ignores_project_files_present(self, tmp_path) -> None:
-        # Keyed on the USER directory only -- a project .claude with its own
-        # rules (the shape every checkout of this repo has) must not change
-        # the verdict when the user-level directory itself does not exist.
-        paths = _three_files(tmp_path, project={"permissions": {"allow": ["Bash(nx:*)"]}})
+    def test_user_config_dir_absent_but_project_allow_covers_is_ok_not_na(self, tmp_path) -> None:
+        # ship-blocker fix (T2 nexus/7zhag-cre-2026-09-14): the allow/deny
+        # scan across all three files runs BEFORE the not-applicable check.
+        # A project file's rules are read by Claude Code regardless of
+        # whether ~/.claude exists, so a covering allow there must still be
+        # reported as ok, never masked by the user directory's absence.
+        paths = _three_files(tmp_path, project={"permissions": {"allow": ["Bash(nx tuple:*)"]}})
+        assert not paths[0][1].parent.exists()
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is True and r.warn is not True
+        assert "(project)" in r.detail
+        assert "not applicable" not in r.detail
+
+    def test_user_config_dir_absent_but_project_deny_covers_is_denied(self, tmp_path) -> None:
+        # Same ship-blocker: a deny in a project file must still win over
+        # the not-applicable branch when the user directory does not exist.
+        paths = _three_files(tmp_path, project={"permissions": {"deny": ["Bash(nx tuple watch:*)"]}})
+        assert not paths[0][1].parent.exists()
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is False and r.warn is True
+        assert "denied" in r.detail
+        assert "(project)" in r.detail
+        assert "not applicable" not in r.detail
+
+    def test_user_config_dir_absent_with_no_covering_rule_anywhere_is_na(self, tmp_path) -> None:
+        # Keyed on the USER directory only, in the ABSENCE of any covering
+        # rule elsewhere: a project .claude with unrelated (non-covering)
+        # content must not change the not-applicable verdict.
+        paths = _three_files(tmp_path, project={"env": {}})
         assert not paths[0][1].parent.exists()
         r = h._check_tuple_watch_permission(settings_paths=paths)[0]
         assert r.ok is True and r.warn is not True
         assert "not applicable" in r.detail
+
+    def test_unreadable_user_config_dir_is_treated_as_present_soft_warns(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        # The directory-existence check is new, and unlike a plain missing
+        # directory, a permission-denied stat must not silently read as
+        # not-applicable. Simulate the OSError by monkeypatching Path.is_dir
+        # for just this one path -- an actual chmod 000 is not reliable
+        # here since root and some CI sandboxes ignore that bit.
+        paths = _three_files(tmp_path)
+        user_dir = paths[0][1].parent
+        real_is_dir = Path.is_dir
+
+        def _flaky_is_dir(self: Path) -> bool:
+            if self == user_dir:
+                raise PermissionError("simulated: stat denied")
+            return real_is_dir(self)
+
+        monkeypatch.setattr(Path, "is_dir", _flaky_is_dir)
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is False and r.warn is True
+        assert "not configured" in r.detail
+        assert "not applicable" not in r.detail
 
     def test_default_paths_are_not_applicable_when_claude_config_dir_is_absent(
         self, tmp_path, monkeypatch,

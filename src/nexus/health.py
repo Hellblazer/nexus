@@ -5625,38 +5625,46 @@ def _check_tuple_watch_permission(
     project-local) that carries a covering allow rule is reported, named.
     Absent both, the row reports "not configured", naming the entry to add.
 
-    Not applicable when Claude Code has never run on this machine at all
-    (bead nexus-7zhag, found by the 7.45.0 release battery's fresh-install
-    MVV leg 8/10): when the USER-level Claude config directory -- the
-    parent of the "user" entry in :func:`_claude_settings_paths`
+    Not applicable ONLY within the "not configured" outcome above -- no
+    covering allow anywhere and no deny anywhere either (bead nexus-7zhag,
+    found by the 7.45.0 release battery's fresh-install MVV leg 8/10, fixed
+    in two passes after the first pass's own ship-blocker, T2
+    nexus/7zhag-cre-2026-09-14): when the USER-level Claude config directory
+    -- the parent of the "user" entry in :func:`_claude_settings_paths`
     (``CLAUDE_CONFIG_DIR``, or ``~/.claude``) -- does not exist, there is no
     permission surface for this row to check yet, so it reports ``ok=True``
-    with no warning, naming why. This is keyed ONLY on the user-level
+    with no warning, naming why, INSTEAD OF the soft "not configured" warn.
+    This check runs LAST, after the full allow/deny scan across all three
+    files: a project or project-local ``permissions.deny``/``.allow`` is
+    read by Claude Code regardless of whether ``~/.claude`` exists, so a
+    covering rule anywhere -- deny or allow -- still wins exactly as before,
+    even with the user directory absent. It is keyed ONLY on the user-level
     directory, never the project one: the project ``.claude`` directory
     exists in this very checkout regardless of whether Claude Code has ever
     run for the user, and a virgin box's real HOME carries no ``.claude`` at
-    all. Severity is per branch, never uniform and never fatal: the
-    not-applicable branch above is ``ok=True``; once the user directory
-    exists, ``ok=True`` only when a covering allow rule stands unchallenged
-    by any deny, and ``ok=False, warn=True`` (soft, never fatal) for a deny
-    override or no covering rule at all.
+    all. The directory-existence check itself never raises: an unreadable
+    parent (e.g. permission-denied on stat) is treated as PRESENT, falling
+    through to the ordinary soft "not configured" warn -- conservative,
+    since "cannot tell" must never read as "nothing to check here" the way
+    "does not exist" does. Severity is per branch, never uniform and never
+    fatal: ``ok=True`` when a covering allow rule stands unchallenged by any
+    deny, or when the user directory is absent (not-applicable, no
+    override survives it); ``ok=False, warn=True`` (soft, never fatal) for
+    a deny override or a "not configured" outcome with the user directory
+    present (or unreadable).
+
+    Caveat: this row reads ``CLAUDE_CONFIG_DIR`` from ``nx doctor``'s OWN
+    process environment (:func:`_claude_settings_path`), which need not
+    match the environment of the Claude Code process actually running the
+    Monitor -- a Claude Code launched with a different ``CLAUDE_CONFIG_DIR``
+    than the shell invoking ``nx doctor`` makes this row look at the wrong
+    directory.
     """
     label = _TUPLE_WATCH_PERMISSION_LABEL
     paths = settings_paths if settings_paths is not None else _claude_settings_paths()
     hint_path = paths[0][1] if paths else _claude_settings_path()
     hint = f"add {_TUPLE_WATCH_DOCUMENTED_RULE!r} to permissions.allow in {hint_path}"
     all_paths_str = ", ".join(str(p) for _, p in paths)
-
-    user_config_dir = hint_path.parent
-    if not user_config_dir.is_dir():
-        return [HealthResult(
-            label=label, ok=True,
-            detail=(
-                f"not applicable -- {user_config_dir} does not exist, so Claude Code has "
-                "never run on this machine; there is no permissions.allow/.deny surface for "
-                f"'{_TUPLE_WATCH_COMMAND}' to check yet."
-            ),
-        )]
 
     covering: tuple[str, Path] | None = None
     denying: tuple[str, Path] | None = None
@@ -5686,6 +5694,22 @@ def _check_tuple_watch_permission(
         return [HealthResult(
             label=label, ok=True,
             detail=f"{path} ({name}) permissions.allow covers '{_TUPLE_WATCH_COMMAND}'",
+        )]
+
+    user_config_dir = hint_path.parent
+    try:
+        user_config_dir_exists = user_config_dir.is_dir()
+    except OSError:
+        user_config_dir_exists = True  # unreadable is not the same as absent -- stay conservative
+
+    if not user_config_dir_exists:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=(
+                f"not applicable -- {user_config_dir} does not exist, so Claude Code has "
+                "never run on this machine; there is no permissions.allow/.deny surface for "
+                f"'{_TUPLE_WATCH_COMMAND}' to check yet."
+            ),
         )]
 
     return [HealthResult(
