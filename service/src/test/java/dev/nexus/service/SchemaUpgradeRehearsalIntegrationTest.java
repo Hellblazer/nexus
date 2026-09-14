@@ -227,6 +227,29 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * coverage regeneration was needed for this check (OLD_TAG did not
      * change); {@code uv run pytest tests/test_rehearsal_seed_coverage_lint.py}
      * and this class both stayed green throughout.
+     *
+     * <p><strong>2026-09-14 rotation check (engine-service-v0.1.119 downstream
+     * bump, RDR-208 Phase 1 R1): STILL NOT rotated, same reason.</strong>
+     * {@code catalog-013-chash-checks-validate.xml} is present in both
+     * {@code engine-service-v0.1.118} and {@code engine-service-v0.1.119}
+     * (verified via {@code git cat-file -e <tag>:<path>}) — the divergence-
+     * injection point has not moved since the 2026-09-13 check above, so
+     * every candidate "previously-deployed" tag from v0.1.33 onward still
+     * fails this test's own precondition and {@code engine-service-v0.1.17}
+     * stays pinned. One thing DID change since the last check:
+     * {@code catalog-002-hygiene.xml} is no longer byte-identical between
+     * v0.1.17 and HEAD — {@code git diff engine-service-v0.1.17 HEAD --
+     * .../catalog-002-hygiene.xml} now shows a 3-line addition (commit
+     * {@code 729c61d5c}, nexus-f7dwp's mechanized DATA EFFECT disclosure
+     * backfill). The added text is a {@code <comment>} line only
+     * ("DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing
+     * ... value"); no SQL statement changed, and {@code
+     * scripts/data_effect_lint.py}'s own contract is that this class of edit
+     * is checksum-neutral, so the divergence-injection point still reaches
+     * the same constraint-bearing state on the old leg. No manifest/seed-
+     * coverage regeneration needed (OLD_TAG did not change); {@code uv run
+     * pytest tests/test_rehearsal_seed_coverage_lint.py} and this class both
+     * stayed green throughout.
      */
     private static final String OLD_TAG = "engine-service-v0.1.17";
 
