@@ -54,10 +54,18 @@ import java.util.Map;
  *   <li>{@code DOC_CROSS_TOMB} (collection A) + {@code DOC_CROSS_LIVE} (collection B) /
  *       {@code CHASH_CROSS} — the cross-collection case the FIRST, rejected client-side cut
  *       of nexus-zewg3 could not resolve correctly (critique T2 nexus/critique-nexus-zewg3
- *       Significant 1): a chash physically stored in collection A, tombstone-referenced from
- *       a doc in A, but ALSO live-referenced from a doc in B. {@code nexus.purge_trash}'s own
- *       chunk-sweep predicate is collection-blind on the manifest side, so this chash is
- *       protected tenant-wide and must never count toward collection A's total either.</li>
+ *       Significant 1): a chash physically stored in BOTH collection A and collection B (two
+ *       independent {@code nexus.chunks} rows, one per collection — RDR-191), tombstone-
+ *       referenced from a doc in A, but ALSO live-referenced from a UNRELATED doc in B.
+ *       <strong>GH #1546 (nexus-ky9ps) UPDATED this fixture's own expectation:</strong>
+ *       {@code nexus.purge_trash}'s chunk-sweep predicate (and its two Java mirrors,
+ *       {@link CatalogRepository#strandedChunkCount} / {@code
+ *       PgVectorRepository#liveChunksCondition}) are now scoped to the chunk's OWN
+ *       collection, so collection B's live document no longer protects collection A's row —
+ *       A's copy counts toward A's tombstone-protected total and IS reclaimed by
+ *       {@code purgeTrash}; B's copy, protected by its own live manifest row, is untouched.
+ *       Before this fix, the predicate was collection-blind on the manifest side and B's live
+ *       reference incorrectly protected A's row tenant-wide.</li>
  * </ul>
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -220,22 +228,25 @@ class CatalogTombstoneProtectedChunkCountTest {
     // ── tombstone the fixture's three candidate docs ────────────────────────────
 
     @Test @Order(20)
-    void afterTombstoning_onlyTheTombstoneOnlyChashCounts_sharedAndCrossCollectionChashesDoNot() {
+    void afterTombstoning_tombOnlyAndCrossCollectionChashesCount_sharedDoesNot() {
         assertThat(catalogRepo.deleteDocument(TENANT, DOC_TOMB_ONLY)).isEqualTo(1);
         assertThat(catalogRepo.deleteDocument(TENANT, DOC_SHARED_TOMB)).isEqualTo(1);
         assertThat(catalogRepo.deleteDocument(TENANT, DOC_CROSS_TOMB)).isEqualTo(1);
 
         assertThat(catalogRepo.tombstoneProtectedChunkCount(TENANT, COLLECTION_A))
-            .as("exactly CHASH_TOMB_ONLY: CHASH_SHARED is still live-referenced by "
-                + "DOC_SHARED_LIVE in the SAME collection, and CHASH_CROSS is still "
-                + "live-referenced by DOC_CROSS_LIVE in COLLECTION_B -- purge_trash's own "
-                + "predicate is collection-blind on the manifest side, so a live reference "
-                + "in ANY collection protects it (the nexus-zewg3 critique's Significant 1 "
-                + "cross-collection gap the first, rejected client-side cut could not close)")
-            .isEqualTo(1L);
+            .as("GH #1546 / nexus-ky9ps: CHASH_TOMB_ONLY AND CHASH_CROSS both count now. "
+                + "CHASH_SHARED is still live-referenced by DOC_SHARED_LIVE in the SAME "
+                + "collection, so it stays protected. CHASH_CROSS's only manifest row IN "
+                + "COLLECTION_A points at the now-tombstoned DOC_CROSS_TOMB -- the live "
+                + "reference from DOC_CROSS_LIVE lives in a DIFFERENT collection (B) and no "
+                + "longer protects A's row, since the predicate is scoped to the examined "
+                + "row's own collection (the nexus-zewg3 critique's Significant 1 "
+                + "cross-collection gap, now closed by the collection-scoped fix)")
+            .isEqualTo(2L);
         assertThat(catalogRepo.tombstoneProtectedChunkCount(TENANT, COLLECTION_B))
-            .as("COLLECTION_B's only chunk (CHASH_CROSS) is live-referenced by "
-                + "DOC_CROSS_LIVE, which is not tombstoned")
+            .as("COLLECTION_B's own copy of CHASH_CROSS is live-referenced by "
+                + "DOC_CROSS_LIVE, which is not tombstoned -- protected by its OWN "
+                + "collection's manifest row")
             .isEqualTo(0L);
     }
 
@@ -264,15 +275,17 @@ class CatalogTombstoneProtectedChunkCountTest {
         assertThat(perCollectionSum)
             .as("summing the collection-scoped count across every collection in the "
                 + "tenant must equal the tenant-wide stranded count purgeTrashPreview "
-                + "reports at the same olderThanDays=0 threshold")
+                + "reports at the same olderThanDays=0 threshold -- GH #1546 / nexus-ky9ps: "
+                + "2 (CHASH_TOMB_ONLY + CHASH_CROSS, both in COLLECTION_A) now that the "
+                + "predicate is collection-scoped, not 1")
             .isEqualTo(tenantWideStranded)
-            .isEqualTo(1L);
+            .isEqualTo(2L);
     }
 
     // ── execute: purge_trash physically reclaims the tombstone-only chash ──────
 
     @Test @Order(30)
-    void afterPurgeTrash_tombstoneOnlyChashCountDropsToZero_sharedAndCrossSurviveUnaffected() {
+    void afterPurgeTrash_tombOnlyAndCrossCollectionChashCountsDropToZero_sharedSurvivesUnaffected() {
         Map<String, Object> executed = catalogRepo.purgeTrash(TENANT, 0);
         assertThat(executed.get("dry_run")).isEqualTo(false);
 
@@ -283,23 +296,34 @@ class CatalogTombstoneProtectedChunkCountTest {
         assertThat(documentExists(DOC_CROSS_TOMB)).isFalse();
 
         assertThat(catalogRepo.tombstoneProtectedChunkCount(TENANT, COLLECTION_A))
-            .as("CHASH_TOMB_ONLY's chunk row was physically swept by this purgeTrash call "
-                + "-- nothing left in COLLECTION_A held alive only by a tombstone")
+            .as("CHASH_TOMB_ONLY's AND CHASH_CROSS's COLLECTION_A chunk rows were both "
+                + "physically swept by this purgeTrash call (GH #1546 / nexus-ky9ps: the "
+                + "cross-collection row is stranded from A's own perspective now) -- nothing "
+                + "left in COLLECTION_A held alive only by a tombstone")
             .isEqualTo(0L);
         assertThat(catalogRepo.tombstoneProtectedChunkCount(TENANT, COLLECTION_B))
             .isEqualTo(0L);
 
-        // CHASH_SHARED and CHASH_CROSS were never stranded (a live doc protected each
-        // one throughout) -- their physical chunk rows must survive this purge call
-        // untouched, exactly as purge_trash's own predicate promises.
+        // CHASH_SHARED was never stranded (a live doc in the SAME collection protected it
+        // throughout) -- its physical chunk row must survive this purge call untouched.
         assertThat(chunks384CountIn(COLLECTION_A, CHASH_SHARED))
             .as("live-protected chunk must survive purge_trash")
             .isEqualTo(1L);
+        // GH #1546 / nexus-ky9ps: CHASH_CROSS's COLLECTION_A row is now RECLAIMED -- its
+        // only manifest row in A pointed at the now-purged DOC_CROSS_TOMB, and B's live
+        // reference no longer protects A's row under the collection-scoped predicate.
         assertThat(chunks384CountIn(COLLECTION_A, CHASH_CROSS))
-            .as("cross-collection-live-protected chunk must survive purge_trash")
-            .isEqualTo(1L);
+            .as("the cross-collection chunk's COLLECTION_A row is reclaimed -- it was "
+                + "protected ONLY by a tombstone in its own collection")
+            .isEqualTo(0L);
         assertThat(chunks384CountIn(COLLECTION_A, CHASH_TOMB_ONLY))
             .as("the genuinely tombstone-only chunk is gone")
             .isEqualTo(0L);
+        // CHASH_CROSS's SEPARATE, independent COLLECTION_B row is untouched: protected by
+        // its own collection's live manifest row (DOC_CROSS_LIVE), never tombstoned.
+        assertThat(chunks384CountIn(COLLECTION_B, CHASH_CROSS))
+            .as("the cross-collection chunk's COLLECTION_B row survives, protected by its "
+                + "own collection's live manifest row")
+            .isEqualTo(1L);
     }
 }

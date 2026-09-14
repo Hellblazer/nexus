@@ -6,6 +6,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.SQLDialect;
@@ -21,9 +22,12 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -245,19 +249,19 @@ class CatalogPurgeTrashTest {
 
     /** Collection-scoped sibling of {@link #chunks384Count} (GH #1546 / nexus-ky9ps
      *  cross-collection fixture): {@code nexus.chunks} is keyed (tenant_id, collection,
-     *  chash), so a chash present in two collections needs a per-collection count. */
+     *  chash), so a chash present in two collections needs a per-collection count.
+     *  Typed jOOQ (RawSqlGateTest's reduce-only test-tree ceiling), mirroring
+     *  {@code CatalogTombstoneProtectedChunkCountTest#chunks384CountIn}'s own shape. */
     private long chunksCountInCollection(String collection, String chashHex) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            var ps = su.prepareStatement(
-                "SELECT count(*) FROM nexus.chunks WHERE tenant_id = ? AND collection = ? "
-                + "AND chash = decode(?, 'hex') AND embedding_384 IS NOT NULL");
-            ps.setString(1, TENANT);
-            ps.setString(2, collection);
-            ps.setString(3, chashHex);
-            var rs = ps.executeQuery();
-            rs.next();
-            return rs.getLong(1);
-        }
+        return tenantScope.withTenant(TENANT, ctx -> {
+            Long count = ctx.selectCount().from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(TENANT)
+                       .and(CHUNKS.COLLECTION.eq(collection))
+                       .and(ChashHex.hex(CHUNKS.CHASH).eq(chashHex))
+                       .and(CHUNKS.EMBEDDING_384.isNotNull()))
+                .fetchOne(0, Long.class);
+            return count != null ? count : 0L;
+        });
     }
 
     /** nexus-erwvd parity pin support: total {@code nexus.chunks} rows (RDR-191
@@ -613,11 +617,13 @@ class CatalogPurgeTrashTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION2);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES "
-                + "('" + TENANT + "', '" + DOC_CROSS_DEAD + "', 'Cross Dead', '" + COLLECTION + "'), "
-                + "('" + TENANT + "', '" + DOC_CROSS_LIVE + "', 'Cross Live', '" + COLLECTION2 + "')");
         }
+        // Typed jOOQ (RawSqlGateTest's reduce-only test-tree ceiling) via CatalogRepository's
+        // own public upsertDocument, rather than a raw multi-row INSERT string.
+        catalogRepo.upsertDocument(TENANT, Map.of(
+            "tumbler", DOC_CROSS_DEAD, "title", "Cross Dead", "physical_collection", COLLECTION));
+        catalogRepo.upsertDocument(TENANT, Map.of(
+            "tumbler", DOC_CROSS_LIVE, "title", "Cross Live", "physical_collection", COLLECTION2));
 
         // Same chash, physically stored in BOTH collections -- nexus.chunks is keyed
         // (tenant_id, collection, chash), so these are two independent rows.
@@ -630,13 +636,26 @@ class CatalogPurgeTrashTest {
             insertManifestRow(su, DOC_CROSS_LIVE, CHASH_CROSS, COLLECTION2);
         }
 
+        // Baseline dry-run total (nothing tombstoned in THIS fixture yet) -- the
+        // delta below isolates exactly this fixture's own contribution, uncontaminated
+        // by whatever the earlier Order(10-30) fixtures already left stranded/resolved
+        // in the shared TENANT.
+        long strandedBefore = ((Number) catalogRepo.purgeTrashPreview(TENANT, olderThanDays)
+            .get("chunks_384_stranded")).longValue();
+
         assertThat(catalogRepo.deleteDocument(TENANT, DOC_CROSS_DEAD)).isEqualTo(1);
         // Age the tombstone past the grace window; DOC_CROSS_LIVE stays live throughout.
+        // Typed jOOQ (RawSqlGateTest's reduce-only test-tree ceiling), mirroring
+        // ReadShapeViewsTest's own DELETED_AT-backdate idiom -- a Java-clock
+        // OffsetDateTime value, not SQL interval arithmetic; the 60-day margin against
+        // this test's 30-day older_than threshold leaves no room for JVM/Postgres clock
+        // drift to matter.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "UPDATE nexus.catalog_documents SET deleted_at = NOW() - interval '60 days' "
-                + "WHERE tenant_id = '" + TENANT + "' AND tumbler = '" + DOC_CROSS_DEAD + "'");
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now().minusDays(60))
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(DOC_CROSS_DEAD)))
+                .execute();
         }
 
         assertThat(chunksCountInCollection(COLLECTION, CHASH_CROSS))
@@ -644,6 +663,20 @@ class CatalogPurgeTrashTest {
             .isEqualTo(1L);
         assertThat(chunksCountInCollection(COLLECTION2, CHASH_CROSS))
             .as("sanity: cross-collection chunk present in COLLECTION2 before purge")
+            .isEqualTo(1L);
+
+        // GH #1546 / nexus-ky9ps: strandedChunkCount's collection scoping had no direct
+        // dry-run regression coverage before this -- the DELTA (not an absolute number,
+        // to stay uncontaminated by the rest of this class's shared-tenant fixture state)
+        // must attribute exactly ONE newly-stranded chunk: COLLECTION's copy, whose only
+        // manifest row now points at the aged DOC_CROSS_DEAD tombstone. COLLECTION2's
+        // copy stays protected by its own live manifest row (DOC_CROSS_LIVE) and must
+        // never count, even though it shares the chash.
+        long strandedAfter = ((Number) catalogRepo.purgeTrashPreview(TENANT, olderThanDays)
+            .get("chunks_384_stranded")).longValue();
+        assertThat(strandedAfter - strandedBefore)
+            .as("purgeTrashPreview's dry-run chunks_384_stranded delta must count exactly "
+                + "COLLECTION's cross-collection row as newly stranded, not COLLECTION2's")
             .isEqualTo(1L);
 
         Map<String, Object> executed = catalogRepo.purgeTrash(TENANT, olderThanDays);

@@ -1150,7 +1150,9 @@ $$
         </sql>
         <rollback>
             <!-- Restores catalog-033-gc-audit-producers.xml's catalog-033-1 body
-                 verbatim (collection-unscoped chunk-sweep anti-join). -->
+                 (collection-unscoped chunk-sweep anti-join), functionally identical
+                 but with that changeset's inline SQL comments stripped, not a
+                 byte-for-byte restore. -->
             <sql splitStatements="false" stripComments="false">
 CREATE OR REPLACE FUNCTION nexus.purge_trash(older_than interval)
 RETURNS bigint

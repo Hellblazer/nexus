@@ -373,11 +373,14 @@ class PgVectorTombstoneFilterTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION2);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES "
-                + "('" + TENANT + "', '" + DOC_CROSS_DEAD + "', 'Cross Dead Doc', '" + COLLECTION + "'), "
-                + "('" + TENANT + "', '" + DOC_CROSS_LIVE + "', 'Cross Live Doc', '" + COLLECTION2 + "')");
         }
+        // Typed jOOQ (RawSqlGateTest's reduce-only test-tree ceiling) via
+        // CatalogRepository's own public upsertDocument, rather than a raw multi-row
+        // INSERT string.
+        catalogRepo.upsertDocument(TENANT, Map.of(
+            "tumbler", DOC_CROSS_DEAD, "title", "Cross Dead Doc", "physical_collection", COLLECTION));
+        catalogRepo.upsertDocument(TENANT, Map.of(
+            "tumbler", DOC_CROSS_LIVE, "title", "Cross Live Doc", "physical_collection", COLLECTION2));
 
         // Same chash, physically stored in BOTH collections -- nexus.chunks is keyed
         // (tenant_id, collection, chash), so these are two independent rows.
