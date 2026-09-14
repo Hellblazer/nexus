@@ -525,3 +525,5 @@ the parent; Gap 4 and the MVV are scoped to sessions that share an engine; the
 identity table records that names are kept across `/clear`. A3 moved from
 unverified to verified, and A4 was corrected. Open for the gate: the conflict
 behavior, the fork rule, and the TTL and heartbeat values.
+
+- 2026-09-14: Gate round 1 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `3b07bee53`; critique `nexus_rdr/208-gate-critique-2026-09-14`.
