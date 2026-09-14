@@ -32,7 +32,7 @@ RDR-205 Phase 5/6 consumer: `mailbox/<address>` tuple-space messaging, addressed
 - Resend, one row: the SAME sender resending the SAME nonce to one address is ONE tuple, not a second. `expires_at` never passes `created_at` plus the template's 7-day retention, however many times it is resent.
 - Missing `from`: an `out` naming no `from` is a `SchemaViolation` — `from` is the template's one required dimension.
 - Dead-letter: three attempts against one message — nacks, lapsed leases, or a mix of both — park it out of every future claimant's view. It stays readable by `rd` with `claim_state="dead"`, and `subspace_stats` counts it under `dead`.
-- Template (`service/src/main/resources/tuples/templates/mailbox.yaml`): keys `to`; dims `from` (required), `kind`, `correlation_id`, `address_kind` in `{agent, instance}`; `take.enabled=true`, `max_attempts=3`, `max_lease_seconds=900`, `retention_seconds=604800`.
+- Template (`service/src/main/resources/tuples/templates/mailbox.yaml`): keys `to`; dims `from` (required), `kind`, `correlation_id`, `address_kind` in `{agent, instance, session}` (RDR-208 Phase 1 Step 2; `instance` retired after RDR-208 Phase 3); `take.enabled=true`, `max_attempts=3`, `max_lease_seconds=900`, `retention_seconds=604800`.
 
 ## Success Criteria
 

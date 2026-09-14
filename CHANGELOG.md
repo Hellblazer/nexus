@@ -83,6 +83,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   equal nonce never collapse onto one row), `take.enabled=false` (a lease,
   never claimed), `retention_seconds=604800`, `max_body_bytes=0`. Three v1
   templates now load at boot.
+- **`mailbox/<address>`'s `address_kind` dim gains `session` (RDR-208 Phase 1
+  Step 2, bead nexus-galkv.2).** Values are now `{agent, instance, session}`;
+  `instance` is retired after RDR-208 Phase 3. Additive for old clients,
+  which never send `session`; a new client sending it to an older engine
+  gets `SchemaViolation`, so the engine ships first.
 
 ## [7.45.0] - 2026-09-14
 

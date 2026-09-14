@@ -348,6 +348,47 @@ class TupleRepositoryTest {
         assertThat(rows).as("two distinct rows, not one collapsed by a shared id").hasSize(2);
     }
 
+    // ── mailbox address_kind gains session (RDR-208 P1.2, bead nexus-galkv.2) ──
+
+    @Test
+    void out_mailboxAddressKindSession_accepted_readBack() {
+        String to = "agent-kind-session-" + UUID.randomUUID();
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+                Map.of("from", "sender-kind-session", "address_kind", "session"),
+                "body", "nonce-kind-session", null);
+
+        var rows = repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).dims()).containsEntry("address_kind", "session");
+    }
+
+    /** instance is retired after RDR-208 Phase 3, but stays accepted through
+     *  the migration window -- see the header comment in mailbox.yaml. */
+    @Test
+    void out_mailboxAddressKindInstance_stillAccepted_readBack() {
+        String to = "agent-kind-instance-" + UUID.randomUUID();
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+                Map.of("from", "sender-kind-instance", "address_kind", "instance"),
+                "body", "nonce-kind-instance", null);
+
+        var rows = repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).dims()).containsEntry("address_kind", "instance");
+    }
+
+    @Test
+    void out_mailboxAddressKindUnlistedValue_schemaViolation_noRowWritten() {
+        String to = "agent-kind-bogus-" + UUID.randomUUID();
+        assertThatThrownBy(() -> repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+                Map.of("from", "sender-kind-bogus", "address_kind", "process"),
+                "body", "nonce-kind-bogus", null))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("field 'address_kind'")
+                .hasMessageContaining("not in [agent, instance, session]");
+
+        assertThat(repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null)).isEmpty();
+    }
+
     // ── ten concurrent inp on one row ───────────────────────────────────────
 
     @Test
