@@ -527,6 +527,53 @@ def test_fts5_sentinel_confidence_skips_band_math_returns_top() -> None:
     assert log[1]["in_band"] is False
 
 
+def test_retrieval_only_plan_in_band_never_wins_on_cost() -> None:
+    # GH #1545, the recorded run: plans 483/482 reduce, 477 is query-only
+    # at $0 and sat inside the band, so the chooser returned an id list.
+    summarize = _match(483, 0.547, "search", "traverse", "search", "store_get_many", "operator_summarize")
+    generate = _match(482, 0.519, "search", "traverse", "store_get_many", "operator_generate")
+    query_only = _match(477, 0.507, "query")
+    chosen, log = choose_within_band([summarize, generate, query_only], _empty_table())
+    assert chosen.plan_id != 477
+    assert chosen.plan_id == 483  # cheapest reducing plan; tie -> earlier position
+    by_id = {row["plan_id"]: row for row in log}
+    assert by_id[477]["in_band"] is True
+    assert by_id[477]["retrieval_only"] is True
+    assert by_id[483]["retrieval_only"] is False
+
+
+def test_retrieval_only_top_match_yields_to_an_in_band_reducing_plan() -> None:
+    query_only = _match(1, 0.80, "query")
+    reducing = _match(2, 0.79, "search", "operator_summarize")
+    chosen, _log = choose_within_band([query_only, reducing], _empty_table())
+    assert chosen.plan_id == 2
+
+
+def test_retrieval_only_top_match_wins_when_the_reducing_plan_is_out_of_band() -> None:
+    query_only = _match(1, 0.80, "query")
+    reducing = _match(2, 0.70, "search", "operator_summarize")
+    chosen, _log = choose_within_band([query_only, reducing], _empty_table())
+    assert chosen.plan_id == 1
+
+
+def test_all_in_band_candidates_retrieval_only_falls_back_to_top() -> None:
+    top = _match(1, 0.80, "query")
+    other = _match(2, 0.79, "search", "store_get_many")
+    chosen, log = choose_within_band([top, other], _empty_table())
+    assert chosen.plan_id == 1
+    assert all("retrieval_only" not in row for row in log)
+
+
+def test_unknown_tool_is_not_a_reduce_step_and_never_wins_unpriced() -> None:
+    # An unrecognized tool prices at usd=None and is not an operator, so it
+    # is not "reducing": the retrieval-only top match keeps the band.
+    query_only = _match(1, 0.80, "query")
+    misspelled = _match(2, 0.79, "search", "operator_sumarize")
+    chosen, log = choose_within_band([query_only, misspelled], _empty_table())
+    assert chosen.plan_id == 1
+    assert all("retrieval_only" not in row for row in log)
+
+
 def test_choose_within_band_raises_on_empty_matches() -> None:
     with pytest.raises(ValueError):
         choose_within_band([], _empty_table())

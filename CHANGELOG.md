@@ -7,6 +7,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **`nx_answer(scope=<owner name>)` resolves a name shared by a repo and a
+  curator owner to the repo (GH #1544, nexus-twtma).** The
+  `UNIQUE(name, owner_type)` constraint lets `1.48 repo canon-chat` and
+  `1.49 curator canon-chat` (the curator behind `knowledge__canon-chat`)
+  coexist, and `resolve_owner_scope` refused the name outright, so every
+  scoped surface (`nx_answer`, `query(subtree=)`, `nx search --repo`,
+  `catalog_resolve(owner=)`) failed for any repo with a same-named
+  knowledge collection. A shared name now resolves to the single repo
+  owner; the curator stays reachable by its tumbler; a shared name with no
+  single repo owner still raises the candidate-naming error.
+- **`nx_answer` plan choice no longer lets a $0 retrieval-only plan win the
+  confidence band (GH #1545, nexus-uhdkv).** `choose_within_band` took the
+  lowest predicted cost inside the band, and a query-only plan prices at
+  $0 by construction, so once one sat in the band it beat every plan that
+  reduces, and the run ended at step 1 with a chunk listing as
+  `final_text`. Cost-ranking now compares only in-band plans that carry a
+  reduce step (a tool outside the retrieval set); a retrieval-only plan
+  still wins as the top match when it is alone in the band or every
+  in-band plan is retrieval-only. `plan_choice` rows gain
+  `retrieval_only` when the exclusion applied.
 - **`claude -p` dispatch usage now records a canonical model id even when
   the CLI reports two `modelUsage` entries (nexus-xepsr).** Every live
   dispatch reports a second, near-zero-cost entry for a side call the CLI

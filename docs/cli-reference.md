@@ -1178,7 +1178,7 @@ nx catalog list [--owner PREFIX_OR_NAME] [--type TEXT] [-n/--limit N] [--offset 
 
 | Flag | Description |
 |------|-------------|
-| `--owner` | Filter to one owner. Accepts a dotted tumbler (`1.2`) or an owner name (resolved via catalog lookup); ambiguous names across multiple owners raise a clean error naming the candidates |
+| `--owner` | Filter to one owner. Accepts a dotted tumbler (`1.2`) or an owner name (resolved via catalog lookup); a name shared by a repo and a curator owner resolves to the repo (GH #1544); any other shared name raises a clean error naming the candidates |
 | `--type` | Filter to a `content_type` (e.g. `code`, `rdr`, `knowledge`) |
 | `-n`, `--limit` | Page size. Default `50`. **Server-side cap (nexus-xoimv)** — the underlying query is limited at the source, not truncated client-side after a full fetch |
 | `--offset` | Skip this many entries (pagination) |

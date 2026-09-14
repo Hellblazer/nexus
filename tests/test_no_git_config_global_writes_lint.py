@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import subprocess
 
 import pytest
 
@@ -161,9 +162,23 @@ def _violations(text: str) -> list[str]:
     return hits
 
 
+def _git_tracked(pattern: str) -> list[pathlib.Path]:
+    """Files git tracks under REPO_ROOT matching *pattern* (a ``git ls-files``
+    pathspec such as ``*.py``). Tracked, not walked: an rglob over the
+    checkout also scans every ignored venv on the box (a second
+    ``.venv-3.13`` here flagged huggingface_hub's own ``git config
+    --global`` on 2026-09-14), which is neither this repo's code nor
+    anything a fix could reach.
+    """
+    out = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "--", pattern],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    return sorted(REPO_ROOT / rel for rel in out.split("\0") if rel)
+
+
 def _tracked_scripts() -> list[pathlib.Path]:
-    scripts = sorted(REPO_ROOT.rglob("*.sh"))
-    return [p for p in scripts if ".git" not in p.parts]
+    return [p for p in _git_tracked("*.sh") if ".git" not in p.parts]
 
 
 #: This lint's own file, excluded from its own Python scan: its docstring
@@ -175,7 +190,7 @@ _SELF = pathlib.Path(__file__).resolve()
 
 
 def _tracked_python_files() -> list[pathlib.Path]:
-    files = sorted(REPO_ROOT.rglob("*.py"))
+    files = _git_tracked("*.py")
     return [
         p
         for p in files

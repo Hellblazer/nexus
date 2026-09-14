@@ -116,3 +116,18 @@ be correct once a choice exists.
 | `nexus-se36l` | Estimator returns one constant per plan; no re-derive tripwire. |
 | `nexus-8uk28` | `check`'s `ok` bool gates branching on a saturated proxy. |
 | `nexus-i8to5` | Planner dispatch invisible in per-step telemetry. |
+
+## Addendum, 2026-09-14
+
+Phase 3's min-cost-within-band selection shipped with a hole its own
+telemetry made visible three weeks later (GH #1545, nexus-uhdkv): a
+retrieval-only plan prices at $0 by construction, so the moment one sat
+inside the band it beat every plan that reduces, and `nx_answer` returned
+a chunk listing as `final_text`. Five of fifteen recent runs on the
+reporting store were degenerate. The chooser now cost-ranks only in-band
+plans that carry a recognized operator step; a retrieval-only plan still
+wins as the top match when it is alone in the band or every in-band plan
+is retrieval-only. The lesson is the one above in a smaller frame: the
+cost axis was tuned against plans that all answered, and nothing asserted
+that the cheapest plan still produced an answer.
+

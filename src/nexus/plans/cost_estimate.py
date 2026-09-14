@@ -609,6 +609,33 @@ def _candidate_log(match: "Match", estimate: PlanCostEstimate, *, in_band: bool)
     }
 
 
+def _has_reduce_step(plan_json: Any) -> bool:
+    """True when at least one step names a recognized operator
+    (:func:`nexus.plans.bundle.is_operator_tool`) -- a step that produces
+    an answer rather than an id list (GH #1545). The file's three-way tool
+    partition (retrieval / recognized operator / unknown) is kept: an
+    unknown or misspelled tool is NOT a reduce step, so it cannot become
+    the sole "reducing" candidate and win over a priced plan while its own
+    estimate is ``usd=None`` (code-review finding, 2026-09-14). Malformed
+    plans count as non-reducing.
+    """
+    plan = plan_json
+    if isinstance(plan, str):
+        try:
+            plan = json.loads(plan)
+        except (json.JSONDecodeError, TypeError):
+            return False
+    steps = plan.get("steps") if isinstance(plan, dict) else None
+    if not isinstance(steps, list):
+        return False
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        if is_operator_tool(_extract_tool(step)):
+            return True
+    return False
+
+
 def choose_within_band(
     matches: "list[Match]",
     price_table: OperatorPriceTable,
@@ -670,6 +697,12 @@ def choose_within_band(
     every prefix candidate is unpriceable, ``matches[0]`` is returned --
     the tie resolves to earliest matcher position, i.e. the top match.
 
+    A retrieval-only candidate (no recognized operator step) is excluded from the cost comparison
+    whenever the prefix also holds a reducing candidate (GH #1545): it
+    prices at $0 by construction and would otherwise dominate every plan
+    that produces an answer. It still wins when it is ``matches[0]`` and
+    alone in the band, or when every in-band candidate is retrieval-only.
+
     ``matches[0].confidence is None`` (the FTS5 fallback sentinel) means
     there is no numeric band to compute -- returns ``matches[0]``
     unchanged; every candidate is still logged with ``in_band`` set only
@@ -718,6 +751,20 @@ def choose_within_band(
 
     if len(prefix) <= 1:
         return matches[0], decision_log
+
+    # GH #1545: a retrieval-only plan (no operator step anywhere) prices at
+    # $0 by construction, so once one sits inside the band it beats every
+    # plan that actually reduces, and nx_answer returns a chunk listing.
+    # Cost-ranking compares only plans with a reduce step; a retrieval-only
+    # plan can still win as matches[0] when it is alone in the band or every
+    # in-band plan is retrieval-only.
+    reducing = [pair for pair in prefix if _has_reduce_step(pair[0].plan_json)]
+    if reducing and len(reducing) < len(prefix):
+        for row, (m, _est) in zip(decision_log, prefix):
+            row["retrieval_only"] = not _has_reduce_step(m.plan_json)
+        prefix = reducing
+        if len(prefix) == 1:
+            return prefix[0][0], decision_log
 
     def _sort_key(indexed: "tuple[int, tuple[Match, PlanCostEstimate]]") -> tuple[int, float, int]:
         position, (_m, est) = indexed

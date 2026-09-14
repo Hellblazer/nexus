@@ -114,6 +114,41 @@ class TestStep1PlanChoiceWiring:
         assert choice_events[0]["chosen_plan_id"] == cheap.plan_id
 
     @pytest.mark.asyncio
+    async def test_in_band_retrieval_only_plan_yields_to_the_reducing_plan(self, tmp_path):
+        """GH #1545 (nexus-uhdkv) through the real Step-1 path: the top
+        match is a $0 query-only plan, a reducing plan sits in the band;
+        the envelope names the reducing plan and its candidate row carries
+        ``retrieval_only`` for the excluded one."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.cost_estimate as _cost
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        _cost.invalidate_price_table_cache()
+        query_only = _match(477, 0.507, "query", name="query-only")
+        reducing = _match(483, 0.547, "search", "store_get_many", "operator_summarize", name="reducing")
+        run_result = PlanResult(steps=[{"text": "The final answer."}])
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[query_only, reducing]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("how is dp-mcp deployed to staging?", structured=True)
+
+        plan_choice = result["plan_choice"]
+        assert plan_choice is not None
+        assert plan_choice["chosen_plan_id"] == reducing.plan_id
+        assert result["plan_id"] == reducing.plan_id
+        rows = {row["plan_id"]: row for row in plan_choice["candidates"]}
+        assert rows[query_only.plan_id]["retrieval_only"] is True
+        assert rows[reducing.plan_id]["retrieval_only"] is False
+
+    @pytest.mark.asyncio
     async def test_cost_ranking_failure_falls_back_to_top_confidence_match(self, tmp_path, monkeypatch):
         """(c) fail-safe: choose_within_band raising -> nx_answer proceeds
         with matches[0] (the pre-existing top-confidence choice), never

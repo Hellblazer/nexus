@@ -73,9 +73,32 @@ def resolve_owner_scope(cat: Any, raw: str, *, strict: bool = True) -> str:
             "registered owner. `nx catalog owners` lists the known owners."
         )
     if len(matches) > 1:
+        repo_matches = _repo_owners_among(cat, matches)
+        if len(repo_matches) == 1:
+            # GH #1544: a repo and the curator behind its knowledge__<name>
+            # collection legitimately share one name (the constraint is
+            # UNIQUE(name, owner_type)). The name a caller has in hand is
+            # the repo's; the curator stays reachable by its tumbler.
+            return str(repo_matches[0])
         candidates = ", ".join(str(t) for t in matches)
         raise OwnerScopeError(
             f"{text!r} is ambiguous: {len(matches)} owners share this name across "
             f"types ({candidates}). Pass the dotted tumbler."
         )
     return str(matches[0])
+
+
+def _repo_owners_among(cat: Any, tumblers: list[Any]) -> list[Any]:
+    """The subset of *tumblers* whose owner row is ``owner_type == "repo"``.
+
+    Read through ``get_owner_by_prefix`` (on the reader protocol already)
+    rather than a new by-name-with-type method, so this stays a two-extra-
+    round-trip path taken only when a name is shared. An owner row the
+    catalog cannot show is not a repo; it never captures the name.
+    """
+    repos: list[Any] = []
+    for t in tumblers:
+        row = cat.get_owner_by_prefix(str(t))
+        if isinstance(row, dict) and row.get("owner_type") == "repo":
+            repos.append(t)
+    return repos
