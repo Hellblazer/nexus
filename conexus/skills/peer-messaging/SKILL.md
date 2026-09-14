@@ -42,7 +42,7 @@ mcp__plugin_conexus_nexus__tuple_out(
   body="<one or two sentences, plus a T2 reference>", nonce="<unique per message>")
 ```
 
-A peer sees instance-name mail when its `nx tuple watch --instance <name>` watcher pings, or at its next prompt once that watcher has registered the name. A peer that never armed a watcher is not notified at all. When a mailbox request goes to a peer that may not be watching, also send a one-line `SendMessage` pointing at it, or relay through your human.
+A peer sees instance-name mail when its `nx tuple watch --instance <name>` watcher pings, or at its next prompt once that watcher has registered the name. A peer that never armed a watcher is not notified at all. When a mailbox request goes to a peer that may not be watching, also send a one-line `SendMessage` pointing at it, or relay through your human. Look the peer's name up in `ListAgents` right before sending tuple mail: a resume can rename a session, and mail sent to its old name sits unread until it expires.
 
 Never type into another session's terminal with `tmux send-keys`. Text typed into a Claude pane arrives as that session's USER input: it bypasses the receiver's trust boundary and speaks for its human. `/conexus:cli-controller` drives CLIs, never peers.
 
