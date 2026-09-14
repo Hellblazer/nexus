@@ -3896,8 +3896,17 @@ class TestFailureRecordAddressability:
 
         from nexus.operators.dispatch import claude_dispatch, OperatorError
 
+        # The root logger is process-global: under -n auto a sibling test in
+        # the same worker can leave its own RotatingFileHandler attached, and
+        # the message would then name that file instead of this one
+        # (2 failures in a 19421-pass run, 2026-09-14; both pass alone).
+        # Detach every pre-existing file handler for the duration.
+        root = logging.getLogger()
+        stray = [h for h in root.handlers if isinstance(h, logging.handlers.RotatingFileHandler)]
+        for h in stray:
+            root.removeHandler(h)
         handler = logging.handlers.RotatingFileHandler(tmp_path / "mcp.log")
-        logging.getLogger().addHandler(handler)
+        root.addHandler(handler)
         try:
             proc = _make_proc(stdout=b'boom', returncode=1, stderr=b'')
             with patch(
@@ -3906,8 +3915,10 @@ class TestFailureRecordAddressability:
                 with pytest.raises(OperatorError) as exc:
                     await claude_dispatch("prompt", _SIMPLE_SCHEMA)
         finally:
-            logging.getLogger().removeHandler(handler)
+            root.removeHandler(handler)
             handler.close()
+            for h in stray:
+                root.addHandler(h)
         msg = str(exc.value)
         assert "operator_dispatch_failed" in msg  # the event name to look for
         assert str(tmp_path / "mcp.log") in msg   # ...and exactly where
@@ -3920,15 +3931,21 @@ class TestFailureRecordAddressability:
 
         from nexus.operators.dispatch import claude_dispatch, OperatorError
 
+        # Same root-logger hazard as the test above: a sibling test's file
+        # handler makes "plain CLI" false for this worker, so build the
+        # condition instead of asserting it as a precondition.
         root = logging.getLogger()
-        assert not any(
-            isinstance(h, logging.handlers.RotatingFileHandler)
-            for h in root.handlers
-        ), "test precondition: no file handler attached"
-        proc = _make_proc(stdout=b'boom', returncode=1, stderr=b'')
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
-            with pytest.raises(OperatorError) as exc:
-                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        stray = [h for h in root.handlers if isinstance(h, logging.handlers.RotatingFileHandler)]
+        for h in stray:
+            root.removeHandler(h)
+        try:
+            proc = _make_proc(stdout=b'boom', returncode=1, stderr=b'')
+            with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+                with pytest.raises(OperatorError) as exc:
+                    await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        finally:
+            for h in stray:
+                root.addHandler(h)
         assert "no log file attached" in str(exc.value)
 
 
