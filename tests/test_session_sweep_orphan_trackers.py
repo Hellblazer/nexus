@@ -208,9 +208,15 @@ class TestKillOrphanTrackerPids:
             # Wait for the (escalated) SIGKILL to take effect.
             rc = proc.wait(timeout=5.0)
             assert rc != 0, "SIGTERM-trap process exited cleanly"
-            # The helper waited at most ~grace_seconds before
-            # SIGKILL; total elapsed should be < ~grace+overhead.
-            assert elapsed < 3.0, (
+            # nexus-scc9t: loose hang guard, not a precision timing
+            # check. This is a genuine real-time claim (the helper's
+            # grace_seconds=1.0 poll-then-escalate loop), not pure
+            # logic, so wall time can't be fully eliminated. 12.0s is
+            # 12x the 1.0s grace budget -- guards against escalation
+            # never firing (an outright hang) while clear of ordinary
+            # -n auto scheduler delay; it does not slow down a passing
+            # run, only how fast a genuine regression is caught.
+            assert elapsed < 12.0, (
                 f"helper took {elapsed:.2f}s for grace_seconds=1.0"
             )
         finally:

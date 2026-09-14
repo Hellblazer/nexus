@@ -630,6 +630,14 @@ def test_engine_down_is_logged_and_exits_zero_fast(tmp_path: Path) -> None:
     elapsed = time.monotonic() - start
 
     assert proc.returncode == 0, proc.stderr
+    # nexus-scc9t: loose hang guard, not a precision timing check. This
+    # is a real subprocess (bash -> the projection script) hitting a
+    # refused connection (ECONNREFUSED), which fails near-instantly --
+    # the transport's own _POST_TIMEOUT_S is 5s, so 10.0s (2x that) is
+    # never reached in correct operation and guards against the
+    # connection-refused path somehow falling through to the full
+    # transport timeout (or worse, hanging past it), while staying clear
+    # of ordinary -n auto process-spawn + scheduler delay.
     assert elapsed < 10.0, f"engine-down path took {elapsed:.2f}s -- should be bounded by the transport timeout"
     log = _log_path(tmp_path / "state")
     assert "SKIP kind=start" in log.read_text()

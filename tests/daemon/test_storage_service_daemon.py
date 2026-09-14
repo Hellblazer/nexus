@@ -2956,17 +2956,24 @@ class TestStopDoesNotWaitOnAnAlreadyDeadSupervisor:
                 config_dir, supervisor_pid=proc.pid, engine_pid=None,
                 age_s=1.0, ttl=15.0,
             )
-            t0 = time.monotonic()
-            outcome = stop_storage_service(config_dir=config_dir)
-            elapsed = time.monotonic() - t0
+            with patch("time.sleep") as mock_sleep:
+                outcome = stop_storage_service(config_dir=config_dir)
         finally:
             with contextlib.suppress(ChildProcessError, OSError, subprocess.TimeoutExpired):
                 proc.wait(timeout=5)
 
-        assert elapsed < 2.0, (
-            "an already-dead (zombie) supervisor must not hold the graceful "
-            f"stop window open; took {elapsed:.2f}s of a 5s budget"
-        )
+        # nexus-scc9t: an already-dead (zombie) supervisor must not hold
+        # the graceful stop window open. stop_storage_service's
+        # lease-branch wait loop checks ``_pid_is_running`` (zombie-aware,
+        # same primitive terminate_pids uses) BEFORE sleeping, so it
+        # breaks out on the first iteration for a zombie pid without ever
+        # calling time.sleep(0.1) -- and the Phase-2/3 process-table
+        # sweep finds no match for this fixture's bare subprocess (no
+        # storage-service argv shape), so its own grace-wait loop is
+        # equally never entered. Asserted directly rather than via a
+        # wall-clock elapsed bound, which a loaded box can blow with no
+        # regression present.
+        mock_sleep.assert_not_called()
         assert outcome.stubborn == (), (
             f"a corpse is not a stubborn survivor: {outcome}"
         )

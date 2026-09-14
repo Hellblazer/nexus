@@ -986,6 +986,15 @@ class TestMailboxArmIntegration:
 
         assert "Nexus ready" in output
         assert "MAILBOX WATCH" not in output
+        # nexus-scc9t: loose hang guard anchored to a REAL external
+        # constraint (hooks.json's own 10s SessionStart timeout), not an
+        # arbitrary multiplier -- the 1s margin below that hard ceiling
+        # is the property under test, so it cannot simply be loosened
+        # further without losing that meaning. With the engine genuinely
+        # absent and no network attempt, normal duration is
+        # milliseconds, so 9.0s is already several orders of magnitude
+        # over normal -- comfortably clear of ordinary -n auto scheduler
+        # delay.
         assert elapsed < 9.0, (
             f"nx hook session-start took {elapsed:.3f}s with the engine "
             f"absent; budget is 10s"

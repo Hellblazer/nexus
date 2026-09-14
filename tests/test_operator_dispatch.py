@@ -2768,14 +2768,36 @@ class TestRealSubprocessDrain:
         )
 
         TIMEOUT = 1.5
-        t0 = time.monotonic()
-        with patch(
-            "asyncio.create_subprocess_exec",
-            side_effect=_real_create_subprocess_exec_side_effect(str(script)),
+        # nexus-scc9t: was an end-to-end ``elapsed < 1.5 * TIMEOUT``
+        # wall-clock bound. That folds in phase 2's own REAL 1.5s
+        # wait_for plus post-kill cleanup, both subject to scheduler
+        # delay a loaded -n auto run can inflate independent of any
+        # regression. The actual property under test is narrower: PHASE
+        # 1 (wait for the first byte) must resolve almost instantly, not
+        # burn its own budget, when data streams from the start. Proven
+        # directly by timing just that one asyncio.wait_for call (the
+        # first of the two sequential calls claude_dispatch makes --
+        # src/nexus/operators/dispatch.py) rather than the whole
+        # two-phase-plus-cleanup sequence.
+        real_wait_for = asyncio.wait_for
+        phase_durations: list[float] = []
+
+        async def _timed_wait_for(coro, timeout=None):
+            t0 = time.monotonic()
+            try:
+                return await real_wait_for(coro, timeout=timeout)
+            finally:
+                phase_durations.append(time.monotonic() - t0)
+
+        with (
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=_real_create_subprocess_exec_side_effect(str(script)),
+            ),
+            patch("asyncio.wait_for", new=_timed_wait_for),
         ):
             with pytest.raises(OperatorTimeoutError) as exc_info:
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=TIMEOUT)
-        elapsed = time.monotonic() - t0
 
         err = exc_info.value
         assert err.partial_text != ""
@@ -2783,11 +2805,17 @@ class TestRealSubprocessDrain:
             f"expected dozens of streamed events before the kill, got "
             f"event_count={err.event_count}"
         )
-        assert elapsed < 1.5 * TIMEOUT, (
-            f"elapsed {elapsed:.2f}s should be close to the {TIMEOUT}s "
-            f"budget (continuous streaming from the start means phase 1 "
-            f"resolves almost instantly), not up to 2x it -- got "
-            f"{elapsed:.2f}s"
+        assert len(phase_durations) >= 2, (
+            f"expected at least the two sequential-phase wait_for calls, "
+            f"saw {len(phase_durations)}"
+        )
+        phase1_duration = phase_durations[0]
+        assert phase1_duration < TIMEOUT / 2, (
+            f"phase 1 (first-byte wait) took {phase1_duration:.2f}s -- "
+            f"close to its own {TIMEOUT}s budget, meaning it did not "
+            f"detect the immediately-streaming first byte quickly "
+            f"(continuous streaming from the start means phase 1 should "
+            f"resolve almost instantly)"
         )
 
 

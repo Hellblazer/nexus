@@ -504,9 +504,33 @@ class TestNeverBlocksThePrompt:
         # a shared box measures the box as much as the code, and a red would name
         # the hook while meaning the machine was busy. The subprocess timeout
         # above is the hang guard; this is the behaviour.
+        #
+        # nexus-scc9t round 2: a peer's combined full run red'd on the exact
+        # substrings below. mailbox_drain.py's per-call timeout is a RACE
+        # between two clocks both set to call_timeout: the outer
+        # thread.join(call_timeout) giving up while the background urlopen
+        # call is still blocked reading the response ("{route} exceeded its
+        # {call_timeout}s deadline; the prompt is not waiting for it",
+        # mailbox_drain.py's _post around line 392) versus urlopen's OWN
+        # internal socket timeout completing that thread FIRST with a
+        # caught TimeoutError ("transport failure on {route}: ...", same
+        # function, line ~395). Both fire from the SAME call_timeout and
+        # both are the bounded-skip property this test exists to prove --
+        # which one wins is scheduler-dependent under load, not a
+        # behavioural difference, so accept either. The transport branch also
+        # reports connection refused and malformed replies, so it counts only
+        # when it names the timeout.
         assert "SKIP" in res.stderr
-        assert "deadline" in res.stderr, res.stderr
-        assert "the prompt is not waiting for it" in res.stderr
+        assert (
+            (
+                "/v1/tuples/rd exceeded its" in res.stderr
+                and "the prompt is not waiting for it" in res.stderr
+            )
+            or (
+                "transport failure on /v1/tuples/rd" in res.stderr
+                and "timed out" in res.stderr
+            )
+        ), res.stderr
 
     def test_malformed_payload_does_not_crash_the_prompt(self, tmp_path, engine) -> None:
         eng = engine()

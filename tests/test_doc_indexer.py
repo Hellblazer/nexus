@@ -1159,6 +1159,16 @@ def test_batch_index_markdowns_skips_malformed_frontmatter_and_continues(
         content_type="rdr",
     )
     elapsed = time.monotonic() - t0
+    # nexus-scc9t round 2 (critic finding): the prior comment here claimed
+    # "low single-digit seconds" for this call without measuring it --
+    # measured directly (uv run pytest -k
+    # test_batch_index_markdowns_skips_malformed_frontmatter_and_continues
+    # -s), three local runs against the in-process MiniLM embedder: 0.199s,
+    # 0.183s, 0.250s. 30.0s is therefore >100x normal, not merely
+    # "low single-digit seconds" over it -- a loose hang guard against the
+    # malformed-frontmatter file causing an unbounded retry/hang in the
+    # post-pass (this test's actual concern), comfortably clear of
+    # ordinary -n auto scheduler delay.
     assert elapsed < 30.0, f"batch hung or far too slow ({elapsed:.1f}s)"
     assert results[str(bad)] == "failed"
     assert results[str(good)] == "indexed"

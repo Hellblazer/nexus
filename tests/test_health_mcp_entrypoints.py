@@ -589,30 +589,53 @@ class TestProbeMcpServerAliveVsHung:
         # 0.5 * 4 = 2s; with the extension gone the verdict reads "after 0s".
         assert "timed out after 2s" in detail, detail
 
-    def test_crashing_binary_fails_fast_never_pays_the_extension(
+    def test_crashing_binary_is_reported_as_a_crash_not_a_hang(
         self, tmp_path: Path
     ) -> None:
-        """The OTHER half of the distinction: a crash must still fail on
-        the very first poll, exactly as before nexus-jw44t.
+        """The OTHER half of the distinction: a crash must still be
+        reported as a crash, never as a genuine hang that waited out the
+        extension budget.
 
         nexus-rqji3: previously proven by an elapsed-time ceiling
         (``elapsed < 15.0``), which a sufficiently loaded box could in
-        principle still exceed even for a near-instant crash. Proven
-        directly instead: ``on_timeout`` must never fire at all, since a
-        crash exits (and ``communicate()`` returns normally) before any
-        poll can time out — the retry/extension path is never entered.
+        principle still exceed even for a near-instant crash.
+
+        nexus-scc9t round 2: the ``on_timeout``-counting replacement
+        (``assert poll_counts == []``) itself flaked under a real 16-
+        worker full-suite run: "saw [1]" -- the fake binary is still a
+        real ``python3`` interpreter that must start up before its own
+        ``ModuleNotFoundError`` fires, and under load that startup can
+        legitimately outlive ONE poll interval, so ``on_timeout`` fires
+        once before the crash is even observed -- the crash is still
+        caught promptly right after, and the extension path (waiting out
+        ``timeout * _MCP_PROBE_ALIVE_EXTENSION_FACTOR``) is never
+        actually exhausted, but the poll COUNT is not a reliable zero
+        regardless of how fast the fake binary starts.
+
+        Proven on the probe's own decision instead, independent of poll
+        count: :func:`_probe_mcp_server`'s detail string is the
+        ``"exited <code>"`` shape only when ``communicate()`` returned
+        normally because the process had already exited (the fast
+        exit-check path) -- the genuine-hang deadline branch produces a
+        categorically different ``"timed out after ...s ... a genuine
+        hang"`` shape. Checking which shape came back proves "reported
+        as a crash, never waited out the extension" regardless of how
+        many polls a slow interpreter boot needed.
         """
         binary = tmp_path / "nx-mcp"
         _write_fake_binary(binary, _CRASHING_MODULE_NOT_FOUND)
 
-        poll_counts: list[int] = []
-        ok, detail = _probe_mcp_server(
-            str(binary), "nexus", on_timeout=poll_counts.append
-        )  # default timeout=8.0
+        ok, detail = _probe_mcp_server(str(binary), "nexus")  # default timeout=8.0
 
         assert ok is False
         assert "ModuleNotFoundError" in detail
-        assert poll_counts == [], (
-            f"a crashing binary must fail on the very first poll — the "
-            f"extension path (on_timeout) must never engage; saw {poll_counts}"
+        assert detail.startswith("exited "), (
+            f"a crashing binary must be reported via the immediate "
+            f"exit-check path (communicate() returning because the "
+            f"process had already exited), not the genuine-hang deadline "
+            f"path: {detail!r}"
+        )
+        assert "timed out after" not in detail, (
+            f"crash detection burned the full extension budget instead "
+            f"of catching the exit promptly: {detail!r}"
         )
