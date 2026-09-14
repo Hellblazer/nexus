@@ -50,6 +50,15 @@ source "$HERE/lock.sh"
 
 PASS=0
 FAIL=0
+# migration-rehearsal/run.sh derives PREV_RELEASE by walking published v*
+# tags (git show vX:src/nexus/engine_version.py) BEFORE it reaches the lock
+# this suite exercises. CI's pytest jobs check out at depth 1 with no tags, so
+# the derivation there aborts with "cannot derive PREV_RELEASE" and every
+# migration-rehearsal case fails for a reason unrelated to locking (7.45.0
+# release PR #1543, 2026-09-14). Pin the pair the way run_sh_guard_test.sh
+# does; the values only need to parse, nothing here converges an engine.
+export NEXUS_PREV_RELEASE="${NEXUS_PREV_RELEASE:-1.0.0}"
+export NEXUS_PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.0.1}"
 ok()  { echo "  [ok] $1"; PASS=$((PASS + 1)); }
 bad() { echo "  [FAIL] $1"; FAIL=$((FAIL + 1)); }
 
