@@ -75,6 +75,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   resume changes the name; a re-arm that reused the old name watched the
   wrong mailbox. The re-arm reaches sessions with the next plugin release.
 
+### Added
+- **`directory/<name>` tuple template (RDR-208 Phase 1 Step 1, bead
+  nexus-galkv.1).** A new v1 engine template for session-directory entries:
+  keys `[name]`, required `session_id` dim, `id_from=keys+nonce` with
+  `session_id` in `id_dims` (so two sessions arming the same name with an
+  equal nonce never collapse onto one row), `take.enabled=false` (a lease,
+  never claimed), `retention_seconds=604800`, `max_body_bytes=0`. Three v1
+  templates now load at boot.
+
 ## [7.45.0] - 2026-09-14
 
 Paired with engine-service-v0.1.118. Not additive: the tuple size limits below

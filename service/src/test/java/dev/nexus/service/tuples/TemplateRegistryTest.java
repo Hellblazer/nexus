@@ -37,11 +37,11 @@ class TemplateRegistryTest {
     // ── real v1 resource templates ──────────────────────────────────────
 
     @Test
-    void bothV1ResourceTemplatesLoadAtBoot() {
+    void allV1ResourceTemplatesLoadAtBoot() {
         TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
         assertEquals(List.of(TemplateRegistry.SOURCE_RESOURCES), registry.sources());
         List<String> names = registry.templates().stream().map(TemplateSchema::name).toList();
-        assertEquals(List.of("ledger/<session_id>", "mailbox/<address>"), names);
+        assertEquals(List.of("directory/<name>", "ledger/<session_id>", "mailbox/<address>"), names);
     }
 
     @Test
@@ -78,6 +78,18 @@ class TemplateRegistryTest {
         assertEquals(List.of("from"), mailbox.idDims());
         assertTrue(mailbox.dimensions().get("from").required());
         assertEquals(List.of("agent", "instance"), mailbox.dimensions().get("address_kind").values());
+
+        TemplateSchema directory = registry.templates().stream()
+                .filter(t -> t.name().equals("directory/<name>")).findFirst().orElseThrow();
+        assertEquals(Set.of("name"), Set.copyOf(directory.keys()));
+        assertTrue(directory.keyValues().isEmpty());
+        assertFalse(directory.take().enabled());
+        assertEquals(604_800L, directory.retentionSeconds());
+        assertEquals(TemplateSchema.IdFrom.KEYS_NONCE, directory.idFrom());
+        assertEquals(List.of("session_id"), directory.idDims());
+        assertTrue(directory.dimensions().get("session_id").required());
+        assertEquals("string", directory.dimensions().get("session_id").type());
+        assertEquals(0L, directory.maxBodyBytes());
     }
 
     // ── registry() digest ───────────────────────────────────────────────
@@ -228,11 +240,11 @@ class TemplateRegistryTest {
     }
 
     @Test
-    void defaultClaimLogTtlPassesBootCheckForBothV1Templates() {
-        // Exercised implicitly by bothV1ResourceTemplatesLoadAtBoot (default TTL, no
+    void defaultClaimLogTtlPassesBootCheckForAllV1Templates() {
+        // Exercised implicitly by allV1ResourceTemplatesLoadAtBoot (default TTL, no
         // NX_TUPLE_CLAIM_LOG_TTL_DAYS override), stated explicitly here for the record.
         TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
-        assertEquals(2, registry.templates().size());
+        assertEquals(3, registry.templates().size());
     }
 
     @Test
@@ -311,7 +323,7 @@ class TemplateRegistryTest {
         assertEquals(2, registry.sources().size());
         assertEquals(TemplateRegistry.SOURCE_RESOURCES, registry.sources().get(0));
         assertTrue(registry.sources().get(1).startsWith("directory:"), registry.sources().get(1));
-        assertEquals(3, registry.templates().size());
+        assertEquals(4, registry.templates().size());
         assertTrue(registry.templates().stream().anyMatch(t -> t.name().equals("test/<id>")));
     }
 

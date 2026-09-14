@@ -1,0 +1,38 @@
+# RDR-208 Phase 1 Step 1 template: session-directory entries (bead
+# nexus-galkv.1). A directory entry is a short-lived lease that maps a
+# name to the session currently holding it -- decision 3 (T2
+# nexus_rdr/208-decision-gate-2026-09-14): written with ttl_seconds=300
+# and re-sent every 60s by the live holder.
+#
+# id_dims: [session_id] (audit round-1 fix, not in the original RDR text):
+# the tuple id is sha256 over tenant, subspace, keys, id_dims and nonce
+# (TupleRepository.computeId). Without session_id in id_dims, two
+# sessions arming the same name with an equal nonce would share one row
+# and the second holder would silently disappear -- forbidden by
+# decision 1 (a name whose live entries point at more than one session
+# is a mailbox_send error naming every holder). Mirrors mailbox.yaml's
+# id_dims: [from].
+#
+# max_body_bytes: 0 -- a directory entry carries no body, same call as
+# ledger.yaml's (bead nexus-r7xao): the only writers are the RDR-208
+# session-directory heartbeat, and it never sends a body field.
+name: directory/<name>
+
+keys:
+  - name
+
+dimensions:
+  session_id:
+    type: string
+    required: true
+
+id_from: keys+nonce
+id_dims:
+  - session_id
+
+take:
+  enabled: false
+
+retention_seconds: 604800
+
+max_body_bytes: 0

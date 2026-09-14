@@ -457,6 +457,7 @@ def test_declared_ledger_dims_finds_the_ledger_template_by_name() -> None:
         "templates": [
             {"name": "mailbox/<address>", "dimensions": {"from": {}}},
             {"name": "ledger/<session_id>", "dimensions": {"agent_type": {}, "commit": {}, "t2_ref": {}, "verify": {}}},
+            {"name": "directory/<name>", "dimensions": {"session_id": {}}},
         ],
     })
     assert _REAL_DECLARED_LEDGER_DIMS(store) == {"agent_type", "commit", "t2_ref", "verify"}

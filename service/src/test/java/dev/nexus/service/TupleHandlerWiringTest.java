@@ -122,7 +122,7 @@ class TupleHandlerWiringTest {
         assertThat(resp.statusCode()).isEqualTo(200);
         var body = mapper.readValue(resp.body(), MAP_T);
         assertThat(body).containsKey("digest");
-        assertThat((java.util.List<?>) body.get("templates")).hasSize(2);
+        assertThat((java.util.List<?>) body.get("templates")).hasSize(3);
     }
 
     /**

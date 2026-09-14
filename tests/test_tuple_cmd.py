@@ -162,6 +162,7 @@ class TestTupleTemplatesListStats:
         names = {t.get("name") for t in reg["templates"]}
         assert "mailbox/<address>" in names
         assert "ledger/<session_id>" in names
+        assert "directory/<name>" in names
 
     def test_list_and_stats_reflect_a_written_tuple(self, t2_service_env) -> None:
         addr = _uniq("addr")
