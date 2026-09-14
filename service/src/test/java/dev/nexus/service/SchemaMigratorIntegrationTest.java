@@ -23,7 +23,9 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.time.OffsetDateTime;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
@@ -2019,6 +2021,203 @@ class SchemaMigratorIntegrationTest {
         }
     }
 
+    // ── Test 18: nexus-jl08t — reexecuted_changesets on an AGED database ────────
+    // (a database where every runAlways changeset already has a prior row) that
+    // picks up genuinely new changesets in the same walk — the exact shape
+    // conexus's engine-service-v0.1.118 PITR-fork rehearsal hit: new_changesets=5,
+    // reexecuted_changesets=25, pending_at_start=17, against a changelog that
+    // parses to exactly 12 runAlways changeSet elements (5 grants-nexus-svc.xml,
+    // 5 grants-nexus-diag.xml, 1 staging-001, 1 taxonomy-011 — see AGENTS.md §
+    // Engine-service release).
+
+    /**
+     * Pins nexus-x0s52's {@code MigrationOutcome} fields against an AGED
+     * database: one where every {@code runAlways} changeset already has a
+     * databasechangelog row (from a prior boot), and N genuinely new
+     * changesets land in THIS walk alongside them — nexus-jl08t's target
+     * shape, reproduced hermetically without a historical changelog snapshot.
+     *
+     * <p><strong>How the aged state is built.</strong> Migrate a fresh
+     * database to full HEAD (every changeset, including the tuples-003/004
+     * family, lands and every {@code runAlways} row gets its first
+     * {@code dateexecuted} stamp). Then REWIND only the tuples-003/004
+     * family: delete their five databasechangelog rows and drop the
+     * CHECK constraint {@code tuples-003-3} added (so re-adding it on the
+     * next walk does not fail as a duplicate). The database is now
+     * structurally identical to "every runAlways changeset has already run
+     * at least once; five ordinary changesets are still pending" — the
+     * v0.1.118 walk's own shape (450 pre-existing rows, 5 new landings, 12
+     * pre-existing runAlways rows) without needing to check out an old
+     * changelog snapshot.
+     *
+     * <p><strong>What this pins.</strong> {@code pending_at_start} must equal
+     * the 5 rewound changesets plus the FULL runAlways set (Liquibase's
+     * {@code listUnrunChangeSets()} always includes {@code runAlways}
+     * changesets regardless of prior execution — nexus-x0s52's javadoc).
+     * {@code reexecuted_changesets} must equal EXACTLY the runAlways set's
+     * size — no more. The v0.1.118 anomaly (reexecuted=25 against 12
+     * declared runAlways changesets) is exactly a violation of this last
+     * assertion; if {@code SchemaMigrator} ever regresses to counting extra
+     * rows as "reexecuted" when new changesets land in the same walk as
+     * runAlways re-runs, this test fails with the runAlways count named,
+     * not a bare "25 != 12" surprise read out of a production log.
+     */
+    @Test
+    @Order(18)
+    void reexecutedChangesets_onAgedDatabase_countsExactlyTheRunAlwaysSet() throws Exception {
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.startDedicated();
+        try {
+            final String role = "nexus_admin_jl08t_test";
+            final String pass = "nexus_admin_jl08t_test_pass";
+
+            // Phase A: same minimal DBA-equivalent bootstrap as the o8dil29 test.
+            try (Connection su = agedPg.createConnection("")) {
+                su.setAutoCommit(true);
+                // SANCTIONED RAW: see bootstrap()'s own comment above -- same
+                // admin/svc role bootstrap class, no jOOQ typed-DSL form.
+                su.createStatement().execute(
+                    "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
+                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
+                su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
+                su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
+                su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
+                su.createStatement().execute(
+                    "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
+                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
+                bootstrapVectorExtensionsForFreshWalk(su, role);
+            }
+
+            var cfg = new com.zaxxer.hikari.HikariConfig();
+            cfg.setJdbcUrl(agedPg.getJdbcUrl());
+            cfg.setUsername(role);
+            cfg.setPassword(pass);
+            cfg.setMaximumPoolSize(2);
+            cfg.setPoolName("nexus-admin-jl08t-test");
+
+            try (var agedDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+
+                // Phase B: full fresh walk -- lands every changeset, including
+                // tuples-003/004, so every runAlways row now carries a prior
+                // dateexecuted stamp exactly like a real, already-migrated cluster.
+                SchemaMigrator.migrate(agedDs);
+
+                List<String> tuplesIds = List.of(
+                    "tuples-003-1", "tuples-003-2", "tuples-003-3", "tuples-003-4",
+                    "tuples-004-1");
+
+                // Determine, dynamically (never hardcoded), which unrun
+                // changesets are runAlways on this fully-migrated database --
+                // by construction the ONLY thing left unrun on a fully-migrated
+                // database is the runAlways set (nexus-x0s52's javadoc).
+                Set<String> runAlwaysIds = new HashSet<>();
+                try (Connection conn = agedDs.getConnection()) {
+                    Database database = DatabaseFactory.getInstance()
+                        .findCorrectDatabaseImplementation(new JdbcConnection(conn));
+                    try (Liquibase liquibase = new Liquibase(
+                            "db/changelog/db.changelog-master.xml",
+                            new ClassLoaderResourceAccessor(),
+                            database)) {
+                        for (ChangeSet cs : liquibase.listUnrunChangeSets(
+                                new Contexts(), new LabelExpression())) {
+                            assertThat(cs.isAlwaysRun())
+                                .as("on a fully-migrated database, every unrun "
+                                    + "changeset must be runAlways: " + cs.getId())
+                                .isTrue();
+                            runAlwaysIds.add(cs.getId());
+                        }
+                    }
+                }
+                assertThat(runAlwaysIds)
+                    .as("nexus-jl08t: the runAlways set parsed straight from the "
+                        + "changelog XML at HEAD (12: 5 grants-nexus-svc-*, 5 "
+                        + "grants-nexus-diag-*, staging-4-svc-grants, taxonomy-011-8)")
+                    .hasSize(12);
+
+                // Snapshot every runAlways row's dateexecuted BEFORE the rewind.
+                Map<String, java.sql.Timestamp> beforeRewind = new LinkedHashMap<>();
+                try (Connection conn = agedDs.getConnection()) {
+                    for (String id : runAlwaysIds) {
+                        beforeRewind.put(id, dateExecutedFor(conn, id));
+                    }
+                }
+
+                // Phase C: rewind ONLY the tuples-003/004 family -- delete their
+                // databasechangelog rows and drop the CHECK constraint
+                // tuples-003-3 added, so the next migrate() call sees exactly 5
+                // pending changesets on a database where every runAlways
+                // changeset already ran once -- the "5 new landed, walk
+                // otherwise clean" shape nexus-jl08t investigates.
+                try (Connection conn = agedDs.getConnection()) {
+                    conn.createStatement().execute(
+                        "ALTER TABLE nexus.tuples DROP CONSTRAINT IF EXISTS chk_tuples_body_size");
+                    dsl(conn).deleteFrom(databaseChangeLog())
+                        .where(DSL.field(DSL.name("id"), String.class).in(tuplesIds))
+                        .execute();
+                }
+
+                long rowsBeforeSecondWalk;
+                try (Connection conn = agedDs.getConnection()) {
+                    rowsBeforeSecondWalk = changelogRowCount(conn);
+                }
+
+                // Phase D: the walk under test.
+                SchemaMigrator.MigrationOutcome outcome = SchemaMigrator.migrate(agedDs);
+
+                long rowsAfterSecondWalk;
+                try (Connection conn = agedDs.getConnection()) {
+                    rowsAfterSecondWalk = changelogRowCount(conn);
+                }
+
+                // ── Assert: new_changesets is exactly the rewound 5 ──────────
+                assertThat(rowsAfterSecondWalk - rowsBeforeSecondWalk)
+                    .as("row-count delta must equal the 5 rewound changesets")
+                    .isEqualTo(5L);
+                assertThat(outcome.newChangesets())
+                    .as("nexus-x0s52: new_changesets counts rows that genuinely "
+                        + "landed for the first time")
+                    .isEqualTo(5L);
+
+                // ── Assert: pending_at_start = new (5) + runAlways (12) ──────
+                assertThat(outcome.pendingAtStart())
+                    .as("nexus-jl08t: listUnrunChangeSets() before the walk counts "
+                        + "the 5 genuinely-pending changesets PLUS the full "
+                        + "runAlways set (always considered unrun regardless of "
+                        + "prior execution) -- 5 + 12 = 17 on the v0.1.118 walk")
+                    .isEqualTo(5L + runAlwaysIds.size());
+
+                // ── Assert: reexecuted_changesets counts EXACTLY the runAlways
+                // set that pre-existed this walk -- no more, no less. This is
+                // the assertion nexus-jl08t exists to pin: does the walk count
+                // (dateexecuted-bump) anything beyond the runAlways rows when
+                // new changesets land in the SAME walk?
+                Map<String, java.sql.Timestamp> afterRewalk = new LinkedHashMap<>();
+                try (Connection conn = agedDs.getConnection()) {
+                    for (String id : runAlwaysIds) {
+                        afterRewalk.put(id, dateExecutedFor(conn, id));
+                    }
+                }
+                long actuallyBumped = runAlwaysIds.stream()
+                    .filter(id -> afterRewalk.get(id).after(beforeRewind.get(id)))
+                    .count();
+                assertThat(actuallyBumped)
+                    .as("every runAlways row's dateexecuted must move during a "
+                        + "walk that re-executes it")
+                    .isEqualTo(runAlwaysIds.size());
+
+                assertThat(outcome.reexecutedChangesets())
+                    .as("nexus-jl08t: reexecuted_changesets must count exactly "
+                        + "the runAlways set touched by this walk (12) -- not "
+                        + "more. A value exceeding runAlwaysIds.size() here "
+                        + "reproduces the v0.1.118 anomaly (measured "
+                        + "reexecuted=25 against 12 declared runAlways "
+                        + "changesets) inside a hermetic test.")
+                    .isEqualTo((long) runAlwaysIds.size());
+            }
+        } finally {
+            agedPg.stop();
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static DSLContext dsl(Connection c) {
@@ -2084,5 +2283,24 @@ class SchemaMigratorIntegrationTest {
             .from(databaseChangeLog())
             .where(idField.eq(id)).and(authorField.eq(author)).and(filenameField.eq(filename))
             .fetchOne(exectype);
+    }
+
+    /**
+     * {@code databasechangelog.dateexecuted} for a changeset, keyed by ID
+     * alone (nexus-jl08t test 18): every ID used there is a distinct,
+     * file-namespaced string (e.g. {@code grants-nexus-diag-3},
+     * {@code taxonomy-011-8}) with no collision across this project's
+     * changelog, so a bare ID lookup is unambiguous for this purpose.
+     * {@code fetchOne} itself would throw on a genuine collision rather than
+     * silently picking one row.
+     */
+    private static java.sql.Timestamp dateExecutedFor(Connection conn, String id) throws Exception {
+        Field<java.sql.Timestamp> dateExecuted =
+            DSL.field(DSL.name("dateexecuted"), java.sql.Timestamp.class);
+        Field<String> idField = DSL.field(DSL.name("id"), String.class);
+        return dsl(conn).select(dateExecuted)
+            .from(databaseChangeLog())
+            .where(idField.eq(id))
+            .fetchOne(dateExecuted);
     }
 }

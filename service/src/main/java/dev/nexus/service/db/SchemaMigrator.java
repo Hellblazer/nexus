@@ -204,12 +204,33 @@ public final class SchemaMigrator {
      *                        / {@code runOnChange} re-runs (a clean walk proves
      *                        they executed, not that their content is right)
      *
+     * <p><strong>The exact identity (nexus-jl08t).</strong> In a race-free,
+     * single-writer walk, {@code reexecutedChangesets ==
+     * pendingAtStart - newChangesets}, EXACTLY — not merely as an upper
+     * bound. {@code pendingAtStart} is already the full set Liquibase's own
+     * planner intends to touch this walk (every genuinely-new changeset plus
+     * every {@code runAlways}/{@code runOnChange} rerun); {@code
+     * newChangesets} is the genuinely-new subset of that same plan measured
+     * via the row-count delta; whatever remains of the plan is, by
+     * construction, exactly the rerun subset {@code
+     * countChangelogRowsSince} independently measures via the timestamp
+     * window. {@code migrate()} checks this identity on every walk and logs
+     * {@code event=schema_migration_count_anomaly} on any mismatch — see
+     * that check's own comment at the computation site for what a mismatch
+     * means and the exact case (conexus's engine-service-v0.1.118 PITR-fork
+     * walk: {@code new_changesets=5 pending_at_start=17
+     * reexecuted_changesets=25}, where this changelog's 12 {@code
+     * runAlways} changesets predict {@code 17-5=12}) that motivated adding
+     * it. {@code SchemaMigratorIntegrationTest}'s "aged database" test pins
+     * the identity against a hermetic reproduction of that same shape
+     * (5 new + 12 pre-existing {@code runAlways} changesets).
+     *
      * <p>Counts assume the single-instance-per-database boot this deployment
      * runs. Two instances walking concurrently stay CORRECT on schema (the
      * Liquibase changelog lock serializes the DDL) but can misattribute rows
      * between their two log lines; a negative raw reading logs
      * {@code event=schema_migration_count_anomaly} rather than clamping
-     * silently.
+     * silently, and so does a reading that violates the identity above.
      */
     public record MigrationOutcome(
             int pendingAtStart, long newChangesets, long reexecutedChangesets) {}
@@ -310,6 +331,38 @@ public final class SchemaMigrator {
                 }
                 long newChangesets = Math.max(0, rawNew);
                 long reexecuted = Math.max(0, rawReexecuted);
+                // nexus-jl08t: reexecuted_changesets has an exact identity in a
+                // race-free single-writer walk -- pending is the FULL set
+                // Liquibase's own planner intends to touch this walk (every
+                // genuinely-new changeset plus every runAlways/runOnChange
+                // rerun; see MigrationOutcome's own javadoc), so
+                // reexecuted == pending - newChangesets EXACTLY, not merely as
+                // an upper bound. Proven in SchemaMigratorIntegrationTest's
+                // "aged database" test (5 new + 12 pre-existing runAlways ->
+                // pending=17, reexecuted=12 == 17-5). A mismatch means
+                // countChangelogRowsSince's independent timestamp-window
+                // query saw a row THIS walk's own plan never touched -- a
+                // concurrent walker, a PITR-fork restore landing a stray
+                // production timestamp inside the window, or some other
+                // external writer -- exactly the unexplained shape conexus's
+                // v0.1.118 walk hit (reexecuted=25 against pending=17,
+                // new_changesets=5, expected reexecuted=12). Logged, never
+                // silently accepted: the field is derived from a live
+                // measurement specifically so a real-world drift like that
+                // one is visible here instead of requiring a manual
+                // changelog-parsing investigation to notice.
+                long expectedReexecuted = Math.max(0, pending - newChangesets);
+                if (reexecuted != expectedReexecuted) {
+                    log.warn("event=schema_migration_count_anomaly "
+                            + "reexecuted_changesets={} expected_reexecuted={} "
+                            + "pending_at_start={} new_changesets={} — "
+                            + "reexecuted_changesets must equal pending_at_start "
+                            + "minus new_changesets in a race-free single-writer "
+                            + "walk; this mismatch means countChangelogRowsSince "
+                            + "counted a databasechangelog row this walk's own "
+                            + "plan did not include",
+                            reexecuted, expectedReexecuted, pending, newChangesets);
+                }
                 // The old line logged the PRE-update pending count as
                 // applied_changesets — a quantity the walk never computed
                 // (12x overstatement measured on the v0.1.86 fork walk). The

@@ -993,7 +993,19 @@ class RawSqlGateTest {
         // cast is the test's own subject (VectorBinding always renders the
         // schema-qualified ::nexus.vector, which would silently change what that one
         // statement proves).
-        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 50),
+        // nexus-jl08t: 50 -> 56. Test 18 (the "aged database" reexecuted_changesets
+        // pin) adds a NINTH occurrence of this file's own documented 5-site
+        // admin/svc role bootstrap against a dedicated container (same class as
+        // bootstrap() plus the 7 existing aged-box tests, unchanged shape --
+        // CREATE ROLE / GRANT CREATE ON DATABASE|SCHEMA / GRANT pg_monitor WITH
+        // ADMIN OPTION, no jOOQ typed-DSL form), plus one new raw
+        // "ALTER TABLE nexus.tuples DROP CONSTRAINT IF EXISTS chk_tuples_body_size"
+        // (rewinding tuples-003-3's CHECK constraint before re-running it -- DDL,
+        // no jOOQ typed form). The test's own databasechangelog DELETE and its
+        // dateExecutedFor/SELECT read both go through the existing typed
+        // DSL.table(DSL.name("databasechangelog"))/DSL.field(DSL.name(...), Class)
+        // idiom this file already uses for that table, so neither adds a site.
+        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 56),
         // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 37 -> 39 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         // nexus-cbo4a batch 12: 39 -> 16. Converted seed inserts (10 sites: HEAD-schema
@@ -1414,7 +1426,9 @@ class RawSqlGateTest {
     // codegen equivalent, see the two entries' own comments above).
     // nexus-8zoyp seed-coverage follow-up: 918 -> 925 (+7, matching
     // SchemaUpgradeRehearsalIntegrationTest.java's own 104 -> 111 above).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 925;
+    // nexus-jl08t: 925 -> 931 (+6, matching SchemaMigratorIntegrationTest.java's
+    // own 50 -> 56 above).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 931;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
