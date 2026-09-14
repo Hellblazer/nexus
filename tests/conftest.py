@@ -384,6 +384,21 @@ def pytest_sessionstart(session):
 
         install_fence(Path(tempfile.mkdtemp(prefix="nx-suite-home-")))
 
+    # A test that moves HOME again (tests/test_scratch.py's t1 fixture sets HOME
+    # to its tmp_path) resolved the MiniLM model cache under that empty dir and
+    # downloaded the artifact from S3 mid-suite; one full run failed on an HTTP
+    # 503. Pin the cache to the operator's real one, as install_fence pins
+    # UV_CACHE_DIR, fenced or not. setdefault, so an explicit outer value wins;
+    # xdist workers inherit it.
+    if _is_controller_or_serial:
+        from nexus.db.minilm_direct import CACHE_DIR_ENV  # noqa: PLC0415 — session-start only
+        from tests._fence_home import REAL_HOME_ENV  # noqa: PLC0415 — test-only helper
+
+        _real_home = os.environ.get(REAL_HOME_ENV) or os.path.expanduser("~")
+        os.environ.setdefault(
+            CACHE_DIR_ENV, str(Path(_real_home) / ".cache" / "chroma" / "onnx_models"),
+        )
+
     if _is_controller_or_serial:
         # Snapshotting here (before any worker is spawned -- xdist spawns
         # workers lazily inside pytest_runtestloop, called after

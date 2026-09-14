@@ -27,6 +27,7 @@ P0b (previously transitive via chromadb), shared with
 from __future__ import annotations
 
 import hashlib
+import os
 import tarfile
 import threading
 from pathlib import Path
@@ -38,23 +39,30 @@ _log = structlog.get_logger(__name__)
 
 MODEL_NAME = "all-MiniLM-L6-v2"
 
+#: Overrides the cache root, the directory that holds ``MODEL_NAME``. The unit
+#: suite sets it at session start to the operator's real cache
+#: (``tests/conftest.py``), because a test that points HOME at a tmp dir would
+#: otherwise resolve an empty cache and download the model again.
+CACHE_DIR_ENV = "NX_MINILM_CACHE_DIR"
+
+
 def download_path() -> Path:
     """Chroma-compatible cache root (see module docstring — load-bearing
     for artifact reuse and engine parity; do not "clean up" to a
     nexus-named directory), resolved at CALL time.
 
+    :data:`CACHE_DIR_ENV`, when set, replaces the HOME-derived root. Tests
+    that move HOME did redirect this path: the scratch suite's ``t1``
+    fixture sets HOME to its tmp dir, and its embedder downloaded the
+    artifact from S3 on every run until an HTTP 503 failed a full suite.
+
     nexus-pfuns: was a module-level ``Path.home()`` constant, frozen at
-    import — the same import-time-default class already fixed for the
-    3 writers that bead named (``gc_purge_marker.py`` / ``t3.py`` /
-    ``routing/_lib.py``). No test currently redirects this path (it is
-    deliberately the same real, shared, chroma-compatible location for
-    every install/test — re-downloading a large model artifact per test
-    run would be its own cost problem), so this is a defensive fix, not
-    a live-leak fix: a module-level constant would silently resist any
-    future test that DOES need to redirect it (e.g. via a patched
-    ``Path.home()``), same as the bug already found and fixed elsewhere.
+    import. Resolving at call time keeps a test that patches
+    ``Path.home()`` from being defeated by a frozen constant.
     """
-    return Path.home() / ".cache" / "chroma" / "onnx_models" / MODEL_NAME
+    override = os.environ.get(CACHE_DIR_ENV, "").strip()
+    root = Path(override) if override else Path.home() / ".cache" / "chroma" / "onnx_models"
+    return root / MODEL_NAME
 
 
 def artifact_dir() -> Path:

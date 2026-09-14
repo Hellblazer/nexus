@@ -91,3 +91,26 @@ class TestDifferentialParityAgainstChroma:
         assert np.allclose(a, b, atol=1e-6), (
             f"max divergence {np.abs(a - b).max()}"
         )
+
+
+def test_a_test_that_moves_home_does_not_download_the_model(tmp_path, monkeypatch) -> None:
+    """nexus-gd3b9: a fixture that points HOME at a tmp dir used to make the
+    embedder resolve an empty cache under it and download the artifact from
+    S3 mid-suite (an HTTP 503 failed a full run). The suite pins the cache
+    to the operator's real one, so this must not touch the network."""
+    from nexus.db import minilm_direct
+
+    # Precondition, kept apart from the regression: the module fixture has
+    # warmed the pinned cache. A cold cache reads as this failure, never as
+    # the re-download the test exists to catch.
+    warm = minilm_direct.artifact_dir()
+    assert (warm / "model.onnx").is_file(), f"MiniLM cache not warm at {warm}"
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def _no_download(*_a, **_kw):
+        raise AssertionError("the model was downloaded again under a moved HOME")
+
+    monkeypatch.setattr("httpx.stream", _no_download)
+    assert minilm_direct.ensure_artifact() == minilm_direct.artifact_dir()
+    assert not str(minilm_direct.artifact_dir()).startswith(str(tmp_path))
