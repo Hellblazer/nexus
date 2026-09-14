@@ -104,9 +104,11 @@ review showed it patches the identity this RDR demotes.
 - Mailbox template: `mailbox/<address>`, keys `to`, dims `from` (required),
   `kind`, `correlation_id`, `address_kind` in {agent, instance}; `id_from:
   keys+nonce`, take enabled, retention 7 days.
-- `rd` returns only live rows: it skips consumed rows and rows past their
-  `expires_at`, orders by `created_at` then id, oldest first, and returns each
-  row's `created_at` and `expires_at`. It has no descending order and no
+- `rd` skips consumed rows and rows past their `expires_at` and returns every
+  other row, claimed and dead-lettered ones included, each with its
+  `claim_state`, `created_at` and `expires_at`. It orders by `created_at` then
+  id, oldest first. A take-disabled template such as the directory never has a
+  claimed or dead-lettered row, so for it every returned row is live. It has no descending order and no
   latest-only read.
 - An `out` whose id matches an existing row adds no row. It moves the row's
   `expires_at` to the earlier of the new expiry and the row's own `created_at`
@@ -169,7 +171,8 @@ survey is in T3 as `tuple-space/research-rdr-208-name-directory-prior-art`.
   previous id is new code, not an existing step.
 - **✅ Verified** (source search, research-2): the drain's delivery loop stops
   when a claim returns nothing. That, not a short `rd` page, is the signal that
-  a mailbox is empty.
+  a mailbox is empty. The cleared-record delete rule in the Technical Design adds two
+  more conditions to it.
 - **✅ Verified** (source search, research-2): the watcher already covers the
   session-id mailbox by default; `--instance` adds the name's mailbox.
 - **⚠️ Documented** (specifications and documentation, research-4): every
@@ -224,8 +227,8 @@ entry whose nonce is its arm time, finer than one second and joined with its
 pid, with a short `ttl_seconds`, and re-sends the same entry on a heartbeat. A re-send has the same id, so it moves the entry's expiry forward
 instead of adding a row. Values, decided 2026-09-14: a 300-second TTL, re-sent
 every 60 seconds. An entry stops resolving within one TTL after
-its watcher stops. On a `/clear` self-stop the watcher releases its entry at
-once by re-sending it with `ttl_seconds=1`; on any other exit it leaves the
+its watcher stops. On a `/clear` self-stop the watcher releases its entry by
+re-sending it with `ttl_seconds=1`, so it lapses within about a second; on any other exit it leaves the
 entry to lapse, so a `/resume` inside the TTL still finds the name resolving. A re-send cannot move expiry past the entry's `created_at`
 plus the 7-day retention, so a watcher that runs that long writes a fresh entry
 with a new nonce before then.
@@ -256,16 +259,17 @@ ever a silent write to a mailbox nobody reads. The mailbox and peer-messaging sk
 send through it; raw `tuple_out` to `mailbox/` stays possible and documented
 as the low-level path. The sender's own address (`from`) is the session id in
 the tuple-watch session marker, then `NX_T1_SESSION_ID`; with neither, the call
-is refused. A subagent passes `from_address` to send as its own agent id.
+is refused. `from_address` overrides it with a session-id or agent-id shape,
+and a subagent passes its own agent id.
 
 **`/clear`.** On `source=clear`, SessionStart reads the previous session id
 from `tuple-watch/session.<claude pid>` before overwriting it, and writes
 `<config>/tuple-watch/cleared.<new session id>` naming that id. The drain for
 the new session drains the named mailbox inside its usual budget. It deletes the
 record only when, for every mailbox the record names, the claim loop ended on an
-empty claim, a read shows no live row other than dead-lettered ones, and that
-mailbox's pending file is empty. Any other ending (the budget running out, a
-refused ack, a row still under lease) keeps the record for the next prompt. A
+empty claim, a read returns no row except dead-lettered ones, and that
+mailbox's pending file is empty. Any other outcome (the budget running out, a
+refused ack, a row still claimed under lease) keeps the record for the next prompt. A
 second `/clear` before that carries the ids the record names forward into its
 own record. `/resume` and `/compact` need nothing.
 
@@ -293,7 +297,7 @@ this RDR.
 | Mailbox template | `service/src/main/resources/tuples/templates/mailbox.yaml` | `address_kind` values gain `session`; `instance` retired after Phase 3 |
 | Directory template | new, same directory, added to the engine's boot list | new template; an engine release |
 | Watcher | `src/nexus/tuple_watch.py`, `src/nexus/commands/tuple_cmd.py` | writes its directory entry at arm and re-sends it on a heartbeat; stops watching instance mailboxes after Phase 3 |
-| Drain hook | `conexus/hooks/scripts/mailbox_drain.py` | drains the cleared record's mailbox until a claim returns nothing; drops instance mailboxes after Phase 3 |
+| Drain hook | `conexus/hooks/scripts/mailbox_drain.py` | drains each mailbox the cleared record names, and deletes the record only under the three conditions in the Technical Design's `/clear` paragraph; drops instance mailboxes after Phase 3 |
 | SessionStart | `src/nexus/hooks.py`, `src/nexus/tuple_watch.py` | on `source=clear`, reads the previous id from the pid marker before overwriting it |
 | MCP | `src/nexus/mcp/core.py`; name pins in `tests/test_mcp_package.py` and `tests/test_mcp_tuple_tools.py`; `tests/test_mcp_tool_description_lint.py` | `mailbox_send` |
 
@@ -430,8 +434,12 @@ Additive; `instance` still accepted.
 ### Phase 3: Transition
 
 Senders move to `mailbox_send`. The drain keeps draining registered
-instance-name mailboxes for one retention window (7 days) after the release,
-then stops, and `address_kind: instance` is refused.
+instance-name mailboxes for one retention window (7 days) after the release
+that ships Phase 2. Then a client release (R3) stops draining and sending on
+them, and only after R3's tag does an engine release (R4) refuse
+`address_kind: instance`. Old clients must stop sending it before the engine
+refuses it, and a client release tree carries no engine source past its pinned
+engine tag (T2 `nexus/plan-rdr-208-implementation-2026-09-14`).
 
 ### Day 2 Operations
 
@@ -490,8 +498,9 @@ Checked section against section after the research pass:
 - The directory's 7-day retention appears only as the template's ceiling.
   Everywhere an entry's life is described, it is the short TTL the watcher
   renews.
-- A cleared mailbox is forgotten when a claim returns nothing. The Technical
-  Design, the Test Plan and Phase 2 Step 3 state the same rule.
+- A cleared record is deleted only under the three conditions in the Technical
+  Design's `/clear` paragraph, and the Test Plan states the same rule (both
+  amended after the gate).
 - Gap 4 and the MVV both limit cross-machine resolution to sessions that share
   a managed `service_url`.
 
@@ -518,8 +527,10 @@ tuple space.
   engine release. A client that sends `address_kind: session` to an older engine
   gets `SchemaViolation`, so the engine deploys before the client release that
   sends it. Old clients are unaffected.
-- **Deployment model**: engine tag first, then the client release, paired
-  through the wire ledger.
+- **Deployment model**: for Phases 1 and 2, engine tag first, then the client
+  release, paired through the wire ledger. The Phase 3 retirement reverses the
+  order: the client release that stops sending `address_kind: instance` ships
+  before the engine release that refuses it.
 - **Incremental adoption**: instance-name mailboxes keep draining for one
   retention window after the release (Phase 3).
 - **Memory management**: the live directory rows under a name are about one per
@@ -573,3 +584,4 @@ behavior, the fork rule, and the TTL and heartbeat values.
 - 2026-09-14: Post-accept amendment: Sam's three gate decisions (T2 `nexus_rdr/208-decision-gate-2026-09-14`), so a name held by two live sessions is refused rather than delivered to the newest; and gate Significants 1 and 2 (a watcher that stops while its session lives; `/clear` with two processes on one session id). Fix check recorded in T2 as `nexus_rdr/208-fix-check-<tip>`.
 - 2026-09-14: Post-accept amendment: the Risks bullet on a stopped watcher states the registry file's 7-day retention instead of "never expired" (observation d1 of fix check `nexus_rdr/208-fix-check-0bfcc6bb7`). Fix check recorded in T2 as `nexus_rdr/208-fix-check-<tip>`.
 - 2026-09-14: Post-accept amendment: six design items from the implementation plan's audit (T2 `nexus/plan-rdr-208-implementation-2026-09-14`): `id_dims` on `session_id`; agent-id routing and `from_address` in `mailbox_send`; `mailbox_send`'s default sender; the watcher's release on a `/clear` self-stop; the three-condition delete rule; chained `/clear`s. Fix check recorded in T2 as `nexus_rdr/208-fix-check-<tip>`.
+- 2026-09-14: Fix round on amendment 2: the watcher's release lapses within about a second rather than at once; the Existing Infrastructure Audit's drain row and the Finalization Gate's Contradiction Check state the three-condition rule; a row still claimed under lease is named as an outcome, not a claim-loop ending; the Technical Environment says `rd` returns claimed and dead-lettered rows with their `claim_state`; `from_address` takes a session-id or agent-id shape; Phase 3 and the Deployment model give the client-before-engine order for retiring `address_kind: instance` (fix check `nexus_rdr/208-fix-check-a91e461ea`). Fix check recorded in T2 as `nexus_rdr/208-fix-check-<tip>`.
