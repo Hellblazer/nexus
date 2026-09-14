@@ -221,31 +221,33 @@ is retired.
 days. The watcher armed with `--instance NAME` writes an entry whose nonce is
 its arm time, with a short `ttl_seconds`, and re-sends the same entry on a
 heartbeat. A re-send has the same id, so it moves the entry's expiry forward
-instead of adding a row. Proposed values, to be tuned in Phase 2: a 300-second
-TTL, re-sent every 60 seconds. An entry stops resolving within one TTL after
+instead of adding a row. Values, decided 2026-09-14: a 300-second TTL, re-sent
+every 60 seconds. An entry stops resolving within one TTL after
 its watcher stops. A re-send cannot move expiry past the entry's `created_at`
 plus the 7-day retention, so a watcher that runs that long writes a fresh entry
 with a new nonce before then.
 
 **Resolution.** A sender reads `directory/<name>` once. `rd` returns only live
-entries, oldest first, so the last row names the session that armed the name
-most recently. When more than one live entry names different sessions,
-`mailbox_send` delivers to the newest and returns the other candidates in its
-result, so the sender sees the conflict instead of losing it.
+entries. When they all name one session, that session is the recipient. When
+they name more than one session, `mailbox_send` writes nothing and returns an
+error that lists each holder's session id, and the sender resends to the
+session id it means (Sam's decision, 2026-09-14, T2
+`nexus_rdr/208-decision-gate-2026-09-14`).
 
 **Rename on resume.** The old process ends, its watcher stops re-sending, and
 the old name resolves to the same session for at most one TTL, then stops
 resolving. Mail to an old name therefore either arrives or is refused with an
 error naming the name; it is never written to a mailbox nobody reads.
 
-**Reuse.** A session that arms a name another live session holds writes the
-newer entry and wins. The earlier holder's entry remains until its watcher
-stops, and `mailbox_send` reports both.
+**Reuse.** A session that arms a name another live session holds adds its own
+entry. Until the earlier holder's entry lapses, the name resolves to two
+sessions, and `mailbox_send` refuses it and names both.
 
 **Sending.** A new MCP tool `mailbox_send(to, body, kind, correlation_id)`
 resolves `to`: a session-id shape is used as is; anything else is looked up in
-the directory; an unresolvable name is an error naming the name, never a
-silent write to a mailbox nobody reads. The mailbox and peer-messaging skills
+the directory; an unresolvable name is an error naming the name, and a name
+held by more than one live session is an error naming every holder. Neither is
+ever a silent write to a mailbox nobody reads. The mailbox and peer-messaging skills
 send through it; raw `tuple_out` to `mailbox/` stays possible and documented
 as the low-level path.
 
@@ -262,7 +264,11 @@ session starts with an empty mailbox and is reachable by name once its watcher
 arms.
 
 **Two processes on one session id.** Two terminals resuming one session both
-drain its mailbox, and each message is claimed by one of them. No change.
+drain its mailbox, and each message is claimed by one of them. When one of them
+runs `/clear`, only that process's SessionStart runs, so only it writes a
+cleared record. The other process still holds the old session id and keeps
+draining the old mailbox as its own. Both then claim from that mailbox, and
+each message is still delivered exactly once, to one of them.
 
 **Scope.** Resolution reaches every session that shares an engine: all
 sessions on one machine in local mode, and every session pointed at one managed
@@ -288,7 +294,7 @@ rename and reuse cases instead of handing mail between names, and the one
 boundary it does not survive, `/clear`, is a boundary the harness reports
 explicitly, so it can be handled at a single, known moment. Directory entries
 that live only while their watcher re-sends them follow every lease-based
-naming system surveyed, and they keep the newest-entry read to one `rd`.
+naming system surveyed, and they keep resolution to one `rd`.
 
 ## Alternatives Considered
 
@@ -344,8 +350,17 @@ it (2026-09-14).
 
 - **Directory entries for ended sessions**: an entry lapses within one TTL
   after its watcher stops, so an ended session stops resolving in minutes.
-- **Clock ordering**: resolution orders by the engine's `created_at`, one
-  clock, not the senders'.
+- **A watcher that stops while its session lives**: its entry lapses too, and
+  the name stops resolving; mail sent by session id is unaffected. The drain
+  hook runs at each prompt and prints a re-arm instruction when it finds no
+  live watcher (nexus-6konb.19). It tries only at a prompt at least 600 seconds
+  after its last re-arm and at least 60 seconds after its last attempt
+  (`_REARM_INTERVAL_S` and `_REARM_RETRY_S` in
+  `conexus/hooks/scripts/mailbox_drain.py`), so a session with no prompts stays
+  unresolvable by name until its next one. The per-session registry file this
+  replaces never expired, so mail sent to the name in that window still landed
+  and waited for the next prompt; here the sender gets an error and can resend
+  by session id.
 - **Engine and client skew**: a client that sends `address_kind: session` to an
   engine without it gets `SchemaViolation`. The engine deploys before the client
   release that sends it; old clients are unaffected.
@@ -363,8 +378,10 @@ it (2026-09-14).
 
 ### Prerequisites
 
-None outstanding: A1 to A5 are verified. Open for the gate: the conflict
-behavior of `mailbox_send`, the fork rule, and the TTL and heartbeat values.
+None outstanding: A1 to A5 are verified, and Sam decided the three items the
+gate left open (2026-09-14, T2 `nexus_rdr/208-decision-gate-2026-09-14`): a name
+held by two live sessions is refused, a fork leaves the parent's mailbox with
+the parent, and the lease is a 300-second TTL re-sent every 60 seconds.
 
 ### Minimum Viable Validation
 
@@ -415,13 +432,19 @@ None.
 
 - A re-send moves an entry's expiry; after its watcher stops, the entry lapses
   within one TTL and the name stops resolving.
-- Resolution picks the newest live entry; with two live entries naming
-  different sessions, `mailbox_send` delivers to the newest and returns both.
+- Resolution: when every live entry names one session, mail reaches it; when
+  live entries name two sessions, `mailbox_send` writes nothing and its error
+  names both.
 - Rename: mail to the new name reaches the session; mail to the old name
   arrives within one TTL and is refused after it.
 - `/clear`: SessionStart records the previous id before its output; the drain
   empties the previous mailbox and deletes the record when a claim returns
   nothing; an interrupted pass keeps the record.
+- Two processes on one session id, one of which runs `/clear`: each message in
+  the old mailbox is delivered exactly once, to one of them.
+- A watcher that stops while its session lives: the name stops resolving
+  within one TTL, mail by session id still arrives, and the name resolves again
+  after the re-arm.
 - Fork: a forked session writes no cleared record, and the parent's mailbox is
   untouched.
 - `mailbox_send` refuses an unresolvable name and writes nothing.
@@ -459,8 +482,8 @@ No contradiction found.
 A1 to A5 are verified: A1 and A2 by observation on this machine (research-3),
 A3 from the harness code and its documentation (research-3), and A4 and A5 by
 reading `TupleRepository` (research-1). Nothing the design rests on is assumed.
-Three items are open decisions, not assumptions: the conflict behavior of
-`mailbox_send`, the fork rule, and the TTL and heartbeat values.
+Three items were open decisions at the gate, not assumptions; Sam decided them
+on 2026-09-14 (see Prerequisites).
 
 ### Scope Verification
 
@@ -527,3 +550,4 @@ unverified to verified, and A4 was corrected. Open for the gate: the conflict
 behavior, the fork rule, and the TTL and heartbeat values.
 
 - 2026-09-14: Gate round 1 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `3b07bee53`; critique `nexus_rdr/208-gate-critique-2026-09-14`.
+- 2026-09-14: Post-accept amendment: Sam's three gate decisions (T2 `nexus_rdr/208-decision-gate-2026-09-14`), so a name held by two live sessions is refused rather than delivered to the newest; and gate Significants 1 and 2 (a watcher that stops while its session lives; `/clear` with two processes on one session id). Fix check recorded in T2 as `nexus_rdr/208-fix-check-<tip>`.
