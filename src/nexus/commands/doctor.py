@@ -2902,7 +2902,7 @@ def _count_orphan_trackers() -> int | None:
         from nexus.session import _parse_orphan_tracker_candidates  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         ps_output = subprocess.check_output(
-            ["ps", "-eo", "pid,ppid,etime,command"],
+            ["ps", "-ww", "-eo", "pid,ppid,etime,command"],
             text=True,
             stderr=subprocess.DEVNULL,
         )

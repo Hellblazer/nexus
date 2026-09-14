@@ -252,6 +252,20 @@ def _write_tuple_watch_session_marker(new_session_id: str, source: str | None) -
         _log.debug("tuple_watch_session_marker_write_failed", error=str(exc))
 
 
+def adopt_session_marker(session_id: str) -> None:
+    """Point this claude process's watcher self-stop marker at *session_id*,
+    recording no ``/clear``.
+
+    ``nx hook mailbox-arm`` calls this. ``/branch`` forks a new session in the
+    same claude process and runs no SessionStart, so the marker still names
+    the parent session and the parent's watcher keeps running in the fork.
+    Writing the fork's id stops that watcher. No cleared record is written:
+    the parent's mailbox stays with the parent (RDR-208 Fork paragraph).
+    Best-effort, like every marker write here.
+    """
+    _write_tuple_watch_session_marker(session_id, None)
+
+
 # -- SessionStart -------------------------------------------------------------
 
 def render_session_start(session_id: str, *, mailbox_arm_text: str = "") -> str:

@@ -178,9 +178,10 @@ def mailbox_arm_instruction(session_id: str) -> str:
     2026-09-12), so a session firing this instruction again may find one
     already running from before. No TaskStop step is needed for that,
     unlike an earlier version of this instruction: a watcher from before a
-    ``/clear`` or ``/resume`` DISCOVERS the change itself (nexus-6konb.12,
-    MM-3.4 fix 1 -- :func:`nexus.tuple_watch.run_watch`'s per-cycle check
-    against the marker ``nexus.hooks`` writes) and stops on its own,
+    ``/clear``, ``/resume`` or ``/branch`` DISCOVERS the change itself
+    (nexus-6konb.12, MM-3.4 fix 1 -- :func:`nexus.tuple_watch.run_watch`'s
+    per-cycle check against the marker ``nexus.hooks`` writes, which
+    ``nx hook mailbox-arm`` moves after a ``/branch``) and stops on its own,
     releasing its lock for the replacement Monitor this instruction arms.
     The old TaskStop rule could never have worked after a genuine
     ``/clear`` in the first place: the fresh conversation running this
@@ -202,7 +203,7 @@ def mailbox_arm_instruction(session_id: str) -> str:
         "    })\n"
         "Take <name> from ListAgents now, not memory: it changes on resume. "
         "Without one, omit --instance. Arming twice is harmless (a lock "
-        "refuses it); a watcher from before a /clear or /resume stops "
+        "refuses it); a watcher from before a /clear, /resume or /branch stops "
         "itself, and this instruction re-arms. Each line is a ping, never "
         "the message; the watcher never claims: call "
         "mcp__plugin_conexus_nexus__tuple_in on the named mailbox, handle "
