@@ -4994,8 +4994,10 @@ def store_get_many(
     Use this instead of repeated `store_get` calls when resolving many ids
     at once (e.g. a plan step's `$stepN.ids` results). Returns a
     human-readable "Hydrated N/M docs" listing with each document's content
-    under an `[id]` line and a trailing `Missing: ...` line, or
-    `{contents, missing, section_types}` when `structured=True`.
+    under an `[id]` line and a trailing `Missing: ...` line, or, when
+    `structured=True`, `{contents, missing, section_types, source_notes}`
+    (`source_notes` names the collection each entry was found in), or
+    `{contents, missing, error}` if the batch fetch itself failed.
 
     Constraints:
     - `ids` accepts a comma-separated string, a flat list, or a list of
@@ -7298,7 +7300,10 @@ def traverse(
     never both.
 
     Returns `{"tumblers": [...], "ids": [], "collections": [...]}` for
-    `$stepN.tumblers`/`$stepN.collections` references.
+    `$stepN.tumblers`/`$stepN.collections` references, or the same shape
+    plus a `"warning"` key
+    (`{"tumblers": [...], "ids": [], "collections": [...], "warning": "..."}`)
+    when `purpose` does not resolve to a known name.
 
     Constraints:
     - `ids` is ALWAYS an empty list — this tool returns document tumblers,
