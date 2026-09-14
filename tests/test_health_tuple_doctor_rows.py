@@ -569,10 +569,55 @@ def _three_files(
 
 
 class TestCheckTupleWatchPermission:
-    # ── absence / unreadable, never a crash ──────────────────────────────
+    # ── not applicable: Claude Code never ran on this box (nexus-7zhag) ──
 
-    def test_all_three_files_missing_is_not_configured_never_crashes(self, tmp_path) -> None:
+    def test_user_config_dir_absent_is_not_applicable_never_warns(self, tmp_path) -> None:
+        # _three_files() with no payloads creates nothing at all -- not even
+        # the "user-home" parent directory. This is the real fresh-install
+        # MVV shape: a scrubbed HOME that has never had Claude Code write to
+        # it. Was "not configured, warn=True" before nexus-7zhag; a virgin
+        # box has no permission surface to be missing a rule from.
         paths = _three_files(tmp_path)
+        assert not paths[0][1].parent.exists()
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is True and r.warn is not True and r.fatal is False
+        assert "not applicable" in r.detail
+        assert "not configured" not in r.detail
+
+    def test_user_config_dir_absent_ignores_project_files_present(self, tmp_path) -> None:
+        # Keyed on the USER directory only -- a project .claude with its own
+        # rules (the shape every checkout of this repo has) must not change
+        # the verdict when the user-level directory itself does not exist.
+        paths = _three_files(tmp_path, project={"permissions": {"allow": ["Bash(nx:*)"]}})
+        assert not paths[0][1].parent.exists()
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is True and r.warn is not True
+        assert "not applicable" in r.detail
+
+    def test_default_paths_are_not_applicable_when_claude_config_dir_is_absent(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        missing = tmp_path / "never-existed"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(missing))
+        r = h._check_tuple_watch_permission()[0]
+        assert r.ok is True and r.warn is not True
+        assert "not applicable" in r.detail
+
+    def test_default_paths_are_not_applicable_when_home_has_no_dot_claude(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        assert not (tmp_path / ".claude").exists()
+        r = h._check_tuple_watch_permission()[0]
+        assert r.ok is True and r.warn is not True
+        assert "not applicable" in r.detail
+
+    # ── absence / unreadable, once the user dir exists, never a crash ────
+
+    def test_user_dir_present_with_no_files_at_all_is_not_configured(self, tmp_path) -> None:
+        paths = _three_files(tmp_path)
+        paths[0][1].parent.mkdir(parents=True)
         r = h._check_tuple_watch_permission(settings_paths=paths)[0]
         assert r.ok is False and r.warn is True
         assert "not configured" in r.detail
@@ -618,6 +663,7 @@ class TestCheckTupleWatchPermission:
 
     def test_covering_rule_in_project_file_names_project(self, tmp_path) -> None:
         paths = _three_files(tmp_path, project={"permissions": {"allow": ["Bash(nx tuple:*)"]}})
+        paths[0][1].parent.mkdir(parents=True)  # user dir present, just no user rule
         r = h._check_tuple_watch_permission(settings_paths=paths)[0]
         assert r.ok is True
         assert "(project)" in r.detail
@@ -626,6 +672,7 @@ class TestCheckTupleWatchPermission:
         paths = _three_files(
             tmp_path, project_local={"permissions": {"allow": ["Bash(nx tuple watch:*)"]}},
         )
+        paths[0][1].parent.mkdir(parents=True)  # user dir present, just no user rule
         r = h._check_tuple_watch_permission(settings_paths=paths)[0]
         assert r.ok is True
         assert "(project-local)" in r.detail
@@ -730,6 +777,7 @@ class TestCheckTupleWatchPermission:
 
     def test_not_configured_detail_makes_no_claim_about_prompts(self, tmp_path) -> None:
         paths = _three_files(tmp_path)
+        paths[0][1].parent.mkdir(parents=True)  # user dir present, so this hits not-configured
         r = h._check_tuple_watch_permission(settings_paths=paths)[0]
         assert "prompt" not in r.detail.lower()
 
@@ -752,7 +800,9 @@ class TestCheckTupleWatchPermission:
         a correction, never re-asserted as a current justification.
         """
         import inspect
-        not_configured = h._check_tuple_watch_permission(settings_paths=_three_files(tmp_path))[0]
+        no_rule_paths = _three_files(tmp_path)
+        no_rule_paths[0][1].parent.mkdir(parents=True)  # user dir present, so not-configured
+        not_configured = h._check_tuple_watch_permission(settings_paths=no_rule_paths)[0]
         denied = h._check_tuple_watch_permission(
             settings_paths=_three_files(tmp_path, user={"permissions": {"deny": ["Bash"]}}),
         )[0]
@@ -770,7 +820,9 @@ class TestCheckTupleWatchPermission:
     # ── severity ──────────────────────────────────────────────────────────
 
     def test_severity_is_always_informational_never_fatal(self, tmp_path) -> None:
-        not_configured = h._check_tuple_watch_permission(settings_paths=_three_files(tmp_path))[0]
+        no_rule_paths = _three_files(tmp_path)
+        no_rule_paths[0][1].parent.mkdir(parents=True)  # user dir present, so not-configured
+        not_configured = h._check_tuple_watch_permission(settings_paths=no_rule_paths)[0]
         assert not_configured.fatal is False
         denied = h._check_tuple_watch_permission(
             settings_paths=_three_files(tmp_path, user={"permissions": {"deny": ["Bash"]}}),
@@ -783,6 +835,7 @@ class TestCheckTupleWatchPermission:
 
     def test_names_the_exact_entry_to_add(self, tmp_path) -> None:
         paths = _three_files(tmp_path)
+        paths[0][1].parent.mkdir(parents=True)  # user dir present, so not-configured
         r = h._check_tuple_watch_permission(settings_paths=paths)[0]
         assert "Bash(nx tuple watch:*)" in r.detail
 

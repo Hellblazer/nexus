@@ -5625,16 +5625,38 @@ def _check_tuple_watch_permission(
     project-local) that carries a covering allow rule is reported, named.
     Absent both, the row reports "not configured", naming the entry to add.
 
-    Always informational, per the bead's own severity note: ``ok=True``
-    only when a covering allow rule stands unchallenged by any deny;
-    ``ok=False, warn=True`` (soft, never fatal) for a deny override or no
-    covering rule at all.
+    Not applicable when Claude Code has never run on this machine at all
+    (bead nexus-7zhag, found by the 7.45.0 release battery's fresh-install
+    MVV leg 8/10): when the USER-level Claude config directory -- the
+    parent of the "user" entry in :func:`_claude_settings_paths`
+    (``CLAUDE_CONFIG_DIR``, or ``~/.claude``) -- does not exist, there is no
+    permission surface for this row to check yet, so it reports ``ok=True``
+    with no warning, naming why. This is keyed ONLY on the user-level
+    directory, never the project one: the project ``.claude`` directory
+    exists in this very checkout regardless of whether Claude Code has ever
+    run for the user, and a virgin box's real HOME carries no ``.claude`` at
+    all. Severity is per branch, never uniform and never fatal: the
+    not-applicable branch above is ``ok=True``; once the user directory
+    exists, ``ok=True`` only when a covering allow rule stands unchallenged
+    by any deny, and ``ok=False, warn=True`` (soft, never fatal) for a deny
+    override or no covering rule at all.
     """
     label = _TUPLE_WATCH_PERMISSION_LABEL
     paths = settings_paths if settings_paths is not None else _claude_settings_paths()
     hint_path = paths[0][1] if paths else _claude_settings_path()
     hint = f"add {_TUPLE_WATCH_DOCUMENTED_RULE!r} to permissions.allow in {hint_path}"
     all_paths_str = ", ".join(str(p) for _, p in paths)
+
+    user_config_dir = hint_path.parent
+    if not user_config_dir.is_dir():
+        return [HealthResult(
+            label=label, ok=True,
+            detail=(
+                f"not applicable -- {user_config_dir} does not exist, so Claude Code has "
+                "never run on this machine; there is no permissions.allow/.deny surface for "
+                f"'{_TUPLE_WATCH_COMMAND}' to check yet."
+            ),
+        )]
 
     covering: tuple[str, Path] | None = None
     denying: tuple[str, Path] | None = None
