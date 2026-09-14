@@ -141,7 +141,8 @@ else
     bad "nx init (see below)"; tail -30 "$RUN/init.log"
     echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): provisioning"; exit 1
 fi
-if nx tuple templates --json 2>/dev/null | grep -q 'directory/'; then
+templates="$(nx tuple templates --json 2>/dev/null)"
+if [[ "$templates" == *directory/* ]]; then
     ok "the local engine carries the directory/<name> template"
 else
     bad "no directory template on the local engine"; nx tuple templates 2>&1 | tail -20
