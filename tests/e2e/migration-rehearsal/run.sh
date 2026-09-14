@@ -543,8 +543,21 @@ lock_acquire "$LOCKDIR" || exit 1
 # fix note this replaces) so every trap reassignment from here on can
 # chain build_lease_release in as a failure-path backstop; the acquire
 # itself happens locally around the docker invocation, not here.
-# shellcheck source=../../../scripts/lib/build-lease.sh disable=SC1091
-source "$SCRIPT_DIR/../../../scripts/lib/build-lease.sh"
+# shellcheck source=../../../scripts/lib/release-props-lease.sh disable=SC1091
+source "$SCRIPT_DIR/../../../scripts/lib/release-props-lease.sh"
+# nexus-iexvl: set once a guided-family leg (--guided/--shakeout-e2e/
+# --candidate-migration) has acquired the "service" build lease around its
+# release.properties STAMP (below), so the later native-build step does
+# not try to re-acquire the same lease from this same process (which would
+# deadlock — build_lease_acquire_wait would wait on itself forever) and so
+# it knows to leave the lease held rather than releasing it early. Every
+# EXIT trap in this file already runs `_guided_restore` (restore the
+# bytes) BEFORE `build_lease_release service` (see the trap reassignment
+# just below) -- that ordering was already correct; the only defect was
+# acquiring the lease too late, well after the stamp was already sitting
+# in the tree unprotected. 0 = never acquired for a stamp; the native
+# build's own acquire/release stays exactly as it was for every other leg.
+NX_STAMP_LEASE_HELD=0
 # Code-review CRITICAL fix: the trap installed at the top of the script
 # (before LOCKDIR existed) referenced $LOCKDIR unconditionally — any of the
 # 12 argument-conflict guards ABOVE this point firing `exit 2` would invoke
@@ -592,6 +605,23 @@ if [ "$GUIDED" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ] || [ "$CANDIDATE_MIGRATION" = 1 
     # manifest above); nothing in this tree is touched.
     echo "[stamp] artifacts already carry release_version=$GUIDED_STAMP_VERSION — no stamp, no rebuild"
   else
+  # nexus-iexvl: acquire the SAME "service" build lease the native-build
+  # step further down uses, HERE, before the stamp is written, and hold it
+  # (via NX_STAMP_LEASE_HELD, checked below) all the way to this script's
+  # own EXIT trap -- never released early. Before this fix the stamp sat
+  # in the tree for the whole span between this write and whatever later
+  # line happened to acquire the lease (the native build, or nothing at
+  # all if the freshness check decided a rebuild was unnecessary), with
+  # the lease completely free that whole time: exactly the window a
+  # concurrent scripts/build-gate-jar.sh observed and, on top of its own
+  # now-fixed ordering bug, reapplied on its own exit.
+  build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" migration-rehearsal-stamp "$LEG"
+  NX_STAMP_LEASE_HELD=1
+  if ! release_props_guard_clean "$RELEASE_PROPS" service; then
+    build_lease_release service
+    NX_STAMP_LEASE_HELD=0
+    exit 75
+  fi
   echo "[stamp] stamping $RELEASE_PROPS release_version=$GUIDED_STAMP_VERSION (restored on exit)…"
   grep -v '^release_version=' "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp"
   printf 'release_version=%s\n' "$GUIDED_STAMP_VERSION" >> "$RELEASE_PROPS.tmp"
@@ -668,7 +698,17 @@ elif [ "$DO_BUILD" = 1 ]; then
     # bounded by NX_BUILD_LEASE_WAIT like every other producer (nexus-pv93h:
     # --shakeout used to exit 75 the instant a cached gate-jar copy held
     # the lease); rc 75 names the holder only once the bound is exhausted.
-    build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" docker-native-build migration-rehearsal
+    # nexus-iexvl: a guided-family leg already acquired this SAME lease
+    # before stamping above (NX_STAMP_LEASE_HELD=1) and holds it all the
+    # way to this script's own EXIT trap -- re-acquiring here would be
+    # this same process waiting on a lease it already holds itself
+    # (build_lease_acquire_wait would block until NX_BUILD_LEASE_WAIT
+    # expired, then refuse). Every other leg that reaches this branch
+    # (the default, non-stamping rehearse.sh path) never set the flag and
+    # acquires/releases exactly as before.
+    if [ "$NX_STAMP_LEASE_HELD" = 0 ]; then
+      build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" docker-native-build migration-rehearsal
+    fi
     docker run --rm --entrypoint bash \
       --add-host=host.docker.internal:host-gateway \
       -v "$PWD":/src -w /src/service \
@@ -677,7 +717,13 @@ elif [ "$DO_BUILD" = 1 ]; then
       -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
       "$GRAAL_IMAGE" \
       -c "./mvnw -B -Pnative -DskipTests -Dnative.image.opt=-Ob -Dnative.image.maxheap=${NATIVE_MAXHEAP} package"
-    build_lease_release service
+    # Released here only when THIS block acquired it; a guided-family
+    # stamp's lease stays held (see above) until this script's own EXIT
+    # trap runs _guided_restore and then build_lease_release service, in
+    # that order -- releasing it here too would free it the instant the
+    # native build finishes, reopening the exact window (stamp on disk,
+    # lease free, script still running its e2e phases) nexus-iexvl fixes.
+    [ "$NX_STAMP_LEASE_HELD" = 0 ] && build_lease_release service
   else
     # nexus-ndve9: when we DO reuse, say how old the artifact is — the failing
     # shakeout's log recorded only "candidate native binary present", which

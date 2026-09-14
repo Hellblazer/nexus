@@ -301,8 +301,8 @@ REAL_HOME="$HOME"
 # shellcheck source=tests/e2e/lib/fence_home.sh
 source "$REPO_ROOT/tests/e2e/lib/fence_home.sh"
 source "$REPO_ROOT/tests/e2e/lib/gate_advisory.sh"   # passed_by_default (nexus-1c7oq)
-# shellcheck source=./scripts/lib/build-lease.sh disable=SC1091
-source "$REPO_ROOT/scripts/lib/build-lease.sh"   # nexus-56qvf: holds the lease across stamp+package+restore, not just the mvn call
+# shellcheck source=./scripts/lib/release-props-lease.sh disable=SC1091
+source "$REPO_ROOT/scripts/lib/release-props-lease.sh"   # nexus-56qvf: holds the lease across stamp+package+restore, not just the mvn call
 GATE_HOME="$SCRATCH/home"
 fence_home "$REAL_HOME" "$GATE_HOME" ".config/nexus"
 export HOME="$GATE_HOME"
@@ -493,6 +493,14 @@ print(jar_freshness_skip_reason() or "")
   # window) — it closes the CONCURRENT-CLOBBER hazard the bead names as
   # fixable, not that specific unreplicated occurrence.
   build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" local-service-gate.sh-stamp-package
+  # nexus-iexvl: now that the lease is ours, nobody else can legitimately
+  # be mid-stamp -- a dirty file here means a prior process left the tree
+  # stamped without holding this lease for its whole stamp lifetime.
+  # Refuse before overwriting it as though it were the true baseline.
+  if ! release_props_guard_clean "$RELEASE_PROPS" service; then
+    build_lease_release service
+    exit 75
+  fi
   echo "[gate] rebuilding service jar (release_version=$GATE_STAMP build_ref=$GATE_BUILD_REF)..."
   # Pre-invocation bytes, never `git checkout` (nexus-iws18: HEAD is not
   # what was in the tree when the gate started).
