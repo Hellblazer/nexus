@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-47 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
+48 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
 RDR-182 consent-gated ``forensics``/``remediate`` pair (nexus-ykzbj.10/.11)
 was deleted at nexus-lgdel — the chash-rekey upgrade rung it steered
 operators toward no longer exists.
@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterable
 from typing import Annotated, Any
 
@@ -81,6 +82,11 @@ from nexus.mcp.operator_requests import (
     build_verify_request,
 )
 from nexus.ttl import parse_ttl
+from nexus.tuple_directory import (
+    resolve_default_from,
+    resolve_send_address,
+    validate_from_address,
+)
 
 #: Module logger for MCP tool handlers (nexus-yttqr). Read-path handlers return a
 #: string to the agent rather than raising; before returning an error they must
@@ -6612,6 +6618,77 @@ def tuple_stats(
         return _tuple_census_to_dict(c)
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return {"error": _mcp_tool_error("tuple_stats", e)}
+
+
+@mcp.tool(
+    title="Send Mailbox Message",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
+)
+def mailbox_send(
+    to: Annotated[str, Field(
+        description=(
+            "Destination: a session id, an agent id (\"a\" + 16 hex "
+            "chars), or a name. A name is resolved against the live "
+            "session directory at send time."
+        ),
+    )],
+    body: Annotated[str | None, Field(
+        description="Optional message payload; same size limit as tuple_out's body.",
+    )] = None,
+    kind: Annotated[str | None, Field(
+        description="Optional message kind dimension, passed through unchanged to the mailbox tuple.",
+    )] = None,
+    correlation_id: Annotated[str | None, Field(
+        description="Optional correlation id dimension, passed through unchanged to the mailbox tuple.",
+    )] = None,
+    from_address: Annotated[str | None, Field(
+        description=(
+            "Optional sender override -- a session id or an agent id. "
+            "Defaults to this MCP server's own current session."
+        ),
+    )] = None,
+) -> dict:
+    """Send a message to a session, an agent, or a NAME, resolved at send time.
+
+    Use this instead of a raw `tuple_out` to `mailbox/<address>` whenever
+    `to` might be a name rather than an address already known to be a
+    session or agent id -- `tuple_out` writes wherever it is told, with
+    no resolution, while this tool resolves a name against the live
+    session directory first (and still works as a `tuple_out` shorthand
+    when `to` is already a session or agent id). Returns
+    `{"tuple_id": "...", "to": "...", "address_kind": "...", "from": "..."}`.
+
+    A name resolves through `directory/<name>`'s live rows: no live
+    holder is refused, naming the name; more than one distinct holding
+    session is refused, naming every holder -- resend to one of those
+    session ids directly instead. `from_address`, when given, must itself
+    be a session id or an agent id. With no `from_address`, the sender
+    defaults to this MCP server's own current session, and is refused
+    when that cannot be resolved. Either refusal writes nothing.
+    """
+    try:
+        from_id = (
+            validate_from_address(from_address) if from_address
+            else resolve_default_from()
+        )
+
+        def _send(db: Any) -> tuple[str, str, str]:
+            address, address_kind = resolve_send_address(to, db.tuples)
+            dims: dict[str, str] = {"from": from_id, "address_kind": address_kind}
+            if kind:
+                dims["kind"] = kind
+            if correlation_id:
+                dims["correlation_id"] = correlation_id
+            tuple_id = db.tuples.out(
+                f"mailbox/{address}", {"to": address}, dims, body, nonce=str(uuid.uuid4()),
+            )
+            return tuple_id, address, address_kind
+
+        tuple_id, address, address_kind = _t2_index_write(_send, op="mailbox_send")
+        return {"tuple_id": tuple_id, "to": address, "address_kind": address_kind, "from": from_id}
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return {"error": _mcp_tool_error("mailbox_send", e)}
 
 
 # ── Demoted tools (plain functions, no @mcp.tool()) ──────────────────────────

@@ -8,14 +8,14 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 | Server | Entry point | Tools | Purpose |
 |---|---|---|---|
-| `nexus` | `nx-mcp` | 47 | Storage tiers, retrieval, operators, orchestration, diagnostics |
+| `nexus` | `nx-mcp` | 48 | Storage tiers, retrieval, operators, orchestration, diagnostics |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`) or the `.mcpb` extension. No separate install.
 
 **Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started § Install](getting-started.md#install) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
-## `nexus` — retrieval + storage (47 tools)
+## `nexus` — retrieval + storage (48 tools)
 
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
@@ -76,6 +76,7 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 | `tuple_registry` | The boot-loaded template set: `{digest, sources, templates}` |
 | `tuple_list` | Concrete subspaces that exist, optionally filtered by prefix |
 | `tuple_stats` | The census for one subspace |
+| `mailbox_send` | Send to a session, an agent, or a NAME, resolved at send time (RDR-208). A session or agent id writes directly; a name reads every live `directory/<name>` row and refuses (writing nothing) on zero or more than one distinct holding session. Returns `{tuple_id, to, address_kind, from}` |
 
 **Routing rule of thumb**: `tuple_rd`/`tuple_in` with `timeout_s=0` (the default) are the probe forms — never block. Pass `timeout_s>0` only when the caller intends to wait; a wait of minutes is a loop of parked calls (each capped at 25 s by default), never one long park. There are no separate probe-named tools (`tuple_rdp`/`tuple_inp`) — `timeout_s=0` covers that case on the same tool.
 

@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """The nine RDR-205/RDR-206 tuple-space MCP tools (beads nexus-em75s.10,
-nexus-h61dl.9), against the real engine substrate (``t2_service_env``).
+nexus-h61dl.9), plus mailbox_send (RDR-208 Phase 2 Step 2, bead
+nexus-galkv.10), against the real engine substrate (``t2_service_env``).
 
 Uses the ``mailbox/<address>`` template loaded at engine boot (keys
 ``[to]``, dims ``{from, kind, correlation_id, address_kind}``,
-``take.enabled=true`` — see ``tests/db/test_http_tuple_store.py``'s module
-docstring for the full template shapes).
+``take.enabled=true``) and the ``directory/<name>`` template (keys
+``[name]``, dims ``{session_id}``) — see ``tests/db/test_http_tuple_store.py``'s
+module docstring for the full template shapes.
 """
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import datetime
 
@@ -18,6 +21,7 @@ import pytest
 from nexus.db.t2.http_tuple_store import HttpTupleStore, ReplyNotWrittenError
 
 from nexus.mcp.core import (
+    mailbox_send,
     tuple_ack,
     tuple_in,
     tuple_list,
@@ -312,3 +316,220 @@ class TestTupleRegistryListStats:
         stats = tuple_stats(f"mailbox/{addr}")
         assert stats["total"] == 0
         assert stats["available"] == 0
+
+
+class TestMailboxSend:
+    """RDR-208 Phase 2 Step 2 (bead nexus-galkv.10): send-time `to`
+    resolution and the default `from`. Every test sets NX_T1_SESSION_ID so
+    the `from` fallback resolves without touching a real tuple-watch
+    session marker on this box; the marker-vs-env tests below override
+    that with an explicit marker file instead."""
+
+    def _directory_entry(self, name: str, session_id: str, *, ttl_seconds: int | None = None) -> None:
+        tuple_out(
+            f"directory/{name}", {"name": name}, {"session_id": session_id},
+            nonce=_uniq("nonce"), ttl_seconds=ttl_seconds,
+        )
+
+    def test_session_id_delivers_directly_with_address_kind_session(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
+        dest = str(uuid.uuid4())
+        result = mailbox_send(dest, body="hello", kind="ping", correlation_id="corr-1")
+        assert isinstance(result, dict) and "error" not in result
+        assert result["to"] == dest
+        assert result["address_kind"] == "session"
+
+        rows = tuple_rd(f"mailbox/{dest}", {"to": dest})
+        assert len(rows) == 1
+        assert rows[0]["body"] == "hello"
+        assert rows[0]["dims"]["address_kind"] == "session"
+        assert rows[0]["dims"]["kind"] == "ping"
+        assert rows[0]["dims"]["correlation_id"] == "corr-1"
+        assert rows[0]["dims"]["from"] == result["from"]
+
+    def test_agent_id_delivers_directly_with_address_kind_agent(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
+        dest = "a" + uuid.uuid4().hex[:16]
+        result = mailbox_send(dest, body="hello")
+        assert "error" not in result
+        assert result["to"] == dest
+        assert result["address_kind"] == "agent"
+
+        rows = tuple_rd(f"mailbox/{dest}", {"to": dest})
+        assert len(rows) == 1
+        assert rows[0]["dims"]["address_kind"] == "agent"
+
+    def test_name_with_one_live_holder_delivers_to_that_session(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
+        name = _uniq("name")
+        sid = str(uuid.uuid4())
+        self._directory_entry(name, sid)
+
+        result = mailbox_send(name, body="hey")
+        assert "error" not in result
+        assert result["to"] == sid
+        assert result["address_kind"] == "session"
+
+        rows = tuple_rd(f"mailbox/{sid}", {"to": sid})
+        assert len(rows) == 1 and rows[0]["body"] == "hey"
+
+    def test_unresolvable_name_errors_naming_the_name_and_writes_nothing(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
+        name = _uniq("noholder")
+
+        result = mailbox_send(name, body="x")
+        assert "error" in result
+        assert name in result["error"]
+
+        # A defect that fell through and used the unresolved name literally
+        # as the mailbox address would show up here as a live row.
+        stats = tuple_stats(f"mailbox/{name}")
+        assert stats["total"] == 0
+
+    def test_two_live_holders_errors_listing_both_and_writes_nothing(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
+        name = _uniq("name")
+        sid1, sid2 = str(uuid.uuid4()), str(uuid.uuid4())
+        self._directory_entry(name, sid1)
+        self._directory_entry(name, sid2)
+
+        result = mailbox_send(name, body="x")
+        assert "error" in result
+        assert sid1 in result["error"]
+        assert sid2 in result["error"]
+
+        assert tuple_rd(f"mailbox/{sid1}", {"to": sid1}) == []
+        assert tuple_rd(f"mailbox/{sid2}", {"to": sid2}) == []
+
+    def test_one_session_two_live_rows_is_one_holder_not_a_conflict(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
+        name = _uniq("name")
+        sid = str(uuid.uuid4())
+        self._directory_entry(name, sid)  # the original watcher row
+        self._directory_entry(name, sid)  # a re-armed watcher's new nonce
+
+        result = mailbox_send(name, body="x")
+        assert "error" not in result
+        assert result["to"] == sid
+
+    def test_lapsed_entry_is_refused(self, t2_service_env, monkeypatch) -> None:
+        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
+        name = _uniq("name")
+        sid = str(uuid.uuid4())
+        self._directory_entry(name, sid, ttl_seconds=1)
+        time.sleep(1.5)
+
+        result = mailbox_send(name, body="x")
+        assert "error" in result
+        assert name in result["error"]
+
+    def test_significant_a_lapse_refused_then_session_send_then_rearm_resolves_again(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        """Gate Significant (a): a directory entry lapses while its session
+        stays live -- the name refuses, mail BY SESSION ID still arrives,
+        and a fresh entry with a new nonce (what a re-armed watcher writes)
+        makes the name resolve again."""
+        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
+        name = _uniq("name")
+        sid = str(uuid.uuid4())
+        self._directory_entry(name, sid, ttl_seconds=1)
+        time.sleep(1.5)
+
+        refused = mailbox_send(name, body="x")
+        assert "error" in refused and name in refused["error"]
+
+        by_session = mailbox_send(sid, body="still-reachable")
+        assert "error" not in by_session
+        assert by_session["to"] == sid
+        rows = tuple_rd(f"mailbox/{sid}", {"to": sid}, n=5)
+        assert any(r["body"] == "still-reachable" for r in rows)
+
+        self._directory_entry(name, sid)  # re-armed watcher, fresh nonce
+        resolved_again = mailbox_send(name, body="resolved-again")
+        assert "error" not in resolved_again
+        assert resolved_again["to"] == sid
+
+    def test_from_defaults_to_the_moved_session_marker_not_a_stale_env_var(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """RDR-208 audit round-2 fix: the default `from` is the tuple-watch
+        session marker for this MCP server's claude ancestor, not
+        NX_T1_SESSION_ID -- the env var lags a `/clear` handoff while the
+        marker is written synchronously by SessionStart. Moving only the
+        env var, not the marker, would pass either way; this test moves
+        the marker and leaves the env var stale, so only the fix (reading
+        the marker first) can pass it."""
+        import nexus.session as session_mod
+        from nexus.tuple_watch import write_session_marker
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setattr(session_mod, "find_immediate_claude_pid", lambda: 4242)
+        moved_id = str(uuid.uuid4())
+        write_session_marker(tmp_path, 4242, moved_id)
+        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))  # stale -- must not be used
+
+        dest = str(uuid.uuid4())
+        result = mailbox_send(dest, body="from-check")
+        assert "error" not in result
+        assert result["from"] == moved_id
+
+        rows = tuple_rd(f"mailbox/{dest}", {"to": dest})
+        assert rows[0]["dims"]["from"] == moved_id
+
+    def test_from_falls_back_to_env_when_no_marker_present(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        import nexus.session as session_mod
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setattr(session_mod, "find_immediate_claude_pid", lambda: 4242)
+        env_id = str(uuid.uuid4())
+        monkeypatch.setenv("NX_T1_SESSION_ID", env_id)
+
+        dest = str(uuid.uuid4())
+        result = mailbox_send(dest, body="x")
+        assert "error" not in result
+        assert result["from"] == env_id
+
+    def test_from_refused_when_neither_marker_nor_env_present_and_nothing_written(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        import nexus.session as session_mod
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setattr(session_mod, "find_immediate_claude_pid", lambda: 4242)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+
+        dest = str(uuid.uuid4())
+        result = mailbox_send(dest, body="x")
+        assert "error" in result
+
+        assert tuple_rd(f"mailbox/{dest}", {"to": dest}) == []
+
+    def test_a_failed_directory_read_errors_and_writes_nothing(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
+
+        def _boom(self, *a, **kw):
+            raise RuntimeError("directory read exploded")
+
+        monkeypatch.setattr(HttpTupleStore, "rd", _boom)
+        name = _uniq("name")
+
+        result = mailbox_send(name, body="x")
+        assert "error" in result
+        assert "directory read exploded" in result["error"]
