@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+from structlog.testing import capture_logs
+
 from nexus.mcp_infra import _sweep_superseded_vectors
 
 
@@ -584,12 +586,12 @@ def test_sweep_is_skipped_loudly_when_docs_for_chashes_raises() -> None:
     col = MagicMock()
     with patch("nexus.db.make_t3", return_value=MagicMock(
             get_collection=MagicMock(return_value=col))), \
-            patch("structlog.get_logger") as log:
+            capture_logs() as logs:
         _manifest_write_loop(fake, {"doc-A": _metas("keep", "new1")}, "coll",
                              reader=fake)
 
     col.delete.assert_not_called()          # fail-open: nothing deleted
-    events = [c.args[0] for c in log.return_value.warning.call_args_list if c.args]
+    events = [e["event"] for e in logs if e["log_level"] == "warning"]
     assert "superseded_sweep_skipped_no_reverse_lookup" in events, events
 
 
@@ -606,11 +608,11 @@ def test_sweep_is_skipped_loudly_when_the_before_read_fails() -> None:
     col = MagicMock()
     with patch("nexus.db.make_t3", return_value=MagicMock(
             get_collection=MagicMock(return_value=col))), \
-            patch("structlog.get_logger") as log:
+            capture_logs() as logs:
         _manifest_write_loop(fake, {"doc-A": _metas("new1")}, "coll", reader=fake)
 
     col.delete.assert_not_called()          # fail-open: nothing deleted
-    events = [c.args[0] for c in log.return_value.warning.call_args_list if c.args]
+    events = [e["event"] for e in logs if e["log_level"] == "warning"]
     assert "superseded_sweep_before_read_failed" in events, events
 
 
