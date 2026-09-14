@@ -16,11 +16,19 @@ substrate, no I/O.
 from __future__ import annotations
 
 import types
+import uuid
 from typing import Any
 
 import pytest
 
-from nexus.tuple_directory import DirectoryResolutionError, classify_directory_holders
+from nexus.db.limits import MAX_QUERY_RESULTS
+from nexus.tuple_directory import (
+    DirectoryResolutionError,
+    classify_directory_holders,
+    list_directory_entries,
+    resolve_send_address,
+    validate_from_address,
+)
 
 
 def _row(session_id: str, *, id_: str = "id") -> Any:
@@ -57,3 +65,98 @@ class TestClassifyDirectoryHolders:
         blank = types.SimpleNamespace(id="x", dims={})
         with pytest.raises(DirectoryResolutionError, match="no live holder"):
             classify_directory_holders("some-name", [blank])
+
+
+def _paged_row(session_id: str, row_id: str) -> Any:
+    """A `list_directory_entries` paging test needs `.created_at` too (the
+    cursor `since=(last.created_at, last.id)` is built from it) -- `_row`
+    above omits it since the classifier alone never reads it."""
+    return types.SimpleNamespace(
+        id=row_id, dims={"session_id": session_id}, created_at=f"created-{row_id}",
+    )
+
+
+class _PagedDirectoryStore:
+    """A fake `HttpTupleStore.rd()` returning `MAX_QUERY_RESULTS`-sized
+    pages until a short final page, with a distinct holder ONLY on that
+    final page (test validation gap 1, T2 `nexus_rdr/208-p2-test-
+    validation-galkv16-2026-09-14`).
+
+    Cursor-driven, not call-count-driven: a fresh call with `since=None`
+    always restarts at page 0, matching the real engine's own stateless
+    `rd` contract, so one store instance safely backs more than one
+    `list_directory_entries`/`resolve_send_address` call across a test
+    module (unlike a running call counter, which would treat a SECOND
+    top-level call as a continuation of the first and run off the end of
+    `pages`).
+
+    What turns this test red: `list_directory_entries` (`src/nexus/
+    tuple_directory.py:87`) stopping after its first `tuples.rd(...)`
+    call -- its `if len(page) < MAX_QUERY_RESULTS: break` continuation
+    replaced by an unconditional break after page 0, or the whole
+    `while True` loop replaced by one bare, unpaged call. Either edit
+    means page 3's `session-B` holder is never read, and this module's
+    two-holder refusal (`test_a_holder_appearing_only_on_the_last_page_
+    is_counted`) silently becomes a false single-holder resolution
+    instead of raising.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.pages: list[list[Any]] = [
+            [_paged_row("session-A", f"p0-{i}") for i in range(MAX_QUERY_RESULTS)],
+            [_paged_row("session-A", f"p1-{i}") for i in range(MAX_QUERY_RESULTS)],
+            [_paged_row("session-B", "p2-0")],  # the short page; the only session-B row
+        ]
+        self.calls: list[tuple[str, str] | None] = []
+
+    def rd(self, subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0):
+        self.calls.append(since)
+        if since is None:
+            return self.pages[0]
+        cursors = {
+            (page[-1].created_at, page[-1].id): i
+            for i, page in enumerate(self.pages[:-1])
+        }
+        idx = cursors.get(since)
+        if idx is None:
+            raise AssertionError(f"unexpected since cursor {since!r} for a fresh page request")
+        return self.pages[idx + 1]
+
+
+class TestListDirectoryEntriesPaging:
+    def test_pages_until_a_short_page_in_cursor_order(self) -> None:
+        name = "some-name"
+        store = _PagedDirectoryStore(name)
+
+        entries = list_directory_entries(name, store)
+
+        assert len(entries) == 2 * MAX_QUERY_RESULTS + 1
+        # Stops on the short (3rd) page -- no 4th call was ever made.
+        assert len(store.calls) == 3
+        assert store.calls[0] is None
+        assert store.calls[1] == (store.pages[0][-1].created_at, store.pages[0][-1].id)
+        assert store.calls[2] == (store.pages[1][-1].created_at, store.pages[1][-1].id)
+
+    def test_a_holder_appearing_only_on_the_last_page_is_counted(self) -> None:
+        name = "some-other-name"
+        store = _PagedDirectoryStore(name)
+
+        with pytest.raises(DirectoryResolutionError) as exc_info:
+            resolve_send_address(name, store)
+        msg = str(exc_info.value)
+        assert "session-A" in msg
+        assert "session-B" in msg
+
+
+class TestValidateFromAddress:
+    def test_session_id_shape_is_accepted(self) -> None:
+        sid = str(uuid.uuid4())
+        assert validate_from_address(sid) == sid
+
+    def test_agent_id_shape_is_accepted(self) -> None:
+        agent_id = "a" + "0" * 16
+        assert validate_from_address(agent_id) == agent_id
+
+    def test_neither_shape_is_refused(self) -> None:
+        with pytest.raises(DirectoryResolutionError, match="neither a session id nor an agent id"):
+            validate_from_address("not-a-valid-shape")

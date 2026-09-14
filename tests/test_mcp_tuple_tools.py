@@ -533,3 +533,59 @@ class TestMailboxSend:
         result = mailbox_send(name, body="x")
         assert "error" in result
         assert "directory read exploded" in result["error"]
+
+    def test_agent_id_from_address_stamps_from_with_that_agent_id(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        """from_address test validation gap 2 (T2 nexus_rdr/208-p2-test-
+        validation-galkv16-2026-09-14): NX_T1_SESSION_ID is set so a bug
+        that silently ignored from_address and fell back to the default
+        would still produce SOME `from`, not a refusal -- the assertion on
+        `result["from"]` is what catches the ignored override."""
+        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
+        dest = str(uuid.uuid4())
+        agent_id = "a" + uuid.uuid4().hex[:16]
+
+        result = mailbox_send(dest, body="x", from_address=agent_id)
+        assert "error" not in result
+        assert result["from"] == agent_id
+
+        rows = tuple_rd(f"mailbox/{dest}", {"to": dest})
+        assert len(rows) == 1
+        assert rows[0]["dims"]["from"] == agent_id
+
+    def test_session_id_from_address_overrides_the_session_marker(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """A live, correctly-read session marker is armed here too, so this
+        proves from_address WINS over it -- not merely that from_address
+        works when nothing else is set."""
+        import nexus.session as session_mod
+        from nexus.tuple_watch import write_session_marker
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setattr(session_mod, "find_immediate_claude_pid", lambda: 4242)
+        marker_id = str(uuid.uuid4())
+        write_session_marker(tmp_path, 4242, marker_id)
+
+        override_id = str(uuid.uuid4())
+        dest = str(uuid.uuid4())
+        result = mailbox_send(dest, body="x", from_address=override_id)
+        assert "error" not in result
+        assert result["from"] == override_id
+        assert result["from"] != marker_id
+
+        rows = tuple_rd(f"mailbox/{dest}", {"to": dest})
+        assert rows[0]["dims"]["from"] == override_id
+
+    def test_invalid_from_address_shape_is_refused_and_writes_nothing(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
+        dest = str(uuid.uuid4())
+
+        result = mailbox_send(dest, body="x", from_address="not-a-valid-shape")
+        assert "error" in result
+
+        stats = tuple_stats(f"mailbox/{dest}")
+        assert stats["total"] == 0
