@@ -2,12 +2,12 @@
 title: "Summarization at the T2 Expiry Boundary — the Manage Phase RDR-057 Cut"
 id: RDR-207
 type: Feature
-status: draft
+status: accepted
 priority: high
 author: conexus (relayed and filed by nexus)
 reviewed-by: self
 created: 2026-09-12
-accepted_date:
+accepted_date: 2026-09-14
 related_issues: [conexus-61pz, conexus-j2jf]
 related_rdrs: [RDR-057, RDR-131, RDR-132, RDR-194, RDR-128, RDR-209]
 ---
