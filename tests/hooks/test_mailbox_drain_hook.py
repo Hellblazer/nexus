@@ -14,7 +14,6 @@ tuple hook, because the thing under test is a stdlib-only script with no
 """
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import shlex
@@ -1452,12 +1451,11 @@ def test_drain_address_address_at_the_cap_reaches_the_probe(monkeypatch, tmp_pat
     inclusive. Runs the REAL ``_drain_claimant`` -- no monkeypatch needed
     now that its length is independent of the address.
 
-    ``_pending_lock`` is stubbed here: a 248-char address makes
-    ``<address>.pending.lock`` a filename over POSIX ``NAME_MAX`` (255),
-    a SEPARATE, filesystem-level constraint this SIZE-CHECK boundary test
-    is not about (see ``test_pending_lock_with_*`` and
-    ``test_a_held_pending_lock_makes_the_pass_skip_and_keep_the_record``
-    for that mechanism's own coverage).
+    Runs the REAL ``_pending_lock`` too (gate audit round 3): a 248-char
+    address makes ``address + ".pending.lock"`` exceed POSIX ``NAME_MAX``
+    (255), which ``_address_file_name`` now falls back to a sha256-digest
+    filename for, so a wire-valid address of this length reaches the probe
+    end to end instead of the lock failing closed on ENAMETOOLONG.
     """
     module = _load_module()
     calls: list[str] = []
@@ -1466,13 +1464,8 @@ def test_drain_address_address_at_the_cap_reaches_the_probe(monkeypatch, tmp_pat
         calls.append(address)
         return []
 
-    @contextlib.contextmanager
-    def _fake_pending_lock(config_dir, address, *, deadline):
-        yield True
-
     monkeypatch.setattr(module, "_probe_page", _fake_probe_page)
     monkeypatch.setattr(module, "_read_pending", lambda config_dir, address: [])
-    monkeypatch.setattr(module, "_pending_lock", _fake_pending_lock)
 
     address = "a" * 248
     assert len(f"mailbox/{address}") == 256
@@ -1594,6 +1587,69 @@ def test_pending_lock_with_ample_budget_waits_up_to_its_own_ceiling(tmp_path) ->
 
     assert elapsed >= module._PENDING_LOCK_TIMEOUT_S * 0.9
     assert elapsed < module._PENDING_LOCK_TIMEOUT_S * 2
+
+
+def test_a_short_address_keeps_its_existing_file_name() -> None:
+    """nexus-galkv.6, gate audit round 3. An ordinary, short address (well
+    under NAME_MAX) must keep using the exact literal name it always has,
+    so a pending or seen file already on disk from before this fix still
+    resolves after an upgrade -- ``_address_file_name`` only falls back to
+    the digest form when the literal name would not fit.
+    """
+    module = _load_module()
+
+    address = "sess-abc123"
+    assert module._address_file_name(address, ".pending.json") == "sess-abc123.pending.json"
+    assert module._address_file_name(address, ".drained.json") == "sess-abc123.drained.json"
+    assert module._address_file_name(address, ".pending.lock") == "sess-abc123.pending.lock"
+
+
+def test_a_long_address_pending_file_round_trips(tmp_path, engine, capsys) -> None:
+    """nexus-galkv.6, gate audit round 3. An address long enough to force
+    the sha256-digest filename fallback (``address + ".pending.lock"``
+    alone already exceeds POSIX NAME_MAX at 248 chars) must still round-
+    trip a pending entry across two drain passes, exactly like a short
+    address does: written on the pass whose ack response is lost,
+    recovered and DELIVERED on the next. Calls ``_drain_address`` directly
+    against a real mock engine, bypassing the full hook's
+    ``_valid_address`` 128-byte session-selection gate (this address is
+    wire-valid per the 256-byte subspace cap; whether the hook's OWN
+    address-selection gate should also widen to match is a separate
+    question this fix does not touch).
+    """
+    module = _load_module()
+    eng = engine()
+    address = "a" * 248
+    eng.rows = [_row("long-addr-row", body="long address recovery", to=address)]
+    eng.drop_after_effect_on = ("/v1/tuples/ack", 1)
+    base_url = f"http://127.0.0.1:{eng.port}"
+
+    try:
+        module._drain_address(
+            base_url, "test-token", address, is_local=True, config_dir=tmp_path,
+            deadline=time.monotonic() + 10, out=module._Out(),
+        )
+    except module._Skip:
+        pass  # the ack's effect landed; only its response was lost
+    capsys.readouterr()  # nothing should have been delivered on pass 1; discard either way
+
+    pending_path = module._pending_path(tmp_path, address)
+    assert pending_path.exists(), "the pending record must survive the lost ack response"
+    assert pending_path.name != f"{address}.pending.json", (
+        "a 248-char address must use the digest fallback filename, not the literal one"
+    )
+
+    eng.drop_after_effect_on = None
+    eng.rows = []  # gone at the engine: the ack landed
+    ending = module._drain_address(
+        base_url, "test-token", address, is_local=True, config_dir=tmp_path,
+        deadline=time.monotonic() + 10, out=module._Out(),
+    )
+    delivered = capsys.readouterr().out
+
+    assert ending == "empty"
+    assert "long address recovery" in delivered, "the recovered row must actually be delivered"
+    assert not pending_path.exists(), "the recovered entry must be cleared, not left behind"
 
 
 # ── Per-turn re-arm (bead nexus-6konb.19) ────────────────────────────────────

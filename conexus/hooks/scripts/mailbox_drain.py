@@ -138,6 +138,11 @@ _MAX_DELIVER = 10
 #: regardless, so the record is naming rows that are already gone.
 _CLEARED_RECORD_RETENTION_S = 7.0 * 24.0 * 3600.0
 
+#: POSIX filename length ceiling (Linux/macOS NAME_MAX; ext4, APFS, etc.),
+#: counted in UTF-8 bytes -- see :func:`_address_file_name` (gate audit
+#: round 3).
+_NAME_MAX_BYTES = 255
+
 #: Fixed-width pieces of the claimant :func:`_drain_claimant` builds --
 #: chosen so the claimant's total length never depends on the address or on
 #: the pid's own digit count (gate audit round 2 finding 1). 16 hex chars of
@@ -218,8 +223,40 @@ def _session_registry_path(config_dir: Path, session_id: str) -> Path:
     return config_dir / "tuple-watch" / "addresses.d" / session_id
 
 
+def _address_file_name(address: str, suffix: str) -> str:
+    """The on-disk filename for one of this hook's per-address files --
+    pending, seen/drained, pending-lock -- given *suffix* (e.g.
+    ``".pending.json"``). ONE helper for all of them (nexus-galkv.6, gate
+    audit round 3), so the same rule and the same fallback apply everywhere
+    an address becomes a filename.
+
+    Uses ``address + suffix`` literally whenever that fits within POSIX
+    ``NAME_MAX`` (255 bytes, counted in UTF-8) -- so every existing pending
+    or seen file already on disk resolves under its current name, unchanged,
+    on an upgraded box. ``_valid_address`` already caps an address at 128
+    bytes, well inside that on its own, but the round-2 fix widened the
+    WIRE-valid range to 248 bytes (the subspace cap), and a 243-256-byte
+    address makes ``address + suffix`` exceed ``NAME_MAX`` even though the
+    address itself is perfectly valid on the wire. Every filesystem call on
+    such a name fails with ENAMETOOLONG, which -- with the pending lock now
+    failing CLOSED on any such failure (fix 3) -- would make that address
+    undrainable FOREVER, not just degrade one best-effort feature.
+
+    So an address whose literal name would not fit instead gets a
+    FIXED-LENGTH name built from a sha256 digest of *address*, with the SAME
+    *suffix* -- distinct addresses collide on this name only as improbably
+    as they collide on sha256 itself, and the digest form is always well
+    under ``NAME_MAX`` for any suffix this module uses.
+    """
+    literal = f"{address}{suffix}"
+    if len(literal.encode("utf-8")) <= _NAME_MAX_BYTES:
+        return literal
+    digest = hashlib.sha256(address.encode("utf-8")).hexdigest()
+    return f"{digest}{suffix}"
+
+
 def _seen_path(config_dir: Path, address: str) -> Path:
-    return config_dir / "tuple-watch" / f"{address}.drained.json"
+    return config_dir / "tuple-watch" / _address_file_name(address, ".drained.json")
 
 
 def _read_session_registry(config_dir: Path, session_id: str) -> list[str]:
@@ -456,7 +493,7 @@ def _write_seen(config_dir: Path, address: str, dead_surfaced: set[str]) -> None
 
 
 def _pending_path(config_dir: Path, address: str) -> Path:
-    return config_dir / "tuple-watch" / f"{address}.pending.json"
+    return config_dir / "tuple-watch" / _address_file_name(address, ".pending.json")
 
 
 def _read_pending(config_dir: Path, address: str) -> list[dict[str, str]]:
@@ -524,7 +561,7 @@ def _pending_lock(config_dir: Path, address: str, *, deadline: float):
     new session's own drain and any still-live process holding the old
     session id both drain that address now.
     """
-    path = config_dir / "tuple-watch" / f"{address}.pending.lock"
+    path = config_dir / "tuple-watch" / _address_file_name(address, ".pending.lock")
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
