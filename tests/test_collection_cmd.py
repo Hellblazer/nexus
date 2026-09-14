@@ -631,7 +631,7 @@ def test_reindex_refuses_code_collection_before_the_sourceless_scan(runner, env_
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": ["a", "b"], "metadatas": [{}, {}]}
     mock_db.get_or_create_collection.return_value = mock_col
-    result = _invoke(runner, mock_db, ["reindex", "code__1-38__voyage-code-3__v1"])
+    result = _invoke(runner, mock_db, ["reindex", "code__1-38__bge-base-en-v15-768__v1"])
     assert result.exit_code != 0
     assert "no re-index driver for code" in result.output
     assert "--force" not in result.output
