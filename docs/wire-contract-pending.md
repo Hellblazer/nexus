@@ -71,6 +71,8 @@ carries no method signature for a contract change to reconcile against) is a
 
 ## Unshipped
 
+- `225280731` -- bead nexus-galkv.1 -- engine tag `engine-service-v0.1.119` -- [additive] Adds the `directory/<name>` tuple template (keys `[name]`, `session_id` required, `id_from: keys+nonce` with `id_dims: [session_id]`, take disabled, retention 604800 s, `max_body_bytes: 0`) to the engine's boot template set (RDR-208 Phase 1 Step 1). Direction safety, both directions: OLD client + NEW engine -- an old client never reads or writes `directory/`, and every template it does use is unchanged, so nothing it sends is refused or answered differently. NEW client + OLD engine -- the RDR-208 Phase 2 client (the watcher's directory lease, `mailbox_send`'s name lookup) writes and reads `directory/` rows, which an engine without the template refuses as an unknown subspace; the paired client release pins this engine tag, and RDR-208 Phase 2 specifies that a failed directory write is reported and never fatal, with mail by session id unaffected.
+- `c73026c0f` -- bead nexus-galkv.2 -- engine tag `engine-service-v0.1.119` -- [additive] The mailbox template's `address_kind` dimension accepts `session` besides `agent` and `instance` (RDR-208 Phase 1 Step 2). Direction safety, both directions: OLD client + NEW engine -- the accepted set only grows, so every `address_kind` an old client sends (`agent`, `instance`) is still accepted. NEW client + OLD engine -- `mailbox_send` (RDR-208 Phase 2) stamps `address_kind: session`, which an engine without this change refuses as a schema violation; the paired client release pins this engine tag.
 
 
 
