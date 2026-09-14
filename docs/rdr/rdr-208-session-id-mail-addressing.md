@@ -437,7 +437,58 @@ real sessions.
 
 ## Finalization Gate
 
-Not yet run.
+### Contradiction Check
+
+Checked section against section after the research pass:
+
+- The identity table, the four gaps, the Technical Design and the Test Plan use
+  the same facts: the name changes on `/resume` and is kept on `/clear`, and the
+  session id is kept on `/resume` except under `--fork-session` and `/branch`.
+- The directory's 7-day retention appears only as the template's ceiling.
+  Everywhere an entry's life is described, it is the short TTL the watcher
+  renews.
+- A cleared mailbox is forgotten when a claim returns nothing. The Technical
+  Design, the Test Plan and Phase 2 Step 3 state the same rule.
+- Gap 4 and the MVV both limit cross-machine resolution to sessions that share
+  a managed `service_url`.
+
+No contradiction found.
+
+### Assumption Verification
+
+A1 to A5 are verified: A1 and A2 by observation on this machine (research-3),
+A3 from the harness code and its documentation (research-3), and A4 and A5 by
+reading `TupleRepository` (research-1). Nothing the design rests on is assumed.
+Three items are open decisions, not assumptions: the conflict behavior of
+`mailbox_send`, the fork rule, and the TTL and heartbeat values.
+
+### Scope Verification
+
+The MVV is in scope and runs on real sessions; nothing in it is deferred. Its
+second-machine step runs only where a second machine shares the managed
+`service_url`. Two local-mode machines are out of scope, because they share no
+tuple space.
+
+### Cross-Cutting Concerns
+
+- **Versioning**: the directory template and `address_kind: session` ship in an
+  engine release. A client that sends `address_kind: session` to an older engine
+  gets `SchemaViolation`, so the engine deploys before the client release that
+  sends it. Old clients are unaffected.
+- **Deployment model**: engine tag first, then the client release, paired
+  through the wire ledger.
+- **Incremental adoption**: instance-name mailboxes keep draining for one
+  retention window after the release (Phase 3).
+- **Memory management**: the live directory rows under a name are about one per
+  live watcher that holds it. Lapsed rows are deleted by the existing expiry
+  purge.
+- **Build tool compatibility, licensing, IDE compatibility, secret lifecycle**:
+  N/A.
+
+### Proportionality
+
+One template, one address kind, one MCP tool, one SessionStart read and one
+drain record. No new store and no new table.
 
 ## References
 
