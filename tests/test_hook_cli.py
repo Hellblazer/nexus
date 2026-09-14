@@ -333,12 +333,14 @@ class TestMailboxArmCmd:
         from nexus.commands.hook import hook_group
 
         with (
+            patch("nexus.hooks.adopt_session_marker") as adopt,
             patch("nexus.tuple_watch.watcher_alive", return_value=alive) as live,
             patch("nexus.mailbox_arm.arm_block", **arm) as arm_block,
         ):
             result = CliRunner().invoke(
                 hook_group, ["mailbox-arm", "--session-id", "s1"],
             )
+        self.adopt = adopt
         return result, live, arm_block
 
     def test_prints_the_arm_block(self):
@@ -347,12 +349,47 @@ class TestMailboxArmCmd:
         assert "ARM-TEXT" in result.output
         arm_block.assert_called_once_with("s1")
         assert live.call_args.args[1] == "s1"
+        self.adopt.assert_called_once_with("s1")
 
     def test_prints_nothing_when_a_watcher_is_alive(self):
         result, _live, arm_block = self._invoke(alive=True, arm={"return_value": "ARM-TEXT"})
         assert result.exit_code == 0
         assert result.output == ""
         arm_block.assert_not_called()
+        self.adopt.assert_called_once_with("s1")
+
+    def test_moves_this_process_marker_to_the_session_and_records_no_clear(
+        self, tmp_path, monkeypatch,
+    ):
+        """RDR-208 MVV 2026-09-14: /branch runs no SessionStart, so this
+        process's marker still names the parent and the parent's watcher
+        keeps running in the fork. mailbox-arm moves the marker, which stops
+        that watcher, and writes no cleared record: the parent's mailbox
+        stays with the parent."""
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.hook import hook_group
+        from nexus.tuple_watch import session_marker_path
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        marker = session_marker_path(tmp_path, 777)
+        marker.parent.mkdir(parents=True)
+        marker.write_text("parent-sess")
+        with (
+            patch("nexus.session.find_immediate_claude_pid", return_value=777),
+            patch("nexus.tuple_watch.watcher_alive", return_value=False),
+            patch("nexus.mailbox_arm.arm_block", return_value="ARM-TEXT"),
+        ):
+            result = CliRunner().invoke(
+                hook_group, ["mailbox-arm", "--session-id", "fork-sess"],
+            )
+        assert result.exit_code == 0, result.output
+        assert "ARM-TEXT" in result.output
+        assert marker.read_text() == "fork-sess"
+        assert sorted(p.name for p in marker.parent.glob("cleared.*")) == []
 
     def test_prints_nothing_when_no_arm_is_possible(self):
         result, _live, _arm = self._invoke(alive=False, arm={"return_value": ""})

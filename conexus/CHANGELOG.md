@@ -4,6 +4,19 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.46.1] - 2026-09-14
+
+Paired engine: engine-service-v0.1.119 (`REQUIRED_ENGINE_VERSION` (0, 1, 119)),
+unchanged. Plugin version aligned with conexus 7.46.1. This pin advance makes
+live the plugin changes `PENDING_RELEASE.md` held:
+
+- `hooks/scripts/mailbox_drain.py` (nexus-galkv.19): after a `/branch`, the
+  fork's first prompt re-arms and moves the watcher self-stop marker to the
+  fork, which stops the parent's watcher and releases its name lease; the
+  watcher-liveness probe passes `ps -ww`.
+- `skills/mailbox/SKILL.md` (nexus-galkv.19): a watcher from before a
+  `/branch` also stops itself.
+
 ## [7.46.0] - 2026-09-14
 
 Paired engine: engine-service-v0.1.119 (`REQUIRED_ENGINE_VERSION` (0, 1, 119)).

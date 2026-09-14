@@ -67,12 +67,18 @@ So after draining, this hook checks whether a live ``nx tuple watch``
 process holds this session's own mailbox lock, by the pid the watcher writes
 into the lock and that pid's command line. It never takes the lock itself: a
 probe holding it even briefly could make a starting watcher refuse its own
-mailbox. It stays silent on the first prompt it sees for a session, when the
-SessionStart instruction (if it arrived) is in front of the model, and it
-consults nothing SessionStart writes, because SessionStart output is what
-can be lost. From the second prompt on, with no live watcher, it prints the
-wheel's arm text from ``nx hook mailbox-arm``: at most once per 10 minutes
-after a delivered instruction, once per minute after a failed attempt.
+mailbox. It stays silent on the first prompt it sees for a session when a
+watcher self-stop marker names that session: SessionStart ran for it, and its
+instruction (if it arrived) is in front of the model. When no marker names
+the session, no SessionStart ran: ``/branch`` forks a session inside the same
+claude process without one (RDR-208 MVV, 2026-09-14), so the parent's watcher
+keeps running in the fork. The hook then arms on that first prompt, and
+``nx hook mailbox-arm`` moves the process's marker to the fork, which stops
+the parent's watcher. A marker can only make the hook speak, never silence
+it, because SessionStart output is what can be lost. From the second prompt
+on, with no live watcher, it prints the wheel's arm text from
+``nx hook mailbox-arm``: at most once per 10 minutes after a delivered
+instruction, once per minute after a failed attempt.
 
 Stdlib only, no ``nexus`` import, endpoint through the shared
 ``_endpoint_resolve`` sibling (nexus-aginu): the same constraints the
@@ -1134,8 +1140,11 @@ def _pid_is_watcher(pid: int | None) -> bool:
     except OSError:
         return False
     try:
+        # -ww: procps (Linux) truncates a piped command column to COLUMNS, and
+        # the watcher's mark sits at the tail of its command line, so a narrow
+        # terminal would read a live watcher as none (the 5957a0055 class).
         proc = subprocess.run(  # noqa: S603 S607 — fixed argv; ps resolved on PATH
-            ["ps", "-p", str(pid), "-o", "command="],
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2.0,
         )
     except (OSError, subprocess.SubprocessError):
@@ -1193,20 +1202,49 @@ def _since(now: float, then: float) -> float:
     return delta if delta >= 0 else float("inf")
 
 
+#: The watcher self-stop marker, ``tuple-watch/session.<claude pid>``
+#: (nexus.tuple_watch.session_marker_path), spelled here for the same reason
+#: as the lock name above and pinned by the same test file.
+_SESSION_MARKER_PREFIX = "session."
+
+
+def _session_marker_names(config_dir: Path, session_id: str) -> bool:
+    """True when some claude process's self-stop marker names *session_id*,
+    that is, a SessionStart ran for it. ``/branch`` forks a session without
+    one, so a fork's first prompt finds none."""
+    try:
+        markers = list((config_dir / "tuple-watch").glob(_SESSION_MARKER_PREFIX + "*"))
+    except OSError:
+        return False
+    for marker in markers:
+        if marker.name.endswith(".tmp"):
+            continue
+        try:
+            if marker.read_text(encoding="utf-8").strip() == session_id:
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _rearm_if_unwatched(config_dir: Path, session_id: str, *, started: float) -> None:
     """Re-issue the arm instruction when this session has no live watcher.
 
-    Silent on the first prompt this hook sees for a session. The interval
-    starts only once an instruction was actually printed; a failed attempt
-    backs off for the short retry spacing instead.
+    Silent on the first prompt this hook sees for a session when a marker
+    names it, since SessionStart then ran; a fork has no such marker and
+    arms at once (module docstring, RE-ARM). The interval starts only once an
+    instruction was actually printed; a failed attempt backs off for the
+    short retry spacing instead.
     """
     if not _valid_address(session_id):
         return
     path = _rearm_state_path(config_dir, session_id)
     state = _read_rearm_state(path)
     if state is None:
-        _write_rearm_state(path, {"last_rearm": 0.0, "last_attempt": 0.0})
-        return
+        state = {"last_rearm": 0.0, "last_attempt": 0.0}
+        _write_rearm_state(path, state)
+        if _session_marker_names(config_dir, session_id):
+            return
     if _watcher_live(config_dir, session_id):
         return
     now = time.time()

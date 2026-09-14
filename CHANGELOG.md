@@ -6,6 +6,35 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.46.1] - 2026-09-14
+
+Paired with engine-service-v0.1.119, unchanged from 7.46.0. A patch cut from
+v7.46.0 carrying only the RDR-208 `/branch` fix and its local-mode MVV
+harness; develop's RDR-207 Phase 1 engine work waits for the next engine tag.
+
+### Fixed
+- **A `/branch` no longer leaves the parent session's mailbox watcher running
+  in the fork (nexus-galkv.19).** `/branch` mints a new session id in the same
+  Claude Code process and runs no SessionStart, so the watcher's self-stop
+  marker kept naming the parent. The parent's watcher kept its name lease
+  under the parent's id and pinged the parent's mail into the fork with
+  "Drain it now". The UserPromptSubmit drain hook now re-arms on a session's
+  first prompt when no marker names that session, and `nx hook mailbox-arm`
+  first points the process's marker at the current session, so the parent's
+  watcher stops and releases its directory entry as it does after `/clear`.
+  No cleared record is written: the parent's mailbox stays with the parent.
+- **Two more process probes read the whole command line (`ps -ww`).** The
+  drain hook's watcher-liveness check and `nx doctor --check-resources`'
+  orphan-tracker count could miss their match on Linux when `COLUMNS` was
+  set, the class 7.46.0 fixed elsewhere. A lint test now fails any
+  command-reading `ps` call without `-ww`.
+
+### Added
+- `tests/e2e/rdr208-mvv/run.sh`: the RDR-208 MVV on a virgin local-mode box,
+  in a container, through the real hooks, watcher and `mailbox_send` against
+  the bundled engine; `--published X.Y.Z` runs a released version, and step
+  6's expectation follows the drain hook under test.
+
 ## [7.46.0] - 2026-09-14
 
 Paired with engine-service-v0.1.119. Additive: the directory template and
