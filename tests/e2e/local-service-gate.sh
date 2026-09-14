@@ -505,32 +505,29 @@ print(jar_freshness_skip_reason() or "")
   # session confirmed no concurrent Maven/build-gate-jar.sh ran in that
   # window) — it closes the CONCURRENT-CLOBBER hazard the bead names as
   # fixable, not that specific unreplicated occurrence.
-  build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" local-service-gate.sh-stamp-package
-  # nexus-iexvl: now that the lease is ours, nobody else can legitimately
-  # be mid-stamp -- a dirty file here means a prior process left the tree
-  # stamped without holding this lease for its whole stamp lifetime.
-  # Refuse before overwriting it as though it were the true baseline.
-  if ! release_props_guard_clean "$RELEASE_PROPS" service; then
-    build_lease_release service
-    exit 75
-  fi
+  # nexus-iexvl round 3: routed through scripts/lib/release-props-lease.sh's
+  # release_props_stamp_under_lease -- the SAME shared helper run.sh and
+  # build-artifacts.sh use -- instead of a hand-rolled acquire+guard+
+  # snapshot+sed sequence with local _restore_props/_restore_props_and_
+  # release_lease functions. Those hand-rolled restores never cleared
+  # RELEASE_PROPS_SNAPSHOT or removed the snapshot file, so this script's
+  # own cleanup() EXIT trap (which unconditionally restores from
+  # RELEASE_PROPS_SNAPSHOT and releases the lease) re-applied the STALE
+  # snapshot a second time at the gate's own final exit, potentially
+  # minutes later and with no ownership check -- clobbering a concurrent
+  # legitimate stamper's in-flight bytes. release_props_stamp_under_lease
+  # acquires the lease, guards clean, snapshots, and stamps in one call;
+  # release_props_restore_and_release (below) restores AND removes the
+  # snapshot file before releasing, so cleanup()'s trailing restore is a
+  # genuine no-op once RELEASE_PROPS_SNAPSHOT is cleared to "" after each
+  # restore call, exactly as run.sh does for its own guided-family stamp.
+  RELEASE_PROPS_SNAPSHOT="$(release_props_stamp_under_lease "$RELEASE_PROPS" service "${NX_BUILD_LEASE_WAIT:-3600}" "release_version=$GATE_STAMP" "build_ref=$GATE_BUILD_REF")" || exit $?
   echo "[gate] rebuilding service jar (release_version=$GATE_STAMP build_ref=$GATE_BUILD_REF)..."
-  # Pre-invocation bytes, never `git checkout` (nexus-iws18: HEAD is not
-  # what was in the tree when the gate started). Snapshotted HERE, only now
-  # that the lease is ours and the guard above has passed -- never earlier
-  # (nexus-iexvl; see RELEASE_PROPS_SNAPSHOT's declaration above for why).
-  RELEASE_PROPS_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/release.properties.snapshot.XXXXXX")"
-  cp "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT"
-  _restore_props() { cp "$RELEASE_PROPS_SNAPSHOT" "$RELEASE_PROPS"; }
-  _restore_props_and_release_lease() { _restore_props; build_lease_release service; }
-  sed -e "s/^release_version=.*/release_version=${GATE_STAMP}/" \
-      -e "s/^build_ref=.*/build_ref=${GATE_BUILD_REF}/" \
-      "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp" \
-    && mv "$RELEASE_PROPS.tmp" "$RELEASE_PROPS"
   # Bare mvnw, deliberately (see the lease comment above) — this process
   # already holds the lease scripts/mvnw-leased.sh would otherwise acquire.
   if ! (cd "$REPO_ROOT/service" && ./mvnw -q package -DskipTests); then
-    _restore_props_and_release_lease
+    release_props_restore_and_release "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT" service
+    RELEASE_PROPS_SNAPSHOT=""
     echo "[gate] ERROR: service jar rebuild failed — fix the Maven build and re-run:" >&2
     echo "         scripts/mvnw-leased.sh package -DskipTests" >&2
     exit 2
@@ -548,7 +545,8 @@ print(jar_freshness_skip_reason() or "")
      || ! grep -qx "build_ref=${GATE_BUILD_REF}" "$GATE_CLASSES_PROPS" 2>/dev/null; then
     echo "[gate] FATAL: target/classes/META-INF/nexus/release.properties does not carry the stamp this run just wrote (release_version=$GATE_STAMP build_ref=$GATE_BUILD_REF); actual contents:" >&2
     cat "$GATE_CLASSES_PROPS" >&2 2>/dev/null || echo "  (file missing)" >&2
-    _restore_props_and_release_lease
+    release_props_restore_and_release "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT" service
+    RELEASE_PROPS_SNAPSHOT=""
     exit 2
   fi
   # Command substitution (not a pipe into grep -q) so pipefail can never
@@ -559,10 +557,12 @@ print(jar_freshness_skip_reason() or "")
   if [[ "$JAR_RELEASE_PROPS" != *"release_version=${GATE_STAMP}"* ]]; then
     echo "[gate] FATAL: $JAR's packaged release.properties does not carry release_version=$GATE_STAMP; actual contents:" >&2
     printf '%s\n' "${JAR_RELEASE_PROPS:-  (entry missing)}" >&2
-    _restore_props_and_release_lease
+    release_props_restore_and_release "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT" service
+    RELEASE_PROPS_SNAPSHOT=""
     exit 2
   fi
-  _restore_props_and_release_lease
+  release_props_restore_and_release "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT" service
+  RELEASE_PROPS_SNAPSHOT=""
 fi
 
 # 3. Resolve a launch artifact: installed native binary wins; dev jar fallback.
