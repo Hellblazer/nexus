@@ -4353,8 +4353,7 @@ def store_put(
     - On a collection whose embedding model has a small token window
       (bge-base-en-v1.5 at 512 tokens, MiniLM at 256; both local mode), a
       note longer than the window is stored as several chunks under one
-      catalog document, split at newlines, sentence ends or spaces. Voyage
-      collections never split.
+      catalog document. Voyage collections never split.
     - `collection` must be a bare subject area, never a placeholder or a
       pre-rendered four-segment/model-token name.
     - A non-empty `title` reconciles onto the existing (collection, title)
