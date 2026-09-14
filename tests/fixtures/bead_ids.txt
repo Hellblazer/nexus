@@ -1445,6 +1445,7 @@ nexus-7z4pt
 nexus-7z6s7
 nexus-7z7rj
 nexus-7zcv
+nexus-7zhag
 nexus-7zup9
 nexus-7zuzz
 nexus-7zuzz.1
@@ -3454,6 +3455,7 @@ nexus-ie7o8.1
 nexus-iebjm
 nexus-iej4o
 nexus-iexvl
+nexus-iexvl.1
 nexus-if8y
 nexus-ifgxr
 nexus-iftc
@@ -4838,6 +4840,7 @@ nexus-pw0jk.1
 nexus-pwclh
 nexus-pwq18
 nexus-px0to
+nexus-px7po
 nexus-pxiuk
 nexus-pxkz
 nexus-pxnai
@@ -5651,6 +5654,7 @@ nexus-uieig
 nexus-uizok
 nexus-uizok.1
 nexus-ujdha
+nexus-ujdha.1
 nexus-ujlew
 nexus-ujn5
 nexus-ujomp
