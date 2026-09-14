@@ -292,13 +292,16 @@ happened.
   test that inserts a quarantined row and asserts no read returns it.
   **Status**: Verified (finding 4: twelve read entry points, all jOOQ on one
   table). **Method**: Source Search.
-- [ ] A5: the write paths that can reach an existing row are exactly three:
-  `upsert` (by key, through its `ON CONFLICT ... DO UPDATE` branch),
-  `putOrMerge` (by a content-similarity scan over the project) and
-  `mergeMemories` (by explicit ids); `importRow` and `importBatch` insert
-  only. Each of the three gets the rule stated in the Technical Design.
-  **Status**: Verified (finding 6: five write entry points enumerated from
-  the public signatures; the conflict branch sets six columns and no state
+- [ ] A5: `MemoryRepository` has five write entry points, and each reaches
+  an existing row in one of three shapes: an `ON CONFLICT (tenant_id,
+  project, title) DO UPDATE` branch (`upsert`, `importRow`, `importBatch`),
+  a content-similarity scan over the project (`putOrMerge`), or explicit ids
+  (`mergeMemories`). The rule in the Technical Design is stated per shape,
+  not per method, and the test derives the conflict-branch set from the
+  repository source rather than from this sentence.
+  **Status**: Verified (finding 7, correcting finding 6: the two import
+  paths carry the same conflict key and update branch as `upsert`; the
+  branch sets content, tags, session, agent, timestamp and TTL and no state
   column; the scan filters on project and title only; merge updates by id).
   **Method**: Source Search.
 - [ ] A2: keeping `deleted_ids` with its current meaning (rows actually gone)
@@ -440,16 +443,19 @@ Liquibase, every reference schema-qualified):
   of the TTL its author set. `listQuarantined(tenant, project)` is the one
   read that sees them.
 - Write paths that can reach an existing row (assumption A5) each state
-  what they do to a quarantined one. `upsert`: a put whose key names a
-  quarantined row is a decision to keep that title with new content, so the
-  `DO UPDATE` branch also sets `quarantined_at` and `rolled_up_at` to `NULL`
-  in the same statement; the row comes back with the TTL the put gave it.
-  `putOrMerge`: its similarity scan adds `quarantined_at IS NULL`, so a
-  hidden row is never a merge target; its same-title branch is the upsert
-  above. `mergeMemories`: refuses when the kept id or any deleted id names
-  a quarantined row, so the caller restores first; refusal is the safe
-  direction and the ids are explicit. `importRow` and `importBatch` insert
-  new rows and are unaffected.
+  what they do to a quarantined one, by shape. Conflict branch (`upsert`,
+  `importRow`, `importBatch`): a write that names an existing title is a
+  decision to keep that title with the written content, so every `DO
+  UPDATE` branch on the title key also sets `quarantined_at` and
+  `rolled_up_at` to `NULL` in the same statement; the row comes back with
+  the TTL the write gave it. Similarity scan (`putOrMerge`): the scan adds
+  `quarantined_at IS NULL`, so a hidden row is never a merge target; its
+  same-title branch is the conflict branch above. Explicit ids
+  (`mergeMemories`): refuses when the kept id or any deleted id names a
+  quarantined row, so the caller restores first; refusal is the safe
+  direction and the ids are explicit. A test greps the repository source
+  for every conflict branch and asserts each carries the two clears, then
+  drives each of the three through a quarantined row.
 - Routes, all new or additive: `POST /v1/memory/expire` (response gains
   `quarantined_ids`), `POST /v1/memory/reap`, `POST /v1/memory/{id}/restore`,
   `GET /v1/memory/quarantined?project=`, `POST /v1/memory/summaries`,
@@ -561,8 +567,9 @@ It was decided against on 2026-09-14 with the analysis in hand.
   reach an existing row carries a stated rule. Cheap per query, but a read
   path added later that forgets the predicate silently resurrects cold rows,
   and a write path added later that forgets its rule silently writes into
-  them; the reflection-driven test pins the read set, and the three write
-  paths are named in A5 and tested one by one.
+  them; the reflection-driven test pins the read set, the source-grep test
+  pins the conflict-branch set, and the scan and id paths are tested by
+  name.
 - The session-end message changes wording; a person reading "quarantined 3"
   learns something that "expired 3" hid.
 - A summary is a separate row, so the store grows by summaries rather than
@@ -634,10 +641,11 @@ run in one test module against the engine substrate, in the default suite.
 2. `MemoryRepository`: `expire` returns the two-list result; `reap`,
    `restore`, `insertSummary`, `listQuarantined`, `listSummaries`; the
    `quarantined_at IS NULL` predicate on every read path, with a test that
-   inserts a quarantined row and walks every public read method; the three
-   write-path rules (upsert clears both stamps in its conflict branch,
-   putOrMerge's scan excludes quarantined rows, mergeMemories refuses on a
-   quarantined id).
+   inserts a quarantined row and walks every public read method; the
+   write-path rules by shape (every conflict branch on the title key,
+   `upsert`, `importRow` and `importBatch`, clears both stamps;
+   `putOrMerge`'s scan excludes quarantined rows; `mergeMemories` refuses on
+   a quarantined id), with the source-grep test over conflict branches.
 3. `MemoryHandler`: the six routes; `handleExpire` emits both keys.
 4. Wire ledger: one `[additive]` entry per commit touching the surface.
 5. Full Java suite (schema change), `SchemaMigratorIntegrationTest` walk, the
@@ -697,6 +705,10 @@ None.
 - **Scenario**: put on a title that names a quarantined, marked row —
   **Verify**: the row is readable again with the new content and the put's
   TTL, `quarantined_at` and `rolled_up_at` both null, same id.
+- **Scenario**: importRow, and separately importBatch, with a row whose
+  title names a quarantined, marked row — **Verify**: the row is readable
+  again with the imported content and fidelity fields, both stamps null,
+  same id.
 - **Scenario**: putOrMerge with a quarantined row as the only near-duplicate
   — **Verify**: a new row is created; the quarantined row is untouched and
   still hidden.
