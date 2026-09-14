@@ -126,9 +126,9 @@ CREATE INDEX IF NOT EXISTS idx_ta_tenant_doc_id_fk
             Step 4: Add composite FK (tenant_id, doc_id) → catalog_documents(tenant_id, tumbler).
             NULL doc_id satisfies the FK (no constraint violation); only non-NULL values are checked.
             DATA EFFECT: UPDATEs nexus.document_aspects.doc_id to NULL for empty-string and
-            orphaned (no matching catalog_documents row) values; the original non-empty orphan
-            values are not recoverable from the rollback, which only restores the blanket
-            doc_id='' default, not the per-row prior value.
+            orphaned (no matching catalog_documents row) values; irreversible for the orphaned
+            rows — the original non-empty values are not recoverable from the rollback, which
+            only restores the blanket doc_id='' default, not the per-row prior value.
         </comment>
         <sql splitStatements="true" stripComments="false">
 -- Step 1: empty-string sentinel → NULL

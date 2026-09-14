@@ -45,10 +45,38 @@ row). Detected two ways:
 
   1. Raw SQL in forward ``<sql>`` elements (see _classify_sql_text).
   2. Structured Liquibase change-type elements ``<delete>``, ``<update>``,
-     ``<dropTable>``, ``<dropColumn>`` as direct children of a
-     ``<changeSet>`` (zero current usage in this corpus — grep-verified
+     ``<dropTable>``, ``<dropColumn>``, ``<modifyDataType>``,
+     ``<truncateTable>`` as direct children of a ``<changeSet>`` (zero
+     current usage of ANY structured tag in this corpus — grep-verified
      2026-09-13, every changeset here uses raw ``<sql>`` — but the bead
      names these explicitly and a future changeset could use them).
+
+KNOWN LIMITS, DELIBERATELY NOT BUILT (code-review pass, 2026-09-13). Two SQL
+shapes are invisible to this classifier and are NOT closed here:
+
+  - **Function/trigger-body DML that a changeset calls back IMMEDIATELY**,
+    in the same ``<sql>`` block, right after defining it (e.g.
+    ``CREATE FUNCTION ... AS $$ ... DELETE ... $$; SELECT fn();`` in one
+    changeset). ``_strip_exempt_dollar_bodies`` blinds every non-DO dollar
+    body regardless of whether the SAME statement block invokes it right
+    after — the exemption is correct for the common case (a function
+    defined for LATER, caller-triggered use, e.g. catalog-033's
+    ``gc_quarantine_orphans``, called only via a separate HTTP endpoint,
+    not by its own changeset), but would miss a changeset that defines
+    then immediately calls a destructive function in the same breath.
+  - **Dynamic SQL DML** (``EXECUTE 'DELETE ...'`` / ``EXECUTE
+    format('DELETE FROM %I...', ...)``): the destructive keyword sits
+    inside a string literal, which ``_split_statements`` blanks to ``''``
+    before any DELETE/UPDATE/TRUNCATE regex runs, by design (see
+    ``_split_statements``'s own docstring) — so a dynamically-built
+    DELETE/UPDATE is invisible to the classifier by construction.
+
+Neither shape appears anywhere in the current 63-changeset corpus (grep-
+verified 2026-09-13: no co-located CREATE FUNCTION + immediate call, no
+EXECUTE/format use with a DELETE/UPDATE keyword — every hit is
+GRANT/REVOKE/ALTER/SELECT). A future changeset using either shape ships
+UNDETECTED by this module; closing them is tracked as follow-up work, not
+attempted here.
 
 ``<rollback>`` bodies are STRUCTURALLY EXCLUDED, mirroring
 ``test_changelog_rls_lint.py``'s own established, reviewed convention:
@@ -138,15 +166,25 @@ def _strip_exempt_dollar_bodies(sql: str) -> str:
     return "".join(out)
 
 
-def _split_statements(sql: str) -> list[str]:
+def _split_statements(sql: str) -> list[tuple[str, str]]:
+    """Split *sql* into ``(original, blanked)`` pairs, one per semicolon-
+    delimited statement (comments and exempt dollar-quoted bodies already
+    stripped). ``original`` keeps every string literal verbatim -- it is
+    what a caller hands to a deployer as the census predicate, so a literal
+    like ``'unknown'`` or ``'disputed'`` must survive. ``blanked`` collapses
+    every literal to ``''`` and exists ONLY so the classification regexes
+    below can't be fooled by a keyword sitting inside a string value (e.g.
+    a comment or label column containing the text "DELETE FROM"); it is
+    never surfaced to a caller.
+    """
     cleaned = _strip_exempt_dollar_bodies(_strip_comments(sql))
-    fragments = []
+    fragments: list[tuple[str, str]] = []
     for raw in cleaned.split(";"):
         frag = raw.strip()
         if not frag:
             continue
-        frag = _STRING_LITERAL_RE.sub("''", frag)
-        fragments.append(frag)
+        blanked = _STRING_LITERAL_RE.sub("''", frag)
+        fragments.append((frag, blanked))
     return fragments
 
 
@@ -168,22 +206,81 @@ _ALTER_TYPE_USING_RE = re.compile(
 )
 
 # Liquibase structured change-type elements that are themselves data effects
-# regardless of what a raw <sql> scan would find (zero usage in this corpus
-# today — see module docstring).
-_STRUCTURED_DATA_EFFECT_TAGS = ("delete", "update", "dropTable", "dropColumn")
+# regardless of what a raw <sql> scan would find. <modifyDataType> and
+# <truncateTable> (the structured counterparts of ALTER ... TYPE ... USING
+# and TRUNCATE) were added alongside <delete>/<update>/<dropTable>/
+# <dropColumn> so the structured-element path names the SAME five kinds the
+# raw-<sql> path already detects (zero usage of ANY structured tag in this
+# corpus today — every changeset here uses raw <sql> — but the bead names
+# these explicitly and a future changeset could use them).
+_STRUCTURED_DATA_EFFECT_TAGS = (
+    "delete",
+    "update",
+    "dropTable",
+    "dropColumn",
+    "modifyDataType",
+    "truncateTable",
+)
+
+# Table-name extraction, one regex per statement kind, run against the SAME
+# leading-stripped text the classifier already matched against. Used only to
+# populate DataEffectReason.table for the structural DATA EFFECT check
+# (check_data_effect_structure) -- never for classification itself.
+_TABLE_TOKEN = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?"
+_DELETE_TABLE_RE = re.compile(rf"^DELETE\s+FROM\s+({_TABLE_TOKEN})", re.IGNORECASE)
+_UPDATE_TABLE_RE = re.compile(rf"^UPDATE\s+({_TABLE_TOKEN})", re.IGNORECASE)
+_TRUNCATE_TABLE_RE = re.compile(
+    rf"^TRUNCATE\s+(?:TABLE\s+)?({_TABLE_TOKEN})", re.IGNORECASE
+)
+_DROP_TABLE_TABLE_RE = re.compile(
+    rf"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?({_TABLE_TOKEN})", re.IGNORECASE
+)
+# Covers both DROP COLUMN and ALTER COLUMN ... TYPE ... USING -- both are
+# clauses of an ALTER TABLE statement, so the table name comes from the
+# same place either way.
+_ALTER_TABLE_TABLE_RE = re.compile(
+    rf"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?({_TABLE_TOKEN})", re.IGNORECASE
+)
+
+_TABLE_EXTRACTORS: dict[str, tuple[re.Pattern[str], str]] = {
+    # kind -> (regex, "match" | "search")
+    "delete": (_DELETE_TABLE_RE, "match"),
+    "update": (_UPDATE_TABLE_RE, "match"),
+    "truncate": (_TRUNCATE_TABLE_RE, "match"),
+    "drop_table": (_DROP_TABLE_TABLE_RE, "search"),
+    "drop_column": (_ALTER_TABLE_TABLE_RE, "search"),
+    "alter_type_using": (_ALTER_TABLE_TABLE_RE, "search"),
+}
+
+
+def _extract_table(kind: str, stmt_text: str) -> str:
+    """Best-effort table name for *kind* out of *stmt_text*, or ``""`` if
+    the shape doesn't match (a statement this module's regexes can't parse,
+    or a kind with no single-table shape, e.g. a structured-tag reason)."""
+    extractor = _TABLE_EXTRACTORS.get(kind)
+    if extractor is None:
+        return ""
+    pattern, mode = extractor
+    m = pattern.match(stmt_text) if mode == "match" else pattern.search(stmt_text)
+    return m.group(1) if m else ""
 
 
 @dataclass(frozen=True)
 class DataEffectReason:
     kind: str  # "delete" | "update" | "truncate" | "drop_table" | "drop_column" | "alter_type_using" | "structured:<tag>"
     detail: str
-    # The exact matched SQL statement (comment-stripped, single-quoted
-    # literals blanked), empty for a structured-tag reason with no <sql>
-    # text of its own. Handed to scripts/list_data_effects.py verbatim as
-    # the starting point for the census predicate a deployer runs on their
-    # own fork before trusting a predicted row count — it is literally the
-    # statement that will run, not a re-derived summary of it.
+    # The exact matched SQL statement, comment-stripped, string literals
+    # INTACT (see _split_statements) -- empty for a structured-tag reason
+    # with no <sql> text of its own. Handed to scripts/list_data_effects.py
+    # verbatim as the starting point for the census predicate a deployer
+    # runs on their own fork before trusting a predicted row count — it is
+    # literally the statement that will run, not a re-derived summary of it.
     statement: str = ""
+    # The table this reason's statement touches, best-effort (see
+    # _extract_table); "" when unresolved (a structured-tag reason, or a
+    # statement shape none of _TABLE_EXTRACTORS covers). Used only by
+    # check_data_effect_structure below.
+    table: str = ""
 
 
 def _classify_sql_text(sql_text: str) -> list[DataEffectReason]:
@@ -195,34 +292,66 @@ def _classify_sql_text(sql_text: str) -> list[DataEffectReason]:
     reasons: list[DataEffectReason] = []
     seen_kinds: set[str] = set()
 
-    for stmt in _split_statements(sql_text):
-        stmt_for_leading = _LEADING_DO_BEGIN_RE.sub("", stmt)
+    for orig, blanked in _split_statements(sql_text):
+        stmt_for_leading = _LEADING_DO_BEGIN_RE.sub("", blanked)
+        orig_for_leading = _LEADING_DO_BEGIN_RE.sub("", orig)
 
         if _DELETE_RE.match(stmt_for_leading) and "delete" not in seen_kinds:
             seen_kinds.add("delete")
-            reasons.append(DataEffectReason("delete", "DELETE FROM statement", stmt))
+            reasons.append(
+                DataEffectReason(
+                    "delete", "DELETE FROM statement", orig,
+                    _extract_table("delete", orig_for_leading),
+                )
+            )
 
         if _UPDATE_RE.match(stmt_for_leading) and "update" not in seen_kinds:
             seen_kinds.add("update")
-            reasons.append(DataEffectReason("update", "UPDATE ... SET statement", stmt))
+            reasons.append(
+                DataEffectReason(
+                    "update", "UPDATE ... SET statement", orig,
+                    _extract_table("update", orig_for_leading),
+                )
+            )
 
         if _TRUNCATE_RE.match(stmt_for_leading) and "truncate" not in seen_kinds:
             seen_kinds.add("truncate")
-            reasons.append(DataEffectReason("truncate", "TRUNCATE statement", stmt))
+            reasons.append(
+                DataEffectReason(
+                    "truncate", "TRUNCATE statement", orig,
+                    _extract_table("truncate", orig_for_leading),
+                )
+            )
 
-        if _DROP_TABLE_RE.search(stmt) and "drop_table" not in seen_kinds:
+        if _DROP_TABLE_RE.search(stmt_for_leading) and "drop_table" not in seen_kinds:
             seen_kinds.add("drop_table")
-            reasons.append(DataEffectReason("drop_table", "DROP TABLE statement", stmt))
+            reasons.append(
+                DataEffectReason(
+                    "drop_table", "DROP TABLE statement", orig,
+                    _extract_table("drop_table", orig_for_leading),
+                )
+            )
 
-        if _DROP_COLUMN_RE.search(stmt) and "drop_column" not in seen_kinds:
+        if _DROP_COLUMN_RE.search(stmt_for_leading) and "drop_column" not in seen_kinds:
             seen_kinds.add("drop_column")
-            reasons.append(DataEffectReason("drop_column", "DROP COLUMN clause", stmt))
+            reasons.append(
+                DataEffectReason(
+                    "drop_column", "DROP COLUMN clause", orig,
+                    _extract_table("drop_column", orig_for_leading),
+                )
+            )
 
-        if _ALTER_TYPE_USING_RE.search(stmt) and "alter_type_using" not in seen_kinds:
+        if (
+            _ALTER_TYPE_USING_RE.search(stmt_for_leading)
+            and "alter_type_using" not in seen_kinds
+        ):
             seen_kinds.add("alter_type_using")
             reasons.append(
                 DataEffectReason(
-                    "alter_type_using", "ALTER COLUMN ... TYPE ... USING clause", stmt
+                    "alter_type_using",
+                    "ALTER COLUMN ... TYPE ... USING clause",
+                    orig,
+                    _extract_table("alter_type_using", orig_for_leading),
                 )
             )
 
@@ -250,15 +379,123 @@ def has_data_effect_line(comment_text: str | None) -> bool:
     return DATA_EFFECT_MARKER in comment_text
 
 
-def extract_data_effect_lines(comment_text: str | None) -> list[str]:
-    """Return every line (stripped) containing the marker, in document order."""
-    if not comment_text:
-        return []
-    return [
-        line.strip()
-        for line in comment_text.splitlines()
-        if DATA_EFFECT_MARKER in line
-    ]
+# A paragraph break inside a <comment> -- a blank line (allowing trailing
+# whitespace on the blank line itself). Terminates a DATA EFFECT paragraph
+# when a multi-paragraph comment has one.
+_PARAGRAPH_BREAK_RE = re.compile(r"\n[ \t]*\n")
+
+# A line that itself opens a NEW labelled paragraph, e.g. "DATA EFFECT:" is
+# one instance of this shape. Used defensively to stop the DATA EFFECT
+# extraction before a hypothetical second label sharing the same paragraph
+# (no blank line between them) -- not exercised by any of the 63 lines
+# backfilled by nexus-f7dwp today (DATA EFFECT is always the LAST labelled
+# paragraph of its <comment>), but the module docstring's rule needs to
+# name a stopping point for a future comment that adds one after it.
+_LABELLED_LINE_RE = re.compile(r"^[ \t]*[A-Z][A-Z0-9 \-]{2,40}:[ \t]", re.MULTILINE)
+
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+def _normalize_whitespace(text: str) -> str:
+    return _WHITESPACE_RUN_RE.sub(" ", text).strip()
+
+
+def extract_data_effect_text(comment_text: str | None) -> str | None:
+    """Return the full, whitespace-normalized ``DATA EFFECT: ...`` sentence
+    from *comment_text*, or ``None`` if the marker isn't present.
+
+    THE TERMINATOR RULE. The multi-line XML `<comment>` style this corpus
+    uses wraps a sentence across several physical lines with leading
+    indentation on each continuation -- a naive ``line for line in
+    comment.splitlines() if MARKER in line`` (the bug this function
+    replaces, nexus-f7dwp critic finding) silently drops every
+    continuation line, which is where 44 of the 63 backfilled lines carry
+    their table name or their reversibility clause. The text actually runs
+    from the marker to the end of its PARAGRAPH, where "paragraph" ends at
+    whichever of these comes first:
+
+      1. a blank line (a paragraph break within a multi-paragraph
+         `<comment>` -- several of the 63 lines have prose paragraphs
+         BEFORE the DATA EFFECT paragraph, separated by blank lines; none
+         has one AFTER, but the rule has to name a stop for one that did);
+      2. the start of another labelled paragraph sharing the same
+         paragraph with no blank line between (``_LABELLED_LINE_RE`` --
+         defensive, not exercised by the current corpus);
+      3. the end of the `<comment>` text itself (the common case today:
+         DATA EFFECT is always the LAST paragraph of its comment across
+         all 63 lines, checked exhaustively 2026-09).
+
+    Internal whitespace (the line-wrap newlines and the multi-line style's
+    leading indentation) is collapsed to single spaces so the returned
+    text reads as one sentence regardless of how the XML wrapped it.
+    """
+    if not comment_text or DATA_EFFECT_MARKER not in comment_text:
+        return None
+    start = comment_text.index(DATA_EFFECT_MARKER)
+    rest = comment_text[start:]
+
+    para_break = _PARAGRAPH_BREAK_RE.search(rest)
+    if para_break:
+        rest = rest[: para_break.start()]
+
+    # A labelled line at position 0 is the DATA EFFECT marker line itself;
+    # only a LATER one (within the same paragraph) terminates the text --
+    # re.search alone would keep re-finding that same position-0 match, so
+    # this scans every match and takes the first one that isn't it.
+    for label in _LABELLED_LINE_RE.finditer(rest):
+        if label.start() > 0:
+            rest = rest[: label.start()]
+            break
+
+    return _normalize_whitespace(rest)
+
+
+_REVERSIBILITY_KEYWORD = "reversible"  # substring of "irreversible" too
+
+
+def check_data_effect_structure(
+    comment_text: str | None, reasons: list["DataEffectReason"]
+) -> list[str]:
+    """Structural validation of the DATA EFFECT sentence in *comment_text*
+    against *reasons* (this changeset's own classifier findings) — checks
+    WHAT it says, not just that the marker is present (``has_data_effect_
+    line`` already covers presence; this is the one layer down critic
+    finding Significant-1 named: a vacuous ``DATA EFFECT: cleans up rows.``
+    passes the presence check today).
+
+    Returns a list of problem strings (empty when structurally sound).
+    Two checks, both derived from what the 63 lines already do in
+    practice, not invented vocabulary:
+
+      1. **Names every table.** Every distinct, resolvable
+         ``DataEffectReason.table`` (see ``_extract_table``) must appear in
+         the extracted text, schema-qualified (``nexus.tuples``) or bare
+         (``tuples``) — the corpus uses both spellings. A reason with no
+         resolvable table (a ``structured:<tag>`` reason, or a SQL shape
+         none of ``_TABLE_EXTRACTORS`` covers) is skipped — there is
+         nothing to require by name.
+      2. **States reversibility**, using the corpus's own vocabulary: the
+         substring "reversible" (case-insensitive), which also matches
+         "irreversible" — the only two spellings any of the 63 lines use
+         (measured 2026-09-13; no line says "not reversible" or anything
+         else).
+    """
+    text = extract_data_effect_text(comment_text)
+    if text is None:
+        return ["no DATA EFFECT: line"]
+    lowered = text.lower()
+
+    problems: list[str] = []
+    if _REVERSIBILITY_KEYWORD not in lowered:
+        problems.append("does not state reversibility (reversible/irreversible)")
+
+    tables = sorted({r.table for r in reasons if r.table})
+    for table in tables:
+        bare = table.rsplit(".", 1)[-1]
+        if table.lower() not in lowered and bare.lower() not in lowered:
+            problems.append(f"does not name table {table!r}")
+
+    return problems
 
 
 # ---------------------------------------------------------------------------
@@ -270,9 +507,9 @@ def parse_master_include_order(master_path: Path) -> list[str]:
     tree = ET.parse(master_path)
     root = tree.getroot()
     return [
-        Path(el.get("file")).name
+        Path(file_attr).name
         for el in root.iter(f"{_XSD_NS}include")
-        if el.get("file")
+        if (file_attr := el.get("file"))
     ]
 
 
@@ -331,10 +568,21 @@ class DataEffectFinding:
 
 
 @dataclass
+class StructuralProblem:
+    finding: DataEffectFinding
+    problems: list[str]
+
+
+@dataclass
 class AnalysisResult:
     walked_files: list[str] = field(default_factory=list)
     data_effecting: list[DataEffectFinding] = field(default_factory=list)
     missing_disclosure: list[DataEffectFinding] = field(default_factory=list)
+    # Present (has_data_effect_line is True) but structurally deficient --
+    # doesn't name every table its own reasons touch, or doesn't state
+    # reversibility. Disjoint from missing_disclosure: a finding lands in
+    # at most one of the two lists.
+    structurally_invalid: list[StructuralProblem] = field(default_factory=list)
 
 
 def analyze_changelog(
@@ -343,8 +591,9 @@ def analyze_changelog(
 ) -> AnalysisResult:
     """Walk *master_path*'s include order and classify every changeset.
 
-    Returns every data-effecting changeset found, plus the subset still
-    missing a ``DATA EFFECT:`` line in its ``<comment>``.
+    Returns every data-effecting changeset found, the subset still missing
+    a ``DATA EFFECT:`` line entirely, and the subset that HAS one but fails
+    ``check_data_effect_structure`` (present but vacuous or incomplete).
     """
     include_order = parse_master_include_order(master_path)
 
@@ -367,6 +616,10 @@ def analyze_changelog(
             result.data_effecting.append(finding)
             if not has_data_effect_line(cs.comment_text):
                 result.missing_disclosure.append(finding)
+                continue
+            problems = check_data_effect_structure(cs.comment_text, reasons)
+            if problems:
+                result.structurally_invalid.append(StructuralProblem(finding, problems))
 
     return result
 
@@ -375,7 +628,18 @@ if __name__ == "__main__":
     res = analyze_changelog()
     print(f"walked {len(res.walked_files)} files")
     print(f"{len(res.data_effecting)} data-effecting changeset(s)")
+    invalid_ids = {sp.finding.changeset.changeset_id for sp in res.structurally_invalid}
     for f in res.data_effecting:
         kinds = ",".join(r.kind for r in f.reasons)
-        flag = "MISSING" if f in res.missing_disclosure else "ok"
+        if f in res.missing_disclosure:
+            flag = "MISSING"
+        elif f.changeset.changeset_id in invalid_ids:
+            flag = "INVALID"
+        else:
+            flag = "ok"
         print(f"  [{flag}] {f.changeset.file}:{f.changeset.changeset_id} ({kinds})")
+    for sp in res.structurally_invalid:
+        print(
+            f"    {sp.finding.changeset.file}:{sp.finding.changeset.changeset_id}: "
+            + "; ".join(sp.problems)
+        )

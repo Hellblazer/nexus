@@ -98,7 +98,7 @@ $$;
     </changeSet>
 
     <changeSet id="catalog-013-1b" author="nexus-1wjmq">
-        <comment>chash_index: RE-RUN the 013-0 normalization with FORCE RLS toggled off — 013-0 silently no-op'd in production (2026-07-08 v0.1.33 deploy incident). DATA EFFECT: same effect as catalog-013-0 (DELETE of colliding 64-char rows, UPDATE truncating the rest to [:32]), now actually visible to the FORCE-RLS owner role; irreversible for the same reason (documented no-op rollback below).</comment>
+        <comment>chash_index: RE-RUN the 013-0 normalization with FORCE RLS toggled off — 013-0 silently no-op'd in production (2026-07-08 v0.1.33 deploy incident). DATA EFFECT: same effect as catalog-013-0 on nexus.chash_index (DELETE of colliding 64-char rows, UPDATE truncating the rest to [:32]), now actually visible to the FORCE-RLS owner role; irreversible for the same reason (documented no-op rollback below).</comment>
         <sql splitStatements="true">
 -- INCIDENT nexus-1wjmq (2026-07-08, conexus-ml1z): the v0.1.33 cloud deploy
 -- failed at 013-2's VALIDATE. Root cause: nexus_admin (the Liquibase role)

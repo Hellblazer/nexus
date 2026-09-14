@@ -105,10 +105,10 @@ DELETE FROM nexus.widgets WHERE stale = true;
     (changelog_dir / "b.xml").write_text(
         _changelog(
             """    <changeSet id="b-1" author="t">
-        <comment>Backfills a column. DATA EFFECT: UPDATEs nexus.gadgets.note to ''
-            for every NULL row; reversible.</comment>
+        <comment>Backfills a column. DATA EFFECT: UPDATEs nexus.gadgets.note to 'legacy'
+            for every row where status = 'archived'; reversible.</comment>
         <sql splitStatements="true">
-UPDATE nexus.gadgets SET note = '' WHERE note IS NULL;
+UPDATE nexus.gadgets SET note = 'legacy' WHERE status = 'archived';
         </sql>
     </changeSet>"""
         )
@@ -148,17 +148,34 @@ def test_finds_only_added_data_effecting_changesets(fixture_repo: Path):
 
 
 def test_missing_disclosure_is_flagged_in_the_table(fixture_repo: Path):
+    """The table cell must carry the FULL DATA EFFECT sentence, continuation
+    line included -- a naive ``line for line in comment.splitlines() if
+    MARKER in line`` scan (the bug this pins) truncates at the first
+    physical newline and would silently drop the "; reversible." clause
+    that lives on this fixture's SECOND physical line, exactly the shape
+    44/63 real backfilled lines use (nexus-f7dwp critic finding)."""
     rows = lde.find_added_data_effecting_changesets("v1", "v2", repo_root=fixture_repo)
     table = lde.render_markdown_table(rows)
     assert "a-2" in table and "MISSING" in table
-    assert "b-1" in table and "DATA EFFECT: UPDATEs nexus.gadgets.note" in table
+    assert "b-1" in table
+    assert (
+        "DATA EFFECT: UPDATEs nexus.gadgets.note to 'legacy' for every row "
+        "where status = 'archived'; reversible." in table
+    )
 
 
 def test_census_predicate_carries_the_exact_matched_statement(fixture_repo: Path):
+    """The predicate must carry the statement's REAL literal values, not a
+    blanked '' placeholder -- b-1's UPDATE has two non-empty literals
+    ('legacy', 'archived'), the hygiene-004-1 shape (a real CASE/WHERE
+    literal, not an already-blank one) that the old code's
+    _STRING_LITERAL_RE.sub("''", ...) blanking-before-capture defect made
+    invisible: an all-'' fixture literal can't distinguish "captured
+    correctly" from "blanked and it happened to already be ''"."""
     rows = lde.find_added_data_effecting_changesets("v1", "v2", repo_root=fixture_repo)
     b_row = next(r for r in rows if r.changeset_id == "b-1")
     predicate = lde._census_predicate(b_row.finding)
-    assert "UPDATE nexus.gadgets SET note = '' WHERE note IS NULL" in predicate
+    assert "UPDATE nexus.gadgets SET note = 'legacy' WHERE status = 'archived'" in predicate
 
 
 def test_check_exits_nonzero_when_a_missing_row_is_present(fixture_repo: Path, capsys):

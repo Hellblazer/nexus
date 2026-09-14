@@ -58,6 +58,7 @@ from data_effect_lint import (
     ChangesetInfo,
     DataEffectFinding,
     classify_changeset,
+    extract_data_effect_text,
     has_data_effect_line,
     iter_changesets_from_text,
     parse_master_include_order,
@@ -95,7 +96,9 @@ def _master_include_order_at_ref(ref: str, repo_root: Path) -> list[str]:
     root = ET.fromstring(content)
     ns = "{http://www.liquibase.org/xml/ns/dbchangelog}"
     return [
-        Path(el.get("file")).name for el in root.iter(f"{ns}include") if el.get("file")
+        Path(file_attr).name
+        for el in root.iter(f"{ns}include")
+        if (file_attr := el.get("file"))
     ]
 
 
@@ -173,14 +176,10 @@ def render_markdown_table(rows: list[AddedRow]) -> str:
     for row in rows:
         finding = row.finding
         assert finding is not None
-        comment = finding.changeset.comment_text or ""
-        if has_data_effect_line(comment):
-            effect_lines = [
-                line.strip()
-                for line in comment.splitlines()
-                if "DATA EFFECT:" in line
-            ]
-            effect_cell = " ".join(effect_lines).replace("|", "\\|")
+        comment = finding.changeset.comment_text
+        effect_text = extract_data_effect_text(comment)
+        if effect_text is not None:
+            effect_cell = effect_text.replace("|", "\\|")
         else:
             effect_cell = "**MISSING** — no `DATA EFFECT:` line in this changeset's `<comment>`"
         predicate_cell = _census_predicate(finding).replace("|", "\\|").replace("\n", "<br>")

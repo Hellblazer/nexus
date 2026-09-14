@@ -108,7 +108,7 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="catalog-025-0" author="nexus-71gw2">
-        <comment>catalog_document_chunks.collection: delete unresolvable (NULL) and dangling (stamped-but-unverified) rows, resync chunk_count, then SET NOT NULL. No resolution, no sentinel, no DEFAULT (Hal ruling 2026-08-12). DATA EFFECT: DELETEs every nexus.catalog_document_chunks row with a NULL or dangling (unverified) collection, and UPDATEs documents.chunk_count for every touched document; irreversible (the rollback only relaxes the NOT NULL constraint and the index shape, not the deleted manifest rows — a re-index regenerates them).</comment>
+        <comment>catalog_document_chunks.collection: delete unresolvable (NULL) and dangling (stamped-but-unverified) rows, resync chunk_count, then SET NOT NULL. No resolution, no sentinel, no DEFAULT (Hal ruling 2026-08-12). DATA EFFECT: DELETEs every nexus.catalog_document_chunks row with a NULL or dangling (unverified) collection, and UPDATEs nexus.catalog_documents.chunk_count for every touched document; irreversible (the rollback only relaxes the NOT NULL constraint and the index shape, not the deleted manifest rows — a re-index regenerates them).</comment>
         <sql splitStatements="true" stripComments="false">
 -- Fourth boot-brick closure: block a concurrent old-binary writer for the
 -- WHOLE remainder of this transaction before touching anything else.

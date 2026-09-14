@@ -37,7 +37,9 @@ import pytest
 from data_effect_lint import (
     DATA_EFFECT_MARKER,
     analyze_changelog,
+    check_data_effect_structure,
     classify_changeset,
+    extract_data_effect_text,
     has_data_effect_line,
 )
 
@@ -132,6 +134,132 @@ END $$;
 def test_structured_change_tags_are_detected():
     reasons = classify_changeset("", structured_tags=["delete", "dropColumn"])
     assert {r.kind for r in reasons} == {"structured:delete", "structured:dropColumn"}
+
+
+def test_structured_modify_data_type_and_truncate_table_tags_are_detected():
+    reasons = classify_changeset("", structured_tags=["modifyDataType", "truncateTable"])
+    assert {r.kind for r in reasons} == {
+        "structured:modifyDataType",
+        "structured:truncateTable",
+    }
+
+
+def test_census_predicate_keeps_real_string_literals():
+    """DataEffectReason.statement must carry the statement's REAL literal
+    values, not the classifier's internal blanked-for-matching copy (nexus-
+    f7dwp code-review finding): a census predicate built from a blanked
+    '' loses the actual value a deployer needs to build a SELECT count(*)
+    probe against."""
+    sql = "UPDATE nexus.widgets SET status = 'archived' WHERE owner = 'legacy';"
+    reasons = classify_changeset(sql, structured_tags=[])
+    assert len(reasons) == 1
+    assert reasons[0].statement == "UPDATE nexus.widgets SET status = 'archived' WHERE owner = 'legacy'"
+
+
+def test_extract_table_populates_reason_table_field():
+    cases = [
+        ("DELETE FROM nexus.widgets WHERE stale = true;", "nexus.widgets"),
+        ("UPDATE nexus.widgets SET name = 'x' WHERE id = 1;", "nexus.widgets"),
+        ("TRUNCATE nexus.widgets;", "nexus.widgets"),
+        ("DROP TABLE nexus.widgets;", "nexus.widgets"),
+        ("ALTER TABLE nexus.widgets DROP COLUMN stale;", "nexus.widgets"),
+        (
+            "ALTER TABLE nexus.widgets ALTER COLUMN created_at TYPE timestamptz "
+            "USING NULLIF(created_at, '')::timestamptz;",
+            "nexus.widgets",
+        ),
+    ]
+    for sql, expected_table in cases:
+        reasons = classify_changeset(sql, structured_tags=[])
+        assert len(reasons) == 1, (sql, reasons)
+        assert reasons[0].table == expected_table, (sql, reasons)
+
+
+# ---------------------------------------------------------------------------
+# extract_data_effect_text -- the wrapped-sentence extraction (nexus-f7dwp
+# critic ship-blocker: a line-scan silently truncated 44/63 real lines)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_data_effect_text_returns_full_wrapped_sentence():
+    """The real house style: DATA EFFECT wraps across physical lines with
+    leading indentation on the continuation. The old
+    ``line for line in comment.splitlines() if MARKER in line`` extraction
+    kept only the FIRST physical line -- this must return the whole
+    sentence, whitespace-normalized."""
+    comment = (
+        "Backfills a column. DATA EFFECT: UPDATEs nexus.gadgets.note to ''\n"
+        "            for every NULL row; reversible."
+    )
+    text = extract_data_effect_text(comment)
+    assert text == "DATA EFFECT: UPDATEs nexus.gadgets.note to '' for every NULL row; reversible."
+
+
+def test_extract_data_effect_text_stops_at_a_blank_line():
+    comment = (
+        "Some setup prose.\n\n"
+        "DATA EFFECT: UPDATEs nexus.widgets.note; reversible.\n\n"
+        "A trailing paragraph that must NOT be pulled in."
+    )
+    text = extract_data_effect_text(comment)
+    assert text == "DATA EFFECT: UPDATEs nexus.widgets.note; reversible."
+
+
+def test_extract_data_effect_text_stops_at_the_next_labelled_line():
+    """Defensive: a second labelled paragraph sharing the same paragraph
+    (no blank line) must not be absorbed into the DATA EFFECT text."""
+    comment = (
+        "DATA EFFECT: UPDATEs nexus.widgets.note; reversible.\n"
+        "SEE ALSO: some other note that is not part of the effect."
+    )
+    text = extract_data_effect_text(comment)
+    assert text == "DATA EFFECT: UPDATEs nexus.widgets.note; reversible."
+
+
+def test_extract_data_effect_text_returns_none_without_marker():
+    assert extract_data_effect_text("no marker here") is None
+    assert extract_data_effect_text(None) is None
+
+
+# ---------------------------------------------------------------------------
+# check_data_effect_structure -- WHAT the DATA EFFECT sentence says, not
+# just that it is present (critic Significant-1: a vacuous line passes
+# has_data_effect_line today)
+# ---------------------------------------------------------------------------
+
+
+def test_structure_check_flags_missing_reversibility():
+    reasons = classify_changeset("DELETE FROM nexus.widgets WHERE stale = true;", [])
+    comment = "DATA EFFECT: DELETEs nexus.widgets rows where stale is true."
+    problems = check_data_effect_structure(comment, reasons)
+    assert any("reversib" in p for p in problems), problems
+
+
+def test_structure_check_flags_missing_table_name():
+    reasons = classify_changeset("DELETE FROM nexus.widgets WHERE stale = true;", [])
+    comment = "DATA EFFECT: cleans up some stale rows; irreversible."
+    problems = check_data_effect_structure(comment, reasons)
+    assert any("nexus.widgets" in p for p in problems), problems
+
+
+def test_structure_check_accepts_a_bare_table_spelling():
+    """The corpus spells tables both schema-qualified and bare (e.g.
+    "UPDATEs document_aspects.doc_id" with no "nexus." prefix) -- the bare
+    spelling must satisfy the check too."""
+    reasons = classify_changeset("DELETE FROM nexus.widgets WHERE stale = true;", [])
+    comment = "DATA EFFECT: DELETEs widgets rows where stale is true; irreversible."
+    assert check_data_effect_structure(comment, reasons) == []
+
+
+def test_structure_check_passes_a_well_formed_line():
+    reasons = classify_changeset("DELETE FROM nexus.widgets WHERE stale = true;", [])
+    comment = "DATA EFFECT: DELETEs nexus.widgets rows where stale is true; irreversible."
+    assert check_data_effect_structure(comment, reasons) == []
+
+
+def test_structure_check_reports_missing_marker():
+    reasons = classify_changeset("DELETE FROM nexus.widgets WHERE stale = true;", [])
+    assert check_data_effect_structure("no marker here", reasons) == ["no DATA EFFECT: line"]
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +422,27 @@ def test_real_changelog_every_data_effecting_changeset_is_disclosed():
         + ", ".join(
             f"{f.changeset.file}:{f.changeset.changeset_id} ({','.join(r.kind for r in f.reasons)})"
             for f in result.missing_disclosure
+        )
+    )
+
+
+def test_real_changelog_every_data_effect_line_is_structurally_valid():
+    """One layer down from presence: every DATA EFFECT line in the real
+    changelog must also name every table its own reasons touch and state
+    reversibility (check_data_effect_structure) -- critic Significant-1's
+    "a vacuous line passes today" gap. 3 lines failed this the first time
+    it was measured against the real corpus (2026-09-13: fk-001-2 missing
+    reversibility; catalog-013-1b and catalog-025-0 missing a table name);
+    all three were fixed in their <comment> elements the same day."""
+    result = analyze_changelog()
+    assert result.structurally_invalid == [], (
+        "changeset(s) carry a DATA EFFECT line that doesn't name every "
+        "table it touches or doesn't state reversibility -- see nexus-f7dwp "
+        "/ scripts/data_effect_lint.py's check_data_effect_structure: "
+        + ", ".join(
+            f"{sp.finding.changeset.file}:{sp.finding.changeset.changeset_id} "
+            f"({'; '.join(sp.problems)})"
+            for sp in result.structurally_invalid
         )
     )
 
