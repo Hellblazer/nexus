@@ -448,7 +448,8 @@ Liquibase, every reference schema-qualified):
   decision to keep that title with the written content, so every `DO
   UPDATE` branch on the title key also sets `quarantined_at` and
   `rolled_up_at` to `NULL` in the same statement; the row comes back with
-  the TTL the write gave it. Similarity scan (`putOrMerge`): the scan adds
+  the TTL the write gave it, where `restore` makes the row permanent because
+  it has no TTL argument and a write names its own. Similarity scan (`putOrMerge`): the scan adds
   `quarantined_at IS NULL`, so a hidden row is never a merge target; its
   same-title branch is the conflict branch above. Explicit ids
   (`mergeMemories`): refuses when the kept id or any deleted id names a
