@@ -97,6 +97,9 @@ from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
     jar_freshness_skip_reason,
     pg_bin_dir,
+    build_in_progress_reason,
+    build_lease_wait_seconds,
+    wait_for_build_lease,
 )
 
 _log = structlog.get_logger(__name__)
@@ -609,6 +612,21 @@ def throwaway_pg_cluster(
         shutil.rmtree(pgdata, ignore_errors=True)
 
 
+def _jar_ready_reason(jar: Path) -> str | None:
+    """The boot-time jar verdict, waiting for a build first (nexus-wwaqm).
+
+    A build that took the lease after the session-start gate
+    (tests/conftest.py ``_gate_on_build_lease``) is first seen here, at this
+    worker's first boot. Wait for it through NX_BUILD_LEASE_WAIT as the gate
+    does; the default 0 is a single look. Only the boot path waits:
+    ``jar_freshness_skip_reason`` stays an immediate check, because the
+    session-start stale-jar warning also calls it and must never block.
+    """
+    if build_in_progress_reason():
+        wait_for_build_lease(build_lease_wait_seconds())
+    return jar_freshness_skip_reason(jar)
+
+
 def _boot() -> dict:
     """Boot hermetic PG + the shaded service JAR. Called once, under _lock."""
     try:
@@ -619,7 +637,7 @@ def _boot() -> dict:
             f"{exc}",
             stacklevel=2,
         )
-    stale = jar_freshness_skip_reason(_JAR)
+    stale = _jar_ready_reason(_JAR)
     if stale:
         raise RuntimeError(
             f"T2 engine substrate unavailable: {stale}. The unit suite's T2 "

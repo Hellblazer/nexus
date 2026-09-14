@@ -225,10 +225,13 @@ def _gate_on_build_lease() -> None:
     controller (workers spawn after this returns), turns that into one
     line and exit 75 — or, with ``NX_BUILD_LEASE_WAIT=<seconds>``, into a
     wait that starts the suite when the holder is gone. ``_boot()``'s own
-    check runs once per worker process at its first substrate boot, so a
-    build that starts after this gate and before a worker boots is still
-    refused there; one that starts after every worker has booted is not
-    seen by either (the shell lease's own residual, nexus-06fu4).
+    check runs once per worker process at its first substrate boot and
+    honours the same wait (``_engine_substrate._jar_ready_reason``; the
+    session-start stale-jar warning stays non-blocking), so a build that
+    starts after this gate and before a worker boots is waited for there
+    too; one that starts after every
+    worker has booted is not seen by either (the shell lease's own
+    residual, nexus-06fu4).
 
     Only a run that will boot the engine is gated
     (``_selected_t2_substrate_boots_engine``). ``=none`` provisions nothing,

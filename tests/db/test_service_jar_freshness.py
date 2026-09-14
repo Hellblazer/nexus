@@ -475,3 +475,64 @@ class TestWaitForBuildLease:
         assert build_lease_wait_seconds() == 900
         monkeypatch.setenv("NX_BUILD_LEASE_WAIT", "soon")
         assert build_lease_wait_seconds() == 0
+
+
+
+class TestBootCheckHonoursTheLeaseWait:
+    """nexus-wwaqm. A build that takes the lease after the session-start gate is
+    first seen at a worker's first boot. The boot path waits through the same
+    NX_BUILD_LEASE_WAIT the gate honours; the shared jar_freshness_skip_reason
+    never waits, because the session-start stale-jar warning calls it too and
+    must not block."""
+
+    def _stub(self, monkeypatch, *, held: bool, after_wait: str | None):
+        from tests import _engine_substrate as es
+
+        calls: list[int] = []
+
+        def _wait(max_seconds):
+            calls.append(max_seconds)
+            return after_wait
+
+        monkeypatch.setattr(es, "build_in_progress_reason",
+                            lambda *a, **k: "a service BUILD IS IN PROGRESS (stub)" if held else None)
+        monkeypatch.setattr(es, "wait_for_build_lease", _wait)
+        monkeypatch.setattr(es, "jar_freshness_skip_reason", lambda jar: after_wait)
+        return es, calls
+
+    def test_a_held_lease_is_waited_for_with_the_configured_bound(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        es, calls = self._stub(monkeypatch, held=True, after_wait=None)
+        monkeypatch.setenv("NX_BUILD_LEASE_WAIT", "900")
+        assert es._jar_ready_reason(tmp_path / "x.jar") is None
+        assert calls == [900]
+
+    def test_a_lease_still_held_after_the_wait_is_reported(self, tmp_path, monkeypatch) -> None:
+        es, calls = self._stub(monkeypatch, held=True, after_wait="a service BUILD IS IN PROGRESS (still)")
+        monkeypatch.setenv("NX_BUILD_LEASE_WAIT", "900")
+        assert es._jar_ready_reason(tmp_path / "x.jar") == "a service BUILD IS IN PROGRESS (still)"
+        assert calls == [900]
+
+    def test_without_the_variable_the_boot_takes_a_single_look(self, tmp_path, monkeypatch) -> None:
+        es, calls = self._stub(monkeypatch, held=True, after_wait="held")
+        monkeypatch.delenv("NX_BUILD_LEASE_WAIT", raising=False)
+        es._jar_ready_reason(tmp_path / "x.jar")
+        assert calls == [0]
+
+    def test_no_lease_means_no_wait(self, tmp_path, monkeypatch) -> None:
+        es, calls = self._stub(monkeypatch, held=False, after_wait=None)
+        monkeypatch.setenv("NX_BUILD_LEASE_WAIT", "900")
+        es._jar_ready_reason(tmp_path / "x.jar")
+        assert calls == []
+
+    def test_the_shared_freshness_check_never_waits(self, tmp_path, monkeypatch) -> None:
+        from tests.db import _service_fixture as sf
+
+        def _forbidden(*_a, **_k):
+            raise AssertionError("jar_freshness_skip_reason must not wait: its callers include a non-blocking warning")
+
+        monkeypatch.setattr(sf, "build_in_progress_reason", lambda *a, **k: "held")
+        monkeypatch.setattr(sf, "wait_for_build_lease", _forbidden)
+        monkeypatch.setenv("NX_BUILD_LEASE_WAIT", "900")
+        assert sf.jar_freshness_skip_reason(tmp_path / "x.jar") == "held"
