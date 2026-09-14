@@ -15,6 +15,10 @@ Since P3 removed the ``=sqlite`` opt-out there is exactly one backend:
 """
 from __future__ import annotations
 
+import ast
+import pathlib
+import re
+
 import pytest
 
 from nexus.db.storage_mode import (
@@ -238,6 +242,80 @@ def test_t2_facade_stores_is_valid_names_minus_catalog_and_t1() -> None:
     exactly VALID_STORE_NAMES minus the two documented exclusions, so a new
     store added to one set cannot silently miss the other."""
     assert set(T2_FACADE_STORES) == VALID_STORE_NAMES - {"catalog", "t1"}
+
+
+_T2_INIT_PATH = (
+    pathlib.Path(__file__).resolve().parent.parent.parent
+    / "src" / "nexus" / "db" / "t2" / "__init__.py"
+)
+_HTTP_CALL_NAME = re.compile(r"^_*Http")
+
+
+def _t2database_constructed_domain_store_names() -> frozenset[str]:
+    """AST-derive the set of domain-store attribute names
+    ``T2Database.__init__`` actually constructs: every ``self.<name>:
+    <Type> = <Type>(...)`` annotated assignment inside ``__init__`` whose
+    call target's name matches ``Http*`` (after stripping any leading
+    underscores from an aliased import, e.g. ``_HttpTaxonomyStore``).
+    This deliberately excludes ``self._path`` (no ``Http*`` call) and
+    ``self.RENAME_LOCK`` (``threading.RLock()``, not ``Http*``) -- the
+    two other annotated ``self.`` assignments in the same method that are
+    not domain stores.
+
+    ``self._taxonomy`` is mapped to the public name ``taxonomy``: the
+    store is constructed onto the private ``_taxonomy`` attribute, but
+    every caller -- and ``T2_FACADE_STORES`` itself -- names it
+    ``taxonomy`` (the property it is read through).
+
+    Pure AST walk, no import of ``nexus.db.t2`` and no ``T2Database``
+    instantiation (which would require a live engine endpoint) --
+    complements ``test_valid_store_names_covers_t2database_attributes``,
+    which checks one direction (constructed subset of named) via a real
+    instantiation; this walk checks both directions against
+    ``T2_FACADE_STORES`` specifically, statically.
+    """
+    tree = ast.parse(_T2_INIT_PATH.read_text(), filename=str(_T2_INIT_PATH))
+    class_node = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "T2Database"
+    )
+    init_node = next(
+        n for n in class_node.body
+        if isinstance(n, ast.FunctionDef) and n.name == "__init__"
+    )
+
+    names: set[str] = set()
+    for node in ast.walk(init_node):
+        if not isinstance(node, ast.AnnAssign):
+            continue
+        target = node.target
+        if not (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+        ):
+            continue
+        if not isinstance(node.value, ast.Call) or not isinstance(node.value.func, ast.Name):
+            continue
+        if not _HTTP_CALL_NAME.match(node.value.func.id):
+            continue
+        attr = target.attr
+        names.add("taxonomy" if attr == "_taxonomy" else attr)
+    return frozenset(names)
+
+
+def test_t2_facade_stores_matches_t2database_ast_construction() -> None:
+    """T2_FACADE_STORES must equal exactly the set of domain-store
+    attributes T2Database.__init__ actually constructs, so a store added
+    to one without the other (as ``tuples`` -- HttpTupleStore, RDR-205 --
+    went missing from several fan-out tests' hand-typed store lists for a
+    while) goes red here instead of silently drifting."""
+    constructed = _t2database_constructed_domain_store_names()
+    assert constructed == set(T2_FACADE_STORES), (
+        f"T2Database.__init__ constructs {sorted(constructed)} but "
+        f"T2_FACADE_STORES is {sorted(T2_FACADE_STORES)} -- a domain "
+        f"store was added to (or removed from) one without the other"
+    )
 
 
 def test_valid_store_names_covers_t2database_attributes(
