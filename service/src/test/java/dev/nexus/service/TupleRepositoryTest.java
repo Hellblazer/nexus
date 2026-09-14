@@ -350,6 +350,20 @@ class TupleRepositoryTest {
 
     // ── mailbox address_kind gains session (RDR-208 P1.2, bead nexus-galkv.2) ──
 
+    /** agent is the original v1 value (RDR-205); still accepted unchanged
+     *  now that address_kind also carries instance and session. */
+    @Test
+    void out_mailboxAddressKindAgent_stillAccepted_readBack() {
+        String to = "agent-kind-agent-" + UUID.randomUUID();
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+                Map.of("from", "sender-kind-agent", "address_kind", "agent"),
+                "body", "nonce-kind-agent", null);
+
+        var rows = repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).dims()).containsEntry("address_kind", "agent");
+    }
+
     @Test
     void out_mailboxAddressKindSession_accepted_readBack() {
         String to = "agent-kind-session-" + UUID.randomUUID();
