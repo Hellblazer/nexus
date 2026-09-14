@@ -302,6 +302,126 @@ class TestTupleWatchSessionMarkerWriter:
         assert "Nexus ready" in output
 
 
+class TestClearRecordsThePreviousSession:
+    """RDR-208 Phase 2 Step 3: on ``/clear``, SessionStart records the
+    mailbox a ``/clear`` just stranded so the drain can empty it once.
+    Reuses :meth:`TestTupleWatchSessionMarkerWriter._session_start`.
+    """
+
+    def _session_start(self, monkeypatch, tmp_path, *, source, claude_pid=4242):
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        with (
+            patch("nexus.hooks.write_claude_session_id"),
+            patch("nexus.session.find_immediate_claude_pid", return_value=claude_pid),
+            patch("nexus.session.find_mcp_sibling_pids", return_value=[]),
+        ):
+            return session_start(claude_session_id="new-sess-id", source=source)
+
+    def test_clear_with_a_prior_marker_writes_the_cleared_record(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        from nexus.tuple_watch import (
+            cleared_record_path,
+            session_marker_path,
+            write_session_marker,
+        )
+
+        write_session_marker(tmp_path, 4242, "old-sess-id")
+        self._session_start(monkeypatch, tmp_path, source="clear")
+
+        record = cleared_record_path(tmp_path, "new-sess-id")
+        assert record.is_file()
+        assert record.read_text(encoding="utf-8").splitlines() == ["old-sess-id"]
+        marker = session_marker_path(tmp_path, 4242)
+        assert marker.read_text(encoding="utf-8").strip() == "new-sess-id"
+
+    @pytest.mark.parametrize("source", ["resume", "compact", "startup", "fork", None])
+    def test_every_other_source_writes_no_record(
+        self, tmp_path, monkeypatch, source,
+    ) -> None:
+        from nexus.tuple_watch import cleared_record_path, write_session_marker
+
+        write_session_marker(tmp_path, 4242, "old-sess-id")
+        self._session_start(monkeypatch, tmp_path, source=source)
+
+        assert not cleared_record_path(tmp_path, "new-sess-id").exists()
+
+    def test_clear_to_the_same_id_writes_no_record(self, tmp_path, monkeypatch) -> None:
+        from nexus.tuple_watch import cleared_record_path, write_session_marker
+
+        write_session_marker(tmp_path, 4242, "new-sess-id")
+        self._session_start(monkeypatch, tmp_path, source="clear")
+
+        assert not cleared_record_path(tmp_path, "new-sess-id").exists()
+
+    def test_clear_with_no_prior_marker_writes_no_record(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        from nexus.tuple_watch import cleared_record_path
+
+        self._session_start(monkeypatch, tmp_path, source="clear")
+
+        assert not cleared_record_path(tmp_path, "new-sess-id").exists()
+
+    def test_chained_clear_carries_the_ids_forward(self, tmp_path, monkeypatch) -> None:
+        """S1 -> S2 -> S3 with no prompt (and so no drain) at S2: the record
+        for S3 names both S2 and S1, and S2's own now-unreachable record is
+        removed rather than left to strand S1's id.
+        """
+        from nexus.tuple_watch import cleared_record_path, write_session_marker
+
+        write_session_marker(tmp_path, 4242, "s1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        with (
+            patch("nexus.hooks.write_claude_session_id"),
+            patch("nexus.session.find_immediate_claude_pid", return_value=4242),
+            patch("nexus.session.find_mcp_sibling_pids", return_value=[]),
+        ):
+            session_start(claude_session_id="s2", source="clear")
+            session_start(claude_session_id="s3", source="clear")
+
+        s3_record = cleared_record_path(tmp_path, "s3")
+        assert s3_record.read_text(encoding="utf-8").splitlines() == ["s2", "s1"]
+        assert not cleared_record_path(tmp_path, "s2").exists()
+
+    def test_inherited_session_id_writes_no_record(self, tmp_path, monkeypatch) -> None:
+        from nexus.tuple_watch import cleared_record_path, write_session_marker
+
+        write_session_marker(tmp_path, 4242, "old-sess-id")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_SESSION_ID", "inherited-sess-id")
+        with (
+            patch("nexus.hooks.write_claude_session_id"),
+            patch("nexus.session.find_immediate_claude_pid", return_value=4242),
+            patch("nexus.session.find_mcp_sibling_pids", return_value=[]),
+        ):
+            session_start(claude_session_id="ignored", source="clear")
+
+        assert not cleared_record_path(tmp_path, "inherited-sess-id").exists()
+
+    def test_cleared_record_write_failure_does_not_crash_session_start(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        from nexus.tuple_watch import write_session_marker
+
+        write_session_marker(tmp_path, 4242, "old-sess-id")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        with (
+            patch("nexus.hooks.write_claude_session_id"),
+            patch("nexus.session.find_immediate_claude_pid", return_value=4242),
+            patch("nexus.session.find_mcp_sibling_pids", return_value=[]),
+            patch(
+                "nexus.tuple_watch.record_clear_and_write_session_marker",
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
+            output = session_start(claude_session_id="new-sess-id", source="clear")
+        assert "Nexus ready" in output
+
+
 # ── session_end ──────────────────────────────────────────────────────────────
 
 

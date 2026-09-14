@@ -81,6 +81,7 @@ hook runs on boxes where the client package may be mid-upgrade.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -93,6 +94,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _endpoint_resolve as _ep  # noqa: E402
@@ -123,6 +129,18 @@ _PROBE_N = 20
 
 #: Live rows consumed per prompt, for the same reason.
 _MAX_DELIVER = 10
+
+#: RDR-208 Phase 2 Step 3: how long a ``cleared.<session id>`` record is kept
+#: around unresolved before it is pruned, matching the mailbox template's own
+#: retention. Past this, the mailbox it names has expired on the engine side
+#: regardless, so the record is naming rows that are already gone.
+_CLEARED_RECORD_RETENTION_S = 7.0 * 24.0 * 3600.0
+
+#: Bound on how long the pending-file lock (see :func:`_pending_lock`) waits
+#: for a concurrent holder before giving up and running unlocked. Small: this
+#: closes a narrow interleaving window, it is not a queueing mechanism, and a
+#: prompt is waiting on the whole hook.
+_PENDING_LOCK_TIMEOUT_S = 2.0
 
 #: Per-turn re-arm (bead nexus-6konb.19). This script cannot import nexus, so
 #: it spells two wheel facts itself, each pinned against the wheel by
@@ -211,6 +229,165 @@ def _read_session_registry(config_dir: Path, session_id: str) -> list[str]:
     return out
 
 
+def _cleared_record_path(config_dir: Path, session_id: str) -> Path:
+    """``<config>/tuple-watch/cleared.<session_id>``, matching
+    ``nexus.tuple_watch.cleared_record_path`` -- pinned against drift by
+    :func:`test_rearm_naming_matches_the_wheel`'s sibling in the test module.
+    *session_id* here is the reading session's OWN id: the record this hook
+    reads was written FOR it, naming the mailbox(es) its own ``/clear``
+    stranded (RDR-208 Phase 2 Step 3).
+    """
+    return config_dir / "tuple-watch" / f"cleared.{session_id}"
+
+
+def _read_cleared_record(config_dir: Path, session_id: str) -> list[str]:
+    """The mailbox(es) THIS session's ``/clear`` stranded, one per line, in
+    the order :func:`nexus.tuple_watch.record_clear_and_write_session_marker`
+    wrote them (the immediately-previous session first, then any chained
+    further back). Blank lines and ``#`` comments are ignored. A malformed
+    entry is dropped AND logged -- unlike the silent drop in
+    :func:`_read_session_registry` -- because an operator-visible mailbox id
+    landing in this record and failing validation is itself worth knowing
+    about, not routine noise. A missing or unreadable file is simply no
+    record, never a failure: most sessions never ``/clear``.
+    """
+    path = _cleared_record_path(config_dir, session_id)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return []
+    out: list[str] = []
+    for line in raw.splitlines():
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        if _valid_address(entry):
+            out.append(entry)
+        else:
+            _log_skip(f"cleared record {path.name}: skipping malformed mailbox id {entry!r}")
+    return out
+
+
+def _delete_cleared_record(config_dir: Path, session_id: str) -> None:
+    try:
+        _cleared_record_path(config_dir, session_id).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _prune_stale_cleared_records(config_dir: Path, *, now: float) -> None:
+    """Delete any ``cleared.*`` record whose file is older than the mailbox
+    template's own 7-day retention: the mailbox it names has expired at the
+    engine regardless of whether this hook ever confirmed it empty, so the
+    record is naming rows that are already gone. Runs once per invocation,
+    over every record in the directory -- not scoped to the current
+    session's own record -- since a record can outlive the session that
+    would ever read it again (e.g. a chained clear's now-unreachable id;
+    see :func:`nexus.tuple_watch.record_clear_and_write_session_marker`).
+    """
+    watch_dir = config_dir / "tuple-watch"
+    try:
+        entries = list(watch_dir.iterdir())
+    except OSError:
+        return
+    for path in entries:
+        if not path.name.startswith("cleared."):
+            continue
+        try:
+            age = now - path.stat().st_mtime
+        except OSError:
+            continue
+        if age > _CLEARED_RECORD_RETENTION_S:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def _mailbox_confirmed_empty(base_url: str, token: str, address: str, *, is_local: bool,
+                             config_dir: Path, deadline: float) -> bool:
+    """True iff *address* is safe to forget: a fresh ``rd`` probe shows no
+    row other than dead-lettered ones (a row under another process's lease
+    still counts as live -- it may yet be delivered by whoever holds it),
+    and nothing of this hook's own is still in flight for it.
+    """
+    import time  # noqa: PLC0415 — deferred: only this path needs a clock
+
+    try:
+        rows = _probe_page(base_url, token, address, is_local=is_local,
+                           deadline=deadline, since=None)
+    except _Skip:
+        return False
+    if any(r.get("claim_state") != "dead" for r in rows):
+        return False
+    return not _read_pending(config_dir, address)
+
+
+def _drain_named_mailbox(base_url: str, token: str, address: str, *, is_local: bool,
+                         config_dir: Path, deadline: float, out: _Out) -> bool:
+    """Drain one mailbox a cleared record names, and say whether it is safe
+    to forget.
+
+    Per the audit's delete rule (RDR-208 Phase 2 Step 3), ALL of these must
+    hold, not just ``delivered == 0``:
+
+    1. the claim loop ended on an EMPTY claim, not the deadline, not
+       ``_MAX_DELIVER``, not an ack refusal;
+    2. a fresh ``rd`` probe afterward shows no live row (dead-lettered rows
+       do not count; a row under another process's lease does);
+    3. the address's pending file is empty or missing.
+
+    Any other ending -- including an unexpected exception, treated the same
+    as this hook's own per-address handling in :func:`_drain_all` -- keeps
+    the record for the next prompt to try again.
+    """
+    try:
+        ending = _drain_address(base_url, token, address, is_local=is_local,
+                                config_dir=config_dir, deadline=deadline, out=out)
+    except _Skip as exc:
+        _log_skip(f"cleared mailbox/{address}: {exc}")
+        return False
+    except Exception as exc:  # noqa: BLE001 — mirrors _drain_all's own per-address handling
+        _log_skip(f"cleared mailbox/{address}: unexpected {type(exc).__name__}: {exc}")
+        return False
+    if ending != "empty":
+        return False
+    return _mailbox_confirmed_empty(base_url, token, address, is_local=is_local,
+                                    config_dir=config_dir, deadline=deadline)
+
+
+def _drain_cleared_record(base_url: str, token: str, session_id: str, *, is_local: bool,
+                          config_dir: Path, deadline: float, out: _Out) -> None:
+    """Drain every mailbox this session's cleared record names, inside the
+    SAME budget as the session's own mailbox, and delete the record only
+    when every named mailbox came back safe to forget. A record naming more
+    than one mailbox (a chained clear) is all-or-nothing: partially draining
+    it and pruning only the finished names would need per-name state this
+    record does not carry, and leaving the whole record for one more pass is
+    cheap -- an already-empty mailbox costs one quick probe next time.
+    """
+    import time  # noqa: PLC0415 — deferred: only this path needs a clock
+
+    named = _read_cleared_record(config_dir, session_id)
+    if not named:
+        return
+    all_confirmed = True
+    for address in named:
+        if time.monotonic() >= deadline:
+            _log_skip(
+                f"drain budget of {_TOTAL_BUDGET_S}s spent before reaching the "
+                f"cleared record's mailbox/{address}; the record keeps until the "
+                "next prompt",
+            )
+            all_confirmed = False
+            break
+        if not _drain_named_mailbox(base_url, token, address, is_local=is_local,
+                                    config_dir=config_dir, deadline=deadline, out=out):
+            all_confirmed = False
+    if all_confirmed:
+        _delete_cleared_record(config_dir, session_id)
+
+
 def _read_seen(config_dir: Path, address: str) -> set[str]:
     try:
         data = json.loads(_seen_path(config_dir, address).read_text(encoding="utf-8"))
@@ -269,6 +446,60 @@ def _save_pending(config_dir: Path, address: str, entries: list[dict[str, str]])
         pass
 
 
+@contextlib.contextmanager
+def _pending_lock(config_dir: Path, address: str):
+    """Exclusive advisory lock over one address's pending-file read-modify-
+    write (nexus-galkv.6 residual audit finding).
+
+    Two processes draining the SAME address concurrently used to be a rare
+    edge case (two terminals resuming one session id); RDR-208 Phase 2 Step 3
+    makes it the ordinary case for a ``/clear``'s stranded mailbox, since the
+    new session's own drain and any still-live process holding the old
+    session id both drain that address now. Without this lock, X's
+    :func:`_recover_pending` could read a snapshot that still lists a row Y
+    has ALREADY acked and cleared, then write that stale snapshot back after
+    Y's own clear -- resurrecting the entry Y just removed. Wrapping each
+    read-decide-write sequence in this lock closes exactly that interleaving.
+
+    Best-effort and bounded: a lock this cannot take within
+    ``_PENDING_LOCK_TIMEOUT_S`` degrades to running unlocked rather than
+    holding up a prompt -- every other write in this file already accepts
+    that a lost race here costs at worst a redundant or a recovered entry,
+    never a crash.
+    """
+    path = config_dir / "tuple-watch" / f"{address}.pending.lock"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        yield
+        return
+    locked = False
+    deadline = time.monotonic() + _PENDING_LOCK_TIMEOUT_S
+    try:
+        while time.monotonic() < deadline:
+            try:
+                if sys.platform == "win32":
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except OSError:
+                time.sleep(0.02)
+        yield
+    finally:
+        if locked:
+            try:
+                if sys.platform == "win32":
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        os.close(fd)
+
+
 def _write_pending(config_dir: Path, address: str, tuple_id: str, rendered: str) -> None:
     """Record a claimed-but-not-yet-acked row, so its delivery survives a lost
     ack RESPONSE.
@@ -277,14 +508,16 @@ def _write_pending(config_dir: Path, address: str, tuple_id: str, rendered: str)
     per prompt, so a single slot would let row B's record overwrite row A's while
     A was still unresolved, losing exactly the trace this file exists to keep.
     """
-    entries = [e for e in _read_pending(config_dir, address) if e["id"] != tuple_id]
-    entries.append({"id": tuple_id, "rendered": rendered})
-    _save_pending(config_dir, address, entries)
+    with _pending_lock(config_dir, address):
+        entries = [e for e in _read_pending(config_dir, address) if e["id"] != tuple_id]
+        entries.append({"id": tuple_id, "rendered": rendered})
+        _save_pending(config_dir, address, entries)
 
 
 def _clear_pending(config_dir: Path, address: str, tuple_id: str) -> None:
-    entries = [e for e in _read_pending(config_dir, address) if e["id"] != tuple_id]
-    _save_pending(config_dir, address, entries)
+    with _pending_lock(config_dir, address):
+        entries = [e for e in _read_pending(config_dir, address) if e["id"] != tuple_id]
+        _save_pending(config_dir, address, entries)
 
 
 def _recover_pending(config_dir: Path, address: str, present_ids: set[str],
@@ -321,16 +554,17 @@ def _recover_pending(config_dir: Path, address: str, present_ids: set[str],
     sure, an unresolved id is treated exactly like a PRESENT one: kept, never
     guessed away.
     """
-    entries = _read_pending(config_dir, address)
-    if not entries:
-        return
-    keep: list[dict[str, str]] = []
-    for entry in entries:
-        if entry["id"] in present_ids or not confirmed_complete:
-            keep.append(entry)   # still there, or its absence is unconfirmed
-        else:
-            out.block(entry["rendered"])
-    _save_pending(config_dir, address, keep)
+    with _pending_lock(config_dir, address):
+        entries = _read_pending(config_dir, address)
+        if not entries:
+            return
+        keep: list[dict[str, str]] = []
+        for entry in entries:
+            if entry["id"] in present_ids or not confirmed_complete:
+                keep.append(entry)   # still there, or its absence is unconfirmed
+            else:
+                out.block(entry["rendered"])
+        _save_pending(config_dir, address, keep)
 
 
 def _post(base_url: str, token: str, route: str, body: dict[str, Any],
@@ -493,12 +727,32 @@ def _probe_page(base_url: str, token: str, address: str, *, is_local: bool,
 
 
 def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
-                   config_dir: Path, deadline: float, out: _Out) -> None:
+                   config_dir: Path, deadline: float, out: _Out) -> str:
     """Probe one address and deliver what it can, writing each row as it goes.
 
-    Returns nothing: every delivered row has already been written by the time
-    this returns, so a failure part-way through cannot retract an earlier one.
-    A :class:`_Skip` still propagates -- the caller stops the drain -- but what
+    Returns how the claim loop ENDED, one of:
+
+    * ``"empty"`` -- either nothing was ever seen on the address (an empty
+      probe, before any claim was attempted), or a claim attempt itself came
+      back empty (a peer got there first, or the address genuinely has
+      nothing left to claim). RDR-208 Phase 2 Step 3's cleared-record drain
+      treats this as the one ending that MAY warrant forgetting the record,
+      and only after its own confirming checks (see
+      :func:`_drain_named_mailbox`) -- ``delivered == 0`` alone is not this
+      signal, since it is also produced by ``"budget"``, ``"cap"`` and
+      ``"ack_refused"`` below.
+    * ``"budget"`` -- the drain's deadline was reached before a claim
+      attempt (this prompt's own budget, not this address's).
+    * ``"cap"`` -- ``_MAX_DELIVER`` was reached without ever seeing an empty
+      claim; there may be more still on the address.
+    * ``"ack_refused"`` -- a claim was made but its ``ack`` came back a
+      confirmed negative (404 ClaimNotFound); the claimed row's lease lapses
+      and it returns to the mailbox for a later drain to pick up.
+    * ``"skipped"`` -- refused before any POST (an oversized address).
+
+    Every delivered row has already been written by the time this returns,
+    so a failure part-way through cannot retract an earlier one. A
+    :class:`_Skip` still propagates -- the caller stops the drain -- but what
     was already delivered stays delivered.
     """
     import time  # noqa: PLC0415 — deferred: only this path needs a clock
@@ -516,7 +770,7 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
     )
     if size_reason is not None:
         _log_skip(f"mailbox/{address}: oversized address, refused before any POST: {size_reason}")
-        return
+        return "skipped"
 
     rows = _probe_page(base_url, token, address, is_local=is_local,
                        deadline=deadline, since=None)
@@ -582,7 +836,7 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
             _write_seen(config_dir, address, seen & present)
 
     if not saw_any_row:
-        return
+        return "empty"
 
     # LIVE DELIVERY. Deliberately NOT gated on a live-row count read off a
     # probe page: ``/v1/tuples/in`` claims the address's own oldest unclaimed
@@ -600,7 +854,7 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
     delivered = 0
     while delivered < _MAX_DELIVER:
         if time.monotonic() >= deadline:
-            break
+            return "budget"
         claim = _post(base_url, token, "/v1/tuples/in", {
             "subspace": f"mailbox/{address}",
             "keys_pattern": {"to": address},
@@ -608,7 +862,7 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
             "lease_s": 30,
         }, is_local=is_local, budget_s=deadline - time.monotonic())
         if not claim or not claim.get("claim_id"):
-            break  # a peer took it between rd and in, or the queue emptied
+            return "empty"  # a peer took it between rd and in, or the queue emptied
         row = claim.get("tuple") or {}
         row_id = str(row.get("id"))
         rendered = _render_live(address, row)
@@ -627,10 +881,11 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
             # it and this record would be a duplicate. Dropped by id, so no other
             # row's record is disturbed.
             _clear_pending(config_dir, address, row_id)
-            break
+            return "ack_refused"
         out.block(rendered)
         _clear_pending(config_dir, address, row_id)
         delivered += 1
+    return "cap"
 
 
 def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
@@ -858,6 +1113,11 @@ def _drain_all() -> int:
     session_id = str(payload.get("session_id") or "").strip()
 
     config_dir = _config_dir()
+    try:
+        _prune_stale_cleared_records(config_dir, now=time.time())
+    except Exception as exc:  # noqa: BLE001 — maintenance only, never the prompt's problem
+        _log_skip(f"cleared-record prune: unexpected {type(exc).__name__}: {exc}")
+
     addresses: list[str] = []
     if _valid_address(session_id):
         addresses.append(session_id)
@@ -905,6 +1165,19 @@ def _drain_all() -> int:
             # than being quietly indistinguishable from a planned skip.
             _log_skip(f"mailbox/{address}: unexpected {type(exc).__name__}: {exc}")
             continue
+
+    # RDR-208 Phase 2 Step 3: this session's own ``/clear`` record, if any --
+    # the mailbox(es) a previous session id was stranded at -- drained after
+    # the session's own addresses, inside the same overall budget.
+    if _valid_address(session_id):
+        try:
+            _drain_cleared_record(
+                base_url, token, session_id, is_local=is_local,
+                config_dir=config_dir, deadline=deadline, out=out,
+            )
+        except Exception as exc:  # noqa: BLE001 — never the prompt's problem; the record keeps for the next pass
+            _log_skip(f"cleared record for {session_id}: unexpected {type(exc).__name__}: {exc}")
+
     try:
         _rearm_if_unwatched(config_dir, session_id, started=started)
     except Exception as exc:  # noqa: BLE001 — the re-arm is advisory; a prompt never sees it fail

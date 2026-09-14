@@ -98,12 +98,12 @@ def _write_storage_lease(config_dir: Path, *, host: str, port: int) -> None:
 
 
 def _row(tuple_id: str, *, sender: str = "peer-a", body: str = "hello",
-         kind: str = "note", claim_state=None) -> dict:
+         kind: str = "note", claim_state=None, to: str = SESSION_ID) -> dict:
     return {
         "id": tuple_id,
-        "subspace": f"mailbox/{SESSION_ID}",
+        "subspace": f"mailbox/{to}",
         "template": "mailbox",
-        "keys": {"to": SESSION_ID},
+        "keys": {"to": to},
         "dims": {"from": sender, "kind": kind, "correlation_id": "c-1"},
         "body": body,
         "claim_state": claim_state,
@@ -154,6 +154,14 @@ class _MockEngine:
         #: at ONE mailbox and the others watched for collateral damage.
         self.malformed_rd_for: str | None = None
         self._route_counts: dict[str, int] = {}
+        #: Serializes the claim decision (read-eligible, then mutate) and the
+        #: ack decision (read-matched, then mutate) across concurrent handler
+        #: threads -- ThreadingHTTPServer runs one thread per connection, and
+        #: two real drain subprocesses hitting this engine at once (RDR-208
+        #: Phase 2 Step 3's concurrent-drain test) need the SAME atomicity a
+        #: real engine's own claim/ack provides, or two threads can each read
+        #: "eligible" before either mutates, and both "claim" the same row.
+        self._claim_lock = threading.Lock()
         engine = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -200,22 +208,64 @@ class _MockEngine:
                         self._json(200, {})
                         return
                     pattern = (body.get("keys_pattern") or {}).get("to")
-                    live = [
-                        r for r in engine.rows
-                        if r["claim_state"] != "dead"
-                        and (pattern is None or r["keys"].get("to") == pattern)
-                    ]
-                    if not live:
-                        self._json(200, {})
-                        return
-                    row = live[0]
-                    self._json(200, {"tuple": row, "claim_id": "claim-" + row["id"]})
+                    now = time.time()
+                    # Lease semantics (nexus-galkv.6 harness fix): a row already
+                    # claimed with a live lease is NOT eligible -- otherwise two
+                    # concurrent `in` calls on one mailbox both "claim" the same
+                    # row, which a real engine's exactly-once contract forbids
+                    # and which made the concurrent-drain test vacuous. The read
+                    # (eligible) and the write (mutate the chosen row) happen
+                    # under one lock, matching the atomicity a real engine's
+                    # claim provides -- two ThreadingHTTPServer handler threads
+                    # racing here otherwise both read "eligible" before either
+                    # mutates, and both claim the same row.
+                    with engine._claim_lock:
+                        eligible = [
+                            r for r in engine.rows
+                            if r["claim_state"] != "dead"
+                            and (pattern is None or r["keys"].get("to") == pattern)
+                            and (r.get("claim_state") != "claimed"
+                                 or (r.get("lease_until") or 0) < now)
+                        ]
+                        if not eligible:
+                            self._json(200, {})
+                            return
+                        row = eligible[0]
+                        row["claim_state"] = "claimed"
+                        row["claimant"] = body.get("claimant")
+                        row["lease_until"] = now + float(body.get("lease_s") or 30)
+                        claimed = dict(row)
+                    self._json(200, {"tuple": claimed, "claim_id": "claim-" + claimed["id"]})
                 elif self.path == "/v1/tuples/ack":
                     if not engine.ack_ok:
+                        # ClaimNotFound means the CLAIM itself is invalid --
+                        # already expired or never valid -- not "still held by
+                        # someone else"; the docstring above this test file's
+                        # own _drain_address call site says the row "returns
+                        # to the mailbox" on this outcome. So the claim this
+                        # forced 404 refuses is released here too, or a lease
+                        # semantics-aware `in` (nexus-galkv.6) would keep the
+                        # row unreclaimable for its full 30s and a same-prompt
+                        # or next-prompt re-claim test would starve on a lease
+                        # nothing actually holds any more.
+                        cid = body.get("claim_id", "")
+                        with engine._claim_lock:
+                            for r in engine.rows:
+                                if "claim-" + r["id"] == cid:
+                                    r["claim_state"] = None
+                                    r["claimant"] = None
+                                    r["lease_until"] = None
                         self._json(404, {"error": "ClaimNotFound"})
                         return
                     cid = body.get("claim_id", "")
-                    engine.rows = [r for r in engine.rows if "claim-" + r["id"] != cid]
+                    with engine._claim_lock:
+                        matched = [r for r in engine.rows if "claim-" + r["id"] == cid]
+                        if not matched:
+                            # No live claim by this id: already acked, or never
+                            # claimed. A real engine answers ClaimNotFound either way.
+                            self._json(404, {"error": "ClaimNotFound"})
+                            return
+                        engine.rows = [r for r in engine.rows if "claim-" + r["id"] != cid]
                     if engine.ack_500_after_effect:
                         self._json(500, {"error": "boom"})
                         return
@@ -938,6 +988,275 @@ class TestPartialFailureNeverLosesDeliveredMail:
         )
 
 
+# ── Cleared-record drain (RDR-208 Phase 2 Step 3, bead nexus-galkv.6) ───────
+#
+# On ``/clear``, SessionStart records the previous session id in
+# ``<config>/tuple-watch/cleared.<new session id>``. This hook reads its OWN
+# session's record, after its own mailbox, and empties every mailbox it
+# names -- deleting the record only when EVERY named mailbox's claim loop
+# ended on an empty claim, a fresh probe shows no live row (dead-lettered
+# rows do not count; a row under another process's lease does), and its
+# pending file is empty or missing. Any other outcome keeps the record.
+
+
+def _write_cleared_record(config_dir: Path, session_id: str, ids: list[str]) -> Path:
+    path = config_dir / "tuple-watch" / f"cleared.{session_id}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(ids) + "\n", encoding="utf-8")
+    return path
+
+
+def _cleared_record_path(config_dir: Path, session_id: str) -> Path:
+    return config_dir / "tuple-watch" / f"cleared.{session_id}"
+
+
+class TestClearedRecordDrain:
+    def test_mail_at_the_named_mailbox_arrives_once_and_the_record_is_deleted(
+        self, tmp_path, engine,
+    ) -> None:
+        eng = engine()
+        eng.rows = [_row("s1-mail", body="stranded by the clear", to="old-sess-id")]
+        _wired(tmp_path, eng)
+        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0, res.stderr
+        assert "stranded by the clear" in res.stdout
+        assert not record.exists()
+
+        # The next prompt sees no record and no message: exactly once.
+        second = _run(tmp_path=tmp_path)
+        assert second.returncode == 0, second.stderr
+        assert "stranded by the clear" not in second.stdout
+
+    def test_the_cap_keeps_the_record_and_the_next_pass_confirms_empty(
+        self, tmp_path, engine,
+    ) -> None:
+        """``_MAX_DELIVER`` (10) ends the claim loop without ever seeing an
+        empty claim, so the record must survive that pass -- there may be
+        more left. Only the NEXT pass, which claims nothing, deletes it."""
+        eng = engine()
+        eng.rows = [_row(f"m{i}", body=f"msg{i}", to="old-sess-id") for i in range(10)]
+        _wired(tmp_path, eng)
+        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
+
+        first = _run(tmp_path=tmp_path)
+        assert first.returncode == 0, first.stderr
+        for i in range(10):
+            assert f"msg{i}" in first.stdout
+        assert record.exists(), "the cap was reached; the record must survive"
+
+        second = _run(tmp_path=tmp_path)
+        assert second.returncode == 0, second.stderr
+        assert second.stdout.strip() == ""
+        assert not record.exists()
+
+    def test_budget_exhausted_before_the_cleared_mailbox_keeps_the_record(
+        self, tmp_path, engine,
+    ) -> None:
+        eng = engine()
+        eng.rows = [_row("s1-mail", body="stranded by the clear", to="old-sess-id")]
+        # Consumes the whole drain budget on the session's OWN mailbox probe,
+        # so the cleared-record drain never even starts.
+        eng.rd_delay_s = 30.0
+        _wired(tmp_path, eng)
+        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0, res.stderr
+        assert "stranded by the clear" not in res.stdout
+        assert record.exists()
+
+    def test_an_ack_refusal_keeps_the_record(self, tmp_path, engine) -> None:
+        eng = engine()
+        eng.rows = [_row("s1-mail", body="ack will fail", to="old-sess-id")]
+        eng.ack_ok = False
+        _wired(tmp_path, eng)
+        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0, res.stderr
+        assert "ack will fail" not in res.stdout
+        assert record.exists()
+
+    def test_a_row_under_another_processs_lease_keeps_the_record(
+        self, tmp_path, engine,
+    ) -> None:
+        """The claim loop ends empty (nothing eligible to claim), but the
+        confirming probe afterward still finds the row -- claimed, with a
+        live lease held by a process other than this one -- so it counts as
+        LIVE and the record must survive. ``delivered == 0`` alone is not
+        the delete signal."""
+        eng = engine()
+        row = _row("s1-mail", body="held by a peer", to="old-sess-id")
+        row["claim_state"] = "claimed"
+        row["claimant"] = "some-other-process"
+        row["lease_until"] = time.time() + 300.0
+        eng.rows = [row]
+        _wired(tmp_path, eng)
+        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0, res.stderr
+        assert "held by a peer" not in res.stdout
+        assert record.exists()
+        assert "/v1/tuples/in" in eng.paths()
+
+    def test_a_nonempty_pending_file_keeps_the_record(self, tmp_path, engine) -> None:
+        """A pending entry whose id is STILL PRESENT in the mailbox (here, a
+        dead-lettered row of the same id) is kept by ``_recover_pending``
+        unconditionally -- it is not "absent, so recovered" -- so the pending
+        file stays non-empty after the pass and the cleared record must
+        survive on that basis alone, even though the claim loop itself ended
+        empty and the only row present is dead-lettered (not live).
+        """
+        eng = engine()
+        eng.rows = [_row("ghost-id", body="dead", claim_state="dead", to="old-sess-id")]
+        _wired(tmp_path, eng)
+        config_dir = tmp_path / "config"
+        record = _write_cleared_record(config_dir, SESSION_ID, ["old-sess-id"])
+        pending_dir = config_dir / "tuple-watch"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        (pending_dir / "old-sess-id.pending.json").write_text(
+            json.dumps({"entries": [
+                {"id": "ghost-id", "rendered": "- an ambiguous earlier ack"},
+            ]}),
+            encoding="utf-8",
+        )
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0, res.stderr
+        assert record.exists()
+        assert (pending_dir / "old-sess-id.pending.json").exists(), (
+            "the pending entry is present in the mailbox and must be kept, not recovered"
+        )
+
+    def test_a_malformed_id_is_skipped_while_the_others_drain(
+        self, tmp_path, engine,
+    ) -> None:
+        eng = engine()
+        eng.rows = [_row("s1-mail", body="the good one", to="old-sess-id")]
+        _wired(tmp_path, eng)
+        config_dir = tmp_path / "config"
+        path = _cleared_record_path(config_dir, SESSION_ID)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("../etc/passwd\nold-sess-id\n", encoding="utf-8")
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0, res.stderr
+        assert "the good one" in res.stdout
+        assert "SKIP" in res.stderr
+        assert "malformed" in res.stderr
+        assert not path.exists()
+
+    def test_two_clears_before_a_prompt_drain_both_old_mailboxes(
+        self, tmp_path, engine,
+    ) -> None:
+        """A -> B -> C with no prompt in between: the writer carries both
+        ids forward into one record; this hook drains both from it."""
+        eng = engine()
+        eng.rows = [
+            _row("a-mail", body="from the first clear", to="session-a"),
+            _row("b-mail", body="from the second clear", to="session-b"),
+        ]
+        _wired(tmp_path, eng)
+        record = _write_cleared_record(
+            tmp_path / "config", SESSION_ID, ["session-b", "session-a"],
+        )
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0, res.stderr
+        assert "from the first clear" in res.stdout
+        assert "from the second clear" in res.stdout
+        assert not record.exists()
+
+    def test_a_fork_leaves_the_parents_mailbox_untouched(
+        self, tmp_path, engine,
+    ) -> None:
+        """No cleared record at all (a fork writes none, per RDR-208's Fork
+        paragraph and Sam's decision 2): this hook never touches the
+        parent's mailbox, and issues no `in` call for it."""
+        eng = engine()
+        eng.rows = [_row("parent-mail", body="still the parent's", to="parent-sess-id")]
+        _wired(tmp_path, eng)
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0, res.stderr
+        assert "still the parent's" not in res.stdout
+        in_bodies = [b for p, b in eng.calls if p == "/v1/tuples/in"]
+        assert not any(
+            (b.get("keys_pattern") or {}).get("to") == "parent-sess-id" for b in in_bodies
+        )
+
+    def test_a_record_older_than_seven_days_is_pruned(self, tmp_path, engine) -> None:
+        eng = engine()
+        eng.rows = [_row("s1-mail", body="expired mailbox", to="old-sess-id")]
+        _wired(tmp_path, eng)
+        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
+        old_mtime = time.time() - (8 * 24 * 3600)
+        os.utime(record, (old_mtime, old_mtime))
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0, res.stderr
+        assert "expired mailbox" not in res.stdout
+        assert not record.exists()
+
+    def test_two_processes_on_one_session_id_concurrently_deliver_exactly_once(
+        self, tmp_path, engine,
+    ) -> None:
+        """Gate Significant (b). X cleared S1 to S2 (cleared.S2 names S1);
+        mail was already sitting at S1. X's drain (through the record) and
+        Y's ordinary drain (Y still resumes S1) run CONCURRENTLY as two real
+        subprocesses against one engine. Every message is delivered exactly
+        once across the two outputs.
+        """
+        eng = engine()
+        eng.rows = [_row(f"m{i}", body=f"concurrent-{i}", to="old-sess-id") for i in range(5)]
+        _wired(tmp_path, eng)
+        _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
+
+        results: dict[str, subprocess.CompletedProcess[str]] = {}
+        barrier = threading.Barrier(2)
+
+        def _go(key: str, payload_session_id: str) -> None:
+            barrier.wait(timeout=10)
+            results[key] = _run(tmp_path=tmp_path, stdin=_payload(session_id=payload_session_id))
+
+        tx = threading.Thread(target=_go, args=("x", SESSION_ID))
+        ty = threading.Thread(target=_go, args=("y", "old-sess-id"))
+        tx.start()
+        ty.start()
+        tx.join(timeout=30)
+        ty.join(timeout=30)
+
+        assert not tx.is_alive() and not ty.is_alive(), "a drain subprocess hung"
+        res_x, res_y = results["x"], results["y"]
+        assert res_x.returncode == 0, res_x.stderr
+        assert res_y.returncode == 0, res_y.stderr
+
+        expected = {f"concurrent-{i}" for i in range(5)}
+        delivered_x = {m for m in expected if m in res_x.stdout}
+        delivered_y = {m for m in expected if m in res_y.stdout}
+        assert delivered_x & delivered_y == set(), (
+            f"a message was delivered to both processes: {delivered_x & delivered_y}\n"
+            f"x stdout:\n{res_x.stdout}\ny stdout:\n{res_y.stdout}"
+        )
+        assert delivered_x | delivered_y == expected, (
+            f"not every message was delivered: missing "
+            f"{expected - (delivered_x | delivered_y)}\n"
+            f"x stdout:\n{res_x.stdout}\ny stdout:\n{res_y.stdout}"
+        )
+
+
 # ── Size pre-check (bead nexus-r7xao) ────────────────────────────────────────
 
 
@@ -964,12 +1283,13 @@ def test_drain_address_oversized_address_skips_before_any_post(monkeypatch) -> N
     skips: list[str] = []
     monkeypatch.setattr(module, "_log_skip", skips.append)
 
-    module._drain_address(
+    ending = module._drain_address(
         "http://engine.invalid", "token", "a" * 260,
         is_local=True, config_dir=Path("/nonexistent"),
         deadline=time.monotonic() + 5, out=module._Out(),
     )
 
+    assert ending == "skipped"
     assert len(skips) == 1
     assert "oversized" in skips[0]
     assert "260 bytes" in skips[0] or "subspace" in skips[0]
@@ -996,12 +1316,13 @@ def test_drain_address_address_at_the_cap_reaches_the_probe(monkeypatch) -> None
 
     address = "a" * 114
     assert len(f"mailbox-drain-{address}") == 128
-    module._drain_address(
+    ending = module._drain_address(
         "http://engine.invalid", "token", address,
         is_local=True, config_dir=Path("/nonexistent"),
         deadline=time.monotonic() + 5, out=module._Out(),
     )
     assert calls == [address]
+    assert ending == "empty"
 
 
 # ── Per-turn re-arm (bead nexus-6konb.19) ────────────────────────────────────
@@ -1226,6 +1547,19 @@ def test_rearm_naming_matches_the_wheel() -> None:
     for sid in (SESSION_ID, "odd id/with:chars"):
         assert module._watch_lock_path(cfg, sid) == tuple_watch.lock_path(cfg, sid)
     assert module._WATCH_COMMAND_MARK == tuple_watch.WATCH_COMMAND_MARK
+
+
+def test_cleared_record_naming_matches_the_wheel() -> None:
+    """RDR-208 Phase 2 Step 3: this script cannot import nexus, so it spells
+    the cleared-record filename itself
+    (``nexus.tuple_watch.record_clear_and_write_session_marker`` writes it,
+    naming a previous session's mailbox). It must agree with the wheel."""
+    from nexus import tuple_watch
+
+    module = _load_module()
+    cfg = Path("/cfg")
+    for sid in (SESSION_ID, "odd-id-with-dashes.and.dots"):
+        assert module._cleared_record_path(cfg, sid) == tuple_watch.cleared_record_path(cfg, sid)
 
 
 def test_the_lock_body_the_watcher_writes_parses_to_its_pid(tmp_path) -> None:
