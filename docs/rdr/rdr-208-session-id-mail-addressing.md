@@ -31,16 +31,17 @@ Mail to a session goes to `mailbox/<name>`. The watcher (`nx tuple watch
 delivers from it once a per-session registry file on local disk names it.
 
 The harness gives a session three identities, and each breaks at a different
-boundary. Measured on one session on 2026-09-14:
+boundary. Observed on this machine with Claude Code 2.1.270 on 2026-09-14 and
+checked against the harness documentation (T2 `nexus_rdr/208-research-3`):
 
 | Identity | `/resume` | `/clear` | `/compact` |
 |---|---|---|---|
-| `ListAgents` name | changed (nexus-58 to nexus-03) | not measured | kept |
-| Session id | kept (the same id before and after) | changes, by design (JDR-001) | kept |
-| Claude process pid | changed (47502 to 765) | kept (the watcher's stop marker relies on it) | kept |
+| `ListAgents` name | changes: a new random suffix at every process start | kept | kept |
+| Session id | kept, unless `--fork-session` or `/branch` | changes, by design (JDR-001) | kept |
+| Claude process pid | changes | kept | kept |
 
-No identity the harness provides holds across both `/resume` and `/clear`. The
-name, the one mail is addressed to, breaks on the most common boundary.
+No identity holds across both `/resume` and `/clear`. The name, the one mail is
+addressed to, breaks on `/resume`, the most common boundary.
 
 ### Enumerated gaps to close
 
@@ -54,10 +55,11 @@ around a rename; it does not close it.
 
 #### Gap 2: a name can pass to another session
 
-Names appear to come from a small pool (two digits after the repo name). A
-session that later receives a name drains whatever earlier mail was addressed
-to it, and two sessions that each held the name at different times both have a
-claim on its mailbox. Unverified: whether the harness actually reuses names.
+The harness builds a default name from the working directory's basename and
+one random byte in hex, drawn at every process start, and does not deduplicate
+it, even between live sessions. That leaves 256 names per directory. A session
+that later draws a name drains whatever earlier mail was addressed to it, and
+two live sessions can hold the same name at once.
 
 #### Gap 3: `/clear` strands the previous session's mail
 
@@ -70,8 +72,11 @@ current one.
 #### Gap 4: name resolution exists on one machine only
 
 The only record of which session holds which name is a local file
-(`<config>/tuple-watch/addresses.d/<session id>`). A sender on another machine,
-or a cloud session, cannot resolve a name at all.
+(`<config>/tuple-watch/addresses.d/<session id>`). Sessions that share an
+engine but not a file system, for example two machines pointed at one managed
+service, cannot resolve a name at all. Two machines in local mode run separate
+engines and share no tuple space, so no addressing scheme reaches between them;
+this RDR does not change that.
 
 ## Relationship to Prior RDRs
 
@@ -99,42 +104,110 @@ review showed it patches the identity this RDR demotes.
 - Mailbox template: `mailbox/<address>`, keys `to`, dims `from` (required),
   `kind`, `correlation_id`, `address_kind` in {agent, instance}; `id_from:
   keys+nonce`, take enabled, retention 7 days.
-- `out` is idempotent by construction: a tuple's id comes from the template's
-  `id_from` fields, so a retried `out` is the same tuple and does not update it.
-- Watcher and drain resolve the session id from the process environment and
-  the hook payload; neither needs the name for the session-id mailbox.
+- `rd` returns only live rows: it skips consumed rows and rows past their
+  `expires_at`, orders by `created_at` then id, oldest first, and returns each
+  row's `created_at` and `expires_at`. It has no descending order and no
+  latest-only read.
+- An `out` whose id matches an existing row adds no row. It moves the row's
+  `expires_at` to the earlier of the new expiry and the row's own `created_at`
+  plus the template's retention, leaves the body, dims and claim state alone,
+  and wakes waiters either way.
+- A per-tuple `ttl_seconds` below the template's retention is accepted.
+- Templates load at engine boot from a fixed list, so a new template ships only
+  in an engine release.
+- The watcher resolves the session id from its environment, and a hook from its
+  input payload. No environment variable or hook input carries the
+  `ListAgents` name; only the model, reading `ListAgents`, can supply it.
+- Local mode runs one engine per machine. Sessions on different machines share
+  an engine only when both point at the same managed `service_url`.
 
 ## Research Findings
 
+### Investigation
+
+Four read-only passes on 2026-09-14, recorded in T2 as
+`nexus_rdr/208-research-1` (engine), `-2` (client, hooks, MCP, deployment),
+`-3` (harness identities), and `-4` (prior art: ZooKeeper, etcd, Consul,
+Erlang `global`, Akka Receptionist, Orleans, SIP registrars). The prior-art
+survey is in T3 as `tuple-space/research-rdr-208-name-directory-prior-art`.
+
 ### Key Discoveries
 
-- The session id survives `/resume` and `/compact` and is already a mailbox
-  every watcher covers by default. Measured on one session.
-- `/clear` changes the session id, but SessionStart runs and overwrites the
-  tuple-watch marker for the same claude pid, so the previous id is available
-  at exactly the moment it is replaced; today it is discarded.
-- Senders know names, not session ids: `ListAgents` shows a name and a short
-  ref, never the session id. Any session-id scheme needs a name directory.
+- **✅ Verified** (source search, research-1): `rd` cannot return the newest
+  row of a subspace without paging through the older ones. It does skip
+  expired rows, so the rows it returns under one name are that name's live
+  entries. With entries that lapse minutes after their watcher stops, that is
+  about one per live holder, and the newest is the last row of a single read.
+- **✅ Verified** (source search, research-1): A4 as first drafted ("leaves the
+  first tuple unchanged") is wrong in one detail: a repeated `out` moves
+  `expires_at` and wakes waiters. The design needs only the body and dims to
+  stay unchanged, and they do.
+- **✅ Verified** (source search, research-1): the directory template needs no
+  schema change. Take disabled is `take.enabled: false`, which the ledger
+  template already ships. A session id and a name both satisfy the subspace
+  address grammar.
+- **✅ Verified** (source search, research-1): the engine checks `address_kind`
+  against the template's value list in application code, with no database
+  constraint. Adding `session` is safe for old clients. A new client that sends
+  it to an old engine gets `SchemaViolation`, so the engine ships first.
+- **✅ Verified** (observed and read from the harness, research-3): names are a
+  random byte per process start and are not deduplicated. Four renames on
+  resume were observed on this machine, each with the session id unchanged.
+  The harness carries an unshipped flag, `tengu_session_stable_address`, that
+  derives the name from the session id and adds a `sid:<session id>` address
+  to `ListAgents` rows. It is off here.
+- **✅ Verified** (observed, research-3): two terminals that resume one session
+  share its id, so two live processes can drain one session-id mailbox. Each
+  message still reaches exactly one of them, because delivery is a claim.
+- **⚠️ Documented** (harness code and hooks documentation, research-3): no hook
+  input carries a previous session id. On `/clear` the harness runs SessionEnd
+  with reason `clear` before it mints the new id, in the same process, so that
+  hook sees the old id. Reading the pid-keyed watch marker at SessionStart gives
+  the same link without a second hook.
+- **✅ Verified** (source search, research-2): SessionStart overwrites
+  `tuple-watch/session.<claude pid>` without reading it first. Recording the
+  previous id is new code, not an existing step.
+- **✅ Verified** (source search, research-2): the drain's delivery loop stops
+  when a claim returns nothing. That, not a short `rd` page, is the signal that
+  a mailbox is empty.
+- **✅ Verified** (source search, research-2): the watcher already covers the
+  session-id mailbox by default; `--instance` adds the name's mailbox.
+- **⚠️ Documented** (specifications and documentation, research-4): every
+  lease-based naming system surveyed (ZooKeeper, etcd, Consul, Jini) ties an
+  entry's life to a heartbeat measured in seconds and keeps one current entry
+  per name. A fixed 7-day window has the shape of a DNS TTL: an ended session's
+  entry would resolve for a week, and reads would grow with every arm. None of
+  the surveyed systems lets a conflict pass without a signal.
+- **⚠️ Documented** (research-4): no surveyed naming system drains an old
+  address once and then forgets it. The closest pattern is one-pass
+  dead-letter redelivery, which fits a claim-and-ack mailbox.
 
 ### Critical Assumptions
 
-- **A1**: the session id is unchanged across `/resume`. Status: verified once
-  (this session). Method: record the id before and after a resume in the MVV.
-- **A2**: the claude pid is unchanged across `/clear`. Status: relied on by
-  the shipped watcher stop marker (nexus-6konb.12). Method: the MVV.
-- **A3**: `ListAgents` names are reused across sessions. Status: unverified.
-  The design is correct either way (newest directory entry wins); only Gap 2's
-  severity depends on it.
-- **A4**: a second `out` with the same id leaves the first tuple unchanged.
-  Status: stated in RDR-205; to verify against `TupleRepository` before Phase 1.
+- **A1**: the session id is unchanged across `/resume`. Status: ✅ Verified
+  (research-3: four resumed processes, one id per transcript; also
+  documented). Exceptions: `--fork-session` and `/branch` mint a new id.
+- **A2**: the claude pid is unchanged across `/clear`. Status: ✅ Verified
+  (research-3: one process observed running through a `/clear`, its watch
+  marker firing as designed).
+- **A3**: `ListAgents` names are reused across sessions. Status: ✅ Verified
+  by design (research-3): a random byte per process start, never
+  deduplicated. Gap 2 is real.
+- **A4**: a second `out` with an existing id leaves the body and dims
+  unchanged. Status: ✅ Verified (research-1), with the correction that it
+  moves `expires_at`.
+- **A5**: `rd` skips expired rows, so a lapsed directory entry stops resolving
+  without waiting for the purge. Status: ✅ Verified (source search of the
+  read query).
 
 ## Proposed Solution
 
 ### Approach
 
 Every session has one mailbox, keyed by its session id. Names become aliases a
-sender resolves at send time through a directory in the tuple space. `/clear`
-drains the previous session's mailbox once.
+sender resolves at send time through a directory in the tuple space whose
+entries live only while their watcher does. `/clear` drains the previous
+session's mailbox once.
 
 ### Technical Design
 
@@ -144,16 +217,30 @@ in Phase 3 ends. `address_kind` keeps `agent` and gains `session`; `instance`
 is retired.
 
 **Directory.** A new template `directory/<name>`: keys `name`; dims
-`session_id` (required); `id_from: keys+nonce`, the nonce the arm time, so
-every arm writes a new entry rather than being absorbed by idempotency (A4);
-take disabled; retention 7 days, matching the mailbox. `nx tuple watch
---instance NAME` writes an entry at every arm. To resolve a name, a sender
-reads `directory/<name>` and takes the entry with the newest `created_at`.
-Rename on resume: the session re-arms under the new name, and the old name's
-newest entry still names the same session, so mail to either name arrives.
-Reuse: a session that later arms under a pooled name writes a newer entry and
-wins. No local file is consulted, so resolution works from any machine
-(Gap 4).
+`session_id` (required); `id_from: keys+nonce`; take disabled; retention 7
+days. The watcher armed with `--instance NAME` writes an entry whose nonce is
+its arm time, with a short `ttl_seconds`, and re-sends the same entry on a
+heartbeat. A re-send has the same id, so it moves the entry's expiry forward
+instead of adding a row. Proposed values, to be tuned in Phase 2: a 300-second
+TTL, re-sent every 60 seconds. An entry stops resolving within one TTL after
+its watcher stops. A re-send cannot move expiry past the entry's `created_at`
+plus the 7-day retention, so a watcher that runs that long writes a fresh entry
+with a new nonce before then.
+
+**Resolution.** A sender reads `directory/<name>` once. `rd` returns only live
+entries, oldest first, so the last row names the session that armed the name
+most recently. When more than one live entry names different sessions,
+`mailbox_send` delivers to the newest and returns the other candidates in its
+result, so the sender sees the conflict instead of losing it.
+
+**Rename on resume.** The old process ends, its watcher stops re-sending, and
+the old name resolves to the same session for at most one TTL, then stops
+resolving. Mail to an old name therefore either arrives or is refused with an
+error naming the name; it is never written to a mailbox nobody reads.
+
+**Reuse.** A session that arms a name another live session holds writes the
+newer entry and wins. The earlier holder's entry remains until its watcher
+stops, and `mailbox_send` reports both.
 
 **Sending.** A new MCP tool `mailbox_send(to, body, kind, correlation_id)`
 resolves `to`: a session-id shape is used as is; anything else is looked up in
@@ -162,23 +249,36 @@ silent write to a mailbox nobody reads. The mailbox and peer-messaging skills
 send through it; raw `tuple_out` to `mailbox/` stays possible and documented
 as the low-level path.
 
-**`/clear`.** On `source=clear`, SessionStart, which already overwrites the
-tuple-watch marker for its claude pid, first reads the previous session id from
-it and writes `<config>/tuple-watch/cleared.<new session id>` naming that id.
-The drain for the new session drains the named mailbox once, forgetting it
-only when a pass leaves it empty (the rule `_drain_address` already reports),
-then deletes the record. `/resume` and `/compact` need nothing.
+**`/clear`.** On `source=clear`, SessionStart reads the previous session id
+from `tuple-watch/session.<claude pid>` before overwriting it, and writes
+`<config>/tuple-watch/cleared.<new session id>` naming that id. The drain for
+the new session drains the named mailbox and deletes the record when a claim
+returns nothing; a pass interrupted before that keeps the record for the next
+prompt. `/resume` and `/compact` need nothing.
+
+**Fork.** `/branch` and `--fork-session` mint a new session id, but the parent
+session still exists and can be resumed, so its mailbox stays with it. A forked
+session starts with an empty mailbox and is reachable by name once its watcher
+arms.
+
+**Two processes on one session id.** Two terminals resuming one session both
+drain its mailbox, and each message is claimed by one of them. No change.
+
+**Scope.** Resolution reaches every session that shares an engine: all
+sessions on one machine in local mode, and every session pointed at one managed
+`service_url`. Two machines in local mode share no tuple space, before or after
+this RDR.
 
 ### Existing Infrastructure Audit
 
 | Piece | Where | Change |
 |---|---|---|
 | Mailbox template | `service/src/main/resources/tuples/templates/mailbox.yaml` | `address_kind` values gain `session`; `instance` retired after Phase 3 |
-| Directory template | new, same directory | new template; an engine release |
-| Watcher | `src/nexus/tuple_watch.py`, `commands/tuple_cmd.py` | writes a directory entry at arm; stops watching instance mailboxes after Phase 3 |
-| Drain hook | `conexus/hooks/scripts/mailbox_drain.py` | drains the cleared record's mailbox once; drops instance mailboxes after Phase 3 |
-| SessionStart | `src/nexus/hooks.py` | records the previous session id on `source=clear` |
-| MCP | `src/nexus/mcp/core.py` | `mailbox_send` |
+| Directory template | new, same directory, added to the engine's boot list | new template; an engine release |
+| Watcher | `src/nexus/tuple_watch.py`, `src/nexus/commands/tuple_cmd.py` | writes its directory entry at arm and re-sends it on a heartbeat; stops watching instance mailboxes after Phase 3 |
+| Drain hook | `conexus/hooks/scripts/mailbox_drain.py` | drains the cleared record's mailbox until a claim returns nothing; drops instance mailboxes after Phase 3 |
+| SessionStart | `src/nexus/hooks.py`, `src/nexus/tuple_watch.py` | on `source=clear`, reads the previous id from the pid marker before overwriting it |
+| MCP | `src/nexus/mcp/core.py`; name pins in `tests/test_mcp_package.py` and `tests/test_mcp_tuple_tools.py`; `tests/test_mcp_tool_description_lint.py` | `mailbox_send` |
 
 ### Decision Rationale
 
@@ -186,7 +286,9 @@ The session id is the identity the harness keeps across the most boundaries,
 and it is already a watched mailbox. Moving the address there removes the
 rename and reuse cases instead of handing mail between names, and the one
 boundary it does not survive, `/clear`, is a boundary the harness reports
-explicitly, so it can be handled at a single, known moment.
+explicitly, so it can be handled at a single, known moment. Directory entries
+that live only while their watcher re-sends them follow every lease-based
+naming system surveyed, and they keep the newest-entry read to one `rd`.
 
 ## Alternatives Considered
 
@@ -218,6 +320,16 @@ it (2026-09-14).
 - Session-id addressing with no directory: senders cannot learn session ids.
 - Sender discipline only (look the name up just before sending): leaves Gaps 2
   to 4 open.
+- Directory entries that live the full 7 days: an ended session's entry would
+  resolve for a week, and every arm would add a row to every later read.
+- One entry per name (`id_from: keys`): a re-send by a new holder moves only the
+  expiry, so the first holder would keep the name.
+- Recording the previous id in SessionEnd with reason `clear`: that hook sees
+  the old id, but so does the pid marker SessionStart already rewrites, and a
+  second hook adds a second timeout.
+- Waiting for the harness's own session-id addresses (`sid:`): they sit behind
+  a flag that is off here, in an internal format. If they ship, senders could
+  address session ids directly and the directory becomes optional.
 
 ## Trade-offs
 
@@ -225,21 +337,25 @@ it (2026-09-14).
 
 - One engine template and an engine release; the client halves pair with it.
 - A new MCP tool (the core server grows by one).
+- The watcher sends one small `out` per heartbeat for its name.
 - Old instance-name mailboxes drain for one retention window, then stop.
 
 ### Risks and Mitigations
 
-- **Directory entries for ended sessions**: an entry outlives its session for
-  up to 7 days. Mitigation: newest entry wins, so a live holder always
-  outranks an ended one; mail to a name only an ended session held goes to
-  that session's mailbox and expires, as mail to an ended session does today.
+- **Directory entries for ended sessions**: an entry lapses within one TTL
+  after its watcher stops, so an ended session stops resolving in minutes.
 - **Clock ordering**: resolution orders by the engine's `created_at`, one
   clock, not the senders'.
+- **Engine and client skew**: a client that sends `address_kind: session` to an
+  engine without it gets `SchemaViolation`. The engine deploys before the client
+  release that sends it; old clients are unaffected.
 
 ### Failure Modes
 
 - The directory is unreachable at send: `mailbox_send` fails loudly; nothing is
   written.
+- A heartbeat fails: the entry lapses and the name stops resolving until the
+  next successful re-send. Mail to the session id is unaffected.
 - SessionStart's output is lost at a clear: the cleared record is written
   before any output, so the drain still finds it.
 
@@ -247,23 +363,27 @@ it (2026-09-14).
 
 ### Prerequisites
 
-- Verify A4 against `TupleRepository`.
+None outstanding: A1 to A5 are verified. Open for the gate: the conflict
+behavior of `mailbox_send`, the fork rule, and the TTL and heartbeat values.
 
 ### Minimum Viable Validation
 
-Two real sessions on one box and one on a second machine. Session A arms under
-its name; B sends to that name through `mailbox_send`; A resumes and is
-renamed; B sends to the old name and to the new one; A receives both. A runs
-`/clear`; mail B sent to A's old session id before the clear arrives at A's
-first prompt after it, once. C, on the second machine, resolves A's name and
-reaches it.
+Two real sessions on one machine. Session A arms under its name; B sends to
+that name through `mailbox_send`; A resumes and is renamed; B sends to the new
+name and A receives it; B sends to the old name within one TTL, which arrives,
+and after it, which is refused with the name in the error. A runs `/clear`;
+mail B sent to A's old session id before the clear arrives at A's first prompt
+after it, once. When a second machine shares A's managed `service_url`, a
+session there resolves A's name and reaches it; two local-mode machines are
+out of scope.
 
 ### Phase 1: Engine
 
 #### Step 1: directory template
 
-`directory/<name>` as specified, with engine tests for the newest-entry read
-and for two sessions arming the same name.
+`directory/<name>` as specified, added to the boot list, with engine tests for
+a re-send moving expiry, a lapsed entry dropping out of `rd`, and two sessions
+arming one name.
 
 #### Step 2: `address_kind` gains `session`
 
@@ -271,11 +391,11 @@ Additive; `instance` still accepted.
 
 ### Phase 2: Client
 
-#### Step 1: the watcher writes a directory entry at every arm
+#### Step 1: the watcher writes its directory entry at arm and re-sends it on a heartbeat
 
-#### Step 2: `mailbox_send`
+#### Step 2: `mailbox_send`, with its name pins and description lint
 
-#### Step 3: the cleared record and its one-time drain
+#### Step 3: the previous-id read at SessionStart, the cleared record, and its one-time drain
 
 ### Phase 3: Transition
 
@@ -293,14 +413,17 @@ None.
 
 ## Test Plan
 
-- Resolution picks the newest entry; a re-arm under the same name by the same
-  session writes a new entry.
-- Rename: mail to the old and the new name both reach the session.
-- Reuse: after another session arms a name, mail resolves to it, not the
-  earlier holder.
-- `/clear`: the cleared record is written before SessionStart output; the
-  drain empties the previous mailbox once and deletes the record; a pass that
-  does not empty it keeps the record.
+- A re-send moves an entry's expiry; after its watcher stops, the entry lapses
+  within one TTL and the name stops resolving.
+- Resolution picks the newest live entry; with two live entries naming
+  different sessions, `mailbox_send` delivers to the newest and returns both.
+- Rename: mail to the new name reaches the session; mail to the old name
+  arrives within one TTL and is refused after it.
+- `/clear`: SessionStart records the previous id before its output; the drain
+  empties the previous mailbox and deletes the record when a claim returns
+  nothing; an interrupted pass keeps the record.
+- Fork: a forked session writes no cleared record, and the parent's mailbox is
+  untouched.
 - `mailbox_send` refuses an unresolvable name and writes nothing.
 - Transition: a registered instance mailbox is drained until the window ends.
 
@@ -321,6 +444,14 @@ Not yet run.
 - RDR-205 §Technical Design, Phase 6
 - JDR-001, the T1 three-scopes record
 - Beads nexus-6konb.19, .20, .21
+- T2 `nexus_rdr/208-research-1` to `-4` (2026-09-14); T3
+  `tuple-space/research-rdr-208-name-directory-prior-art`
+- Claude Code documentation: sessions (code.claude.com/docs/en/sessions),
+  hooks (code.claude.com/docs/en/hooks), CLI reference
+  (code.claude.com/docs/en/cli-reference)
+- ZooKeeper programmer's guide (sessions and ephemeral nodes); etcd leases;
+  Consul sessions; Erlang `global` (name conflict resolution); RFC 3261
+  (registrar bindings)
 
 ## Revision History
 
@@ -330,3 +461,16 @@ Drafted at Sam's direction after the name-handoff build for nexus-6konb.21 was
 paused: the name is the least stable of the three identities the harness
 provides, and the session id plus a recorded `/clear` link covers what the
 name cannot.
+
+### 2026-09-14 — Research pass (four records, T2 `nexus_rdr/208-research-1` to `-4`)
+
+Engine, client, harness-identity and prior-art passes. Design changes from the
+findings: directory entries live only while their watcher re-sends them,
+instead of 7 days, which also makes the newest-entry read one `rd`;
+`mailbox_send` reports a name held by two live sessions; SessionStart gains the
+previous-id read the draft assumed already existed; the drain forgets a cleared
+mailbox when a claim returns nothing; a fork leaves its parent's mailbox with
+the parent; Gap 4 and the MVV are scoped to sessions that share an engine; the
+identity table records that names are kept across `/clear`. A3 moved from
+unverified to verified, and A4 was corrected. Open for the gate: the conflict
+behavior, the fork rule, and the TTL and heartbeat values.
