@@ -126,7 +126,7 @@ rc3=$?
 if [[ $rc3 -eq 0 ]]; then ok "stamp+restore round trip exits 0"; else bad "round trip failed (rc $rc3): $out3"; fi
 if [[ "$out3" == *"MID=release_version=9.9.9"* ]]; then ok "file carries the stamp while the lease is held"; else bad "stamp not visible mid-hold: $out3"; fi
 if [[ "$out3" == *"LEASE_HELD_DURING_BUILD=1"* ]]; then ok "lease directory exists during the held window"; else bad "lease not held during the window: $out3"; fi
-if [[ "$out3" == *"FINAL=release_version=$(printf '%s' "$baseline3" | head -1 | cut -d= -f2)"* || "$out3" == *"FINAL=$baseline3"* ]]; then
+if [[ "$out3" == *"FINAL=release_version=$(printf '%s\n' "$baseline3" | sed -n '1s/^[^=]*=//p')"* || "$out3" == *"FINAL=$baseline3"* ]]; then
     ok "file restored to its pre-stamp bytes"
 else
     bad "file not restored to baseline: $out3 (baseline was: $baseline3)"

@@ -115,6 +115,7 @@ run_a() {
   # substitution when VAR is already non-empty) — this fixture has no
   # release-tag history for them to walk.
   env -i \
+    NX_NO_TELEMETRY=1 \
     PATH="$WORKDIR/bin:/usr/bin:/bin:/usr/local/bin" \
     HOME="$HOME" \
     TMPDIR="${TMPDIR:-/tmp}" \
