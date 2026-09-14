@@ -93,6 +93,37 @@ def session_start_cmd() -> None:
     click.echo(output)
 
 
+@hook_group.command("mailbox-arm")
+@click.option(
+    "--session-id", "session_id", required=True,
+    help="The session whose mailbox watch is being armed.",
+)
+def mailbox_arm_cmd(session_id: str) -> None:
+    """Print the mailbox-watch arm instruction for a session, or nothing.
+
+    nexus-6konb.19: the UserPromptSubmit drain hook runs this when its own
+    check finds no live watcher on the session's mailbox lock. It checks
+    again through the wheel's lock path, so a drift in the hook's copy of
+    that naming can cost a spawn but never a wrong instruction, then prints
+    the same text SessionStart emits (``nexus.mailbox_arm.arm_block``), so the
+    instruction versions with the wheel that ships ``nx tuple watch``. It
+    prints nothing when a watcher is live or an arm could not succeed, and
+    never exits non-zero.
+    """
+    from nexus import config as _config  # noqa: PLC0415 — deferred: hook startup cost
+    from nexus import mailbox_arm, tuple_watch  # noqa: PLC0415 — deferred: hook startup cost
+
+    try:
+        if tuple_watch.watcher_alive(_config.nexus_config_dir(), session_id):
+            return
+        text = mailbox_arm.arm_block(session_id)
+    except Exception as exc:  # noqa: BLE001 — a hook helper must never fail the prompt it serves
+        _log.debug("mailbox_arm_cmd_failed", error=str(exc))
+        return
+    if text:
+        click.echo(text)
+
+
 @hook_group.command("session-end")
 def session_end_cmd() -> None:
     """Run the SessionEnd hook (called by Claude Code on session close)."""

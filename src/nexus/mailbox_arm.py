@@ -81,6 +81,7 @@ PROBE_TIMEOUT_S = 2.0
 PROBE_CACHE_TTL_S = 120.0
 
 
+
 def _probe_cache_path(config_dir: Path) -> Path:
     return config_dir / _STATE_SUBDIR / _PROBE_CACHE_NAME
 
@@ -185,23 +186,29 @@ def mailbox_arm_instruction(session_id: str) -> str:
     ``/clear`` in the first place: the fresh conversation running this
     instruction has no memory of the OLD Monitor's harness task id, so
     there was no way for a model to discover what to stop.
+
+    Tells the model to take the name from a ListAgents call made now
+    (nexus-6konb.20): ListAgents renames a session on resume (measured
+    nexus-58 to nexus-03, 2026-09-14), and a re-arm that reused the old
+    name from memory watched the wrong instance mailbox.
     """
     return (
         f"{ARM_MARKER}: arm once, now.\n"
         "    Monitor({\n"
-        '      command: "nx tuple watch --instance <your ListAgents name>",\n'
+        '      command: "nx tuple watch --instance <name>",\n'
         f'      description: "mailbox watch {session_id}",\n'
         "      persistent: true,\n"
         "      timeout_ms: 3600000\n"
         "    })\n"
-        "Without a name, omit --instance. Arming twice is harmless (a lock "
-        "refuses the second); a watcher from before a /clear or /resume "
-        "stops itself and says so, then this instruction re-arms it. Each "
-        "line is a ping, never the message; the watcher never claims: call "
+        "Take <name> from ListAgents now, not memory: it changes on resume. "
+        "Without one, omit --instance. Arming twice is harmless (a lock "
+        "refuses it); a watcher from before a /clear or /resume stops "
+        "itself, and this instruction re-arms. Each line is a ping, never "
+        "the message; the watcher never claims: call "
         "mcp__plugin_conexus_nexus__tuple_in on the named mailbox, handle "
         "it, then mcp__plugin_conexus_nexus__tuple_ack (with reply for a "
         "request) or mcp__plugin_conexus_nexus__tuple_nack. An unacked "
-        "claim lapses, and after three lapses it is dead-lettered."
+        "claim lapses; after three it is dead-lettered."
     )
 
 

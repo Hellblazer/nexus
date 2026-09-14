@@ -315,3 +315,53 @@ class TestSessionStartCmdGuidanceImperative:
         assert result.exit_code == 0
         assert "Nexus ready" in result.output
         assert GUIDANCE_IMPERATIVE not in result.output
+
+
+# ── nx hook mailbox-arm (nexus-6konb.19) ────────────────────────────────────
+
+
+class TestMailboxArmCmd:
+    """The drain hook's per-turn re-arm asks the wheel for the arm text, so
+    the text versions with the wheel that ships ``nx tuple watch``. The
+    command re-checks liveness through the wheel's own lock path first."""
+
+    def _invoke(self, *, alive: bool, arm: object):
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.hook import hook_group
+
+        with (
+            patch("nexus.tuple_watch.watcher_alive", return_value=alive) as live,
+            patch("nexus.mailbox_arm.arm_block", **arm) as arm_block,
+        ):
+            result = CliRunner().invoke(
+                hook_group, ["mailbox-arm", "--session-id", "s1"],
+            )
+        return result, live, arm_block
+
+    def test_prints_the_arm_block(self):
+        result, live, arm_block = self._invoke(alive=False, arm={"return_value": "ARM-TEXT"})
+        assert result.exit_code == 0, result.output
+        assert "ARM-TEXT" in result.output
+        arm_block.assert_called_once_with("s1")
+        assert live.call_args.args[1] == "s1"
+
+    def test_prints_nothing_when_a_watcher_is_alive(self):
+        result, _live, arm_block = self._invoke(alive=True, arm={"return_value": "ARM-TEXT"})
+        assert result.exit_code == 0
+        assert result.output == ""
+        arm_block.assert_not_called()
+
+    def test_prints_nothing_when_no_arm_is_possible(self):
+        result, _live, _arm = self._invoke(alive=False, arm={"return_value": ""})
+        assert result.exit_code == 0
+        assert result.output == ""
+
+    def test_a_failure_prints_nothing_and_exits_zero(self):
+        result, _live, _arm = self._invoke(
+            alive=False, arm={"side_effect": RuntimeError("boom")},
+        )
+        assert result.exit_code == 0
+        assert result.output == ""

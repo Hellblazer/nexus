@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A session whose mailbox-watch arm instruction never arrived gets it again
+  (nexus-6konb.19, nexus-6konb.20).** The SessionStart arm instruction could
+  fail to reach a session: at a resume, `nx hook session-start` ran but its
+  output never reached the transcript, and nothing re-armed. After draining,
+  the UserPromptSubmit mailbox drain hook now checks whether a live
+  `nx tuple watch` process holds the session's own mailbox lock. From the
+  second prompt of a session on, when none does, it re-issues the arm
+  instruction from the new `nx hook mailbox-arm`: at most once every 10
+  minutes after a delivered instruction, once a minute after a failed
+  attempt. It relies on nothing SessionStart writes, since SessionStart
+  output is what can be lost. The instruction now says to take
+  the instance name from a `ListAgents` call made at arm time, because a
+  resume changes the name; a re-arm that reused the old name watched the
+  wrong mailbox. The re-arm reaches sessions with the next plugin release.
+
 ## [7.45.0] - 2026-09-14
 
 Paired with engine-service-v0.1.118. Not additive: the tuple size limits below

@@ -60,6 +60,20 @@ hazard RDR-206 Step 1 closed inside the engine, appearing here between
 two HTTP calls where no transaction can close it -- so the fix is to
 trust only what ``ack`` confirmed.
 
+RE-ARM (bead nexus-6konb.19). The SessionStart arm instruction can fail to
+reach a session (measured 2026-09-14: ``nx hook session-start`` ran at a
+resume and its output never reached the transcript), and nothing re-armed.
+So after draining, this hook checks whether a live ``nx tuple watch``
+process holds this session's own mailbox lock, by the pid the watcher writes
+into the lock and that pid's command line. It never takes the lock itself: a
+probe holding it even briefly could make a starting watcher refuse its own
+mailbox. It stays silent on the first prompt it sees for a session, when the
+SessionStart instruction (if it arrived) is in front of the model, and it
+consults nothing SessionStart writes, because SessionStart output is what
+can be lost. From the second prompt on, with no live watcher, it prints the
+wheel's arm text from ``nx hook mailbox-arm``: at most once per 10 minutes
+after a delivered instruction, once per minute after a failed attempt.
+
 Stdlib only, no ``nexus`` import, endpoint through the shared
 ``_endpoint_resolve`` sibling (nexus-aginu): the same constraints the
 ``tuple_ledger_project.py`` hook runs under, for the same reason -- a
@@ -68,8 +82,13 @@ hook runs on boxes where the client package may be mid-upgrade.
 from __future__ import annotations
 
 import json
+import os
+import re
+import shutil
+import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -104,6 +123,33 @@ _PROBE_N = 20
 
 #: Live rows consumed per prompt, for the same reason.
 _MAX_DELIVER = 10
+
+#: Per-turn re-arm (bead nexus-6konb.19). This script cannot import nexus, so
+#: it spells two wheel facts itself, each pinned against the wheel by
+#: tests/hooks/test_mailbox_drain_hook.py: the watcher's lock name
+#: (nexus.tuple_watch.lock_path) and the command a live watcher runs
+#: (nexus.tuple_watch.WATCH_COMMAND_MARK). Drift in either costs at most a
+#: wasted spawn, never a wrong instruction: ``nx hook mailbox-arm`` re-checks
+#: liveness through the wheel's own lock path before it prints anything.
+_LOCK_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
+_LOCK_PID = re.compile(r"\bpid=(\d+)")
+_WATCH_COMMAND_MARK = "tuple watch"
+
+#: This hook's own record per session, ``tuple-watch/rearm.<session id>``:
+#: when it last delivered an arm instruction and when it last tried.
+_REARM_STATE_PREFIX = "rearm."
+#: Spacing after a delivered instruction. Bounds a session that never arms
+#: to one reminder per interval.
+_REARM_INTERVAL_S = 600.0
+#: Spacing after a failed attempt (no nx, nx failed, nx timed out). Short,
+#: because the failure this path exists for is a transient one.
+_REARM_RETRY_S = 60.0
+
+#: The whole hook stays under the harness's 10 s kill. The re-arm spawns only
+#: into what the drain left of this ceiling, and not at all below the minimum.
+_HOOK_CEILING_S = 9.0
+_REARM_MIN_S = 1.5
+_REARM_SPAWN_CAP_S = 5.0
 
 _TENANT = _ep.DEFAULT_TENANT
 _SAFE_ADDRESS_CHARS = frozenset(
@@ -642,6 +688,142 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
     return base_url, token, is_local
 
 
+def _watch_lock_path(config_dir: Path, session_id: str) -> Path:
+    return config_dir / "tuple-watch" / (_LOCK_UNSAFE.sub("_", session_id) + ".lock")
+
+
+def _rearm_state_path(config_dir: Path, session_id: str) -> Path:
+    return config_dir / "tuple-watch" / f"{_REARM_STATE_PREFIX}{session_id}"
+
+
+def _lock_pid(body: str) -> int | None:
+    match = _LOCK_PID.search(body)
+    return int(match.group(1)) if match else None
+
+
+def _pid_is_watcher(pid: int | None) -> bool:
+    """A live process running ``nx tuple watch``. The lock file outlives its
+    watcher, so a dead pid is no watcher, and a live pid running anything
+    else is a reused pid, also no watcher."""
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        pass
+    except OSError:
+        return False
+    try:
+        proc = subprocess.run(  # noqa: S603 S607 — fixed argv; ps resolved on PATH
+            ["ps", "-p", str(pid), "-o", "command="],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True  # cannot inspect it: trust the live pid rather than nag
+    return _WATCH_COMMAND_MARK in proc.stdout
+
+
+def _watcher_live(config_dir: Path, session_id: str) -> bool:
+    try:
+        body = _watch_lock_path(config_dir, session_id).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return _pid_is_watcher(_lock_pid(body))
+
+
+def _read_rearm_state(path: Path) -> dict[str, float] | None:
+    """``None`` when this hook has never run for the session. An unreadable
+    or malformed record reads as present and empty, so it can only make a
+    reminder due, never suppress one."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    state: dict[str, float] = {}
+    for key in ("last_rearm", "last_attempt"):
+        try:
+            state[key] = float(data.get(key, 0.0))
+        except (TypeError, ValueError):
+            state[key] = 0.0
+    return state
+
+
+def _write_rearm_state(path: Path, state: dict[str, float]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.parent / (path.name + ".tmp")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def _since(now: float, then: float) -> float:
+    """Seconds from *then* to *now*; a clock that went backwards reads as
+    long ago, so it can only make a reminder due."""
+    delta = now - then
+    return delta if delta >= 0 else float("inf")
+
+
+def _rearm_if_unwatched(config_dir: Path, session_id: str, *, started: float) -> None:
+    """Re-issue the arm instruction when this session has no live watcher.
+
+    Silent on the first prompt this hook sees for a session. The interval
+    starts only once an instruction was actually printed; a failed attempt
+    backs off for the short retry spacing instead.
+    """
+    if not _valid_address(session_id):
+        return
+    path = _rearm_state_path(config_dir, session_id)
+    state = _read_rearm_state(path)
+    if state is None:
+        _write_rearm_state(path, {"last_rearm": 0.0, "last_attempt": 0.0})
+        return
+    if _watcher_live(config_dir, session_id):
+        return
+    now = time.time()
+    if _since(now, state.get("last_rearm", 0.0)) < _REARM_INTERVAL_S:
+        return
+    if _since(now, state.get("last_attempt", 0.0)) < _REARM_RETRY_S:
+        return
+    remaining = _HOOK_CEILING_S - (time.monotonic() - started)
+    if remaining < _REARM_MIN_S:
+        return
+    state["last_attempt"] = now
+    _write_rearm_state(path, state)
+    nx = shutil.which("nx")
+    if nx is None:
+        _log_skip("no live mailbox watcher for this session, and no nx on PATH to re-arm it")
+        return
+    try:
+        proc = subprocess.run(  # noqa: S603 — nx resolved on PATH; argv built from a validated session id
+            [nx, "hook", "mailbox-arm", "--session-id", session_id],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=min(remaining, _REARM_SPAWN_CAP_S),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _log_skip(f"re-arm instruction unavailable: {type(exc).__name__}: {exc}")
+        return
+    text = proc.stdout.strip()
+    if proc.returncode != 0 or not text:
+        return
+    state["last_rearm"] = now
+    _write_rearm_state(path, state)
+    sys.stdout.write(
+        "No mailbox watch is running for this session; its SessionStart arm "
+        "instruction may not have arrived.\n" + text + "\n"
+    )
+    sys.stdout.flush()
+
+
 def main() -> int:
     """The hook entry point. NEVER raises, and never exits non-zero.
 
@@ -661,8 +843,7 @@ def main() -> int:
 
 
 def _drain_all() -> int:
-    import time  # noqa: PLC0415 — deferred: only main needs a clock
-
+    started = time.monotonic()
     try:
         raw = sys.stdin.read()
     except (OSError, ValueError):
@@ -724,6 +905,10 @@ def _drain_all() -> int:
             # than being quietly indistinguishable from a planned skip.
             _log_skip(f"mailbox/{address}: unexpected {type(exc).__name__}: {exc}")
             continue
+    try:
+        _rearm_if_unwatched(config_dir, session_id, started=started)
+    except Exception as exc:  # noqa: BLE001 — the re-arm is advisory; a prompt never sees it fail
+        _log_skip(f"re-arm check: unexpected {type(exc).__name__}: {exc}")
     return 0
 
 

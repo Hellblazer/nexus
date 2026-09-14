@@ -99,6 +99,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import time
 from collections import deque
 from collections.abc import Callable, Iterable
@@ -576,6 +577,47 @@ def lock_path(state_dir: Path, address: str) -> Path:
     return state_dir / _STATE_SUBDIR / (_SAFE_NAME.sub("_", address) + ".lock")
 
 
+#: The command a live watcher runs, as ``ps`` shows it
+#: (``.../bin/nx tuple watch --instance nexus-03``). :func:`watcher_alive`
+#: requires it, so a reused pid never reads as a watcher; the stdlib drain
+#: hook spells the same mark and a parity test pins the two (nexus-6konb.19).
+WATCH_COMMAND_MARK = "tuple watch"
+_LOCK_BODY_PID = re.compile(r"\bpid=(\d+)")
+
+
+def watcher_alive(state_dir: Path, address: str) -> bool:
+    """True when a live ``nx tuple watch`` process holds *address*'s lock
+    (nexus-6konb.19).
+
+    Reads the pid the holder wrote into the lock body. It never probes the
+    flock, so it cannot make a starting watcher refuse its own address. The
+    lock file outlives its watcher, so a dead pid is no watcher, and so is a
+    live pid running anything other than the watcher.
+    """
+    try:
+        body = lock_path(state_dir, address).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    match = _LOCK_BODY_PID.search(body)
+    pid = int(match.group(1)) if match else 0
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        pass
+    except OSError:
+        return False
+    try:
+        proc = subprocess.run(  # noqa: S603 S607 — fixed argv; ps resolved on PATH
+            ["ps", "-p", str(pid), "-o", "command="],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True  # cannot inspect it: trust the live pid
+    return WATCH_COMMAND_MARK in proc.stdout
+
+
 def acquire_watch_locks(
     addresses: Iterable[str],
     *,
@@ -890,7 +932,8 @@ def run_watch(
                 emit(
                     f"{PING_PREFIX} STOP: this conversation is now session {marker},"
                     f" not {spawn_session_id} -- the watch for the old session is"
-                    f" stopping. Re-arm per the SessionStart instruction.",
+                    f" stopping. Re-arm per the SessionStart instruction, with the"
+                    f" name from a fresh ListAgents call.",
                 )
                 return stats
         # Rotate which address goes first each cycle. This does NOT fix an observed

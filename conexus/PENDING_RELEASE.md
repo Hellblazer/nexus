@@ -32,4 +32,5 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.45.0)
 
-(none)
+- `conexus/hooks/scripts/mailbox_drain.py` (nexus-6konb.19): when no live watcher holds this session's own mailbox lock, the UserPromptSubmit drain re-issues the arm instruction from `nx hook mailbox-arm`, at most once every 10 minutes. Against a wheel without that subcommand it prints nothing.
+- `conexus/skills/mailbox/SKILL.md` (nexus-6konb.19, nexus-6konb.20): the arm name comes from a `ListAgents` call at arm time, because a resume changes it; documents the per-turn re-arm.
