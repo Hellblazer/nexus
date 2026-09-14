@@ -356,12 +356,16 @@ def tuple_directory_cmd(name: str, json_out: bool) -> None:
 
     Prints each live directory/NAME entry's session_id, created_at and
     expires_at, and flags NAME as ambiguous when more than one distinct
-    session holds it -- the case `mailbox_send` refuses. Uses the SAME
-    resolver `mailbox_send` uses (nexus.tuple_directory.resolve_send_address),
-    so the two can never disagree about whether NAME is safely addressable.
+    session holds it -- the case `mailbox_send` refuses. Reads
+    `directory/NAME` exactly ONCE and classifies that one list through the
+    SAME pure classifier `mailbox_send` uses (nexus.tuple_directory.
+    classify_directory_holders), so the two can never disagree about
+    whether NAME is safely addressable, and a lapse or a re-nonce between
+    two reads can never make the printed entries and the verdict below
+    describe different moments (gate audit round B item 1).
     """
     from nexus.tuple_directory import (  # noqa: PLC0415 — deferred: CLI startup cost
-        DirectoryResolutionError, list_directory_entries, resolve_send_address,
+        DirectoryResolutionError, classify_directory_holders, list_directory_entries,
     )
 
     store = _store()
@@ -385,10 +389,10 @@ def tuple_directory_cmd(name: str, json_out: bool) -> None:
     ambiguous = False
     if entries:
         try:
-            resolved_session, _kind = resolve_send_address(name, store)
+            resolved_session, _kind = classify_directory_holders(name, rows)
         except DirectoryResolutionError:
-            # entries is non-empty here, so the only way resolve_send_address
-            # can still refuse is the more-than-one-holder branch.
+            # entries is non-empty here, so the only way the classifier can
+            # still refuse is the more-than-one-holder branch.
             ambiguous = True
 
     if json_out:

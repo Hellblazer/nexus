@@ -1185,6 +1185,10 @@ def run_watch(
                     # arm-time nonce -- so the name stops resolving to this
                     # session within about a second instead of riding out a
                     # full TTL while the new session's watcher re-arms it.
+                    # Explicit narrowing (gate audit round B item 2): directory_active
+                    # is a plain bool, so pyright does not itself infer that
+                    # directory_name/directory_session_id are non-None here.
+                    assert directory_name is not None and directory_session_id is not None
                     _release_directory_entry(store, directory_name, directory_session_id, lease)
                 emit(
                     f"{PING_PREFIX} STOP: this conversation is now session {marker},"
@@ -1194,6 +1198,14 @@ def run_watch(
                 )
                 return stats
         if directory_active:
+            # Explicit narrowing (gate audit round B item 2), same reasoning as
+            # the self-stop release call above: directory_active is a plain
+            # bool, not a type guard pyright can chase back to these three.
+            assert (
+                directory_name is not None
+                and directory_session_id is not None
+                and directory_pid is not None
+            )
             _directory_heartbeat(
                 store, directory_name, directory_session_id, lease,
                 config=config, t=t, pid=directory_pid, emitter=emitter,

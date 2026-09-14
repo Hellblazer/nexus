@@ -21,8 +21,11 @@ T2 nexus_rdr/208-decision-gate-2026-09-14):
     `tests/hooks/test_subagent_stop_hook.py:288` uses) resolves directly,
     `address_kind="agent"` -- NEVER through the directory;
   - anything else is a NAME: every live row of `directory/<name>` is read
-    (paged with the `since` cursor until a short page) and its distinct
-    `session_id` dims are collected. Zero holders is a
+    ONCE (`list_directory_entries`, paged with the `since` cursor until a
+    short page) and classified by the PURE `classify_directory_holders`
+    over that one list -- never a second read -- so a lapse or a re-nonce
+    between two reads can never make a caller's printed state and its
+    verdict describe different moments. Zero holders is a
     :class:`DirectoryResolutionError` naming the name; one holder
     resolves to that session (several live rows of the SAME session --
     a re-armed watcher's new nonce beside its old row -- are one holder,
@@ -105,11 +108,47 @@ def list_directory_entries(name: str, tuples: Any) -> list[Any]:
     return rows
 
 
+def classify_directory_holders(name: str, entries: list[Any]) -> tuple[str, str]:
+    """Pure classifier over an ALREADY-FETCHED `directory/<name>` entries
+    list (gate audit round B item 1, code review
+    T2 nexus/rdr-208-phase2b-cre-2026-09-14): takes no store and does no I/O,
+    so both :func:`resolve_send_address` and the `nx tuple directory NAME`
+    CLI verb read `list_directory_entries` exactly ONCE and classify that
+    SAME list, instead of each reading independently and risking a lapse or
+    a re-nonce between two reads making the two callers describe different
+    moments.
+
+    Zero distinct `session_id` dims among *entries* is a
+    :class:`DirectoryResolutionError` naming *name*; more than one distinct
+    holder is a :class:`DirectoryResolutionError` naming every holder.
+    Several entries for the SAME session (a re-armed watcher's new nonce
+    beside its old row) are one holder, not a conflict.
+    """
+    holders: set[str] = set()
+    for row in entries:
+        session_id = (row.dims or {}).get("session_id")
+        if session_id:
+            holders.add(session_id)
+
+    if not holders:
+        raise DirectoryResolutionError(f"no live holder for name {name!r}")
+    if len(holders) > 1:
+        ids = ", ".join(sorted(holders))
+        raise DirectoryResolutionError(
+            f"name {name!r} is held by more than one session ({ids}); resend to one of these session ids directly"
+        )
+    return next(iter(holders)), "session"
+
+
 def resolve_send_address(to: str, tuples: Any) -> tuple[str, str]:
     """Resolve `mailbox_send`'s `to` into `(address, address_kind)`.
 
     A directory read that raises propagates unchanged: nothing about `to`
-    was resolved, so the caller never reaches a write.
+    was resolved, so the caller never reaches a write. Reads
+    `list_directory_entries` exactly once and classifies that one list
+    through :func:`classify_directory_holders` -- the same classifier the
+    `nx tuple directory NAME` CLI verb calls over its own single read, so
+    the two can never disagree.
     """
     if not to:
         raise DirectoryResolutionError("to must not be empty")
@@ -118,20 +157,7 @@ def resolve_send_address(to: str, tuples: Any) -> tuple[str, str]:
     if looks_like_agent_id(to):
         return to, "agent"
 
-    holders: set[str] = set()
-    for row in list_directory_entries(to, tuples):
-        session_id = (row.dims or {}).get("session_id")
-        if session_id:
-            holders.add(session_id)
-
-    if not holders:
-        raise DirectoryResolutionError(f"no live holder for name {to!r}")
-    if len(holders) > 1:
-        ids = ", ".join(sorted(holders))
-        raise DirectoryResolutionError(
-            f"name {to!r} is held by more than one session ({ids}); resend to one of these session ids directly"
-        )
-    return next(iter(holders)), "session"
+    return classify_directory_holders(to, list_directory_entries(to, tuples))
 
 
 def validate_from_address(value: str) -> str:

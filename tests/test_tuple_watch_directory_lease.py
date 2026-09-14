@@ -35,6 +35,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+import yaml
 
 from nexus.db.t2.http_tuple_store import HttpTupleStore
 from nexus.tuple_watch import (
@@ -314,3 +315,29 @@ class TestDirectoryLeaseIntegration:
         time.sleep(1.5)
         rows = store.rd(f"directory/{name}", {"name": name}, n=10)
         assert not rows  # lapsed on its own, within one TTL
+
+
+@pytest.mark.lint
+class TestDirectoryRetentionMatchesTheEngineTemplate:
+    """DIRECTORY_RETENTION_S (gate audit round B item 3, code review
+    T2 nexus/rdr-208-phase2b-cre-2026-09-14) duplicates directory.yaml's own
+    retention_seconds by hand -- the module comment above the constant says
+    so, but a comment is not enforcement. Reads the YAML directly rather
+    than trusting the comment, so either value moving alone (the engine
+    template's retention, or the client constant _directory_heartbeat's
+    rotate check is derived from) fails loud instead of silently drifting
+    apart."""
+
+    def test_retention_matches_directory_template(self) -> None:
+        repo_root = Path(__file__).resolve().parent.parent
+        template_path = (
+            repo_root / "service" / "src" / "main" / "resources" / "tuples"
+            / "templates" / "directory.yaml"
+        )
+        data = yaml.safe_load(template_path.read_text(encoding="utf-8"))
+        assert data["retention_seconds"] == DIRECTORY_RETENTION_S, (
+            f"directory.yaml's retention_seconds ({data['retention_seconds']}) "
+            f"no longer matches nexus.tuple_watch.DIRECTORY_RETENTION_S "
+            f"({DIRECTORY_RETENTION_S}) -- _directory_heartbeat's re-nonce-"
+            f"before-ceiling rotate check assumes these are equal"
+        )

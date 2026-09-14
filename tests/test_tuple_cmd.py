@@ -194,9 +194,11 @@ class TestTupleTemplatesListStats:
 
 class TestTupleDirectoryCmd:
     """RDR-208 Phase 2 Step 4 (bead nexus-galkv.11): ``nx tuple directory
-    NAME`` -- shows who holds a name, through the SAME resolver
+    NAME`` -- shows who holds a name, reading ``directory/NAME`` exactly
+    once and classifying that one list through the SAME pure classifier
     ``mailbox_send`` (nexus-galkv.10) uses, so the verb and the tool cannot
-    disagree about whether a name is safely addressable."""
+    disagree about whether a name is safely addressable (gate audit round B
+    item 1, code review T2 ``nexus/rdr-208-phase2b-cre-2026-09-14``)."""
 
     def _arm(self, name: str, session_id: str) -> None:
         res = _invoke([
@@ -265,6 +267,64 @@ class TestTupleDirectoryCmd:
         assert payload["ambiguous"] is True
         assert payload["resolved_session_id"] is None
         assert len(payload["entries"]) == 2
+
+    def test_reads_directory_exactly_once_and_stays_self_consistent(
+        self, monkeypatch,
+    ) -> None:
+        """The bug this guards against: the verb used to read
+        ``directory/NAME`` once for the printed list and a SECOND time
+        inside the resolver's own classification -- a lapse or a re-nonce
+        landing between those two reads would make the printed entries and
+        the ambiguous/resolved verdict describe two different moments. A
+        fake store whose second call would see a SECOND holder that never
+        existed at the first read proves both that the verb reads exactly
+        once (the assert on ``fake.calls``) and that its output is the
+        SAME single read throughout (one entry, not ambiguous, resolved to
+        the one real holder -- never a spurious two-holder verdict)."""
+        import types
+
+        import nexus.commands.tuple_cmd as tuple_cmd_mod
+
+        name = _uniq("name")
+        sid1, sid2 = str(uuid.uuid4()), str(uuid.uuid4())
+
+        def _row(session_id: str, row_id: str) -> object:
+            return types.SimpleNamespace(
+                id=row_id, subspace=f"directory/{name}", template="directory/<name>",
+                keys={"name": name}, dims={"session_id": session_id}, body=None,
+                claim_state=None, claimant=None, lease_until=None, attempts=0,
+                consumed_at=None, consumed_by=None,
+                expires_at="2026-01-01T00:05:00Z", created_at="2026-01-01T00:00:00Z",
+            )
+
+        class _FakeStore:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def rd(self, subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0):
+                self.calls += 1
+                # A second call (the bug this test catches) would see a
+                # world with a SECOND holder that just armed -- if the verb
+                # ever reads twice, this makes the divergence visible.
+                rows = [_row(sid1, "a")]
+                if self.calls > 1:
+                    rows.append(_row(sid2, "b"))
+                return rows
+
+        fake = _FakeStore()
+        monkeypatch.setattr(tuple_cmd_mod, "_store", lambda: fake)
+
+        res = _invoke(["directory", name, "--json"])
+        assert res.exit_code == 0, res.output
+        payload = _last_json_line(res.output)
+
+        assert fake.calls == 1, (
+            f"directory/{name} was read {fake.calls} times, expected exactly 1"
+        )
+        assert len(payload["entries"]) == 1
+        assert payload["holders"] == [sid1]
+        assert payload["ambiguous"] is False
+        assert payload["resolved_session_id"] == sid1
 
 
 class TestKvParsing:
