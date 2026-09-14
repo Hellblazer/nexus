@@ -67,11 +67,16 @@ def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
     """A catalog rooted at tmp_path with both config-dir + catalog-path env
     overrides wired.
 
-    The conftest-level ``_isolate_catalog`` fixture sets ``NEXUS_CATALOG_PATH``
-    to a non-existent ``<tmp>/test-catalog`` so production hooks don't write
-    to the user's real catalog. We need ``catalog_path()`` to resolve to
-    OUR seeded catalog directory instead, so override both env vars: this
-    fixture's ``cat`` is what ``_repo_collections`` opens via
+    ``catalog_path()`` already falls back to ``NEXUS_CONFIG_DIR/catalog``
+    when ``NEXUS_CATALOG_PATH`` is unset, and the autouse
+    ``_isolate_config_dir`` fixture (tests/conftest.py) isolates
+    ``NEXUS_CONFIG_DIR`` for every test — so nothing here is needed for
+    SAFETY (nexus-w1ip review round: the conftest-level ``_isolate_catalog``
+    fixture this docstring used to cite for that purpose is deleted). This
+    fixture still overrides BOTH env vars for its own reason: the test
+    needs ``catalog_path()`` to resolve to a SPECIFIC, pre-created seeded
+    directory it controls (``cat_dir`` below), not merely an isolated one —
+    this fixture's ``cat`` is what ``_repo_collections`` opens via
     ``nexus.config.catalog_path()``.
     """
     cfg = tmp_path / "config"

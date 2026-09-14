@@ -2753,16 +2753,21 @@ class TestSectionTypeInPipeline:
 # through ``make_chunk_metadata(..., doc_id=...)``.
 
 
-def _setup_phase_a_catalog(tmp_path, monkeypatch):
-    """Initialize a fresh catalog at the path the autouse ``_isolate_catalog``
-    fixture configures via ``NEXUS_CATALOG_PATH`` and return an EphemeralClient
-    T3 with the local ONNX embedder.
+def _setup_phase_a_catalog(monkeypatch):
+    """Return an EphemeralClient T3 with the local ONNX embedder for the
+    RDR-102 Phase A pre-flight-registration tests below.
 
     Forces local-mode ingest by clearing Voyage/Chroma credentials so the
     indexer does not attempt to call the real cloud APIs.
 
     nexus-i711w: the local Catalog.init is gone — pre-flight registration
-    goes to the live catalog, which needs no init.
+    goes to the live catalog, which needs no init, so this helper does not
+    construct or return a catalog directory path at all (nexus-w1ip review
+    round: the ``tmp_path``-derived path it used to return alongside the
+    T3 handle was never read by any of its 8 call sites — dead since the
+    i711w deletion above made local catalog init unnecessary; removed
+    rather than kept as an unused artifact of a since-deleted autouse
+    fixture).
 
     nexus-tp8yk D2a: the module-level autouse ``_no_propagating_fence_
     complete`` fixture stubs ``_fence_complete`` for every test in this
@@ -2772,7 +2777,6 @@ def _setup_phase_a_catalog(tmp_path, monkeypatch):
     """
     from nexus.db.t3 import T3Database
 
-    cat_dir = tmp_path / "test-catalog"
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     monkeypatch.setattr(
@@ -2787,7 +2791,7 @@ def _setup_phase_a_catalog(tmp_path, monkeypatch):
     client = make_vector_test_client()
     _stub_agreeing_embedding_profile(monkeypatch)
 
-    return cat_dir, T3Database(_client=client, local_mode=True)
+    return T3Database(_client=client, local_mode=True)
 
 
 # _doc_registered_count helper retired with the events.jsonl event log
@@ -2803,7 +2807,7 @@ def test_index_pdf_does_not_emit_source_path(
     key; the catalog tumbler in doc_id is the canonical reference and
     normalize() filters source_path at the schema-level removal.
     """
-    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+    t3 = _setup_phase_a_catalog(monkeypatch)
 
     with pdf_extract_patches_ctx():
         index_pdf(sample_pdf, corpus="rdr102-pdf-b", t3=t3, embed_fn=_fake_embed)
@@ -2829,7 +2833,7 @@ def test_index_markdown_does_not_emit_source_path(
     _markdown_chunks make_chunk_metadata call) must drop source_path
     from its kwargs.
     """
-    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+    t3 = _setup_phase_a_catalog(monkeypatch)
 
     n = index_markdown(sample_md, corpus="rdr102-md-b", t3=t3)
     assert n > 0
@@ -2859,7 +2863,7 @@ def test_index_pdf_writes_doc_id_when_catalog_initialized(
     never threaded down. Phase A registers upfront and passes the
     resolved tumbler through to the chunker.
     """
-    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+    t3 = _setup_phase_a_catalog(monkeypatch)
     _wrap_write_batch_with_fk_seed(t3)
     # RDR-204 Phase 1 follow-up (nexus-f5wwx): t3 is already constructed
     # above with the chroma opt-out baked in (its own local ONNX embed
@@ -2902,7 +2906,7 @@ def test_index_markdown_writes_doc_id_when_catalog_initialized(
     on chunk metadata; the catalog manifest is authoritative. Verify
     the manifest has rows for the indexed markdown file.
     """
-    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+    t3 = _setup_phase_a_catalog(monkeypatch)
     _wrap_write_batch_with_fk_seed(t3)
     # RDR-204 Phase 1 follow-up (nexus-f5wwx): see the matching comment in
     # test_index_pdf_writes_doc_id_when_catalog_initialized above.
@@ -2935,7 +2939,7 @@ def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
     ``document_chunks`` manifest for each registered Document. Chunk
     metadata no longer carries doc_id directly.
     """
-    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+    t3 = _setup_phase_a_catalog(monkeypatch)
     _wrap_write_batch_with_fk_seed(t3)
     rdr_path = tmp_path / "rdr-102-test.md"
     rdr_path.write_text(
@@ -2986,7 +2990,7 @@ def test_index_markdown_post_hook_updates_chunk_count_after_preflight(
     invisible to operators who never read the Document row but a
     structural drift between catalog + T3 chunk counts.
     """
-    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+    t3 = _setup_phase_a_catalog(monkeypatch)
 
     n = index_markdown(sample_md, corpus="rdr102-chunkcount", t3=t3)
     assert n > 0, "expected index_markdown to upsert at least one chunk"
@@ -3021,7 +3025,7 @@ def test_frontmatter_title_year_reach_catalog_despite_preflight(
         "---\ntitle: The Widget Specification\ncreated: 2026-03-14\n---\n\n"
         "# Widgets\n\nBody.\n"
     )
-    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+    t3 = _setup_phase_a_catalog(monkeypatch)
 
     n = index_markdown(md, corpus="ivzw8-title", t3=t3)
     assert n > 0
@@ -3041,7 +3045,7 @@ def test_curated_title_survives_reindex(tmp_path, monkeypatch):
     clobbered by a re-index — backfill applies only to the stem default."""
     md = tmp_path / "notes.md"
     md.write_text("---\ntitle: Frontmatter Title\n---\n\n# N\n\nBody.\n")
-    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+    t3 = _setup_phase_a_catalog(monkeypatch)
 
     assert index_markdown(md, corpus="ivzw8-curated", t3=t3) > 0
 

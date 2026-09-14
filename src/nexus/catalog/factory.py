@@ -28,7 +28,6 @@ GH #1419.4 split-brain: at one backup timestamp ``.catalog.db`` showed
 """
 from __future__ import annotations
 
-import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -36,6 +35,7 @@ from typing import Any, Optional
 import structlog
 
 from nexus.catalog.catalog_protocol import CATALOG_WRITE_OPS
+from nexus.service_handles import SharedClientSlot, cached_endpoint_key
 
 _log = structlog.get_logger(__name__)
 
@@ -54,150 +54,109 @@ _log = structlog.get_logger(__name__)
 # fixed in mcp_infra.py. Same design here: a process-lifetime singleton,
 # CAS-narrowed (nexus-u2u0n): the lock guards only resolving/evicting the
 # singleton, never the call itself — see _SharedServiceCatalogHandle._call.
-_service_catalog_lock = threading.Lock()
-_service_catalog_client: Any = None
-
-#: nexus-0dpli: in-flight caller count per instance, keyed by ``id(client)``.
-#: Incremented under ``_service_catalog_lock`` at resolve time, decremented
-#: under the same lock when a caller's forwarded call returns OR raises.
-#: Load-bearing for eviction safety: the CAS narrowing means multiple
-#: threads can be genuinely mid-call against the SAME shared instance at
-#: once, so an eviction cannot simply close() the instance it just kicked
-#: out of the shared slot — a sibling may still be using it. See
-#: ``_release_shared_catalog_ref``.
-_service_catalog_refcounts: dict[int, int] = {}
-
-#: nexus-0dpli: ids of instances that have been evicted from the shared slot
-#: (so no NEW caller will ever resolve them) but still have callers in
-#: flight. The LAST caller to release its reference on a pending instance
-#: is the one that physically closes it — never the evictor itself, unless
-#: the evictor was also the last (or only) holder.
-_service_catalog_pending_close: set[int] = set()
-
-#: nexus-jb4pp: per-op ``{op: [calls, lock_wait_s, call_s]}`` for the shared
-#: service-catalog handle. ``_service_catalog_lock`` is held for the FULL
-#: duration of every forwarded call — including the network round trip — so
-#: every catalog write in the process (manifest write_many, the RUNFENCE
-#: begin_index_run_many, registration) is strictly serialized against every
-#: other, across all indexing workers. That serialization was invisible: it
-#: is billed to whichever caller's timer brackets the call, so the manifest
-#: hook's measured cost has always included time spent waiting on OTHER
-#: threads' catalog traffic. Splitting wait from call is what makes
-#: "is the manifest cost client, network, or server?" answerable at all.
-#: Counters are plain floats mutated under the lock they measure.
-_service_catalog_op_stats: dict[str, list[float]] = {}
+#
+# nexus-w1ip: the singleton's state (lock, refcounts, pending-close,
+# per-op stats) now lives on a :class:`~nexus.service_handles.SharedClientSlot`
+# INSTANCE instead of module globals -- see that module's docstring for the
+# full CAS/refcount contract, preserved verbatim here. Keyed by
+# ``_service_catalog_endpoint_key`` so a rotated ``(base_url, token)`` pair
+# (e.g. a fresh per-test tenant token) resolves a fresh client instead of
+# silently reusing one built against the OLD identity -- the defect this
+# bead closes, not just its test-isolation symptom.
 
 
-def _record_catalog_op(name: str, wait_s: float, call_s: float,
-                       *, calls: int = 1) -> None:
-    """Accumulate one op's timings. Called while holding the lock it
-    measures, so the read-modify-write of the shared row is atomic.
+def _build_service_catalog_client() -> Any:
+    from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-    *calls* is 0 for the non-callable attribute path — that access still
-    queued for the lock, so its wait is real and must be counted, but it
-    is not a round trip and must not inflate the call count.
+    return HttpCatalogClient()
+
+
+def _close_service_catalog_client(client: Any) -> None:
+    client.close()
+
+
+def _service_catalog_endpoint_key_uncached() -> tuple[str, str]:
+    """The ``(base_url, token)`` a fresh ``HttpCatalogClient()`` would
+    resolve RIGHT NOW (nexus-w1ip). A mismatch against the key the
+    currently-held client was built under evicts it, so a rotated token
+    or endpoint is picked up automatically instead of silently answering
+    under the wrong identity. Uncached — wrapped by
+    :data:`_service_catalog_endpoint_key` below, which is what the slot
+    actually receives."""
+    from nexus.db.service_endpoint import resolve_service_endpoint  # noqa: PLC0415 — deferred to avoid import cycle
+
+    return resolve_service_endpoint()
+
+
+def _service_catalog_is_env_pinned() -> bool:
+    """Cheap freshness check for the TTL wrapper below — see
+    ``nexus.db.service_endpoint.is_endpoint_env_pinned``'s docstring."""
+    from nexus.db.service_endpoint import is_endpoint_env_pinned  # noqa: PLC0415 — deferred to avoid import cycle
+
+    return is_endpoint_env_pinned()
+
+
+#: TTL-memoized ``endpoint_key`` (nexus-w1ip review round, finding (b)):
+#: the uncached resolver's lease-file fallback is real disk I/O on a path
+#: this module's own docstring calls hot (manifest write_many, the
+#: RUNFENCE begin_index_run_many, every catalog op). ``is_fresh_required``
+#: is the env/config-pinned check, so that CHEAP path is never delayed by
+#: the cache — only the genuinely I/O-bound lease-file fallback is
+#: memoized. See :func:`~nexus.service_handles.cached_endpoint_key` /
+#: :data:`~nexus.service_handles.DEFAULT_ENDPOINT_KEY_CACHE_TTL_S` for the
+#: TTL rationale, and that same module's ``resolve_and_apply``/
+#: ``resolve_and_acquire`` for why this is called OUTSIDE the slot's lock.
+_service_catalog_endpoint_key = cached_endpoint_key(
+    _service_catalog_endpoint_key_uncached,
+    is_fresh_required=_service_catalog_is_env_pinned,
+)
+
+
+#: Default process-lifetime slot. ``make_catalog_reader``/``make_catalog_writer``
+#: and any ``_SharedServiceCatalogHandle()`` constructed with no explicit
+#: *slot* argument resolve against this instance — existing callers work
+#: unchanged.
+_default_catalog_slot: SharedClientSlot = SharedClientSlot(
+    _build_service_catalog_client,
+    _close_service_catalog_client,
+    endpoint_key=_service_catalog_endpoint_key,
+)
+
+
+def reset_shared_service_catalog_client_for_tests(
+    slot: Optional[SharedClientSlot] = None,
+) -> None:
+    """Close and clear the shared SERVICE-mode catalog client (tests only).
+
+    *slot* defaults to the process's shared default slot; pass an explicit
+    one to reset a test-injected slot instead.
     """
-    _row = _service_catalog_op_stats.setdefault(name, [0.0, 0.0, 0.0])
-    _row[0] += calls
-    _row[1] += wait_s
-    _row[2] += call_s
+    (slot if slot is not None else _default_catalog_slot).reset_for_tests()
 
 
-def service_catalog_op_stats() -> dict[str, dict[str, float]]:
+def service_catalog_op_stats(
+    slot: Optional[SharedClientSlot] = None,
+) -> dict[str, dict[str, float]]:
     """Snapshot of per-op shared-catalog-handle timings (nexus-jb4pp).
 
     ``{op: {"calls": n, "lock_wait_s": s, "call_s": s}}`` where
-    ``lock_wait_s`` is time blocked on ``_service_catalog_lock`` before the
-    call began and ``call_s`` is the forwarded call itself (client
+    ``lock_wait_s`` is time blocked on the slot's resolution lock before
+    the call began and ``call_s`` is the forwarded call itself (client
     serialization + network + server). Cumulative across threads, so both
     may exceed wall clock.
     """
-    with _service_catalog_lock:
-        return {
-            op: {"calls": v[0], "lock_wait_s": v[1], "call_s": v[2]}
-            for op, v in _service_catalog_op_stats.items()
-        }
+    return (slot if slot is not None else _default_catalog_slot).op_stats()
 
 
-def reset_service_catalog_op_stats() -> None:
+def reset_service_catalog_op_stats(slot: Optional[SharedClientSlot] = None) -> None:
     """Zero the per-op counters (review finding on nexus-jb4pp): the stats
-    dict is a process-lifetime module global, so a process that runs more
-    than one index pass (MCP tool, watch mode, a multi-indexing pytest
-    session) would otherwise report cumulative-since-process-start numbers
-    with no signal — the same mis-attribution class this instrumentation
-    exists to kill. ``_run_index`` calls this at start so every
+    dict is a process-lifetime slot, so a process that runs more than one
+    index pass (MCP tool, watch mode, a multi-indexing pytest session)
+    would otherwise report cumulative-since-process-start numbers with no
+    signal — the same mis-attribution class this instrumentation exists to
+    kill. ``_run_index`` calls this at start so every
     ``index_catalog_op_stats`` event covers exactly one run."""
-    with _service_catalog_lock:
-        _service_catalog_op_stats.clear()
-
-
-def _get_shared_service_catalog_client() -> Any:
-    global _service_catalog_client
-    if _service_catalog_client is None:
-        from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
-        _service_catalog_client = HttpCatalogClient()
-    return _service_catalog_client
-
-
-def reset_shared_service_catalog_client_for_tests() -> None:
-    """Close and clear the shared SERVICE-mode catalog client (tests only)."""
-    global _service_catalog_client
-    with _service_catalog_lock:
-        if _service_catalog_client is not None:
-            _service_catalog_client.close()
-        _service_catalog_client = None
-        # nexus-0dpli: a test that left in-flight refcount bookkeeping
-        # behind (e.g. a barrier test that closed early) must not leak
-        # into the next test's assertions.
-        _service_catalog_refcounts.clear()
-        _service_catalog_pending_close.clear()
-
-
-def _acquire_shared_catalog_ref(client: Any) -> None:
-    """Record one more in-flight caller against *client*. Callers MUST
-    hold ``_service_catalog_lock`` and call this immediately after
-    resolving the client, in the SAME critical section — otherwise a
-    concurrent eviction could run between resolve and acquire and never
-    see this caller's reference (nexus-0dpli)."""
-    key = id(client)
-    _service_catalog_refcounts[key] = _service_catalog_refcounts.get(key, 0) + 1
-
-
-def _release_shared_catalog_ref(client: Any, *, evict: bool) -> bool:
-    """Release this caller's in-flight reference to *client*. Callers MUST
-    hold ``_service_catalog_lock``.
-
-    When *evict* is True, also clears the shared slot if it still points
-    at *client* (compare-and-swap by identity) so future resolvers build
-    fresh — regardless of whether THIS caller ends up being the one that
-    physically closes it.
-
-    Returns True exactly when the CALLER must run ``client.close()``
-    itself (after releasing the lock): either this is an evicting caller
-    and no other in-flight caller holds a reference (refcount drains to
-    zero right here), or this is a NON-evicting caller finishing its call
-    normally but a PRIOR caller already evicted *client* while this one
-    was still in flight (``nexus-0dpli``'s pending-close handoff) and this
-    is the last reference draining it. Never returns True for two
-    different callers on the same *client* — the refcount decrement and
-    the pending-close check happen in one atomic (locked) step, so
-    exactly one caller ever sees ``remaining <= 0``.
-    """
-    global _service_catalog_client
-    if evict and _service_catalog_client is client:
-        _service_catalog_client = None
-    key = id(client)
-    remaining = _service_catalog_refcounts.get(key, 1) - 1
-    if remaining > 0:
-        _service_catalog_refcounts[key] = remaining
-        if evict:
-            _service_catalog_pending_close.add(key)
-        return False
-    _service_catalog_refcounts.pop(key, None)
-    was_pending = key in _service_catalog_pending_close
-    _service_catalog_pending_close.discard(key)
-    return evict or was_pending
+    (slot if slot is not None else _default_catalog_slot).reset_op_stats()
 
 
 class _SharedServiceCatalogHandle:
@@ -208,7 +167,7 @@ class _SharedServiceCatalogHandle:
     is only torn down via error-triggered eviction or
     :func:`reset_shared_service_catalog_client_for_tests`.
 
-    CAS-NARROWED (nexus-u2u0n): ``_service_catalog_lock`` is held ONLY long
+    CAS-NARROWED (nexus-u2u0n): the slot's resolution lock is held ONLY long
     enough to resolve (get-or-build) the current client — never across the
     forwarded call's own network round trip. ``_call`` resolves under the
     lock, releases, makes the call, and on failure re-acquires the lock to
@@ -260,7 +219,20 @@ class _SharedServiceCatalogHandle:
     to ``False`` and is set ``True`` only inside ``except Exception`` —
     so a non-``Exception`` ``BaseException`` correctly releases WITHOUT
     evicting, the same safe default as no exception at all.
+
+    nexus-w1ip: the lock, refcounts, pending-close set and per-op stats
+    this docstring describes now live on a
+    :class:`~nexus.service_handles.SharedClientSlot` instance (``self._slot``)
+    rather than module globals — the CAS/refcount/eviction semantics above
+    are unchanged, only where the state is held. A slot also auto-evicts
+    on a stale ``(base_url, token)`` — see
+    :func:`_service_catalog_endpoint_key` — which this class gets for
+    free via :meth:`SharedClientSlot.resolve_and_apply` /
+    :meth:`SharedClientSlot.resolve_and_acquire`.
     """
+
+    def __init__(self, slot: Optional[SharedClientSlot] = None) -> None:
+        self._slot: SharedClientSlot = slot if slot is not None else _default_catalog_slot
 
     def __getattr__(self, name: str) -> Any:
         # nexus-jb4pp: this acquisition is NOT a formality — before the
@@ -273,25 +245,21 @@ class _SharedServiceCatalogHandle:
         # resolution is in-process (no round trip), so the wait it can
         # still show is queueing behind ANOTHER thread's brief resolution,
         # not behind a network call.
-        _w0 = time.monotonic()
-        with _service_catalog_lock:
-            _wait = time.monotonic() - _w0
-            client = _get_shared_service_catalog_client()
-            attr = getattr(client, name)  # may raise (e.g. local-mode-only ._db) — let it propagate untouched
-            _non_callable = not callable(attr)
-            if _non_callable:
-                # Recorded INSIDE the lock: the counters are plain floats
-                # whose only mutual exclusion is this lock.
-                _record_catalog_op(name, _wait, 0.0, calls=0)
+        #
+        # resolve_and_apply folds the getattr INTO the same locked section
+        # as the resolve (may raise -- e.g. local-mode-only ._db -- and
+        # propagates untouched), preserving the pre-nexus-w1ip convoy
+        # semantics this comment describes.
+        attr, _wait = self._slot.resolve_and_apply(lambda client: getattr(client, name))
+        _non_callable = not callable(attr)
         if _non_callable:
+            # Recorded via the slot's own lock — the counters are plain
+            # floats whose only mutual exclusion is that lock.
+            self._slot.record_op(name, _wait, 0.0, calls=0)
             return attr
 
         def _call(*args: Any, **kwargs: Any) -> Any:
-            _w1 = time.monotonic()
-            with _service_catalog_lock:
-                _wait2 = time.monotonic() - _w1
-                current = _get_shared_service_catalog_client()
-                _acquire_shared_catalog_ref(current)
+            current, _wait2 = self._slot.resolve_and_acquire()
             _c0 = time.monotonic()
             _evict = False
             try:
@@ -313,26 +281,8 @@ class _SharedServiceCatalogHandle:
                 # (KeyboardInterrupt/SystemExit) must still release this
                 # call's reference, or it leaks and can strand a sibling's
                 # already-evicted, pending-close instance forever.
-                #
-                # _record_catalog_op is folded into the SAME locked
-                # section: its own docstring has always said "called
-                # while holding the lock it measures" (true pre-CAS-
-                # narrowing, when the whole call ran inside
-                # `with _service_catalog_lock`), but the narrowing moved
-                # this call outside any lock, leaving concurrent callers
-                # racing an unguarded read-modify-write on the shared
-                # stats dict. Unlike `mcp_infra._record_t2_op` (given its
-                # own dedicated `_service_t2_stats_lock` in the same
-                # round), this function was never given one — restored
-                # the invariant here instead, at zero extra cost since
-                # this section already re-acquires `_service_catalog_lock`
-                # for the refcount release.
-                with _service_catalog_lock:
-                    _close_now = _release_shared_catalog_ref(current, evict=_evict)
-                    _record_catalog_op(
-                        name, _wait + _wait2, time.monotonic() - _c0)
-                if _close_now:
-                    current.close()
+                self._slot.release(current, evict=_evict)
+                self._slot.record_op(name, _wait + _wait2, time.monotonic() - _c0)
 
         return _call
 

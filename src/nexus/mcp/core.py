@@ -8459,8 +8459,9 @@ def _nx_answer_record_complete(
     before this bead. Nesting one ``_t2_index_write`` call inside
     another (the Step 6 arm's shape, since its own outer call already
     wraps the whole ``_nx_answer_record_complete`` invocation) is safe:
-    ``_service_t2_lock`` (mcp_infra.py) is released before ``write_fn``
-    runs, so the inner call's brief re-acquisition never deadlocks
+    ``mcp_infra._default_t2_slot``'s resolution lock (nexus-w1ip) is
+    released before ``write_fn`` runs, so the inner call's brief
+    re-acquisition never deadlocks
     against the outer one. The 404 fallback's own outcome bump reuses
     this exact shape for the same reason.
 

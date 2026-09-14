@@ -123,10 +123,11 @@ def test_hook_reaches_route_and_persists_without_embeddings_fetch(t2_service_env
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 
     # get_t3() is a lazy process-lifetime singleton NOT auto-reset between
-    # tests (tests/conftest.py's `_reset_service_t2_db` docstring: only the
-    # credential-bearing T2 handle is evicted automatically). A stale
-    # instance from an earlier test wouldn't break correctness here (the
-    # hook's service branch no longer calls anything on it besides the
+    # tests (unlike the T2 singleton, mcp_infra._default_t2_slot, which
+    # self-heals on a rotated per-test tenant token via its own
+    # endpoint-key staleness check — nexus-w1ip; T3 carries no such check
+    # yet). A stale instance from an earlier test wouldn't break correctness
+    # here (the hook's service branch no longer calls anything on it besides the
     # isinstance-shaped `is_service_backed` gate), but forcing a fresh
     # resolve keeps this test independent of suite ordering — same pattern
     # as tests/db/test_http_vector_client.py's TestTaxonomyServiceModeGuard.

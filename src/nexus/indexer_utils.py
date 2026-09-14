@@ -1353,9 +1353,10 @@ def resolve_index_concurrency() -> int:
     instead of selecting a divergent backend, so no supported
     configuration can produce the hazard this gate was once extended for.
     Every T2 write from every hook already goes through
-    ``mcp_infra._service_t2_lock`` regardless of this gate or the hook
-    lock, which is what actually protects the shared T2 client's
-    lifecycle. The real remaining constraint on narrowing
+    ``mcp_infra._default_t2_slot``'s own resolution lock (nexus-w1ip)
+    regardless of this gate or the hook lock, which is what actually
+    protects the shared T2 client's lifecycle. The real remaining
+    constraint on narrowing
     ``LockedHookRegistry`` is a DIFFERENT, still-live hazard: the manifest
     hook's superseded-vector sweep did a client-side read-then-write-then-
     read sequence across the catalog that a concurrent flush could race

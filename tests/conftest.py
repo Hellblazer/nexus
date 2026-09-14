@@ -1957,88 +1957,6 @@ def _pin_t2_substrate(request: pytest.FixtureRequest) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_shared_service_catalog_client() -> None:
-    """Drop the process-lifetime shared SERVICE catalog client between tests
-    (nexus-aqbrk).
-
-    ``nexus.catalog.factory`` memoises ONE ``HttpCatalogClient`` for the life
-    of the process (nexus-5en9j — it was the largest reconstruction count in
-    the nexus-53x7s shakeout, 394 constructions in one run). Correct in
-    production, where the tenant never changes mid-process. Wrong for a
-    pytest session, where the engine substrate mints a FRESH TENANT AND TOKEN
-    per test: the memoised client keeps the FIRST test's token, so every
-    later test's catalog reads and writes land in the first test's tenant.
-
-    The visible symptom is not "wrong tenant" — it is accumulation. Rows pile
-    up in tenant #1 across the whole module, and eventually a
-    ``register_owner`` that is the first of its name IN ITS OWN TEST hits a
-    row an earlier test already wrote, and the engine correctly refuses:
-    ``HTTP 409: integrity constraint violation`` on ``/v1/catalog/owners/
-    upsert`` (catalog_owners_unique_name_type). Order-dependent, passes in
-    isolation, and the error names a constraint rather than the cause — the
-    same profile as the import-seed-id defect, and the same trap.
-
-    ``reset_shared_service_catalog_client_for_tests`` already existed for
-    exactly this; nothing called it outside the one test that owns the
-    caching behaviour itself. Reset on BOTH sides so a test that constructs
-    the client cannot leak it forward, and a test that inherits one cannot
-    start dirty.
-    """
-    from nexus.catalog import factory
-
-    factory.reset_shared_service_catalog_client_for_tests()
-    yield
-    factory.reset_shared_service_catalog_client_for_tests()
-
-
-@pytest.fixture(autouse=True)
-def _reset_service_t2_db() -> None:
-    """Drop the process-lifetime service ``T2Database`` singleton between tests
-    (nexus-aqbrk).
-
-    THE SAME DEFECT AS ``_reset_shared_service_catalog_client`` ABOVE, one
-    tier over, and named as such in nexus-5en9j: ``mcp_infra`` memoises ONE
-    service-backed ``T2Database`` in ``_service_t2_db`` and every service-mode
-    ``t2_index_write`` runs against it (``_service_t2_write_locked``). Its
-    ``Http*Store`` clients bake in the endpoint and BEARER TOKEN they saw at
-    construction, and the engine substrate mints a fresh tenant + token per
-    test — so a singleton built by the first test writes every later test's
-    rows into the FIRST test's tenant.
-
-    The symptom is a test reading an empty store it just wrote to: the write
-    landed in tenant #1, the read-back runs in its own tenant. Order-dependent
-    — passes solo, fails in file order — and harmless on the SQLite substrate,
-    where ``t2_index_write`` never takes the service branch and this reset is
-    a no-op.
-
-    Already diagnosed once, per-file: ``tests/test_rdr_084_plan_grow.py``
-    carries a local autouse fixture calling ``reset_singletons()`` for exactly
-    this reason. That is the same shape the catalog client had before the
-    fixture above — one file working around a session-wide hazard. This
-    promotes the eviction to the whole suite.
-
-    SCOPE IS DELIBERATELY NARROWER THAN ``reset_singletons()``. That helper
-    also drops ``_t1_instance`` / ``_t3_instance`` / ``_collections_cache`` /
-    the plan cache / the vector client; making all of that autouse would
-    invalidate module-scoped T1/T3 injections that tests legitimately expect
-    to survive across a file. Only the credential-bearing T2 handle is evicted
-    here. Reset on BOTH sides, for the same reason as the catalog client: a
-    test cannot leak one forward, and cannot start dirty.
-    """
-    import nexus.mcp_infra as mcp_infra
-
-    def _evict() -> None:
-        with mcp_infra._service_t2_lock:
-            if mcp_infra._service_t2_db is not None:
-                mcp_infra._service_t2_db.close()
-            mcp_infra._service_t2_db = None
-
-    _evict()
-    yield
-    _evict()
-
-
-@pytest.fixture(autouse=True)
 def _restore_t3_singleton(request: pytest.FixtureRequest):
     """SNAPSHOT/RESTORE ``mcp_infra._t3_instance`` around every test
     (nexus-jovc9, closing the residual nexus-0ne4s filed by nexus-gtl01).
@@ -2066,8 +1984,10 @@ def _restore_t3_singleton(request: pytest.FixtureRequest):
     exactly the jovc9 signature, and exactly gtl01's signature one link
     upstream.
 
-    SNAPSHOT/RESTORE, not evict-both-sides (the shape
-    ``_reset_service_t2_db`` above takes). Restoring the PRIOR value cannot
+    SNAPSHOT/RESTORE, not evict-both-sides (the shape the T2/catalog
+    singleton slots' own staleness-detecting resolve now makes unnecessary
+    for THOSE tiers — nexus-w1ip; T3 has no such endpoint-key check yet, so
+    this fixture still evicts by hand). Restoring the PRIOR value cannot
     invalidate a handle installed before this test — the objection that kept
     the conftest from doing this for T3 at gtl01 time. That objection named
     module-scoped T3 injections; a full-tree sweep at jovc9 found none (every
@@ -2248,31 +2168,6 @@ def _stub_plan_grow_generalizer(request, monkeypatch: pytest.MonkeyPatch) -> Non
         "nexus.mcp.core._generalize_grown_match_description",
         AsyncMock(return_value=None),
     )
-
-
-@pytest.fixture(autouse=True)
-def _isolate_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Redirect NEXUS_CATALOG_PATH so tests never pollute the real user catalog.
-
-    Without this, integration tests that trigger _catalog_hook() (via index_repo,
-    index_markdown, or similar) register documents in the user's live catalog at
-    ~/.config/nexus/. Before this fixture landed (RDR-060, 2026-04-08), 64
-    orphan ``int-cce-*`` curator owners accumulated from
-    ``test_cce_query_retrieves_cce_indexed_markdown`` alone.
-
-    HISTORY, corrected 2026-08-18 (wave-3 critique): this docstring used to
-    claim the mechanism was catalog write paths guarding on
-    ``Catalog.is_initialized(cat_path)`` and cite
-    ``tests/test_catalog_isolation.py`` — BOTH are gone (the guard left the
-    service-mode write path at nexus-f1itv; the local catalog and its
-    isolation file were deleted at nexus-i711w). In the service era this
-    env var is residual local-path hygiene only; the isolation that
-    actually protects the operator's catalog is the three-fixture stack
-    (``_isolate_config_dir`` + ``_isolate_service_endpoint_env`` +
-    ``_pin_t2_substrate``'s per-test tenant), regression-locked by
-    ``tests/test_service_catalog_isolation.py`` (nexus-1vt0b).
-    """
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "test-catalog"))
 
 
 @pytest.fixture(autouse=True)

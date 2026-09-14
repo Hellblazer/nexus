@@ -1973,12 +1973,13 @@ class TestGuardedMethods:
 
 class TestFactorySeam:
     @pytest.fixture(autouse=True)
-    def _reset_shared_service_catalog_client(self):
+    def _reset_catalog_slot_around(self):
         """nexus-5en9j: service-mode readers/writers now share ONE
-        process-lifetime HttpCatalogClient (module-global state in
-        catalog/factory.py), not a fresh instance per call. Reset before
-        AND after each test so this test class's real (unmocked)
-        HttpCatalogClient construction never leaks into a sibling test."""
+        process-lifetime HttpCatalogClient (a SharedClientSlot instance,
+        ``catalog/factory._default_catalog_slot`` — nexus-w1ip), not a
+        fresh instance per call. Reset before AND after each test so this
+        test class's real (unmocked) HttpCatalogClient construction never
+        leaks into a sibling test."""
         from nexus.catalog.factory import reset_shared_service_catalog_client_for_tests
 
         reset_shared_service_catalog_client_for_tests()

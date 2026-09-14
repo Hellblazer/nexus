@@ -710,9 +710,10 @@ class LockedHookRegistry:
     resolved to exactly one backend (``StorageBackend.SERVICE``) since
     RDR-158 P3, so no supported configuration produces a divergent T2
     backend, and every T2 write from every hook goes through
-    ``mcp_infra._service_t2_lock`` regardless of this class. The real
-    remaining constraint this class protects is the manifest hook's
-    client-side sweep sequence, not the T2 backend question.
+    ``mcp_infra._default_t2_slot``'s own resolution lock (nexus-w1ip)
+    regardless of this class. The real remaining constraint this class
+    protects is the manifest hook's client-side sweep sequence, not the
+    T2 backend question.
 
     Two consequences are load-bearing (unchanged from the coarse-lock
     version, now applied per-hook rather than per-dispatch):

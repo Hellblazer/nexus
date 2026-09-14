@@ -2051,8 +2051,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         round-trips into one per distinct owner.
 
         POSITIVE RESULTS ONLY — a miss is never cached. This client is a
-        PROCESS-LIFETIME SINGLETON (catalog/factory.py
-        ``_get_shared_service_catalog_client``, nexus-53x7s), so caching
+        PROCESS-LIFETIME SINGLETON (catalog/factory.py's
+        ``_default_catalog_slot``, nexus-53x7s / nexus-w1ip), so caching
         a ``None`` would pin "this owner does not exist" for the life of
         the process: an owner registered afterwards by ANOTHER process
         (a separate ``nx index repo`` run, a daemon) would never be
