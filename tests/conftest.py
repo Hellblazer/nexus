@@ -524,9 +524,18 @@ def pytest_sessionfinish(session, exitstatus):
 #: (nexus-wjkc7): it must NOT also appear in
 #: ``_REAL_CONFIG_DIR_ALLOWLIST_PREFIXES``, which would exempt it from the
 #: diff entirely and make this stricter, size-checked rule unreachable.
+#:
+#: ``dropped_writes.jsonl``: the best-effort drop meter. Its live writers are
+#: the conexus routing hook (``_record_dropped_routing_event``, which records
+#: every subagent git write on this box and appends here when its engine POST
+#: fails) and the session-end capability census (``record_drop``). Both open
+#: it O_APPEND and nothing rotates it. A peer session's worktree commit during
+#: a run therefore grows it with no test involved: a 19,372-pass run exited 1
+#: over one such line (nexus-ume6q batch, peer commit ca8d314b0).
 _APPEND_ONLY_REAL_CONFIG_LOGS = frozenset({
     "routing_log.jsonl",
     "index.log",
+    "dropped_writes.jsonl",
 })
 
 #: Directories under the real config dir that hold AMBIENT DAEMON OUTPUT --
