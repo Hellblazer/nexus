@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
@@ -260,23 +261,26 @@ def test_collection_exists_asks_the_store_not_the_listing(rdr_hook_module, monke
 
 
 def test_resolution_failure_is_logged_not_swallowed(rdr_hook_module, monkeypatch, tmp_path) -> None:
+    """nexus-ujdha: this used to replace structlog.get_logger globally with a
+    fake that had only .warning(). Run alone, nexus.indexer was first imported
+    inside the hook's path-derived fallback, AFTER the patch, so its
+    module-level logger became the fake and the fallback's .debug() raised:
+    the test failed in isolation and passed in the full suite, where
+    nexus.indexer was already imported. capture_logs() records the real event
+    and leaks nothing into modules imported during the test."""
     mod = rdr_hook_module
-    logged: list[dict] = []
-
-    class _Logger:
-        def warning(self, event, **kw):
-            logged.append({"event": event, **kw})
-
-    import structlog
-    monkeypatch.setattr(structlog, "get_logger", lambda *a, **k: _Logger())
 
     def boom():
         raise ConnectionError("engine down")
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", boom)
     monkeypatch.setattr("nexus.repo_identity._repo_identity", lambda r: ("isolated", "abcdef12"))
-    name = mod._resolve_rdr_collection(tmp_path)
+    with capture_logs() as logged:
+        name = mod._resolve_rdr_collection(tmp_path)
     assert name == "rdr__isolated-abcdef12__voyage-context-3__v1"
-    assert any(e["event"] == "rdr_hook_collection_resolution_failed" and e["source"] == "catalog" for e in logged), logged
+    assert any(
+        e["event"] == "rdr_hook_collection_resolution_failed" and e.get("source") == "catalog"
+        for e in logged
+    ), logged
 
 
 def test_indexed_document_count_matches_the_indexer_walk(rdr_hook_module, tmp_path) -> None:
