@@ -72,7 +72,7 @@ destroyed is EXPIRY, which is not a promote at all. An RDR that inherits the
 | RDR | Status | Relationship |
 | --- | --- | --- |
 | RDR-057 Progressive Formalization Across Memory Tiers | closed | **Origin.** It created the expiry this RDR questions, and it named this RDR as the precondition for revisiting the cut. Its stated rationale for cutting — "No failure mode analysis" — has expired: the analysis is below. That is the strongest evidence for reopening, and it is the reason this is a new RDR rather than an amendment. |
-| RDR-131 T2 Session Rollup Summaries (MemTree-Lite) | draft (stub) | **Adjacent draft, and thinner than it looks.** 123 lines from a single 2026-05-27 stub commit, no beads, nothing implemented, and its own rationale/alternatives/test-plan sections read "to be completed during research". It SKETCHES the `memory_summaries` shape design (a) would consume rather than specifying it. Scope boundary: RDR-131 owns WHAT a rollup is and how it is produced for context injection; RDR-207 owns WHETHER expiry may delete a row that no rollup covers. RDR-131 can ship without RDR-207 (summaries with no gate); RDR-207's design (a) cannot ship without RDR-131's shape, so it sequences after. |
+| RDR-131 T2 Session Rollup Summaries (MemTree-Lite) | abandoned (2026-09-12; its live half moved here) | **Adjacent draft, and thinner than it looks.** 123 lines from a single 2026-05-27 stub commit, no beads, nothing implemented, and its own rationale/alternatives/test-plan sections read "to be completed during research". It SKETCHES the `memory_summaries` shape design (a) would consume rather than specifying it. Scope boundary: RDR-131 owns WHAT a rollup is and how it is produced for context injection; RDR-207 owns WHETHER expiry may delete a row that no rollup covers. RDR-131 can ship without RDR-207 (summaries with no gate); RDR-207's design (a) cannot ship without RDR-131's shape, so it sequences after. |
 | RDR-132 Scope-Routed T1 to T2 Promotion | draft | **Adjacent draft.** Concerns the T1→T2 boundary and namespace scoping; RDR-207 concerns the T2-expiry boundary. They meet only in §RF-8's table, which both should fill in for their own row. No sequencing dependency. |
 | RDR-194 Post-RDR-187 FK Census (§A14, "One TTL Semantics") | closed | **Precedent.** It already ruled that unit-less TTL naming is half the reason `0` reads as "no TTL", and unified the semantics rather than accepting a half-measure. RDR-207's out-of-scope item (the `ttl=30`-by-omission default) is the same family of defect at the API surface rather than the schema, so that fix has precedent here rather than needing to argue from first principles. |
 | RDR-128 T2 Single-Writer Enforcement | closed | **Context, not overlap.** Its P3 routes the session-end flush and TTL sweep through the T2 daemon because the detached SessionEnd grandchild can outlive the MCP lifespan. That routing is why failure mode 1 below is about execution context rather than about correctness. |
@@ -103,7 +103,7 @@ filing.
 
 **Verified — the sweep is continuous, not a future cliff.**
 `MemoryRepository.expire()` has no scheduler; its only trigger is
-`POST /v1/memory/expire`, and `src/nexus/hooks.py:440` calls it at **every
+`POST /v1/memory/expire`, and `src/nexus/hooks.py:583` calls it at **every
 session end** — measured at ~3/hour, 20 firings in the 6.3 hours to 22:43Z, one
 of which (20:29:59Z) returned a non-empty `deleted_ids`.
 
@@ -146,6 +146,55 @@ the one structured field, not of the logging. The directional point stands
 unchanged: the exception is caught, the expiry proceeds regardless, and a
 summarization step written in that idiom would fail while the delete still
 happened.
+
+- **✅ Verified** (source search, 2026-09-14, tree at 05327a277) — Candidate (a)
+  does not depend on RDR-131, and its minimal shape is cheap. RDR-131 has been
+  `status: abandoned` since 2026-09-12 (its abandon reason says its live half
+  moved here); the relationship table above is corrected to say so. Its
+  `memory_summaries` shape was one sentence, `memory_summaries(project,
+  span_start, span_end, content, entry_ids)`, with no tenant, session, model or
+  produced-at column. `nexus.memory` today carries id, tenant_id, project,
+  title, session, agent, content, tags, timestamp, ttl_days, access_count,
+  last_accessed and fts_vector, and no mark or state column.
+  `MemoryRepository.expire()` selects `WHERE ttl_days IS NOT NULL`, computes the
+  heat-weighted TTL in Java and deletes; there is no other predicate. The
+  minimal shape for (a) is one nullable mark column on `nexus.memory` (for
+  example `rolled_up_at`), one added predicate in `expire()`, and a separate
+  `nexus.memory_summaries` table (tenant_id, project, source ids, content,
+  produced_at, model) modelled on the append-only `aspect_promotion_log`
+  pattern: one or two Liquibase changesets and one jOOQ predicate. What is not
+  cheap, and not needed for the gate, is the rollup producer, the
+  session-end-flush wiring and the drill-down injection RDR-131 sketched. So (a)
+  must specify the summaries shape in this RDR; there is no RDR to sequence
+  behind. No prior T2 record decides any of this.
+  *Source: `docs/rdr/rdr-131-t2-session-rollup-summaries.md:5-6,103-104`;
+  `service/src/main/resources/db/changelog/memory-001-baseline.xml:85-97`,
+  `memory-003-ttl-days.xml`; `MemoryRepository.java:566-598`;
+  `aspects-001-baseline.xml:9,32`. T2 `nexus_rdr/207-research-1`.*
+
+- **✅ Verified for (b), ❓ Assumed for (a)** (source search, 2026-09-14) —
+  What the wire change looks like. The current contract is `POST
+  /v1/memory/expire` with the body ignored and `{"deleted_ids": [...]}` back
+  (`MemoryHandler.java:382-386`, `http_memory_store.py:481-484`). Three real
+  callers of the client method: `T2Database.expire` (`db/t2/__init__.py:737`,
+  which also logs `memory_deleted` from that list), `hooks.py:583` inside the
+  session-end flush-then-expire, and `nx memory expire`. Under (a) the shape can
+  stay identical and an old client simply sees fewer ids, which reads
+  `[additive]` in the wire ledger's sense (old client plus new engine safe),
+  provided the mark write is a separate endpoint the client never needs for
+  expire to work. That separation is not yet specified here, so (a)'s
+  additivity is assumed, not verified. Under (b) the response changes meaning:
+  `deleted_ids` either keeps its name while the rows still exist, or becomes
+  `quarantined_ids`, and the session-end path relies on rows actually being
+  gone. That is a real narrowing, so (b) is not additive and needs the paired
+  non-additive choreography. (b) also adds a new `nx memory` verb; the group has
+  put, get, search, list, delete, expire and promote today, and "quarantine" has
+  no hit anywhere in `src`, `service` or `tests`. Tests pinning the shape:
+  `tests/db/test_http_memory_store.py:309`,
+  `tests/db/test_t1_cli_dedicated_session.py:152`,
+  `tests/db/test_mvv_memory_service.py:592-651`.
+  *Source: files above; `docs/wire-contract-pending.md:54-62` for the
+  `[additive]` rule. T2 `nexus_rdr/207-research-2`.*
 
 ## Proposed Solution
 
@@ -224,7 +273,7 @@ Designs (a) and (b) both imply a wire change; (c) may. Flagged explicitly:
 | Surface | Change |
 | --- | --- |
 | Engine | `MemoryRepository.expire()`, `MemoryHandler POST /v1/memory/expire` |
-| Client | `src/nexus/hooks.py:440` (session-end trigger), `T2Database.expire` (`db/t2/__init__.py`), `http_memory_store.py`, `commands/memory.py` (`expire_cmd`, `promote_cmd`) |
+| Client | `src/nexus/hooks.py:583` (session-end trigger), `T2Database.expire` (`db/t2/__init__.py`), `http_memory_store.py`, `commands/memory.py` (`expire_cmd`, `promote_cmd`) |
 | Wire contract | **Yes.** Any change to what `POST /v1/memory/expire` does or returns, and any new rollup/mark endpoint, is a wire change. Two of the three candidates imply one. |
 | Plugin / marketplace | Not touched. |
 | Paired-release choreography | Not touched. |
@@ -267,7 +316,7 @@ Not run. Filed as draft.
 - RDR-057 §Problem Statement, §RF-3, §RF-8, §RF-12, §Cut and Deferred,
   §Instrumentation — `docs/rdr/rdr-057-progressive-formalization-memory-tiers.md`
 - RDR-131 (`memory_summaries` shape), RDR-132, RDR-194 §A14, RDR-128 P3
-- `src/nexus/hooks.py:440`; `src/nexus/db/t2/__init__.py:735`;
+- `src/nexus/hooks.py:583`; `src/nexus/db/t2/__init__.py:735`;
   `src/nexus/db/t2/http_memory_store.py:481`
 - arxiv 2604.01707 (the relevance-decay formula RDR-057 §RF-3 inverted)
 - conexus beads: `conexus-61pz` (their half), `conexus-j2jf` (the `ttl=30`
@@ -279,3 +328,4 @@ Not run. Filed as draft.
 | --- | --- |
 | 2026-09-12 | Filed as draft. Text relayed from conexus; prior-art scan, house-format sections, and the failure-mode-5 correction added on filing. Lifecycle transitions are Sam's; nothing here is accepted. |
 | 2026-09-12 | Research Findings amended hours after filing: the full tenant sweep to permanent landed, so the "2,269 remain" measurement is now historical. Recorded rather than edited away — a record that quietly drops a number a reader would re-measure teaches them to distrust the rest of it, and the measurement is still the evidence for why the boundary needs deciding. Also corrected the RDR-131 characterisation: it is a 123-line never-researched stub whose design sections read "to be completed during research", not an existing specification of the `memory_summaries` shape, so candidate (a) requires that design to be WRITTEN rather than merely sequenced behind RDR-131. |
+| 2026-09-14 | Research Findings 1 and 2 added (T2 `207-research-1`, `207-research-2`): RDR-131 is abandoned, so candidate (a) must specify its own summaries shape; the wire change is assumed additive under (a) and verified non-additive under (b). Two stale facts corrected from those findings: RDR-131's status in the relationship table, and the session-end trigger line (`hooks.py:583`, not 440). |
