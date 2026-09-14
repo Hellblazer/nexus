@@ -3557,7 +3557,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # already-uploaded page's chunks on a stale-registration retry —
         # a correctness risk, not just a wasted call.
         from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
-        ensure_collection_registered(collection)
+        # This client's own endpoint, never the ambient catalog writer
+        # (nexus-dvgsf): a client pinned to a second engine must register
+        # the collection where it is about to write it.
+        ensure_collection_registered(collection, registrar=self._catalog_registrar)
         failed: list[str] = []
         refused: list[dict] = []
         refused_count = 0

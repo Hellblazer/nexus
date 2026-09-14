@@ -45,6 +45,7 @@ Design shape:
 
 from __future__ import annotations
 
+import hashlib
 import ssl
 import threading
 import time
@@ -479,16 +480,25 @@ class _EndpointRegistrar:
         self._store = store
 
     @property
-    def scope(self) -> "tuple[str, str] | None":
-        """``(base_url, tenant)`` — the cache-partition key for this
-        registrar, distinct from any other endpoint/tenant pair; ``None``
-        (the ambient partition) when the store has no ``_base_url`` of
-        its own yet (see the class docstring)."""
+    def scope(self) -> "tuple[str, str, str] | None":
+        """``(base_url, tenant, bearer digest)`` — the cache-partition key
+        for this registrar; ``None`` (the ambient partition) when the store
+        has no ``_base_url`` of its own yet (see the class docstring).
+
+        The bearer is part of the key because the declared tenant is
+        advisory: the engine binds the tenant from the bearer (a root token
+        binds ``default``, a mint-locked credential the tenant it was issued
+        under; see ``nexus.db.data_token``, nexus-ssqk9). Two stores on one
+        endpoint that declare one tenant can therefore be bound to two
+        server tenants, and must not share a cache entry (nexus-dvgsf
+        critic). A re-minted bearer changes the digest, which costs one
+        idempotent re-registration per collection and never skips one."""
         base_url = getattr(self._store, "_base_url", None)
         tenant = getattr(self._store, "_tenant", None)
         if base_url is None or tenant is None:
             return None
-        return (base_url, tenant)
+        token = getattr(self._store, "_token", None) or ""
+        return (base_url, tenant, hashlib.sha256(token.encode()).hexdigest()[:16])
 
     def __call__(self) -> Any:
         base_url = getattr(self._store, "_base_url", None)
@@ -504,7 +514,7 @@ class _EndpointRegistrar:
         return make_catalog_writer_for_endpoint(
             base_url=base_url,
             token=getattr(self._store, "_token", None) or "",
-            tenant=self._store._tenant,
+            tenant=getattr(self._store, "_tenant", None) or DEFAULT_TENANT,
             # The store's own pool (or a test's mocked transport), never a
             # second real client to the same host: the writer neither owns
             # nor closes an injected client (nexus-m20mf contract).

@@ -1600,7 +1600,8 @@ def collection_registration_kwargs(name: str) -> dict[str, str]:
 _REGISTERED_COLLECTIONS: set[str] = set()
 #: Per-process cache for a registrar bound to an EXPLICIT endpoint/tenant
 #: (nexus-w1ip follow-up, critic review 2026-09-14, gap 1): keyed on
-#: ``((base_url, tenant), name)`` rather than name alone, so a SECOND
+#: ``((base_url, tenant, bearer digest), name)`` rather than name alone
+#: (the bearer because the declared tenant is advisory; nexus-dvgsf), so a SECOND
 #: store pinned to a SECOND engine registering the SAME name a
 #: DIFFERENT store already registered still calls its own registrar,
 #: instead of short-circuiting behind the first store's cache entry and
@@ -1610,11 +1611,11 @@ _REGISTERED_COLLECTIONS: set[str] = set()
 #: uses :data:`_REGISTERED_COLLECTIONS` instead; the two sets are
 #: disjoint partitions of the same idempotent-registration cache, never
 #: merged.
-_REGISTERED_COLLECTIONS_SCOPED: set[tuple[tuple[str, str], str]] = set()
+_REGISTERED_COLLECTIONS_SCOPED: set[tuple[tuple[str, ...], str]] = set()
 _REGISTERED_COLLECTIONS_LOCK = threading.Lock()
 
 
-def _registration_cache_contains(scope: "tuple[str, str] | None", name: str) -> bool:
+def _registration_cache_contains(scope: "tuple[str, ...] | None", name: str) -> bool:
     """True when *name* is already known-registered in *scope*'s cache
     partition — :data:`_REGISTERED_COLLECTIONS` for ambient (``scope is
     None``), :data:`_REGISTERED_COLLECTIONS_SCOPED` otherwise. Caller's
@@ -1625,7 +1626,7 @@ def _registration_cache_contains(scope: "tuple[str, str] | None", name: str) -> 
     return (scope, name) in _REGISTERED_COLLECTIONS_SCOPED
 
 
-def _registration_cache_add(scope: "tuple[str, str] | None", name: str) -> None:
+def _registration_cache_add(scope: "tuple[str, ...] | None", name: str) -> None:
     """Mark *name* known-registered in *scope*'s cache partition. Caller
     holds :data:`_REGISTERED_COLLECTIONS_LOCK`."""
     if scope is None:
@@ -1634,7 +1635,7 @@ def _registration_cache_add(scope: "tuple[str, str] | None", name: str) -> None:
         _REGISTERED_COLLECTIONS_SCOPED.add((scope, name))
 
 
-def _registration_cache_discard(scope: "tuple[str, str] | None", name: str) -> None:
+def _registration_cache_discard(scope: "tuple[str, ...] | None", name: str) -> None:
     """Evict *name* from *scope*'s cache partition. Caller holds
     :data:`_REGISTERED_COLLECTIONS_LOCK`."""
     if scope is None:
@@ -1681,8 +1682,8 @@ def ensure_collection_registered(
     is name-keyed only (no tenant dimension) — matching every other
     ambient-tenant catalog write in this codebase (``make_catalog_writer()``
     itself resolves tenant from config, not from a caller-supplied
-    value). A *registrar* that carries a ``scope`` attribute (an
-    ``(base_url, tenant)`` pair — see :class:`~nexus.db.t2.
+    value). A *registrar* that carries a ``scope`` attribute (a
+    ``(base_url, tenant, bearer digest)`` triple — see :class:`~nexus.db.t2.
     _refreshable_client._EndpointRegistrar`) is cached separately, keyed
     on ``(scope, name)`` — nexus-w1ip follow-up gap 1: a name-only cache
     shared across scopes let a SECOND store pinned to a SECOND engine

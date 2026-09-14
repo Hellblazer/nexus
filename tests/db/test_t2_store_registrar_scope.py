@@ -35,6 +35,7 @@ from urllib.parse import urlparse
 
 import pytest
 
+from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.db.t2.http_aspect_queue import HttpAspectQueue
 from nexus.db.t2.http_chash_index import HttpChashIndex
 from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
@@ -157,6 +158,20 @@ def _drive_taxonomy(store) -> None:
     store.record_discover_count("some_col", 5)
 
 
+def _drive_taxonomy_persist_assignments(store) -> None:
+    # Registers through a direct ensure_collection_registered call, not
+    # write_with_registration_retry (nexus-dvgsf critic sweep).
+    store.persist_assignments([{"source_collection": "some_col", "doc_id": "chash-1", "topic_id": 1}])
+
+
+def _mk_catalog(base_url: str, token: str):
+    return HttpCatalogClient(base_url=base_url, _token=token)
+
+
+def _drive_catalog_write_manifest_many(store) -> None:
+    store.write_manifest_many([("1.1.1", [])], collection="some_col")
+
+
 #: Collection name each driver's write ultimately registers -- needed by
 #: the collision-case test below to pre-register the RIGHT name against
 #: the ambient server before driving the "own"-pinned store.
@@ -166,6 +181,14 @@ _CASES = [
     pytest.param(_mk_document_aspects, _drive_document_aspects, "some_col", id="HttpDocumentAspectsStore"),
     pytest.param(_mk_document_highlights, _drive_document_highlights, "new_col", id="HttpDocumentHighlightsStore"),
     pytest.param(_mk_taxonomy, _drive_taxonomy, "some_col", id="HttpTaxonomyStore"),
+    pytest.param(
+        _mk_taxonomy, _drive_taxonomy_persist_assignments, "some_col",
+        id="HttpTaxonomyStore.persist_assignments",
+    ),
+    pytest.param(
+        _mk_catalog, _drive_catalog_write_manifest_many, "some_col",
+        id="HttpCatalogClient.write_manifest_many",
+    ),
 ]
 
 
@@ -256,3 +279,49 @@ def test_ambient_registration_first_does_not_short_circuit_the_stores_own_regist
             f"the store's own registrar must still be called for {target_name!r} even though "
             f"the ambient cache already marked it registered; got {own_handler.calls!r}"
         )
+
+
+def _multi_bearer_handler(tokens: tuple[str, ...]) -> type[_RecordingHandler]:
+    """A ``_RecordingHandler`` accepting any of *tokens*, recording which
+    bearer each registration call carried."""
+
+    class _Handler(_RecordingHandler):
+        TOKEN = tokens[0]
+        calls: list[str] = []
+        registration_bearers: list[str] = []
+
+        def _check_auth(self) -> bool:
+            auth = self.headers.get("Authorization", "")
+            if auth not in {f"Bearer {t}" for t in tokens}:
+                self._send(401, {"error": "unauthorized"})
+                return False
+            if urlparse(self.path).path == REGISTRATION_ROUTE:
+                type(self).registration_bearers.append(auth.removeprefix("Bearer "))
+            return True
+
+    return _Handler
+
+
+def test_same_endpoint_and_tenant_with_a_different_bearer_registers_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The declared tenant is advisory: the engine binds the tenant from
+    the bearer, so two stores on one endpoint that both declare the default
+    tenant can be bound to two server tenants (nexus-dvgsf critic, T2
+    ``nexus/nexus-dvgsf-critic-2026-09-14``). Each must register the
+    collection with its own bearer. With a ``(base_url, tenant)`` cache key
+    the second store hits the first store's entry and never registers."""
+    tokens = (OWN_TOKEN, f"{OWN_TOKEN}-second-tenant")
+    own_handler = _multi_bearer_handler(tokens)
+    ambient_handler = _handler_subclass(AMBIENT_TOKEN)
+
+    with fake_http_server(own_handler) as own_url, fake_http_server(ambient_handler) as ambient_url:
+        _pin_ambient_env(monkeypatch, ambient_url)
+        for token in tokens:
+            store = _mk_chash(own_url, token)
+            try:
+                _drive_chash(store)
+            finally:
+                store.close()
+
+    assert own_handler.registration_bearers == list(tokens), own_handler.registration_bearers

@@ -1107,7 +1107,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             a.get("source_collection") for a in assignments if a.get("source_collection")
         }
         for source_collection in source_collections:
-            ensure_collection_registered(source_collection)
+            ensure_collection_registered(source_collection, registrar=self._catalog_registrar)
         _PAGE = 1000  # engine cap (MAX_BATCH parity)
 
         def _post_pages() -> None:

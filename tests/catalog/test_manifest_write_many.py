@@ -287,6 +287,13 @@ class TestWriteManifestManyReachesGatewayRetryFloor:
 
         monkeypatch.setattr(c, "_request_once", fake_request_once, raising=False)
         monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+        # write_manifest_many registers the collection on this client's own
+        # endpoint first (nexus-dvgsf), through a separate writer whose
+        # transport this test does not patch; it would dial fake-svc.
+        # Registration is not what this test measures.
+        import nexus.corpus as corpus  # noqa: PLC0415 — the registration seam write_manifest_many imports at call time
+
+        monkeypatch.setattr(corpus, "ensure_collection_registered", lambda *a, **k: None)
 
         result = c.write_manifest_many(
             [("1.9.18", [{"chash": "a" * 64, "position": 0}])],
