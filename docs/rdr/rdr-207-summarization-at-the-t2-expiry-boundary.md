@@ -830,3 +830,4 @@ rather than edited away for the reason stated in its revision note.
 | 2026-09-14 | Gate round 1 — BLOCKED (1 Critical, 1 Significant, 1 ship-blocker(s)); commit `abd90979f`; critique `nexus_rdr/207-gate-critique-2026-09-14`. |
 | 2026-09-14 | Gate round 2 — BLOCKED (1 Critical, 0 Significant, 1 ship-blocker(s)); commit `7e23eb65e`; critique `nexus_rdr/207-gate-critique-2026-09-14b`. |
 | 2026-09-14 | Gate round 3 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `5710ac384`; critique `nexus_rdr/207-gate-critique-2026-09-14d`. |
+| 2026-09-14 | Accept: the three round 3 residuals dispositioned by file change, commits `9124a2be7` (delete override named, summaries-delete verb struck, A5 import-branch wording) and `007aac28d` (A5 count); fix checks `nexus_rdr/207-fix-check-9124a2be7` and `nexus_rdr/207-fix-check-007aac28d`, both PASS. |
