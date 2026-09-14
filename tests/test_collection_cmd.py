@@ -622,6 +622,23 @@ def test_reindex_aborts_on_sourceless(runner, env_creds, mock_db) -> None:
     assert any(w in result.output.lower() for w in ("sourceless", "source_path", "force", "lost"))
 
 
+def test_reindex_refuses_code_collection_before_the_sourceless_scan(runner, env_creds, mock_db) -> None:
+    """GH #1546 (nexus-rndy5): a code collection with sourceless entries used
+    to reach the sourceless check first, which asks for --force; the code
+    refusal then fired on the second run. It fires first, and no chunk page
+    is ever read."""
+    mock_db.collection_info.return_value = {"count": 3, "metadata": {}}
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": ["a", "b"], "metadatas": [{}, {}]}
+    mock_db.get_or_create_collection.return_value = mock_col
+    result = _invoke(runner, mock_db, ["reindex", "code__1-38__voyage-code-3__v1"])
+    assert result.exit_code != 0
+    assert "no re-index driver for code" in result.output
+    assert "--force" not in result.output
+    mock_db.get_or_create_collection.assert_not_called()
+    mock_col.get.assert_not_called()
+
+
 def test_reindex_refuses_when_all_entries_sourceless(
     runner, env_creds, mock_db,
 ) -> None:
