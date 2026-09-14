@@ -292,6 +292,15 @@ happened.
   test that inserts a quarantined row and asserts no read returns it.
   **Status**: Verified (finding 4: twelve read entry points, all jOOQ on one
   table). **Method**: Source Search.
+- [ ] A5: the write paths that can reach an existing row are exactly three:
+  `upsert` (by key, through its `ON CONFLICT ... DO UPDATE` branch),
+  `putOrMerge` (by a content-similarity scan over the project) and
+  `mergeMemories` (by explicit ids); `importRow` and `importBatch` insert
+  only. Each of the three gets the rule stated in the Technical Design.
+  **Status**: Verified (finding 6: five write entry points enumerated from
+  the public signatures; the conflict branch sets six columns and no state
+  column; the scan filters on project and title only; merge updates by id).
+  **Method**: Source Search.
 - [ ] A2: keeping `deleted_ids` with its current meaning (rows actually gone)
   and adding `quarantined_ids` beside it is `[additive]`: an old client reads
   `deleted_ids` only, through `resp.get("deleted_ids", [])`, and ignores the
@@ -430,6 +439,17 @@ Liquibase, every reference schema-qualified):
   therefore invisible exactly as a deleted row was, which keeps the meaning
   of the TTL its author set. `listQuarantined(tenant, project)` is the one
   read that sees them.
+- Write paths that can reach an existing row (assumption A5) each state
+  what they do to a quarantined one. `upsert`: a put whose key names a
+  quarantined row is a decision to keep that title with new content, so the
+  `DO UPDATE` branch also sets `quarantined_at` and `rolled_up_at` to `NULL`
+  in the same statement; the row comes back with the TTL the put gave it.
+  `putOrMerge`: its similarity scan adds `quarantined_at IS NULL`, so a
+  hidden row is never a merge target; its same-title branch is the upsert
+  above. `mergeMemories`: refuses when the kept id or any deleted id names
+  a quarantined row, so the caller restores first; refusal is the safe
+  direction and the ids are explicit. `importRow` and `importBatch` insert
+  new rows and are unaffected.
 - Routes, all new or additive: `POST /v1/memory/expire` (response gains
   `quarantined_ids`), `POST /v1/memory/reap`, `POST /v1/memory/{id}/restore`,
   `GET /v1/memory/quarantined?project=`, `POST /v1/memory/summaries`,
@@ -537,10 +557,12 @@ It was decided against on 2026-09-14 with the analysis in hand.
 - Nothing in T2 is deleted without two labels on it, one from expiry and one
   from a summary. That is the point, and it is also a standing population of
   cold rows until someone rolls them up.
-- Every read path carries one more predicate. Cheap per query, but it is
-  twelve sites plus two, and a new read path added later that forgets the
-  predicate silently resurrects cold rows; the reflection-driven test exists
-  for that.
+- Every read path carries one more predicate and every write path that can
+  reach an existing row carries a stated rule. Cheap per query, but a read
+  path added later that forgets the predicate silently resurrects cold rows,
+  and a write path added later that forgets its rule silently writes into
+  them; the reflection-driven test pins the read set, and the three write
+  paths are named in A5 and tested one by one.
 - The session-end message changes wording; a person reading "quarantined 3"
   learns something that "expired 3" hid.
 - A summary is a separate row, so the store grows by summaries rather than
@@ -612,7 +634,10 @@ run in one test module against the engine substrate, in the default suite.
 2. `MemoryRepository`: `expire` returns the two-list result; `reap`,
    `restore`, `insertSummary`, `listQuarantined`, `listSummaries`; the
    `quarantined_at IS NULL` predicate on every read path, with a test that
-   inserts a quarantined row and walks every public read method.
+   inserts a quarantined row and walks every public read method; the three
+   write-path rules (upsert clears both stamps in its conflict branch,
+   putOrMerge's scan excludes quarantined rows, mergeMemories refuses on a
+   quarantined id).
 3. `MemoryHandler`: the six routes; `handleExpire` emits both keys.
 4. Wire ledger: one `[additive]` entry per commit touching the surface.
 5. Full Java suite (schema change), `SchemaMigratorIntegrationTest` walk, the
@@ -669,6 +694,14 @@ None.
 - **Scenario**: quarantine, rollup marks, restore, a put gives the row a new
   TTL, expire re-quarantines it, reap — **Verify**: reap deletes nothing; the
   row is quarantined and unmarked.
+- **Scenario**: put on a title that names a quarantined, marked row —
+  **Verify**: the row is readable again with the new content and the put's
+  TTL, `quarantined_at` and `rolled_up_at` both null, same id.
+- **Scenario**: putOrMerge with a quarantined row as the only near-duplicate
+  — **Verify**: a new row is created; the quarantined row is untouched and
+  still hidden.
+- **Scenario**: mergeMemories with a quarantined id among the deletes, and
+  again as the kept id — **Verify**: refused both times, nothing written.
 - **Scenario**: old-client shape — **Verify**: a client reading only
   `deleted_ids` parses the new response (the existing contract test at
   `tests/db/test_http_memory_store.py:309` keeps passing unchanged).
@@ -775,3 +808,4 @@ rather than edited away for the reason stated in its revision note.
 | 2026-09-14 | Research Findings 1 and 2 added (T2 `207-research-1`, `207-research-2`): RDR-131 is abandoned, so candidate (a) must specify its own summaries shape; the wire change is assumed additive under (a) and verified non-additive under (b). Two stale facts corrected from those findings: RDR-131's status in the relationship table, and the session-end trigger line (`hooks.py:583`, not 440). |
 | 2026-09-14 | Sam's decision recorded: candidates (a) and (b) composed, (c) split out as RDR-209, do-nothing rejected. Gap headings, technical design, implementation plan, test plan, validation table and critical assumptions written. Finding 3 added (T2 `207-research-3`): the `ttl=30` omission default was reversed 2026-09-12 (nexus-473mx), and `quarantine` already names a T3 lifecycle state; the out-of-scope section and the superseded-measurements paragraph corrected accordingly. |
 | 2026-09-14 | Gate round 1 — BLOCKED (1 Critical, 1 Significant, 1 ship-blocker(s)); commit `abd90979f`; critique `nexus_rdr/207-gate-critique-2026-09-14`. |
+| 2026-09-14 | Gate round 2 — BLOCKED (1 Critical, 0 Significant, 1 ship-blocker(s)); commit `7e23eb65e`; critique `nexus_rdr/207-gate-critique-2026-09-14b`. |
