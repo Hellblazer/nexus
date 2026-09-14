@@ -37,6 +37,7 @@ Client-composed (pure-Python logic over server-side data):
 from __future__ import annotations
 
 import contextlib
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import httpx
@@ -72,6 +73,24 @@ from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
 
 # ── HttpMemoryStore ────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class MemoryExpireResult:
+    """What one ``expire()`` sweep did (RDR-207 Phase 1, bead nexus-l3yuc.9).
+
+    ``deleted_ids`` is empty from engine-service RDR-207 Phase 1 on and is
+    kept for the response shape; ``quarantined_ids`` names the rows the sweep
+    hid. ``swept`` is the count callers that only ever wanted "how many rows
+    left view" read.
+    """
+
+    deleted_ids: list[int] = field(default_factory=list)
+    quarantined_ids: list[int] = field(default_factory=list)
+
+    @property
+    def swept(self) -> int:
+        return len(self.deleted_ids) + len(self.quarantined_ids)
 
 
 class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
@@ -478,10 +497,24 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
     # ── Housekeeping ───────────────────────────────────────────────────────────
 
-    def expire(self) -> list[int]:
-        """Delete TTL-expired memory entries. Returns list of deleted row IDs."""
+    def expire(self) -> MemoryExpireResult:
+        """Sweep TTL-expired memory entries (RDR-207: quarantine, not deletion).
+
+        From engine-service RDR-207 Phase 1 on, ``POST /v1/memory/expire``
+        stamps ``quarantined_at`` on every row past its heat-weighted TTL and
+        reports them in ``quarantined_ids``; ``deleted_ids`` stays in the
+        response and is always empty. Against an older engine the response
+        carries ``deleted_ids`` only, so ``quarantined_ids`` reads as empty
+        here: both directions parse (docs/wire-contract-pending.md,
+        ``[additive]``). A quarantined row is hidden from every read exactly
+        as a deleted one was; ``nx memory restore <id>`` (Phase 2) brings it
+        back.
+        """
         resp = self._post("/v1/memory/expire", {})
-        return [int(i) for i in resp.get("deleted_ids", [])]
+        return MemoryExpireResult(
+            deleted_ids=[int(i) for i in resp.get("deleted_ids", [])],
+            quarantined_ids=[int(i) for i in resp.get("quarantined_ids", [])],
+        )
 
     # ── Consolidation (RDR-061 E6) ─────────────────────────────────────────────
 

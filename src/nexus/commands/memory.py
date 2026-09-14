@@ -262,7 +262,7 @@ def expire_cmd() -> None:
     land on the in-process facade.
     """
     with t2_handle() as db:
-        count = db.memory.expire()
+        swept = db.memory.expire()
         try:
             from nexus.db.t2.records import RELEVANCE_LOG_RETENTION_DAYS  # noqa: PLC0415 — single-source horizon coupling
             db.telemetry.expire_relevance_log(days=RELEVANCE_LOG_RETENTION_DAYS)
@@ -272,7 +272,10 @@ def expire_cmd() -> None:
             # this. Without the daemon-side facade we lose that
             # signal, but the memory-side expiry still landed.
             pass
-    click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")
+    q = len(swept.quarantined_ids)
+    d = len(swept.deleted_ids)
+    click.echo(f"Quarantined {q} {'entry' if q == 1 else 'entries'}"
+               + (f", deleted {d}" if d else "") + ".")
 
 
 @memory.command("promote")

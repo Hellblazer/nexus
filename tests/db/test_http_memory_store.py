@@ -665,9 +665,14 @@ class TestDelete:
 
 
 class TestExpire:
-    def test_expire_returns_list(self, store: HttpMemoryStore) -> None:
+    def test_expire_against_old_engine_shape_parses(self, store: HttpMemoryStore) -> None:
+        # The stub replies {"deleted_ids": []} with no quarantined_ids, the
+        # shape of every engine before RDR-207 Phase 1: the new client reads
+        # both lists as empty (docs/wire-contract-pending.md, [additive]).
         result = store.expire()
-        assert isinstance(result, list)
+        assert result.deleted_ids == []
+        assert result.quarantined_ids == []
+        assert result.swept == 0
 
 
 class TestMerge:

@@ -3323,6 +3323,11 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.index_failures",
     "nexus.ladder_completions",
     "nexus.memory",
+    # nexus.memory_summaries: RDR-207 Phase 1 (nexus-l3yuc.1, memory-004-
+    # quarantine-and-rollup.xml). Rollup summaries, provenance of the
+    # rolled_up_at mark on nexus.memory; ENABLE + FORCE + its own
+    # tenant_isolation policy (RLS is per table).
+    "nexus.memory_summaries",
     # "nexus.migration_jobs" REMOVED (nexus-tk070.p5b, reworked
     # 2026-08-20, migration-002-tenant-pk.xml): dead table dropped —
     # MigrationHandler.java / MigrationJobRepository.java deleted at

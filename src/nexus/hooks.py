@@ -639,7 +639,7 @@ def session_end_flush() -> str:
     except Exception as exc:  # noqa: BLE001 — session-end boundary: a storage error of ANY class must not crash the host (the SQLite-specific catch went with the substrate, 2026-08-29)
         _log.warning("session_end: storage error during flush/expire", error=str(exc))
 
-    return f"Session ended. Flushed {flushed} scratch entries. Expired {expired} memory entries."
+    return f"Session ended. Flushed {flushed} scratch entries. Quarantined {expired} memory entries."
 
 
 def session_end() -> str:

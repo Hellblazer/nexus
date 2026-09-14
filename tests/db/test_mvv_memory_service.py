@@ -594,8 +594,8 @@ class TestMVVExpire:
         so through this client the row is gone from ``get`` exactly as before,
         while ``deleted_ids`` is empty from this engine on (kept in the response
         so this client's ``resp.get("deleted_ids", [])`` keeps parsing). The
-        row still exists in the table. Phase 2 (nexus-l3yuc.9 / .12) teaches the
-        client ``quarantined_ids`` and asserts membership there.
+        row still exists in the table, and the client reports it in
+        ``quarantined_ids`` (nexus-l3yuc.9's store slice).
         """
         p = f"ep-{ns}"
         row_id = store.put(p, "old.md", "stale", ttl=1)
@@ -604,10 +604,13 @@ class TestMVVExpire:
             f"UPDATE nexus.memory SET timestamp = '{past}' "
             f"WHERE id = {row_id}"
         )
-        deleted_ids = store.expire()
-        assert deleted_ids == [], (
+        swept = store.expire()
+        assert swept.deleted_ids == [], (
             "expire() quarantines instead of deleting from RDR-207 Phase 1 on; "
-            f"deleted_ids must be empty, got {deleted_ids}"
+            f"deleted_ids must be empty, got {swept.deleted_ids}"
+        )
+        assert row_id in swept.quarantined_ids, (
+            f"expire() must report row {row_id} in quarantined_ids; got {swept}"
         )
         assert store.get(project=p, title="old.md") is None, (
             "a quarantined row must be hidden from get exactly as a deleted one was"
@@ -661,12 +664,12 @@ class TestMVVExpire:
             f"WHERE id = {row_id}"
         )
         # effective_ttl = 1 * (1 + ln(6)) ≈ 2.79 days; age 1.5 days < 2.79 → survives
-        deleted_ids = store.expire()
-        assert row_id not in deleted_ids, (
+        swept = store.expire()
+        assert row_id not in swept.deleted_ids and row_id not in swept.quarantined_ids, (
             f"Heat-weighted expire failed: row {row_id} (access_count=5, ttl=1, age=1.5d) "
-            f"was deleted despite effective_ttl≈2.79 days. "
+            f"was swept despite effective_ttl≈2.79 days. "
             f"Java expire() likely ignores access_count (naive age>ttl check). "
-            f"deleted_ids={deleted_ids}"
+            f"result={swept}"
         )
         assert store.get(project=p, title="hot.md") is not None, (
             "hot.md was deleted by expire() — heat-weighting formula not applied"

@@ -735,7 +735,13 @@ class T2Database:
     # ── Housekeeping ──────────────────────────────────────────────────────────
 
     def expire(self, relevance_log_days: int | None = None) -> int:
-        """Delete TTL-expired entries using heat-weighted effective TTL.
+        """Sweep TTL-expired entries using heat-weighted effective TTL.
+
+        RDR-207 (nexus-l3yuc.9): from engine-service RDR-207 Phase 1 on the
+        engine QUARANTINES a row past its TTL instead of deleting it; the
+        row is hidden from every read and ``nx memory restore`` brings it
+        back. The return value counts rows swept from view (quarantined plus,
+        against an older engine, deleted).
 
         effective_ttl = base_ttl * (1 + log(access_count + 1))
         Highly accessed entries survive longer. Unaccessed entries (access_count=0)
@@ -743,10 +749,10 @@ class T2Database:
 
         Also purges relevance_log rows older than ``relevance_log_days`` days
         (default 90) to prevent unbounded growth of the telemetry table.
-        Return value counts only memory rows deleted.
-
         Emits the ``expire_complete`` structured log event with fields:
-          * ``memory_deleted`` (int) — number of memory rows deleted
+          * ``memory_deleted`` (int) — number of memory rows deleted (always
+            0 from RDR-207 Phase 1 engines on; kept for older engines)
+          * ``memory_quarantined`` (int) — number of memory rows quarantined
           * ``relevance_log_deleted`` (int) — number of relevance_log rows
             purged; 0 when the purge succeeded but had nothing to delete
           * ``relevance_log_error`` (str, optional) — exception class name
@@ -770,17 +776,18 @@ class T2Database:
         except Exception as exc:  # noqa: BLE001 — best-effort relevance-log expiry; logged via log.warning, expiry continues
             log_error = type(exc).__name__
             _log.warning("expire_relevance_log_failed", exc_info=exc)
-        expired_ids = self.memory.expire()
+        swept = self.memory.expire()
         extra: dict[str, Any] = {}
         if log_error is not None:
             extra["relevance_log_error"] = log_error
         _log.info(
             "expire_complete",
-            memory_deleted=len(expired_ids),
+            memory_deleted=len(swept.deleted_ids),
+            memory_quarantined=len(swept.quarantined_ids),
             relevance_log_deleted=log_deleted,
             **extra,
         )
-        return len(expired_ids)
+        return swept.swept
 
     def complete_aspect(self, record_fields: dict[str, Any]) -> bool:
         """Persist an extracted aspect and clear its queue row in one call.
