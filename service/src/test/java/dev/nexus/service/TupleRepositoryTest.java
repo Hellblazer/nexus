@@ -7,6 +7,7 @@ import dev.nexus.service.db.ClaimOwnershipException;
 import dev.nexus.service.db.LeaseTooLongException;
 import dev.nexus.service.db.ParkCapExceededException;
 import dev.nexus.service.db.SchemaViolationException;
+import dev.nexus.service.db.TakeDisabledException;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.TimeoutTooLongException;
 import dev.nexus.service.db.TtlTooLongException;
@@ -345,6 +346,61 @@ class TupleRepositoryTest {
 
         var rows = repo.rdp(TENANT_A, subspace, Map.of("to", to), 10, null);
         assertThat(rows).as("two distinct rows, not one collapsed by a shared id").hasSize(2);
+    }
+
+    // ── mailbox address_kind gains session (RDR-208 P1.2, bead nexus-galkv.2) ──
+
+    /** agent is the original v1 value (RDR-205); still accepted unchanged
+     *  now that address_kind also carries instance and session. */
+    @Test
+    void out_mailboxAddressKindAgent_stillAccepted_readBack() {
+        String to = "agent-kind-agent-" + UUID.randomUUID();
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+                Map.of("from", "sender-kind-agent", "address_kind", "agent"),
+                "body", "nonce-kind-agent", null);
+
+        var rows = repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).dims()).containsEntry("address_kind", "agent");
+    }
+
+    @Test
+    void out_mailboxAddressKindSession_accepted_readBack() {
+        String to = "agent-kind-session-" + UUID.randomUUID();
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+                Map.of("from", "sender-kind-session", "address_kind", "session"),
+                "body", "nonce-kind-session", null);
+
+        var rows = repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).dims()).containsEntry("address_kind", "session");
+    }
+
+    /** instance is retired after RDR-208 Phase 3, but stays accepted through
+     *  the migration window -- see the header comment in mailbox.yaml. */
+    @Test
+    void out_mailboxAddressKindInstance_stillAccepted_readBack() {
+        String to = "agent-kind-instance-" + UUID.randomUUID();
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+                Map.of("from", "sender-kind-instance", "address_kind", "instance"),
+                "body", "nonce-kind-instance", null);
+
+        var rows = repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).dims()).containsEntry("address_kind", "instance");
+    }
+
+    @Test
+    void out_mailboxAddressKindUnlistedValue_schemaViolation_noRowWritten() {
+        String to = "agent-kind-bogus-" + UUID.randomUUID();
+        assertThatThrownBy(() -> repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+                Map.of("from", "sender-kind-bogus", "address_kind", "process"),
+                "body", "nonce-kind-bogus", null))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("field 'address_kind'")
+                .hasMessageContaining("not in [agent, instance, session]");
+
+        assertThat(repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null)).isEmpty();
     }
 
     // ── ten concurrent inp on one row ───────────────────────────────────────
@@ -872,9 +928,10 @@ class TupleRepositoryTest {
     @Test
     void registry_returnsDigestAndTemplates() {
         var snap = repo.registry();
-        // ledger, mailbox (bundled resources) + probe (this class's extra template
-        // directory, bead nexus-em75s.39's multi-pinned-key fixture — see startAll).
-        assertThat(snap.templates()).hasSize(3);
+        // directory, ledger, mailbox (bundled resources) + probe (this class's extra
+        // template directory, bead nexus-em75s.39's multi-pinned-key fixture — see
+        // startAll).
+        assertThat(snap.templates()).hasSize(4);
         assertThat(snap.digest()).isNotBlank();
     }
 
@@ -1091,6 +1148,279 @@ class TupleRepositoryTest {
                 .as("expires_at clamped to the ORIGINAL created_at plus retention, never now plus retention")
                 .isCloseTo(ceiling, org.assertj.core.api.Assertions.within(2, java.time.temporal.ChronoUnit.SECONDS));
         assertThat(row.expiresAt()).isBefore(OffsetDateTime.now(java.time.ZoneOffset.UTC).plusDays(7).minusHours(1));
+    }
+
+    // ── directory/<name>: RDR-208 Phase 1 Step 1 (bead nexus-galkv.1) ───────
+
+    @Test
+    void out_directoryWithoutNonce_schemaViolation() {
+        String name = "session-no-nonce-" + UUID.randomUUID();
+        assertThatThrownBy(() -> repo.out(TENANT_A, "directory/" + name, Map.of("name", name),
+                Map.of("session_id", "sess-no-nonce"), null, null, 300L))
+                .isInstanceOf(SchemaViolationException.class);
+    }
+
+    @Test
+    void out_directoryMissingSessionId_schemaViolation_noRowWritten() {
+        String name = "session-missing-sid-" + UUID.randomUUID();
+        assertThatThrownBy(() -> repo.out(TENANT_A, "directory/" + name, Map.of("name", name), Map.of(),
+                null, "nonce-dir-missing-sid", 300L))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("session_id");
+        assertThat(repo.rdp(TENANT_A, "directory/" + name, null, 10, null)).isEmpty();
+    }
+
+    @Test
+    void out_directoryTtl300Accepted_aboveRetentionRefusedWithTtlTooLong() {
+        String name1 = "session-ttl300-" + UUID.randomUUID();
+        byte[] id = repo.out(TENANT_A, "directory/" + name1, Map.of("name", name1),
+                Map.of("session_id", "sess-ttl300"), null, "nonce-dir-ttl300", 300L);
+        assertThat(id).isNotNull();
+        assertThat(repo.rdp(TENANT_A, "directory/" + name1, null, 10, null)).hasSize(1);
+
+        String name2 = "session-ttl-too-long-" + UUID.randomUUID();
+        assertThatThrownBy(() -> repo.out(TENANT_A, "directory/" + name2, Map.of("name", name2),
+                Map.of("session_id", "sess-toolong"), null, "nonce-dir-toolong", 999_999_999L))
+                .isInstanceOf(TtlTooLongException.class);
+        assertThat(repo.rdp(TENANT_A, "directory/" + name2, null, 10, null)).isEmpty();
+    }
+
+    @Test
+    void in_directoryTakeDisabled_refused() {
+        String name = "session-take-disabled-" + UUID.randomUUID();
+        assertThatThrownBy(() -> repo.in(TENANT_A, "directory/" + name, Map.of("name", name),
+                "claimant", 30, 0))
+                .isInstanceOf(TakeDisabledException.class);
+    }
+
+    /**
+     * id_dims: [session_id] (audit round-1 fix, T2 nexus_rdr/208-decision-gate-2026-09-14
+     * decision 1): the id is sha256 over tenant, subspace, keys, id_dims and nonce
+     * (TupleRepository.computeId), so two sessions arming one name with an EQUAL
+     * nonce must still land as two distinct rows rather than collapsing onto one --
+     * mirrors {@link #out_twoSendersMintSameNonce_produceTwoRows} for mailbox's
+     * {@code id_dims: [from]}.
+     */
+    @Test
+    void out_twoSessionsArmSameName_twoRows_oldestFirst_distinctSessionIds_evenWithEqualNonce() {
+        String name = "session-two-holders-" + UUID.randomUUID();
+        String session1 = "sess-a-" + UUID.randomUUID();
+        String session2 = "sess-b-" + UUID.randomUUID();
+        String nonce = "shared-nonce-dir-" + UUID.randomUUID();
+
+        byte[] id1 = repo.out(TENANT_A, "directory/" + name, Map.of("name", name),
+                Map.of("session_id", session1), null, nonce, 300L);
+        byte[] id2 = repo.out(TENANT_A, "directory/" + name, Map.of("name", name),
+                Map.of("session_id", session2), null, nonce, 300L);
+        assertThat(id2)
+                .as("session_id enters the id -- an equal nonce from two sessions never collides")
+                .isNotEqualTo(id1);
+
+        var rows = repo.rd(TENANT_A, "directory/" + name, null, 10, null, 0);
+        assertThat(rows).hasSize(2);
+        assertThat(rows.get(0).createdAt())
+                .as("rd returns both rows oldest first")
+                .isBeforeOrEqualTo(rows.get(1).createdAt());
+        assertThat(rows.stream().map(r -> r.dims().get("session_id")).toList())
+                .containsExactlyInAnyOrder(session1, session2);
+    }
+
+    @Test
+    void out_directoryResentSameNameSessionAndNonce_movesExpiresAtForward_bodyAndDimsUnchanged() throws Exception {
+        String name = "session-resend-" + UUID.randomUUID();
+        String sessionId = "sess-resend-" + UUID.randomUUID();
+        byte[] id1 = repo.out(TENANT_A, "directory/" + name, Map.of("name", name),
+                Map.of("session_id", sessionId), null, "nonce-dir-resend", 300L);
+        assertThat(repo.rdp(TENANT_A, "directory/" + name, null, 10, null)).hasSize(1);
+
+        // Backdate expires_at well below what a fresh 300s ttl resend would set,
+        // leaving created_at alone so the retention ceiling (604800s out) never
+        // binds -- isolates the "moved forward" claim from the separate refire-clamp
+        // property out_directoryWeekLongRefireClamp_... below already covers.
+        OffsetDateTime nearExpiry = OffsetDateTime.now(java.time.ZoneOffset.UTC).plusSeconds(10);
+        try (Connection su = pg.createConnection("")) {
+            org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .update(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                    .set(dev.nexus.service.jooq.nexus.Tables.TUPLES.EXPIRES_AT, nearExpiry)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(id1))
+                    .execute();
+        }
+
+        byte[] id2 = repo.out(TENANT_A, "directory/" + name, Map.of("name", name),
+                Map.of("session_id", sessionId), null, "nonce-dir-resend", 300L);
+        assertThat(id2).as("re-send with the same name/session_id/nonce adds no row").isEqualTo(id1);
+
+        var secondRead = repo.rdp(TENANT_A, "directory/" + name, null, 10, null);
+        assertThat(secondRead).as("the resend refreshes the SAME row, not a second one").hasSize(1);
+        assertThat(secondRead.get(0).expiresAt())
+                .as("resend moves expires_at forward from the backdated value")
+                .isAfter(nearExpiry.plusSeconds(60));
+        assertThat(secondRead.get(0).body()).isNull();
+        assertThat(secondRead.get(0).dims()).isEqualTo(Map.of("session_id", sessionId));
+    }
+
+    /** Mirrors {@link #out_weekLongRefireClamp_expiresAtNeverPastOriginalCreatedAtPlusRetention}
+     *  for {@code directory/<name>} -- same 604800s retention. */
+    @Test
+    void out_directoryWeekLongRefireClamp_expiresAtNeverPastOriginalCreatedAtPlusRetention() throws Exception {
+        String name = "session-week-refire-" + UUID.randomUUID();
+        String sessionId = "sess-week-" + UUID.randomUUID();
+        byte[] id = repo.out(TENANT_A, "directory/" + name, Map.of("name", name),
+                Map.of("session_id", sessionId), null, "nonce-dir-week", 300L);
+
+        OffsetDateTime sixDaysAgo = OffsetDateTime.now(java.time.ZoneOffset.UTC).minusDays(6);
+        try (Connection su = pg.createConnection("")) {
+            org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .update(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                    .set(dev.nexus.service.jooq.nexus.Tables.TUPLES.CREATED_AT, sixDaysAgo)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(id))
+                    .execute();
+        }
+
+        // A resend using the default (retention-length) ttl would, without the
+        // clamp, push expires_at to now + 604800s -- well past created_at (six days
+        // ago) plus the template's own 604800s retention ceiling.
+        repo.out(TENANT_A, "directory/" + name, Map.of("name", name),
+                Map.of("session_id", sessionId), null, "nonce-dir-week", null);
+
+        var row = repo.rdp(TENANT_A, "directory/" + name, null, 10, null).get(0);
+        OffsetDateTime ceiling = sixDaysAgo.plusSeconds(604_800L); // directory.yaml retention_seconds
+        assertThat(row.expiresAt())
+                .as("expires_at clamped to the ORIGINAL created_at plus retention, never now plus retention")
+                .isCloseTo(ceiling, org.assertj.core.api.Assertions.within(2, java.time.temporal.ChronoUnit.SECONDS));
+    }
+
+    /**
+     * A freshly-INSERTED directory entry ({@code ttl_seconds=1}, a never-before-
+     * used nonce -- the INSERT path) lapses and drops out of {@code rd} before
+     * any purge runs -- {@code queryOnce} filters on {@code expires_at > now},
+     * no sweep needed. Bounded poll (no fixed sleep). This covers the INSERT
+     * path only; it does NOT exercise a resend shortening an existing row's
+     * expiry -- see {@link
+     * #out_directoryResentWithShorterTtl_expiresAtMovesBackward_thenRdDropsAfterLapse}
+     * for the RESEND path (a live, longer-lived row pulled back by a short-ttl
+     * resend of the SAME id) that P2.1's release-on-self-stop actually depends
+     * on (nexus-galkv.4 gate finding SIGNIFICANT 1, T2
+     * nexus/rdr-208-p1-critique-galkv4-2026-09-14).
+     */
+    @Test
+    void out_directoryTtl1_expiresQuickly_rdDropsEntryAfterLapse() throws Exception {
+        String name = "session-ttl1-" + UUID.randomUUID();
+        String sessionId = "sess-ttl1-" + UUID.randomUUID();
+        repo.out(TENANT_A, "directory/" + name, Map.of("name", name),
+                Map.of("session_id", sessionId), null, "nonce-dir-ttl1", 1L);
+
+        assertThat(repo.rdp(TENANT_A, "directory/" + name, null, 10, null)).hasSize(1);
+
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        List<TupleRepository.TupleRow> rows;
+        do {
+            rows = repo.rdp(TENANT_A, "directory/" + name, null, 10, null);
+            if (rows.isEmpty()) {
+                break;
+            }
+            Thread.sleep(100);
+        } while (System.nanoTime() < deadlineNanos);
+        assertThat(rows).as("entry drops out of rd once ttl_seconds=1 lapses").isEmpty();
+    }
+
+    /**
+     * The genuine RESEND-shortens-expiry property the test above does NOT
+     * cover: a live, longer-lived row (ttl=300, ~5 minutes out) resent with
+     * the SAME id (same name/session_id/nonce) but a short {@code
+     * ttl_seconds=1} pulls {@code expires_at} BACKWARD to ~1s out, not
+     * forward. This is exactly what P2.1's release-on-self-stop needs
+     * (nexus-galkv.9: the watcher re-sends its CURRENT entry with {@code
+     * ttl_seconds=1} on self-stop so a live 300s lease lapses within about a
+     * second instead of riding out its full remaining time).
+     *
+     * <p>Falsification: {@code writeOut}'s ON CONFLICT clause is {@code
+     * .set(TUPLES.EXPIRES_AT, DSL.least(candidateExpiry, ceiling))} --
+     * unconditional on the row's OLD {@code expires_at}. If that were ever
+     * changed to {@code DSL.greatest(oldExpiresAt, DSL.least(candidateExpiry,
+     * ceiling))} (a "leases only extend" reading -- every OTHER directory/
+     * mailbox test in this file would still pass under that change), THIS
+     * test goes red: the second read's {@code expiresAt} would stay near the
+     * ORIGINAL ~300s mark instead of shrinking to ~1s, and the bounded poll
+     * below would time out waiting for a lapse that never comes.
+     */
+    @Test
+    void out_directoryResentWithShorterTtl_expiresAtMovesBackward_thenRdDropsAfterLapse() throws Exception {
+        String name = "session-shrink-" + UUID.randomUUID();
+        String sessionId = "sess-shrink-" + UUID.randomUUID();
+        byte[] id1 = repo.out(TENANT_A, "directory/" + name, Map.of("name", name),
+                Map.of("session_id", sessionId), null, "nonce-dir-shrink", 300L);
+
+        var firstRead = repo.rdp(TENANT_A, "directory/" + name, null, 10, null);
+        assertThat(firstRead).hasSize(1);
+        OffsetDateTime longExpiry = firstRead.get(0).expiresAt();
+        assertThat(longExpiry)
+                .as("baseline: a fresh ttl=300 out sets expires_at ~300s out")
+                .isAfter(OffsetDateTime.now(java.time.ZoneOffset.UTC).plusSeconds(200));
+
+        byte[] id2 = repo.out(TENANT_A, "directory/" + name, Map.of("name", name),
+                Map.of("session_id", sessionId), null, "nonce-dir-shrink", 1L);
+        assertThat(id2).as("same name/session_id/nonce -- the RESEND path, not an insert").isEqualTo(id1);
+
+        var secondRead = repo.rdp(TENANT_A, "directory/" + name, null, 10, null);
+        assertThat(secondRead).hasSize(1);
+        OffsetDateTime shortExpiry = secondRead.get(0).expiresAt();
+        assertThat(shortExpiry)
+                .as("resend with ttl_seconds=1 moves expires_at BACKWARD from the live ~300s row, not forward")
+                .isBefore(OffsetDateTime.now(java.time.ZoneOffset.UTC).plusSeconds(10))
+                .isBefore(longExpiry.minusSeconds(200));
+
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        List<TupleRepository.TupleRow> rows;
+        do {
+            rows = repo.rdp(TENANT_A, "directory/" + name, null, 10, null);
+            if (rows.isEmpty()) {
+                break;
+            }
+            Thread.sleep(100);
+        } while (System.nanoTime() < deadlineNanos);
+        assertThat(rows).as("the shrunk lease lapses within its new ~1s ttl, not the original ~300s one").isEmpty();
+    }
+
+    /**
+     * A lapsed entry is excluded from {@code rd}/{@code rdp} the instant {@code
+     * expires_at} passes -- before any sweep purge runs. The row itself still
+     * physically exists (raw-SQL read via a superuser connection, bypassing RLS,
+     * same pattern as {@code seedExpiredTuple}/{@code claimStateOf} below).
+     */
+    @Test
+    void directoryEntryLapsedTtl_excludedFromRdAndRdp_rowStillExistsBeforePurge() throws Exception {
+        String name = "session-lapsed-" + UUID.randomUUID();
+        String sessionId = "sess-lapsed-" + UUID.randomUUID();
+        byte[] id = repo.out(TENANT_A, "directory/" + name, Map.of("name", name),
+                Map.of("session_id", sessionId), null, "nonce-dir-lapsed", 300L);
+
+        OffsetDateTime past = OffsetDateTime.now(java.time.ZoneOffset.UTC).minusMinutes(5);
+        try (Connection su = pg.createConnection("")) {
+            org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .update(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                    .set(dev.nexus.service.jooq.nexus.Tables.TUPLES.EXPIRES_AT, past)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(id))
+                    .execute();
+        }
+
+        assertThat(repo.rd(TENANT_A, "directory/" + name, null, 10, null, 0))
+                .as("rd excludes a lapsed entry")
+                .isEmpty();
+        assertThat(repo.rdp(TENANT_A, "directory/" + name, null, 10, null))
+                .as("rdp excludes a lapsed entry")
+                .isEmpty();
+
+        try (Connection su = pg.createConnection("")) {
+            Integer count = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .selectCount()
+                    .from(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(id))
+                    .fetchOne(0, Integer.class);
+            assertThat(count)
+                    .as("the row itself still exists -- only rd/rdp filter it, no purge ran")
+                    .isEqualTo(1);
+        }
     }
 
     @Test

@@ -329,6 +329,28 @@ semantics (RDR-100 owns that), any change to operator semantics.
 > (default `None` is a true no-op) rather than changing the return type. Implemented in
 > `src/nexus/operators/dispatch.py` (`DispatchUsage`, `ModelUsage`, `_parse_dispatch_usage`).
 
+> **CORRECTION (2026-09-14, nexus-xepsr):** The implementation built on the paragraph above
+> carried a further rule this RDR's text never actually states: when a single dispatch's
+> `modelUsage` carried more than one entry, `DispatchUsage.model` stayed `None` rather than
+> pick one — pinned only in `DispatchUsage.model`'s own docstring and its unit test, and
+> (in that code, prior to this correction) mis-cited as "196-R3" — 196-R3 above is the
+> `--strict-mcp-config` spike, unrelated to this field. That rule is now REVERSED, Sam's
+> decision: every live `claude -p` dispatch reports a second, near-zero-cost `modelUsage`
+> entry for a side call the CLI makes itself (measured: `claude-haiku-4-5` alongside the
+> answering model, ~$0.001 vs. the answering call's real cost, which carries the CLI's
+> cached system prompt — measured at ~7,000 cache-creation tokens — so it reliably
+> outranks the side call, except when the answering model is itself haiku-priced, in which
+> case both entries already share the requested family and the nexus-ek8tr drift tripwire
+> reaches the same verdict either way). `model` now records the entry with the highest
+> `costUSD` (ties broken by the highest `outputTokens`, then by the first key in
+> `modelUsage`'s own order); `model_usage` itself is untouched, still carrying every entry.
+> This reversal was forced by measurement: leaving `model` permanently `None` failed
+> `TestClaudeDispatchLiveUsage::test_live_dispatch_records_nonzero_cost` on every real
+> dispatch and made the nexus-ek8tr tripwire vacuous (an absent canonical id trivially
+> "matches" any requested model). Implemented in `src/nexus/operators/dispatch.py`
+> (`_parse_dispatch_usage`, `DispatchUsage.model`'s docstring) and
+> `src/nexus/plans/runner.py` (`StepRecord.model`'s docstring, `_rollup_step_usage`).
+
 - `plans/runner.py` collects one `StepRecord` per executed step (including SQL fast-path steps
   with `model=None, cost_usd=0`) and bundles one record per bundled dispatch with the bundled
   step indices listed; passes the list to the run recorder.

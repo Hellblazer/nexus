@@ -2481,11 +2481,19 @@ class TestNxAnswerLatencyProxy:
 
     @pytest.mark.asyncio
     async def test_orchestration_has_no_blocking_calls(self, tmp_path):
-        """With all I/O mocked, nx_answer completes in under 1 second.
+        """With all I/O mocked, nx_answer must never call a real sleep or
+        spawn a subprocess on this fast (mocked plan_run) path.
 
-        A >1s wall time indicates an inadvertent blocking sleep or subprocess.
+        nexus-scc9t: was a wall-clock ``elapsed < 1.0`` bound ("A >1s wall
+        time indicates an inadvertent blocking sleep or subprocess"). A
+        loaded ``-n auto`` run can blow a 1s bound on scheduler delay
+        alone with no such call present. Asserted directly instead:
+        patch time.sleep / asyncio.sleep / subprocess creation and assert
+        none of them fire -- the exact thing the old docstring was trying
+        to infer from elapsed time. nx_answer's own body (src/nexus/mcp/
+        core.py) has no sleep/subprocess call on this path -- everything
+        that could otherwise block is already mocked below.
         """
-        import time
         import nexus.mcp_infra as _infra
         import nexus.plans.runner as _runner
         from nexus.plans.runner import PlanResult
@@ -2500,16 +2508,27 @@ class TestNxAnswerLatencyProxy:
             patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
             patch("nexus.mcp.core.scratch", MagicMock()),
             patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+            patch("time.sleep") as mock_sleep,
+            patch("asyncio.sleep", new=AsyncMock()) as mock_async_sleep,
+            patch("asyncio.create_subprocess_exec") as mock_subproc,
         ):
             from nexus.mcp.core import nx_answer
-            t0 = time.monotonic()
             await nx_answer("fast question")
-            elapsed = time.monotonic() - t0
 
-        assert elapsed < 1.0, (
-            f"nx_answer with mocked I/O took {elapsed:.2f}s — "
-            "possible blocking call reintroduced"
-        )
+        mock_sleep.assert_not_called()
+        # nexus-scc9t round 2 (critic finding): asyncio.sleep(0) is a pure
+        # event-loop yield, not a blocking wait -- a harmless, common idiom
+        # (cooperative scheduling) that assert_not_called() would wrongly
+        # flag. The actual property under test is "no POSITIVE-duration
+        # sleep", so check each call's own delay argument instead of
+        # forbidding the call entirely.
+        for call in mock_async_sleep.call_args_list:
+            delay = call.args[0] if call.args else call.kwargs.get("delay", 0)
+            assert delay <= 0, (
+                f"asyncio.sleep called with a positive delay ({delay}) -- "
+                f"possible blocking call reintroduced"
+            )
+        mock_subproc.assert_not_called()
 
 
 # ── Subagent timeout floor (nexus-7sbf) ──────────────────────────────────────

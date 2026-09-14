@@ -154,16 +154,29 @@
         which the just-acquired topics locks sit exposed to a concurrent
         acquirer.
 
-        A true "increment by delta" was considered and REJECTED: `new_rows`
+        A true "increment by delta" was considered and REJECTED. CORRECTED
+        (nexus-4a8pn, 2026-09-14): this passage originally claimed `new_rows`
         (the INSERT transition table) captures BOTH genuinely new rows and
-        rows touched only via `ON CONFLICT DO UPDATE` (the assign_from_
-        chashes cross-collection pass) — Postgres transition tables do not
-        expose xmin/xmax to distinguish the two, so a naive "+1 per
-        new_rows entry" delta would silently inflate doc_count on every
-        cross-collection re-flush of an already-assigned chash. The batched-
-        aggregate recompute above stays an EXACT full recount (zero drift
-        risk) while still achieving the bead's "narrow the lock window"
-        goal by moving the scan cost off the per-row critical path.
+        rows touched only via `ON CONFLICT DO UPDATE` — it does not. Postgres
+        routes a conflict-resolved row through the UPDATE code path, so it
+        lands in an UPDATE transition table, not the INSERT one; no AFTER
+        UPDATE trigger with `REFERENCING NEW/OLD TABLE` exists on
+        `topic_assignments` (taxonomy-003-3 defines INSERT/DELETE triggers
+        only), so a `DO UPDATE`-resolved row is invisible to `new_rows`, and
+        to every transition table on this table, today. That is harmless for
+        `doc_count` specifically: every `DO UPDATE` clause reachable on this
+        table (the assign_from_chashes cross-collection pass, persist_rebuild's
+        manual-transfer path) targets `similarity`/`source_collection`/
+        `assigned_by`, never `topic_id` — the ON CONFLICT target key is
+        immutable across the update, so a row's topic membership, and
+        therefore its topic's row count, never changes on that path. The
+        batched-aggregate recompute above stays the right design regardless
+        of this correction — one GROUP BY pass over exactly the topics
+        `new_rows` names is simpler and carries zero drift risk, versus a
+        delta approach that would have to reason about transition-table
+        visibility across `DO UPDATE` at all — but the original "would
+        silently inflate doc_count on every cross-collection re-flush"
+        justification was wrong about the mechanism and is retracted.
 
     doc_count is STILL trigger-maintained only (taxonomy-003-4's COMMENT ON
     COLUMN contract, unchanged) — this changeset supersedes taxonomy-003-1/2

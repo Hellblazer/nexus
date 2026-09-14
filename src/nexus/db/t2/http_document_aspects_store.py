@@ -198,6 +198,7 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         r = write_with_registration_retry(
             record.collection,
             lambda: self._post("/upsert", _record_to_body(record)),
+            registrar=self._catalog_registrar,
         )
         return bool(r.get("written", False))
 
@@ -309,6 +310,7 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         r = write_with_registration_retry(
             new,
             lambda: self._post("/rename_collection", {"old": old, "new": new}),
+            registrar=self._catalog_registrar,
         )
         return int(r.get("updated", 0))
 

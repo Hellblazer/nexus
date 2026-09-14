@@ -99,6 +99,10 @@
             attribute to a live catalog document going forward. The FK
             (fk_doc_aspects_catalog_doc, ON DELETE CASCADE) is unaffected —
             NOT NULL and a nullable-target FK coexist normally.
+            DATA EFFECT: DELETEs document_aspects rows with doc_id IS NULL (the
+            554-row orphan class), and UPDATEs any NULL source_uri to '';
+            irreversible for the DELETE (no pre-image kept) — the NOT NULL
+            constraints themselves are reversible via the rollback below.
         </comment>
         <sql splitStatements="true" stripComments="false">
 SET LOCAL lock_timeout = '5s';
@@ -148,6 +152,10 @@ ALTER TABLE nexus.document_aspects ALTER COLUMN doc_id DROP NOT NULL;
             SET NOT NULL on doc_id. Reverses fk-001-4's nullable conversion,
             same rationale as step 1 — a queue item with no attributable
             document is not representable going forward.
+            DATA EFFECT: DELETEs aspect_extraction_queue rows with doc_id IS NULL
+            (0 rows measured at census time; ships unconditionally); irreversible
+            for the DELETE — the NOT NULL constraint is reversible via the
+            rollback below.
         </comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.aspect_extraction_queue NO FORCE ROW LEVEL SECURITY;
@@ -178,6 +186,10 @@ ALTER TABLE nexus.aspect_extraction_queue ALTER COLUMN doc_id DROP NOT NULL;
             document_highlights: delete any rows with NULL source_uri or
             collection (table empty at census time; ships unconditionally),
             then SET NOT NULL on both.
+            DATA EFFECT: DELETEs document_highlights rows with source_uri or
+            collection IS NULL (0 rows measured at census time); irreversible for
+            the DELETE — the NOT NULL constraints are reversible via the rollback
+            below.
         </comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.document_highlights NO FORCE ROW LEVEL SECURITY;
@@ -223,6 +235,11 @@ ALTER TABLE nexus.document_highlights ALTER COLUMN source_uri DROP NOT NULL;
             them. Mirrors chunks.metadata's DEFAULT '{}' (step 5) and catalog_
             collections/catalog_links' DEFAULT now() (steps 6-7) in this same
             file.
+            DATA EFFECT: UPDATEs catalog_documents.content_type / .physical_collection
+            / .corpus / .file_path (to '') and .chunk_count (to 0) for any NULL row
+            (live NULLs measured at 0 for all five; ships unconditionally); reversible
+            via the rollback below (drops the NOT NULL/DEFAULT, does not un-backfill
+            the values, which is harmless since they were NULL originally).
         </comment>
         <sql splitStatements="true" stripComments="false">
 SET LOCAL lock_timeout = '5s';
@@ -341,6 +358,11 @@ ALTER TABLE nexus.catalog_documents ALTER COLUMN content_type DROP DEFAULT;
             hygiene-001-predicted-walk-counts-2026-08-29): 0 non-32-byte
             chash rows on the cloud in either table today; every live row
             is already width 32.
+            DATA EFFECT: UPDATEs chunks.metadata (NULL to '{}') for 32-byte-chash
+            rows, then DELETEs catalog_document_chunks manifest rows and chunks
+            rows whose chash is not 32 bytes (un-rekeyed legacy, 0 measured on the
+            live store); the DELETEs are irreversible — the NOT NULL/DEFAULT
+            themselves are reversible via the rollback below.
         </comment>
         <sql splitStatements="true" stripComments="false">
 SET LOCAL lock_timeout = '5s';
@@ -412,6 +434,11 @@ ALTER TABLE nexus.chunks ALTER COLUMN metadata DROP DEFAULT;
             (aspects-004-1 precedent: toggling only the target leaves the
             join yielding zero rows for the non-bypass owner) — toggled in
             this order, restored in reverse (LIFO).
+            DATA EFFECT: UPDATEs catalog_collections.created_at for every NULL row
+            (backfilled from the earliest indexed_at of the collection's own
+            documents, else now()); reversible via the rollback below (drops the
+            NOT NULL/DEFAULT, does not un-backfill, harmless since the value was
+            NULL originally).
         </comment>
         <sql splitStatements="true" stripComments="false">
 SET LOCAL lock_timeout = '5s';
@@ -461,6 +488,10 @@ ALTER TABLE nexus.catalog_collections ALTER COLUMN created_at DROP DEFAULT;
             the remaining legacy population and the last engine-side gap
             (CatalogRepository's collection insert paths — see this
             changeset's paired Java fix in the same commit).
+            DATA EFFECT: UPDATEs catalog_links.created_at (NULL to now()) for the
+            165 live legacy rows measured at census time; reversible via the
+            rollback below (drops the NOT NULL/DEFAULT, does not un-backfill,
+            harmless since the value was NULL originally).
         </comment>
         <sql splitStatements="true" stripComments="false">
 SET LOCAL lock_timeout = '5s';
@@ -530,6 +561,11 @@ ALTER TABLE nexus.catalog_links ALTER COLUMN created_at DROP DEFAULT;
             the census's historical fact. See hygiene-001-5's comment for
             the full rationale (identical NULL-hole and census-fact note;
             0 non-32-byte chash rows on the cloud today).
+            DATA EFFECT: UPDATEs catalog_document_chunks.chunk_index (NULL to
+            position) for 32-byte-chash rows (22,298 / 7.8% measured NULL at
+            census time), then DELETEs rows whose chash is not 32 bytes; the
+            DELETE is irreversible — the NOT NULL constraint is reversible via
+            the rollback below.
         </comment>
         <sql splitStatements="true" stripComments="false">
 SET LOCAL lock_timeout = '5s';
@@ -618,6 +654,10 @@ DROP FUNCTION IF EXISTS nexus.default_chunk_index_from_position();
         <comment>
             relevance_log.collection: backfill NULL to '' (0 live at census
             time; unconditional), then SET NOT NULL.
+            DATA EFFECT: UPDATEs relevance_log.collection (NULL to '') for any
+            row (0 measured at census time); reversible via the rollback below
+            (drops the NOT NULL, does not un-backfill, harmless since the value
+            was NULL originally).
         </comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.relevance_log NO FORCE ROW LEVEL SECURITY;
@@ -647,6 +687,10 @@ ALTER TABLE nexus.relevance_log ALTER COLUMN collection DROP NOT NULL;
         <comment>
             taxonomy_centroids.label: backfill NULL to '' (0 live at census
             time; unconditional), then SET NOT NULL.
+            DATA EFFECT: UPDATEs taxonomy_centroids.label (NULL to '') for any row
+            (0 measured at census time); reversible via the rollback below (drops
+            the NOT NULL, does not un-backfill, harmless since the value was NULL
+            originally).
         </comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.taxonomy_centroids NO FORCE ROW LEVEL SECURITY;
@@ -683,6 +727,9 @@ ALTER TABLE nexus.taxonomy_centroids ALTER COLUMN label DROP NOT NULL;
             AND its age past last use (or creation) exceeds ttl_days.
             NexusService's new plan_ttl_sweep arm (same 6h cycle as the
             token sweeps, same commit) keeps this from re-accumulating.
+            DATA EFFECT: DELETEs nexus.plans rows already past their ttl_days
+            (~29 of 49 measured in tenant "nexus" at census time); irreversible —
+            no rollback SQL (the rollback below is a documented no-op).
         </comment>
         <sql splitStatements="true" stripComments="false">
 SET LOCAL lock_timeout = '5s';
@@ -723,6 +770,11 @@ ALTER TABLE nexus.plans FORCE ROW LEVEL SECURITY;
             not yet expired), then SET NOT NULL. topic_assignments
             .assigned_at is explicitly OUT OF SCOPE — RDR-194's walk owns
             it, unchanged by this file.
+            DATA EFFECT: DELETEs nexus.plans rows with verb IS NULL (3 rows
+            identified by hand, ids 67/86/117 in tenant "nexus" — pre-refusal
+            shakeout residue; already caught by step 10 in the common case);
+            irreversible for the DELETE — the NOT NULL constraint is reversible
+            via the rollback below.
         </comment>
         <sql splitStatements="true" stripComments="false">
 SET LOCAL lock_timeout = '5s';

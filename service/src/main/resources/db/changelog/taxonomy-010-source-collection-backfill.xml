@@ -213,6 +213,12 @@
             explaining both the correction and why editing this
             already-committed-but-never-deployed changeset in place is
             legitimate.
+            DATA EFFECT: UPDATEs topic_assignments.source_collection for uniquely-
+            resolvable NULL rows, then DELETEs the ambiguous and unresolvable
+            remainders (non-conformant doc_id, or a NULL source_collection with no
+            matching chunk); the DELETEs are irreversible (derived, recomputable
+            data — no rollback attempts to restore the deleted rows or backfilled
+            values, only the NOT NULL constraint is reversed).
         </comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.topic_assignments NO FORCE ROW LEVEL SECURITY;

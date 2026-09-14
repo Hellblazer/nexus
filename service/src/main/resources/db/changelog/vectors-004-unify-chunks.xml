@@ -214,7 +214,7 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="vectors-004-1" author="nexus-o8dil.12">
-        <comment>RDR-191 Phase 4: create nexus.chunks, copy all rows from chunks_384/768/1024, build all indexes, drop the three sources — ONE transaction (N3), copy-THEN-index (N4), lock-first (N2). See file header for the full derivation.</comment>
+        <comment>RDR-191 Phase 4: create nexus.chunks, copy all rows from chunks_384/768/1024, build all indexes, drop the three sources — ONE transaction (N3), copy-THEN-index (N4), lock-first (N2). See file header for the full derivation. DATA EFFECT: copies every row from chunks_384/768/1024 into the unified nexus.chunks table, then DROPs the three source tables; the copy preserves the data (not destructive), but the source tables and their independent identity are gone — irreversible for the source-table shape (the rollback restores the schema, not the pre-drop table split).</comment>
 
         <!-- Step 0: lock-first (N2) + defuse the FORCE RLS DML-blindness trap
              on the three sources (catalog-013-1b pattern) — no restore needed,

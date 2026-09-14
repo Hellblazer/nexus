@@ -32,6 +32,9 @@
             Add server-assigned scope to service_tokens (root|tenant|mint|data),
             default 'tenant' so every pre-868dq row and scope-less INSERT keeps
             its exact prior authority; backfill the single root-labelled row.
+            DATA EFFECT: UPDATEs nexus.service_tokens.scope from its 'tenant' default to 'root'
+            for the single row labelled 'bootstrap-legacy-token'; reversible by dropping the
+            column (the rollback), which discards the backfilled value along with the column.
         </comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.service_tokens ADD COLUMN scope TEXT NOT NULL DEFAULT 'tenant';

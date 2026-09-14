@@ -24,6 +24,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.db.storage_mode import T2_FACADE_STORES
 from tests._catalog_fixture_ops import documents_by_file_path
 
 
@@ -40,25 +41,25 @@ def _instrument_httpx_clients(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 
 
 def _instrument_t2database(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, int]]:
+    """Snapshot every domain store's ``id(_client)``, one snapshot per
+    ``T2Database`` construction. Store names come from
+    ``nexus.db.storage_mode.T2_FACADE_STORES`` -- the same set
+    ``T2Database.__init__`` validates at construction (and
+    ``tests/db/test_storage_mode.py`` pins as exactly what ``__init__``
+    constructs) -- rather than hand-typed here: a hand-typed list is
+    exactly how ``tuples`` (HttpTupleStore, RDR-205) went missing from
+    this fan-out check for as long as it did: the store existed, the
+    shared-client wiring covered it, and this instrumentation simply
+    never looked."""
     from nexus.db.t2 import T2Database
 
+    store_names = T2_FACADE_STORES
     snapshots: list[dict[str, int]] = []
     orig_init = T2Database.__init__
 
     def _capturing_init(self: Any, *args: Any, **kwargs: Any) -> None:
         orig_init(self, *args, **kwargs)
-        snapshots.append(
-            {
-                "memory": id(self.memory._client),
-                "plans": id(self.plans._client),
-                "taxonomy": id(self.taxonomy._client),
-                "telemetry": id(self.telemetry._client),
-                "chash_index": id(self.chash_index._client),
-                "document_aspects": id(self.document_aspects._client),
-                "aspect_queue": id(self.aspect_queue._client),
-                "document_highlights": id(self.document_highlights._client),
-            }
-        )
+        snapshots.append({name: id(getattr(self, name)._client) for name in store_names})
 
     monkeypatch.setattr(T2Database, "__init__", _capturing_init)
     return snapshots
@@ -71,13 +72,14 @@ def test_real_collection_reindex_shares_one_t2_httpx_client(
     """A real ``nx collection reindex`` invocation must build and share
     ONE T2 client across ``run_collection_postprocessing``'s T2Database,
     exactly like ``nx index repo`` already does -- not silently fall back
-    to 8 unshared clients because a different Click group is active.
+    to N unshared clients (one per domain store) because a different
+    Click group is active.
 
     CAN FAIL: reverting collection.py's local ``build_shared_t2_client()``
     + ``client=`` wiring (or reintroducing the ambient Click-context
     lookup inside ``run_collection_postprocessing`` itself) makes the
-    httpx.Client count regress to 8 and/or the per-store client identity
-    assertion fail."""
+    httpx.Client count regress to one-per-domain-store and/or the
+    per-store client identity assertion fail."""
     corpus = "m20mfreindexfanout"
 
     md = tmp_path / "reindex-fanout.md"
@@ -109,10 +111,11 @@ def test_real_collection_reindex_shares_one_t2_httpx_client(
         f"reindex` (run_collection_postprocessing's single T2Database "
         f"context); got {len(t2_snapshots)}"
     )
+    store_count = len(t2_snapshots[0])
     stores_clients = set(t2_snapshots[0].values())
     assert len(stores_clients) == 1, (
-        f"expected all 8 domain stores to share the identical shared "
-        f"client under `nx collection reindex`; found "
+        f"expected all {store_count} domain stores to share the identical "
+        f"shared client under `nx collection reindex`; found "
         f"{len(stores_clients)} distinct client objects: {t2_snapshots[0]}"
     )
     assert len(client_tally) == 2, (
@@ -122,8 +125,9 @@ def test_real_collection_reindex_shares_one_t2_httpx_client(
         f"identical incidental construction the index.py fanout test "
         f"observes for `nx index repo` -- not process-cached across the "
         f"`nx index md` call earlier in this test). BEFORE this fix, this "
-        f"count would have been 9 (8 unshared T2 domain-store clients + "
-        f"the same T3 probe), since run_collection_postprocessing had no "
-        f"way to receive a shared client from `nx collection reindex`'s "
-        f"Click group. Got {len(client_tally)}"
+        f"count would have been {store_count + 1} ({store_count} unshared "
+        f"T2 domain-store clients + the same T3 probe), since "
+        f"run_collection_postprocessing had no way to receive a shared "
+        f"client from `nx collection reindex`'s Click group. Got "
+        f"{len(client_tally)}"
     )

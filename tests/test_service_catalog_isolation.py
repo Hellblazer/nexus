@@ -118,3 +118,45 @@ def test_a_second_tenant_cannot_see_this_tenants_writes(
         f"tenant {other_tenant!r} can read another tenant's catalog write — "
         "the per-test-token isolation boundary is broken (nexus-1vt0b)"
     )
+
+
+def test_token_rotation_without_explicit_reset_resolves_fresh_client(
+    t2_service_env: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-w1ip: the shared catalog client must resolve a FRESH instance
+    when the resolvable (base_url, token) pair changes, with NO explicit
+    ``reset_shared_service_catalog_client_for_tests()`` call — the same
+    scenario ``test_a_second_tenant_cannot_see_this_tenants_writes`` above
+    only passes today BECAUSE it calls that reset by hand. This is the
+    DI plan's design test, not a duplicate of the test above — it proves
+    detection is now AUTOMATIC: before the nexus-w1ip endpoint-key
+    extraction, the module-global singleton had no notion of which
+    endpoint it was built against, so a token rotation (env var change
+    only — no code touches the cached client) was invisible to it: the
+    stale client kept answering under the OLD tenant identity."""
+    from tests._engine_substrate import ensure_engine, mint_test_tenant
+
+    from nexus.catalog.factory import make_catalog_writer, make_catalog_reader
+
+    w = make_catalog_writer()
+    try:
+        owner = w.register_owner("int-cce-w1ip-rotation-probe", "curator")
+        tumbler = w.register(owner, "nexus-w1ip token-rotation probe")
+    finally:
+        w.close()
+
+    other_tenant, other_token = mint_test_tenant(ensure_engine())
+    monkeypatch.setenv("NX_SERVICE_TOKEN", other_token)
+    # Deliberately NO reset_shared_service_catalog_client_for_tests() call
+    # here — the slot must detect the rotated token on its own.
+
+    r = make_catalog_reader()
+    try:
+        leaked = r.resolve(tumbler)
+    finally:
+        r.close()
+    assert leaked is None, (
+        f"tenant {other_tenant!r} can read another tenant's catalog write "
+        "via a STALE cached client — the shared catalog handle did not "
+        "notice its (base_url, token) identity changed (nexus-w1ip)"
+    )

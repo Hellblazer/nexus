@@ -1178,7 +1178,7 @@ nx catalog list [--owner PREFIX_OR_NAME] [--type TEXT] [-n/--limit N] [--offset 
 
 | Flag | Description |
 |------|-------------|
-| `--owner` | Filter to one owner. Accepts a dotted tumbler (`1.2`) or an owner name (resolved via catalog lookup); ambiguous names across multiple owners raise a clean error naming the candidates |
+| `--owner` | Filter to one owner. Accepts a dotted tumbler (`1.2`) or an owner name (resolved via catalog lookup); a name shared by a repo and a curator owner resolves to the repo (GH #1544); any other shared name raises a clean error naming the candidates |
 | `--type` | Filter to a `content_type` (e.g. `code`, `rdr`, `knowledge`) |
 | `-n`, `--limit` | Page size. Default `50`. **Server-side cap (nexus-xoimv)** — the underlying query is limited at the source, not truncated client-side after a full fetch |
 | `--offset` | Skip this many entries (pagination) |
@@ -2048,7 +2048,7 @@ nx collection list
 |------|-------------|
 | `--force` | Skip the pre-delete safety check (which verifies the source documents are still present before wiping the collection) |
 
-The `reindex` command performs a pre-delete safety check before wiping the collection: it confirms the original source documents are still accessible. If the check fails, the command aborts unless `--force` is given. After re-indexing, a `verify --deep` probe runs automatically to confirm retrieval health. The command dispatches per collection type (`code__`, `docs__`, `rdr__`, `knowledge__`) to the appropriate indexer.
+The `reindex` command performs a pre-delete safety check before wiping the collection: it confirms the original source documents are still accessible. If the check fails, the command aborts unless `--force` is given. After re-indexing, a `verify --deep` probe runs automatically to confirm retrieval health. The command dispatches per collection type (`docs__`, `rdr__`, `knowledge__`) to the appropriate indexer; a `code__` collection is refused up front, before any scan or delete, because this verb has no re-index driver for code (use `nx index repo <path>`, which re-indexes in place).
 
 
 **Chash resolution (RDR-086 Phase 1.3, table retired at RDR-187).** The
@@ -2150,7 +2150,7 @@ Hooks run `nx index repo` in the background after each qualifying git operation,
 
 ### nx hook routing-stats
 
-The `nx hook` group (hidden from `nx --help`) hosts Claude Code lifecycle plumbing: `session-start`, `session-end`, `session-end-flush`, and `session-end-detach` are invoked by the conexus plugin's SessionStart/SessionEnd hooks with a JSON payload on stdin and are not intended for manual use. `routing-stats` is the group's one operator-facing verb.
+The `nx hook` group (hidden from `nx --help`) hosts Claude Code lifecycle plumbing: `session-start`, `session-end`, `session-end-flush`, and `session-end-detach` are invoked by the conexus plugin's SessionStart/SessionEnd hooks with a JSON payload on stdin and are not intended for manual use. `mailbox-arm --session-id ID` prints the mailbox-watch arm instruction, or nothing when an arm could not succeed; the UserPromptSubmit mailbox drain hook runs it when no live watcher holds the session's own mailbox. `routing-stats` is the group's one operator-facing verb.
 
 ```
 nx hook routing-stats [--log-path PATH] [--json] [--escapes] [--from-store] [--since ISO_DATE]
@@ -3783,6 +3783,18 @@ The census for one subspace: `total`, `available`, `claimed`, `dead`, `consumed`
 | Flag | Description |
 |------|-------------|
 | `--json` | Output as JSON |
+
+### nx tuple directory
+
+```
+nx tuple directory NAME [--json]
+```
+
+Who holds NAME in the RDR-208 session directory (`directory/<name>`). Prints each live entry's `session_id`, `created_at` and `expires_at`, and flags NAME as ambiguous when more than one distinct session holds it (the case `mailbox_send` refuses). Uses the same resolver `mailbox_send` uses, so the two can never disagree about whether NAME is safely addressable.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output as JSON: `{name, entries, holders, ambiguous, resolved_session_id}` |
 
 ### nx tuple watch
 

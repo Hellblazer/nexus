@@ -10,7 +10,7 @@ import java.util.Map;
 /**
  * A deliberately small YAML subset parser for RDR-205 tuple templates
  * (bead nexus-em75s.3, design call: no {@code jackson-dataformat-yaml}
- * dependency for two fixed, flat templates — see the class's own module,
+ * dependency for a small, fixed set of flat templates — see the class's own module,
  * {@link TemplateRegistry}).
  *
  * <p>Supports exactly what the RDR-205 document shape needs: block
@@ -19,9 +19,9 @@ import java.util.Map;
  * multi-line scalars, no flow mappings, no quote-escaping beyond a single
  * layer of surrounding quotes, and no inline comments — a comment is a
  * whole line whose first non-blank character is {@code #}. This is not a
- * general YAML parser and is not meant to become one: the two v1 templates
- * and whatever the test-only {@code NX_TUPLE_TEMPLATE_DIR} fixtures declare
- * are the only documents it will ever read.
+ * general YAML parser and is not meant to become one: the shipped v1
+ * templates and whatever the test-only {@code NX_TUPLE_TEMPLATE_DIR}
+ * fixtures declare are the only documents it will ever read.
  */
 final class MiniYaml {
 

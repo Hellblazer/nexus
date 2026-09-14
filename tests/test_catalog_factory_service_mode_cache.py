@@ -136,10 +136,10 @@ def test_reset_shared_service_catalog_client_for_tests_clears_singleton(monkeypa
     _install_fake_client(monkeypatch, constructed)
 
     factory.make_catalog_reader().by_doc_id("a")
-    assert factory._service_catalog_client is not None
+    assert factory._default_catalog_slot._client is not None
 
     factory.reset_shared_service_catalog_client_for_tests()
-    assert factory._service_catalog_client is None
+    assert factory._default_catalog_slot._client is None
 
 
 # ── per-op timing split (nexus-jb4pp) ────────────────────────────────────────
@@ -164,7 +164,7 @@ def test_op_stats_keys_on_op_name(monkeypatch) -> None:
 
     monkeypatch.setattr("nexus.catalog.http_catalog_client.HttpCatalogClient", _Client)
     factory.reset_shared_service_catalog_client_for_tests()
-    factory._service_catalog_op_stats.clear()
+    factory._default_catalog_slot.reset_op_stats()
 
     make_catalog_reader().by_doc_id("a")
 
@@ -173,11 +173,11 @@ def test_op_stats_keys_on_op_name(monkeypatch) -> None:
     assert stats["by_doc_id"]["calls"] == 1
 
     factory.reset_shared_service_catalog_client_for_tests()
-    factory._service_catalog_op_stats.clear()
+    factory._default_catalog_slot.reset_op_stats()
 
 
 def test_call_releases_lock_before_network_round_trip(monkeypatch) -> None:
-    """nexus-u2u0n: ``_service_catalog_lock`` narrows to the client
+    """nexus-u2u0n: the slot's resolution lock narrows to the client
     RESOLUTION only — it must not span the forwarded call's own network
     round trip. Proven with a 3-party barrier inside the round trip: under
     the OLD pre-narrowing behavior (lock held across the whole call) only
@@ -215,7 +215,7 @@ def test_call_releases_lock_before_network_round_trip(monkeypatch) -> None:
     monkeypatch.setattr(
         "nexus.catalog.http_catalog_client.HttpCatalogClient", _ConcurrentClient)
     factory.reset_shared_service_catalog_client_for_tests()
-    factory._service_catalog_op_stats.clear()
+    factory._default_catalog_slot.reset_op_stats()
 
     errors: list[Exception] = []
 
@@ -247,7 +247,7 @@ def test_call_releases_lock_before_network_round_trip(monkeypatch) -> None:
     )
 
     factory.reset_shared_service_catalog_client_for_tests()
-    factory._service_catalog_op_stats.clear()
+    factory._default_catalog_slot.reset_op_stats()
 
 
 def test_concurrent_double_failure_does_not_double_close(monkeypatch) -> None:
@@ -297,7 +297,7 @@ def test_concurrent_double_failure_does_not_double_close(monkeypatch) -> None:
     assert len(close_calls) == 1, (
         f"the shared instance must be closed exactly once, got {len(close_calls)}"
     )
-    assert factory._service_catalog_client is None
+    assert factory._default_catalog_slot._client is None
 
     factory.reset_shared_service_catalog_client_for_tests()
 
@@ -339,7 +339,7 @@ def test_domain_exception_does_not_evict(monkeypatch) -> None:
     assert close_calls == [], (
         "a routine domain exception must never evict the shared client"
     )
-    assert factory._service_catalog_client is not None, (
+    assert factory._default_catalog_slot._client is not None, (
         "the still-healthy instance must remain installed for the next caller"
     )
 
@@ -372,7 +372,7 @@ def test_generic_exception_does_not_evict(monkeypatch) -> None:
         make_catalog_reader().by_doc_id("x")
 
     assert close_calls == []
-    assert factory._service_catalog_client is not None
+    assert factory._default_catalog_slot._client is not None
 
     factory.reset_shared_service_catalog_client_for_tests()
 
@@ -457,7 +457,7 @@ def test_in_flight_sibling_survives_eviction_close_deferred_until_it_exits(
         "mid-call — this is the use-after-close bug nexus-0dpli fixes"
     )
     # (ii): the slot is cleared immediately, regardless of drainage.
-    assert factory._service_catalog_client is None, (
+    assert factory._default_catalog_slot._client is None, (
         "the shared slot must be cleared immediately so new callers never "
         "resolve the doomed instance"
     )

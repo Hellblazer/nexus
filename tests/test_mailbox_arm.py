@@ -211,3 +211,13 @@ class TestTupleSurfaceAvailable:
         with patch("nexus.mailbox_arm._probe_tuple_surface", return_value=True) as m:
             tuple_surface_available(tmp_path, now=100.0, probe_timeout_s=0.5)
         m.assert_called_once_with(0.5)
+
+
+class TestInstanceNameIsTakenFresh:
+    """nexus-6konb.20: ListAgents renames a session on resume, so the
+    instruction says to take the name from a call made now."""
+
+    def test_states_the_name_comes_from_a_fresh_listagents_call(self) -> None:
+        text = mailbox_arm_instruction("sess-abc")
+        assert "ListAgents now" in text
+        assert "changes on resume" in text

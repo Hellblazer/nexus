@@ -162,8 +162,10 @@ tuples-003 + nexus-8zoyp).** Stage 3h seeds `nexus.tuples` through the
 FLOOR engine before the swap: mailbox rows in every claim state
 (unclaimed, claimed-and-left, consumed with and without a reply,
 dead-lettered via 3 claim/nack cycles), an over-4096-byte body (written
-past the working-tree client's own mirrored 4096-byte pre-check, since
-the floor enforces no size limit at all), an exactly-4096-byte body, and
+past the working-tree client's own mirrored 4096-byte pre-check, when
+the floor enforces no size limit; a floor from v0.1.118 on refuses it with
+TooLarge, which the leg asserts in place of the over-cap checks), an
+exactly-4096-byte body, and
 ledger rows — under a second tenant too when the floor's `nx tenant
 create` supports minting one. Post-walk it asserts: the over-cap row is
 gone with its claim-log history surviving at `tuple_id=NULL`
@@ -476,6 +478,8 @@ Deploy and cloud-validation are **conexus-side operations** — the bus is passi
 > **Before the relay, when this tag carries a changeset: ask conexus to run the PITR-fork walk rehearsal.** conexus can restore a Crunchy fork of production to a point in time (~6 min, `deploy/RESTORE.md`) and replay the Liquibase walk against the real row set before it runs live. That is the pre-deploy gate for a schema-carrying tag, and it is the one this skill used to omit. It caught `v0.1.78`'s zero-grant `nexus_diag` regression. The walk is CUMULATIVE — it replays everything the target cluster is behind on — so confirm the cloud's live `release_version` from the engine and size the walk from THAT, not from how many changesets you added.
 >
 > Also confirm with conexus before the window opens: (a) the per-release PRE-DEPLOY prerequisites table — some changesets need a Crunchy-superuser grant to EXIST before boot migration, and its absence is a loud failure on the live engine; (b) the per-release DATA EFFECTS table — anything the walk deletes is acknowledged in advance, never discovered mid-deploy; (c) the image is cosign-signed, since under `enable_image_verification=true` an unsigned image BRICKS BOOT; (d) the current image tag is captured FIRST as the rollback target, and the rollback floor is `nexus-service-0.1.84`.
+>
+> **The DATA EFFECTS table in (b) is produced mechanically, not written by hand** (nexus-f7dwp — before this, a destructive changeset's effect reached conexus only because someone typed it into the handoff, and tuples-003-2 / tuples-004-1 shipped in v0.1.118 that way). Run `uv run python scripts/list_data_effects.py <previous-engine-tag> <this-tag>` and paste its markdown table verbatim into the relay — it lists every changeset added in this range that modifies or removes existing rows, each carrying its `DATA EFFECT:` line and a CENSUS PREDICATE column (the exact matched SQL statement). For each row, ask conexus to turn that predicate into a `SELECT count(*) FROM ... WHERE ...` probe against the PITR fork BEFORE the walk. **Only when the changeset's own comment or a paired changeset documents a RAISE NOTICE'd count** (e.g. tuples-003-2, paired with tuples-003-1's logged count) compare the probe to that RAISE NOTICE count — the two must agree, or the row's disposition needs a second look before the window closes. Most data-effecting changesets carry no such count at all (22 of the 38 files nexus-f7dwp backfilled emit zero RAISE NOTICE — single-changeset ALTER COLUMN TYPE rewrites, backfills, and drops, tuples-004-1 itself included): for those, there is nothing to compare the probe against, so just confirm the probe's count is plausible against the DATA EFFECT prose's own stated scope (e.g. "every existing row", "the N rows measured at census time") before the walk runs. A non-zero exit from the script (a row shown `MISSING`) means a changeset in this range modifies rows with no disclosure at all — fix it (add the `DATA EFFECT:` line to the changeset's `<comment>`, checksum-neutral per `scripts/data_effect_lint.py`'s own docstring) before cutting the tag, not after.
 >
 > What conexus does NOT have is a staged/shadow deploy of the BINARY — one environment, and it is the live estate (conexus-vbti). State that narrowly. On 2026-08-27 this checklist's post-deploy-only gate list was read as "the cutover is unvalidated by construction" and reported to Hal; the binary half was right and the WALK half was wrong.
 

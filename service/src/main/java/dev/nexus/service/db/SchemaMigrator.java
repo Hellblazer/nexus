@@ -3,6 +3,7 @@ package dev.nexus.service.db;
 import liquibase.Contexts;
 import liquibase.LabelExpression;
 import liquibase.Liquibase;
+import liquibase.changelog.ChangeSet;
 import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
@@ -10,6 +11,8 @@ import liquibase.exception.LiquibaseException;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.DSLContext;
 import org.jooq.Field;
+import org.jooq.Record4;
+import org.jooq.Result;
 import org.jooq.SQLDialect;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
@@ -27,9 +30,11 @@ import java.time.ZoneOffset;
 import java.util.TimeZone;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Applies the Liquibase master changelog to a target {@link DataSource}.
@@ -179,6 +184,18 @@ public final class SchemaMigrator {
     private SchemaMigrator() { /* static utility */ }
 
     /**
+     * Sentinel value for {@link MigrationOutcome#newChangesets()}, {@link
+     * MigrationOutcome#reexecutedChangesets()}, and {@link
+     * MigrationOutcome#markRanChangesets()} when the walk itself succeeded but
+     * the diagnostic counting that would normally populate those fields could
+     * not complete (nexus-jl08t fix round, T2 [25638] finding 1). {@code
+     * pendingAtStart} is unaffected — it is computed before the counting logic
+     * this sentinel guards and is never itself the cause of a counts-
+     * unavailable outcome.
+     */
+    private static final long COUNTS_UNAVAILABLE = -1L;
+
+    /**
      * What a walk actually did, in truthfully named counts (nexus-x0s52).
      *
      * <p>The old {@code schema_migration_complete} line logged the PRE-update
@@ -186,8 +203,8 @@ public final class SchemaMigrator {
      * v0.1.86 PITR fork walk (2026-08-27): the line said 12 where 1 genuinely
      * new changeset landed and 25 rows were touched (24 {@code runAlways}
      * re-runs) — the logged number corresponded to NONE of the three
-     * quantities an operator might mean by "applied". These three fields are
-     * the real ones:
+     * quantities an operator might mean by "applied". These fields are the
+     * real ones:
      *
      * @param pendingAtStart  {@code listUnrunChangeSets()} BEFORE the update.
      *                        NOT "new changesets waiting": Liquibase counts the
@@ -195,24 +212,153 @@ public final class SchemaMigrator {
      *                        11 on a no-op walk of this changelog), which is
      *                        exactly how the old line came to claim 12 applied
      *                        where 1 landed
-     * @param newChangesets   {@code databasechangelog} row-count delta across
-     *                        the update — changesets that genuinely landed for
-     *                        the first time ("did my one changeset land" reads
-     *                        THIS field)
-     * @param reexecutedChangesets rows whose {@code dateexecuted} moved during
-     *                        the walk minus the new rows — the {@code runAlways}
-     *                        / {@code runOnChange} re-runs (a clean walk proves
-     *                        they executed, not that their content is right)
+     * @param newChangesets   distinct changeset IDENTITIES (id, author,
+     *                        filename) with a {@code databasechangelog} row
+     *                        stamped {@code EXECUTED} above this walk's
+     *                        pre-walk {@code orderexecuted} watermark —
+     *                        changesets that genuinely landed for the first
+     *                        time ("did my one changeset land" reads THIS
+     *                        field)
+     * @param reexecutedChangesets distinct changeset IDENTITIES stamped
+     *                        {@code RERAN} above the watermark — the
+     *                        {@code runAlways} / {@code runOnChange} re-runs
+     *                        (a clean walk proves they executed, not that
+     *                        their content is right)
+     * @param markRanChangesets distinct changeset IDENTITIES stamped
+     *                        {@code MARK_RAN} above the watermark (a
+     *                        {@code <preConditions onFail="MARK_RAN">} skip)
+     *                        — reported on its own rather than folded into
+     *                        either count above, since it is neither a
+     *                        landing nor a re-run
      *
-     * <p>Counts assume the single-instance-per-database boot this deployment
-     * runs. Two instances walking concurrently stay CORRECT on schema (the
-     * Liquibase changelog lock serializes the DDL) but can misattribute rows
-     * between their two log lines; a negative raw reading logs
-     * {@code event=schema_migration_count_anomaly} rather than clamping
-     * silently.
+     * <p><strong>Counted by IDENTITY, not by row (nexus-jl08t).</strong> A
+     * raw {@code COUNT(*)} grouped by {@code exectype} over the rows this
+     * walk touched counts physical {@code databasechangelog} rows, not
+     * changesets — and this project's production database carries DUPLICATE
+     * rows for at least one changeset identity (confirmed by conexus's
+     * 2026-09-14 read-only query of the live cluster: {@code
+     * grants-nexus-diag-1}/{@code -2} each have several extra copies, 13 in
+     * total against 12 distinct runAlways identities). Liquibase's own
+     * {@code RERAN} path ({@code MarkChangeSetRanGenerator}) issues one
+     * {@code UPDATE ... WHERE id=? AND author=? AND filename=?} per
+     * changeset — a statement with no row-count limit — so it re-stamps
+     * EVERY matching physical row with the same {@code dateexecuted} and
+     * {@code orderexecuted} while Liquibase itself believes it processed one
+     * changeset. That is exactly the mechanism that inflated conexus's
+     * engine-service-v0.1.118 log line to
+     * {@code reexecuted_changesets=25} against 12 declared {@code runAlways}
+     * changesets: a non-distinct row count scoped to that same walk (whether
+     * by the dateexecuted window this replaces, or by Liquibase's own
+     * per-walk {@code deployment_id}) ALSO reports 25 (verified in
+     * {@code SchemaMigratorIntegrationTest}'s "aged database" test, which
+     * seeds the exact production duplicate shape and records both wrong
+     * values and the fixed one). Grouping by identity before counting
+     * removes the row-count amplification entirely: each of the 12
+     * {@code runAlways} identities counts once, however many physical copies
+     * carry it.
+     *
+     * <p><strong>The duplicate rows' origin is KNOWN, not a mystery
+     * (substantive-critic finding, T2 [25635]).</strong> Commit {@code
+     * 585c8c20e} ("fix(schema): stop DATABASECHANGELOG growing a row per
+     * boot", nexus-ixsxa, 2026-07-27) explains that {@code
+     * grants-nexus-diag-1} (author {@code nexus-ykzbj.8}) and {@code
+     * grants-nexus-diag-2} (author {@code nexus-9bufb}) — the EXACT two
+     * identities production shows duplicated — previously carried {@code
+     * <preConditions onFail="MARK_RAN">} on a {@code runAlways} changeset:
+     * while the precondition kept failing, Liquibase's {@code
+     * MarkChangeSetRanGenerator} issued an INSERT (not an UPDATE) on every
+     * boot, growing one extra row per boot until 585c8c20e converted both to
+     * body-guard {@code RERAN} updates and the growth stopped. {@code
+     * grants-nexus-diag.xml}'s own header (lines 48-76) repeats this.
+     * Historical duplicate rows accumulated before that fix were deliberately
+     * NOT swept — 585c8c20e says so verbatim. What is genuinely unrecoverable
+     * is narrower than "origin unknown": it is which PHYSICAL BOOT produced
+     * which copy — every {@code RERAN} update since then overwrites each
+     * copy's {@code dateexecuted}/{@code deployment_id}/{@code orderexecuted}
+     * alike, erasing whatever once distinguished them, so the boot-by-boot
+     * history is gone even though the mechanism and the affected identities
+     * are on record. De-duplicating or deleting the rows already accumulated
+     * is a data-hygiene decision for the database's owner, not something a
+     * walk performs; see {@code migrate()}'s {@code
+     * schema_changelog_duplicate_rows} log line.
+     *
+     * <p><strong>Why {@code orderexecuted}, not {@code deployment_id}
+     * (nexus-jl08t).</strong> Liquibase's own per-walk {@code deployment_id}
+     * was tried first and rejected: recovering it after {@code
+     * liquibase.update()} returns requires reaching into {@code
+     * ChangeLogHistoryServiceFactory}'s internal per-{@code Database} cache,
+     * a plain {@code HashMap} keyed on the {@code Database} object — and
+     * {@code AbstractJdbcDatabase#hashCode()} delegates to its CURRENT JDBC
+     * connection wrapper, which Liquibase's own update pipeline replaces
+     * mid-walk. The same {@code Database} reference then hashes differently
+     * than it did when the entry was cached, so the lookup lands in the
+     * wrong bucket and silently returns a fresh, never-generated service
+     * instance — measured directly: {@code getDeploymentId()} read
+     * {@code null} on every call despite Liquibase's own log line reporting
+     * a real id for that same walk. {@code orderexecuted} carries none of
+     * that fragility: it is a plain integer column read by this class's own
+     * query, independent of any in-process Liquibase object identity or
+     * caching, and every physical copy of a duplicated identity's RERAN
+     * update shares one {@code orderexecuted} value (confirmed by
+     * conexus-9a's production query), so a watermark comparison alone
+     * already scopes correctly to this walk.
+     *
+     * <p><strong>The exact identity.</strong> In a race-free, single-writer
+     * walk, {@code newChangesets + reexecutedChangesets + markRanChangesets
+     * == pendingAtStart} EXACTLY: {@code pendingAtStart} is already the full
+     * set Liquibase's own planner intends to touch this walk (every
+     * genuinely-new changeset plus every {@code runAlways}/
+     * {@code runOnChange} rerun plus any precondition-skip), and the three
+     * counts above partition that same plan by outcome, each de-duplicated
+     * to one entry per identity. {@code migrate()} checks this identity on
+     * every walk and logs {@code event=schema_migration_count_anomaly} on
+     * any mismatch; a real mismatch now means either a second writer
+     * advanced {@code public.databasechangelog}'s {@code orderexecuted}
+     * sequence during this walk (a genuine concurrent walker against the
+     * same database — the watermark scopes out everything ALREADY there
+     * before this walk started, but not a third party racing it), or a
+     * changeset failed or was skipped without Liquibase ever stamping a row
+     * for it — not the retired dateexecuted-clock-window theory this
+     * replaces.
+     *
+     * <p><strong>Counts-unavailable sentinel (nexus-jl08t fix round).</strong>
+     * {@code newChangesets}, {@code reexecutedChangesets}, and {@code
+     * markRanChangesets} are each {@link #COUNTS_UNAVAILABLE} ({@code -1})
+     * when the walk itself succeeded (Liquibase's {@code update()} returned
+     * normally, so the migration is committed) but a transient failure in the
+     * diagnostic counting queries that populate these three fields prevented
+     * computing them. {@code pendingAtStart} is always a real count in that
+     * case — it runs before the counting logic this sentinel guards. A
+     * counts-unavailable outcome is never thrown as a {@link
+     * MigrationException}: the identity check above (partition ==
+     * pendingAtStart) does not apply and is skipped, and {@code migrate()}
+     * logs {@code event=schema_migration_count_unavailable} naming the
+     * failure's cause before returning. Callers that need the real counts for
+     * a specific walk should treat a sentinel outcome as "migration
+     * succeeded, counts unknown" rather than retry or fail the boot on it.
      */
     public record MigrationOutcome(
-            int pendingAtStart, long newChangesets, long reexecutedChangesets) {}
+            int pendingAtStart, long newChangesets, long reexecutedChangesets,
+            long markRanChangesets) {}
+
+    /**
+     * Distinct-identity counts of this walk's {@code databasechangelog} rows,
+     * grouped by {@code exectype}, plus how much row-count duplication the
+     * walk found (nexus-jl08t). See {@link MigrationOutcome}'s javadoc for
+     * why identity de-duplication is required rather than optional.
+     *
+     * @param duplicateChangesetIds each duplicated identity's changeset {@code
+     *      id} paired with its TOTAL physical row count (original plus
+     *      extras), sorted by extra-row count descending so the biggest
+     *      offender leads (substantive-critic finding, T2 [25635] SIGNIFICANT
+     *      (b)) — lets a reader tell the known production baseline ({@code
+     *      grants-nexus-diag-1} x7, {@code -2} x8) from a genuinely new
+     *      identity at a glance, rather than only a bare count.
+     */
+    private record WalkChangesetCounts(
+            long newChangesets, long reexecutedChangesets, long markRanChangesets,
+            long duplicateIdentities, long duplicateExtraRows,
+            List<Map.Entry<String, Integer>> duplicateChangesetIds) {}
 
     /**
      * Applies all pending Liquibase changesets from the master changelog to the
@@ -230,6 +376,39 @@ public final class SchemaMigrator {
      *                             obtained; caller should treat this as fatal
      */
     public static MigrationOutcome migrate(DataSource ds) {
+        return migrate(ds, () -> { });
+    }
+
+    /**
+     * Test seam (nexus-jl08t round 3, T2 [25617]/critic round-2 finding).
+     * {@code afterUpdateHook} runs immediately after {@code
+     * liquibase.update()} returns — the migration is already committed at
+     * that point — and strictly BEFORE the post-walk diagnostic count. The
+     * ordinary {@link #migrate(DataSource)} always passes a no-op, so this
+     * overload changes nothing for any existing caller.
+     *
+     * <p>Exists solely so {@code SchemaMigratorIntegrationTest} can inject a
+     * REAL Postgres error (revoking {@code SELECT} on {@code
+     * databasechangelog} from the migrating role via a second connection)
+     * strictly between the walk and the post-walk count that {@link
+     * #countThisWalkChangesets} performs — the two events happen inside one
+     * synchronous method with no other observable seam. Mocking the {@code
+     * DataSource}/{@code Connection} to fabricate the SQLException would
+     * test a fabrication rather than a genuine database failure; this hook
+     * lets the test cause a real one instead.
+     *
+     * <p><strong>Public, not package-private.</strong> {@code
+     * SchemaMigratorIntegrationTest} lives in {@code dev.nexus.service}, one
+     * package above this class's own {@code dev.nexus.service.db} — the same
+     * cross-package gap {@link #MASTER_CHANGELOG}'s own javadoc already notes
+     * (that constant's classpath string is duplicated test-side rather than
+     * widened). A bare constant tolerates duplication; this seam is behavior,
+     * not a value, so there is nothing to duplicate — widening visibility is
+     * the smaller change. The single-arg {@link #migrate(DataSource)} stays
+     * the only entry point any real caller (service boot, migration
+     * rehearsals) uses.
+     */
+    public static MigrationOutcome migrate(DataSource ds, Runnable afterUpdateHook) {
         log.info("event=schema_migration_start changelog={}", MASTER_CHANGELOG);
         try {
             pinJvmTimeZoneToUtc();
@@ -250,8 +429,8 @@ public final class SchemaMigrator {
             // equivalent -- SET TIME ZONE 'UTC' IS set_config('TimeZone', 'UTC',
             // false) (false = session-scoped, matching SET rather than SET LOCAL) --
             // called through DSL.using(conn, SQLDialect.POSTGRES) over the SAME bare
-            // bootstrap Connection, same conversion shape as countChangelogRows/
-            // countChangelogRowsSince/serverNow below. The EXEMPTION_REGISTRY entry
+            // bootstrap Connection, same conversion shape as maxOrderExecuted/
+            // countThisWalkChangesets below. The EXEMPTION_REGISTRY entry
             // this statement carried ("PostgreSQL session syntax, no jOOQ typed-DSL
             // form for a SET statement at all") is retired with it: set_config(...)
             // is an ordinary PostgreSQL function, not the bare SET statement, so this
@@ -279,37 +458,107 @@ public final class SchemaMigrator {
                     new Contexts(), new LabelExpression()).size();
                 log.info("event=schema_migration_pending changesets={}", pending);
 
-                // nexus-x0s52: capture the changelog's pre-walk state so the
-                // completion line can report what the walk actually DID, not
-                // the pre-update plan under a name promising a result. Row
-                // count is -1 on first boot (table not created yet); walkStart
-                // is the server's own clock in this UTC-pinned session, the
-                // same clock Liquibase stamps dateexecuted from (nexus-rph82).
-                long rowsBefore = countChangelogRows(conn);
-                java.sql.Timestamp walkStart = serverNow(conn);
+                // nexus-jl08t: identify THIS walk's own rows via a pre-walk
+                // orderexecuted WATERMARK, not Liquibase's own deployment_id.
+                // deployment_id was tried first and rejected: ChangeLogHistoryServiceFactory
+                // caches its per-Database service in a plain HashMap keyed on the Database
+                // object, and AbstractJdbcDatabase#hashCode() delegates to its current JDBC
+                // connection wrapper -- which Liquibase's own update() pipeline replaces
+                // mid-walk, changing `database`'s hashCode after it was cached. A HashMap
+                // lookup by the SAME object reference then lands in the wrong bucket and
+                // silently returns a FRESH, never-generated service instance (measured:
+                // getDeploymentId() reads null every time despite Liquibase's own log
+                // line reporting a real id for the same walk). ORDEREXECUTED has none of
+                // that fragility -- it is a plain integer column this method reads with
+                // its own query, entirely independent of any in-process Liquibase object
+                // identity or caching behavior, and every physical row of a duplicate
+                // identity's RERAN update shares one orderexecuted value (confirmed by
+                // conexus-9a's production query), so a plain watermark comparison already
+                // scopes to this walk without needing deployment_id at all.
+                //
+                // nexus-jl08t fix round (code review, T2 [25638] finding 1): this
+                // watermark read and the post-walk count below are DIAGNOSTIC ONLY --
+                // migrate()'s actual job is liquibase.update(), which either succeeds
+                // (committed) or throws (fatal, unchanged). A transient SQLException in
+                // either diagnostic query must never turn a COMMITTED migration into a
+                // fatal boot failure, so each is caught on its own rather than sharing
+                // this method's outer catch(SQLException), which still wraps a genuine
+                // connection/update failure into a fatal MigrationException exactly as
+                // before. See COUNTS_UNAVAILABLE and MigrationOutcome's javadoc for the
+                // sentinel contract this produces on a diagnostic failure.
+                Long orderExecutedWatermark;
+                try {
+                    orderExecutedWatermark = maxOrderExecuted(conn);
+                } catch (SQLException e) {
+                    log.warn("event=schema_migration_count_unavailable phase=pre_walk_watermark "
+                            + "cause=\"{}\"", e.toString());
+                    orderExecutedWatermark = null;
+                }
 
                 liquibase.update(new Contexts(), new LabelExpression());
+                afterUpdateHook.run();
 
-                long rowsAfter = countChangelogRows(conn);
-                long rawNew = rowsBefore < 0
-                        ? Math.max(rowsAfter, 0)
-                        : rowsAfter - rowsBefore;
-                long touched = countChangelogRowsSince(conn, walkStart);
-                long rawReexecuted = touched - Math.max(0, rawNew);
-                // Review follow-up (x0s52 round 2): a negative RAW count means a
-                // concurrent writer moved databasechangelog under this walk (a
-                // multi-instance boot — Liquibase's lock serializes the DDL, not
-                // these diagnostics). Clamp for the report, but never silently:
-                // the anomaly line preserves the raw readings.
-                if (rawNew < 0 || rawReexecuted < 0) {
-                    log.warn("event=schema_migration_count_anomaly rows_before={} "
-                            + "rows_after={} touched={} — concurrent changelog "
-                            + "writer suspected; the completion counts below are "
-                            + "clamped and may misattribute rows between instances",
-                            rowsBefore, rowsAfter, touched);
+                if (orderExecutedWatermark == null) {
+                    return countsUnavailableOutcome(pending);
                 }
-                long newChangesets = Math.max(0, rawNew);
-                long reexecuted = Math.max(0, rawReexecuted);
+
+                WalkChangesetCounts counts;
+                try {
+                    counts = countThisWalkChangesets(conn, orderExecutedWatermark);
+                } catch (SQLException e) {
+                    log.warn("event=schema_migration_count_unavailable phase=post_walk "
+                            + "cause=\"{}\"", e.toString());
+                    return countsUnavailableOutcome(pending);
+                }
+
+                if (counts.duplicateIdentities() > 0) {
+                    // nexus-jl08t: confirmed on production 2026-09-14 (conexus-9a,
+                    // read-only) -- grants-nexus-diag-1/-2 each carry several extra
+                    // databasechangelog rows sharing one identity (13 extra rows
+                    // across those 2 identities at the time of that query). Every
+                    // copy is re-executed together on every runAlways walk because
+                    // Liquibase's RERAN UPDATE has no row-count limit; the counts
+                    // above are already de-duplicated by identity, so they report
+                    // what Liquibase actually ran, not the physical row count. The
+                    // MECHANISM and the affected identities are documented (commit
+                    // 585c8c20e / nexus-ixsxa -- see MigrationOutcome's javadoc);
+                    // what this walk cannot recover is which physical BOOT produced
+                    // which copy -- every RERAN overwrites each copy's own
+                    // dateexecuted/deployment_id alike -- and this walk does not
+                    // delete or merge them: that is a data-hygiene decision for the
+                    // database's owner, not something a migration performs.
+                    log.warn("event=schema_changelog_duplicate_rows identity_count={} "
+                            + "extra_rows={} orderexecuted_watermark={} identities={}",
+                            counts.duplicateIdentities(), counts.duplicateExtraRows(),
+                            orderExecutedWatermark,
+                            formatDuplicateIdentities(counts.duplicateChangesetIds()));
+                }
+
+                long newChangesets = counts.newChangesets();
+                long reexecuted = counts.reexecutedChangesets();
+                long markRan = counts.markRanChangesets();
+                // nexus-jl08t: the three outcome counts partition pending_at_start
+                // EXACTLY in a race-free single-writer walk -- see MigrationOutcome's
+                // javadoc. A mismatch now means a genuine second writer advanced
+                // public.databasechangelog's orderexecuted sequence DURING this
+                // walk (a concurrent walker against the same database), or a
+                // changeset failed/was skipped without Liquibase ever stamping a
+                // row for it -- not the retired dateexecuted-clock-window theory
+                // (fixed) nor row-count duplication (already de-duplicated above
+                // by identity).
+                long accountedFor = newChangesets + reexecuted + markRan;
+                if (accountedFor != pending) {
+                    log.warn("event=schema_migration_count_anomaly accounted_for={} "
+                            + "pending_at_start={} new_changesets={} "
+                            + "reexecuted_changesets={} mark_ran_changesets={} — "
+                            + "new_changesets + reexecuted_changesets + "
+                            + "mark_ran_changesets must equal pending_at_start; this "
+                            + "mismatch means a second writer advanced "
+                            + "public.databasechangelog's orderexecuted sequence "
+                            + "during this walk, or a changeset failed or was "
+                            + "skipped without leaving a databasechangelog row",
+                            accountedFor, pending, newChangesets, reexecuted, markRan);
+                }
                 // The old line logged the PRE-update pending count as
                 // applied_changesets — a quantity the walk never computed
                 // (12x overstatement measured on the v0.1.86 fork walk). The
@@ -317,9 +566,10 @@ public final class SchemaMigrator {
                 // place: a deploy grep for it should find nothing and force a
                 // read of the real fields, never silently match new semantics.
                 log.info("event=schema_migration_complete new_changesets={} "
-                        + "reexecuted_changesets={} pending_at_start={}",
-                        newChangesets, reexecuted, pending);
-                return new MigrationOutcome(pending, newChangesets, reexecuted);
+                        + "reexecuted_changesets={} pending_at_start={} "
+                        + "mark_ran_changesets={}",
+                        newChangesets, reexecuted, pending, markRan);
+                return new MigrationOutcome(pending, newChangesets, reexecuted, markRan);
             }
 
         } catch (SQLException e) {
@@ -329,96 +579,167 @@ public final class SchemaMigrator {
         }
     }
 
-    // ── nexus-x0s52: truthful walk counts ────────────────────────────────────
+    /**
+     * Builds the "migration succeeded, counts unknown" outcome and logs
+     * {@code schema_migration_complete} with the {@link #COUNTS_UNAVAILABLE}
+     * sentinel in place of the three fields the caller's diagnostic query
+     * could not compute (nexus-jl08t fix round). Always called AFTER {@code
+     * liquibase.update()} has already returned normally, so the migration
+     * itself is committed regardless of this outcome's counts.
+     */
+    private static MigrationOutcome countsUnavailableOutcome(int pending) {
+        log.info("event=schema_migration_complete new_changesets={} "
+                + "reexecuted_changesets={} pending_at_start={} "
+                + "mark_ran_changesets={} counts_unavailable=true",
+                COUNTS_UNAVAILABLE, COUNTS_UNAVAILABLE, pending, COUNTS_UNAVAILABLE);
+        return new MigrationOutcome(pending, COUNTS_UNAVAILABLE, COUNTS_UNAVAILABLE, COUNTS_UNAVAILABLE);
+    }
+
+    // ── nexus-x0s52 / nexus-jl08t: truthful walk counts ──────────────────────
     // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): databasechangelog
     // is explicitly schema-qualified as "public" below (DSL.name("public",
-    // "databasechangelog") / to_regclass('public.databasechangelog')), matching
-    // VersionHandler's own DATABASECHANGELOG constant -- this table is Liquibase's
-    // own bookkeeping table, created via a migration connection that carries no
-    // search_path override, so it lands in Postgres's own default schema
-    // ("$user", public) resolving to public. Previously unqualified and relying on
-    // the calling session's search_path (the SAME connection Liquibase itself just
-    // used, which happened to still resolve correctly) -- exactly the silent
-    // reliance Sam's directive retires; the table's actual location is fixed and
-    // known, so naming it explicitly costs nothing and removes any dependency on
-    // resolution order.
+    // "databasechangelog")), matching VersionHandler's own DATABASECHANGELOG
+    // constant -- this table is Liquibase's own bookkeeping table, created via a
+    // migration connection that carries no search_path override, so it lands in
+    // Postgres's own default schema ("$user", public) resolving to public.
     //
-    // nexus-zrcj7 step 4 review follow-up (critic, T2 [24235]): the three methods
-    // below used to carry raw JDBC Statement/PreparedStatement calls, EXEMPTED with
-    // the reason "no jOOQ typed-DSL form" -- false. The true (and only) reason they
-    // were raw was architectural: they run on the BARE bootstrap Connection Liquibase
-    // itself borrows, before this class ever constructs a DSLContext. That connection
-    // is a plain java.sql.Connection like any other, and jOOQ's DSL.using(Connection,
-    // SQLDialect) wraps ANY such connection -- so the architectural constraint does
-    // NOT actually preclude typed DSL here. Converted: DSL.table(DSL.name(
-    // "public", "databasechangelog")) / DSL.field(DSL.name("dateexecuted"), ...) for
-    // Liquibase's own bookkeeping table (outside jOOQ codegen's modeled schemata, but
-    // nameable via the same safe quoted-identifier idiom ChashCensus.java/
-    // StagingPromoteOps.java/this bead's own TaxonomyRepository#advanceTopicsIdSequence
-    // conversion already use), DSL.function("to_regclass", ...) for the existence probe, and
-    // DSL.currentTimestamp() -- which jOOQ's own Postgres dialect renders as
-    // CAST(CURRENT_TIMESTAMP AS timestamp without time zone), the EXACT semantic
-    // equivalent of the retired "now()::timestamp" (session-zone wall clock, tz
-    // dropped; session is UTC-pinned by pinJvmTimeZoneToUtc()/the SET TIME ZONE
-    // statement above). Each method still throws SQLException (unchanged signature,
-    // unchanged caller-side catch(SQLException) at this method's own call site) by
-    // catching jOOQ's unchecked DataAccessException and rethrowing checked -- jOOQ
-    // itself never throws SQLException directly, so this preserves the exact
-    // propagation path migrate()'s own catch(SQLException) already depends on.
+    // nexus-zrcj7 step 4 review follow-up (critic, T2 [24235]): the methods below
+    // run on the BARE bootstrap Connection Liquibase itself borrows, before this
+    // class ever constructs its own long-lived DSLContext. That connection is a
+    // plain java.sql.Connection like any other, and jOOQ's DSL.using(Connection,
+    // SQLDialect) wraps ANY such connection, so typed DSL applies here exactly as
+    // elsewhere: DSL.table(DSL.name("public", "databasechangelog")) /
+    // DSL.field(DSL.name(...), Class) for Liquibase's own bookkeeping table
+    // (outside jOOQ codegen's modeled schemata, but nameable via the same safe
+    // quoted-identifier idiom ChashCensus.java/StagingPromoteOps.java/this bead's
+    // own TaxonomyRepository#advanceTopicsIdSequence conversion already use).
+    // Throws SQLException (matching migrate()'s own catch(SQLException) at its
+    // call site) by catching jOOQ's unchecked DataAccessException and rethrowing
+    // checked -- jOOQ itself never throws SQLException directly.
 
-    /** Rows in {@code databasechangelog}, or -1 when the table does not exist
-     * yet (first boot — Liquibase creates it during the update). */
-    private static long countChangelogRows(Connection conn) throws SQLException {
+    /** The highest {@code orderexecuted} in {@code databasechangelog} before this
+     * walk, or 0 when the table does not exist yet (first boot) or is empty --
+     * {@code orderexecuted} starts at 1, so 0 never collides with a real row. */
+    private static long maxOrderExecuted(Connection conn) throws SQLException {
         try {
             DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
             String regclass = ctx.select(DSL.function(
                     "to_regclass", SQLDataType.VARCHAR, DSL.val("public.databasechangelog")))
                 .fetchOne(0, String.class);
             if (regclass == null) {
-                return -1L;
+                return 0L;
             }
-            // jOOQ 3.20.11 (pinned; see pom.xml) has no countLarge() -- that arrived in
-            // a later jOOQ release. count() returns Field<Integer>; cast to BIGINT to
-            // keep this method's own long return type without narrowing anywhere.
-            Field<Long> cnt = DSL.count().cast(SQLDataType.BIGINT);
-            return ctx.select(cnt)
+            Field<Integer> orderExecuted = DSL.field(DSL.name("orderexecuted"), Integer.class);
+            Integer max = ctx.select(DSL.max(orderExecuted))
                 .from(DSL.table(DSL.name("public", "databasechangelog")))
-                .fetchOne(cnt);
+                .fetchOne(DSL.max(orderExecuted));
+            return max == null ? 0L : max.longValue();
         } catch (DataAccessException e) {
-            throw new SQLException("countChangelogRows failed", e);
+            throw new SQLException("maxOrderExecuted failed", e);
         }
     }
 
-    /** Rows whose {@code dateexecuted} is at or after {@code since} — every row
-     * this walk touched (new rows plus {@code runAlways}/{@code runOnChange}
-     * re-stamps). Valid because the session and JVM are both UTC-pinned
-     * (nexus-rph82), so the stamp and the comparison share one clock. */
-    private static long countChangelogRowsSince(Connection conn, java.sql.Timestamp since)
+    /**
+     * Counts this walk's {@code databasechangelog} rows by outcome, scoped to
+     * rows whose {@code orderexecuted} is strictly above the pre-walk watermark
+     * and de-duplicated by changeset IDENTITY (id, author, filename) rather than
+     * by physical row (nexus-jl08t). See {@link MigrationOutcome}'s javadoc for
+     * why a raw row count still over-counts on this project's production
+     * database, which carries duplicate rows for at least one changeset
+     * identity — every physical copy of a duplicated identity shares the SAME
+     * {@code orderexecuted} once re-executed (confirmed by conexus-9a's
+     * production query), so the watermark alone scopes correctly but the
+     * IDENTITY de-duplication is still required to count changesets, not rows.
+     */
+    private static WalkChangesetCounts countThisWalkChangesets(Connection conn, long orderExecutedWatermark)
             throws SQLException {
         try {
             DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
-            Field<java.sql.Timestamp> dateExecuted =
-                DSL.field(DSL.name("dateexecuted"), java.sql.Timestamp.class);
-            Field<Long> cnt = DSL.count().cast(SQLDataType.BIGINT);
-            return ctx.select(cnt)
+            Field<String> idField = DSL.field(DSL.name("id"), String.class);
+            Field<String> authorField = DSL.field(DSL.name("author"), String.class);
+            Field<String> filenameField = DSL.field(DSL.name("filename"), String.class);
+            Field<String> exectypeField = DSL.field(DSL.name("exectype"), String.class);
+            Field<Integer> orderExecutedField = DSL.field(DSL.name("orderexecuted"), Integer.class);
+
+            Result<Record4<String, String, String, String>> rows = ctx
+                .select(idField, authorField, filenameField, exectypeField)
                 .from(DSL.table(DSL.name("public", "databasechangelog")))
-                .where(dateExecuted.greaterOrEqual(since))
-                .fetchOne(cnt);
+                .where(orderExecutedField.gt((int) orderExecutedWatermark))
+                .fetch();
+
+            Map<List<String>, Integer> rowsPerIdentity = new LinkedHashMap<>();
+            Map<String, Set<List<String>>> identitiesByExecType = new LinkedHashMap<>();
+            for (Record4<String, String, String, String> row : rows) {
+                List<String> identity = List.of(row.value1(), row.value2(), row.value3());
+                rowsPerIdentity.merge(identity, 1, Integer::sum);
+                identitiesByExecType
+                    .computeIfAbsent(row.value4(), k -> new HashSet<>())
+                    .add(identity);
+            }
+
+            long newChangesets = identitiesByExecType
+                .getOrDefault(ChangeSet.ExecType.EXECUTED.value, Set.of()).size();
+            long reexecuted = identitiesByExecType
+                .getOrDefault(ChangeSet.ExecType.RERAN.value, Set.of()).size();
+            long markRan = identitiesByExecType
+                .getOrDefault(ChangeSet.ExecType.MARK_RAN.value, Set.of()).size();
+
+            long duplicateIdentities = rowsPerIdentity.values().stream()
+                .filter(count -> count > 1).count();
+            long duplicateExtraRows = rowsPerIdentity.values().stream()
+                .filter(count -> count > 1).mapToLong(count -> count - 1).sum();
+            // nexus-jl08t fix round (critic finding, T2 [25635] SIGNIFICANT (b)):
+            // named by id, total physical row count, biggest offender first --
+            // migrate()'s log line caps this list so a reader can tell the known
+            // production baseline (grants-nexus-diag-1 x7, -2 x8) from a new
+            // occurrence without cross-referencing a separate record.
+            List<Map.Entry<String, Integer>> duplicateChangesetIds = rowsPerIdentity.entrySet().stream()
+                .filter(e -> e.getValue() > 1)
+                .map(e -> Map.entry(e.getKey().get(0), e.getValue()))
+                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                .toList();
+
+            return new WalkChangesetCounts(
+                newChangesets, reexecuted, markRan, duplicateIdentities, duplicateExtraRows,
+                duplicateChangesetIds);
         } catch (DataAccessException e) {
-            throw new SQLException("countChangelogRowsSince failed", e);
+            throw new SQLException("countThisWalkChangesets failed", e);
         }
     }
 
-    /** The server's own clock as a session-zone (UTC) timestamp — the same
-     * clock Liquibase stamps {@code dateexecuted} from. */
-    private static java.sql.Timestamp serverNow(Connection conn) throws SQLException {
-        try {
-            return DSL.using(conn, SQLDialect.POSTGRES)
-                .select(DSL.currentTimestamp())
-                .fetchOne(DSL.currentTimestamp());
-        } catch (DataAccessException e) {
-            throw new SQLException("serverNow failed", e);
+    /** Cap on how many duplicated identities {@link #formatDuplicateIdentities}
+     * names before folding the rest into a {@code "+N more"} tail. */
+    private static final int DUPLICATE_IDENTITIES_LOG_CAP = 10;
+
+    /**
+     * Renders a walk's duplicated changeset identities as {@code "id xN, id
+     * xN, ... +K more"} (critic finding, T2 [25635] SIGNIFICANT (b)): the
+     * {@code schema_changelog_duplicate_rows} line previously carried only
+     * aggregate counts, so a reader could not tell the known production
+     * baseline ({@code grants-nexus-diag-1} x7, {@code -2} x8) from a
+     * genuinely new duplicated identity without a separate query. Capped at
+     * {@link #DUPLICATE_IDENTITIES_LOG_CAP} entries, largest-copy-count
+     * first, so the line stays bounded even on a box with many duplicated
+     * identities.
+     */
+    private static String formatDuplicateIdentities(List<Map.Entry<String, Integer>> duplicates) {
+        if (duplicates.isEmpty()) {
+            return "(none)";
         }
+        int shown = Math.min(duplicates.size(), DUPLICATE_IDENTITIES_LOG_CAP);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < shown; i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            Map.Entry<String, Integer> d = duplicates.get(i);
+            sb.append(d.getKey()).append(" x").append(d.getValue());
+        }
+        int remaining = duplicates.size() - shown;
+        if (remaining > 0) {
+            sb.append(" +").append(remaining).append(" more");
+        }
+        return sb.toString();
     }
 
     /**
@@ -602,10 +923,14 @@ public final class SchemaMigrator {
      * {@code Main} also pins it before any datasource is built, because a
      * pooled connection negotiates its session zone at connect time.
      *
-     * <p>The nexus-x0s52 completion counts depend on this pin too:
-     * {@code countChangelogRowsSince} windows {@code dateexecuted} against a
-     * server timestamp read in the UTC session — revert this pin and
-     * {@code reexecuted_changesets} silently skews by the zone offset.
+     * <p>{@code schema_migration_complete}'s counts no longer depend on this
+     * pin (nexus-jl08t): they are keyed on {@code orderexecuted}, a plain
+     * integer sequence, not on a {@code dateexecuted} clock window, so this
+     * class's own reporting is immune to zone skew regardless of this pin's
+     * state. The pin still matters for every EXTERNAL reader of
+     * {@code dateexecuted} — conexus's own post-deploy audits window that
+     * column against {@code now()} exactly as described above, and see the
+     * same zone skew this fixes if it is ever reverted.
      */
     public static void pinJvmTimeZoneToUtc() {
         TimeZone before = TimeZone.getDefault();

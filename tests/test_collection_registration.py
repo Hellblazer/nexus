@@ -269,6 +269,59 @@ def test_non_409_http_error_propagates_and_is_not_cached(
     writer.close.assert_called_once()
 
 
+class _ScopedFakeRegistrar:
+    """Duck-types :class:`nexus.db.t2._refreshable_client._EndpointRegistrar`'s
+    contract (a zero-arg factory carrying a ``.scope`` attribute) without
+    importing it, matching this file's dependency-light fake-writer style."""
+
+    def __init__(self, writer: MagicMock, *, scope: tuple[str, str]) -> None:
+        self._writer = writer
+        self.scope = scope
+        self.calls = 0
+
+    def __call__(self) -> MagicMock:
+        self.calls += 1
+        return self._writer
+
+
+def test_two_registrar_scopes_for_the_same_name_each_call_their_own_registrar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-w1ip follow-up, critic review 2026-09-14 gap 1: the cache was
+    name-only, so a SECOND store pinned to a SECOND scope (endpoint +
+    tenant) registering a name a FIRST store already registered would
+    short-circuit before ever calling ITS OWN registrar — reproducing
+    this bead's target symptom (422 "not registered" on the second
+    engine) via cache collision instead of ambient misrouting. Two
+    DIFFERENT scopes for the SAME name must each independently call
+    (and separately cache) their own registrar; re-registering under
+    either scope again must stay cached (no second call to either)."""
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client.is_vector_service_mode", lambda: True,
+    )
+    name = "knowledge__ensure-scoped-test"
+    writer_a = _fake_writer()
+    writer_b = _fake_writer()
+    registrar_a = _ScopedFakeRegistrar(writer_a, scope=("http://engine-a:8080", "tenant-a"))
+    registrar_b = _ScopedFakeRegistrar(writer_b, scope=("http://engine-b:8080", "tenant-b"))
+
+    ensure_collection_registered(name, registrar=registrar_a)
+    ensure_collection_registered(name, registrar=registrar_b)
+    # Re-registering under either scope again must stay cached.
+    ensure_collection_registered(name, registrar=registrar_a)
+    ensure_collection_registered(name, registrar=registrar_b)
+
+    assert registrar_a.calls == 1
+    assert registrar_b.calls == 1
+    writer_a.register_collection.assert_called_once()
+    writer_b.register_collection.assert_called_once()
+    assert (registrar_a.scope, name) in corpus._REGISTERED_COLLECTIONS_SCOPED
+    assert (registrar_b.scope, name) in corpus._REGISTERED_COLLECTIONS_SCOPED
+    # Never touches the ambient partition.
+    assert name not in corpus._REGISTERED_COLLECTIONS
+
+
 def test_writer_is_closed_even_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

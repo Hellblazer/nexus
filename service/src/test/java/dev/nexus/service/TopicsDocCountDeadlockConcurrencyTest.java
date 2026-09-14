@@ -520,11 +520,18 @@ class TopicsDocCountDeadlockConcurrencyTest {
      * and the changeset it validates.
      */
     private void restoreFixedTriggerBody() throws Exception {
-        // nexus-6n51g: restore the LIVE generation. taxonomy-015-1/-2 supersede
-        // taxonomy-013-1/-2 via CREATE OR REPLACE; restoring taxonomy-013 here would
-        // silently re-install the superseded FOR UPDATE body under every later phase.
-        String insSql = extractChangesetSql(LIVE_TRIGGER_CHANGELOG, "taxonomy-015-1");
-        String delSql = extractChangesetSql(LIVE_TRIGGER_CHANGELOG, "taxonomy-015-2");
+        // nexus-6n51g / nexus-4a8pn: restore the LIVE generation. taxonomy-017-1/-2
+        // supersede taxonomy-015-1/-2 via CREATE OR REPLACE (adding the posture
+        // tripwire guard; taxonomy-015-1/-2 themselves superseded taxonomy-013-1/-2
+        // the same way) -- restoring an earlier generation here would silently
+        // re-install a superseded body (missing the guard, or the FOR UPDATE lock
+        // mode) under every later phase. Safe for every call path this test exercises:
+        // assignFromChashesTask goes through the real TaxonomyRepository#assignFromChashes
+        // (tenantScope.withTenant sets nexus.tenant correctly), and rawInsertTask's raw
+        // connection explicitly sets it too (PgContainerHelper#setTenant) -- the guard
+        // never fires for either.
+        String insSql = extractChangesetSql(LIVE_TRIGGER_CHANGELOG, "taxonomy-017-1");
+        String delSql = extractChangesetSql(LIVE_TRIGGER_CHANGELOG, "taxonomy-017-2");
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(insSql);
@@ -537,7 +544,7 @@ class TopicsDocCountDeadlockConcurrencyTest {
      *  for the given changeSet id from taxonomy-013-doc-count-lock-order.xml. */
     /** Changelog holding the LIVE trigger generation (see restoreFixedTriggerBody). */
     private static final String LIVE_TRIGGER_CHANGELOG =
-        "db/changelog/taxonomy-015-doc-count-lock-mode.xml";
+        "db/changelog/taxonomy-017-doc-count-posture-tripwire.xml";
 
     private static String extractChangesetSql(String changelogResource, String changeSetId) throws Exception {
         var dbf = javax.xml.parsers.DocumentBuilderFactory.newInstance();

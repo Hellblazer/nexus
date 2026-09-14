@@ -138,6 +138,11 @@
             nexus-tk070.cc6: 0 zero-rows / 0 total rows measured on the
             live store — this changeset is a no-op there today, but ships
             unconditionally guarded regardless.
+            DATA EFFECT: UPDATEs every nexus.frecency row with ttl_days = 0 to NULL
+            (measured 0 rows on the live store; RAISE NOTICE'd regardless);
+            reversible via the rollback's inverse UPDATE (NULL back to 0) before
+            restoring NOT NULL DEFAULT 0 — though a row written NULL directly by a
+            later client is indistinguishable from a converted row by rollback time.
         </comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.frecency ALTER COLUMN ttl_days DROP DEFAULT;
@@ -200,6 +205,9 @@ ALTER TABLE nexus.frecency ALTER COLUMN ttl_days SET DEFAULT 0;
             nexus.frecency's CHECK, not at land time — the identical
             staging-exemption precedent legacy-001-3 already established
             for the chunk_id format CHECK.
+            DATA EFFECT: UPDATEs every staging.frecency row with ttl_days = 0 to
+            NULL (mirrors telemetry-006-1); reversible via the rollback's inverse
+            UPDATE before restoring NOT NULL DEFAULT 0.
         </comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE staging.frecency ALTER COLUMN ttl_days DROP DEFAULT;

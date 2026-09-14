@@ -191,7 +191,7 @@ def _write_t1_handoff_markers(new_session_id: str) -> None:
         _log.debug("t1_handoff_marker_write_failed", error=str(exc))
 
 
-def _write_tuple_watch_session_marker(new_session_id: str) -> None:
+def _write_tuple_watch_session_marker(new_session_id: str, source: str | None) -> None:
     """nexus-6konb.12 (MM-3.4 fix 1): tell a live ``nx tuple watch`` Monitor
     from before this ``/clear``/``/resume`` that the conversation is now a
     different session, so it can stop itself rather than keep holding its
@@ -217,6 +217,18 @@ def _write_tuple_watch_session_marker(new_session_id: str) -> None:
     session. The watcher still only stops on a mismatch, so a same-id write
     is a no-op for it.
 
+    RDR-208 Phase 2 Step 3: on ``source == "clear"`` this also records the
+    session a ``/clear`` just stranded, so
+    ``conexus/hooks/scripts/mailbox_drain.py`` can empty that mailbox once
+    (:func:`nexus.tuple_watch.record_clear_and_write_session_marker`). Never
+    on an INHERITED session id (``NX_SESSION_ID`` set): that names a nested
+    subprocess reusing its parent's session, not a real ``/clear`` boundary
+    a mailbox was stranded at, and recording one there would name a
+    "previous" session that never stopped receiving mail. Every other
+    source (``resume``, ``compact``, ``startup``, ``fork``, or none) writes
+    no record, per the RDR's Fork and Two-processes paragraphs and Sam's
+    decision that a fork leaves the parent's mailbox with the parent.
+
     Best-effort: any failure (no ``ps``, no config dir, disk error) is
     logged at debug and swallowed -- a SessionStart hook must never fail
     the session over a mailbox-watch convenience feature.
@@ -224,12 +236,18 @@ def _write_tuple_watch_session_marker(new_session_id: str) -> None:
     try:
         from nexus import config as _nx_config  # noqa: PLC0415 — deferred import; module attribute so a patched nexus.config reaches it (nexus-78blw)
         from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — deferred import; rare/branch-local path
-        from nexus.tuple_watch import write_session_marker  # noqa: PLC0415 — deferred import; rare/branch-local path
+        from nexus.tuple_watch import (  # noqa: PLC0415 — deferred import; rare/branch-local path
+            record_clear_and_write_session_marker,
+        )
 
         claude_pid = find_immediate_claude_pid()
         if claude_pid <= 0:
             return
-        write_session_marker(_nx_config.nexus_config_dir(), claude_pid, new_session_id)
+        inherited = bool(os.environ.get("NX_SESSION_ID", "").strip())
+        record_clear_and_write_session_marker(
+            _nx_config.nexus_config_dir(), claude_pid, new_session_id,
+            record_clear=(source == "clear" and not inherited),
+        )
     except Exception as exc:  # noqa: BLE001 — best-effort; hook must never crash session-start over a mailbox-watch convenience feature
         _log.debug("tuple_watch_session_marker_write_failed", error=str(exc))
 
@@ -319,7 +337,7 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
         _write_t1_handoff_markers(session_id)
     if session_id and session_id != "unknown":
         # Every source, not just clear/resume: see the writer's docstring.
-        _write_tuple_watch_session_marker(session_id)
+        _write_tuple_watch_session_marker(session_id, source)
 
     # nexus-gff3g: do NOT claim "T1 scratch initialized" here. This hook only
     # records the session-id; T1 chroma is owned by the MCP server's FastMCP

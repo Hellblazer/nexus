@@ -2259,8 +2259,17 @@ public final class TaxonomyRepository {
      * Persist a topic split: delete parent assignments, insert child topics + assignments.
      * Returns list of new child topic IDs.
      *
+     * <p>nexus-4a8pn: each spec's {@code doc_count} is accepted for wire
+     * compatibility but ignored — every child's {@code TOPICS.DOC_COUNT} is
+     * seeded 0 and left for the AFTER INSERT trigger to set once its
+     * {@code doc_ids} land (RDR-154 P0, nexus-i7ivk: "the trigger is the
+     * sole writer"). Trusting the caller's value was a reachable over-count:
+     * a spec with a nonzero {@code doc_count} but no doc_ids never fired the
+     * trigger, leaving the seeded value stuck above the real (zero) count.
+     *
      * @param topicId      parent topic id
-     * @param childSpecs   list of child specs; each has: label, doc_count, created_at, terms_json, doc_ids
+     * @param childSpecs   list of child specs; each has: label, doc_count (ignored,
+     *                     see above), created_at, terms_json, doc_ids
      * @param collectionName collection the parent topic belongs to
      */
     @SuppressWarnings("unchecked")
@@ -2283,16 +2292,23 @@ public final class TaxonomyRepository {
             List<Long> childIds = new ArrayList<>();
             for (var spec : childSpecs) {
                 String label      = (String) spec.get("label");
-                int    docCount   = ((Number) spec.get("doc_count")).intValue();
                 String createdAt  = (String) spec.get("created_at");
                 String termsJson  = (String) spec.getOrDefault("terms_json", null);
                 List<String> docIds = (List<String>) spec.getOrDefault("doc_ids", List.of());
 
+                // nexus-4a8pn: a spec's "doc_count" is accepted on the wire (old
+                // clients still send it) but IGNORED here — TOPICS.DOC_COUNT is
+                // always seeded 0, since the AFTER INSERT trigger (RDR-154 P0,
+                // nexus-i7ivk: "the trigger is the sole writer") is what sets the
+                // true value once batchInsertAssignments lands rows below. Trusting
+                // the caller's claimed count was reachable over-count: when docIds
+                // is empty, batchInsertAssignments returns early and no row ever
+                // enters new_rows, so a claimed nonzero doc_count went uncorrected.
                 OffsetDateTime createdAtTs = parseTsStrict(createdAt);
                 long childId = ctx.insertInto(TOPICS,
                         TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.PARENT_ID,
                         TOPICS.COLLECTION, TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS)
-                    .values(tenant, label, topicId, collectionName, docCount, createdAtTs, termsJson)
+                    .values(tenant, label, topicId, collectionName, 0, createdAtTs, termsJson)
                     .returningResult(TOPICS.ID)
                     .fetchOne()
                     .get(TOPICS.ID);
@@ -2373,6 +2389,11 @@ public final class TaxonomyRepository {
      * empty (the {@code < 5} docs / all-noise case), matching the monolithic
      * {@code rebuild_taxonomy}'s unconditional clear. A non-atomic Python
      * delete+insert loop cannot preserve this; hence a batch endpoint.
+     *
+     * <p>nexus-4a8pn: each spec's {@code doc_count} is accepted for wire
+     * compatibility but ignored — see {@link #persistSplit}'s identical note.
+     * Every inserted topic's {@code TOPICS.DOC_COUNT} is seeded 0, left for
+     * the AFTER INSERT trigger to set once {@code doc_ids} land.
      */
     @SuppressWarnings("unchecked")
     public List<Long> persistRebuildTopics(String tenant, String collection,
@@ -2396,11 +2417,15 @@ public final class TaxonomyRepository {
             List<Long> topicIds = new ArrayList<>();
             for (var spec : safeSpecs) {
                 String label        = (String) spec.get("label");
-                int    docCount     = ((Number) spec.get("doc_count")).intValue();
                 String terms        = (String) spec.getOrDefault("terms", null);
                 String reviewStatus = (String) spec.getOrDefault("review_status", "pending");
                 String assignedBy   = (String) spec.getOrDefault("assigned_by", "hdbscan");
                 List<String> docIds = (List<String>) spec.getOrDefault("doc_ids", List.of());
+
+                // nexus-4a8pn: "doc_count" is accepted on the wire (old clients
+                // still send it) but IGNORED — see persistSplit's identical note
+                // above. TOPICS.DOC_COUNT is always seeded 0; the AFTER INSERT
+                // trigger corrects it once batchInsertAssignments lands rows.
 
                 // nexus-n2ls1 (critique M2): same in-request belt as
                 // persistDiscoveredTopics — rebuild's inserts are root topics
@@ -2416,7 +2441,7 @@ public final class TaxonomyRepository {
                 Long topicId = ctx.insertInto(TOPICS,
                         TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
                         TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS, TOPICS.REVIEW_STATUS)
-                    .values(tenant, label, collection, docCount, now, terms, reviewStatus)
+                    .values(tenant, label, collection, 0, now, terms, reviewStatus)
                     .onConflict(TOPICS.TENANT_ID, TOPICS.COLLECTION, TOPICS.LABEL)
                     .where(TOPICS.PARENT_ID.isNull())
                     .doNothing()
@@ -2486,6 +2511,11 @@ public final class TaxonomyRepository {
      * OR IGNORE} chunk assignments). Returns topic_ids aligned to {@code specs}
      * order. The batch endpoint preserves the guard atomically vs a TOCTOU
      * Python count+loop.
+     *
+     * <p>nexus-4a8pn: each spec's {@code doc_count} is accepted for wire
+     * compatibility but ignored — see {@link #persistSplit}'s identical note.
+     * Every inserted topic's {@code TOPICS.DOC_COUNT} is seeded 0, left for
+     * the AFTER INSERT trigger to set once {@code doc_ids} land.
      */
     @SuppressWarnings("unchecked")
     public List<Long> persistDiscoveredTopics(String tenant, String collection,
@@ -2510,10 +2540,14 @@ public final class TaxonomyRepository {
             List<Long> topicIds = new ArrayList<>();
             for (var spec : specs) {
                 String label        = (String) spec.get("label");
-                int    docCount     = ((Number) spec.get("doc_count")).intValue();
                 String terms        = (String) spec.getOrDefault("terms", null);
                 String assignedBy   = (String) spec.getOrDefault("assigned_by", "hdbscan");
                 List<String> docIds = (List<String>) spec.getOrDefault("doc_ids", List.of());
+
+                // nexus-4a8pn: "doc_count" is accepted on the wire (old clients
+                // still send it) but IGNORED — see persistSplit's identical note
+                // above. TOPICS.DOC_COUNT is always seeded 0; the AFTER INSERT
+                // trigger corrects it once batchInsertAssignments lands rows.
 
                 // nexus-n2ls1 defense-in-depth: DO NOTHING on the taxonomy-004
                 // partial unique target. The advisory lock above already
@@ -2530,7 +2564,7 @@ public final class TaxonomyRepository {
                 Long topicId = ctx.insertInto(TOPICS,
                         TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
                         TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS)
-                    .values(tenant, label, collection, docCount, now, terms)
+                    .values(tenant, label, collection, 0, now, terms)
                     .onConflict(TOPICS.TENANT_ID, TOPICS.COLLECTION, TOPICS.LABEL)
                     .where(TOPICS.PARENT_ID.isNull())
                     .doNothing()

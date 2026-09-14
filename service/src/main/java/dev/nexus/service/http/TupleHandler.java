@@ -58,7 +58,7 @@ import java.util.Optional;
  * uses at every other bytea-identity boundary); {@code keys}/{@code dims}
  * are plain JSON objects of string values.
  *
- * <p>Errors: the nine RDR-205 typed errors ({@link TupleException} and its
+ * <p>Errors: the ten RDR-205 typed errors ({@link TupleException} and its
  * subtypes) are caught ahead of the generic ladder and rendered as {@code
  * {"error": "<code>", "detail": "<message>"}} at each exception's own
  * {@link TupleException#httpStatus()} — {@code ParkCapExceeded} additionally

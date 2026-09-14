@@ -38,8 +38,15 @@ from typing import Any, NoReturn
 
 import structlog
 
-from nexus.redact import redact_credentials
+from nexus.db.gateway_backoff import (
+    _EMBED_SERVER_SIDE_WRITE_PATH_SUFFIXES,
+    _EMBED_WRITE_504_BACKOFF_FLOOR_S,
+    _GATEWAY_RETRY_CODES,
+    _GATEWAY_RETRY_SLEEPS,
+    _is_embed_server_side_write_path,
+)
 from nexus.logging_setup import emit_import_time_warning
+from nexus.redact import redact_credentials
 
 _log = structlog.get_logger(__name__)
 
@@ -628,13 +635,19 @@ def _request_once(
         raise
 
 
-#: Backoff schedule for gateway-transient HTTP codes (502/503/504). Found by
-#: the nexus-duoak.4 scaling sweep: concurrent CCE upsert batches slow
-#: server-side embedding past the gateway timeout, and a single unretried 504
-#: killed an entire ``nx index repo`` run. Upserts are idempotent
-#: (content-addressed), so bounded retry is safe for every /v1 call family.
-_GATEWAY_RETRY_SLEEPS: tuple[float, ...] = (2.0, 5.0, 10.0)
-_GATEWAY_RETRY_CODES = frozenset({502, 503, 504})
+#: nexus-r46u9: the gateway-transient backoff schedule (_GATEWAY_RETRY_SLEEPS/
+#: _GATEWAY_RETRY_CODES), the embed-write 504 floor
+#: (_EMBED_WRITE_504_BACKOFF_FLOOR_S), the embed-write path suffixes
+#: (_EMBED_SERVER_SIDE_WRITE_PATH_SUFFIXES) and the classifier
+#: (_is_embed_server_side_write_path) used below all moved to
+#: :mod:`nexus.db.gateway_backoff` (a leaf module, imported at the top of
+#: this file) so ``db/t2/_refreshable_client.py`` — which needs the SAME
+#: shape for the catalog's combined write, ``/v1/catalog/manifest/write_many``
+#: — can share them without importing this module. See that module's
+#: docstring for the full rationale; these names are kept accessible here
+#: under their ORIGINAL underscore-prefixed spelling purely because tests
+#: reference ``http_vector_client._GATEWAY_RETRY_SLEEPS`` etc. directly —
+#: new code should import from :mod:`nexus.db.gateway_backoff`.
 
 #: Per-collection chunk cap for a SINGLE /v1/vectors/upsert-chunks POST
 #: (nexus-nf3n7). CCE collections (docs/knowledge/rdr — voyage-context-3) embed
@@ -1241,16 +1254,29 @@ def _request(
     a bounded backoff retry (``_GATEWAY_RETRY_SLEEPS``); all other HTTP
     errors propagate immediately — 4xx/500 are not transient.
 
+    nexus-r46u9: a 504 on a server-side-embedding write route
+    (:func:`_is_embed_server_side_write_path`) floors EVERY scheduled sleep
+    at :data:`_EMBED_WRITE_504_BACKOFF_FLOOR_S` (30s) instead of the raw
+    2s/5s/10s schedule — the edge's own ~30s request-timeout bound means a
+    504 there is evidence the engine is still finishing the SAME batch, not
+    that it gave up; resending immediately piles a duplicate embed job on
+    top of the one already in flight. 502/503 on any route, and 504 on any
+    non-embed-write route, keep the unfloored schedule.
+
     Budget arithmetic (nexus-7dsgp, GH #1405 defect 1 — "must not stack
     with existing retry wrappers into unbounded totals"): the RETRY branch
     below adds ``_wait_for_lease_republication()``'s bounded 12s poll on
     top of the existing two-attempt shape (each attempt already bounded by
-    ``timeout`` plus up to 17s of gateway backoff). Worst case for one
-    ``_request`` call: attempt 1 (~timeout, or +17s if gateway-transient)
-    + 12s lease wait + attempt 2 (~timeout, or +17s again) — a fixed 12s
-    added to the pre-existing two-attempt total, never unbounded.
+    ``timeout`` plus up to 17s of gateway backoff — or, for a repeated 504
+    on an embed-write route, up to 90s = 3 x 30s floored backoff). Worst
+    case for one ``_request`` call: attempt 1 (~timeout, or +17s/+90s if
+    gateway-transient) + 12s lease wait + attempt 2 (~timeout, or +17s/+90s
+    again) — a fixed 12s added to the pre-existing two-attempt total, never
+    unbounded.
     """
     import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+
+    embed_write_path = _is_embed_server_side_write_path(path)
 
     def _once_with_gateway_retry() -> Any:
         for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
@@ -1261,14 +1287,16 @@ def _request(
             except urllib.error.HTTPError as exc:
                 if exc.code not in _GATEWAY_RETRY_CODES or delay is None:
                     raise
+                floored = exc.code == 504 and embed_write_path
+                sleep_s = max(delay, _EMBED_WRITE_504_BACKOFF_FLOOR_S) if floored else delay
                 _log.warning(
-                    "vector_gateway_retry",
+                    "vector_gateway_retry_embed_write_504" if floored else "vector_gateway_retry",
                     path=path,
                     code=exc.code,
                     attempt=i + 1,
-                    sleep_s=delay,
+                    sleep_s=sleep_s,
                 )
-                time.sleep(delay)
+                time.sleep(sleep_s)
         raise AssertionError("unreachable")  # loop always returns or raises
 
     try:

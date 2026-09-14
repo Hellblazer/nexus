@@ -36,7 +36,7 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="catalog-015-0" author="nexus-8gue1">
-        <comment>fts_vector: add separator-normalized segment so filename/path fragments (rdr-021.md) are findable by free-text search (RDR-021)</comment>
+        <comment>fts_vector: add separator-normalized segment so filename/path fragments (rdr-021.md) are findable by free-text search (RDR-021). DATA EFFECT: DROPs and re-ADDs the GENERATED fts_vector column on catalog_documents (a table rewrite that recomputes the derived tsvector for every row from title/author/corpus/file_path — no independently-stored data lost); reversible via the rollback's inverse DROP+ADD using the prior expression.</comment>
         <sql splitStatements="true">
 ALTER TABLE nexus.catalog_documents DROP COLUMN fts_vector;
 ALTER TABLE nexus.catalog_documents

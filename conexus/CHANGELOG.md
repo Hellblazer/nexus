@@ -4,6 +4,48 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.46.0] - 2026-09-14
+
+Paired engine: engine-service-v0.1.119 (`REQUIRED_ENGINE_VERSION` (0, 1, 119)).
+Plugin version aligned with conexus 7.46.0. This pin advance makes live the
+plugin changes `PENDING_RELEASE.md` held:
+
+- Session-id mail addressing (RDR-208 Phase 2):
+  - The mailbox skill sends through the new `mailbox_send` MCP tool. A peer's
+    name resolves through the session directory at send time; a name with no
+    live holder, or with more than one, is refused with the failure named,
+    and `nx tuple directory NAME` shows who holds a name so the sender can
+    resend by session id. Raw `tuple_out` stays documented for a
+    caller-controlled resend nonce and the cross-instance request/ack shape. A
+    subagent passes `from_address` set to its own agent id (nexus-galkv.12).
+  - The peer-messaging skill's mailbox-request example sends through
+    `mailbox_send` and retires the "look up `ListAgents` right before sending"
+    workaround; `ListAgents` is still how a sender learns a peer's name
+    (nexus-galkv.12).
+  - `auto-approve-nx-mcp.sh` allows `mailbox_send`, so a send does not prompt
+    (nexus-galkv.10).
+  - The mailbox skill documents `address_kind` as `{agent, instance, session}`,
+    with `instance` retired after RDR-208 Phase 3 (nexus-galkv.2).
+- `mailbox_drain.py`:
+  - After a session's own mailbox, the drain reads
+    `<config>/tuple-watch/cleared.<session id>` and empties every mailbox a
+    `/clear` stranded. It deletes the record only once every named mailbox's
+    claim loop ended empty, a read paged to the end shows no row except
+    dead-lettered ones, and its pending file is empty; a record older than 7
+    days is pruned. Each pass holds the address's pending-file lock for the
+    whole pass, skips the mailbox when the lock is busy, and claims under its
+    own claimant, so two processes draining one address cannot both deliver a
+    row (nexus-galkv.6).
+  - When no live watcher holds this session's own mailbox lock, the
+    UserPromptSubmit drain re-issues the arm instruction from
+    `nx hook mailbox-arm`, at most once every 10 minutes; the arm name comes
+    from a `ListAgents` call at arm time, because a resume changes it
+    (nexus-6konb.19, nexus-6konb.20).
+- The peer-messaging skill tells senders to look a peer's name up in
+  `ListAgents` right before sending tuple mail, since a resume can rename a
+  session (nexus-6konb.21); the `mailbox_send` change above supersedes this
+  for name-addressed sends.
+
 ## [7.45.0] - 2026-09-14
 
 Paired engine: engine-service-v0.1.118 (`REQUIRED_ENGINE_VERSION` (0, 1, 118)).

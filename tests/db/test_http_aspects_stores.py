@@ -38,6 +38,18 @@ def _make_transport(handlers: dict):
     """
     def handle_request(request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        if path == "/v1/catalog/collections/upsert" and path not in handlers:
+            # A registering write's pre-registration now targets THIS
+            # store's own endpoint over its own (shared) client (nexus-w1ip
+            # follow-up), so every store built through _store() below hits
+            # this route before its real write. Answer it the way the
+            # engine does -- an idempotent upsert -- unless a test
+            # explicitly overrides the route via its own handlers dict.
+            try:
+                body = json.loads(request.content.decode("utf-8")) if request.content else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                body = {}
+            return httpx.Response(200, json={"created": True, "name": body.get("name", "")})
         handler = handlers.get(path)
         if handler is None:
             return httpx.Response(404, json={"error": f"not found: {path}"})

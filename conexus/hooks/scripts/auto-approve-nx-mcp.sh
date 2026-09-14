@@ -72,6 +72,7 @@ case "$TOOL_NAME" in
   mcp__plugin_conexus_nexus__tuple_registry|\
   mcp__plugin_conexus_nexus__tuple_list|\
   mcp__plugin_conexus_nexus__tuple_stats|\
+  mcp__plugin_conexus_nexus__mailbox_send|\
   mcp__plugin_conexus_sequential-thinking__sequentialthinking)
     # Event-aware output. PermissionRequest fires only when a PROMPT would be
     # shown; under defaultMode:auto the classifier decides first and never

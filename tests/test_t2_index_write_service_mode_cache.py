@@ -113,17 +113,17 @@ def test_reset_singletons_clears_service_t2_singleton(monkeypatch) -> None:
     monkeypatch.setattr("nexus.db.t2.T2Database", _FakeT2Database)
 
     mi.t2_index_write(lambda db: db)
-    assert mi._service_t2_db is not None
+    assert mi._default_t2_slot._client is not None
 
     mi.reset_singletons()
-    assert mi._service_t2_db is None
+    assert mi._default_t2_slot._client is None
 
 
 # ── CAS narrowing (nexus-ldab2) ──────────────────────────────────────────────
 
 
 def test_write_fn_releases_lock_before_running(monkeypatch) -> None:
-    """nexus-ldab2: ``_service_t2_lock`` narrows to the singleton
+    """nexus-ldab2: the slot's resolution lock narrows to the singleton
     RESOLUTION only — it must not span ``write_fn``'s own (potentially
     slow / network-bound) execution. Proven with a 3-party barrier inside
     write_fn: under the OLD pre-narrowing behavior (lock held across the
@@ -214,7 +214,7 @@ def test_concurrent_double_failure_does_not_double_close(monkeypatch) -> None:
     assert len(close_calls) == 1, (
         f"the shared instance must be closed exactly once, got {len(close_calls)}"
     )
-    assert mi._service_t2_db is None
+    assert mi._default_t2_slot._client is None
 
 
 def test_op_stats_key_on_explicit_op_name(monkeypatch) -> None:
@@ -279,7 +279,7 @@ def test_domain_exception_does_not_evict(monkeypatch) -> None:
     assert close_calls == [], (
         "a routine domain exception must never evict the shared T2Database"
     )
-    assert mi._service_t2_db is not None, (
+    assert mi._default_t2_slot._client is not None, (
         "the still-healthy instance must remain installed for the next caller"
     )
 
@@ -350,7 +350,7 @@ def test_in_flight_sibling_survives_eviction_close_deferred_until_it_exits(
         "still mid-write_fn — the use-after-close bug nexus-0dpli fixes"
     )
     # (ii): the slot is cleared immediately, regardless of drainage.
-    assert mi._service_t2_db is None, (
+    assert mi._default_t2_slot._client is None, (
         "the shared slot must be cleared immediately so new callers never "
         "resolve the doomed instance"
     )
@@ -492,7 +492,7 @@ async def test_plan_match_t1_failure_does_not_evict_the_shared_t2_singleton(
         "a T1 connectivity failure OUTSIDE the write_fn closure must never "
         "evict the shared T2Database singleton"
     )
-    assert _infra._service_t2_db is constructed[0], (
+    assert _infra._default_t2_slot._client is constructed[0], (
         "the singleton slot must remain installed after a non-T2 failure"
     )
 
@@ -541,7 +541,7 @@ def test_shared_singleton_401_remints_without_eviction(fake_service, monkeypatch
         "the shared T2Database singleton must be reused across the "
         "401-then-remint retry, never rebuilt"
     )
-    assert mi._service_t2_db is instances[0]
+    assert mi._default_t2_slot._client is instances[0]
     assert instances[0].closed is False
 
 
@@ -606,7 +606,7 @@ async def test_plan_match_connectivity_error_evicts_the_shared_t2_singleton(
         "must evict the shared T2Database singleton -- the concrete "
         "gap critique [24578] found"
     )
-    assert _infra._service_t2_db is None
+    assert _infra._default_t2_slot._client is None
 
 
 def test_price_table_connectivity_error_is_swallowed_not_evicted(monkeypatch) -> None:
@@ -652,12 +652,12 @@ def test_price_table_connectivity_error_is_swallowed_not_evicted(monkeypatch) ->
         "connectivity failure, exactly as it does for any other query "
         "failure -- never a fabricated price"
     )
-    assert mi._service_t2_db is not None, (
+    assert mi._default_t2_slot._client is not None, (
         "the swallowed failure never reaches _service_t2_write_locked's "
         "classifier, so the singleton is NOT evicted here -- the "
         "documented residual, not a claimed fix"
     )
-    assert mi._service_t2_db.closed is False
+    assert mi._default_t2_slot._client.closed is False
 
 
 def test_record_run_connectivity_error_is_swallowed_not_evicted(monkeypatch) -> None:
@@ -698,12 +698,12 @@ def test_record_run_connectivity_error_is_swallowed_not_evicted(monkeypatch) -> 
         op="record_run",
     )  # must not raise -- the internal swallow absorbs it
 
-    assert mi._service_t2_db is not None, (
+    assert mi._default_t2_slot._client is not None, (
         "the swallowed failure never reaches _service_t2_write_locked's "
         "classifier, so the singleton is NOT evicted here -- the "
         "documented residual, not a claimed fix"
     )
-    assert mi._service_t2_db.closed is False
+    assert mi._default_t2_slot._client.closed is False
 
 
 @pytest.mark.asyncio
@@ -806,4 +806,50 @@ async def test_run_start_connectivity_error_evicts_mid_call_and_record_complete_
         "the choke point's outcome bump -- merged into the SAME write as "
         "the record above -- must also land against the rebuilt instance"
     )
-    assert _infra._service_t2_db is constructed[1]
+    assert _infra._default_t2_slot._client is constructed[1]
+
+
+# ── nexus-w1ip: endpoint-key auto-detection against the REAL engine ────────
+
+
+def test_token_rotation_without_explicit_reset_resolves_fresh_client(
+    t2_service_env: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-w1ip: the shared ``T2Database`` singleton must resolve a
+    FRESH instance when the resolvable ``(base_url, token)`` pair
+    changes, with NO explicit reset — mirrors
+    ``tests/test_service_catalog_isolation.py``'s identical proof on the
+    catalog side. Before nexus-w1ip's endpoint-key extraction, the shared
+    T2Database singleton had no notion of which endpoint it was built
+    against, so a token rotation (an env var change only — no code
+    touches the cached singleton) was invisible to it: a write routed
+    through the stale client's ``Http*Store`` instances kept landing
+    under the OLD tenant's bearer, and a caller believing it switched
+    tenants would actually still be reading/writing the first one's
+    rows."""
+    from tests._engine_substrate import ensure_engine, mint_test_tenant
+
+    import nexus.mcp_infra as mi
+
+    plan_id = mi.t2_index_write(
+        lambda db: db.plans.save_plan(
+            query="nexus-w1ip token-rotation probe",
+            plan_json='{"steps": []}',
+            verb="query",
+        ),
+        op="plan_save",
+    )
+
+    _other_tenant, other_token = mint_test_tenant(ensure_engine())
+    monkeypatch.setenv("NX_SERVICE_TOKEN", other_token)
+    # Deliberately NO reset_singletons() / explicit slot reset here — the
+    # slot must detect the rotated token on its own.
+
+    leaked = mi.t2_index_write(
+        lambda db: db.plans.get_plan(plan_id), op="plan_get",
+    )
+    assert leaked is None, (
+        f"tenant {_other_tenant!r} can read another tenant's plan-library "
+        "row via a STALE cached T2Database — the shared T2 handle did not "
+        "notice its (base_url, token) identity changed (nexus-w1ip)"
+    )

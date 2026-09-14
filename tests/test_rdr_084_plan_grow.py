@@ -28,13 +28,13 @@ import pytest
 from nexus.plans.match import Match
 
 
-# The ``_service_t2_db`` eviction this file used to do for itself is now
-# suite-wide (``tests/conftest.py::_reset_service_t2_db``, nexus-aqbrk). The
-# hazard it named — ``t2_index_write``'s process-lifetime service
-# ``T2Database`` baking in the first test's tenant token — is unchanged; it
-# is simply no longer this one file's problem to solve. Verified by deleting
-# the fixture below and confirming the file stays green ONLY while the
-# conftest eviction is armed.
+# The manual per-file T2-singleton eviction this file used to do for
+# itself, then the suite-wide autouse conftest fixture that replaced it
+# (nexus-aqbrk), are BOTH gone now (nexus-w1ip): the T2 slot
+# (``nexus.mcp_infra._default_t2_slot``) detects a rotated per-test tenant
+# token itself — see ``SharedClientSlot``'s ``endpoint_key`` — and rebuilds
+# automatically, so there is no first-test's-tenant hazard left for either
+# this file or a suite-wide fixture to guard against.
 
 
 def _ad_hoc_match(plan_json: str | None = None) -> Match:

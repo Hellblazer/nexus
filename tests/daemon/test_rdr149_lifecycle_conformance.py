@@ -50,14 +50,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
+from unittest.mock import patch
 
 import pytest
 
@@ -932,9 +935,8 @@ class TestTerminationSurvivorVerdict:
             assert pid_running(pid) is False, (
                 f"a zombie is dead, not running: state={process_state(pid)!r}"
             )
-            t0 = time.monotonic()
-            stubborn = terminate_pids([pid], grace_s=5.0)
-            elapsed = time.monotonic() - t0
+            with patch("time.sleep") as mock_sleep:
+                stubborn = terminate_pids([pid], grace_s=5.0)
         finally:
             with contextlib.suppress(ChildProcessError, OSError, subprocess.TimeoutExpired):
                 proc.wait(timeout=5)
@@ -943,9 +945,57 @@ class TestTerminationSurvivorVerdict:
             "it as a SIGKILL survivor breaks `nx daemon service stop`'s exit "
             "code and the documented stop && start remedy chain"
         )
-        assert elapsed < 2.0, (
-            "an already-dead pid must not burn the SIGTERM grace window "
-            f"before the verdict; took {elapsed:.2f}s"
+        # nexus-scc9t round 2 (critic finding): an already-dead pid is
+        # USUALLY filtered out of `live` before the grace loop is ever
+        # entered (service_registry.terminate_pids), so the loop's
+        # ``if not live: return []`` fires on its first iteration and its
+        # own time.sleep(0.2) is never called -- but pid_running()'s own
+        # docstring says an UNKNOWN process_state() (`None`, e.g. a `ps`
+        # subprocess snapshot racing the kernel's own zombie-state update,
+        # or simply not settling in time under load) is treated as
+        # RUNNING, permissive-on-ambiguity by design. So a zombie can
+        # legitimately read as alive for exactly ONE loop iteration
+        # before the next check (one grace-loop tick later) settles to
+        # not-running -- a platform-dependent race, not a bug. At most
+        # one poll sleep is allowed; a loop that waits out the whole
+        # grace period (the real regression this guards) calls sleep
+        # dozens of times, so this stays a precise catch.
+        #
+        # Filtered to calls above 0.05s (traced live under load, nexus-
+        # scc9t round 2 follow-up): on a platform with no /proc,
+        # process_state() shells out to `ps` via subprocess.run(...,
+        # timeout=10), and CPython's own Popen._wait() reap-wait busy
+        # loop calls time.sleep() with an exponential-backoff delay
+        # CAPPED AT 0.05s (`delay = min(delay * 2, remaining, .05)`,
+        # Lib/subprocess.py) while waiting for that `ps` child to exit --
+        # entirely unrelated to terminate_pids' OWN deliberate 0.2s
+        # (grace loop) / 0.1s (post-kill settle) polls, and more likely
+        # to fire more than once under the very same load this fix
+        # exists to tolerate. 0.05 is a hard ceiling on that noise, so
+        # any captured call above it is unambiguously a genuine
+        # terminate_pids poll, never ps-reap noise. That holds only while
+        # every terminate_pids interval stays above the cap, so the source
+        # is checked: an interval at or below it would make the filter hide
+        # real polls and this test pass vacuously.
+        ps_reap_sleep_cap_s = 0.05
+        intervals = [
+            float(v)
+            for v in re.findall(r"time\.sleep\(([0-9.]+)\)", inspect.getsource(terminate_pids))
+        ]
+        assert intervals and min(intervals) > ps_reap_sleep_cap_s, (
+            f"terminate_pids sleep intervals {intervals} must all exceed the "
+            f"{ps_reap_sleep_cap_s}s ps-reap cap this filter relies on; "
+            f"re-derive the filter if an interval changed or became a name"
+        )
+        real_polls = [
+            c for c in mock_sleep.call_args_list if c.args[0] > ps_reap_sleep_cap_s
+        ]
+        assert len(real_polls) <= 1, (
+            f"time.sleep called with a >{ps_reap_sleep_cap_s}s (genuine poll) argument "
+            f"{len(real_polls)} times -- expected at most one (the "
+            f"platform-dependent one-tick settle race), not a loop that "
+            f"waited out the grace period: {real_polls} (all calls: "
+            f"{mock_sleep.call_args_list})"
         )
 
     def test_live_process_is_still_terminated_and_reported_clean(self) -> None:

@@ -86,9 +86,26 @@ class ChangelogBulkGrantConformanceTest {
      * at test-bootstrap time is owned by nexus_admin, so the GH #1402 /
      * nexus-46yy3 hazard this allowlist otherwise guards against cannot occur
      * here — verified, not merely asserted by the file's presence in this set.
+     *
+     * <p><b>db.changelog-test-admin-role.xml</b> (nexus-4a8pn, taxonomy-017's
+     * case (f)/(h) fixture bootstrap): the IDENTICAL shape and IDENTICAL
+     * verified reasoning as db.changelog-test-role.xml above — a per-test
+     * throwaway role (this one modeling nexus_admin's NOSUPERUSER/NOBYPASSRLS
+     * posture) granted broad DML across nexus/staging, applied in the SAME
+     * {@code @BeforeAll} immediately after {@code applyProductSchema}, before
+     * this file's own trailing {@code ALTER TABLE nexus.topic_assignments
+     * OWNER TO ${adminRole}} statement runs. At the moment the bulk GRANTs
+     * execute every relation under nexus/staging is still owned by the
+     * container superuser that just ran the product changelog (same as
+     * db.changelog-test-role.xml's case) — the GH #1402/nexus-46yy3
+     * foreign-ownership hazard this allowlist otherwise guards against cannot
+     * occur here either. The LATER, single-relation ownership transfer is a
+     * targeted {@code ALTER TABLE ... OWNER TO}, not a bulk grant, and is
+     * outside this scanner's {@code ON ALL} pattern entirely.
      */
     private static final Set<String> ALLOWLISTED_FILES =
-        Set.of("grants-nexus-diag.xml", "db.changelog-test-role.xml");
+        Set.of("grants-nexus-diag.xml", "db.changelog-test-role.xml",
+               "db.changelog-test-admin-role.xml");
 
     @Test
     void noUnguardedBulkGrantOutsideAllowlist() throws IOException, URISyntaxException {

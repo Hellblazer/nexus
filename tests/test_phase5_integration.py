@@ -11,8 +11,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
+from structlog.testing import capture_logs
 
 from nexus.cli import main
+
+
+def _warnings(logs: list[dict]) -> list[dict]:
+    """Warning-level entries recorded by structlog.testing.capture_logs."""
+    return [e for e in logs if e["log_level"] == "warning"]
 
 
 @pytest.fixture()
@@ -111,10 +117,10 @@ class TestPluginCliVersionCheck:
         with (
             patch("nexus.mcp_infra.default_db_path", return_value=tmp_path / "no.db"),
             patch("importlib.metadata.version", return_value="4.9.2"),
-            patch("structlog.get_logger") as mock_get_logger,
+            capture_logs() as logs,
         ):
             check_version_compatibility()
-            mock_get_logger.return_value.warning.assert_not_called()
+            assert _warnings(logs) == []
 
     def test_plugin_version_matches_cli_no_warning(self, tmp_path: Path, monkeypatch) -> None:
         from nexus.mcp_infra import check_version_compatibility
@@ -126,10 +132,10 @@ class TestPluginCliVersionCheck:
         with (
             patch("nexus.mcp_infra.default_db_path", return_value=tmp_path / "no.db"),
             patch("importlib.metadata.version", return_value="4.9.2"),
-            patch("structlog.get_logger") as mock_get_logger,
+            capture_logs() as logs,
         ):
             check_version_compatibility()
-            mock_get_logger.return_value.warning.assert_not_called()
+            assert _warnings(logs) == []
 
     def test_patch_divergence_no_warning(self, tmp_path: Path, monkeypatch) -> None:
         from nexus.mcp_infra import check_version_compatibility
@@ -141,10 +147,10 @@ class TestPluginCliVersionCheck:
         with (
             patch("nexus.mcp_infra.default_db_path", return_value=tmp_path / "no.db"),
             patch("importlib.metadata.version", return_value="4.9.2"),
-            patch("structlog.get_logger") as mock_get_logger,
+            capture_logs() as logs,
         ):
             check_version_compatibility()
-            mock_get_logger.return_value.warning.assert_not_called()
+            assert _warnings(logs) == []
 
     def test_cli_newer_warns_with_plugin_update_hint(self, tmp_path: Path, monkeypatch) -> None:
         """CLI is at a newer minor version → user should run /plugin update."""
@@ -157,13 +163,11 @@ class TestPluginCliVersionCheck:
         with (
             patch("nexus.mcp_infra.default_db_path", return_value=tmp_path / "no.db"),
             patch("importlib.metadata.version", return_value="4.10.0"),
-            patch("structlog.get_logger") as mock_get_logger,
+            capture_logs() as logs,
         ):
             check_version_compatibility()
-            mock_log = mock_get_logger.return_value
-            mock_log.warning.assert_called_once()
-            event, kwargs = mock_log.warning.call_args.args[0], mock_log.warning.call_args.kwargs
-            assert event == "plugin_cli_version_mismatch"
+            (kwargs,) = _warnings(logs)
+            assert kwargs["event"] == "plugin_cli_version_mismatch"
             assert kwargs["cli_version"] == "4.10.0"
             assert kwargs["plugin_version"] == "4.9.0"
             assert "/plugin update" in kwargs["hint"]
@@ -179,12 +183,10 @@ class TestPluginCliVersionCheck:
         with (
             patch("nexus.mcp_infra.default_db_path", return_value=tmp_path / "no.db"),
             patch("importlib.metadata.version", return_value="4.9.2"),
-            patch("structlog.get_logger") as mock_get_logger,
+            capture_logs() as logs,
         ):
             check_version_compatibility()
-            mock_log = mock_get_logger.return_value
-            mock_log.warning.assert_called_once()
-            kwargs = mock_log.warning.call_args.kwargs
+            (kwargs,) = _warnings(logs)
             assert "uv tool upgrade conexus" in kwargs["hint"]
 
     def test_plugin_newer_hint_follows_the_layout(self, tmp_path: Path, monkeypatch) -> None:
@@ -202,10 +204,10 @@ class TestPluginCliVersionCheck:
         with (
             patch("nexus.mcp_infra.default_db_path", return_value=tmp_path / "no.db"),
             patch("importlib.metadata.version", return_value="4.9.2"),
-            patch("structlog.get_logger") as mock_get_logger,
+            capture_logs() as logs,
         ):
             check_version_compatibility()
-            kwargs = mock_get_logger.return_value.warning.call_args.kwargs
+            kwargs = _warnings(logs)[-1]
             assert "nx self install" in kwargs["hint"]
             assert "uv tool" not in kwargs["hint"]
 
@@ -222,10 +224,10 @@ class TestPluginCliVersionCheck:
         with (
             patch("nexus.mcp_infra.default_db_path", return_value=tmp_path / "no.db"),
             patch("importlib.metadata.version", return_value="4.9.2"),
-            patch("structlog.get_logger") as mock_get_logger,
+            capture_logs() as logs,
         ):
             check_version_compatibility()  # must not raise
-            mock_get_logger.return_value.warning.assert_not_called()
+            assert _warnings(logs) == []
 
 
 # ── doctor --check-schema tests ─────────────────────────────────────────────

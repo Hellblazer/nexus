@@ -851,6 +851,12 @@ $$
             content_type value, and a promoted lifecycle_state is no longer
             'dormant') — a hypothetical re-run finds zero rows, independent
             of Liquibase's own once-only checksum guarantee.
+            DATA EFFECT: UPDATEs catalog_collections.content_type / owner_id /
+            embedding_model / model_version / dimension / lifecycle_state for
+            quarantine-shaped rows the shipped hygiene-002-2 defect misregistered
+            (v0.1.109..this fix); reversible in effect only — no rollback SQL (the
+            corrected values are copied from a real sibling row or a deterministic
+            prefix strip, not something to undo).
         </comment>
         <sql splitStatements="true" stripComments="false">
 SET LOCAL lock_timeout = '5s';

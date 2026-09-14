@@ -83,7 +83,7 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="aspects-004-1" author="nexus-ubnwk">
-        <comment>One-time backfill: nexus.document_aspects.doc_id = catalog_documents.tumbler for legacy rows matched by exact source_uri (RDR-156 Decision 5, search_aspect_scoped's join precondition).</comment>
+        <comment>One-time backfill: nexus.document_aspects.doc_id = catalog_documents.tumbler for legacy rows matched by exact source_uri (RDR-156 Decision 5, search_aspect_scoped's join precondition). DATA EFFECT: UPDATEs document_aspects.doc_id (currently NULL) for every row whose source_uri exactly matches a live catalog document; reversible in effect only (a rolled-back cluster has doc_id NULL again, and the backfill re-stamps identically on next apply — no rollback SQL is needed).</comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.document_aspects  NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE nexus.catalog_documents NO FORCE ROW LEVEL SECURITY;

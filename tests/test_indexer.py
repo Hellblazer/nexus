@@ -72,8 +72,10 @@ def _reset_t3_singleton_per_test():
     ``nexus.db.make_t3`` per-test (directly or via ``_patches``) expecting
     a fresh ``db`` mock every time; without this reset, the first test in
     file order to populate the singleton leaks its mock into every later
-    test that never re-triggers construction — same hazard class as
-    ``tests/conftest.py``'s ``_reset_service_t2_db`` one tier over.
+    test that never re-triggers construction — same hazard class the T2
+    singleton (``mcp_infra._default_t2_slot``, nexus-w1ip) used to carry a
+    suite-wide autouse reset fixture for, one tier over, before its own
+    endpoint-key staleness check made that fixture unnecessary.
     """
     from nexus.mcp_infra import reset_singletons
 
@@ -181,10 +183,10 @@ def _patches(db, *, cfg=None, extra=None):
     # mcp_infra.get_t3()'s memoised singleton (_t3_instance) rather than
     # calling nexus.db.make_t3() directly on every invocation. Without a
     # reset, the FIRST test in file order to populate the singleton leaks
-    # its `db` mock into every later test — the exact class of hazard
-    # tests/conftest.py's _reset_service_t2_db docstring describes one
-    # tier over. Evict on both sides so this test cannot leak forward or
-    # start dirty.
+    # its `db` mock into every later test — the exact class of hazard the
+    # T2 singleton (mcp_infra._default_t2_slot, nexus-w1ip) carried its
+    # own endpoint-key staleness check for, one tier over. Evict on both
+    # sides so this test cannot leak forward or start dirty.
     from nexus.mcp_infra import reset_singletons
     reset_singletons()
     try: yield mocks

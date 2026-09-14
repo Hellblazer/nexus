@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from unittest.mock import patch
 
 import pytest
 import structlog
@@ -212,17 +213,43 @@ class TestTimeoutNamesTheBead:
         held = _try_acquire_boot_slot(tmp_path, max_concurrent=1)
         assert held is not None
         try:
-            start = time.monotonic()
-            with pytest.raises(RuntimeError):
-                with _boot_semaphore_slot(
-                    max_concurrent=1, lock_dir=tmp_path,
-                    timeout_s=0.3, poll_s=0.05,
-                ):
-                    pass  # pragma: no cover
-            elapsed = time.monotonic() - start
-            assert elapsed < 3.0, (
-                f"timeout took {elapsed}s for a 0.3s budget -- looks like a "
-                "silent hang, not a bounded wait"
+            real_sleep = time.sleep
+            sleep_calls: list[float] = []
+
+            def _counting_sleep(seconds: float) -> None:
+                sleep_calls.append(seconds)
+                real_sleep(seconds)  # unchanged real timing -- only counted
+
+            with patch("time.sleep", side_effect=_counting_sleep):
+                with pytest.raises(RuntimeError):
+                    with _boot_semaphore_slot(
+                        max_concurrent=1, lock_dir=tmp_path,
+                        timeout_s=0.3, poll_s=0.05,
+                    ):
+                        pass  # pragma: no cover
+            # nexus-scc9t round 2 (critic finding): a wall-clock bound
+            # loosened to tolerate scheduler delay (3.0s -> 5.0s) stops
+            # catching a deadline check that is an order of magnitude too
+            # long -- a 0.3s budget effectively becoming 3.0s still
+            # passes under a 5.0s bound. Count poll sleeps instead:
+            # poll_s=0.05s against timeout_s=0.3s means a correct
+            # deadline check polls ~6 times before raising; a regression
+            # 10x too long (an effective 3.0s deadline) polls ~60 times,
+            # REGARDLESS of machine speed. Scheduler contention can only
+            # ever REDUCE the count (each real sleep(0.05) call may
+            # itself take longer under load, so fewer ticks fit before
+            # the real deadline trips), never inflate it past what the
+            # deadline itself allows -- immune to the exact flake class a
+            # wall-clock bound is not, while catching the 10x regression
+            # the loosened bound stopped catching. _try_acquire_boot_slot
+            # is pure file-locking (no subprocess calls), so there is no
+            # other source of time.sleep in this code path to conflate
+            # with the semaphore's own poll (unlike terminate_pids'
+            # `ps`-subprocess-reap noise elsewhere in this round).
+            assert len(sleep_calls) < 20, (
+                f"{len(sleep_calls)} poll sleeps for a 0.3s timeout_s / "
+                f"0.05s poll_s -- looks like the deadline check is off by "
+                f"an order of magnitude, not honoring timeout_s: {sleep_calls}"
             )
         finally:
             held.close()

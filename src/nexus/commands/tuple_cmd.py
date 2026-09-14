@@ -14,6 +14,8 @@ Subcommands:
   templates  -- the boot-loaded template registry (digest, sources, templates).
   list       -- concrete subspaces that exist.
   stats      -- the census for one subspace.
+  directory  -- who holds a name in the RDR-208 session directory (bead
+                nexus-galkv.11; resolver in ``nexus.tuple_directory``).
   watch      -- ping-then-pull mailbox watcher for a Claude Code Monitor
                 (bead nexus-6konb.2; loop in ``nexus.tuple_watch``).
 
@@ -58,7 +60,7 @@ def _print_tuple_error(e: Exception) -> None:
 
 @click.group(name="tuple")
 def tuple_group() -> None:
-    """RDR-205 Linda tuple space: out / rd / in / ack (with an optional reply) / nack / renew / templates / list / stats / watch."""
+    """RDR-205 Linda tuple space: out / rd / in / ack (with an optional reply) / nack / renew / templates / list / stats / directory / watch."""
 
 
 @tuple_group.command(name="out")
@@ -346,6 +348,77 @@ def tuple_stats_cmd(subspace: str, json_out: bool) -> None:
     click.echo(f"newest_created_at: {c.newest_created_at}")
 
 
+@tuple_group.command(name="directory")
+@click.argument("name")
+@click.option("--json", "json_out", is_flag=True, default=False, help="Output as JSON.")
+def tuple_directory_cmd(name: str, json_out: bool) -> None:
+    """Show who holds NAME in the RDR-208 session directory.
+
+    Prints each live directory/NAME entry's session_id, created_at and
+    expires_at, and flags NAME as ambiguous when more than one distinct
+    session holds it -- the case `mailbox_send` refuses. Reads
+    `directory/NAME` exactly ONCE and classifies that one list through the
+    SAME pure classifier `mailbox_send` uses (nexus.tuple_directory.
+    classify_directory_holders), so the two can never disagree about
+    whether NAME is safely addressable, and a lapse or a re-nonce between
+    two reads can never make the printed entries and the verdict below
+    describe different moments (gate audit round B item 1).
+    """
+    from nexus.tuple_directory import (  # noqa: PLC0415 — deferred: CLI startup cost
+        DirectoryResolutionError, classify_directory_holders, list_directory_entries,
+    )
+
+    store = _store()
+    try:
+        rows = list_directory_entries(name, store)
+    except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
+        _print_tuple_error(e)
+        raise SystemExit(1) from e
+
+    entries = [
+        {
+            "session_id": (row.dims or {}).get("session_id"),
+            "created_at": row.created_at,
+            "expires_at": row.expires_at,
+        }
+        for row in rows
+    ]
+    holders = sorted({e["session_id"] for e in entries if e["session_id"]})
+
+    resolved_session: str | None = None
+    ambiguous = False
+    if entries:
+        try:
+            resolved_session, _kind = classify_directory_holders(name, rows)
+        except DirectoryResolutionError:
+            # entries is non-empty here, so the only way the classifier can
+            # still refuse is the more-than-one-holder branch.
+            ambiguous = True
+
+    if json_out:
+        click.echo(json.dumps({
+            "name": name,
+            "entries": entries,
+            "holders": holders,
+            "ambiguous": ambiguous,
+            "resolved_session_id": resolved_session,
+        }))
+        return
+
+    if not entries:
+        click.echo(f"No live directory entry for {name!r}.")
+        return
+    for e in entries:
+        click.echo(f"  session_id: {e['session_id']}  created_at: {e['created_at']}  expires_at: {e['expires_at']}")
+    if ambiguous:
+        click.echo(
+            f"{name!r} is held by {len(holders)} sessions -- mailbox_send "
+            f"would refuse this name; resend to one of these session ids directly."
+        )
+    else:
+        click.echo(f"{name!r} resolves to session {resolved_session}.")
+
+
 # ── rendering helpers ────────────────────────────────────────────────────────
 
 
@@ -453,7 +526,14 @@ def tuple_watch_cmd(
         # acquired. The name belongs to the new session regardless of whether a
         # stale watcher from a prior /clear still holds that address's lock, and
         # the drain hook must drain it at this session's prompts either way.
-        if instance and session_id_from_env and instance in watched and not addresses:
+        # RDR-208 Phase 2 Step 1 (bead nexus-galkv.9): the directory lease write
+        # condition mirrors the registration's exactly -- it does NOT depend on
+        # whether the instance lock was acquired either. The name belongs to
+        # this session regardless; a clash is for mailbox_send to refuse, not
+        # for the watcher to hide.
+        session_owns_instance = bool(instance and session_id_from_env and instance in watched and not addresses)
+        directory_name = instance if session_owns_instance else None
+        if session_owns_instance:
             write_instance_registration(sd, session_id_from_env, instance)
         if session_id_from_env:
             prune_stale_registrations(sd, session_id_from_env)
@@ -468,6 +548,8 @@ def tuple_watch_cmd(
             # (nexus-6konb.13 docs critic). Only the default, session-resolved
             # watch compares itself against the SessionStart marker.
             spawn_session_id=None if addresses else session_id_from_env,
+            directory_name=directory_name,
+            directory_session_id=session_id_from_env if directory_name else None,
         )
     except KeyboardInterrupt:
         return

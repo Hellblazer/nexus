@@ -34,6 +34,8 @@ from typing import Any
 import httpx
 import pytest
 
+from nexus.db.storage_mode import T2_FACADE_STORES
+
 
 def _instrument_httpx_clients(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """Wrap ``httpx.Client.__init__`` to COUNT constructions without
@@ -56,23 +58,23 @@ class TestT2DatabaseSharedClientFanout:
     ) -> None:
         """BEFORE: the shape every existing ``T2Database(path)`` call site
         uses today (``client=`` omitted) still builds one ``httpx.Client``
-        per domain store -- 8, per the facade's own docstring inventory
-        (memory, plans, taxonomy, telemetry, chash_index, document_aspects,
-        aspect_queue, document_highlights). This is the regression pin: a
-        change that collapses these without an explicit ``client=`` opt-in
-        would be a silent behavior change for every caller that passes
-        nothing, which the design record's "nothing changes for callers
-        that pass nothing" contract forbids."""
+        per domain store -- ``nexus.db.storage_mode.T2_FACADE_STORES``,
+        not hand-typed here. This is the regression pin: a change that
+        collapses these without an explicit ``client=`` opt-in would be a
+        silent behavior change for every caller that passes nothing,
+        which the design record's "nothing changes for callers that pass
+        nothing" contract forbids."""
         from nexus.db.t2 import T2Database
 
+        expected = len(T2_FACADE_STORES)
         tally = _instrument_httpx_clients(monkeypatch)
 
         db = T2Database(tmp_path / "t2.db")
         try:
-            assert len(tally) == 9, (
+            assert len(tally) == expected, (
                 f"expected T2Database(path) with no client= to construct "
-                f"exactly 9 httpx.Client()s (one per domain store); got "
-                f"{len(tally)}"
+                f"exactly {expected} httpx.Client()s (one per domain "
+                f"store); got {len(tally)}"
             )
         finally:
             db.close()
@@ -82,13 +84,19 @@ class TestT2DatabaseSharedClientFanout:
     ) -> None:
         """AFTER: a caller building ONE shared client via
         ``build_shared_t2_client()`` and passing it as ``client=`` gets
-        all 8 domain stores reusing that single pool -- 8 -> 0 additional
+        ALL domain stores reusing that single pool -- N -> 0 additional
         constructions for the facade call itself (1 total across the
         whole scenario, for the shared client's own construction, counted
-        separately below so the two numbers are not conflated)."""
+        separately below so the two numbers are not conflated). Every
+        domain store's ``_client`` identity is checked below, from
+        ``nexus.db.storage_mode.T2_FACADE_STORES`` rather than hand-typed
+        one attribute at a time -- a hand-typed list is exactly how
+        ``tuples`` (HttpTupleStore, RDR-205) could have gone unchecked
+        here."""
         from nexus.db.t2 import T2Database
         from nexus.db.t2._refreshable_client import build_shared_t2_client
 
+        store_names = T2_FACADE_STORES
         shared = build_shared_t2_client()
         tally = _instrument_httpx_clients(monkeypatch)
 
@@ -96,18 +104,15 @@ class TestT2DatabaseSharedClientFanout:
         try:
             assert len(tally) == 0, (
                 f"expected T2Database(path, client=shared) to construct "
-                f"ZERO additional httpx.Client()s (all 8 stores reuse the "
-                f"injected client); got {len(tally)} additional "
-                f"constructions -- some store is still building its own"
+                f"ZERO additional httpx.Client()s (all {len(store_names)} "
+                f"stores reuse the injected client); got {len(tally)} "
+                f"additional constructions -- some store is still "
+                f"building its own"
             )
-            assert db.memory._client is shared
-            assert db.plans._client is shared
-            assert db.taxonomy._client is shared
-            assert db.telemetry._client is shared
-            assert db.chash_index._client is shared
-            assert db.document_aspects._client is shared
-            assert db.aspect_queue._client is shared
-            assert db.document_highlights._client is shared
+            for name in store_names:
+                assert getattr(db, name)._client is shared, (
+                    f"db.{name}._client is not the injected shared client"
+                )
         finally:
             db.close()
             # The facade's close() must NOT have closed the injected

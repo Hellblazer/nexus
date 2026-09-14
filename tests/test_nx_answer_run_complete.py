@@ -582,13 +582,14 @@ class TestOutcomeBumpReachesEvictionClassifier:
     raises the SAME ``ConnectionError`` (armed on the caller-supplied
     ``db`` too, so the failure is genuinely there to see either way) but
     never routes it through ``_t2_index_write`` at all, so the singleton
-    is left completely untouched (``mi._service_t2_db is original``,
+    is left completely untouched (``mi._default_t2_slot._client is original``,
     ``original.closed is False``) instead of evicted. Reverted after
     confirming red.
 
     NON-VACUITY NOTE for anyone re-deriving this test: a version that
-    skips the pre-warm step (asserts starting from ``_service_t2_db is
-    None`` and ending at ``is None``) is vacuous against the bug — the
+    skips the pre-warm step (asserts starting from
+    ``mi._default_t2_slot._client is None`` and ending at ``is None``) is
+    vacuous against the bug — the
     buggy code never touches ``_service_t2_write_locked`` at all for the
     outcome write, so the singleton would stay ``None`` -> ``None``
     whether or not the fix is present, and the assertion would pass on
@@ -613,18 +614,21 @@ class TestOutcomeBumpReachesEvictionClassifier:
 
         monkeypatch.setattr("nexus.db.t2.T2Database", _FakeT2Database)
 
-        assert mi._service_t2_db is None, (
-            "test must start with no resolved singleton -- the suite's "
-            "autouse _reset_service_t2_db fixture (conftest.py) should "
-            "already guarantee this"
-        )
+        # nexus-w1ip: the suite-wide autouse T2-singleton reset fixture is
+        # gone (the slot's own endpoint-key staleness check makes it
+        # unnecessary for the tenant-rotation hazard it existed for -- see
+        # tests/conftest.py history), so this test resets explicitly
+        # instead of asserting a precondition a deleted fixture used to
+        # guarantee. A genuinely EMPTY singleton here is load-bearing: it
+        # is what makes "evicted" and "untouched" distinguishable below.
+        mi._default_t2_slot.reset_for_tests()
 
         # Pre-warm the shared singleton via a successful write (never
         # touches increment_run_outcome, so the armed side_effect above
         # does not fire here) -- see the class docstring's non-vacuity
         # note for why this step is load-bearing.
         mi.t2_index_write(lambda db: None, op="warmup")
-        original = mi._service_t2_db
+        original = mi._default_t2_slot._client
         assert original is not None and original.closed is False, (
             "pre-warm must leave a healthy, resolved singleton in place"
         )
@@ -648,14 +652,14 @@ class TestOutcomeBumpReachesEvictionClassifier:
             composite_supported_at_start=False, early_bump_fired=False,
         )  # must not raise -- the choke point's own catch absorbs it
 
-        assert mi._service_t2_db is None, (
+        assert mi._default_t2_slot._client is None, (
             "the connectivity failure on the outcome bump must evict the "
             "pre-warmed singleton (routed through _service_t2_write_locked's "
             "classifier), not leave it in place"
         )
         assert original.closed is True, (
             "the evicted singleton must actually be closed once its "
-            "refcount drains, not merely detached from _service_t2_db"
+            "refcount drains, not merely detached from the slot"
         )
 
 

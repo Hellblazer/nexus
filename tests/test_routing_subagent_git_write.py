@@ -937,9 +937,16 @@ class TestNexus3c92mRound4PrimaryRule:
         guard = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(guard)
         big = "git " + ("x" * 100_000)
-        t0 = time.perf_counter()
+        # nexus-scc9t: CPU time (time.process_time), not wall time
+        # (time.perf_counter) -- this is a deliberate performance pin on
+        # the code's own work, and process_time excludes scheduler-delay
+        # time the process spent NOT running, which a loaded -n auto run
+        # can otherwise inflate past the budget with no regression
+        # present. A real regression still shows up here: it costs more
+        # actual CPU, which process_time counts in full.
+        t0 = time.process_time()
         guard._primary_match(guard._normalize_for_primary_scan(big))
-        elapsed_ms = (time.perf_counter() - t0) * 1000
+        elapsed_ms = (time.process_time() - t0) * 1000
         assert elapsed_ms < 50, f"{elapsed_ms:.3f}ms >= 50ms budget"
 
     def test_100kb_many_git_occurrences_verb_at_end_scans_well_under_50ms(self):
@@ -952,9 +959,11 @@ class TestNexus3c92mRound4PrimaryRule:
         guard = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(guard)
         big = ("git nonmatch " * 5000) + "checkout"
-        t0 = time.perf_counter()
+        # nexus-scc9t: CPU time, not wall time -- see the comment on
+        # test_100kb_command_scans_well_under_50ms above.
+        t0 = time.process_time()
         m = guard._primary_match(guard._normalize_for_primary_scan(big))
-        elapsed_ms = (time.perf_counter() - t0) * 1000
+        elapsed_ms = (time.process_time() - t0) * 1000
         assert m is not None, "expected a match (checkout is present after the first git)"
         assert elapsed_ms < 50, f"{elapsed_ms:.3f}ms >= 50ms budget"
 
@@ -1239,11 +1248,13 @@ class TestNexus3c92mRound6SplicedExpansions:
         guard = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(guard)
         big = "git " + ("x" * 100_000)
-        t0 = time.perf_counter()
+        # nexus-scc9t: CPU time, not wall time -- see the comment on
+        # test_100kb_command_scans_well_under_50ms above.
+        t0 = time.process_time()
         normalized = guard._normalize_for_primary_scan(big)
         guard._find_spliced_expansion(normalized)
         guard._primary_match(normalized)
-        elapsed_ms = (time.perf_counter() - t0) * 1000
+        elapsed_ms = (time.process_time() - t0) * 1000
         assert elapsed_ms < 50, f"{elapsed_ms:.3f}ms >= 50ms budget"
 
     def test_many_dollar_var_occurrences_scans_near_linearly(self):
@@ -1277,13 +1288,19 @@ class TestNexus3c92mRound6SplicedExpansions:
         spec.loader.exec_module(guard)
 
         def scan_ms(text: str) -> float:
+            # nexus-scc9t round 2: CPU time, not wall time -- a peer's
+            # combined full run red'd this on scheduler contention, not a
+            # regression. process_time excludes time this process spent
+            # NOT running, so both the absolute ceiling and the ratio
+            # below measure actual work done, immune to a contention
+            # burst landing unevenly across the small/large measurements.
             best = float("inf")
             for _ in range(3):
-                t0 = time.perf_counter()
+                t0 = time.process_time()
                 normalized = guard._normalize_for_primary_scan(text)
                 guard._find_spliced_expansion(normalized)
                 guard._primary_match(normalized)
-                best = min(best, time.perf_counter() - t0)
+                best = min(best, time.process_time() - t0)
             return best * 1000
 
         small = "git " + (chr(36) + "VAR ") * 5_000 + "checkout"

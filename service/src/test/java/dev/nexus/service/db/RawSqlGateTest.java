@@ -993,7 +993,46 @@ class RawSqlGateTest {
         // cast is the test's own subject (VectorBinding always renders the
         // schema-qualified ::nexus.vector, which would silently change what that one
         // statement proves).
-        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 50),
+        // nexus-jl08t: 50 -> 56. Test 18 (the "aged database" reexecuted_changesets
+        // pin) adds a NINTH occurrence of this file's own documented 5-site
+        // admin/svc role bootstrap against a dedicated container (same class as
+        // bootstrap() plus the 7 existing aged-box tests, unchanged shape --
+        // CREATE ROLE / GRANT CREATE ON DATABASE|SCHEMA / GRANT pg_monitor WITH
+        // ADMIN OPTION, no jOOQ typed-DSL form), plus one new raw
+        // "ALTER TABLE nexus.tuples DROP CONSTRAINT IF EXISTS chk_tuples_body_size"
+        // (rewinding tuples-003-3's CHECK constraint before re-running it -- DDL,
+        // no jOOQ typed form). The test's own databasechangelog DELETE and its
+        // dateExecutedFor/SELECT read both go through the existing typed
+        // DSL.table(DSL.name("databasechangelog"))/DSL.field(DSL.name(...), Class)
+        // idiom this file already uses for that table, so neither adds a site.
+        // nexus-jl08t follow-up (duplicate-row rework): test 18 was renamed to
+        // reexecutedChangesets_onAgedDatabaseWithDuplicateHistory_countsExactlyTheRunAlwaysSet
+        // and its seeding/assertions rewritten (production's duplicate-row shape,
+        // not a dateexecuted future-stamp), but Phase A/C's raw SQL footprint is
+        // BYTE-IDENTICAL to what earned the 50 -> 56 bump above -- the new
+        // duplicateChangelogRow/captureLogs helpers and every new assertion are
+        // typed jOOQ, so the ceiling stayed at 56, not reduced and not raised again.
+        // nexus-jl08t fix round (code review, T2 [25638] finding 3): 56 -> 55. The
+        // "ALTER TABLE nexus.tuples DROP CONSTRAINT IF EXISTS chk_tuples_body_size"
+        // site called out above DOES have a jOOQ typed-DSL form after all --
+        // dsl(conn).alterTable(TUPLES).dropConstraintIfExists("chk_tuples_body_size")
+        // .execute(), matching this repo's own established pattern (e.g.
+        // CollectionRegistryFkTest/CollectionRegistryFkExtraTest's identical
+        // alterTable(...).dropConstraintIfExists(...) calls) -- converted. The
+        // NINTH admin/svc bootstrap occurrence (5 sites: CREATE ROLE / GRANT CREATE
+        // ON DATABASE|SCHEMA / GRANT pg_monitor WITH ADMIN OPTION) still has no
+        // jOOQ form and stays raw, so the ceiling drops by exactly the one
+        // converted site: 56 -> 55.
+        // nexus-jl08t round 3 (test 19, the real counts-unavailable test the
+        // round-2 review found missing): reuses the shared bootstrap()/adminDs
+        // fixture (it is @Order(19), guaranteed to run last) instead of a
+        // dedicated container, so it needs no throwaway role/schema bootstrap
+        // at all, and its REVOKE SELECT ON databasechangelog (the test's
+        // real-SQL-failure seam) is typed jOOQ (dsl(conn).revoke(...).on(...)
+        // .from(DSL.role(...))) -- the same revoke/grant shape
+        // ScratchSchemaLiquibaseTest and StagingPromoteOpsIntegrationTest
+        // already use. Net raw-SQL count for this file: unchanged, still 55.
+        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 55),
         // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 37 -> 39 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         // nexus-cbo4a batch 12: 39 -> 16. Converted seed inserts (10 sites: HEAD-schema
@@ -1414,7 +1453,16 @@ class RawSqlGateTest {
     // codegen equivalent, see the two entries' own comments above).
     // nexus-8zoyp seed-coverage follow-up: 918 -> 925 (+7, matching
     // SchemaUpgradeRehearsalIntegrationTest.java's own 104 -> 111 above).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 925;
+    // nexus-jl08t: 925 -> 931 (+6, matching SchemaMigratorIntegrationTest.java's
+    // own 50 -> 56 above).
+    // nexus-jl08t fix round: 931 -> 930 (-1, matching
+    // SchemaMigratorIntegrationTest.java's own 56 -> 55 above -- the
+    // ALTER TABLE ... DROP CONSTRAINT site converted to typed jOOQ DSL).
+    // nexus-jl08t round 3: unchanged at 930 -- test 19 (the real
+    // counts-unavailable test the round-2 review found missing) reuses the
+    // shared fixture and its own REVOKE is typed jOOQ, so
+    // SchemaMigratorIntegrationTest.java's own count above stays 55.
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 930;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

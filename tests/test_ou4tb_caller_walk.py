@@ -71,11 +71,24 @@ class TestProjectionIncompleteFetchCounted:
             def project_against(self, col, others, client, threshold=0.85):
                 return {"chunk_assignments": [], "incomplete_fetch": True}
 
-        total, incomplete = _project_cross_collections(
+        total, incomplete, nonfinite = _project_cross_collections(
             _Tax(), ["code__a", "code__b"], None,
         )
         assert total == 0
         assert incomplete == 2
+        assert nonfinite == 0
+
+    def test_nonfinite_chunks_are_counted(self) -> None:
+        """nexus-2fa0w: the store excludes NaN/inf source chunks and reports
+        them as ``nonfinite_chunks``; the auto-pass must count, not drop."""
+        class _Tax:
+            def project_against(self, col, others, client, threshold=0.85):
+                return {"chunk_assignments": [], "nonfinite_chunks": ["x", "y"]}
+
+        total, incomplete, nonfinite = _project_cross_collections(
+            _Tax(), ["code__a", "code__b"], None,
+        )
+        assert (total, incomplete, nonfinite) == (0, 0, 4)
 
 
 class TestCatalogSpans:
@@ -447,6 +460,16 @@ class TestProjectionPassBehavior:
         assert any("incomplete source fetch" in s for s in said)
         assert "taxonomy_projection_incomplete_fetch" in _events(logs)
 
+    def test_nonfinite_chunks_surfaced(self) -> None:
+        """nexus-2fa0w: parity with incomplete_fetch on the auto-pass."""
+        class _Tax:
+            def project_against(self, *a, **k):
+                return {"chunk_assignments": [], "nonfinite_chunks": ["x"]}
+
+        said: list[str] = []
+        _run_projection_pass(_Tax(), ["a", "b"], None, said.append)
+        assert any("2 chunk(s) with a non-finite embedding excluded" in s for s in said)
+
     def test_generic_failure_warns_without_crashing(self) -> None:
         class _Tax:
             def project_against(self, *a, **k):
@@ -478,6 +501,17 @@ class TestDiscoverProjectionBehavior:
 
         _run_discover_projection(_Tax(), ["a", "b"], None)
         assert "incomplete" in capsys.readouterr().out
+
+    def test_nonfinite_chunks_echoed(self, capsys) -> None:
+        """nexus-2fa0w: parity with incomplete_fetch on the discover pass."""
+        class _Tax:
+            def project_against(self, *a, **k):
+                return {"chunk_assignments": [], "nonfinite_chunks": ["x", "y"]}
+
+        _run_discover_projection(_Tax(), ["a", "b"], None)
+        out = capsys.readouterr().out
+        assert "2 chunk(s) of a excluded (non-finite embedding)" in out
+        assert "2 chunk(s) of b excluded (non-finite embedding)" in out
 
     def test_command_body_calls_the_helper(self) -> None:
         src = (Path(__file__).resolve().parent.parent / "src/nexus/commands/taxonomy_cmd.py").read_text()

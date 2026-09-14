@@ -2768,14 +2768,36 @@ class TestRealSubprocessDrain:
         )
 
         TIMEOUT = 1.5
-        t0 = time.monotonic()
-        with patch(
-            "asyncio.create_subprocess_exec",
-            side_effect=_real_create_subprocess_exec_side_effect(str(script)),
+        # nexus-scc9t: was an end-to-end ``elapsed < 1.5 * TIMEOUT``
+        # wall-clock bound. That folds in phase 2's own REAL 1.5s
+        # wait_for plus post-kill cleanup, both subject to scheduler
+        # delay a loaded -n auto run can inflate independent of any
+        # regression. The actual property under test is narrower: PHASE
+        # 1 (wait for the first byte) must resolve almost instantly, not
+        # burn its own budget, when data streams from the start. Proven
+        # directly by timing just that one asyncio.wait_for call (the
+        # first of the two sequential calls claude_dispatch makes --
+        # src/nexus/operators/dispatch.py) rather than the whole
+        # two-phase-plus-cleanup sequence.
+        real_wait_for = asyncio.wait_for
+        phase_durations: list[float] = []
+
+        async def _timed_wait_for(coro, timeout=None):
+            t0 = time.monotonic()
+            try:
+                return await real_wait_for(coro, timeout=timeout)
+            finally:
+                phase_durations.append(time.monotonic() - t0)
+
+        with (
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=_real_create_subprocess_exec_side_effect(str(script)),
+            ),
+            patch("asyncio.wait_for", new=_timed_wait_for),
         ):
             with pytest.raises(OperatorTimeoutError) as exc_info:
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=TIMEOUT)
-        elapsed = time.monotonic() - t0
 
         err = exc_info.value
         assert err.partial_text != ""
@@ -2783,11 +2805,17 @@ class TestRealSubprocessDrain:
             f"expected dozens of streamed events before the kill, got "
             f"event_count={err.event_count}"
         )
-        assert elapsed < 1.5 * TIMEOUT, (
-            f"elapsed {elapsed:.2f}s should be close to the {TIMEOUT}s "
-            f"budget (continuous streaming from the start means phase 1 "
-            f"resolves almost instantly), not up to 2x it -- got "
-            f"{elapsed:.2f}s"
+        assert len(phase_durations) >= 2, (
+            f"expected at least the two sequential-phase wait_for calls, "
+            f"saw {len(phase_durations)}"
+        )
+        phase1_duration = phase_durations[0]
+        assert phase1_duration < TIMEOUT / 2, (
+            f"phase 1 (first-byte wait) took {phase1_duration:.2f}s -- "
+            f"close to its own {TIMEOUT}s budget, meaning it did not "
+            f"detect the immediately-streaming first byte quickly "
+            f"(continuous streaming from the start means phase 1 should "
+            f"resolve almost instantly)"
         )
 
 
@@ -3896,8 +3924,17 @@ class TestFailureRecordAddressability:
 
         from nexus.operators.dispatch import claude_dispatch, OperatorError
 
+        # The root logger is process-global: under -n auto a sibling test in
+        # the same worker can leave its own RotatingFileHandler attached, and
+        # the message would then name that file instead of this one
+        # (2 failures in a 19421-pass run, 2026-09-14; both pass alone).
+        # Detach every pre-existing file handler for the duration.
+        root = logging.getLogger()
+        stray = [h for h in root.handlers if isinstance(h, logging.handlers.RotatingFileHandler)]
+        for h in stray:
+            root.removeHandler(h)
         handler = logging.handlers.RotatingFileHandler(tmp_path / "mcp.log")
-        logging.getLogger().addHandler(handler)
+        root.addHandler(handler)
         try:
             proc = _make_proc(stdout=b'boom', returncode=1, stderr=b'')
             with patch(
@@ -3906,8 +3943,10 @@ class TestFailureRecordAddressability:
                 with pytest.raises(OperatorError) as exc:
                     await claude_dispatch("prompt", _SIMPLE_SCHEMA)
         finally:
-            logging.getLogger().removeHandler(handler)
+            root.removeHandler(handler)
             handler.close()
+            for h in stray:
+                root.addHandler(h)
         msg = str(exc.value)
         assert "operator_dispatch_failed" in msg  # the event name to look for
         assert str(tmp_path / "mcp.log") in msg   # ...and exactly where
@@ -3920,15 +3959,21 @@ class TestFailureRecordAddressability:
 
         from nexus.operators.dispatch import claude_dispatch, OperatorError
 
+        # Same root-logger hazard as the test above: a sibling test's file
+        # handler makes "plain CLI" false for this worker, so build the
+        # condition instead of asserting it as a precondition.
         root = logging.getLogger()
-        assert not any(
-            isinstance(h, logging.handlers.RotatingFileHandler)
-            for h in root.handlers
-        ), "test precondition: no file handler attached"
-        proc = _make_proc(stdout=b'boom', returncode=1, stderr=b'')
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
-            with pytest.raises(OperatorError) as exc:
-                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        stray = [h for h in root.handlers if isinstance(h, logging.handlers.RotatingFileHandler)]
+        for h in stray:
+            root.removeHandler(h)
+        try:
+            proc = _make_proc(stdout=b'boom', returncode=1, stderr=b'')
+            with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+                with pytest.raises(OperatorError) as exc:
+                    await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        finally:
+            for h in stray:
+                root.addHandler(h)
         assert "no log file attached" in str(exc.value)
 
 
@@ -4156,8 +4201,12 @@ class TestParseDispatchUsage:
         canonical_model is read from canonicalModel, not its key, (b) the
         top-level DispatchUsage fields come from the top-level ``usage``/
         ``total_cost_usd``, not either modelUsage entry, and (c) the
-        single-value ``model`` convenience field stays None -- genuinely
-        ambiguous with two distinct canonical models, not a silent pick."""
+        single-value ``model`` convenience field records the HIGHER-cost
+        entry's canonical id (nexus-xepsr, 2026-09-14: Sam's decision
+        reverses the earlier code-only 'leave None, never a silent pick' rule for
+        the >1-entry case -- see DispatchUsage.model's docstring). Here
+        haiku's 2.0 costUSD outranks sonnet's 1.0, so haiku's canonical id
+        must win, not None."""
         from nexus.operators.dispatch import _parse_dispatch_usage
 
         doctored = dict(_fixture_result_event())
@@ -4187,9 +4236,9 @@ class TestParseDispatchUsage:
 
         assert usage.model_usage["sonnet"].canonical_model == "claude-sonnet-5-20260101"
         assert usage.model_usage["haiku"].canonical_model == "claude-haiku-5-20260101"
-        assert usage.model is None, (
-            "two distinct canonical models is genuinely ambiguous for the "
-            "single-value convenience field -- must not silently pick one"
+        assert usage.model == "claude-haiku-5-20260101", (
+            "the higher-cost entry (2.0 vs 1.0) must win under the "
+            "nexus-xepsr reversal of the earlier code-only 'leave None' rule"
         )
         # The load-bearing anti-cross-wiring assertions: these values exist
         # ONLY at the top level (900/901/9.0), never in either modelUsage
@@ -4200,6 +4249,144 @@ class TestParseDispatchUsage:
         assert usage.output_tokens == 901
         assert usage.cache_creation_input_tokens == 902
         assert usage.cache_read_input_tokens == 903
+
+    def test_highest_cost_entry_wins_with_missing_cost_ranked_last(self) -> None:
+        """nexus-xepsr (2026-09-14): when modelUsage has more than one
+        entry, ``model`` records the HIGHEST-costUSD entry's canonical id
+        (the answering call) -- not None. An entry with a missing (None)
+        costUSD must rank BELOW every entry that has a real cost, never
+        win by virtue of a real entry merely being cheap."""
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        doctored = dict(_fixture_result_event())
+        doctored["modelUsage"] = {
+            "no-cost-entry": {
+                "inputTokens": 999999, "outputTokens": 999999,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                "costUSD": None,
+                "canonicalModel": "claude-mystery-5",
+            },
+            "cheap-entry": {
+                "inputTokens": 1, "outputTokens": 1,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                "costUSD": 0.0001,
+                "canonicalModel": "claude-haiku-4-5",
+            },
+        }
+
+        usage = _parse_dispatch_usage(doctored)
+
+        assert usage.model == "claude-haiku-4-5", (
+            f"an entry with a real (even tiny) cost must outrank a "
+            f"missing-cost entry regardless of token counts: got {usage.model!r}"
+        )
+
+    def test_tie_broken_by_output_tokens_then_first_key(self) -> None:
+        """Equal costUSD: the entry with more outputTokens wins. Equal
+        cost AND tokens: the FIRST key in modelUsage's own iteration
+        order wins (nexus-xepsr)."""
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        doctored = dict(_fixture_result_event())
+        doctored["modelUsage"] = {
+            "first": {
+                "inputTokens": 1, "outputTokens": 5,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                "costUSD": 0.5,
+                "canonicalModel": "claude-a-5",
+            },
+            "second": {
+                "inputTokens": 1, "outputTokens": 50,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                "costUSD": 0.5,
+                "canonicalModel": "claude-b-5",
+            },
+        }
+        usage = _parse_dispatch_usage(doctored)
+        assert usage.model == "claude-b-5", "equal cost -- higher outputTokens must win"
+
+        doctored["modelUsage"] = {
+            "first": {
+                "inputTokens": 1, "outputTokens": 5,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                "costUSD": 0.5,
+                "canonicalModel": "claude-a-5",
+            },
+            "second": {
+                "inputTokens": 1, "outputTokens": 5,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                "costUSD": 0.5,
+                "canonicalModel": "claude-b-5",
+            },
+        }
+        usage = _parse_dispatch_usage(doctored)
+        assert usage.model == "claude-a-5", "equal cost and tokens -- first key must win"
+
+    def test_all_entries_non_dict_yields_no_raise_and_none_model(self) -> None:
+        """code-review-expert CRITICAL (nexus-xepsr fix round): a
+        non-empty ``modelUsage`` dict whose every entry fails the
+        ``isinstance(entry, dict)`` filter leaves the FILTERED
+        ``model_usage`` empty. A prior version of the >=2-entry branch
+        did not guard for that -- ``len(model_usage) == 1`` was False, so
+        it fell into the ``else`` clause that called ``max()`` on an
+        empty dict, which raises ``ValueError``, breaking this function's
+        documented contract to never raise on a malformed payload. This
+        must come back with ``model=None`` and no exception, and (since
+        the top-level ``modelUsage`` key WAS present and non-empty) with
+        no ``dispatch_usage_fields_missing`` warning -- that warning path
+        only fires when the raw value itself is absent/empty/non-dict,
+        which is not this scenario."""
+        from structlog.testing import capture_logs
+
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        doctored = dict(_fixture_result_event())
+        doctored["modelUsage"] = {
+            "claude-opus-5": "not a dict",
+            "claude-haiku-4-5": ["also", "not", "a", "dict"],
+        }
+
+        with capture_logs() as cap:
+            usage = _parse_dispatch_usage(doctored)
+
+        assert usage.model is None
+        assert usage.model_usage == {}
+        assert not any(e.get("event") == "dispatch_usage_fields_missing" for e in cap)
+
+    def test_cheap_answering_call_still_loses_to_a_pricier_side_call(self) -> None:
+        """The selection is purely cost-ranked, not semantically aware of
+        which entry is "the answering call" -- if a bundled dispatch ever
+        reports a genuinely cheaper answering-model entry alongside a
+        pricier one (the inverse of the common shape, where the answering
+        call's cached system prompt keeps its cost well above the CLI's
+        own haiku-priced side call), the pricier entry's canonical id is
+        what gets recorded, exactly as the >1-entry rule says -- there is
+        no special-casing of "the first entry" or "the requested model".
+        """
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        doctored = dict(_fixture_result_event())
+        doctored["modelUsage"] = {
+            "cheap-answering-call": {
+                "inputTokens": 900, "outputTokens": 40,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                "costUSD": 0.0005,
+                "canonicalModel": "claude-haiku-4-5",
+            },
+            "pricier-side-call": {
+                "inputTokens": 30, "outputTokens": 400,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 7000,
+                "costUSD": 0.09,
+                "canonicalModel": "claude-opus-5",
+            },
+        }
+
+        usage = _parse_dispatch_usage(doctored)
+
+        assert usage.model == "claude-opus-5", (
+            f"the higher-cost entry must win regardless of which one is "
+            f"semantically 'the answer': got {usage.model!r}"
+        )
 
 
 class TestClaudeDispatchUsageSink:

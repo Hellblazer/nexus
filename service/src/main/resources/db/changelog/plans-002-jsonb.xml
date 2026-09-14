@@ -136,6 +136,9 @@
             plans.plan_json TEXT NOT NULL -> jsonb NOT NULL; plans.default_bindings TEXT ->
             jsonb NULL (ONE ALTER TABLE, one rewrite). plans.dimensions / .parent_dims stay
             TEXT — deferred, see header (byte-equality plan-identity index / eq-match).
+            DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing
+            plans.plan_json / .default_bindings value from TEXT to jsonb; reversible via the
+            rollback's inverse ::text cast.
         </comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.plans

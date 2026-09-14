@@ -194,7 +194,7 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "content_hash": content_hash,
             "content": content,
             "doc_id": doc_id,
-        }))
+        }), registrar=self._catalog_registrar)
         self._signal_wake()
 
     def enqueue_many(self, rows: list[dict]) -> int:
@@ -397,6 +397,7 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         r = write_with_registration_retry(
             new,
             lambda: self._post("/rename_collection", {"old": old, "new": new}),
+            registrar=self._catalog_registrar,
         )
         return int(r.get("updated", 0))
 

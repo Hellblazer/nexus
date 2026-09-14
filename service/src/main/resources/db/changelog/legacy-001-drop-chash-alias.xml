@@ -132,6 +132,9 @@
             SECURITY and Liquibase's nexus_admin owner is not BYPASSRLS, so
             an untoggled DELETE would silently match zero rows for every
             tenant.
+            DATA EFFECT: DELETEs every nexus.frecency row whose chunk_id is not
+            canonical 64-hex; irreversible (Hal directive 2026-08-16: no campaign to
+            preserve legacy-width rows — documented no-op rollback below).
         </comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.frecency NO FORCE ROW LEVEL SECURITY;
@@ -165,6 +168,9 @@ ALTER TABLE nexus.frecency FORCE ROW LEVEL SECURITY;
             canonical 64-hex chash shape. Same RAISE NOTICE / RLS-toggle
             discipline as legacy-001-1 (relevance_log carries FORCE ROW
             LEVEL SECURITY, telemetry-001-baseline.xml:84).
+            DATA EFFECT: DELETEs every nexus.relevance_log row whose chunk_id is not
+            canonical 64-hex; irreversible (same Hal directive as legacy-001-1 —
+            documented no-op rollback below).
         </comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.relevance_log NO FORCE ROW LEVEL SECURITY;
@@ -300,6 +306,9 @@ $fn$;
             its two indexes (idx_chash_alias_old_bytes, idx_chash_alias_new)
             and its tenant_isolation RLS policy — nothing survives it that
             needs a separate DROP INDEX/DROP POLICY.
+            DATA EFFECT: DROPs nexus.chash_alias, discarding every alias fact (its
+            beneficiary population was measured at zero — RDR-194 cc2); irreversible
+            (the rollback recreates the table's empty schema shape, not the data).
         </comment>
         <sql splitStatements="true" stripComments="false">
 DROP TABLE nexus.chash_alias;

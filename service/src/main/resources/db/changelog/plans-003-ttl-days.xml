@@ -110,6 +110,9 @@
             can be less-than-or-equal to) yet were never deleted by any
             sweep. NULL remains the sole permanent sentinel; 0 becomes
             unrepresentable.
+            DATA EFFECT: DELETEs every nexus.plans row with ttl = 0 (measured 2 rows
+            in tenant "nexus" on the live store); irreversible — the rollback
+            restores the schema (rename + drop CHECK), not the deleted rows.
         </comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.plans NO FORCE ROW LEVEL SECURITY;

@@ -28,6 +28,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -385,11 +386,17 @@ class TestDrain:
         with T2Database(queue_path) as db:
             db.aspect_queue.is_drained()  # just verifies it exists
 
-        # Queue is empty; drain should return without error.
-        start = time.monotonic()
-        drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=locks_dir)
-        elapsed = time.monotonic() - start
-        assert elapsed < 1.0, "drain on empty queue took too long"
+        # nexus-scc9t: drain_worker's own is_drained() short-circuit
+        # (src/nexus/aspect_worker.py: "if queue.is_drained(): ...
+        # return") fires before the poll loop, so time.sleep(poll_interval)
+        # is never called for an already-drained queue. Asserted directly
+        # -- a loaded box can blow a wall-clock elapsed bound with no
+        # regression present, since the assertion cares about REAL
+        # scheduler-delay-inflated seconds rather than whether the
+        # short-circuit engaged.
+        with patch("time.sleep") as mock_sleep:
+            drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=locks_dir)
+        mock_sleep.assert_not_called()
 
     def test_drain_waits_for_in_progress_rows_to_resolve(
         self, queue_path: Path, locks_dir: Path
@@ -462,10 +469,12 @@ class TestDrain:
             db.aspect_queue.claim_next()
             db.aspect_queue.mark_failed("knowledge__test", "/fail.pdf", "broken")
 
-        start = time.monotonic()
-        drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=locks_dir)
-        elapsed = time.monotonic() - start
-        assert elapsed < 1.0
+        # nexus-scc9t: see test_drain_on_empty_queue_is_noop -- a queue
+        # with only terminal (failed) rows is_drained() immediately, so
+        # the short-circuit fires and time.sleep is never called.
+        with patch("time.sleep") as mock_sleep:
+            drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=locks_dir)
+        mock_sleep.assert_not_called()
 
 
 # -- worker stop + drain integration ------------------------------------------

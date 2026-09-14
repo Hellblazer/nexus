@@ -244,6 +244,25 @@ public final class HttpUtil {
                 + "}");
             return true;
         }
+        // nexus-4a8pn taxonomy-017: the doc_count posture tripwire (RAISE EXCEPTION
+        // inside topics_doc_count_recount_ins/_del, SQLSTATE P0001, fired when the
+        // calling session's nexus.tenant GUC does not cover the tenant_id(s) a
+        // topic_assignments INSERT/DELETE just touched) is a caller-diagnosable
+        // posture refusal, not a server fault -- typed 409 ahead of the generic
+        // class-23 branch below (P0001 is not class 23 anyway, but grouped here
+        // with the other business-refusal branches) so the remedy text already
+        // embedded in the PG message reaches the CLIENT, not only the server log.
+        // Narrowly scoped to this one message prefix: every OTHER P0001 (any other
+        // plpgsql RAISE EXCEPTION anywhere else in this codebase) keeps the
+        // generic-500 policy unchanged.
+        String tripwireDetail = docCountPostureTripwireMessage(e);
+        if (tripwireDetail != null) {
+            log.warn("event={}_doc_count_posture_tripwire {} error={}", event, context, tripwireDetail);
+            send(exchange, 409,
+                "{\"error\":\"doc_count posture tripwire\",\"sqlstate\":\""
+                + SQLSTATE_RAISE_EXCEPTION + "\",\"detail\":" + jsonString(tripwireDetail) + "}");
+            return true;
+        }
         String sqlState = sqlState23(e);
         if (sqlState != null) {
             // nexus-7e057: class-23 integrity violations are caller errors (bad FK id
@@ -375,6 +394,45 @@ public final class HttpUtil {
         for (Throwable c = t; c != null; c = c.getCause()) {
             if (c instanceof dev.nexus.service.db.UnregisteredCollectionException uce) {
                 return uce;
+            }
+        }
+        return null;
+    }
+
+    /** PostgreSQL SQLSTATE for a plain {@code RAISE EXCEPTION} with no explicit
+     *  {@code ERRCODE} (the {@code raise_exception} default class). */
+    private static final String SQLSTATE_RAISE_EXCEPTION = "P0001";
+
+    /** The message prefix {@code topics_doc_count_recount_ins}/{@code _del}'s
+     *  taxonomy-017 posture-tripwire {@code RAISE EXCEPTION} always carries
+     *  (see {@link #docCountPostureTripwireMessage}). */
+    private static final String DOC_COUNT_TRIPWIRE_MESSAGE_PREFIX = "topics_doc_count_recount_";
+
+    /**
+     * Walk the cause chain for a {@link SQLException} whose SQLSTATE is {@code
+     * P0001} and whose message starts with {@code topics_doc_count_recount_} —
+     * the nexus-4a8pn taxonomy-017-doc-count-posture-tripwire.xml {@code RAISE
+     * EXCEPTION} inside {@code topics_doc_count_recount_ins}/{@code _del}, fired
+     * when the calling session's {@code nexus.tenant} GUC does not cover the
+     * tenant_id(s) a {@code topic_assignments} INSERT/DELETE just touched (see
+     * that changeset's own header for the full derivation). Returns the
+     * offending exception's message (the PG error text, already naming the
+     * tenant(s) and the remedy) or {@code null} if no such cause exists.
+     *
+     * <p>Narrowly scoped to this ONE message prefix, deliberately: {@code
+     * P0001} is the generic code for EVERY plpgsql {@code RAISE EXCEPTION} in
+     * this codebase that does not set an explicit {@code ERRCODE} — matching on
+     * the bare SQLSTATE alone would reclassify any other such RAISE as a typed
+     * 409 too. Same cause-chain-walk shape as {@link #sqlState23}.
+     */
+    static String docCountPostureTripwireMessage(Throwable t) {
+        Throwable c = t;
+        for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
+            if (c instanceof SQLException se
+                    && SQLSTATE_RAISE_EXCEPTION.equals(se.getSQLState())
+                    && se.getMessage() != null
+                    && se.getMessage().startsWith(DOC_COUNT_TRIPWIRE_MESSAGE_PREFIX)) {
+                return se.getMessage();
             }
         }
         return null;

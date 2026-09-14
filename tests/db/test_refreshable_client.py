@@ -1005,6 +1005,180 @@ class TestGatewayTransientRetry:
         assert mixin._GATEWAY_RETRY_SLEEPS == ref._GATEWAY_RETRY_SLEEPS
 
 
+class TestEmbedWrite504BackoffFloorWriteMany:
+    """nexus-r46u9: the combined write (``/v1/catalog/manifest/write_many``
+    with an inline ``chunks=`` field) was the HEADLINE failure mode of the
+    duplicate-re-embed production incident -- 77 of 101 edge timeouts -- so
+    it gets the SAME 504 floor as ``http_vector_client._request``'s
+    ``/v1/vectors/upsert-chunks``/``/store-put`` routes, via the shared
+    :mod:`nexus.db.gateway_backoff`. Mirrors
+    ``tests/db/test_http_vector_client.py::TestEmbedWrite504BackoffFloor``.
+
+    Unit-style (monkeypatches ``_request_once`` directly, no real HTTP
+    round trip) because the fake server this file's other gateway tests use
+    only serves ``/v1/echo`` -- exercising a write_many-shaped path needs
+    only ``_once_with_gateway_retry`` itself, which is transport-agnostic.
+    """
+
+    def _http_error(self, code: int) -> "httpx.HTTPStatusError":
+        request = httpx.Request("POST", "http://svc/v1/catalog/manifest/write_many")
+        response = httpx.Response(code, request=request)
+        return httpx.HTTPStatusError(f"{code}", request=request, response=response)
+
+    def test_504_with_chunks_floors_every_sleep(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.db.t2 import _refreshable_client as mod
+
+        store = _make_echo_store()
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        def fake_once(method, path, **kwargs):
+            calls.append(1)
+            if len(calls) < 3:
+                raise self._http_error(504)
+            return {"ok": True}
+
+        monkeypatch.setattr(store, "_request_once", fake_once)
+        monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+        result = store._once_with_gateway_retry(
+            "POST", "/v1/catalog/manifest/write_many",
+            json={"docs": [], "collection": "docs__o__x__v1", "chunks": [{"chash": "a"}]},
+        )
+        assert result == {"ok": True}
+        assert len(calls) == 3
+        assert sleeps == [mod._EMBED_WRITE_504_BACKOFF_FLOOR_S] * 2
+
+    def test_504_without_chunks_keeps_default_schedule(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A manifest-only write_many page (no chunks=, or an empty list)
+        never triggers a server-side embed -- no floor."""
+        from nexus.db.t2 import _refreshable_client as mod
+
+        store = _make_echo_store()
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        def fake_once(method, path, **kwargs):
+            calls.append(1)
+            if len(calls) < 3:
+                raise self._http_error(504)
+            return {"ok": True}
+
+        monkeypatch.setattr(store, "_request_once", fake_once)
+        monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+        result = store._once_with_gateway_retry(
+            "POST", "/v1/catalog/manifest/write_many",
+            json={"docs": [], "collection": "docs__o__x__v1"},
+        )
+        assert result == {"ok": True}
+        assert sleeps == list(mod._GATEWAY_RETRY_SLEEPS[:2])
+
+    def test_503_with_chunks_keeps_default_schedule(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The floor is 504-specific -- a 503 on the same chunk-carrying
+        body keeps the unfloored schedule."""
+        from nexus.db.t2 import _refreshable_client as mod
+
+        store = _make_echo_store()
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        def fake_once(method, path, **kwargs):
+            calls.append(1)
+            if len(calls) < 3:
+                raise self._http_error(503)
+            return {"ok": True}
+
+        monkeypatch.setattr(store, "_request_once", fake_once)
+        monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+        result = store._once_with_gateway_retry(
+            "POST", "/v1/catalog/manifest/write_many",
+            json={"docs": [], "collection": "docs__o__x__v1", "chunks": [{"chash": "a"}]},
+        )
+        assert result == {"ok": True}
+        assert sleeps == list(mod._GATEWAY_RETRY_SLEEPS[:2])
+
+    def test_504_on_non_embed_t2_route_keeps_default_schedule(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A path outside the embed-write set (e.g. an ordinary T2 write)
+        never floors, chunks or not."""
+        from nexus.db.t2 import _refreshable_client as mod
+
+        store = _make_echo_store()
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        def fake_once(method, path, **kwargs):
+            calls.append(1)
+            if len(calls) < 3:
+                raise self._http_error(504)
+            return {"ok": True}
+
+        monkeypatch.setattr(store, "_request_once", fake_once)
+        monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+        result = store._once_with_gateway_retry(
+            "POST", "/v1/memory/put", json={"chunks": [{"chash": "a"}]},
+        )
+        assert result == {"ok": True}
+        assert sleeps == list(mod._GATEWAY_RETRY_SLEEPS[:2])
+
+    def test_floored_wait_logs_dedicated_event(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        from nexus.db.t2 import _refreshable_client as mod
+
+        store = _make_echo_store()
+        calls: list[int] = []
+
+        def fake_once(method, path, **kwargs):
+            calls.append(1)
+            if len(calls) < 2:
+                raise self._http_error(504)
+            return {"ok": True}
+
+        monkeypatch.setattr(store, "_request_once", fake_once)
+        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+        with capture_logs() as logs:
+            store._once_with_gateway_retry(
+                "POST", "/v1/catalog/manifest/write_many",
+                json={"docs": [], "collection": "docs__o__x__v1", "chunks": [{"chash": "a"}]},
+            )
+        floor_events = [e for e in logs if e["event"] == "vector_gateway_retry_embed_write_504"]
+        assert len(floor_events) == 1
+        assert floor_events[0]["path"] == "/v1/catalog/manifest/write_many"
+        assert floor_events[0]["attempt"] == 1
+        assert floor_events[0]["sleep_s"] == mod._EMBED_WRITE_504_BACKOFF_FLOOR_S
+
+    def test_exhausted_retries_raise_original_with_floor(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Exhaustion shape (attempt count, final raise) unchanged by the floor."""
+        from nexus.db.t2 import _refreshable_client as mod
+
+        store = _make_echo_store()
+        calls: list[int] = []
+
+        def fake_once(method, path, **kwargs):
+            calls.append(1)
+            raise self._http_error(504)
+
+        monkeypatch.setattr(store, "_request_once", fake_once)
+        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+        with pytest.raises(httpx.HTTPStatusError):
+            store._once_with_gateway_retry(
+                "POST", "/v1/catalog/manifest/write_many",
+                json={"docs": [], "collection": "docs__o__x__v1", "chunks": [{"chash": "a"}]},
+            )
+        assert len(calls) == 1 + len(mod._GATEWAY_RETRY_SLEEPS)
+
+
 class TestReadTimeoutSelfHeal:
     """nexus-1ytp6: prove the newly classified timeout siblings actually
     trigger the self-heal path through ``_send`` (the classifier AND the

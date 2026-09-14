@@ -166,7 +166,7 @@ DROP FUNCTION IF EXISTS nexus.fold_diacritics(text);
     </changeSet>
 
     <changeSet id="memory-002-1" author="nexus-22r1f">
-        <comment>fts_vector: separator-normalized title segment (auth-design.md findable by auth) + diacritic folding on every segment (resume finds résumé)</comment>
+        <comment>fts_vector: separator-normalized title segment (auth-design.md findable by auth) + diacritic folding on every segment (resume finds résumé). DATA EFFECT: DROPs and re-ADDs the GENERATED fts_vector column on nexus.memory (a table rewrite that recomputes the derived tsvector for every row from title/content/tags — no independently-stored data lost); reversible via the rollback's inverse DROP+ADD using the prior expression.</comment>
         <sql splitStatements="true">
 DROP INDEX IF EXISTS nexus.idx_memory_fts;
 ALTER TABLE nexus.memory DROP COLUMN fts_vector;

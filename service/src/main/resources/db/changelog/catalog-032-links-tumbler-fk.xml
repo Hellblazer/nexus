@@ -181,6 +181,10 @@ ALTER TABLE nexus.catalog_links
             and logged through its own (SLF4J-backed) logger by default
             (SHOW_SQL_WARNING_MESSAGES defaults true) — no runAlways, no
             DDL-in-Python, no bespoke Java capture.
+            DATA EFFECT: DELETEs every nexus.catalog_links row whose from_tumbler or
+            to_tumbler has no matching catalog_documents row (up to 200 exported to the
+            migration log before deletion, per RDR-194 D2); irreversible (unrepairable
+            link bookkeeping — no rollback attempts to restore the deleted rows).
         </comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.catalog_links NO FORCE ROW LEVEL SECURITY;

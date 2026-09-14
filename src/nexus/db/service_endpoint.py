@@ -543,6 +543,41 @@ def resolve_service_endpoint(
     return f"http://{host}:{port}", token
 
 
+def is_endpoint_env_pinned() -> bool:
+    """True when :func:`resolve_service_endpoint` can resolve WITHOUT
+    touching the supervisor's lease file (nexus-w1ip review round,
+    finding (b)) — mirrors that function's own two-leg branch order
+    exactly: the ``service_url`` leg needs BOTH halves resolvable without
+    a lease read (``get_credential`` alone — env, or an mtime-cached
+    ``config.yml`` parse, never a lease-file read); the local host/port
+    leg needs all three of ``NX_SERVICE_HOST``/``NX_SERVICE_PORT``/
+    ``NX_SERVICE_TOKEN`` set as raw env (:func:`resolve_service_config`'s
+    own fast path). Cheap by construction — an env read plus, at most, a
+    cached config parse, never the lease file itself.
+
+    For a caller deciding whether it is safe to memoize a resolution
+    (e.g. ``service_handles.cached_endpoint_key``): an env/config-pinned
+    endpoint is already cheap on every call and must stay LIVE so a
+    genuine rotation (a fresh per-test tenant token, a live credential
+    change) is never masked by a stale cache; only the lease-file
+    fallback this returns ``False`` for benefits from — and needs —
+    memoization.
+    """
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+
+    # Same normalization as resolve_service_endpoint's leg 1, so the two
+    # never disagree on a value like "/" (fix-check round 2).
+    url = (get_credential("service_url") or "").strip().rstrip("/")
+    if url:
+        token = (get_credential("service_token") or "").strip()
+        return bool(token)
+    return bool(
+        os.environ.get("NX_SERVICE_HOST", "").strip()
+        and os.environ.get("NX_SERVICE_PORT", "").strip()
+        and os.environ.get("NX_SERVICE_TOKEN", "").strip()
+    )
+
+
 # ── Dev-checkout production-write guard (nexus-a2qhz) ────────────────────────
 #
 # Three incidents (2026-08-19, 2026-08-21 x2 — see the bead) reached Sam's
@@ -715,9 +750,9 @@ def set_test_only_opt_in_reason_for_tests(reason: str | None) -> None:
     """Test-only in-process override for :func:`guard_production_write`'s
     opt-in check — see :data:`_test_only_opt_in_reason`'s docstring.
 
-    ``tests/conftest.py``'s blanket pytest exemption calls this via
-    ``monkeypatch.setattr(service_endpoint, "_test_only_opt_in_reason",
-    "<reason>")`` (still undone per test, same as any other monkeypatch)
+    ``tests/conftest.py``'s blanket pytest exemption sets it via a
+    session-scoped ``MonkeyPatch.setattr(service_endpoint,
+    "_test_only_opt_in_reason", "<reason>")`` (undone at session end)
     instead of setting the real env var — the exemption then never
     appears in ``os.environ`` and cannot leak into a subprocess a test
     spawns. A test that spawns a subprocess needing the REAL guard

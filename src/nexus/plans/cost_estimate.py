@@ -609,6 +609,38 @@ def _candidate_log(match: "Match", estimate: PlanCostEstimate, *, in_band: bool)
     }
 
 
+def _ends_in_answer(plan_json: Any) -> bool:
+    """True when the plan's TERMINAL step names an operator whose bare
+    output is an answer (:func:`nexus.plans.answer_shape.is_answering_operator`:
+    summarize, generate, compare, aggregate) -- the same vocabulary
+    ``classify_answer_shape`` applies to ``final_text`` afterwards, so a
+    plan this admits cannot classify as a non-answer shape by construction
+    of its last step (GH #1545). A plan ending in retrieval, hydration, or a
+    partition/judgement operator (extract, rank, filter, check, verify,
+    groupby) is excluded: ``PlanResult.final`` is always the last step's
+    output, so whatever reduced earlier never reaches the caller. An
+    unknown or misspelled tool is not answering either, so it cannot become
+    the sole admitted candidate while its own estimate is ``usd=None``
+    (code-review finding, 2026-09-14). Malformed plans count as
+    non-answering.
+    """
+    from nexus.plans.answer_shape import is_answering_operator  # noqa: PLC0415 — deferred: sibling module, avoids an import cycle at load
+
+    plan = plan_json
+    if isinstance(plan, str):
+        try:
+            plan = json.loads(plan)
+        except (json.JSONDecodeError, TypeError):
+            return False
+    steps = plan.get("steps") if isinstance(plan, dict) else None
+    if not isinstance(steps, list) or not steps:
+        return False
+    last = steps[-1]
+    if not isinstance(last, dict):
+        return False
+    return is_answering_operator(_extract_tool(last))
+
+
 def choose_within_band(
     matches: "list[Match]",
     price_table: OperatorPriceTable,
@@ -670,6 +702,14 @@ def choose_within_band(
     every prefix candidate is unpriceable, ``matches[0]`` is returned --
     the tie resolves to earliest matcher position, i.e. the top match.
 
+    A non-answering candidate (terminal step is not an answering operator,
+    see :func:`_ends_in_answer`) is excluded from the cost comparison
+    whenever the prefix also holds an answering candidate (GH #1545): a
+    retrieval-only plan prices at $0 by construction and would otherwise
+    dominate every plan that produces an answer. It still wins when it is
+    ``matches[0]`` and alone in the band, or when every in-band candidate
+    is non-answering.
+
     ``matches[0].confidence is None`` (the FTS5 fallback sentinel) means
     there is no numeric band to compute -- returns ``matches[0]``
     unchanged; every candidate is still logged with ``in_band`` set only
@@ -718,6 +758,20 @@ def choose_within_band(
 
     if len(prefix) <= 1:
         return matches[0], decision_log
+
+    # GH #1545: a retrieval-only plan prices at $0 by construction, so once
+    # one sits inside the band it beats every plan that actually answers,
+    # and nx_answer returns a chunk listing. Cost-ranking compares only
+    # plans whose terminal step is an answering operator; a non-answering
+    # plan can still win as matches[0] when it is alone in the band or
+    # every in-band plan is non-answering.
+    answering = [pair for pair in prefix if _ends_in_answer(pair[0].plan_json)]
+    if answering and len(answering) < len(prefix):
+        for row, (m, _est) in zip(decision_log, prefix):
+            row["non_answering"] = not _ends_in_answer(m.plan_json)
+        prefix = answering
+        if len(prefix) == 1:
+            return prefix[0][0], decision_log
 
     def _sort_key(indexed: "tuple[int, tuple[Match, PlanCostEstimate]]") -> tuple[int, float, int]:
         position, (_m, est) = indexed

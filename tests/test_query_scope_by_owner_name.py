@@ -18,6 +18,10 @@ class _Cat:
     def owner_tumblers_by_name(self, name: str) -> list[Tumbler]:
         return [Tumbler.parse(t) for t in self._by_name.get(name, [])]
 
+    def get_owner_by_prefix(self, tumbler_prefix: str) -> dict | None:
+        # Neither shared owner is a repo, so the name stays ambiguous (GH #1544).
+        return {"tumbler_prefix": tumbler_prefix, "owner_type": "curator"}
+
 
 def test_query_reports_an_unknown_owner_name_by_name() -> None:
     with patch("nexus.mcp.core._get_catalog", return_value=_Cat({})):

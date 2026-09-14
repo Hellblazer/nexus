@@ -395,15 +395,37 @@ def _vector_with_retry(
     ``http_vector_client._request``'s OWN inner gateway retry
     (``_GATEWAY_RETRY_SLEEPS``: 2s + 5s + 10s = 17s), which fires for the
     SAME statuses (502/503/504) at a layer BELOW this wrapper, before this
-    wrapper's caller (``_post``) ever raises — so each of this wrapper's 4
-    attempts can itself already have paid up to 17s there: 4 x (60s + 17s)
-    = 308s, call it about 5 minutes. A 429/503+Retry-After signal widens to
-    8 attempts (7 sleeps), each floored at either the escalating default
-    (cap 60s, worst case 7 x 60s = 420s, or 7 x 77s = 539s including the
-    inner gateway retry when the widening status is 503) or the server's
-    own Retry-After (clamped to 300s, worst case 7 x 300s = 2100s if every
-    attempt reports a large one — the inner gateway retry never applies to
-    a 429, which is not in ``_GATEWAY_RETRY_CODES``).
+    wrapper's caller (``_post``) ever raises. This wrapper makes 5 attempts
+    and sleeps between them 4 times, and every one of the 5 ``fn()`` calls
+    pays the inner loop, the fifth included (it raises with no outer sleep
+    after it): 5 x 17s + 4 x 60s = 325s, call it about 5.5 minutes, for
+    502/503 on any route or a 504 on a NON-embed-write route.
+
+    nexus-r46u9: on an embed-write route (``/v1/vectors/upsert-chunks`` /
+    ``/store-put``) under a SUSTAINED 504 storm, the inner gateway retry's
+    three sleeps are each floored at
+    :data:`nexus.db.gateway_backoff._EMBED_WRITE_504_BACKOFF_FLOOR_S`
+    (30s), so the inner total rises from 17s to 3 x 30s = 90s. This
+    wrapper's worst case for that specific storm becomes 5 x 90s + 4 x 60s
+    = 690s, about 11.5 minutes, up from 325s. This is the INTENDED trade, not
+    a regression: verified against ``PgVectorRepository``'s existence-
+    partition (RDR-181) and ``CombinedWriteService`` — the embed call runs
+    with no per-chash in-flight lock or coalescing, so a resend that lands
+    while the first attempt is still inside its synchronous Voyage call
+    genuinely starts a SECOND full embed of the SAME batch, concurrently,
+    on an upstream that is already slow. Under that storm every faster
+    resend is another full re-embed piled on top of the one still running,
+    not a faster recovery — so the worker waits longer per attempt instead
+    of multiplying load on the struggling upstream. The bound is still
+    fixed and stated, just larger for this one failure mode. A
+    429/503+Retry-After signal widens to 8 attempts (7 sleeps), each
+    floored at either the escalating default (cap 60s, worst case 7 x 60s
+    = 420s, or 7 x 77s = 539s including the inner gateway retry when the
+    widening status is 503 — 503 is never floored by the embed-write
+    change above, only 504 is) or the server's own Retry-After (clamped to
+    300s, worst case 7 x 300s = 2100s if every attempt reports a large one
+    — the inner gateway retry never applies to a 429, which is not in
+    ``_GATEWAY_RETRY_CODES``).
     """
     brake = get_brake()
     delay = 2.0
@@ -973,6 +995,20 @@ def _manifest_write_with_retry(
     a Retry-After signal; widened to 7 sleeps at up to the 300s
     Retry-After clamp = 2100s worst case when rate-limited. A successful
     call releases the brake's escalation state.
+
+    nexus-r46u9: this wrapper does NOT compound with the embed-write 504
+    floor (``nexus.db.gateway_backoff._EMBED_WRITE_504_BACKOFF_FLOOR_S``,
+    applied inside ``RefreshableHttpStoreMixin._once_with_gateway_retry``
+    to the combined write, ``/v1/catalog/manifest/write_many`` with
+    ``chunks=``) the way :func:`_vector_with_retry` does. A persistent 504
+    that exhausts the inner gateway-retry schedule re-raises as an
+    ``httpx.HTTPStatusError`` — :func:`_is_connectivity_error` never
+    classifies an HTTP status response as connectivity, and a bare 504
+    carries no Retry-After, so it is not a rate-limit signal either. This
+    wrapper's classifier therefore re-raises it immediately on the FIRST
+    attempt, adding no further sleeps of its own. The floored inner total
+    (up to 3 x 30s = 90s) is paid AT MOST ONCE per call to this wrapper,
+    not multiplied across its own attempt budget.
     """
     brake = get_brake()
     max_connectivity_attempts = len(_MANIFEST_WRITE_RETRY_DELAYS) + 1

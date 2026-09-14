@@ -45,6 +45,7 @@ Design shape:
 
 from __future__ import annotations
 
+import hashlib
 import ssl
 import threading
 import time
@@ -53,13 +54,24 @@ from typing import Any
 import httpx
 import structlog
 
-# nexus-1ytp6: the gateway-transient retry axis is IMPORTED from the T3
-# reference implementation, not redefined -- one source of truth for the
-# schedule its production incident (live 504, 2026-07-04) calibrated.
-# tests/db/test_refreshable_client.py::test_gateway_constants_match_reference
-# additionally pins the two modules' values equal against a future
-# local-redefinition drift.
-from nexus.db.http_vector_client import _GATEWAY_RETRY_CODES, _GATEWAY_RETRY_SLEEPS
+# nexus-1ytp6 / nexus-r46u9: the gateway-transient retry axis (schedule,
+# codes, embed-write 504 floor, and embed-write-path classifier) is
+# IMPORTED from the shared leaf module, not redefined -- one source of
+# truth for the schedule its production incident (live 504, 2026-07-04)
+# calibrated, and (nexus-r46u9) for the floor a second production incident
+# (Voyage slowdown, duplicate re-embeds on the combined write) calibrated.
+# Originally imported from http_vector_client.py directly (the T3
+# reference implementation); moved to nexus.db.gateway_backoff once BOTH
+# this mixin and http_vector_client needed the floor, so neither imports
+# the other. tests/db/test_refreshable_client.py::test_gateway_constants_match_reference
+# additionally pins this module's and http_vector_client's values equal
+# against a future local-redefinition drift.
+from nexus.db.gateway_backoff import (
+    _EMBED_WRITE_504_BACKOFF_FLOOR_S,
+    _GATEWAY_RETRY_CODES,
+    _GATEWAY_RETRY_SLEEPS,
+    _is_embed_server_side_write_path,
+)
 from nexus.db.service_endpoint import (
     DEFAULT_LEASE_WAIT_BUDGET_S,
     discover_lease_with_wait,
@@ -420,6 +432,109 @@ def _resolve_token_only_with_evidence_gate() -> str:
         if not has_ever_resolved_lease():
             raise
         return _resolve_token_only(wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S)
+
+
+class _EndpointRegistrar:
+    """Zero-arg catalog-writer factory bound to one store's explicit
+    endpoint, bearer and tenant, exposing that binding as ``scope``.
+
+    ``registrar=self._catalog_registrar`` (below) passes an INSTANCE of
+    this class, not a bare bound method — a bound method has nowhere to
+    hang the extra ``scope`` attribute :func:`nexus.corpus.
+    ensure_collection_registered`'s cache needs to key on (nexus-w1ip
+    follow-up gap 1, critic review 2026-09-14: the cache was NAME-only,
+    so a second store pinned to a SECOND engine registering an
+    already-registered name in the SAME process short-circuited before
+    ever calling ITS OWN registrar, and 422'd "not registered" on its
+    own engine — reproducing this bead's target symptom via cache
+    collision instead of ambient misrouting). ``getattr(registrar,
+    "scope", None)`` is how the corpus-side cache reads it; a plain
+    lambda/function (every ambient-default caller, unchanged) has no
+    ``scope`` attribute and resolves to ``None`` — the ambient cache
+    partition, byte-identical to pre-existing behaviour.
+
+    Holds a REFERENCE to the store, not a snapshot of its
+    ``_base_url``/``_token``/``_tenant`` at construction time — two
+    reasons. First, "never baked once": every existing caller reads
+    those three fields fresh per request (see this mixin's own module
+    docstring); a registrar that froze them at construction would be
+    the one place that didn't. Second, and why ``scope``/``__call__``
+    use ``getattr(..., None)`` rather than direct attribute access: a
+    store built via ``Store.__new__(Store)`` (bypassing ``__init__`` —
+    a common test-double shortcut across this test suite, predating
+    nexus-w1ip) has NO ``_base_url`` at all, and ``self._catalog_
+    registrar`` is evaluated as a plain argument expression at every
+    one of the 13 write-path call sites, unconditionally, on every
+    call — so a hard attribute read here would turn "construct a
+    registrar object" itself into a crash for any such test double,
+    even one that never reaches an actual registration attempt. A
+    missing ``_base_url`` degrades ``scope`` to ``None`` (the ambient
+    cache partition) and ``__call__`` to the ambient default writer —
+    exactly the pre-nexus-w1ip behaviour for a store that was never
+    told its own endpoint, never a crash.
+    """
+
+    __slots__ = ("_store",)
+
+    def __init__(self, store: "RefreshableHttpStoreMixin") -> None:
+        self._store = store
+
+    @property
+    def scope(self) -> "tuple[str, str, str] | None":
+        """``(base_url, tenant, bearer digest)`` — the cache-partition key
+        for this registrar; ``None`` (the ambient partition) when the store
+        has no ``_base_url`` of its own yet (see the class docstring).
+
+        The bearer is part of the key because the declared tenant is
+        advisory: the engine binds the tenant from the bearer (a root token
+        binds ``default``, a mint-locked credential the tenant it was issued
+        under; see ``nexus.db.data_token``, nexus-ssqk9). Two stores on one
+        endpoint that declare one tenant can therefore be bound to two
+        server tenants, and must not share a cache entry (nexus-dvgsf
+        critic). A re-minted bearer changes the digest, which costs one
+        idempotent re-registration per collection and never skips one."""
+        if not self._pinned():
+            return None
+        base_url = getattr(self._store, "_base_url", None)
+        tenant = getattr(self._store, "_tenant", None)
+        if base_url is None or tenant is None:
+            return None
+        token = getattr(self._store, "_token", None) or ""
+        return (base_url, tenant, hashlib.sha256(token.encode()).hexdigest()[:16])
+
+    def _pinned(self) -> bool:
+        """True only for a store constructed with an explicit ``base_url``.
+
+        A store that resolved its endpoint from the environment writes to
+        the ambient engine, so it registers through the ambient writer and
+        the ambient cache partition, exactly as before nexus-w1ip. Routing
+        it through the scoped partition missed every ambient cache entry
+        and re-registered with re-derived fields, which an engine whose
+        profile differs from the derivation refuses (nexus-dvgsf: the
+        indexer's manifest write and the aspect queue failed in the
+        local-service gate's seam-B round trip)."""
+        return bool(getattr(self._store, "_base_url_pinned", False))
+
+    def __call__(self) -> Any:
+        base_url = getattr(self._store, "_base_url", None)
+        if base_url is None or not self._pinned():
+            # No endpoint of its own to register against (see class
+            # docstring) -- behave exactly as if no registrar had been
+            # passed at all.
+            from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred; avoids a cycle
+
+            return make_catalog_writer()
+        from nexus.catalog.factory import make_catalog_writer_for_endpoint  # noqa: PLC0415 — deferred; avoids a cycle
+
+        return make_catalog_writer_for_endpoint(
+            base_url=base_url,
+            token=getattr(self._store, "_token", None) or "",
+            tenant=getattr(self._store, "_tenant", None) or DEFAULT_TENANT,
+            # The store's own pool (or a test's mocked transport), never a
+            # second real client to the same host: the writer neither owns
+            # nor closes an injected client (nexus-m20mf contract).
+            client=getattr(self._store, "_client", None),
+        )
 
 
 class RefreshableHttpStoreMixin:
@@ -794,6 +909,36 @@ class RefreshableHttpStoreMixin:
 
     # ── Public transport (subclasses call these, never self._client directly) ──
 
+    @property
+    def _catalog_registrar(self) -> "_EndpointRegistrar":
+        """A catalog writer factory bound to THIS store's endpoint, bearer
+        and tenant, for a registration that must land on the engine this
+        store writes to.
+
+        ``write_with_registration_retry`` / ``ensure_collection_registered``
+        default to the process-wide shared catalog client, which resolves
+        its endpoint from the ambient environment. A store constructed
+        against an explicit ``base_url``/``_token`` (the chash integration
+        harness, tenant tooling, any second engine) would then register on
+        whichever engine the environment names and write to its own, and
+        the write 422s "not registered". Before nexus-w1ip the shared client
+        memoised whatever endpoint it first saw, which hid this by accident;
+        the slot's endpoint-key eviction made it visible (local-service gate
+        red, 2026-09-14). Every store on this mixin that pre-registers a
+        collection passes ``registrar=self._catalog_registrar``.
+
+        A PROPERTY, not a plain method: it must return an
+        :class:`_EndpointRegistrar` instance (carrying ``.scope`` for the
+        corpus-side cache, nexus-w1ip follow-up gap 1) each time it is
+        read, not a bound method with nowhere to hang that attribute.
+        Cheap and safe to read unconditionally (every one of the 13
+        write-path call sites does, as a plain argument expression) —
+        it stores a reference to THIS store, never a snapshot; see
+        :class:`_EndpointRegistrar`'s own docstring for why it must not
+        read ``self._base_url`` here.
+        """
+        return _EndpointRegistrar(self)
+
     def _post(
         self,
         path: str,
@@ -1104,23 +1249,47 @@ class RefreshableHttpStoreMixin:
         branch (content append) are not. RESOLVED (nexus-tjvgf): those
         verbs pass ``idempotent=False`` and never reach this loop — this
         method may assume its caller's operation is retry-safe.
+
+        nexus-r46u9: a 504 on a server-side-embedding write route
+        (:func:`~nexus.db.gateway_backoff._is_embed_server_side_write_path`)
+        floors EVERY scheduled sleep at
+        :data:`~nexus.db.gateway_backoff._EMBED_WRITE_504_BACKOFF_FLOOR_S`
+        (30s) instead of the raw schedule — identical reasoning, floor, and
+        log EVENT NAME to ``http_vector_client._request``'s
+        (``vector_gateway_retry_embed_write_504``, deliberately NOT this
+        module's ``refreshable_http_store.*`` namespace, so the two layers'
+        floored waits are one grep/log-query across both) — see that
+        function's docstring. Applied here because the combined write
+        (``/v1/catalog/manifest/write_many`` with inline ``chunks=``) was
+        the HEADLINE failure mode of the production incident this floor
+        exists for (77 of 101 edge timeouts). The outgoing JSON body
+        (``kwargs.get("json")``) is passed to the classifier so a
+        chunk-carrying write_many page floors and a manifest-only page
+        does not (this client always passes the body; there is no
+        body-unavailable case). 502/503 on any route, and 504 on any non-embed-write
+        route, keep the unfloored schedule (and the unfloored
+        ``refreshable_http_store.gateway_retry`` event name).
         """
+        embed_write_path = _is_embed_server_side_write_path(path, kwargs.get("json"))
         for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
             try:
                 return self._request_once(method, path, **kwargs)
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code not in _GATEWAY_RETRY_CODES or delay is None:
                     raise
+                floored = exc.response.status_code == 504 and embed_write_path
+                sleep_s = max(delay, _EMBED_WRITE_504_BACKOFF_FLOOR_S) if floored else delay
                 _log.warning(
-                    "refreshable_http_store.gateway_retry",
+                    "vector_gateway_retry_embed_write_504" if floored
+                    else "refreshable_http_store.gateway_retry",
                     store=type(self).__name__,
                     method=method,
                     path=path,
                     code=exc.response.status_code,
                     attempt=i + 1,
-                    sleep_s=delay,
+                    sleep_s=sleep_s,
                 )
-                time.sleep(delay)
+                time.sleep(sleep_s)
         raise AssertionError("unreachable")  # loop always returns or raises
 
     def _request_once(self, method: str, path: str, **kwargs: Any) -> Any:

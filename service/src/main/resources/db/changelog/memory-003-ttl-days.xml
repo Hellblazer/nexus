@@ -113,6 +113,9 @@
             those rows were already effectively dead (MemoryRepository.expire()
             yields effective_ttl=0 for ttl=0, swept on the next run). NULL
             remains the sole permanent sentinel; 0 becomes unrepresentable.
+            DATA EFFECT: DELETEs every nexus.memory row with ttl = 0 (measured 0 rows
+            on the live store; RAISE NOTICE'd regardless); irreversible — the
+            rollback restores the schema (rename + drop CHECK), not the deleted rows.
         </comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.memory NO FORCE ROW LEVEL SECURITY;

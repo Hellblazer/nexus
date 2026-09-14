@@ -981,7 +981,7 @@ class TestSessionEndNeverClearsSharedScope:
         from nexus.db.t1 import get_t1_database
         from nexus.hooks import session_end_flush
 
-        monkeypatch.setattr(mcp_infra, "_service_t2_db", None)
+        mcp_infra._default_t2_slot.reset_for_tests()
 
         # Seed the shared scope (bare invocation) with a canary.
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
@@ -1019,7 +1019,7 @@ class TestSessionEndNeverClearsSharedScope:
         from nexus.db.t1 import get_t1_database
         from nexus.hooks import session_end_flush
 
-        monkeypatch.setattr(mcp_infra, "_service_t2_db", None)
+        mcp_infra._default_t2_slot.reset_for_tests()
 
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
@@ -1085,7 +1085,7 @@ class TestSessionEndFlushViaLease:
         # here. Reset the process-lifetime service-T2 singleton so THIS
         # test's T2Database binds to THIS test's fake endpoint (monkeypatch
         # restores the prior instance on teardown).
-        monkeypatch.setattr(mcp_infra, "_service_t2_db", None)
+        mcp_infra._default_t2_slot.reset_for_tests()
 
         live_session_id = "live-mcp-session-flush"
         live_token = _mint_live_session_token(fake_service, live_session_id)
@@ -1136,7 +1136,7 @@ class TestSessionEndFlushViaLease:
 
         # Same substrate note as above (nexus-i711w sub-stage A3): T2 leg is
         # HttpMemoryStore against the fake; reset the service-T2 singleton.
-        monkeypatch.setattr(mcp_infra, "_service_t2_db", None)
+        mcp_infra._default_t2_slot.reset_for_tests()
         monkeypatch.delenv("NX_T1_SESSION", raising=False)
         monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
         monkeypatch.delenv("NX_SESSION_ID", raising=False)

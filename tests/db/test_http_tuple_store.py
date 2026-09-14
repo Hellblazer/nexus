@@ -7,8 +7,8 @@ timeout-ordering arithmetic, the parked-502 gateway retry) that do not need
 a live tuple row and are cheaper and more deterministic as mock-transport /
 monkeypatch tests than as engine round trips.
 
-Two v1 templates are loaded at engine boot (``service/src/main/resources/
-tuples/templates/{ledger,mailbox}.yaml``):
+Three v1 templates are loaded at engine boot (``service/src/main/resources/
+tuples/templates/{directory,ledger,mailbox}.yaml``):
 
   - ``ledger/<session_id>``: keys ``[agent_id, kind]``, ``id_from=keys``,
     ``take.enabled=false`` (never claimable).
@@ -16,6 +16,10 @@ tuples/templates/{ledger,mailbox}.yaml``):
     correlation_id, address_kind}``, ``id_from=keys+nonce``,
     ``id_dims=[from]``, ``take.enabled=true``, ``max_attempts=3``,
     ``max_lease_seconds=900``, ``retention_seconds=604800``.
+  - ``directory/<name>`` (RDR-208 Phase 1 Step 1, bead nexus-galkv.1): keys
+    ``[name]``, dims ``{session_id (required)}``, ``id_from=keys+nonce``,
+    ``id_dims=[session_id]``, ``take.enabled=false``,
+    ``retention_seconds=604800``, ``max_body_bytes=0``.
 
 ``t2_service_env`` mints a FRESH tenant per test function and the engine's
 tenant tables carry forced RLS, so tests reusing the SAME literal subspace
@@ -293,12 +297,12 @@ class TestNack:
 
 
 class TestRegistry:
-    def test_registry_carries_both_v1_templates(self, t2_service_env) -> None:
+    def test_registry_carries_all_v1_templates(self, t2_service_env) -> None:
         store = HttpTupleStore()
         reg = store.registry()
         assert reg["digest"]
         names = {t["name"] for t in reg["templates"]}
-        assert {"ledger/<session_id>", "mailbox/<address>"} <= names
+        assert {"ledger/<session_id>", "mailbox/<address>", "directory/<name>"} <= names
 
 
 class TestSubspaceList:

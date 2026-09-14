@@ -27,7 +27,7 @@
         <preConditions onFail="MARK_RAN">
             <sqlCheck expectedResult="1">SELECT count(*) FROM information_schema.tables WHERE table_schema = 'staging' AND table_name = 'chash_index'</sqlCheck>
         </preConditions>
-        <comment>DROP staging.chash_index — the router's landing twin. The promote leg retired at nexus-piwya.7 made every landed row a dead sink; with the /v1/chash writes now 410 and the staging store spec removed, nothing can land here.</comment>
+        <comment>DROP staging.chash_index — the router's landing twin. The promote leg retired at nexus-piwya.7 made every landed row a dead sink; with the /v1/chash writes now 410 and the staging store spec removed, nothing can land here. DATA EFFECT: DROPs staging.chash_index, discarding any landed rows; irreversible (rollback is a documented no-op — the rows were already a dead sink with no promote leg).</comment>
         <sql>
 DROP TABLE staging.chash_index;
         </sql>

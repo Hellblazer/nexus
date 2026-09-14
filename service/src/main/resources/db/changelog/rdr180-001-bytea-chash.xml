@@ -105,7 +105,7 @@ ALTER TABLE nexus.chash_index DROP CONSTRAINT IF EXISTS chash_index_chash_len_ch
     </changeSet>
 
     <changeSet id="rdr180-3-convert-chunks-384" author="nexus-jxizy.2">
-        <comment>chunks_384.chash text -> bytea (hex decodes; non-hex carries as UTF-8 bytes). ALTER TYPE is DDL: rewrites all rows, RLS-exempt, PK rebuilt in place</comment>
+        <comment>chunks_384.chash text -> bytea (hex decodes; non-hex carries as UTF-8 bytes). ALTER TYPE is DDL: rewrites all rows, RLS-exempt, PK rebuilt in place. DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing chunks_384.chash value from TEXT to bytea; reversible via the rollback's faithful inverse USING expression (see the rollback comment's reversibility lemma).</comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.chunks_384
     ALTER COLUMN chash TYPE bytea
@@ -147,7 +147,7 @@ ALTER TABLE IF EXISTS nexus.chunks_384
     </changeSet>
 
     <changeSet id="rdr180-4-convert-chunks-768" author="nexus-jxizy.2">
-        <comment>chunks_768.chash text -> bytea</comment>
+        <comment>chunks_768.chash text -> bytea. DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing chunks_768.chash value from TEXT to bytea; reversible via the rollback's faithful inverse USING expression (rdr180-3's reversibility lemma).</comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.chunks_768
     ALTER COLUMN chash TYPE bytea
@@ -167,7 +167,7 @@ ALTER TABLE IF EXISTS nexus.chunks_768
     </changeSet>
 
     <changeSet id="rdr180-5-convert-chunks-1024" author="nexus-jxizy.2">
-        <comment>chunks_1024.chash text -> bytea</comment>
+        <comment>chunks_1024.chash text -> bytea. DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing chunks_1024.chash value from TEXT to bytea; reversible via the rollback's faithful inverse USING expression (rdr180-3's reversibility lemma).</comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.chunks_1024
     ALTER COLUMN chash TYPE bytea
@@ -187,7 +187,7 @@ ALTER TABLE IF EXISTS nexus.chunks_1024
     </changeSet>
 
     <changeSet id="rdr180-6-convert-manifest" author="nexus-jxizy.2">
-        <comment>catalog_document_chunks.chash text -> bytea</comment>
+        <comment>catalog_document_chunks.chash text -> bytea. DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing catalog_document_chunks.chash value from TEXT to bytea; reversible via the rollback's faithful inverse USING expression (rdr180-3's reversibility lemma).</comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.catalog_document_chunks
     ALTER COLUMN chash TYPE bytea
@@ -233,7 +233,7 @@ ALTER TABLE IF EXISTS nexus.catalog_document_chunks
     </changeSet>
 
     <changeSet id="rdr180-7-convert-chash-index" author="nexus-jxizy.2">
-        <comment>chash_index.chash text -> bytea</comment>
+        <comment>chash_index.chash text -> bytea. DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing chash_index.chash value from TEXT to bytea; reversible via the rollback's faithful inverse USING expression (rdr180-3's reversibility lemma).</comment>
         <sql splitStatements="false" stripComments="false">
 ALTER TABLE nexus.chash_index
     ALTER COLUMN chash TYPE bytea

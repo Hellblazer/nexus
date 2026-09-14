@@ -91,6 +91,10 @@ public final class VersionHandler implements HttpHandler {
             DSL.table(DSL.name("public", "databasechangelog"));
     private static final Field<String> DBCL_ID =
             DSL.field(DSL.name("id"), String.class);
+    private static final Field<String> DBCL_AUTHOR =
+            DSL.field(DSL.name("author"), String.class);
+    private static final Field<String> DBCL_FILENAME =
+            DSL.field(DSL.name("filename"), String.class);
     private static final Field<Integer> DBCL_ORDER_EXECUTED =
             DSL.field(DSL.name("orderexecuted"), Integer.class);
 
@@ -400,7 +404,17 @@ public final class VersionHandler implements HttpHandler {
                           .orderBy(DBCL_ORDER_EXECUTED.desc())
                           .limit(1)
                           .fetchOne(DBCL_ID);
-            count = dsl.fetchCount(DATABASECHANGELOG);
+            // nexus-jl08t sibling sweep (critic finding, T2 [25635] SIGNIFICANT
+            // (a)): public.databasechangelog carries no uniqueness constraint on
+            // (id, author, filename), and production carries duplicate physical
+            // rows for at least one identity (SchemaMigrator.MigrationOutcome's
+            // javadoc has the confirmed mechanism and the two known identities).
+            // A bare fetchCount(DATABASECHANGELOG) counts physical rows and
+            // over-reports schema_changeset_count by the duplicate count
+            // forever on this cluster; count DISTINCT identities instead, which
+            // is what "how many changesets are applied" actually means.
+            count = dsl.fetchCount(
+                dsl.selectDistinct(DBCL_ID, DBCL_AUTHOR, DBCL_FILENAME).from(DATABASECHANGELOG));
         } catch (Exception e) {
             log.warn("event=version_schema_read_failed error={}", e.getMessage());
             error = e.getMessage();

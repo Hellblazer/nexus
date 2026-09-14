@@ -42,6 +42,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from nexus.db.storage_mode import T2_FACADE_STORES
+
 
 def _instrument_t2_construction(monkeypatch) -> list[int]:
     """Wrap ``T2Database.__init__`` to COUNT constructions without faking
@@ -158,22 +160,48 @@ async def test_happy_path_constructs_at_most_one_t2_store(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_happy_path_opens_at_most_eight_connections(monkeypatch) -> None:
-    """ONE nx_answer call must open AT MOST EIGHT httpx.Client pools — the
-    eight Http*Store clients of a SINGLE T2Database. Pre-nexus-m20mf-P2
-    baseline: 40 (5 contexts x 8 stores each its own pool, discarded at
-    every context boundary — the pool-churn cost the design record's §1
-    'two costs neither measurement captured' names as the real argument,
-    distinct from the retracted 90%-of-a-mocked-harness figure)."""
+async def test_happy_path_opens_exactly_one_client_per_domain_store(monkeypatch) -> None:
+    """ONE nx_answer call must open exactly ``len(T2_FACADE_STORES)``
+    httpx.Client pools -- one per domain store on the SINGLE T2Database
+    the happy path resolves (see ``test_happy_path_constructs_at_most_
+    one_t2_store`` above).
+
+    This is NOT the ``client=``-shared-pool shape (RDR-m20mf P3's
+    ``build_shared_t2_client()`` + ``T2Database(..., client=shared)``,
+    which collapses a facade's construction to ONE httpx.Client for all
+    its stores -- see ``tests/db/test_t2_facade_shared_client_fanout.py``
+    and the CLI ``index``/``taxonomy``/``collection`` command fan-out
+    tests). Neither of nx_answer's two T2 access paths passes an
+    explicit shared client: ``t2_index_write``'s process-wide singleton
+    (``_service_t2_write_locked``) constructs its ``T2Database`` with no
+    ``client=`` kwarg, and a bare ``t2_ctx()`` outside an active ``nx
+    index repo`` run resolves ``current_index_run_t2_client()`` to
+    ``None`` and does the same -- so each of the facade's domain stores
+    still builds its own pool. MEASURED stable at
+    ``len(T2_FACADE_STORES)`` (9 at the time of writing) across repeated
+    runs against the real engine substrate; pinned exactly (``==``), not
+    as a ceiling, so a future ``client=`` wiring of nx_answer's T2 path
+    -- which WOULD collapse this to 1 -- is a deliberate, visible change
+    to this test, not a silent drop under a loose upper bound.
+
+    Pre-nexus-m20mf-P2 baseline: 40 (5 contexts x 8 stores each its own
+    pool, discarded at every context boundary -- the pool-churn cost the
+    design record's §1 'two costs neither measurement captured' names as
+    the real argument, distinct from the retracted 90%-of-a-mocked-
+    harness figure; 8, not today's 9, since ``tuples`` (HttpTupleStore,
+    RDR-205) postdates that baseline)."""
     constructed, _requests = _instrument_httpx_clients(monkeypatch)
+    expected = len(T2_FACADE_STORES)
 
     result = await _run_nx_answer_happy_path("what is projection quality?")
 
     assert "final answer" in result.lower()
-    assert len(constructed) <= 9, (
-        f"expected at most 9 httpx.Client constructions (one T2Database's "
-        f"worth of Http*Store pools) for one nx_answer call; got "
-        f"{len(constructed)} (pre-nexus-m20mf-P2 baseline: 40)"
+    assert len(constructed) == expected, (
+        f"expected exactly {expected} httpx.Client constructions (one "
+        f"T2Database's worth of Http*Store pools, one per domain store "
+        f"since nx_answer's T2 access passes no client=) for one "
+        f"nx_answer call; got {len(constructed)} (pre-nexus-m20mf-P2 "
+        f"baseline: 40)"
     )
 
 

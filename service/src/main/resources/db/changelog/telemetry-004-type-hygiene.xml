@@ -98,6 +98,9 @@
         <comment>
             hook_failures.is_batch INTEGER -> boolean; hook_failures.batch_doc_ids TEXT -> jsonb
             NULL (ONE ALTER TABLE, one rewrite).
+            DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing
+            hook_failures.is_batch / .batch_doc_ids value (INTEGER->boolean, TEXT->jsonb);
+            reversible via the rollback's inverse CASE / ::text casts.
         </comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.hook_failures

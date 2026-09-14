@@ -134,9 +134,10 @@ ORDER BY created_at;
 
 ## Templates change with an engine release, not with a data changeset
 
-The two v1 templates (`ledger/<session_id>`, `mailbox/<address>`) ship as
-YAML in engine resources (`service/src/main/resources/tuples/templates/`),
-loaded and validated at boot; a breach fails boot with the file and field
+The v1 templates (`ledger/<session_id>`, `mailbox/<address>`,
+`directory/<name>`) ship as YAML in engine resources
+(`service/src/main/resources/tuples/templates/`), loaded and validated at
+boot; a breach fails boot with the file and field
 named. Changing a template's shape is an engine-release event — the same
 cadence as any other engine change (see AGENTS.md § Engine-service
 release) — never a Liquibase data changeset. Removing a template that has

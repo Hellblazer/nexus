@@ -70,7 +70,7 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="catalog-017-0" author="nexus-23wlw">
-        <comment>catalog_documents.fts_vector: fold Latin-1 diacritics on every segment so 'Godel' finds 'Gödel' (the half catalog-015 left behind)</comment>
+        <comment>catalog_documents.fts_vector: fold Latin-1 diacritics on every segment so 'Godel' finds 'Gödel' (the half catalog-015 left behind). DATA EFFECT: DROPs and re-ADDs the GENERATED fts_vector column on catalog_documents (a table rewrite that recomputes the derived tsvector for every row — no independently-stored data lost); reversible via the rollback's inverse DROP+ADD using the prior expression.</comment>
         <sql splitStatements="true">
 DROP INDEX IF EXISTS nexus.idx_catalog_documents_fts;
 ALTER TABLE nexus.catalog_documents DROP COLUMN fts_vector;

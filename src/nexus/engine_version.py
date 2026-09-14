@@ -492,7 +492,24 @@ from __future__ import annotations
 #: reexecuted_changesets=25 on that walk because production carries 13
 #: historical duplicate changelog rows (nexus-jl08t, fixed after this tag).
 #: Local-mode installs get the size limits ONLY through this pin.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 118)
+#: ->(0,1,119) 2026-09-14: RDR-208 Phase 1 engine half (nexus-galkv.17), rides
+#: the R2 client release carrying RDR-208 Phase 2. Payload since v0.1.118:
+#: nexus-4a8pn, nexus-jl08t (schema_changeset_count now counts DISTINCT
+#: changeset identities rather than raw rows — the production-duplicate-row
+#: fix the v0.1.118 note above named as pending), nexus-f7dwp (the mechanized
+#: DATA EFFECT lint backfill — every existing data-effecting changeset now
+#: carries a checksum-neutral DATA EFFECT comment line, catalog-002-hygiene.xml
+#: included), nexus-y4dmz, nexus-ky9ps (vectors-017 collection-scoped
+#: tombstone filter). Both wire-ledger entries lead with [additive] (dd0a5f92b),
+#: so the deploy fired BEFORE this client tag (nexus-1emxn choreography (a)) —
+#: tagged b013eddc635e, LIVE 2026-09-14T17:44:03Z (digest
+#: sha256:faf3c24d9f39..., cosign+attest verified), STEP-6/PITR-fork-walk
+#: green. Five new changesets (taxonomy-017-1/-2, vectors-017-1/-2/-3); no
+#: data-effecting changesets in this delta. Local-mode installs get the
+#: schema_changeset_count fix and the collection-scoped tombstone filter
+#: ONLY through this pin. Ship record: T2
+#: nexus/engine-service-v0.1.119-ship-2026-09-14.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 119)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

@@ -203,6 +203,27 @@ class TestCheckTupleUnclaimedAgeBehavior:
         assert "ledger/sess1" not in r.detail
         assert rd_calls == []
 
+    def test_take_disabled_directory_subspace_with_day_old_rows_is_ok(self, monkeypatch) -> None:
+        """RDR-208 Phase 1 Step 1 (bead nexus-galkv.1): directory/<name> is
+        also take.enabled=false (a lease, re-sent by its holder, never
+        claimed) -- same doctrine as ledger/<session_id> above. A day-old
+        row must not trip the staleness finding, and rd() must never even
+        be called for this subspace."""
+        import datetime as _dt
+        old = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(days=1)).isoformat().replace("+00:00", "Z")
+        rd_calls: list[str] = []
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("directory/agent-a", available=1, oldest_created_at=old)],
+            rd_by_subspace={"directory/agent-a": [_FakeTupleRow("id1", old, None)]},
+            templates=[_fake_template("directory/<name>", take_enabled=False)],
+            rd_calls=rd_calls,
+        )
+        r = _run_unclaimed(monkeypatch, store)
+        assert r.ok is True
+        assert r.warn is not True
+        assert "directory/agent-a" not in r.detail
+        assert rd_calls == []
+
     def test_mailbox_subspace_with_hour_old_available_row_yields_existing_severity(self, monkeypatch) -> None:
         """The take-enabled path (mailbox/<address>) and the new census
         pre-filter must not change behavior for a row old enough to

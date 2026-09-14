@@ -165,6 +165,24 @@ class HybridSearchFunctionParityIntegrationTest {
 
     private static final String TOMB_TUMBLER = "hsp-tomb";
 
+    // ── Cross-collection tombstone leak, hybrid_search_768 itself (GH #1546,
+    // nexus-ky9ps). PgVectorRepository#hybridSearch dispatches to
+    // text_gated_search_hnsw_first/by_chash, never to nexus.hybrid_search_<dim>
+    // directly (see PgVectorRepository's own nexus-zrcj7 class-javadoc note) --
+    // PgVectorTombstoneFilterTest's hybrid tests exercise only the Java path, so
+    // nothing calls this standalone RRF-fusion function's OWN fix (vectors-017-2)
+    // until this test does. Own, isolated tenant/collections/embedder (768-dim,
+    // FakeEmbedder, not the shared 384-dim ONNX fixture the rest of this class
+    // uses) so this stays self-contained and does not disturb the shared corpus's
+    // exact-set assertions elsewhere in this file.
+    private static final String TENANT_CROSS = "hsparity-tenant-cross";
+    private static final String COL_CROSS_A = "knowledge__hscross-a__fake-768__v1";
+    private static final String COL_CROSS_B = "knowledge__hscross-b__fake-768__v1";
+    private static final String DOC_CROSS_DEAD = "hsp-cross-dead";
+    private static final String DOC_CROSS_LIVE = "hsp-cross-live";
+    private static final String CHASH_CROSS_768 = Chash.ofText("hsp-cross-chash-768").toHex();
+    private static final String CROSS_QUERY_TEXT = "cross collection hybrid search probe";
+
     // Engine-side defaults; conexus xr7.8.9-style callers override via -D system
     // properties. Namespace is NEW (nx.hybridparity.*) — nothing in-tree reads
     // nx.dualrun.* any more (that harness is deleted); mirrors nx.cqparity.* style.
@@ -216,6 +234,7 @@ class HybridSearchFunctionParityIntegrationTest {
     EmbedderRouter docRouter;
     EmbedderRouter queryRouter;
     PgVectorRepository pgRepo;
+    PgVectorRepository crossRepo;
 
     /** Main corpus: tumbler -> text (insertion-ordered, deterministic). */
     final Map<String, String> corpus = new LinkedHashMap<>();
@@ -253,6 +272,7 @@ class HybridSearchFunctionParityIntegrationTest {
         seedNarrowCollection();
         seedCalibrationCollection();
         seedCrossTenantProbe();
+        seedCrossCollectionHybridSearch768Fixture();
     }
 
     @AfterAll
@@ -378,6 +398,67 @@ class HybridSearchFunctionParityIntegrationTest {
         String chash = Chash.ofText("hsp-tenantb-1").toHex();
         pgRepo.upsertChunks(TENANT_B, COL_MAIN, List.of(chash),
             List.of(queries.get(0) + " tenant-b-only-row"), List.of(Map.of()));
+    }
+
+    /**
+     * GH #1546 / nexus-ky9ps: the SAME chash physically stored in two independent
+     * collections ({@code nexus.chunks} is keyed (tenant_id, collection, chash) --
+     * RDR-191), tombstone-referenced from a doc in {@code COL_CROSS_A}, but ALSO
+     * live-referenced from an unrelated doc in {@code COL_CROSS_B}. Before the
+     * collection-scoped fix (vectors-017-2), {@code hybrid_search_768}'s dead-set
+     * anti-join matched the manifest join on (tenant_id, chash) only, so B's live
+     * reference incorrectly protected A's row too. Own tenant/embedder (768-dim
+     * FakeEmbedder, deliberately NOT this class's shared 384-dim ONNX fixture) so
+     * this is fully self-contained.
+     */
+    private void seedCrossCollectionHybridSearch768Fixture() throws Exception {
+        try (Connection reg = pg.createConnection("")) {
+            reg.setAutoCommit(true);
+            DSLContext rctx = DSL.using(reg, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(rctx, TENANT_CROSS, COL_CROSS_A);
+            PgContainerHelper.insertCollection(rctx, TENANT_CROSS, COL_CROSS_B);
+        }
+
+        var fakeEmbedder = new PgVectorRepositoryContractTest.FakeEmbedder(768);
+        crossRepo = new PgVectorRepository(tenantScope, fakeEmbedder, fakeEmbedder);
+
+        // Same chash, physically stored in BOTH collections -- two independent rows.
+        crossRepo.upsertChunks(TENANT_CROSS, COL_CROSS_A, List.of(CHASH_CROSS_768),
+            List.of(CROSS_QUERY_TEXT + " in collection A"), List.of(Map.of()));
+        crossRepo.upsertChunks(TENANT_CROSS, COL_CROSS_B, List.of(CHASH_CROSS_768),
+            List.of(CROSS_QUERY_TEXT + " in collection B"), List.of(Map.of()));
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_CROSS)
+                .set(CATALOG_DOCUMENTS.TUMBLER, DOC_CROSS_DEAD)
+                .set(CATALOG_DOCUMENTS.TITLE, "Cross Dead")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COL_CROSS_A)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime())
+                .execute();
+            ctx.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_CROSS)
+                .set(CATALOG_DOCUMENTS.TUMBLER, DOC_CROSS_LIVE)
+                .set(CATALOG_DOCUMENTS.TITLE, "Cross Live")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COL_CROSS_B)
+                .execute();
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                    CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                .values(TENANT_CROSS, DOC_CROSS_DEAD, 0,
+                    HexFormat.of().parseHex(CHASH_CROSS_768), COL_CROSS_A)
+                .execute();
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                    CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                .values(TENANT_CROSS, DOC_CROSS_LIVE, 0,
+                    HexFormat.of().parseHex(CHASH_CROSS_768), COL_CROSS_B)
+                .execute();
+        }
     }
 
     // ── raw function-call plumbing (the function does not exist yet; every call
@@ -880,6 +961,34 @@ class HybridSearchFunctionParityIntegrationTest {
                 + "exact text+vector match for '%s' -- proves the live_chunks-equivalent "
                 + "deleted_at guard fires (RDR-156 Decision 6)", DIM, q)
             .doesNotContain(tombChash);
+    }
+
+    @Test
+    void hybridSearch768_crossCollectionSameChash_firstCollectionExcludesChunk() {
+        // GH #1546 / nexus-ky9ps: nexus.hybrid_search_768's OWN dead-set anti-join,
+        // called directly (bypassing PgVectorRepository#hybridSearch, which never
+        // invokes this function -- see the fixture's own javadoc). CHASH_CROSS_768's
+        // only manifest row in COL_CROSS_A points at the tombstoned DOC_CROSS_DEAD; the
+        // live reference protecting it lives in a DIFFERENT collection (COL_CROSS_B)
+        // and must no longer mask that under the collection-scoped fix.
+        float[] vec = PgVectorRepositoryContractTest.FakeEmbedder.unitVector(768, 1.0f, 0.0f);
+        List<Map<String, Object>> rows = tenantScope.withTenant(TENANT_CROSS, ctx -> {
+            PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
+            Table<?> fn = HYBRID_SEARCH_768.call(
+                Vector.of(vec), CROSS_QUERY_TEXT, new String[] {COL_CROSS_A}, null, 10);
+            Field<String> id = DSL.field(DSL.name("id"), String.class);
+            return ctx.select(id).from(fn).fetch().map(rec -> {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("id", rec.get(id));
+                return row;
+            });
+        });
+        assertThat(ids(rows))
+            .as("GH #1546 / nexus-ky9ps: nexus.hybrid_search_768 must exclude a chunk "
+                + "tombstoned in ITS OWN collection (COL_CROSS_A) even though an identical "
+                + "chash's manifest row is live-referenced in a DIFFERENT collection "
+                + "(COL_CROSS_B)")
+            .doesNotContain(CHASH_CROSS_768);
     }
 
     // ════════════════════════════════════════════════════════════════════════

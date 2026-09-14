@@ -4535,11 +4535,16 @@ class TestStepRecords:
         Two scenarios in one test (as requested): (1) two entries with
         DIFFERENT canonical models, one with cost_usd=None -- exercises
         the None-arithmetic path -- asserts tokens summed, cost_usd is
-        None (the rule above), model is None (ambiguous, same rule
-        DispatchUsage.model already applies within a single call).
-        (2) two entries sharing the SAME model, both fully populated --
-        asserts the model is KEPT (not needlessly nulled) and cost_usd
-        is a real sum, not divided or dropped.
+        None (the rule above), model is None (ambiguous across the two
+        entries -- this is ``_rollup_step_usage``'s OWN agreement rule
+        over a list of already-constructed ``DispatchUsage`` records, a
+        distinct axis from ``DispatchUsage.model``'s own internal
+        selection among a single dispatch's ``modelUsage`` entries, which
+        nexus-xepsr, 2026-09-14, changed to no longer collapse to None on
+        >1 entries -- see runner.py's docstrings for both). (2) two
+        entries sharing the SAME model, both fully populated -- asserts
+        the model is KEPT (not needlessly nulled) and cost_usd is a real
+        sum, not divided or dropped.
         """
         from nexus.operators.dispatch import DispatchUsage
         from nexus.plans.runner import _rollup_step_usage

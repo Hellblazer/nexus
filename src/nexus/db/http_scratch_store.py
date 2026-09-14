@@ -194,9 +194,9 @@ class HttpScratchStore:
         # mutate-rebuild sequence. Latent under the current single-event-loop
         # MCP dispatch (sync tool bodies never interleave), but the RDR-105
         # contract invites concurrent subagent fan-out through one store, and
-        # the sibling T2 singleton already carries the same guard
-        # (_service_t2_lock) for exactly this close()-under-a-live-caller
-        # class.
+        # the sibling T2 singleton already carries the same guard (its
+        # slot's resolution lock, ``mcp_infra._default_t2_slot``,
+        # nexus-w1ip) for exactly this close()-under-a-live-caller class.
         import threading  # noqa: PLC0415 — stdlib, deferred; ctor-only
 
         self._refresh_lock = threading.Lock()

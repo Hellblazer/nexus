@@ -652,6 +652,23 @@ def reindex_cmd(name: str, force: bool) -> None:
 
     before_count = info["count"]
 
+    # 1b. code__ collections have NO re-index driver in this verb — the
+    # branch below only echoes a suggestion to run `nx index repo`. While
+    # the delete hop was dead (NotImplementedError, nexus-sjb52) that was
+    # unreachable; with a WORKING delete it would silently destroy the
+    # collection (chunks + catalog + taxonomy + registry) and exit 0 with
+    # "0 sources processed" (nexus-caifp). Refuse BEFORE deleting anything,
+    # and before the sourceless scan below: that scan asks for --force
+    # first, so an operator paid a second run to reach this refusal
+    # (GH #1546, nexus-rndy5).
+    if split_candidate_collection_name(name)[0] == "code":
+        raise click.ClickException(
+            f"Refusing to reindex code collection '{name}': this verb has "
+            "no re-index driver for code — it would delete the collection "
+            "and rebuild nothing. Use `nx index repo <path>` instead, "
+            "which re-indexes in place."
+        )
+
     # 2. Pre-delete safety: paginate for sourceless entries (nexus-unyc).
     # nexus-7b5n: a chunk is "reindexable" when it carries either
     # ``source_path`` (legacy chunks predating the doc_id backfill) or
@@ -754,20 +771,6 @@ def reindex_cmd(name: str, force: bool) -> None:
             f"and {len(source_paths)} have source files. The {len(sourceless)} "
             f"sourceless entries cannot be re-indexed and will be LOST. "
             f"Use --force to proceed and accept that loss."
-        )
-
-    # 2b. code__ collections have NO re-index driver in this verb — the
-    # branch below only echoes a suggestion to run `nx index repo`. While
-    # the delete hop was dead (NotImplementedError, nexus-sjb52) that was
-    # unreachable; with a WORKING delete it would silently destroy the
-    # collection (chunks + catalog + taxonomy + registry) and exit 0 with
-    # "0 sources processed" (nexus-caifp). Refuse BEFORE deleting anything.
-    if split_candidate_collection_name(name)[0] == "code":
-        raise click.ClickException(
-            f"Refusing to reindex code collection '{name}': this verb has "
-            "no re-index driver for code — it would delete the collection "
-            "and rebuild nothing. Use `nx index repo <path>` instead, "
-            "which re-indexes in place."
         )
 
     # 3. Delete collection — via the canonical cascade, exactly like

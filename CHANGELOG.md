@@ -6,6 +6,159 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.46.0] - 2026-09-14
+
+Paired with engine-service-v0.1.119. Additive: the directory template and
+`address_kind: session` only widen what the engine accepts, so the engine was
+deployed before the client tag (the additive branch of nexus-1emxn;
+`docs/wire-contract-pending.md`).
+
+Engine fixes carried by engine-service-v0.1.119:
+- The tombstone filter shared by the search functions and `purge_trash`
+  matches manifest rows in the chunk's own collection. Before, a chunk
+  inherited liveness from an identical chunk under a live document in a
+  different collection (GH #1546, nexus-ky9ps). On the managed service, 180
+  chunk rows whose only manifest rows sat in other collections are
+  searchable again (a decided trade-off; the orphan rows are nexus-9la1f).
+- `doc_count` is written only by its triggers, and a recount that cannot see
+  its tenant fails loudly instead of writing zero (nexus-4a8pn).
+- The `schema_migration_complete` log line and `/version`'s
+  `schema_changeset_count` count changesets by identity, so duplicate
+  `databasechangelog` rows no longer inflate them (nexus-jl08t).
+
+### Fixed
+- **Process probes read the whole command line (`ps -ww`).** On Linux,
+  procps truncates a piped `ps -o command=` to `COLUMNS` when that variable
+  is set, which cut the tail off a long command line. The mailbox watcher's
+  liveness check (new in this release) then read a running `nx tuple watch`
+  as absent, and the orphan-tracker sweep, the install census snapshot and
+  the service registry's command probe could miss what they match on. Every
+  command-column `ps` call now asks for unlimited width.
+- **A 504 on a server-side-embedding write waits out the in-flight embed
+  before resending (nexus-r46u9).** During a slow Voyage window the edge
+  returns 504 at its 30 s bound while the engine keeps embedding; the
+  gateway retry re-sent the same batch after 2 s and 5 s, so each resend
+  was a second full embed and identical batches landed two or three times.
+  On a 504 for `/v1/vectors/upsert-chunks`, `/v1/vectors/store-put`, or a
+  chunk-carrying `/v1/catalog/manifest/write_many`, every retry sleep is now
+  floored so a batch taking up to twice the edge bound finishes before the
+  resend; 502/503 and other routes keep the 2/5/10 s schedule. The floored
+  wait logs `vector_gateway_retry_embed_write_504`.
+- **A store pinned to its own engine registers collections on that engine
+  (nexus-dvgsf).** The chash, aspect-queue, document-aspects, highlights and
+  taxonomy stores, and the catalog client's `write_manifest_many`,
+  registered a collection through the process-wide catalog writer, which
+  resolves the ambient endpoint. A store built against an explicit
+  `base_url` and bearer (a second engine, tenant tooling, the chash
+  integration harness) registered on one engine and wrote to another, and
+  the write failed with 422 "not registered". Registration now uses a writer
+  bound to the store's own endpoint, bearer and tenant, and the per-process
+  registration cache is keyed on all three. `HttpCatalogClient.close()` no
+  longer closes an injected HTTP client it does not own.
+- **`nx collection reindex` refuses a `code__` collection up front (GH #1546,
+  nexus-rndy5).** The refusal (this verb has no re-index driver for code;
+  use `nx index repo`) sat behind the sourceless-entry scan, which asks for
+  `--force` first, so an operator reached it only on a second run. It now
+  fires right after the existence check, before any chunk page is read.
+- **`nx_answer(scope=<owner name>)` resolves a name shared by a repo and a
+  curator owner to the repo (GH #1544, nexus-twtma).** The
+  `UNIQUE(name, owner_type)` constraint lets `1.48 repo canon-chat` and
+  `1.49 curator canon-chat` (the curator behind `knowledge__canon-chat`)
+  coexist, and `resolve_owner_scope` refused the name outright, so every
+  scoped surface (`nx_answer`, `query(subtree=)`, `nx search --repo`,
+  `catalog_resolve(owner=)`) failed for any repo with a same-named
+  knowledge collection. A shared name now resolves to the single repo
+  owner and logs `owner_scope_repo_preferred` naming the other owner; the
+  curator stays reachable by its tumbler; a shared name with no single
+  repo owner still raises the candidate-naming error.
+- **`nx_answer` plan choice no longer lets a $0 retrieval-only plan win the
+  confidence band (GH #1545, nexus-uhdkv).** `choose_within_band` took the
+  lowest predicted cost inside the band, and a query-only plan prices at
+  $0 by construction, so once one sat in the band it beat every plan that
+  reduces, and the run ended at step 1 with a chunk listing as
+  `final_text`. Cost-ranking now compares only in-band plans whose terminal
+  step is an answering operator (summarize, generate, compare, aggregate:
+  the complement of the shapes `answer_shape` calls non-answers); a
+  non-answering plan still wins as the top match when it is alone in the
+  band or every in-band plan is non-answering. `plan_choice` rows gain
+  `non_answering` when the exclusion applied.
+- **`claude -p` dispatch usage now records a canonical model id even when
+  the CLI reports two `modelUsage` entries (nexus-xepsr).** Every live
+  dispatch reports a second, near-zero-cost entry for a side call the CLI
+  makes itself (observed: `claude-haiku-4-5` alongside the answering
+  model), and `_parse_dispatch_usage` previously left `DispatchUsage.model`
+  `None` whenever `modelUsage` carried more than one entry -- a rule that
+  was never written into RDR-196's own text and had been mis-cited there
+  as "196-R3" (the RDR's actual `--strict-mcp-config` spike, unrelated to
+  this field; see the RDR's 2026-09-14 CORRECTION block). That made
+  `model` `None` for every real dispatch, which failed
+  `TestClaudeDispatchLiveUsage::test_live_dispatch_records_nonzero_cost`
+  and made the nexus-ek8tr model-family drift tripwire vacuous (an absent
+  canonical id trivially "matches" any requested model). Per Sam's
+  decision, `model` now records the entry with the highest `costUSD` (the
+  answering call, which normally carries the CLI's cached system prompt
+  and so outranks the cheap side call), tie-broken by the highest
+  `outputTokens`, then by the first key in `modelUsage`'s own order;
+  `model_usage` itself is unchanged, still carrying every entry. Fix-round
+  addition (code-review-expert CRITICAL): a `modelUsage` map that is
+  non-empty but whose every entry fails the dict-shape check previously
+  fell into the highest-cost-pick branch and raised `ValueError` on
+  `max()` over an empty dict, breaking `_parse_dispatch_usage`'s
+  documented never-raise-on-a-malformed-payload contract; the 0/1/2+
+  cases are now branched explicitly and `model` stays `None` for the
+  0-entry case with no raise.
+
+- **A session whose mailbox-watch arm instruction never arrived gets it again
+  (nexus-6konb.19, nexus-6konb.20).** The SessionStart arm instruction could
+  fail to reach a session: at a resume, `nx hook session-start` ran but its
+  output never reached the transcript, and nothing re-armed. After draining,
+  the UserPromptSubmit mailbox drain hook now checks whether a live
+  `nx tuple watch` process holds the session's own mailbox lock. From the
+  second prompt of a session on, when none does, it re-issues the arm
+  instruction from the new `nx hook mailbox-arm`: at most once every 10
+  minutes after a delivered instruction, once a minute after a failed
+  attempt. It relies on nothing SessionStart writes, since SessionStart
+  output is what can be lost. The instruction now says to take
+  the instance name from a `ListAgents` call made at arm time, because a
+  resume changes the name; a re-arm that reused the old name watched the
+  wrong mailbox. The re-arm reaches sessions with the next plugin release.
+
+### Added
+- **`directory/<name>` tuple template (RDR-208 Phase 1 Step 1, bead
+  nexus-galkv.1).** A new v1 engine template for session-directory entries:
+  keys `[name]`, required `session_id` dim, `id_from=keys+nonce` with
+  `session_id` in `id_dims` (so two sessions arming the same name with an
+  equal nonce never collapse onto one row), `take.enabled=false` (a lease,
+  never claimed), `retention_seconds=604800`, `max_body_bytes=0`. Three v1
+  templates now load at boot.
+- **`mailbox/<address>`'s `address_kind` dim gains `session` (RDR-208 Phase 1
+  Step 2, bead nexus-galkv.2).** Values are now `{agent, instance, session}`;
+  `instance` is retired after RDR-208 Phase 3. Additive for old clients,
+  which never send `session`; a new client sending it to an older engine
+  gets `SchemaViolation`, so the engine ships first.
+- **`mailbox_send` MCP tool: mail addressed by session id or by name
+  (RDR-208 Phase 2 Step 2, nexus-galkv.10).** `to` takes a session id, an
+  agent id, or a name. A name is looked up in the session directory at send
+  time: one live holder delivers to that session's mailbox; no holder, or
+  more than one, is refused with the failure named and nothing written. The
+  sender's `from` is the tuple-watch session marker, then
+  `NX_T1_SESSION_ID`; `from_address` overrides it. Auto-approved like the
+  other tuple tools.
+- **The mailbox watcher leases its name in `directory/<name>` (RDR-208
+  Phase 2 Step 1, nexus-galkv.9).** `nx tuple watch --instance NAME` writes a
+  directory entry with a 300 s TTL and re-sends it every 60 s, mints a fresh
+  nonce before the 7-day retention ceiling, and releases the entry within
+  about a second when it stops itself after a `/clear`. A plain exit leaves
+  the entry to lapse, so a `/resume` inside the TTL still resolves the name.
+- **`nx tuple directory NAME` (RDR-208 Phase 2 Step 4, nexus-galkv.11).**
+  Shows each live directory entry for NAME and whether it resolves to one
+  session or is held by several (the case `mailbox_send` refuses); `--json`
+  for scripts. It classifies through the same function as `mailbox_send`.
+- **`/clear` no longer strands mail (RDR-208 Phase 2 Step 3,
+  nexus-galkv.6).** SessionStart records the previous session id at a
+  `/clear`, and the UserPromptSubmit drain empties that session's mailbox
+  once, deleting the record only when every named mailbox is confirmed empty.
+
 ## [7.45.0] - 2026-09-14
 
 Paired with engine-service-v0.1.118. Not additive: the tuple size limits below

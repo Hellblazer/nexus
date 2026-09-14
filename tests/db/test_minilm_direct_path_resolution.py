@@ -28,6 +28,7 @@ def test_download_path_resolves_home_at_call_time(tmp_path: pathlib.Path, monkey
     new_home = tmp_path / "new-home"
     new_home.mkdir()
     monkeypatch.setattr(pathlib.Path, "home", lambda: new_home)
+    monkeypatch.delenv(minilm_direct.CACHE_DIR_ENV, raising=False)
 
     resolved = minilm_direct.download_path()
 
@@ -38,6 +39,7 @@ def test_artifact_dir_resolves_home_at_call_time(tmp_path: pathlib.Path, monkeyp
     new_home = tmp_path / "new-home"
     new_home.mkdir()
     monkeypatch.setattr(pathlib.Path, "home", lambda: new_home)
+    monkeypatch.delenv(minilm_direct.CACHE_DIR_ENV, raising=False)
 
     resolved = minilm_direct.artifact_dir()
 
@@ -52,3 +54,23 @@ def test_artifact_dir_is_onnx_subdir_of_download_path(monkeypatch) -> None:
     is always download_path()/"onnx", regardless of what home resolves
     to."""
     assert minilm_direct.artifact_dir() == minilm_direct.download_path() / "onnx"
+
+
+def test_the_cache_dir_override_wins_over_home(tmp_path: pathlib.Path, monkeypatch) -> None:
+    """A test that moves HOME must not move the model cache."""
+    monkeypatch.setenv(minilm_direct.CACHE_DIR_ENV, str(tmp_path / "cache"))
+    monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path / "elsewhere")
+    assert minilm_direct.download_path() == tmp_path / "cache" / minilm_direct.MODEL_NAME
+
+
+def test_the_suite_pins_the_cache_to_the_real_home() -> None:
+    """tests/conftest.py sets the override at session start, from the home
+    the suite had before its HOME fence."""
+    import os  # noqa: PLC0415 — deliberately local
+
+    from tests._fence_home import REAL_HOME_ENV  # noqa: PLC0415 — test-only helper
+
+    real_home = os.environ.get(REAL_HOME_ENV) or os.path.expanduser("~")
+    assert os.environ.get(minilm_direct.CACHE_DIR_ENV) == str(
+        pathlib.Path(real_home) / ".cache" / "chroma" / "onnx_models"
+    )

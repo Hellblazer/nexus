@@ -35,6 +35,8 @@ from enum import Enum
 __all__ = [
     "AnswerShape",
     "NON_ANSWER_SHAPES",
+    "ANSWERING_OPERATORS",
+    "is_answering_operator",
     "classify_answer_shape",
     "render_non_answer_notice",
 ]
@@ -90,6 +92,28 @@ NON_ANSWER_SHAPES: frozenset[AnswerShape] = frozenset({
     AnswerShape.LISTING,
     AnswerShape.EMPTY,
 })
+
+#: Operators whose bare terminal output IS an answer: prose composed from
+#: the evidence. The complement of the operators whose bare payload
+#: :data:`NON_ANSWER_SHAPES` names (``extract``, ``rank``, ``filter``,
+#: ``check``, ``verify``, ``groupby``: partitioned or judged, not
+#: answered). Plan choice (``cost_estimate._ends_in_answer``) uses this to
+#: decide whether a candidate plan can produce an answer at all (GH #1545;
+#: substantive-critic finding on b7ece5d26, 2026-09-14: a plan ending in
+#: ``rank`` was counted as reducing and could win the band, then classify
+#: as ``ranking_only`` downstream).
+ANSWERING_OPERATORS: frozenset[str] = frozenset({
+    "summarize", "generate", "compare", "aggregate",
+    "operator_summarize", "operator_generate", "operator_compare",
+    "operator_aggregate",
+})
+
+
+def is_answering_operator(tool: str) -> bool:
+    """True when *tool* (bare or ``operator_``-prefixed, MCP prefix already
+    stripped) is one whose bare output is an answer shape."""
+    return tool in ANSWERING_OPERATORS
+
 
 #: The ``query()`` plain-corpus renderer's line-1 header, verbatim
 #: (mirrors ``commands/answer_runs._QUERY_LISTING_REROUTE_HEADER_RE``).

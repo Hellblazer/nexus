@@ -1597,15 +1597,25 @@ class TestWaitForWakeOrTimeout:
         from nexus.aspect_worker import signal_aspect_wake
 
         w = self._worker()
+        baseline_mtime = w._last_wake_mtime
         timer = threading.Timer(0.05, signal_aspect_wake)
         timer.start()
         try:
-            started = time.monotonic()
             w._wait_for_wake_or_timeout(5.0)
-            elapsed = time.monotonic() - started
         finally:
             timer.cancel()
-        assert elapsed < 1.0  # woke early, nowhere near the 5s timeout
+        # nexus-scc9t: assert on the code's own decision, not a wall-clock
+        # elapsed bound (a loaded box can blow a 1.0s bound with no
+        # regression present). _last_wake_mtime is updated ONLY on the
+        # wake branch (nexus/aspect_worker.py's
+        # _wait_for_wake_or_timeout) -- the timeout and stop-event
+        # branches return without touching it -- so a changed value
+        # proves the wake fired and was observed, independent of how
+        # long that observation actually took in real time.
+        assert w._last_wake_mtime != baseline_mtime, (
+            "wait did not exit via the wake branch -- looks like it "
+            "waited out the full timeout instead of waking early"
+        )
 
     def test_touch_before_baseline_does_not_cause_spurious_wake(self) -> None:
         """A wake that landed BEFORE the baseline was captured (e.g. a stale
@@ -1620,19 +1630,38 @@ class TestWaitForWakeOrTimeout:
         w._wait_for_wake_or_timeout(0.1)
         assert time.monotonic() - started >= 0.1  # no spurious immediate wake
 
-    def test_stop_event_interrupts_wait_immediately(self) -> None:
+    def test_stop_event_interrupts_wait_immediately(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import threading
 
         w = self._worker()
+        poll_count = 0
+        orig_read = w._read_wake_mtime
+
+        def _counting_read() -> float | None:
+            nonlocal poll_count
+            poll_count += 1
+            return orig_read()
+
+        monkeypatch.setattr(w, "_read_wake_mtime", _counting_read)
+
         timer = threading.Timer(0.05, w._stop_event.set)
         timer.start()
         try:
-            started = time.monotonic()
             w._wait_for_wake_or_timeout(5.0)
-            elapsed = time.monotonic() - started
         finally:
             timer.cancel()
-        assert elapsed < 1.0
+        # nexus-scc9t: count loop iterations instead of measuring wall
+        # time. WAKE_CHECK_INTERVAL_S is 0.02s (the _fast_tick fixture);
+        # a full 5.0s timeout would poll _read_wake_mtime roughly 250
+        # times. Returning after a handful of ticks proves the stop
+        # event interrupted the wait promptly, regardless of how long
+        # each tick's real wall-clock delay actually was under scheduler
+        # contention -- a loaded box can inflate that delay without ever
+        # changing the tick COUNT.
+        assert poll_count < 20, (
+            f"{poll_count} wake-file polls before returning -- looks "
+            f"like the stop event did not interrupt the wait"
+        )
 
     def test_explicit_config_dir_is_the_wake_source(self, tmp_path: Path) -> None:
         """nexus-59611 stage 2 (review): a worker bound to an explicit
@@ -1654,15 +1683,20 @@ class TestWaitForWakeOrTimeout:
         assert time.monotonic() - started >= 0.1
 
         # Touch in the bound dir: wakes.
+        baseline_mtime = w._last_wake_mtime
         timer = threading.Timer(0.05, signal_aspect_wake, args=(cfg,))
         timer.start()
         try:
-            started = time.monotonic()
             w._wait_for_wake_or_timeout(5.0)
-            elapsed = time.monotonic() - started
         finally:
             timer.cancel()
-        assert elapsed < 1.0
+        # nexus-scc9t: see test_returns_early_on_new_touch_during_wait --
+        # the wake branch is the only one that updates _last_wake_mtime,
+        # so this proves the wake fired without measuring wall time.
+        assert w._last_wake_mtime != baseline_mtime, (
+            "wait did not exit via the wake branch -- looks like it "
+            "waited out the full timeout instead of waking early"
+        )
 
     def test_bind_config_dir_rebaselines(self, tmp_path: Path) -> None:
         """A touch that predates bind_config_dir() is the baseline, not a wake."""

@@ -18,7 +18,9 @@ and Java JAR; they are excluded from the default unit suite.
 from __future__ import annotations
 
 import contextlib
+import inspect
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -2956,16 +2958,50 @@ class TestStopDoesNotWaitOnAnAlreadyDeadSupervisor:
                 config_dir, supervisor_pid=proc.pid, engine_pid=None,
                 age_s=1.0, ttl=15.0,
             )
-            t0 = time.monotonic()
-            outcome = stop_storage_service(config_dir=config_dir)
-            elapsed = time.monotonic() - t0
+            with patch("time.sleep") as mock_sleep:
+                outcome = stop_storage_service(config_dir=config_dir)
         finally:
             with contextlib.suppress(ChildProcessError, OSError, subprocess.TimeoutExpired):
                 proc.wait(timeout=5)
 
-        assert elapsed < 2.0, (
-            "an already-dead (zombie) supervisor must not hold the graceful "
-            f"stop window open; took {elapsed:.2f}s of a 5s budget"
+        # nexus-scc9t: an already-dead (zombie) supervisor must not hold
+        # the graceful stop window open. stop_storage_service's
+        # lease-branch wait loop checks ``_pid_is_running`` (zombie-aware,
+        # same primitive terminate_pids uses) BEFORE sleeping, so it
+        # breaks out on the first iteration for a zombie pid without ever
+        # calling time.sleep(0.1) -- and the Phase-2/3 process-table
+        # sweep finds no match for this fixture's bare subprocess (no
+        # storage-service argv shape), so its own grace-wait loop is
+        # equally never entered. Asserted directly rather than via a
+        # wall-clock elapsed bound, which a loaded box can blow with no
+        # regression present.
+        #
+        # Filtered to calls above 0.05 s: process_state() shells out to ps,
+        # and CPython's Popen._wait reap loop sleeps with a backoff capped at
+        # 0.05 s while it waits for that child, which has nothing to do with
+        # the stop loop's own 0.1 s poll. The filter holds only while every
+        # stop_storage_service interval stays above the cap, so the source is
+        # checked too; an interval at or below it would hide a real poll.
+        ps_reap_sleep_cap_s = 0.05
+        intervals = [
+            float(v)
+            for v in re.findall(r"time\.sleep\(([0-9.]+)\)", inspect.getsource(stop_storage_service))
+        ]
+        assert intervals and min(intervals) > ps_reap_sleep_cap_s, (
+            f"stop_storage_service sleep intervals {intervals} must all exceed the "
+            f"{ps_reap_sleep_cap_s}s ps-reap cap this filter relies on"
+        )
+        real_polls = [
+            c for c in mock_sleep.call_args_list if c.args and c.args[0] > ps_reap_sleep_cap_s
+        ]
+        # At most one real poll, as in the rdr149 zombie test: pid_running()
+        # treats an UNKNOWN process_state() as running, and a ps snapshot can
+        # race the kernel's zombie-state settle under load, so a zombie can
+        # read as alive for exactly one tick. A loop that waited out the whole
+        # grace period would poll many times.
+        assert len(real_polls) <= 1, (
+            f"the stop loop kept polling a zombie supervisor: {real_polls} "
+            f"(all calls: {mock_sleep.call_args_list})"
         )
         assert outcome.stubborn == (), (
             f"a corpse is not a stubborn survivor: {outcome}"

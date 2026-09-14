@@ -293,16 +293,26 @@ class StepRecord:
     value space, OPPOSITE meaning at 0 and an off-by-one everywhere else —
     never join or compare these two columns by raw value.
 
-    ``model`` derivation rule (196-R3 / audit fold, binding): always taken
-    VERBATIM from the underlying ``DispatchUsage.model`` — which is
-    itself already "the single modelUsage entry's canonical id, or
+    ``model`` derivation rule, binding: always taken VERBATIM from the
+    underlying ``DispatchUsage.model``. Prior to nexus-xepsr (2026-09-14)
+    that field was itself "the single modelUsage entry's canonical id, or
     ``None`` when zero or ≥2 entries make a single value ambiguous" by
-    construction in ``dispatch._parse_dispatch_usage``. This field is
-    NEVER re-derived from ``model_usage`` keys here, NEVER defaulted to
-    a requested/alias model string, and NEVER coerced to ``""`` when
-    absent — ``None`` is the only "absent" spelling, matching RDR-196
-    risk #1 (a silently-zero/empty telemetry field reads as "this was
-    free", which is the exact measurement bug this arc exists to fix).
+    construction in ``dispatch._parse_dispatch_usage`` — cited here at the
+    time as "196-R3", a mislabeling corrected by nexus-xepsr (196-R3 is
+    RDR-196's ``--strict-mcp-config`` spike, unrelated to this field; the
+    rule itself was never written into RDR-196's own text at all, only
+    into this docstring and ``DispatchUsage.model``'s). Since nexus-xepsr,
+    ``DispatchUsage.model`` is "the single entry's canonical id when
+    ``modelUsage`` has exactly one, or the HIGHEST-costUSD entry's
+    canonical id when it has two or more (tie-broken by outputTokens,
+    then by ``modelUsage``'s own key order), or ``None`` only when
+    ``modelUsage`` is absent, empty, or wholly malformed" — see that
+    dataclass's own docstring for the full rule and its rationale. This
+    field is still NEVER re-derived from ``model_usage`` keys here, NEVER
+    defaulted to a requested/alias model string, and NEVER coerced to
+    ``""`` when absent — ``None`` is the only "absent" spelling, matching
+    RDR-196 risk #1 (a silently-zero/empty telemetry field reads as "this
+    was free", which is the exact measurement bug this arc exists to fix).
 
     ``source`` is one of three values, kept to the RDR's own sketch
     (no fourth value invented): ``"bundle"`` for a real fused
@@ -654,11 +664,32 @@ def _rollup_step_usage(entries: list) -> Any:
     silently drop or mis-divide a future one): the entries are SUMMED,
     never divided — unlike a fused bundle's ONE real dispatch, these are
     N SEPARATELY MEASURED real dispatches, so summing their real costs is
-    honest, not fabricated. ``model`` follows the same ambiguous-population
-    rule ``DispatchUsage.model`` already applies within a single call: the
-    shared canonical id if every entry agrees, else ``None``. Any field
-    that is ``None`` on ANY entry makes the summed field ``None`` too
-    (never silently treat "unknown" as "zero" mid-sum). The per-model
+    honest, not fabricated.
+
+    ``model`` here is THIS function's own agreement rule over the list of
+    per-dispatch ``DispatchUsage`` entries — the shared canonical id if
+    every entry's ``.model`` agrees, else ``None`` — which is a distinct
+    axis from ``DispatchUsage.model``'s own internal selection among a
+    SINGLE dispatch's ``modelUsage`` entries (see ``dispatch._parse_
+    dispatch_usage`` and ``DispatchUsage.model``'s docstring). Before
+    nexus-xepsr (2026-09-14), ``DispatchUsage.model`` was itself ``None``
+    whenever one dispatch's ``modelUsage`` carried more than one entry, so
+    the set-comprehension below (which filters out ``None`` before
+    checking agreement) was effectively absorbing both rules into one:
+    almost any multi-dispatch step's entries would each already be
+    ``None``, so "do they agree" rarely had two real values to compare.
+    Since nexus-xepsr, a single dispatch's ``.model`` is populated even
+    when its own ``modelUsage`` had several entries (the highest-cost one
+    wins), so this function's agreement check now runs against real,
+    non-``None`` values far more often — and can therefore now RESOLVE a
+    shared model across N separately-measured dispatches that previously
+    collapsed to ``None`` purely because each dispatch's own CLI side-call
+    entry made its individual ``.model`` ``None``. No change was needed to
+    the logic below for this: the set-based agreement check was already
+    correct — it only ever compares whatever ``.model`` values it is
+    handed, and those values are simply populated more often now. Any
+    field that is ``None`` on ANY entry makes the summed field ``None``
+    too (never silently treat "unknown" as "zero" mid-sum). The per-model
     breakdown across entries is NOT preserved at StepRecord granularity —
     the flat schema matches ``.p1c``'s ``nx_answer_steps`` sketch (no
     ``model_usage`` column); this is a deliberate, stated roll-up, not a

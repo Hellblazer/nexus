@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-4a8pn case (f) — a genuinely non-superuser, non-BYPASSRLS "admin" role
+    that OWNS nexus.topic_assignments, mirroring production's nexus_admin
+    migration identity (grants-nexus-svc.xml's own header: "nexus_admin
+    (non-superuser schema owner)"). Test containers never provision a literal
+    nexus_admin role — Liquibase runs the master changelog directly over the
+    container SUPERUSER connection (PgContainerHelper#applyProductSchema), so
+    every relation ends up owned by that superuser, not by any non-superuser
+    identity. taxonomy-010-source-collection-backfill.xml (:273, :327) and
+    taxonomy-012-doc-id-chunk-fk.xml (:199)'s remediation DML both toggle
+    ALTER TABLE ... NO FORCE ROW LEVEL SECURITY on topic_assignments/chunks
+    before their DELETEs — a DDL statement PostgreSQL restricts to the table
+    OWNER or a superuser (nexus_test.set_force_rls is SECURITY INVOKER
+    precisely so the CALLER's own ownership authorizes the ALTER TABLE, never
+    bypassing the check — see that function's own comment,
+    db.changelog-test-objects.xml). Reproducing that shape in a container
+    therefore needs a role that actually OWNS topic_assignments, not merely
+    one with DML grants (PgContainerHelper#bootstrapServiceRole's svcRole is
+    deliberately DML-only, never an owner — see that file's own header).
+
+    ONLY safe on a DEDICATED, non-shared container
+    (PgContainerHelper#startDedicated) — reassigning table ownership is
+    global schema state, exactly the class of mutation PgContainerHelper#
+    start's shared-cluster-reuse javadoc names as disqualifying (same
+    reasoning Taxonomy010BackfillDirectIntegrationTest's own header gives for
+    its SET NOT NULL / DROP VIEW mutations).
+
+    Parameterized by ${adminRole}/${adminPass}; runAlways="true" since a fixed
+    changeset id would only ever apply for the first role name a caller ever
+    passed (same reasoning as db.changelog-test-role.xml's own runAlways).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-admin-role-1-bootstrap" author="nexus-4a8pn" runAlways="true">
+        <comment>
+            Create ${adminRole} (NOSUPERUSER NOBYPASSRLS LOGIN) if absent, grant it
+            the same nexus+staging DML/sequence access bootstrapServiceRole gives
+            svcRole (it still needs to read/write ordinary rows through normal
+            grants), then transfer OWNERSHIP of nexus.topic_assignments to it --
+            the one authority a plain DML role cannot get, and the one
+            taxonomy-010/012's own ALTER TABLE ... NO FORCE ROW LEVEL SECURITY
+            step actually requires.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${adminRole}') THEN
+        CREATE ROLE ${adminRole} LOGIN PASSWORD '${adminPass}' NOSUPERUSER NOBYPASSRLS;
+    END IF;
+END
+$$;
+
+GRANT USAGE ON SCHEMA nexus TO ${adminRole};
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO ${adminRole};
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus TO ${adminRole};
+
+-- nexus-4a8pn case (f): the reproduction toggles FORCE RLS on
+-- topic_assignments via nexus_test.set_force_rls (PgContainerHelper's typed
+-- wrapper, see that method's own javadoc) -- a plain LOGIN role has no USAGE
+-- on nexus_test by default, same gap db.changelog-test-role.xml's own
+-- fts_matches grant closes for svcRole.
+GRANT USAGE ON SCHEMA nexus_test TO ${adminRole};
+GRANT EXECUTE ON FUNCTION nexus_test.set_force_rls(regclass, boolean) TO ${adminRole};
+
+ALTER TABLE nexus.topic_assignments OWNER TO ${adminRole};
+        </sql>
+        <rollback>
+            <!-- Test-only role/grant/ownership bootstrap; not automated, same as
+                 db.changelog-test-role.xml's own rollback stance. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

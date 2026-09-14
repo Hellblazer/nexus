@@ -87,13 +87,24 @@ def test_scripts_exist_and_are_executable() -> None:
 def test_start_wrapper_returns_immediately_with_no_endpoint_resolvable(tmp_path: Path) -> None:
     """No storage lease, no env: the projector itself will SKIP (nothing
     to POST to), but the WRAPPER must not wait around to find that out --
-    it backgrounds the work and returns."""
+    it backgrounds the work and returns.
+
+    nexus-scc9t: loose hang guard, not a precision timing check -- this
+    measures a REAL bash subprocess's exit latency, which cannot be
+    reduced to a code-level decision or an injected clock. This module's
+    own docstring measured a detached child at 18ms regardless of the
+    backend it points at; 5.0s is >270x that, guarding against the
+    trailing `&`/fd-redirection backgrounding breaking (an outright
+    block on the harness's own fds) while staying well clear of ordinary
+    -n auto scheduler + subprocess-spawn delay.
+    """
     proc, elapsed = _run_wrapper(START_ASYNC, tmp_path)
     assert proc.returncode == 0
     assert elapsed < 5.0, f"wrapper took {elapsed:.2f}s -- must return near-instantly"
 
 
 def test_stop_wrapper_returns_immediately(tmp_path: Path) -> None:
+    """nexus-scc9t: see test_start_wrapper_returns_immediately_with_no_endpoint_resolvable."""
     proc, elapsed = _run_wrapper(STOP_ASYNC, tmp_path)
     assert proc.returncode == 0
     assert elapsed < 5.0, f"wrapper took {elapsed:.2f}s -- must return near-instantly"
@@ -150,6 +161,9 @@ def test_wrapper_returns_immediately_even_against_an_unreachable_engine(tmp_path
     assert proc.returncode == 0
     # The wrapper itself must be fast; the POST attempt (bounded by
     # tuple_ledger_project.py's own timeout) runs detached in the background.
+    # nexus-scc9t: loose hang guard -- see
+    # test_start_wrapper_returns_immediately_with_no_endpoint_resolvable.
+    # 2.0s is still >100x this module's own 18ms-detached-child baseline.
     assert elapsed < 2.0, (
         f"wrapper took {elapsed:.2f}s against an unreachable engine -- "
         "the backgrounding must decouple this from the transport timeout"
@@ -187,6 +201,8 @@ def test_wrapper_returns_immediately_against_a_listening_but_never_accepting_eng
 
         proc, elapsed = _run_wrapper(START_ASYNC, tmp_path, base_url=base_url)
         assert proc.returncode == 0
+        # nexus-scc9t: loose hang guard -- see
+        # test_start_wrapper_returns_immediately_with_no_endpoint_resolvable.
         assert elapsed < 2.0, (
             f"wrapper took {elapsed:.2f}s against a listening-but-never-accepting "
             "engine -- the backgrounding must decouple this from the connect/read path"

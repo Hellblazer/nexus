@@ -9,13 +9,26 @@ from nexus.catalog.tumbler import Tumbler
 
 
 class _Cat:
-    def __init__(self, by_name: dict[str, list[str]]) -> None:
+    def __init__(
+        self,
+        by_name: dict[str, list[str]],
+        types: dict[str, str] | None = None,
+    ) -> None:
         self._by_name = by_name
+        self._types = types or {}
         self.asked: list[str] = []
+        self.shown: list[str] = []
 
     def owner_tumblers_by_name(self, name: str) -> list[Tumbler]:
         self.asked.append(name)
         return [Tumbler.parse(t) for t in self._by_name.get(name, [])]
+
+    def get_owner_by_prefix(self, tumbler_prefix: str) -> dict | None:
+        self.shown.append(tumbler_prefix)
+        owner_type = self._types.get(tumbler_prefix)
+        if owner_type is None:
+            return None
+        return {"tumbler_prefix": tumbler_prefix, "owner_type": owner_type}
 
 
 def test_dotted_tumbler_passes_through_without_a_lookup() -> None:
@@ -51,8 +64,35 @@ def test_lenient_mode_returns_an_unknown_name_unchanged() -> None:
 
 
 def test_ambiguous_name_lists_candidates() -> None:
-    cat = _Cat({"shared": ["1.3", "1.9"]})
+    cat = _Cat({"shared": ["1.3", "1.9"]}, {"1.3": "curator", "1.9": "person"})
     with pytest.raises(OwnerScopeError, match=r"ambiguous.*1\.3, 1\.9"):
+        resolve_owner_scope(cat, "shared")
+
+
+def test_shared_name_prefers_the_single_repo_owner() -> None:
+    # GH #1544: `1.48 repo canon-chat` and `1.49 curator canon-chat` (the
+    # curator behind knowledge__canon-chat) share the name; the caller's
+    # name is the repo's.
+    cat = _Cat({"canon-chat": ["1.48", "1.49"]}, {"1.48": "repo", "1.49": "curator"})
+    assert resolve_owner_scope(cat, "canon-chat") == "1.48"
+    assert sorted(cat.shown) == ["1.48", "1.49"]
+
+
+def test_shared_name_prefers_the_repo_owner_regardless_of_position() -> None:
+    cat = _Cat({"canon-chat": ["1.49", "1.48"]}, {"1.48": "repo", "1.49": "curator"})
+    assert resolve_owner_scope(cat, "canon-chat") == "1.48"
+
+
+def test_unique_name_never_consults_owner_type() -> None:
+    cat = _Cat({"solo": ["1.7"]}, {"1.7": "curator"})
+    assert resolve_owner_scope(cat, "solo") == "1.7"
+    assert cat.shown == []
+
+
+def test_shared_name_with_an_unshowable_owner_row_stays_ambiguous() -> None:
+    # A row the catalog cannot show is not a repo; nothing captures the name.
+    cat = _Cat({"shared": ["1.3", "1.9"]}, {"1.3": "curator"})
+    with pytest.raises(OwnerScopeError, match="ambiguous"):
         resolve_owner_scope(cat, "shared")
 
 

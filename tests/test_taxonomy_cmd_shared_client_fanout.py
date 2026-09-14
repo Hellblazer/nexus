@@ -11,7 +11,7 @@ builds ONE ``httpx.Client`` via ``build_shared_t2_client()`` per process
 invocation, stashes it on ``ctx.obj``, and ``_T2Database`` (the single
 factory backing every ``nx taxonomy`` subcommand) picks it up -- so a real
 ``nx taxonomy status`` run against the engine substrate constructs exactly
-1 ``httpx.Client``` for its ``T2Database``, not 8.
+1 ``httpx.Client``` for its ``T2Database``, not one per domain store.
 
 Runs against the self-provisioned engine TEST substrate (autouse
 ``_pin_t2_substrate``) -- never production, never a mocked transport.
@@ -27,6 +27,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.commands.taxonomy_cmd import taxonomy
+from nexus.db.storage_mode import T2_FACADE_STORES
 
 
 def _instrument_httpx_clients(monkeypatch: pytest.MonkeyPatch) -> list[int]:
@@ -48,26 +49,21 @@ def _instrument_t2database(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, in
     before this test ever gets to inspect it, and ``close()`` nulls
     ``self._taxonomy`` (see ``T2Database.close``'s lazy-taxonomy comment),
     so anything read post-hoc from a stale reference is unreliable. A
-    same-tick snapshot at construction time has no such problem."""
+    same-tick snapshot at construction time has no such problem.
+
+    Store names come from ``nexus.db.storage_mode.T2_FACADE_STORES``, not
+    hand-typed here -- a hand-typed list is exactly how ``tuples``
+    (HttpTupleStore, RDR-205) went missing from this fan-out check for as
+    long as it did."""
     from nexus.db.t2 import T2Database
 
+    store_names = T2_FACADE_STORES
     snapshots: list[dict[str, int]] = []
     orig_init = T2Database.__init__
 
     def _capturing_init(self: Any, *args: Any, **kwargs: Any) -> None:
         orig_init(self, *args, **kwargs)
-        snapshots.append(
-            {
-                "memory": id(self.memory._client),
-                "plans": id(self.plans._client),
-                "taxonomy": id(self.taxonomy._client),
-                "telemetry": id(self.telemetry._client),
-                "chash_index": id(self.chash_index._client),
-                "document_aspects": id(self.document_aspects._client),
-                "aspect_queue": id(self.aspect_queue._client),
-                "document_highlights": id(self.document_highlights._client),
-            }
-        )
+        snapshots.append({name: id(getattr(self, name)._client) for name in store_names})
 
     monkeypatch.setattr(T2Database, "__init__", _capturing_init)
     return snapshots
@@ -78,10 +74,10 @@ def test_real_taxonomy_status_command_shares_one_httpx_client(
 ) -> None:
     """A real ``nx taxonomy status`` invocation (via the actual ``taxonomy``
     Click group, not a bare function call) against the engine substrate:
-    BEFORE this wiring, one ``_T2Database(...)`` call built 8 independent
-    ``httpx.Client``s; AFTER, the group's one shared client backs all 8
-    domain stores. Table: T2Database constructions -> 1, httpx.Client
-    constructions -> 1 (not 8)."""
+    BEFORE this wiring, one ``_T2Database(...)`` call built one
+    independent ``httpx.Client`` per domain store; AFTER, the group's one
+    shared client backs all of them. Table: T2Database constructions ->
+    1, httpx.Client constructions -> 1 (not one-per-domain-store)."""
     db_path = tmp_path / "memory.db"
     client_tally = _instrument_httpx_clients(monkeypatch)
     t2_instances = _instrument_t2database(monkeypatch)
@@ -96,18 +92,20 @@ def test_real_taxonomy_status_command_shares_one_httpx_client(
         f"expected exactly 1 T2Database construction for `nx taxonomy "
         f"status`; got {len(t2_instances)}"
     )
+    store_count = len(t2_instances[0])
     assert len(client_tally) == 1, (
-        f"BEFORE this wiring this would have been 8 (one httpx.Client per "
-        f"domain store); AFTER, the taxonomy group's one shared client "
-        f"must back the whole facade. Got {len(client_tally)} httpx.Client "
-        f"construction(s) for one `nx taxonomy status` run."
+        f"BEFORE this wiring this would have been {store_count} (one "
+        f"httpx.Client per domain store); AFTER, the taxonomy group's one "
+        f"shared client must back the whole facade. Got "
+        f"{len(client_tally)} httpx.Client construction(s) for one `nx "
+        f"taxonomy status` run."
     )
 
     stores_clients = set(t2_instances[0].values())
     assert len(stores_clients) == 1, (
-        f"expected all 8 domain stores to share the identical shared "
-        f"client; found {len(stores_clients)} distinct client objects: "
-        f"{t2_instances[0]}"
+        f"expected all {store_count} domain stores to share the identical "
+        f"shared client; found {len(stores_clients)} distinct client "
+        f"objects: {t2_instances[0]}"
     )
 
 
@@ -116,19 +114,21 @@ def test_default_taxonomy_construction_outside_a_command_is_unchanged(
 ) -> None:
     """Calling ``_T2Database`` OUTSIDE a live ``taxonomy`` Click context
     (e.g. a helper imported and called directly, or any caller that isn't
-    a CLI invocation) must still build 8 independent httpx.Client()s --
-    the additive contract: nothing changes for callers this fix does not
-    touch."""
+    a CLI invocation) must still build one independent httpx.Client() per
+    domain store (``len(T2_FACADE_STORES)``) -- the additive contract:
+    nothing changes for callers this fix does not touch."""
     from nexus.commands.taxonomy_cmd import _T2Database
 
     client_tally = _instrument_httpx_clients(monkeypatch)
+    expected = len(T2_FACADE_STORES)
 
     db = _T2Database(tmp_path / "memory.db")
     try:
-        assert len(client_tally) == 9, (
+        assert len(client_tally) == expected, (
             f"expected _T2Database() called with no active Click context "
-            f"to build 9 independent httpx.Client()s (default, unwired "
-            f"behavior); got {len(client_tally)}"
+            f"to build {expected} independent httpx.Client()s, one per "
+            f"domain store (default, unwired behavior); got "
+            f"{len(client_tally)}"
         )
     finally:
         db.close()

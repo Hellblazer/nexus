@@ -97,8 +97,10 @@ class TestPersistAssignmentsBatchSelfHeals:
     @pytest.fixture(autouse=True)
     def _clear_registration_cache(self):
         corpus._REGISTERED_COLLECTIONS.clear()
+        corpus._REGISTERED_COLLECTIONS_SCOPED.clear()
         yield
         corpus._REGISTERED_COLLECTIONS.clear()
+        corpus._REGISTERED_COLLECTIONS_SCOPED.clear()
 
     @pytest.fixture(autouse=True)
     def _pin_write_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,6 +110,17 @@ class TestPersistAssignmentsBatchSelfHeals:
         )
 
     def _fake_writer(self, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+        """Patch the ambient default writer and return it.
+
+        ``persist_assignments``'s single-source-collection branch now
+        passes ``registrar=self._catalog_registrar`` (nexus-w1ip
+        follow-up) — but ``HttpTaxonomyStore.__new__(...)`` (this
+        class's pattern throughout) has no ``_base_url`` of its own,
+        and ``_EndpointRegistrar`` degrades gracefully to the ambient
+        default writer for exactly that case (see its own docstring in
+        ``_refreshable_client.py``), so patching ``make_catalog_writer``
+        alone is still sufficient.
+        """
         writer = MagicMock()
         writer.register_collection.return_value = None
         monkeypatch.setattr(

@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from nexus.config import backfill_install_mode_record, is_local_mode
 from nexus.stranded_install import legacy_chroma_dir
@@ -135,15 +136,9 @@ class TestIsLocalMode:
         recorded mode plus a legacy chroma key resolves silently."""
         self._record(tmp_path, monkeypatch, "local", pg_creds=True)
         monkeypatch.setenv("CHROMA_API_KEY", "k")
-        events: list[str] = []
-
-        class _Cap:
-            def warning(self, event, **kw):
-                events.append(event)
-
-        monkeypatch.setattr("structlog.get_logger", lambda *a, **k: _Cap())
-        assert is_local_mode() is True
-        assert events == []
+        with capture_logs() as logs:
+            assert is_local_mode() is True
+        assert [e["event"] for e in logs if e["log_level"] == "warning"] == []
 
     def test_stale_local_record_with_service_url_warns_and_service_url_wins(
         self, tmp_path, monkeypatch,
@@ -154,15 +149,11 @@ class TestIsLocalMode:
         self._record(tmp_path, monkeypatch, "local", pg_creds=False)
         monkeypatch.setenv("NX_SERVICE_URL", "https://m.example")
         monkeypatch.setattr(config_mod, "_mode_record_contradiction_warned", False)
-        events: list[str] = []
-
-        class _Cap:
-            def warning(self, event, **kw):
-                events.append(event)
-
-        monkeypatch.setattr("structlog.get_logger", lambda *a, **k: _Cap())
-        assert is_local_mode() is False
-        assert events == ["mode_record_contradicts_service_url"]
+        with capture_logs() as logs:
+            assert is_local_mode() is False
+        assert [e["event"] for e in logs if e["log_level"] == "warning"] == [
+            "mode_record_contradicts_service_url",
+        ]
 
     def test_nx_local_env_beats_the_record(self, tmp_path, monkeypatch):
         self._record(tmp_path, monkeypatch, "managed", pg_creds=False)

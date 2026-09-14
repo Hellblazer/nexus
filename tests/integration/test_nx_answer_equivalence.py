@@ -279,9 +279,28 @@ class TestGracefulDegradation:
 class TestLatencyMeasurement:
     """SC-2: Record nx_answer latency. Not gated — measurement only."""
 
-    def test_plan_match_latency_under_5s(self):
-        """Plan-match alone (no plan_run) should be fast on warm T1 cache."""
+    def test_plan_match_latency_is_recorded_with_a_hang_backstop(self):
+        """Plan-match alone (no plan_run) should be fast on warm T1 cache.
+
+        nexus-scc9t round 2: renamed from ``test_plan_match_latency_
+        under_5s`` -- that name and the message both claimed a 5s
+        contract this class's own docstring disclaims ("Not gated --
+        measurement only"). The old ``elapsed < 5.0`` hard assertion
+        contradicted that docstring outright -- a real network/DB-backed
+        call, and a loaded box (this test is explicitly opt-in via
+        -m integration, but the release battery and local-service gate
+        can still run it under real contention) could blow a 5s bound
+        with no regression present. Loosened to a genuine hang backstop
+        consistent with the class's stated "measurement only" contract:
+        60s is >>10x any plausible warm-cache plan-match duration, so it
+        will not fire under ordinary load while still catching an
+        outright hang. Name and message now say exactly that, not "<5s".
+        """
         start = time.monotonic()
         _get_plan_match_for_intent("how does the retrieval layer work end-to-end")
         elapsed = time.monotonic() - start
-        assert elapsed < 5.0, f"Plan match took {elapsed:.1f}s (expected <5s)"
+        assert elapsed < 60.0, (
+            f"Plan match took {elapsed:.1f}s -- past the 60s hang backstop "
+            f"(typically well under 5s under normal load; this is not a "
+            f"performance assertion, see class docstring)"
+        )

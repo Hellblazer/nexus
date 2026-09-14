@@ -851,6 +851,41 @@ class TestCheckMigrationState:
         assert r.fatal is False
         assert "RERAN" in r.detail
 
+    def test_reran_count_query_counts_distinct_identities_not_rows(self, tmp_path):
+        """nexus-jl08t sibling sweep (critic finding, T2 [25635] SIGNIFICANT
+        (a)): public.databasechangelog carries no uniqueness constraint on
+        (id, author, filename), and production carries duplicate physical
+        rows for at least one RERAN identity (SchemaMigrator.MigrationOutcome's
+        javadoc). A bare COUNT(*) over the RERAN/other filter over-reports by
+        the duplicate row count; the drift query must count DISTINCT
+        (id, author, filename) instead so the informational RERAN number
+        matches what Liquibase itself believes it re-ran."""
+        creds = _make_creds_file(tmp_path)
+        psql = Path("/fake/psql")
+
+        captured_sql: list[str] = []
+
+        def runner(cmd, *, capture_output, text, check):
+            sql = " ".join(cmd)
+            if "FILTER (WHERE exectype='FAILED')" in sql:
+                captured_sql.append(sql)
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0|2\n", stderr="")
+            if "md5sum IS NULL" in sql:
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0\n", stderr="")
+            if "length(chash)<>32" in sql:
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="5\n", stderr="")
+
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=psql,
+            psql_runner=runner,
+            diag_runner=_diag_runner_counts(0),
+        )
+        assert len(captured_sql) == 1
+        assert "COUNT(DISTINCT (id, author, filename))" in captured_sql[0]
+        assert results[0].ok is True
+
     def test_missing_table_returns_fatal(self, tmp_path):
         """databasechangelog table missing -> fatal."""
         creds = _make_creds_file(tmp_path)

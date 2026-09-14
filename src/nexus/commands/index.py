@@ -1896,7 +1896,8 @@ def _project_cross_collections(
 ) -> int:
     """Project each collection against the others and persist the assignments.
 
-    Returns the total number of cross-collection assignments persisted.
+    Returns ``(assignments persisted, collections with an incomplete source
+    fetch, non-finite source chunks excluded)``.
 
     nexus-g25dk: ``_persist_assignments`` requires ``source_collection`` as a
     3rd positional. The previous inline call omitted it, raising a TypeError
@@ -1909,6 +1910,7 @@ def _project_cross_collections(
 
     total = 0
     incomplete = 0
+    nonfinite = 0
     for col_name in collections:
         others = [c for c in collections if c != col_name]
         if not others:
@@ -1922,11 +1924,14 @@ def _project_cross_collections(
         # dropped it — count it so the caller can tell the operator.
         if result.get("incomplete_fetch"):
             incomplete += 1
+        # nexus-2fa0w: NaN/inf source chunks were excluded (and logged by
+        # the store); counted here so the pass can say so.
+        nonfinite += len(result.get("nonfinite_chunks", []))
         assignments = result.get("chunk_assignments", [])
         if assignments:
             _persist_assignments(assignments, col_name, quiet=True)
             total += len(assignments)
-    return total, incomplete
+    return total, incomplete, nonfinite
 
 
 def _run_projection_pass(
@@ -1949,7 +1954,7 @@ def _run_projection_pass(
 
     try:
         _proj_t0 = time.monotonic()
-        proj_total, proj_incomplete = _project_cross_collections(
+        proj_total, proj_incomplete, proj_nonfinite = _project_cross_collections(
             taxonomy, collections, chroma_client,
         )
         if proj_total:
@@ -1967,6 +1972,12 @@ def _run_projection_pass(
             _log.warning(
                 "taxonomy_projection_incomplete_fetch",
                 collections=proj_incomplete,
+            )
+        if proj_nonfinite:
+            # nexus-2fa0w: the store logged the ids; the pass says the count.
+            say(
+                f"  Project:  WARNING — {proj_nonfinite} chunk(s) with a "
+                f"non-finite embedding excluded from projection"
             )
     except VectorServiceError as exc:
         # nexus-ou4tb: a degraded vector service must not read as

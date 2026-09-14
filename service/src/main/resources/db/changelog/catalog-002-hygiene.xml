@@ -31,6 +31,9 @@
             NULLIF(value,'')::timestamptz maps empty-string sentinel to NULL, and any valid
             ISO-8601 timestamp string is parsed directly.  Safe now because production
             catalog_collections is empty or stub-only (all rows have created_at = '' default).
+            DATA EFFECT: ALTER COLUMN ... TYPE ... USING rewrites every existing
+            catalog_collections.created_at / superseded_at value from TEXT to timestamptz;
+            reversible via the rollback's inverse USING cast back to TEXT.
         </comment>
         <sql splitStatements="true" stripComments="false">
 -- created_at: drop DEFAULT and NOT NULL, convert type
