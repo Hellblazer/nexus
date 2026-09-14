@@ -202,12 +202,33 @@ class _MockEngine:
                         r for r in engine.rows
                         if pattern is None or r["keys"].get("to") == pattern
                     ]
+                    # Sorted + paginated (nexus-galkv.6 fix 1 harness): the
+                    # real engine orders `rd` by (created_at, id) ascending and
+                    # caps a page at the requested `n`. The mock used to
+                    # ignore both and return every matching row in one shot,
+                    # which made a >_PROBE_N-row backlog undetectable by any
+                    # test -- exactly the shape the confirming-probe
+                    # pagination bug needed to hide behind.
+                    rows = sorted(
+                        rows, key=lambda r: (str(r.get("created_at") or ""), str(r.get("id") or "")),
+                    )
+                    since = body.get("since")
+                    if since:
+                        since_key = (str(since.get("created_at") or ""), str(since.get("id") or ""))
+                        rows = [
+                            r for r in rows
+                            if (str(r.get("created_at") or ""), str(r.get("id") or "")) > since_key
+                        ]
+                    n = body.get("n")
+                    if isinstance(n, int) and n > 0:
+                        rows = rows[:n]
                     self._json(200, {"tuples": rows})
                 elif self.path == "/v1/tuples/in":
                     if not engine.claimable:
                         self._json(200, {})
                         return
                     pattern = (body.get("keys_pattern") or {}).get("to")
+                    claimant_in = body.get("claimant")
                     now = time.time()
                     # Lease semantics (nexus-galkv.6 harness fix): a row already
                     # claimed with a live lease is NOT eligible -- otherwise two
@@ -220,6 +241,31 @@ class _MockEngine:
                     # racing here otherwise both read "eligible" before either
                     # mutates, and both claim the same row.
                     with engine._claim_lock:
+                        # Same-claimant idempotent retake (RDR-205 Technical
+                        # Design "Claim"; TupleRepository.claimOnce,
+                        # service/src/main/java/dev/nexus/service/db/
+                        # TupleRepository.java:694-706): a caller presenting
+                        # the SAME claimant as an already-claimed, still-live,
+                        # unconsumed row gets that SAME claim back, no new
+                        # state change. Modeled here (nexus-galkv.6 fix 2) so
+                        # a claimant COLLISION across two concurrent drain
+                        # processes -- the exact hazard fix 2's per-invocation
+                        # unique claimant closes -- is reproducible by a test,
+                        # rather than the mock's own conservative "a claimed
+                        # row is never eligible" rule above hiding it by
+                        # refusing every re-claim outright, real engine
+                        # retake or not.
+                        retake = [
+                            r for r in engine.rows
+                            if r["claim_state"] == "claimed"
+                            and r.get("claimant") == claimant_in
+                            and (r.get("lease_until") or 0) > now
+                            and (pattern is None or r["keys"].get("to") == pattern)
+                        ]
+                        if retake:
+                            row = retake[0]
+                            self._json(200, {"tuple": dict(row), "claim_id": "claim-" + row["id"]})
+                            return
                         eligible = [
                             r for r in engine.rows
                             if r["claim_state"] != "dead"
@@ -232,18 +278,23 @@ class _MockEngine:
                             return
                         row = eligible[0]
                         row["claim_state"] = "claimed"
-                        row["claimant"] = body.get("claimant")
+                        row["claimant"] = claimant_in
                         row["lease_until"] = now + float(body.get("lease_s") or 30)
                         claimed = dict(row)
                     self._json(200, {"tuple": claimed, "claim_id": "claim-" + claimed["id"]})
                 elif self.path == "/v1/tuples/ack":
                     if not engine.ack_ok:
-                        # ClaimNotFound means the CLAIM itself is invalid --
-                        # already expired or never valid -- not "still held by
-                        # someone else"; the docstring above this test file's
-                        # own _drain_address call site says the row "returns
-                        # to the mailbox" on this outcome. So the claim this
-                        # forced 404 refuses is released here too, or a lease
+                        # This forced refusal is a SIMPLIFICATION of the
+                        # engine's real ClaimNotFoundException path -- the
+                        # mock does not model every state a real
+                        # ClaimNotFound can mean, only the one this test
+                        # suite exercises: the claim is invalid (already
+                        # expired or never valid), not "still held by
+                        # someone else". Per that reading, and per this test
+                        # file's own _drain_address call site docstring
+                        # ("the lease lapses and the row returns to the
+                        # mailbox"), the claim this forced 404 refuses is
+                        # released here too -- otherwise a lease
                         # semantics-aware `in` (nexus-galkv.6) would keep the
                         # row unreclaimable for its full 30s and a same-prompt
                         # or next-prompt re-claim test would starve on a lease
@@ -1106,6 +1157,64 @@ class TestClearedRecordDrain:
         assert record.exists()
         assert "/v1/tuples/in" in eng.paths()
 
+    def test_a_leased_row_past_the_first_page_still_keeps_the_record(
+        self, tmp_path, engine,
+    ) -> None:
+        """RDR-208 Phase 2 Step 3 fix 1 (gate audit round 2). Twenty
+        dead-lettered rows fill the confirming probe's first page; a
+        twenty-first row -- claimed, under another process's live lease --
+        sorts strictly after them and only shows up on a SECOND page. A
+        one-page confirming check would miss it entirely and delete the
+        record early.
+        """
+        eng = engine()
+        dead_rows = [
+            _row(f"d{i:02d}", body="dead filler", claim_state="dead", to="old-sess-id")
+            for i in range(20)
+        ]
+        for row in dead_rows:
+            row["created_at"] = "2026-09-12T00:00:00Z"
+        leased = _row("leased-row", body="held by a peer, past the first page", to="old-sess-id")
+        leased["created_at"] = "2026-09-12T00:00:01Z"  # one second later: page 2
+        leased["claim_state"] = "claimed"
+        leased["claimant"] = "some-other-process"
+        leased["lease_until"] = time.time() + 300.0
+        eng.rows = [*dead_rows, leased]
+        _wired(tmp_path, eng)
+        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0, res.stderr
+        assert "held by a peer, past the first page" not in res.stdout
+        assert record.exists(), (
+            "a live row on the confirming probe's SECOND page was missed; "
+            "the record was deleted while a live claim was still unconfirmed"
+        )
+
+    def test_twenty_dead_rows_with_nothing_live_past_them_deletes_the_record(
+        self, tmp_path, engine,
+    ) -> None:
+        """The same shape as the test above, MINUS the leased row: a full
+        first page of dead-lettered rows and a genuinely empty second page
+        must still delete the record -- pagination must not make an
+        actually-empty mailbox unconfirmable."""
+        eng = engine()
+        dead_rows = [
+            _row(f"d{i:02d}", body="dead filler", claim_state="dead", to="old-sess-id")
+            for i in range(20)
+        ]
+        for row in dead_rows:
+            row["created_at"] = "2026-09-12T00:00:00Z"
+        eng.rows = dead_rows
+        _wired(tmp_path, eng)
+        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
+
+        res = _run(tmp_path=tmp_path)
+
+        assert res.returncode == 0, res.stderr
+        assert not record.exists()
+
     def test_a_nonempty_pending_file_keeps_the_record(self, tmp_path, engine) -> None:
         """A pending entry whose id is STILL PRESENT in the mailbox (here, a
         dead-lettered row of the same id) is kept by ``_recover_pending``
@@ -1210,6 +1319,41 @@ class TestClearedRecordDrain:
         assert "expired mailbox" not in res.stdout
         assert not record.exists()
 
+    def test_a_held_pending_lock_makes_the_pass_skip_and_keep_the_record(
+        self, tmp_path, engine,
+    ) -> None:
+        """nexus-galkv.6 fix 3 (gate audit round 2). A lock this pass cannot
+        acquire within its bound must FAIL CLOSED: no claim attempted at
+        all against the mailbox, and the record kept -- never the old
+        behaviour of running the pass unlocked past the timeout, which
+        could duplicate a delivery.
+        """
+        import fcntl  # noqa: PLC0415 — deferred: POSIX-only, this test only
+
+        eng = engine()
+        eng.rows = [_row("s1-mail", body="stranded by the clear", to="old-sess-id")]
+        _wired(tmp_path, eng)
+        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
+        lock_path = tmp_path / "config" / "tuple-watch" / "old-sess-id.pending.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            res = _run(tmp_path=tmp_path)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+        assert res.returncode == 0, res.stderr
+        assert "stranded by the clear" not in res.stdout
+        assert record.exists()
+        assert "SKIP" in res.stderr
+        assert "old-sess-id" in res.stderr
+        in_bodies = [b for p, b in eng.calls if p == "/v1/tuples/in"]
+        assert not any(
+            (b.get("keys_pattern") or {}).get("to") == "old-sess-id" for b in in_bodies
+        ), "the pass claimed from the mailbox despite the unavailable lock"
+
     def test_two_processes_on_one_session_id_concurrently_deliver_exactly_once(
         self, tmp_path, engine,
     ) -> None:
@@ -1295,7 +1439,7 @@ def test_drain_address_oversized_address_skips_before_any_post(monkeypatch) -> N
     assert "260 bytes" in skips[0] or "subspace" in skips[0]
 
 
-def test_drain_address_address_at_the_cap_reaches_the_probe(monkeypatch) -> None:
+def test_drain_address_address_at_the_cap_reaches_the_probe(monkeypatch, tmp_path) -> None:
     """address feeds THREE checks at once: the subspace path segment
     (``mailbox/`` + address, 256-byte cap), the ``to`` pattern value
     (256-byte field cap), and the claimant string (``mailbox-drain-`` +
@@ -1303,7 +1447,15 @@ def test_drain_address_address_at_the_cap_reaches_the_probe(monkeypatch) -> None
     constraint here (14-char prefix leaves 114 for the address; the other
     two caps have far more headroom) -- an address of exactly 114 chars
     makes the claimant exactly 128 bytes. Must reach `_probe_page`,
-    proving the boundary is inclusive."""
+    proving the boundary is inclusive.
+
+    ``_drain_claimant`` is pinned to its old address-only form for this
+    test: nexus-galkv.6 fix 2 makes the REAL claimant also carry a pid and
+    a random suffix (so two concurrent drain processes never collide on
+    the engine's same-claimant retake path), which is exactly the kind of
+    incidental, environment-dependent length this boundary test should not
+    have to reverse-engineer.
+    """
     module = _load_module()
     calls: list[str] = []
 
@@ -1313,16 +1465,35 @@ def test_drain_address_address_at_the_cap_reaches_the_probe(monkeypatch) -> None
 
     monkeypatch.setattr(module, "_probe_page", _fake_probe_page)
     monkeypatch.setattr(module, "_read_pending", lambda config_dir, address: [])
+    monkeypatch.setattr(module, "_drain_claimant", lambda address: f"mailbox-drain-{address}")
 
     address = "a" * 114
     assert len(f"mailbox-drain-{address}") == 128
     ending = module._drain_address(
         "http://engine.invalid", "token", address,
-        is_local=True, config_dir=Path("/nonexistent"),
+        is_local=True, config_dir=tmp_path,
         deadline=time.monotonic() + 5, out=module._Out(),
     )
     assert calls == [address]
     assert ending == "empty"
+
+
+def test_drain_claimant_is_unique_per_invocation() -> None:
+    """nexus-galkv.6 fix 2 (gate audit round 2). Two calls for the SAME
+    address must never produce the same claimant, or two concurrent drain
+    processes draining the same mailbox could collide on the engine's
+    same-claimant retake fast path (TupleRepository.claimOnce,
+    service/src/main/java/dev/nexus/service/db/TupleRepository.java:
+    694-706) and both walk away believing they hold the identical claim.
+    """
+    module = _load_module()
+
+    first = module._drain_claimant("some-address")
+    second = module._drain_claimant("some-address")
+
+    assert first != second
+    assert first.startswith("mailbox-drain-some-address-")
+    assert second.startswith("mailbox-drain-some-address-")
 
 
 # ── Per-turn re-arm (bead nexus-6konb.19) ────────────────────────────────────
