@@ -32,3 +32,6 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.46.0)
 
+- `conexus/hooks/scripts/mailbox_drain.py` (nexus-galkv.19, RDR-208 MVV step 6): `/branch` runs no SessionStart, so the parent's watcher kept running in the fork and pinging the parent's mail there. A session's first prompt now re-arms at once when no watcher self-stop marker names it, and the spawned `nx hook mailbox-arm` moves the marker to the fork, which stops the parent's watcher and releases its directory entry. The watcher-liveness probe passes `ps -ww`, so a narrow terminal on Linux no longer hides a live watcher.
+- `conexus/skills/mailbox/SKILL.md` (nexus-galkv.19): a watcher from before a `/branch` also stops itself.
+

@@ -1736,21 +1736,44 @@ def fake_watcher():
         proc.wait()
 
 
+def _marker(tmp_path: Path, session_id: str, *, claude_pid: int = 4242) -> None:
+    """The watcher self-stop marker SessionStart writes for a claude process."""
+    (_watch_dir(tmp_path) / f"session.{claude_pid}").write_text(session_id)
+
+
 class TestPerTurnRearm:
-    def test_the_first_prompt_of_a_session_stays_silent(self, tmp_path, engine) -> None:
+    def test_the_first_prompt_after_a_sessionstart_stays_silent(self, tmp_path, engine) -> None:
+        """A marker names this session, so SessionStart ran and its arm
+        instruction (if it arrived) is in front of the model."""
         _wired(tmp_path, engine())
         bin_dir, log = _fake_nx(tmp_path)
+        _marker(tmp_path, SESSION_ID)
         res = _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
         assert res.returncode == 0, res.stderr
         assert res.stdout.strip() == ""
         assert _nx_calls(log) == []
         assert _state_path(tmp_path).is_file()
 
+    def test_the_first_prompt_of_a_branched_session_arms_at_once(self, tmp_path, engine) -> None:
+        """/branch forks a session with no SessionStart, so this process's
+        marker still names the parent and the parent's watcher keeps running
+        in the fork (RDR-208 MVV, 2026-09-14). No marker names the fork, so
+        its first prompt re-arms, and the spawned ``nx hook mailbox-arm``
+        moves the marker, which stops the parent's watcher."""
+        _wired(tmp_path, engine())
+        bin_dir, log = _fake_nx(tmp_path)
+        _marker(tmp_path, "parent-session-of-the-fork")
+        res = _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
+        assert res.returncode == 0, res.stderr
+        assert _FAKE_ARM in res.stdout
+        assert _nx_calls(log) == [f"hook mailbox-arm --session-id {SESSION_ID}"]
+
     def test_the_second_prompt_with_no_watcher_reissues_the_wheel_instruction(
         self, tmp_path, engine,
     ) -> None:
         _wired(tmp_path, engine())
         bin_dir, log = _fake_nx(tmp_path)
+        _marker(tmp_path, SESSION_ID)
         _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
         res = _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
         assert res.returncode == 0, res.stderr
@@ -1874,6 +1897,32 @@ def test_rearm_naming_matches_the_wheel() -> None:
     for sid in (SESSION_ID, "odd id/with:chars"):
         assert module._watch_lock_path(cfg, sid) == tuple_watch.lock_path(cfg, sid)
     assert module._WATCH_COMMAND_MARK == tuple_watch.WATCH_COMMAND_MARK
+
+
+def test_session_marker_naming_matches_the_wheel() -> None:
+    """The first-prompt check looks for SessionStart's self-stop marker by
+    name; the hook spells that name itself."""
+    from nexus import tuple_watch
+
+    module = _load_module()
+    cfg = Path("/cfg")
+    wheel = tuple_watch.session_marker_path(cfg, 4242)
+    assert wheel.parent == cfg / "tuple-watch"
+    assert wheel.name == f"{module._SESSION_MARKER_PREFIX}4242"
+
+
+def test_a_live_watcher_is_seen_under_a_narrow_terminal(tmp_path, engine, fake_watcher) -> None:
+    """procps (Linux) truncates a piped ``ps -o command=`` to COLUMNS unless
+    ``-ww`` is given, and the watcher's mark sits at the tail of its command
+    line, so a narrow terminal made a live watcher read as none and the hook
+    nagged. macOS ps does not truncate, so only a Linux run can fail this."""
+    _wired(tmp_path, engine())
+    bin_dir, log = _fake_nx(tmp_path)
+    _seen(tmp_path)
+    _write_lock(tmp_path, fake_watcher)
+    res = _run(tmp_path=tmp_path, env_overrides={**_with_nx(bin_dir), "COLUMNS": "20"})
+    assert res.stdout.strip() == ""
+    assert _nx_calls(log) == []
 
 
 def test_cleared_record_naming_matches_the_wheel() -> None:

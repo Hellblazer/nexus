@@ -109,11 +109,20 @@ def mailbox_arm_cmd(session_id: str) -> None:
     instruction versions with the wheel that ships ``nx tuple watch``. It
     prints nothing when a watcher is live or an arm could not succeed, and
     never exits non-zero.
+
+    First it points this claude process's watcher self-stop marker at
+    *session_id* (:func:`nexus.hooks.adopt_session_marker`). ``/branch``
+    forks a session with no SessionStart, so the marker still names the
+    parent and the parent's watcher keeps running in the fork, pinging the
+    parent's mail there (RDR-208 MVV, 2026-09-14). The drain hook runs this
+    with the current session id, so the write stops that watcher, which
+    releases its directory entry as after a ``/clear``.
     """
     from nexus import config as _config  # noqa: PLC0415 — deferred: hook startup cost
     from nexus import mailbox_arm, tuple_watch  # noqa: PLC0415 — deferred: hook startup cost
 
     try:
+        hooks.adopt_session_marker(session_id)
         if tuple_watch.watcher_alive(_config.nexus_config_dir(), session_id):
             return
         text = mailbox_arm.arm_block(session_id)

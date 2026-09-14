@@ -178,7 +178,7 @@ sequenceDiagram
 
 The ping never claims and the claim never needs the ping. When no watcher is armed, or a ping never arrives (harness auto-stop, a dropped notification), the row is still delivered: the next prompt fires `mailbox_drain.py`, which probes independently, claims, acks and renders the same row inline in that prompt's context, with no ping ever having existed. The drain hook is never told a ping already named a row and never skips one on that account: it is the model, not the hook, that claimed and acked the row above; a row still sitting unclaimed when the hook runs is simply delivered there instead.
 
-A `/clear` or `/resume` mints a new session id out from under a watcher that is still running against the old one; the old watcher discovers this itself on its next probe cycle, stops, and releases its lock so the SessionStart instruction's re-arm can take the address. See [Push delivery](tuple-space.md#push-delivery-rdr-205-ping-then-pull) for that handoff.
+A `/clear`, `/resume` or `/branch` puts the conversation on a new session id while a watcher is still running against the old one; the old watcher discovers this itself on its next probe cycle, stops, and releases its lock so the arm instruction's re-arm can take the address. `/branch` runs no SessionStart, so the fork's first prompt moves the marker the watcher checks, through the drain hook's re-arm (`nx hook mailbox-arm`). See [Push delivery](tuple-space.md#push-delivery-rdr-205-ping-then-pull) for that handoff.
 
 ## How a blocking read parks
 
