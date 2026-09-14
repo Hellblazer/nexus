@@ -13,20 +13,15 @@ pins BOTH drift directions: the packaged template changing without the
 repo file following it, and the repo file diverging from (or adding more
 than one section past) the packaged text.
 
-nexus-cnzei.2 (worktree agent-a3c8be47a809217b4 as of 2026-09-13) has not
-landed ``.beads/PRIME.md`` on this branch yet -- its current draft predates
-this parity contract and does not embed the packaged text verbatim. The
-real-file assertion below SKIPS (never passes vacuously) until that file
-exists in this checkout; :class:`TestParityCheckerLogic` exercises the
-checking logic itself against synthetic fixtures, so the mechanism has
-real, always-running coverage in the meantime.
+``.beads/PRIME.md`` landed with nexus-cnzei.2 and is tracked in this repo;
+the real-file assertion below is a hard failure, never a skip, if it goes
+missing -- :class:`TestParityCheckerLogic` exercises the checking logic
+itself against synthetic fixtures regardless.
 """
 from __future__ import annotations
 
 import re
 from pathlib import Path
-
-import pytest
 
 from nexus.beads_prime import load_template
 
@@ -118,12 +113,11 @@ class TestParityCheckerLogic:
 
 def test_repo_beads_prime_matches_packaged_template_plus_at_most_one_section() -> None:
     repo_prime = _repo_root() / ".beads" / "PRIME.md"
-    if not repo_prime.exists():
-        pytest.skip(
-            "repo .beads/PRIME.md not present on this branch yet -- this "
-            "parity check activates once nexus-cnzei.2 lands it (bead "
-            "nexus-cnzei.8)"
-        )
+    assert repo_prime.exists(), (
+        ".beads/PRIME.md is tracked in this repo (nexus-cnzei.8 landed it) -- "
+        "its absence here means the file was deleted, not that the parity "
+        "check has not activated yet."
+    )
     repo_text = repo_prime.read_text(encoding="utf-8")
     packaged_text = load_template()
     violation = parity_violation(repo_text, packaged_text)

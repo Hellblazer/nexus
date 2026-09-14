@@ -113,10 +113,10 @@
 # dead-lettered bodies are untouched; chk_tuples_body_size is VALIDATED;
 # RLS is ENABLE+FORCE on both tuple-space tables; and the candidate can
 # still claim and ack a surviving row. Consumed-body-NULL is asserted
-# against the nexus-8zoyp contract even when that changeset is not yet
-# stacked in the tree this leg builds from, and counts the row with its
-# NULL body (1:1) so a deleted row fails instead of reading as an empty
-# body. The PASSED and FAILED lines name tuple_tenants=1|2.
+# against the nexus-8zoyp contract (tuples-004, closed and in the tree
+# this leg builds from), and counts the row with its NULL body (1:1) so a
+# deleted row fails instead of reading as an empty body. The PASSED and
+# FAILED lines name tuple_tenants=1|2.
 # The scheduled sweep itself (6h interval, 6h initial delay) cannot fire
 # inside this leg's wall-clock budget, so "the candidate can run the
 # sweep" is asserted structurally (the dead-lettered row's claim_state/
@@ -137,8 +137,14 @@ bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAILS=$((FAILS+1)); }
 note() { printf '       %s\n' "$*"; }
 
 export NX_SERVICE_MAX_HEAP="${NX_SERVICE_MAX_HEAP:-1g}"
-git config --global user.email "candidate-migration@nexus.local" >/dev/null 2>&1 || true
-git config --global user.name  "nexus candidate migration"       >/dev/null 2>&1 || true
+# Identity via env, never `git config --global` (nexus-oqh4s, sibling of the
+# rehearse_package_upgrade.sh incident, 2026-09-12, that rewrote a real
+# ~/.gitconfig): this script is meant to run INSIDE its container, but
+# nothing enforces that.
+export GIT_AUTHOR_NAME="nexus candidate migration"
+export GIT_AUTHOR_EMAIL="candidate-migration@nexus.local"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
 
 SVC_NATIVE_DIR="/opt/nexus-service-native"
 SVC_WELL_KNOWN_DIR="$HOME/.config/nexus/service"
@@ -884,10 +890,8 @@ for TUPLE_LABEL in "${TUPLE_TENANT_IDS[@]}"; do
   [ "$ATCAP_POST" = 4096 ] && ok "tenant $TUPLE_LABEL: the at-cap row is intact at exactly 4096 bytes after the walk" \
     || bad "tenant $TUPLE_LABEL: the at-cap row body is '$ATCAP_POST' bytes after the walk, expected 4096"
 
-  # Consumed rows: NULL bodies once nexus-8zoyp's cleanup lands. Its
-  # changeset is NOT in this worktree (see this leg's own header) -- this
-  # assert is written against that contract regardless, and is expected to
-  # FAIL here until nexus-8zoyp's changeset is stacked in this tree.
+  # Consumed rows: NULL bodies via nexus-8zoyp's cleanup (tuples-004),
+  # closed and in the tree this leg builds from. Format is
   # rows:null-bodies, so a deleted row reads 0:0 and fails instead of
   # passing as an empty body would.
   CONSUMED_BODY_POST="$(diag_sql "SELECT count(*) || ':' || count(*) FILTER (WHERE body IS NULL) FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-consumed-${TUPLE_LABEL}'")"

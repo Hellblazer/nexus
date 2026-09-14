@@ -196,7 +196,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-local = ["fastembed>=0.7.0"]
+# nexus-oqh4s (7.45.0 pre-release audit, the nexus-l2ku5 class in the
+# extras table): was unbounded; a fresh resolve of conexus[local] landed on
+# fastembed 0.8.0 (2026-03-23), untested here, while uv.lock stayed on
+# 0.7.4. 0.x under semver licenses a minor bump to break, so the cap sits
+# at the next minor, not the next major -- see
+# tests/test_dependency_bounds_lint.py's extras gate.
+local = ["fastembed>=0.7.0,<0.8"]
 
 [project.urls]
 Homepage = "https://github.com/Hellblazer/nexus"

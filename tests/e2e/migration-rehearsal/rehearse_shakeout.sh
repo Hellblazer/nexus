@@ -154,8 +154,14 @@ cp "$SVC_NATIVE_DIR"/* "$SVC_WELL_KNOWN_DIR/" && chmod +x "$SVC_WELL_KNOWN_DIR/n
   && ok "candidate positioned at well-known location" || { bad "positioning failed"; exit 1; }
 
 export NX_SERVICE_MAX_HEAP="${NX_SERVICE_MAX_HEAP:-1g}"
-git config --global user.email "shakeout@nexus.local" >/dev/null 2>&1 || true
-git config --global user.name  "nexus shakeout"       >/dev/null 2>&1 || true
+# Identity via env, never `git config --global` (nexus-oqh4s, sibling of the
+# rehearse_package_upgrade.sh incident, 2026-09-12, that rewrote a real
+# ~/.gitconfig): this script is meant to run INSIDE its container, but
+# nothing enforces that.
+export GIT_AUTHOR_NAME="nexus shakeout"
+export GIT_AUTHOR_EMAIL="shakeout@nexus.local"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
 
 # init is idempotent (RDR-174); the -Ob quick-build binary's FIRST boot
 # (native init + 144 Liquibase changesets on fresh PG) can exceed the

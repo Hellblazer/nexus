@@ -2,7 +2,7 @@
 name = "conexus-mcpb"
 version = "7.44.0"
 description = "Conexus packaged as Claude Desktop .mcpb (Desktop Extension)"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     # #1068: the [local] extra (fastembed) MUST be present so the Desktop
     # extension's venv resolves the Tier-1 bge-768 local embedder. Without it,

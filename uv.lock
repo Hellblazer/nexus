@@ -469,7 +469,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.1,<9" },
     { name = "docling-slim", extras = ["convert-core", "format-pdf", "models-local"], specifier = ">=2.125.0,<2.125.1" },
     { name = "fastapi", specifier = ">=0.115,<1.0" },
-    { name = "fastembed", marker = "extra == 'local'", specifier = ">=0.7.0" },
+    { name = "fastembed", marker = "extra == 'local'", specifier = ">=0.7.0,<0.8" },
     { name = "httpx", specifier = ">=0.27,<1.0" },
     { name = "llama-index-core", specifier = ">=0.12.7,<0.15" },
     { name = "markdown-it-py", specifier = ">=4.0.0,<5" },

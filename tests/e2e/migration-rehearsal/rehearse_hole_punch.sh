@@ -73,8 +73,14 @@ command -v initdb >/dev/null 2>&1 && bad "system PostgreSQL present — not a co
 test ! -e "$HOME/.config/nexus/service/nexus-service" && ok "no native binary pre-staged" || bad "native binary already present — not cold"
 
 export NX_SERVICE_MAX_HEAP="${NX_SERVICE_MAX_HEAP:-1g}"
-git config --global user.email "holepunch@nexus.local" >/dev/null 2>&1 || true
-git config --global user.name  "nexus hole-punch"      >/dev/null 2>&1 || true
+# Identity via env, never `git config --global` (nexus-oqh4s, sibling of the
+# rehearse_package_upgrade.sh incident, 2026-09-12, that rewrote a real
+# ~/.gitconfig): this script is meant to run INSIDE its container, but
+# nothing enforces that.
+export GIT_AUTHOR_NAME="nexus hole-punch"
+export GIT_AUTHOR_EMAIL="holepunch@nexus.local"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
 
 say "Cold-acquire — nx daemon service install-binary $SERVICE_TAG"
 if nx daemon service install-binary "$SERVICE_TAG" 2>&1 | sed 's/^/       /'; then

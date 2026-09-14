@@ -59,9 +59,67 @@ def _load_runtime_dependencies() -> list[str]:
     return data["project"]["dependencies"]
 
 
+def _load_optional_dependencies() -> dict[str, list[str]]:
+    with _PYPROJECT.open("rb") as f:
+        data = tomllib.load(f)
+    return data["project"].get("optional-dependencies", {})
+
+
+#: Optional-dependency ("extra") groups in scope for this lint, with the
+#: reason each one's floor actually reaches a real install (not merely
+#: exists in pyproject.toml). ``[local]`` is the only extra defined today:
+#: ``mcpb/pyproject.toml`` pins ``conexus[local]>=X.Y.Z``, so its floor
+#: rides every mcpb (.mcpb Desktop Extension) bundle, and the documented
+#: ``uv tool install "conexus[local]"`` path (README) resolves it fresh off
+#: PyPI exactly like ``[project.dependencies]`` does -- the nexus-l2ku5 class
+#: is agnostic to which table the unbounded floor sits in. A future extra
+#: joins this dict only once an install path is shown to resolve it.
+_IN_SCOPE_EXTRAS: dict[str, str] = {
+    "local": (
+        'pinned by mcpb/pyproject.toml ("conexus[local]>=X.Y.Z", shipped in '
+        "every .mcpb bundle) and by the documented "
+        '`uv tool install "conexus[local]"` path'
+    ),
+}
+
+
 def _has_upper_bound(requirement_string: str) -> bool:
     req = Requirement(requirement_string)
     return any(spec.operator in ("<", "<=") for spec in req.specifier)
+
+
+def _floor_version(req: Requirement):
+    """Lowest version admitted by a ``>=``/``>`` specifier on *req*, or
+    ``None`` if it carries no lower bound."""
+    from packaging.version import Version
+
+    floors = [Version(spec.version) for spec in req.specifier if spec.operator in (">=", ">")]
+    return min(floors) if floors else None
+
+
+def _has_semver_safe_upper_bound(requirement_string: str) -> bool:
+    """Like ``_has_upper_bound``, but for a 0.x floor also requires the cap
+    to sit at the next MINOR, not the next major.
+
+    Under semver, a 0.x minor bump is licensed to break -- ``fastembed``
+    going 0.7.4 -> 0.8.0 (2026-03-23) is exactly that: nothing in this repo
+    tested 0.8.0, yet ``fastembed>=0.7.0`` (no cap at all) resolved it fresh
+    on every install. A cap of ``<1.0`` would have been just as porous:
+    "some upper bound exists" is not the same claim as "the floor's own
+    minor is the only one this bounds admits". This stricter check is what
+    an extras author reaches for when writing the cap, so a well-meaning
+    but semver-naive ``<1.0`` on a fresh 0.x extra still gets caught.
+    """
+    from packaging.version import Version
+
+    req = Requirement(requirement_string)
+    if not _has_upper_bound(requirement_string):
+        return False
+    floor = _floor_version(req)
+    if floor is None or floor.major != 0:
+        return True
+    next_minor = Version(f"0.{floor.minor + 1}")
+    return next_minor not in req.specifier
 
 
 def test_dependency_list_is_non_vacuous() -> None:
@@ -103,6 +161,51 @@ def test_every_runtime_dependency_is_bounded_or_exempt() -> None:
     )
 
 
+def test_in_scope_extras_exist_in_pyproject() -> None:
+    """Non-vacuity for the extras gate: catches an ``_IN_SCOPE_EXTRAS`` group
+    renamed or removed out from under this lint, which would otherwise leave
+    the check silently iterating nothing."""
+    extras = _load_optional_dependencies()
+    for group in _IN_SCOPE_EXTRAS:
+        assert group in extras, (
+            f"{group!r} is in _IN_SCOPE_EXTRAS but not a "
+            f"[project.optional-dependencies] group in {_PYPROJECT}"
+        )
+
+
+def test_every_extra_dependency_is_bounded_or_exempt() -> None:
+    """Extras ship real dependency floors to real installs exactly like
+    ``[project.dependencies]`` does -- mcpb pins ``conexus[local]``, so the
+    ``[local]`` extra's floor rides every .mcpb bundle -- but this lint used
+    to scan only ``[project.dependencies]``. ``fastembed>=0.7.0`` in
+    ``[local]`` was the gap: unbounded, and a fresh resolve landed on 0.8.0
+    (2026-03-23) while uv.lock stayed on 0.7.4 -- the nexus-l2ku5 class,
+    just in the other dependency table. Extras also get the semver-aware
+    check (``_has_semver_safe_upper_bound``): a 0.x floor must be capped at
+    its own next minor, not merely at some upper bound."""
+    extras = _load_optional_dependencies()
+    unbounded_unexempt = []
+    for group, deps in extras.items():
+        if group not in _IN_SCOPE_EXTRAS:
+            continue
+        for dep in deps:
+            req = Requirement(dep)
+            if _has_semver_safe_upper_bound(dep):
+                continue
+            reason = _EXEMPTIONS.get(req.name)
+            if reason and reason.strip():
+                continue
+            unbounded_unexempt.append(f"{group}: {dep}")
+
+    assert not unbounded_unexempt, (
+        "extras dependencies with no semver-safe upper bound and no "
+        f"documented exemption: {unbounded_unexempt} -- for a 0.x floor the "
+        "cap must be the next minor (`pkg>=0.Y.Z,<0.(Y+1)`), for a >=1 "
+        "floor the next major, or add a reasoned entry to _EXEMPTIONS in "
+        "this file (see nexus-l2ku5)."
+    )
+
+
 def test_exemptions_carry_real_reasons() -> None:
     """An exemption with an empty or whitespace-only reason is a silent
     escape hatch -- guard against that shape even though _EXEMPTIONS is
@@ -141,6 +244,35 @@ def test_kill_control_fully_unconstrained_entry_is_detected() -> None:
     is caught too, not just the `>=X` case."""
     assert not _has_upper_bound("some-package[extra]")
     assert not _has_upper_bound("some-package")
+
+
+def test_kill_control_extras_gate_flags_unbounded_fastembed_shape() -> None:
+    """Reproduces the exact pre-fix fastembed entry through the extras
+    check's own machinery, so this doesn't just trust the production test
+    to have exercised the real fix path."""
+    unbounded_unexempt = [
+        dep
+        for dep in ["fastembed>=0.7.0"]
+        if not _has_semver_safe_upper_bound(dep)
+        and not _EXEMPTIONS.get(Requirement(dep).name, "").strip()
+    ]
+    assert unbounded_unexempt == ["fastembed>=0.7.0"], (
+        "kill-control extras entry was not flagged -- the extras gate would "
+        "pass vacuously on a real regression too"
+    )
+
+
+def test_kill_control_next_major_cap_on_zero_x_floor_is_semver_unsafe() -> None:
+    """A 0.x floor capped at the next MAJOR (`<1.0`) satisfies the naive
+    `_has_upper_bound` check but is not semver-safe: it admits every future
+    0.x minor, exactly the shape that let fastembed 0.8.0 through if someone
+    had "fixed" it with a `<1.0` cap instead of `<0.8`."""
+    assert _has_upper_bound("fastembed>=0.7.0,<1.0")
+    assert not _has_semver_safe_upper_bound("fastembed>=0.7.0,<1.0")
+    assert _has_semver_safe_upper_bound("fastembed>=0.7.0,<0.8")
+    # A >=1 floor is unaffected: the existing "any upper bound" shape holds,
+    # since only a MAJOR bump is licensed to break there.
+    assert _has_semver_safe_upper_bound("mcp>=1.0,<2")
 
 
 @pytest.mark.parametrize(

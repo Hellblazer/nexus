@@ -54,8 +54,14 @@ bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAILS=$((FAILS+1)); }
 note() { printf '       %s\n' "$*"; }
 
 export NX_SERVICE_MAX_HEAP="${NX_SERVICE_MAX_HEAP:-1g}"
-git config --global user.email "era-hop@nexus.local" >/dev/null 2>&1 || true
-git config --global user.name  "nexus era hop"       >/dev/null 2>&1 || true
+# Identity via env, never `git config --global` (nexus-oqh4s, sibling of the
+# rehearse_package_upgrade.sh incident, 2026-09-12, that rewrote a real
+# ~/.gitconfig): this script is meant to run INSIDE its container, but
+# nothing enforces that.
+export GIT_AUTHOR_NAME="nexus era hop"
+export GIT_AUTHOR_EMAIL="era-hop@nexus.local"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
 
 # THE SEEDED STORE MUST BE AT THE PATH THE PRODUCT READS. `nx upgrade` has no
 # --local-path knob — deliberately: naming your store is configuration, not
