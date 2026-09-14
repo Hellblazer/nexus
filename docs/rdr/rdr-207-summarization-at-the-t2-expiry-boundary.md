@@ -107,13 +107,33 @@ real overlap.
 
 ## Context
 
+### Background
+
 The manage phase is the work done to memory between writing it and reading it
 — summarizing, deduplicating, scoring, resolving contradictions, and deleting.
 T2 is this project's middle memory tier: persistent notes that outlive a
 session, stored in Postgres behind the engine. A row's TTL (time to live) is
-how long it survives without being touched.
+how long it survives without being touched; heat (the row's access count)
+stretches it.
 
-Today the only manage-phase operation T2 performs is deletion.
+Today the only manage-phase operation T2 performs is deletion. The problem
+was found by conexus, a sibling installation sharing the same hosted store,
+when it measured the surviving population on 2026-09-12 (Research Findings)
+and saw that older months were "permanent" only because everything else from
+those months was already gone.
+
+### Technical Environment
+
+- Engine: `MemoryRepository` (jOOQ over `nexus.memory`, tenant-scoped through
+  row-level security), `MemoryHandler` for `/v1/memory/*`, Liquibase
+  changelogs `memory-001` to `memory-003`. All DDL goes through Liquibase.
+- Client: `HttpMemoryStore` (HTTP client for the memory routes), `T2Database`
+  (the facade the hooks and CLI use), `nx memory` verbs, the MCP `memory_*`
+  tools, and the session-end hook that flushes flagged scratch and calls
+  expire.
+- Deployment: the engine ships as its own tagged binary ahead of the client
+  release; a wire change is recorded in `docs/wire-contract-pending.md` with a
+  direction-safety token that decides whether the engine can deploy first.
 
 ## Research Findings
 
@@ -121,7 +141,18 @@ Today the only manage-phase operation T2 performs is deletion.
 
 Measurements taken by conexus against the live hosted T2 (tenant `nexus`) on
 2026-09-12. Code claims re-verified in this repo at commit `798bb70e7` before
-filing.
+filing; the 2026-09-14 findings were read at `05327a277` and `f8c708d73`.
+
+#### Dependency Source Verification
+
+| Dependency | Source Searched? | Key Findings |
+| --- | --- | --- |
+| `MemoryRepository.expire` | Yes | selects `ttl_days IS NOT NULL`, computes the heat-weighted age in Java, deletes; no other predicate (finding 1) |
+| `MemoryHandler` expire route | Yes | body ignored, returns `deleted_ids` (finding 2) |
+| `HttpMemoryStore.expire` | Yes | reads `deleted_ids` through `.get` with an empty default (finding 2) |
+| `MemoryRepository` read paths | Yes | twelve read entry points plus two read-then-write methods, enumerated (finding 4) |
+| Liquibase grants and RLS | Yes | service grants are schema-wide with default privileges; RLS is per table and must be copied (finding 4) |
+| `memory_put` TTL default | Yes | permanent on omission since 2026-09-12 (finding 3) |
 
 ### Key Discoveries
 
@@ -237,23 +268,42 @@ happened.
   `src/nexus/commands/memory.py:25`; `src/nexus/collection_shape.py:168-190`.
   T2 `nexus_rdr/207-research-3`.*
 
+- **✅ Verified** (source search, 2026-09-14) — Assumptions A1 and A3 below.
+  `MemoryRepository` has twelve public read entry points (find by project,
+  title and id, title resolution, two search overloads, list, project
+  prefixes, glob search, tag search, get-all, stale flagging) and two methods
+  that read before writing (merge, put-or-merge). Each is a tenant-scoped
+  jOOQ query on the memory table, so one shared `quarantined_at IS NULL`
+  condition fits all of them; the test that pins this derives the set by
+  reflection, not from this sentence. The service role's grants are
+  schema-wide with default privileges for future tables, so a new summaries
+  table is covered without a per-table line; the diagnostic role's grants are
+  per table. Row-level security is per table and does not inherit: the
+  summaries table must carry its own copy of the `tenant_isolation` policy.
+  *Source: `MemoryRepository.java` public signatures (lines 82-872);
+  `grants-nexus-svc.xml:143-147,190-191`; `memory-001-baseline.xml:113-127`.
+  T2 `nexus_rdr/207-research-4`.*
+
 ### Critical Assumptions
 
 - [ ] A1: every read path in `MemoryRepository` (get, search, list, prefix
   resolution, stale-flagging) can carry a `quarantined_at IS NULL` predicate,
   and the set of read paths is derived by the implementation and pinned by a
   test that inserts a quarantined row and asserts no read returns it.
-  **Status**: Unverified. **Method**: Source Search, during Phase 1.
+  **Status**: Verified (finding 4: twelve read entry points, all jOOQ on one
+  table). **Method**: Source Search.
 - [ ] A2: keeping `deleted_ids` with its current meaning (rows actually gone)
   and adding `quarantined_ids` beside it is `[additive]`: an old client reads
   `deleted_ids` only, through `resp.get("deleted_ids", [])`, and ignores the
   new key. **Status**: Verified. **Method**: Source Search
   (`http_memory_store.py:484`, finding 2).
 - [ ] A3: the new `nexus.memory_summaries` table takes the same tenant
-  row-level-security policy and service grants as `nexus.memory`
-  (`memory-001-baseline.xml:116-125`, `grants-nexus-svc.xml`). **Status**:
-  Unverified. **Method**: Source Search, during Phase 1; the PITR-fork walk
-  before deploy is the gate that caught the last grants defect (v0.1.78).
+  row-level-security policy and service grants as `nexus.memory`.
+  **Status**: Verified with one correction (finding 4): service grants arrive
+  through schema default privileges, the RLS policy must be copied per table,
+  and the diagnostic role needs an explicit line if it is to read summaries.
+  **Method**: Source Search. The PITR-fork walk before deploy remains the gate
+  that catches a grants defect in practice (v0.1.78).
 - [ ] A4: a summary can be checked against its sources without an LLM. The
   check is that the summary text contains every source row's title.
   **Status**: Assumed. It is a floor, not a fidelity proof; the test plan
@@ -302,6 +352,14 @@ of permitting it — the same principle this project already applied at the
 release-arming gate, where a missing attestation is `NOT-ARMED` and refuses
 rather than silently meaning not-required. Absence of a label is never itself a
 label.
+
+### Approach
+
+Split the one destructive step into two labelled steps and put the only slow,
+fallible step on an attended cadence. Expiry becomes quarantine; a mark
+written with a summary is what lets a reaper delete; the summary is produced
+by a command a person runs. The decision and the design that carries it are
+below.
 
 ### Decision (Sam, 2026-09-14)
 
@@ -472,7 +530,42 @@ It was decided against on 2026-09-14 with the analysis in hand.
 
 ## Trade-offs
 
-Designs (a) and (b) both imply a wire change; (c) may. Flagged explicitly:
+### Consequences
+
+- Nothing in T2 is deleted without two labels on it, one from expiry and one
+  from a summary. That is the point, and it is also a standing population of
+  cold rows until someone rolls them up.
+- Every read path carries one more predicate. Cheap per query, but it is
+  twelve sites plus two, and a new read path added later that forgets the
+  predicate silently resurrects cold rows; the reflection-driven test exists
+  for that.
+- The session-end message changes wording; a person reading "quarantined 3"
+  learns something that "expired 3" hid.
+- A summary is a separate row, so the store grows by summaries rather than
+  shrinking by deletions until reap runs. Storage is not a constraint.
+
+### Risks and Mitigations
+
+- **Risk**: nobody runs rollup, so quarantine fills and the store is
+  effectively permanent with a hidden tail.
+  **Mitigation**: the `nx doctor` row reports the count; that is visible
+  where today's loss was invisible, and it is the safe direction.
+- **Risk**: the title-containment check passes a summary that is wrong in
+  substance.
+  **Mitigation**: it is a floor (assumption A4); the sources stay until a
+  separate reap, and restore exists. A stronger check is a follow-up, not a
+  reason to keep deleting unprocessed rows today.
+- **Risk**: an old client on a new engine reads `deleted_ids` as empty and
+  reports "expired 0" while rows were quarantined.
+  **Mitigation**: accurate, if uninformative; nothing is lost, and the client
+  half ships in the next release.
+- **Risk**: the new table's grants or policy are wrong on production.
+  **Mitigation**: the PITR-fork rehearsal before deploy, the gate that caught
+  v0.1.78.
+
+### Surfaces touched
+
+Both halves imply a wire change. Flagged explicitly:
 
 | Surface | Change |
 | --- | --- |
@@ -596,7 +689,63 @@ a quarantined row.
 
 ## Finalization Gate
 
-Not run. Design recorded 2026-09-14; the gate follows Sam's call.
+### Contradiction Check
+
+One tension, stated rather than smoothed: the Research Findings' urgency
+argument was written when the omission default still put rows on a clock,
+and finding 3 records that the default was reversed the same day. The
+decision does not rest on urgency; it rests on the failure-mode analysis and
+on the survival-by-month measurement, which is history that the default
+reversal does not change. No contradiction between the findings, the six
+failure modes, and the composed design: each failure mode is answered by a
+named part of the design (§Technical Design, "revisited").
+
+### Assumption Verification
+
+A1, A2 and A3 are verified by source search (findings 2 and 4). A4, that a
+summary can be checked without an LLM, is assumed and stated as a floor; the
+test plan shows the check refusing a summary that omits a title, which is
+the behaviour the design needs, not a fidelity proof. It is carried into
+implementation as assumed, with the reap step and restore as the backstop.
+
+#### API Verification
+
+| API Call | Library | Verification |
+| --- | --- | --- |
+| `POST /v1/memory/expire` response shape | engine `MemoryHandler` | Source Search |
+| `HttpMemoryStore.expire` parsing | client | Source Search |
+| `MemoryRepository` read paths | engine (jOOQ) | Source Search, enumerated |
+| service grants and RLS | Liquibase changelogs | Source Search |
+| operator dispatch for rollup | `operator_summarize` path | Documented (existing, not re-read here); Phase 3 reads it |
+
+### Scope Verification
+
+The Minimum Viable Validation is in scope: one test module against the
+engine substrate in the default suite, with the quarantine leg, the
+rollup-mark-reap leg and the forced-failure leg. Summary injection into
+reads and heat graduation are out of scope and named as such.
+
+### Cross-Cutting Concerns
+
+- **Versioning**: engine half ships in the next engine tag; every wire entry
+  is `[additive]`, so the engine deploys before the client tag.
+- **Build tool compatibility**: N/A.
+- **Licensing**: N/A.
+- **Deployment model**: one changeset with a new table and policy; the
+  PITR-fork rehearsal before deploy.
+- **IDE compatibility**: N/A.
+- **Incremental adoption**: an old client works unchanged; new verbs are
+  additive; rollup is opt-in by invocation.
+- **Secret/credential lifecycle**: N/A.
+- **Memory management**: N/A; the rollup command prints its groups before
+  spending.
+
+### Proportionality
+
+Right-sized for a schema change and six routes. The relayed problem
+statement and measurements are longer than the design and are kept whole
+because they are the evidence; the superseded measurement paragraph is kept
+rather than edited away for the reason stated in its revision note.
 
 ## References
 
