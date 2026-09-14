@@ -21,6 +21,15 @@
     DATA EFFECT: line applies (scripts/data_effect_lint.py classifies
     nullable ADD COLUMN, CREATE TABLE and CREATE INDEX as additive).
 
+    BUILD-WINDOW DECISION (the vectors-002 / vectors-003 / staging-002
+    precedent for an index on an existing table): plain CREATE INDEX, not
+    CONCURRENTLY. nexus.memory measured 5,854 rows / 71 MB on the live store
+    (RDR-207 § Context), the partial predicate admits zero rows at creation
+    time (no row carries quarantined_at yet), and Liquibase runs the
+    changeset inside a transaction where CONCURRENTLY is not allowed. The
+    lock window is the milliseconds a two-column ALTER and an empty-index
+    build take; nothing to stage.
+
     nexus.memory_summaries: id, tenant_id, project, content, source_ids
     BIGINT[], produced_at, model, produced_by. source_ids is an ARRAY and
     NOT a foreign key on purpose (RDR-207 § Briefly Rejected): the source

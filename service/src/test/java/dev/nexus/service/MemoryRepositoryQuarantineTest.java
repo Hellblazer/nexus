@@ -284,6 +284,54 @@ class MemoryRepositoryQuarantineTest {
         assertThat(q.getRolledUpAt()).as("the earlier mark did not survive restore").isNull();
     }
 
+    // ── Residual 1, pinned as admitted (plan record; Sam's call to tighten) ───
+
+    @Test
+    void residual1_insertSummaryAdmitsALiveRow_laterExpireThenReapDeletesItUnsummarized() throws Exception {
+        // PINS THE ADMITTED BEHAVIOUR, not the desired one. The plan record
+        // (nexus/plan-rdr-207-implementation-2026-09-14, residual 1) records that
+        // insertSummary refuses only unknown ids, so a LIVE row can be marked; if
+        // its content is then rewritten by a merge (which does not clear the mark)
+        // and the row is later quarantined, reap deletes content the summary never
+        // saw. Tightening insertSummary to refuse a live source changes the design
+        // of record and is Sam's decision; this test exists so that decision, when
+        // taken, turns exactly here red rather than passing silently.
+        String t = tenant(); String p = project();
+        // Live at first (ttl 30 would keep it live; ttl 1 and 3 days old is past
+        // the TTL but stays live until expire runs, which is the point).
+        long live = repo.importRow(t, p, "live", "first content", "t", null, null,
+            1, OffsetDateTime.now(ZoneOffset.UTC).minusDays(3), 0, null);
+        assertThat(repo.findById(t, live)).as("live: not yet quarantined").isPresent();
+
+        repo.insertSummary(t, p, "summary of first content", List.of(live), "m", null);
+        assertThat(repo.findById(t, live).orElseThrow().getRolledUpAt())
+            .as("admitted: a live row is marked").isNotNull();
+
+        long other = repo.upsert(t, p, "other", "b", "t", null, null, 30);
+        repo.mergeMemories(t, live, List.of(other), "rewritten, never summarized");
+        assertThat(repo.findById(t, live).orElseThrow().getRolledUpAt())
+            .as("admitted: the mark survives the merge rewrite").isNotNull();
+
+        // mergeMemories refreshed the timestamp, so the row is under its TTL again
+        // until ttl days pass; age it back past the TTL as the superuser (seeding
+        // only, the assertions below run through the service role).
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                .update(dev.nexus.service.jooq.nexus.Tables.MEMORY)
+                .set(dev.nexus.service.jooq.nexus.Tables.MEMORY.TIMESTAMP,
+                     OffsetDateTime.now(ZoneOffset.UTC).minusDays(3))
+                .where(dev.nexus.service.jooq.nexus.Tables.MEMORY.ID.eq(live))
+                .execute();
+        }
+
+        assertThat(repo.expire(t).quarantinedIds()).containsExactly(live);
+        assertThat(repo.reap(t))
+            .as("admitted: reap deletes the row whose summary predates its content")
+            .containsExactly(live);
+        assertThat(repo.listQuarantined(t, p)).isEmpty();
+    }
+
     // ── Shape and tenant isolation ────────────────────────────────────────────
 
     @Test
