@@ -14,6 +14,7 @@ tuple hook, because the thing under test is a stdlib-only script with no
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -1440,21 +1441,23 @@ def test_drain_address_oversized_address_skips_before_any_post(monkeypatch) -> N
 
 
 def test_drain_address_address_at_the_cap_reaches_the_probe(monkeypatch, tmp_path) -> None:
-    """address feeds THREE checks at once: the subspace path segment
-    (``mailbox/`` + address, 256-byte cap), the ``to`` pattern value
-    (256-byte field cap), and the claimant string (``mailbox-drain-`` +
-    address, 128-byte claimant cap). The claimant is the BINDING
-    constraint here (14-char prefix leaves 114 for the address; the other
-    two caps have far more headroom) -- an address of exactly 114 chars
-    makes the claimant exactly 128 bytes. Must reach `_probe_page`,
-    proving the boundary is inclusive.
+    """address feeds TWO checks now (nexus-galkv.6 fix 2, gate audit round
+    2): the subspace path segment (``mailbox/`` + address, 256-byte cap)
+    and the ``to`` pattern value (256-byte field cap). The claimant no
+    longer varies with *address* at all -- it is fixed-length -- so it
+    never binds here any more; the subspace check is the tighter of the
+    two remaining ones (8-byte ``mailbox/`` prefix leaves 248 for the
+    address). An address of exactly 248 chars makes the subspace exactly
+    256 bytes. Must reach ``_probe_page``, proving the boundary is
+    inclusive. Runs the REAL ``_drain_claimant`` -- no monkeypatch needed
+    now that its length is independent of the address.
 
-    ``_drain_claimant`` is pinned to its old address-only form for this
-    test: nexus-galkv.6 fix 2 makes the REAL claimant also carry a pid and
-    a random suffix (so two concurrent drain processes never collide on
-    the engine's same-claimant retake path), which is exactly the kind of
-    incidental, environment-dependent length this boundary test should not
-    have to reverse-engineer.
+    ``_pending_lock`` is stubbed here: a 248-char address makes
+    ``<address>.pending.lock`` a filename over POSIX ``NAME_MAX`` (255),
+    a SEPARATE, filesystem-level constraint this SIZE-CHECK boundary test
+    is not about (see ``test_pending_lock_with_*`` and
+    ``test_a_held_pending_lock_makes_the_pass_skip_and_keep_the_record``
+    for that mechanism's own coverage).
     """
     module = _load_module()
     calls: list[str] = []
@@ -1463,12 +1466,16 @@ def test_drain_address_address_at_the_cap_reaches_the_probe(monkeypatch, tmp_pat
         calls.append(address)
         return []
 
+    @contextlib.contextmanager
+    def _fake_pending_lock(config_dir, address, *, deadline):
+        yield True
+
     monkeypatch.setattr(module, "_probe_page", _fake_probe_page)
     monkeypatch.setattr(module, "_read_pending", lambda config_dir, address: [])
-    monkeypatch.setattr(module, "_drain_claimant", lambda address: f"mailbox-drain-{address}")
+    monkeypatch.setattr(module, "_pending_lock", _fake_pending_lock)
 
-    address = "a" * 114
-    assert len(f"mailbox-drain-{address}") == 128
+    address = "a" * 248
+    assert len(f"mailbox/{address}") == 256
     ending = module._drain_address(
         "http://engine.invalid", "token", address,
         is_local=True, config_dir=tmp_path,
@@ -1492,8 +1499,101 @@ def test_drain_claimant_is_unique_per_invocation() -> None:
     second = module._drain_claimant("some-address")
 
     assert first != second
-    assert first.startswith("mailbox-drain-some-address-")
-    assert second.startswith("mailbox-drain-some-address-")
+    assert first.startswith("mailbox-drain-")
+    assert second.startswith("mailbox-drain-")
+
+
+def test_drain_claimant_length_is_independent_of_address_and_pid(monkeypatch) -> None:
+    """nexus-galkv.6 fix 2, round 2. A first fix appended ``-{pid}-{suffix}``
+    directly to the address, so the claimant's length grew with the address
+    AND varied with however many digits the pid happened to have --
+    regressing the effective address cap below its old 114-byte headroom
+    and making it pid-dependent (gate audit round 2, finding 1). The
+    claimant's length must be CONSTANT regardless of either.
+    """
+    module = _load_module()
+
+    monkeypatch.setattr(module.os, "getpid", lambda: 7)
+    short_pid_short_addr = module._drain_claimant("a")
+    short_pid_long_addr = module._drain_claimant("a" * 248)
+
+    monkeypatch.setattr(module.os, "getpid", lambda: 2147483647)  # max signed-32-bit pid
+    long_pid_short_addr = module._drain_claimant("a")
+
+    lengths = {
+        len(short_pid_short_addr.encode("utf-8")),
+        len(short_pid_long_addr.encode("utf-8")),
+        len(long_pid_short_addr.encode("utf-8")),
+    }
+    assert len(lengths) == 1, f"claimant length varied: {lengths}"
+    for claimant in (short_pid_short_addr, short_pid_long_addr, long_pid_short_addr):
+        assert len(claimant.encode("utf-8")) <= module._sz.MAX_CLAIMANT_BYTES
+
+
+def test_drain_claimant_pid_of_maximum_width_still_fits(monkeypatch) -> None:
+    """nexus-galkv.6 fix 2, round 2. A pid wider than the fixed padding
+    width (an exotic, wider-than-32-bit pid representation) must not widen
+    the claimant past ``MAX_CLAIMANT_BYTES`` -- it is truncated to the
+    fixed pid width instead of allowed to grow the string.
+    """
+    module = _load_module()
+    monkeypatch.setattr(module.os, "getpid", lambda: 999999999999999999999)  # 21 digits
+
+    claimant = module._drain_claimant("a" * 248)
+
+    assert len(claimant.encode("utf-8")) <= module._sz.MAX_CLAIMANT_BYTES
+
+
+def test_pending_lock_with_almost_no_budget_skips_at_once(tmp_path) -> None:
+    """nexus-galkv.6 fix 3, round 2. A contended acquire must not spend up
+    to ``_PENDING_LOCK_TIMEOUT_S`` when the CALLER's own deadline leaves
+    almost nothing -- it must give up at once, not after the lock's own 2s
+    ceiling regardless of how little budget the caller actually has left.
+    """
+    import fcntl  # noqa: PLC0415 — deferred: POSIX-only, this test only
+
+    module = _load_module()
+    address = "addr-almost-no-budget"
+    lock_path = tmp_path / "tuple-watch" / f"{address}.pending.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        start = time.monotonic()
+        with module._pending_lock(tmp_path, address, deadline=start + 0.05) as acquired:
+            elapsed = time.monotonic() - start
+            assert acquired is False
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    assert elapsed < 0.5, f"lock wait took {elapsed:.2f}s despite an almost-exhausted deadline"
+
+
+def test_pending_lock_with_ample_budget_waits_up_to_its_own_ceiling(tmp_path) -> None:
+    """The other direction, so the clamp is pinned both ways: with plenty of
+    the caller's own budget left, the lock still waits up to its own
+    ``_PENDING_LOCK_TIMEOUT_S`` ceiling, not forever and not zero.
+    """
+    import fcntl  # noqa: PLC0415 — deferred: POSIX-only, this test only
+
+    module = _load_module()
+    address = "addr-ample-budget"
+    lock_path = tmp_path / "tuple-watch" / f"{address}.pending.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        start = time.monotonic()
+        with module._pending_lock(tmp_path, address, deadline=start + 60.0) as acquired:
+            elapsed = time.monotonic() - start
+            assert acquired is False
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    assert elapsed >= module._PENDING_LOCK_TIMEOUT_S * 0.9
+    assert elapsed < module._PENDING_LOCK_TIMEOUT_S * 2
 
 
 # ── Per-turn re-arm (bead nexus-6konb.19) ────────────────────────────────────

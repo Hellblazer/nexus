@@ -82,6 +82,7 @@ hook runs on boxes where the client package may be mid-upgrade.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -137,10 +138,23 @@ _MAX_DELIVER = 10
 #: regardless, so the record is naming rows that are already gone.
 _CLEARED_RECORD_RETENTION_S = 7.0 * 24.0 * 3600.0
 
-#: Bound on how long the pending-file lock (see :func:`_pending_lock`) waits
-#: for a concurrent holder before giving up and running unlocked. Small: this
-#: closes a narrow interleaving window, it is not a queueing mechanism, and a
-#: prompt is waiting on the whole hook.
+#: Fixed-width pieces of the claimant :func:`_drain_claimant` builds --
+#: chosen so the claimant's total length never depends on the address or on
+#: the pid's own digit count (gate audit round 2 finding 1). 16 hex chars of
+#: a sha256 digest is plenty to make an address collision practically
+#: impossible; 10 digits covers a signed-32-bit pid (max 2147483647) and a
+#: pid whose string form happens to be WIDER than that is truncated to its
+#: last 10 digits, never allowed to widen the claimant.
+_CLAIMANT_DIGEST_LEN = 16
+_CLAIMANT_PID_WIDTH = 10
+
+#: Upper bound on how long the pending-file lock (see :func:`_pending_lock`)
+#: waits for a concurrent holder. Small: it is not a queueing mechanism and a
+#: prompt is waiting on the whole hook. FAILS CLOSED on expiry -- the caller
+#: ends its pass "skipped" rather than running unlocked (nexus-galkv.6 fix
+#: 3). The actual wait is also clamped to what the caller's OWN deadline
+#: leaves, so a contended acquire late in the drain's budget gives up at
+#: once instead of spending up to this ceiling regardless.
 _PENDING_LOCK_TIMEOUT_S = 2.0
 
 #: Per-turn re-arm (bead nexus-6konb.19). This script cannot import nexus, so
@@ -477,7 +491,7 @@ def _save_pending(config_dir: Path, address: str, entries: list[dict[str, str]])
 
 
 @contextlib.contextmanager
-def _pending_lock(config_dir: Path, address: str):
+def _pending_lock(config_dir: Path, address: str, *, deadline: float):
     """Exclusive advisory lock over one address's ENTIRE pending-file
     handling for one drain pass (nexus-galkv.6 fix 3, gate audit round 2 --
     tightening the original per-call version this replaces).
@@ -493,6 +507,17 @@ def _pending_lock(config_dir: Path, address: str):
     first probe, not only from whichever pending-file call happens to run
     into the held lock.
 
+    *deadline* is the CALLER's own remaining budget (``_drain_address``'s,
+    which is the whole drain pass's), not a second, independent clock (gate
+    audit round 2 fix 2): waits at most
+    ``min(_PENDING_LOCK_TIMEOUT_S, deadline - now)``, so a contended acquire
+    late in the pass cannot spend up to the lock's own 2s ceiling on top of
+    an already near-exhausted budget -- it gives up at once when there is
+    nothing left to spend, rather than after a further wait nobody budgeted
+    for. One `_TOTAL_BUDGET_S` covers the WHOLE hook (every address, own
+    mailbox and every cleared-record mailbox alike), so this clamp applies
+    identically wherever `_drain_address` is called from.
+
     Two processes draining the SAME address concurrently used to be a rare
     edge case (two terminals resuming one session id); RDR-208 Phase 2 Step 3
     makes it the ordinary case for a ``/clear``'s stranded mailbox, since the
@@ -507,9 +532,11 @@ def _pending_lock(config_dir: Path, address: str):
         yield False
         return
     locked = False
-    deadline = time.monotonic() + _PENDING_LOCK_TIMEOUT_S
+    now = time.monotonic()
+    wait_s = max(0.0, min(_PENDING_LOCK_TIMEOUT_S, deadline - now))
+    lock_deadline = now + wait_s
     try:
-        while time.monotonic() < deadline:
+        while True:
             try:
                 if sys.platform == "win32":
                     msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
@@ -518,6 +545,8 @@ def _pending_lock(config_dir: Path, address: str):
                 locked = True
                 break
             except OSError:
+                if time.monotonic() >= lock_deadline:
+                    break
                 time.sleep(0.02)
         yield locked
     finally:
@@ -766,9 +795,9 @@ def _probe_page(base_url: str, token: str, address: str, *, is_local: bool,
 
 def _drain_claimant(address: str) -> str:
     """A claimant unique to THIS drain invocation (nexus-galkv.6 fix 2, gate
-    audit round 2).
+    audit round 2), of a LENGTH INDEPENDENT of both *address* and the pid.
 
-    The previous form, ``f"mailbox-drain-{address}"``, was derived from the
+    The original form, ``f"mailbox-drain-{address}"``, was derived from the
     address alone, so every process draining the same address presented the
     IDENTICAL claimant string. RDR-208 Phase 2 Step 3 makes two processes
     draining one address the ordinary case (a cleared-record drain and a
@@ -780,8 +809,24 @@ def _drain_claimant(address: str) -> str:
     process's own retry of an in-flight claim, wrong between two independent
     processes that happen to share a name. Including the pid and a random
     suffix makes that collision effectively impossible.
+
+    A first fix appended ``-{pid}-{suffix}`` to the address itself, which
+    regressed the ``MAX_CLAIMANT_BYTES`` check: since the claimant's length
+    then grew with the address AND varied with the pid's own digit count,
+    the effective address cap dropped from 114 bytes (the address-only
+    claimant's own headroom) to something smaller and pid-dependent (gate
+    audit round 2, finding 1). This form is FIXED-LENGTH instead: a short
+    digest of the address (not the address itself) plus the pid truncated
+    and zero-padded to a fixed width, so the claimant's own byte length
+    never depends on how long the address is or how many digits the pid
+    happens to have -- ``check_field_size("claimant", ...)`` below always
+    sees the same length, and the address's own cap is once again a
+    function of the address's OWN limits (the subspace and field-value
+    caps) alone.
     """
-    return f"mailbox-drain-{address}-{os.getpid()}-{secrets.token_hex(4)}"
+    digest = hashlib.sha256(address.encode("utf-8")).hexdigest()[:_CLAIMANT_DIGEST_LEN]
+    pid_str = str(os.getpid())[-_CLAIMANT_PID_WIDTH:].zfill(_CLAIMANT_PID_WIDTH)
+    return f"mailbox-drain-{digest}-{pid_str}-{secrets.token_hex(4)}"
 
 
 def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
@@ -820,9 +865,13 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
 
     # Size pre-check (bead nexus-r7xao): mirrors the engine's own per-field
     # caps for every field this hook itself constructs from *address* --
-    # subspace, the "to" pattern value, and the claimant string below. An
-    # oversized address is refused here, before any POST, the same as every
-    # other precondition this hook checks before touching the network.
+    # subspace and the "to" pattern value. The claimant is checked here too,
+    # but (nexus-galkv.6 fix 2, gate audit round 2) it no longer depends on
+    # *address* at all -- it is fixed-length -- so it never binds; the
+    # address's own effective cap is once again a function of the address's
+    # own limits alone. An oversized address is refused here, before any
+    # POST, the same as every other precondition this hook checks before
+    # touching the network.
     claimant = _drain_claimant(address)
     size_reason = (
         _sz.check_field_size("subspace", f"mailbox/{address}", _sz.MAX_SUBSPACE_BYTES)
@@ -839,7 +888,7 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
     # not be taken FAILS CLOSED: nothing is claimed from the address this
     # pass, so a later, unlocked interleaving with whoever holds the lock is
     # never possible in the first place.
-    with _pending_lock(config_dir, address) as acquired:
+    with _pending_lock(config_dir, address, deadline=deadline) as acquired:
         if not acquired:
             _log_skip(
                 f"mailbox/{address}: pending-file lock held by another drain "
