@@ -493,6 +493,8 @@ class _EndpointRegistrar:
         server tenants, and must not share a cache entry (nexus-dvgsf
         critic). A re-minted bearer changes the digest, which costs one
         idempotent re-registration per collection and never skips one."""
+        if not self._pinned():
+            return None
         base_url = getattr(self._store, "_base_url", None)
         tenant = getattr(self._store, "_tenant", None)
         if base_url is None or tenant is None:
@@ -500,9 +502,22 @@ class _EndpointRegistrar:
         token = getattr(self._store, "_token", None) or ""
         return (base_url, tenant, hashlib.sha256(token.encode()).hexdigest()[:16])
 
+    def _pinned(self) -> bool:
+        """True only for a store constructed with an explicit ``base_url``.
+
+        A store that resolved its endpoint from the environment writes to
+        the ambient engine, so it registers through the ambient writer and
+        the ambient cache partition, exactly as before nexus-w1ip. Routing
+        it through the scoped partition missed every ambient cache entry
+        and re-registered with re-derived fields, which an engine whose
+        profile differs from the derivation refuses (nexus-dvgsf: the
+        indexer's manifest write and the aspect queue failed in the
+        local-service gate's seam-B round trip)."""
+        return bool(getattr(self._store, "_base_url_pinned", False))
+
     def __call__(self) -> Any:
         base_url = getattr(self._store, "_base_url", None)
-        if base_url is None:
+        if base_url is None or not self._pinned():
             # No endpoint of its own to register against (see class
             # docstring) -- behave exactly as if no registrar had been
             # passed at all.

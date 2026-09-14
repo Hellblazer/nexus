@@ -35,6 +35,7 @@ from urllib.parse import urlparse
 
 import pytest
 
+import nexus.corpus as corpus
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.db.t2.http_aspect_queue import HttpAspectQueue
 from nexus.db.t2.http_chash_index import HttpChashIndex
@@ -259,8 +260,6 @@ def test_ambient_registration_first_does_not_short_circuit_the_stores_own_regist
     with fake_http_server(own_handler) as own_url, fake_http_server(ambient_handler) as ambient_url:
         _pin_ambient_env(monkeypatch, ambient_url)
 
-        import nexus.corpus as corpus
-
         # Pre-register target_name against the ambient engine (the
         # unscoped, name-only cache partition) -- simulating a different,
         # earlier, ambient-only caller in this same process.
@@ -279,6 +278,48 @@ def test_ambient_registration_first_does_not_short_circuit_the_stores_own_regist
             f"the store's own registrar must still be called for {target_name!r} even though "
             f"the ambient cache already marked it registered; got {own_handler.calls!r}"
         )
+
+
+@pytest.mark.parametrize("make_store, drive_write, target_name", _CASES)
+def test_an_ambient_resolved_store_uses_the_ambient_registration_cache(
+    make_store, drive_write, target_name, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A store built with no ``base_url`` resolves the ambient endpoint and
+    writes there, so it must use the ambient writer and the ambient cache
+    partition. The local-service gate's seam-B round trip registers its
+    collection with explicit fields and warms only the ambient cache; a
+    scoped lookup missed that entry and re-registered with re-derived
+    fields the engine refused (nexus-dvgsf). Here the ambient cache already
+    holds *target_name*, so the write must not register again anywhere."""
+    del make_store  # every store is built unpinned below
+    ambient_handler = _handler_subclass(AMBIENT_TOKEN)
+
+    with fake_http_server(ambient_handler) as ambient_url:
+        _pin_ambient_env(monkeypatch, ambient_url)
+
+        corpus._REGISTERED_COLLECTIONS.add(target_name)
+        store = _UNPINNED[drive_write]()
+        try:
+            drive_write(store)
+        finally:
+            store.close()
+
+    assert REGISTRATION_ROUTE not in ambient_handler.calls, (
+        f"an ambient-resolved store re-registered {target_name!r} past a warm ambient "
+        f"cache entry; got {ambient_handler.calls!r}"
+    )
+
+
+#: The same stores built with no endpoint of their own, keyed by driver.
+_UNPINNED = {
+    _drive_chash: HttpChashIndex,
+    _drive_aspect_queue: HttpAspectQueue,
+    _drive_document_aspects: HttpDocumentAspectsStore,
+    _drive_document_highlights: HttpDocumentHighlightsStore,
+    _drive_taxonomy: HttpTaxonomyStore,
+    _drive_taxonomy_persist_assignments: HttpTaxonomyStore,
+    _drive_catalog_write_manifest_many: HttpCatalogClient,
+}
 
 
 def _multi_bearer_handler(tokens: tuple[str, ...]) -> type[_RecordingHandler]:
