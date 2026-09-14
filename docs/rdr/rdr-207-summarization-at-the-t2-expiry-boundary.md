@@ -415,9 +415,11 @@ Liquibase, every reference schema-qualified):
   AND rolled_up_at IS NOT NULL`, returning the ids. There is no age horizon
   for unmarked rows; a horizon would reintroduce unlabelled destruction
   (Alternatives, below).
-- `restore(tenant, id)`: clears `quarantined_at` and sets `ttl_days` to
-  `NULL`. Restoring is a decision to keep the row, so it becomes permanent
-  rather than re-entering the same clock.
+- `restore(tenant, id)`: clears `quarantined_at`, clears `rolled_up_at`, and
+  sets `ttl_days` to `NULL`. Restoring is a decision to keep the row, so it
+  becomes permanent rather than re-entering the same clock, and it carries no
+  label from its earlier cycle: if it is ever given a TTL again and
+  re-quarantined, it must be summarized again before a reap can touch it.
 - `insertSummary(tenant, project, content, sourceIds, model, producedBy)`:
   in one transaction, inserts the summary row and sets `rolled_up_at = now()`
   on every source row. Refuses, writing nothing, if any source id does not
@@ -623,7 +625,10 @@ run in one test module against the engine substrate, in the default suite.
    both counts; the session-end message names quarantine.
 2. `nx memory reap|restore|list --quarantined|summaries`; `nx doctor` row.
 3. Contract tests in `tests/db/test_http_memory_store.py` and the MVV module
-   above; the CLI reference gains the verbs.
+   above; `tests/db/test_mvv_memory_service.py::TestMVVExpire::test_expire_ttl`
+   is rewritten to the quarantine semantics (it asserts the row is in
+   `deleted_ids` and gone after expire today); the CLI reference gains the
+   verbs.
 
 ### Phase 3: Rollup producer
 
@@ -659,8 +664,11 @@ None.
   **Verify**: exactly the marked id is deleted.
 - **Scenario**: insertSummary with one unknown source id — **Verify**: refused,
   no summary row, no mark on the known ids.
-- **Scenario**: restore — **Verify**: `quarantined_at` null, `ttl_days` null,
-  row readable.
+- **Scenario**: restore — **Verify**: `quarantined_at` null, `rolled_up_at`
+  null, `ttl_days` null, row readable.
+- **Scenario**: quarantine, rollup marks, restore, a put gives the row a new
+  TTL, expire re-quarantines it, reap — **Verify**: reap deletes nothing; the
+  row is quarantined and unmarked.
 - **Scenario**: old-client shape — **Verify**: a client reading only
   `deleted_ids` parses the new response (the existing contract test at
   `tests/db/test_http_memory_store.py:309` keeps passing unchanged).
@@ -766,3 +774,4 @@ rather than edited away for the reason stated in its revision note.
 | 2026-09-12 | Research Findings amended hours after filing: the full tenant sweep to permanent landed, so the "2,269 remain" measurement is now historical. Recorded rather than edited away — a record that quietly drops a number a reader would re-measure teaches them to distrust the rest of it, and the measurement is still the evidence for why the boundary needs deciding. Also corrected the RDR-131 characterisation: it is a 123-line never-researched stub whose design sections read "to be completed during research", not an existing specification of the `memory_summaries` shape, so candidate (a) requires that design to be WRITTEN rather than merely sequenced behind RDR-131. |
 | 2026-09-14 | Research Findings 1 and 2 added (T2 `207-research-1`, `207-research-2`): RDR-131 is abandoned, so candidate (a) must specify its own summaries shape; the wire change is assumed additive under (a) and verified non-additive under (b). Two stale facts corrected from those findings: RDR-131's status in the relationship table, and the session-end trigger line (`hooks.py:583`, not 440). |
 | 2026-09-14 | Sam's decision recorded: candidates (a) and (b) composed, (c) split out as RDR-209, do-nothing rejected. Gap headings, technical design, implementation plan, test plan, validation table and critical assumptions written. Finding 3 added (T2 `207-research-3`): the `ttl=30` omission default was reversed 2026-09-12 (nexus-473mx), and `quarantine` already names a T3 lifecycle state; the out-of-scope section and the superseded-measurements paragraph corrected accordingly. |
+| 2026-09-14 | Gate round 1 — BLOCKED (1 Critical, 1 Significant, 1 ship-blocker(s)); commit `abd90979f`; critique `nexus_rdr/207-gate-critique-2026-09-14`. |
