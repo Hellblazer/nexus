@@ -18,7 +18,9 @@ and Java JAR; they are excluded from the default unit suite.
 from __future__ import annotations
 
 import contextlib
+import inspect
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -2973,7 +2975,34 @@ class TestStopDoesNotWaitOnAnAlreadyDeadSupervisor:
         # equally never entered. Asserted directly rather than via a
         # wall-clock elapsed bound, which a loaded box can blow with no
         # regression present.
-        mock_sleep.assert_not_called()
+        #
+        # Filtered to calls above 0.05 s: process_state() shells out to ps,
+        # and CPython's Popen._wait reap loop sleeps with a backoff capped at
+        # 0.05 s while it waits for that child, which has nothing to do with
+        # the stop loop's own 0.1 s poll. The filter holds only while every
+        # stop_storage_service interval stays above the cap, so the source is
+        # checked too; an interval at or below it would hide a real poll.
+        ps_reap_sleep_cap_s = 0.05
+        intervals = [
+            float(v)
+            for v in re.findall(r"time\.sleep\(([0-9.]+)\)", inspect.getsource(stop_storage_service))
+        ]
+        assert intervals and min(intervals) > ps_reap_sleep_cap_s, (
+            f"stop_storage_service sleep intervals {intervals} must all exceed the "
+            f"{ps_reap_sleep_cap_s}s ps-reap cap this filter relies on"
+        )
+        real_polls = [
+            c for c in mock_sleep.call_args_list if c.args and c.args[0] > ps_reap_sleep_cap_s
+        ]
+        # At most one real poll, as in the rdr149 zombie test: pid_running()
+        # treats an UNKNOWN process_state() as running, and a ps snapshot can
+        # race the kernel's zombie-state settle under load, so a zombie can
+        # read as alive for exactly one tick. A loop that waited out the whole
+        # grace period would poll many times.
+        assert len(real_polls) <= 1, (
+            f"the stop loop kept polling a zombie supervisor: {real_polls} "
+            f"(all calls: {mock_sleep.call_args_list})"
+        )
         assert outcome.stubborn == (), (
             f"a corpse is not a stubborn survivor: {outcome}"
         )

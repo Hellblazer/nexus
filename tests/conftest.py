@@ -23,7 +23,10 @@ from nexus.db.t3 import T3Database
 # conftest.py (declaring it in a test module itself is a collection
 # error since pytest 5), so it is registered here rather than in that
 # test file.
-pytest_plugins = ["pytester"]
+# tests._posix_spawn routes this process's subprocess spawns onto posix_spawn
+# on macOS, where a fork child can die in Network.framework's atfork handler;
+# see that module's docstring.
+pytest_plugins = ["pytester", "tests._posix_spawn"]
 
 
 # NO _enable_t2_test_auto_migrate: the RDR-120 P3b auto-migrate default
