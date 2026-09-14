@@ -356,6 +356,40 @@ public final class PgContainerHelper {
     }
 
     /**
+     * Bootstrap a test-local "admin" role that OWNS {@code nexus.topic_assignments}
+     * (nexus-4a8pn case (f)) -- see {@code db.changelog-test-admin-role.xml}'s own
+     * header for the full rationale. Unlike {@link #bootstrapServiceRole}'s
+     * {@code svcRole} (DML-only, never an owner), this role can itself run
+     * {@code ALTER TABLE nexus.topic_assignments ... [NO] FORCE ROW LEVEL SECURITY}
+     * (a DDL statement PostgreSQL restricts to the table owner or a superuser),
+     * mirroring production's non-superuser {@code nexus_admin} migration identity.
+     *
+     * <p><b>ONLY call this against a {@link #startDedicated()} container</b> --
+     * table ownership is global schema state; see the changelog file's own header
+     * for why this cannot share a cluster with unrelated test classes.
+     *
+     * <p><b>Call AFTER {@link #applyProductSchema}</b>, same ordering contract as
+     * {@link #bootstrapServiceRole}.
+     *
+     * @param su        superuser connection (the grantor / current table owner)
+     * @param adminRole the test-local admin role name to create
+     * @param adminPass the password for {@code adminRole}
+     */
+    public static void bootstrapAdminRole(Connection su, String adminRole, String adminPass) throws Exception {
+        Database db = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(su));
+        Liquibase liquibase = new Liquibase(
+            "db/changelog-test/db.changelog-test-admin-role.xml", new ClassLoaderResourceAccessor(), db);
+        Map<String, Object> params = new HashMap<>();
+        params.put("adminRole", adminRole);
+        params.put("adminPass", adminPass);
+        for (var entry : params.entrySet()) {
+            liquibase.setChangeLogParameter(entry.getKey(), entry.getValue());
+        }
+        liquibase.update(new Contexts());
+        su.setAutoCommit(true);
+    }
+
+    /**
      * Seed one {@code nexus.service_tokens} row via generated jOOQ DSL (nexus-cbo4a
      * batch 1a) — replaces the hand-rolled {@code INSERT INTO nexus.service_tokens
      * (token_hash, tenant_id, label) VALUES (...) ON CONFLICT (token_hash) DO

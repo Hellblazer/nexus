@@ -148,6 +148,83 @@ class HttpUtilTest {
         assertThat(ex.status).isEqualTo(-1);
     }
 
+    // ── docCountPostureTripwireMessage: P0001 + "topics_doc_count_recount_" prefix ──
+
+    @Test
+    void docCountPostureTripwireMessage_directSqlException() {
+        String msg = "topics_doc_count_recount_del: nexus.tenant GUC (unset) does not cover "
+            + "tenant_id(s) {t1}";
+        assertThat(HttpUtil.docCountPostureTripwireMessage(new SQLException(msg, "P0001")))
+            .isEqualTo(msg);
+    }
+
+    @Test
+    void docCountPostureTripwireMessage_wrappedCause() {
+        String msg = "topics_doc_count_recount_ins: nexus.tenant GUC (t2) does not cover "
+            + "tenant_id(s) {t1}";
+        Throwable wrapped = new RuntimeException("jOOQ DataAccessException",
+            new SQLException(msg, "P0001"));
+        assertThat(HttpUtil.docCountPostureTripwireMessage(wrapped)).isEqualTo(msg);
+    }
+
+    @Test
+    void docCountPostureTripwireMessage_unrelatedP0001_returnsNull() {
+        // Same SQLSTATE (every plain RAISE EXCEPTION uses P0001 by default), but not
+        // this trigger's message -- must NOT be reclassified as the tripwire.
+        assertThat(HttpUtil.docCountPostureTripwireMessage(
+            new SQLException("some other RAISE EXCEPTION entirely", "P0001")))
+            .isNull();
+    }
+
+    @Test
+    void docCountPostureTripwireMessage_matchingPrefixWrongSqlState_returnsNull() {
+        assertThat(HttpUtil.docCountPostureTripwireMessage(
+            new SQLException("topics_doc_count_recount_ins: nexus.tenant GUC ...", "23505")))
+            .isNull();
+    }
+
+    // ── sendTypedDbError: the tripwire → 409 with detail, unaffected elsewhere ──
+
+    @Test
+    void sendTypedDbError_docCountPostureTripwire_maps409WithDetail() throws Exception {
+        CapturingExchange ex = new CapturingExchange();
+        String msg = "topics_doc_count_recount_del: nexus.tenant GUC (unset) does not cover "
+            + "tenant_id(s) {wpath-tenant} present in this DELETE on topic_assignments -- "
+            + "under FORCE ROW LEVEL SECURITY on nexus.topics this trigger's own UPDATE "
+            + "would be silently filtered to zero rows for those tenants, leaving doc_count "
+            + "stale (nexus-4a8pn case (f)). Remedy: set nexus.tenant for the writing "
+            + "session before this statement.";
+        Throwable wrapped = new RuntimeException("jOOQ DataAccessException",
+            new SQLException(msg, "P0001"));
+
+        boolean handled = HttpUtil.sendTypedDbError(ex, wrapped, log, "test_handler", "op=/x");
+
+        assertThat(handled)
+            .as("the posture tripwire must be claimed here, not fall through to the caller's 500")
+            .isTrue();
+        assertThat(ex.status).isEqualTo(409);
+        assertThat(ex.bodyString()).contains("\"sqlstate\":\"P0001\"");
+        assertThat(ex.bodyString())
+            .as("the PG message (which already names the tenant and the remedy) must reach"
+                + " the client as the body's detail, not only the server log")
+            .contains("nexus.tenant");
+    }
+
+    @Test
+    void sendTypedDbError_unrelatedP0001_fallsThroughFalse() throws Exception {
+        CapturingExchange ex = new CapturingExchange();
+        Throwable wrapped = new RuntimeException("jOOQ DataAccessException",
+            new SQLException("some unrelated business-logic RAISE EXCEPTION", "P0001"));
+
+        boolean handled = HttpUtil.sendTypedDbError(ex, wrapped, log, "test_handler", "op=/x");
+
+        assertThat(handled)
+            .as("an unrelated P0001 must keep the generic-500 policy -- only the"
+                + " doc_count posture tripwire's own message prefix is mapped")
+            .isFalse();
+        assertThat(ex.status).isEqualTo(-1);
+    }
+
     // ── minimal capturing HttpExchange (mirrors AspectHandlerEnqueueErrorTest) ─
 
     private static final class CapturingExchange extends HttpExchange {

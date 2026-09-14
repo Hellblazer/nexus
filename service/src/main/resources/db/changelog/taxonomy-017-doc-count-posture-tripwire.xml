@@ -1,0 +1,384 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+
+    <!--
+        nexus-4a8pn — the topics.doc_count triggers gain a POSTURE TRIPWIRE:
+        RAISE EXCEPTION instead of silently under-counting when the calling
+        session's nexus.tenant GUC does not cover every tenant_id the firing
+        statement just touched.
+
+        THE BUG THIS CLOSES (case (f), reproduced in-container 2026-09-14,
+        TopicsDocCountWritePathsTest#adminRoleDelete...). nexus.topics carries
+        FORCE ROW LEVEL SECURITY (taxonomy-001-baseline.xml:168-172), so this
+        trigger's own `UPDATE nexus.topics ...` is itself subject to the
+        `tenant_isolation` policy (`USING (tenant_id = current_setting(
+        'nexus.tenant', true))`) exactly like any other statement against that
+        table — SECURITY INVOKER means the trigger runs as whichever role
+        fired the INSERT/DELETE on topic_assignments, not as some privileged
+        identity. taxonomy-010-source-collection-backfill.xml (:273, :327)
+        and taxonomy-012-doc-id-chunk-fk.xml (:199) both toggle NO FORCE ROW
+        LEVEL SECURITY on topic_assignments/chunks for their one-shot
+        remediation DELETEs, but neither touches nexus.topics' own FORCE
+        posture, and neither sets nexus.tenant on the migration connection
+        (Liquibase never runs through TenantScope.withTenant). A DELETE
+        executed that way — as nexus_admin (owner, NOT BYPASSRLS), no GUC set
+        — fires this trigger, whose UPDATE then matches ZERO rows in
+        nexus.topics for every affected tenant: doc_count silently stays at
+        its pre-delete value while the real topic_assignments count drops.
+        Measured directly: reportedAfter stuck at 2, actualAfter 0. This is
+        the cloud's CONFIRMED over-count signature (large-magnitude,
+        over-count-only drift on a subset of topics) — the write-path fix in
+        this same bead (TaxonomyRepository's persistSplit/persistRebuildTopics/
+        persistDiscoveredTopics no longer seeding doc_count from a caller
+        spec) explains a DIFFERENT, narrower over-count class and does not by
+        itself explain this one.
+
+        WHY A TRIPWIRE, NOT SECURITY DEFINER (investigated and rejected, same
+        bead). SECURITY DEFINER only changes WHO the function executes as;
+        FORCE RLS would still apply to that owner unless the owner also
+        carries BYPASSRLS. nexus_admin (the real migration role) is created
+        NOSUPERUSER NOCREATEDB NOCREATEROLE with no BYPASSRLS
+        (src/nexus/db/pg_provision.py:1557-1559, confirmed explicitly at
+        :525: "a role that is neither superuser nor BYPASSRLS — e.g.
+        nexus_admin") and holds no membership in nexus_diag (the one
+        BYPASSRLS role), so a DEFINER function owned by nexus_admin would
+        stay exactly as subject to topics' FORCE RLS as today's INVOKER body
+        — it would fix nothing. The one way DEFINER-as-nexus_admin COULD
+        work — toggling nexus.topics' FORCE posture INSIDE the trigger, on
+        every firing, since nexus_admin genuinely owns topics — is unsafe:
+        ALTER TABLE ... [NO] FORCE ROW LEVEL SECURITY takes ACCESS EXCLUSIVE,
+        and doing that on this table's hot AFTER INSERT/DELETE STATEMENT
+        trigger would serialize every concurrent writer of topics/
+        topic_assignments, a regression worse than the lock-order deadlock
+        taxonomy-013-doc-count-lock-order.xml / taxonomy-015-doc-count-lock-
+        mode.xml exist to close. A correct SILENT fix (the trigger
+        self-supplying nexus.tenant per distinct tenant in the batch, via SET
+        LOCAL) needs real design review — SET LOCAL persists to the end of
+        the CALLING transaction, so a naive version would leak/overwrite
+        whatever nexus.tenant the caller's LATER statements in that same
+        transaction expect, a cross-tenant GUC hazard of its own. Per the
+        no-silent-fallbacks doctrine (feedback_engine_and_data_directives)
+        and Sam's directive to fix the bypass AT THE WRITE: refuse loud NOW,
+        design the silent self-correcting form LATER.
+
+        WHAT THE GUARD CHECKS, PRECISELY. Before anything else in the
+        function body — before the lock loop, before the batched recompute —
+        collect every DISTINCT tenant_id present in the transition table
+        (new_rows for the INSERT trigger, old_rows for the DELETE trigger)
+        that IS DISTINCT FROM current_setting('nexus.tenant', true). IS
+        DISTINCT FROM (not plain !=) is load-bearing: current_setting(...,
+        true) returns NULL when the GUC is entirely unset, and `tenant_id =
+        NULL` is never TRUE regardless of tenant_id's value — a plain != or =
+        comparison would silently miss the "GUC unset" case entirely (NULL
+        propagates through, satisfying neither branch), which is precisely
+        the shape case (f) reproduced. IS DISTINCT FROM correctly treats NULL
+        as a comparable value, so an unset GUC flags EVERY row's tenant_id as
+        a mismatch. If the resulting set is non-empty, RAISE EXCEPTION naming
+        the current GUC value (or "unset"), the offending tenant_id(s),
+        and the remedy: set nexus.tenant for the writing session before the
+        statement (once per tenant if the batch spans more than one), or call
+        nexus.topics_recount_doc_count(...) (taxonomy-016-doc-count-drift-
+        functions.xml) afterwards to correct it explicitly. A caller with
+        BYPASSRLS and NO GUC set is refused too, deliberately — BYPASSRLS
+        exempts a role from RLS filtering (so its own UPDATE would NOT have
+        silently under-matched), but the guard has no way to distinguish
+        "BYPASSRLS, would have been fine anyway" from "NOBYPASSRLS, about to
+        silently under-count" cheaply and correctly from inside the trigger,
+        and a caller relying on BYPASSRLS to skip setting nexus.tenant is
+        already violating the same operational discipline (every legitimate
+        write path — TenantScope.withTenant, every TaxonomyRepository method
+        — always sets the GUC regardless of role) that made the missing-GUC
+        case reachable in the first place. Set the GUC; it costs nothing on
+        the correct path and closes both failure classes at once.
+
+        A cascade-triggered DELETE (topic_assignments_chunk_fk's ON DELETE
+        CASCADE from nexus.chunks, taxonomy-012-doc-id-chunk-fk.xml) under
+        CORRECT posture (the deleting session's GUC set to the tenant whose
+        chunk is actually being removed) still PASSES this guard — old_rows'
+        tenant_id matches the GUC — and its subsequent UPDATE legitimately
+        matches ZERO rows in nexus.topics when the deleted assignment was a
+        topic's LAST one (COALESCE(c.cnt, 0) already handles that, unchanged
+        from taxonomy-015). The guard is on POSTURE (does the GUC cover the
+        rows this statement is about to touch), never on the UPDATE's own
+        row count — a correctly-scoped zero-row UPDATE is not an error.
+
+        SCOPE: two functions, one guard block each, inserted between BEGIN
+        and the pre-existing "Materialize the distinct (tenant_id, topic_id)
+        pairs" comment. Every other line — the pre-sorted array_agg, the
+        single-table PK-indexed FOR NO KEY UPDATE loop, the batched-aggregate
+        recompute — is taxonomy-015's body, byte-identical. Each rollback
+        restores taxonomy-015's forward body verbatim (no guard), following
+        that changeset's own verbatim-restore precedent.
+
+        NO DATA EFFECT: this changeset only redefines two trigger function
+        bodies via CREATE OR REPLACE FUNCTION; it issues no INSERT/UPDATE/
+        DELETE against any table and modifies zero rows.
+
+        Placed after tuples-004-clear-consumed-body.xml (current tail) and
+        before the grants-nexus-svc.xml runAlways block, matching the
+        established late-append convention (D0.1; see taxonomy-013's /
+        taxonomy-014's / taxonomy-015's / taxonomy-016's own include
+        comments for the identical reasoning). EXPECT_NEW_CHANGESETS=2.
+    -->
+
+    <changeSet id="taxonomy-017-1" author="nexus-4a8pn">
+        <comment>
+            nexus.topics_doc_count_recount_ins (INSERT trigger): POSTURE
+            TRIPWIRE — RAISE EXCEPTION when new_rows carries a tenant_id the
+            calling session's nexus.tenant GUC does not cover, instead of
+            letting FORCE ROW LEVEL SECURITY on nexus.topics silently filter
+            this function's own UPDATE to zero rows for that tenant (case
+            (f), nexus-4a8pn). Body is taxonomy-015-1's verbatim plus this
+            one guard block, inserted before the pre-existing "Materialize"
+            step — see this changeset's own header for the full derivation.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.topics_doc_count_recount_ins()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_tenant_ids  TEXT[];
+    v_topic_ids   BIGINT[];
+    v_i           INT;
+    v_bad_tenants TEXT[];
+BEGIN
+    -- nexus-4a8pn taxonomy-017: POSTURE TRIPWIRE. See this changeset's own
+    -- header for the full derivation (case (f), measured 2026-09-14 -- the
+    -- cloud's confirmed over-count signature). Under FORCE ROW LEVEL
+    -- SECURITY on nexus.topics, this function's own UPDATE below is
+    -- filtered by the CALLING session's nexus.tenant GUC -- a caller whose
+    -- GUC does not cover every tenant_id this INSERT just landed would
+    -- leave doc_count silently stale. Refuse LOUD instead of recomputing
+    -- wrong. IS DISTINCT FROM (not plain !=) is load-bearing: an entirely
+    -- UNSET GUC makes current_setting(...,true) return NULL, and NULL =
+    -- anything is never TRUE -- IS DISTINCT FROM correctly treats NULL as a
+    -- comparable value, so an unset GUC flags every row as a mismatch too.
+    SELECT array_agg(DISTINCT tenant_id ORDER BY tenant_id)
+      INTO v_bad_tenants
+      FROM new_rows
+     WHERE tenant_id IS DISTINCT FROM current_setting('nexus.tenant', true);
+    IF v_bad_tenants IS NOT NULL THEN
+        RAISE EXCEPTION
+            'topics_doc_count_recount_ins: nexus.tenant GUC (%) does not cover tenant_id(s) % '
+            'present in this INSERT on topic_assignments -- under FORCE ROW LEVEL SECURITY on '
+            'nexus.topics this trigger''s own UPDATE would be silently filtered to zero rows '
+            'for those tenants, leaving doc_count stale (nexus-4a8pn case (f)). Remedy: set '
+            'nexus.tenant for the writing session before this statement -- once per tenant if '
+            'the batch spans more than one -- or call nexus.topics_recount_doc_count(...) '
+            'afterwards to correct it explicitly. A caller with BYPASSRLS and no GUC set is '
+            'refused for the same reason: set nexus.tenant regardless of role privilege.',
+            COALESCE(current_setting('nexus.tenant', true), '&lt;unset&gt;'), v_bad_tenants;
+    END IF;
+
+    -- Materialize the distinct (tenant_id, topic_id) pairs FIRST, PRE-SORTED
+    -- (ORDER BY inside array_agg itself — deterministic regardless of
+    -- new_rows' own row order), in a statement carrying NO locking clause.
+    SELECT array_agg(tenant_id ORDER BY tenant_id, topic_id),
+           array_agg(topic_id  ORDER BY tenant_id, topic_id)
+      INTO v_tenant_ids, v_topic_ids
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM new_rows) d;
+
+    -- (1) CORRECTNESS: acquire every affected topics row lock up front, ONE
+    -- ROW AT A TIME via a single-table, PK-indexed, join-free `FOR UPDATE`
+    -- — see the IMPLEMENTATION NOTE above for why a JOIN-based `ORDER BY
+    -- ... FOR UPDATE` does NOT reliably serialize this (PostgreSQL's
+    -- LockRows node locks in JOIN order, not sorted order, once a join is
+    -- involved). Iterating the PRE-SORTED arrays above one indexed
+    -- single-row lock at a time is what actually guarantees every
+    -- concurrent invocation acquires the shared topics in the same
+    -- relative order.
+    FOR v_i IN 1 .. COALESCE(array_length(v_topic_ids, 1), 0) LOOP
+        PERFORM 1 FROM nexus.topics
+         WHERE tenant_id = v_tenant_ids[v_i] AND id = v_topic_ids[v_i]
+           FOR NO KEY UPDATE;
+    END LOOP;
+
+    -- (2) PROBABILITY: recompute doc_count for every affected topic via ONE
+    -- batched GROUP BY aggregate (not a per-row correlated subquery
+    -- re-evaluated once per topics row), narrowing the window the
+    -- just-acquired locks above sit held while the scan work happens.
+    UPDATE nexus.topics t
+       SET doc_count = c.cnt
+      FROM (
+          SELECT ta.tenant_id, ta.topic_id, COUNT(*) AS cnt
+            FROM nexus.topic_assignments ta
+            JOIN (SELECT DISTINCT tenant_id, topic_id FROM new_rows) a
+              ON a.tenant_id = ta.tenant_id AND a.topic_id = ta.topic_id
+           GROUP BY ta.tenant_id, ta.topic_id
+      ) c
+     WHERE t.tenant_id = c.tenant_id AND t.id = c.topic_id;
+    RETURN NULL;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <!-- Restores taxonomy-015-1's body verbatim (no posture tripwire). -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.topics_doc_count_recount_ins()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_tenant_ids TEXT[];
+    v_topic_ids  BIGINT[];
+    v_i          INT;
+BEGIN
+    SELECT array_agg(tenant_id ORDER BY tenant_id, topic_id),
+           array_agg(topic_id  ORDER BY tenant_id, topic_id)
+      INTO v_tenant_ids, v_topic_ids
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM new_rows) d;
+
+    FOR v_i IN 1 .. COALESCE(array_length(v_topic_ids, 1), 0) LOOP
+        PERFORM 1 FROM nexus.topics
+         WHERE tenant_id = v_tenant_ids[v_i] AND id = v_topic_ids[v_i]
+           FOR NO KEY UPDATE;
+    END LOOP;
+
+    UPDATE nexus.topics t
+       SET doc_count = c.cnt
+      FROM (
+          SELECT ta.tenant_id, ta.topic_id, COUNT(*) AS cnt
+            FROM nexus.topic_assignments ta
+            JOIN (SELECT DISTINCT tenant_id, topic_id FROM new_rows) a
+              ON a.tenant_id = ta.tenant_id AND a.topic_id = ta.topic_id
+           GROUP BY ta.tenant_id, ta.topic_id
+      ) c
+     WHERE t.tenant_id = c.tenant_id AND t.id = c.topic_id;
+    RETURN NULL;
+END;
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="taxonomy-017-2" author="nexus-4a8pn">
+        <comment>
+            nexus.topics_doc_count_recount_del (DELETE trigger): POSTURE
+            TRIPWIRE — same guard as taxonomy-017-1, scoped to old_rows. A
+            cascade-triggered DELETE (topic_assignments_chunk_fk's ON DELETE
+            CASCADE) under CORRECT posture still passes this guard and its
+            UPDATE legitimately matches zero rows for a topic whose last
+            assignment was just removed — the guard is on posture, not on
+            the UPDATE's row count. Body is taxonomy-015-2's verbatim plus
+            this one guard block.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.topics_doc_count_recount_del()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_tenant_ids  TEXT[];
+    v_topic_ids   BIGINT[];
+    v_i           INT;
+    v_bad_tenants TEXT[];
+BEGIN
+    -- nexus-4a8pn taxonomy-017: POSTURE TRIPWIRE -- see
+    -- topics_doc_count_recount_ins's identical guard / this changeset's own
+    -- header for the full derivation. A DELETE-driven cascade under CORRECT
+    -- posture (the GUC set to the tenant whose rows are actually being
+    -- deleted) still passes this guard, and its UPDATE below legitimately
+    -- matches zero rows for a topic whose last assignment was just removed
+    -- -- the guard is on POSTURE, never on the UPDATE's row count.
+    SELECT array_agg(DISTINCT tenant_id ORDER BY tenant_id)
+      INTO v_bad_tenants
+      FROM old_rows
+     WHERE tenant_id IS DISTINCT FROM current_setting('nexus.tenant', true);
+    IF v_bad_tenants IS NOT NULL THEN
+        RAISE EXCEPTION
+            'topics_doc_count_recount_del: nexus.tenant GUC (%) does not cover tenant_id(s) % '
+            'present in this DELETE on topic_assignments -- under FORCE ROW LEVEL SECURITY on '
+            'nexus.topics this trigger''s own UPDATE would be silently filtered to zero rows '
+            'for those tenants, leaving doc_count stale (nexus-4a8pn case (f)). Remedy: set '
+            'nexus.tenant for the writing session before this statement -- once per tenant if '
+            'the batch spans more than one -- or call nexus.topics_recount_doc_count(...) '
+            'afterwards to correct it explicitly. A caller with BYPASSRLS and no GUC set is '
+            'refused for the same reason: set nexus.tenant regardless of role privilege.',
+            COALESCE(current_setting('nexus.tenant', true), '&lt;unset&gt;'), v_bad_tenants;
+    END IF;
+
+    -- Materialize the distinct (tenant_id, topic_id) pairs FIRST, PRE-SORTED
+    -- — same reasoning as the INSERT-path function above.
+    SELECT array_agg(tenant_id ORDER BY tenant_id, topic_id),
+           array_agg(topic_id  ORDER BY tenant_id, topic_id)
+      INTO v_tenant_ids, v_topic_ids
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM old_rows) d;
+
+    -- (1) CORRECTNESS: same single-row, join-free, PK-indexed lock loop as
+    -- the INSERT-path function above (see its IMPLEMENTATION NOTE).
+    FOR v_i IN 1 .. COALESCE(array_length(v_topic_ids, 1), 0) LOOP
+        PERFORM 1 FROM nexus.topics
+         WHERE tenant_id = v_tenant_ids[v_i] AND id = v_topic_ids[v_i]
+           FOR NO KEY UPDATE;
+    END LOOP;
+
+    -- (2) PROBABILITY: single batched-aggregate recompute, LEFT JOINed so a
+    -- topic whose LAST assignment was just deleted (zero remaining rows,
+    -- absent from the aggregate's GROUP BY) still resets to 0 rather than
+    -- being skipped.
+    UPDATE nexus.topics t
+       SET doc_count = COALESCE(c.cnt, 0)
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM old_rows) a
+      LEFT JOIN (
+          SELECT ta.tenant_id, ta.topic_id, COUNT(*) AS cnt
+            FROM nexus.topic_assignments ta
+            JOIN (SELECT DISTINCT tenant_id, topic_id FROM old_rows) a2
+              ON a2.tenant_id = ta.tenant_id AND a2.topic_id = ta.topic_id
+           GROUP BY ta.tenant_id, ta.topic_id
+      ) c ON c.tenant_id = a.tenant_id AND c.topic_id = a.topic_id
+     WHERE t.tenant_id = a.tenant_id AND t.id = a.topic_id;
+    RETURN NULL;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <!-- Restores taxonomy-015-2's body verbatim (no posture tripwire). -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.topics_doc_count_recount_del()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_tenant_ids TEXT[];
+    v_topic_ids  BIGINT[];
+    v_i          INT;
+BEGIN
+    SELECT array_agg(tenant_id ORDER BY tenant_id, topic_id),
+           array_agg(topic_id  ORDER BY tenant_id, topic_id)
+      INTO v_tenant_ids, v_topic_ids
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM old_rows) d;
+
+    FOR v_i IN 1 .. COALESCE(array_length(v_topic_ids, 1), 0) LOOP
+        PERFORM 1 FROM nexus.topics
+         WHERE tenant_id = v_tenant_ids[v_i] AND id = v_topic_ids[v_i]
+           FOR NO KEY UPDATE;
+    END LOOP;
+
+    UPDATE nexus.topics t
+       SET doc_count = COALESCE(c.cnt, 0)
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM old_rows) a
+      LEFT JOIN (
+          SELECT ta.tenant_id, ta.topic_id, COUNT(*) AS cnt
+            FROM nexus.topic_assignments ta
+            JOIN (SELECT DISTINCT tenant_id, topic_id FROM old_rows) a2
+              ON a2.tenant_id = ta.tenant_id AND a2.topic_id = ta.topic_id
+           GROUP BY ta.tenant_id, ta.topic_id
+      ) c ON c.tenant_id = a.tenant_id AND c.topic_id = a.topic_id
+     WHERE t.tenant_id = a.tenant_id AND t.id = a.topic_id;
+    RETURN NULL;
+END;
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
