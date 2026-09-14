@@ -9,7 +9,7 @@ historical patterns beyond any single project's post-mortem corpus.
 ## How to file
 
 1. Copy this template into a new T2 entry:
-   `mcp__plugin_conexus_nexus__memory_put(project="rdr_process", title="<project>-incident-<slug>", ttl=0, tags="rdr-audit,incident,<project>,<drift_class>", content=<filled-in template>)`
+   `mcp__plugin_conexus_nexus__memory_put(project="rdr_process", title="<project>-incident-<slug>", tags="rdr-audit,incident,<project>,<drift_class>", content=<filled-in template>)` — omit `ttl`; these filings are permanent by default.
 
 2. Title convention: `<project>-incident-<short-slug>` where slug is a stable
    handle for the incident (e.g. `art-incident-073-dialog-grounding-dropped`).
@@ -34,7 +34,7 @@ scope delivered but the artifact shipped with a material subset missing.
 - Generic bugs caught in review/testing with no scope gap.
 - Process friction that did not result in a delivery gap.
 
-See `conexus/skills/rdr-audit/SKILL.md` for the failure-mode definition and
+See `conexus/skills/rdr-audit-checklist/SKILL.md` for the failure-mode definition and
 sub-pattern taxonomy (unwiring / dim-mismatch / deferred-integration / other).
 -->
 

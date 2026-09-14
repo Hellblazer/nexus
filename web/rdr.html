@@ -243,7 +243,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <div class="see">You might say</div>
 <div class="cmd"><pre>Research how <span class="ph">&lt;THE THING THE DECISION DEPENDS ON&gt;</span> actually behaves. Check our code, our knowledge store, and the outside sources. Add what you find to RDR <span class="ph">&lt;NUMBER&gt;</span>.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
-<p>Claude starts the research agent (<a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/research/SKILL.md"><code>/conexus:research</code></a>). The agent searches the knowledge store first, because an earlier RDR may already answer the question. Then it searches the code, then the web. When it finishes, Claude adds each finding to the RDR with <code>/conexus:rdr-research add</code>. Each finding has a tag:</p>
+<p>Claude starts the research agent (<a href="https://github.com/Hellblazer/nexus/blob/main/conexus/commands/research.md"><code>/conexus:research</code></a>). The agent searches the knowledge store first, because an earlier RDR may already answer the question. Then it searches the code, then the web. When it finishes, Claude adds each finding to the RDR with <code>/conexus:rdr-research add</code>. Each finding has a tag:</p>
 <div class="tbl"><table>
 <tr><th>Tag</th><th>Meaning</th></tr>
 <tr><td>Verified</td><td>Confirmed by reading the code, or by a small program that was run.</td></tr>
@@ -317,10 +317,10 @@ ol.plain li,ul.plain li{margin:3px 0}
 <div class="see">You might say</div>
 <div class="cmd"><pre>Run the gate on RDR <span class="ph">&lt;NUMBER&gt;</span>. Budget: two rounds.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
-<p>Claude runs <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-gate/SKILL.md"><code>/conexus:rdr-gate</code></a>. It makes three checks: the structure (are the required sections present and consistent), the assumptions (is every Critical Assumption verified or clearly accepted), and a critique by an independent agent. The result is PASSED, or BLOCKED with findings marked Critical, Significant, or Minor. Claude shows you the findings before it fixes anything.</p>
+<p>Claude runs <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-gate-checklist/SKILL.md"><code>/conexus:rdr-gate</code></a>. It makes three checks: the structure (are the required sections present and consistent), the assumptions (is every Critical Assumption verified or clearly accepted), and a critique by an independent agent. The result is PASSED, or BLOCKED with findings marked Critical, Significant, or Minor. Claude shows you the findings before it fixes anything.</p>
 
 <h3>Fixing what it finds</h3>
-<p>Claude runs <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-fix/SKILL.md"><code>/conexus:rdr-fix</code></a>. It shows each finding with its place in the document, and then fixes them. Two rules apply. You will see Claude follow them:</p>
+<p>Claude runs <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-fix-checklist/SKILL.md"><code>/conexus:rdr-fix</code></a>. It shows each finding with its place in the document, and then fixes them. Two rules apply. You will see Claude follow them:</p>
 <ul class="plain">
 <li>A fix changes a fact, not one sentence. If a number was wrong, every place where that number appears changes, including memory.</li>
 <li>A fix adds no new explanation. New text is where the findings of the next round come from. A fact that needs support goes into a research finding first. The RDR sentence is then copied from that finding.</li>
@@ -336,8 +336,8 @@ ol.plain li,ul.plain li{margin:3px 0}
 <p>Claude reports PASSED and the residuals, if there are any. If Claude fixed Significant findings during the pass, it stops and shows you the fixes before anything else. Read them. Then go to <a href="#l6">lesson 6</a>.</p>
 
 <div class="further"><h4>Investigate further</h4><ul>
-<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-gate/SKILL.md">The gate skill</a>: the three checks in detail.</li>
-<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-fix/SKILL.md">The fix skill</a>: the fix rules, and why a fix commit adds no new text.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-gate-checklist/SKILL.md">The gate skill</a>: the three checks in detail.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-fix-checklist/SKILL.md">The fix skill</a>: the fix rules, and why a fix commit adds no new text.</li>
 </ul></div>
 </section>
 
@@ -350,7 +350,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <div class="see">You might say</div>
 <div class="cmd"><pre>Accept RDR <span class="ph">&lt;NUMBER&gt;</span>.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
-<p>Claude runs <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-accept/SKILL.md"><code>/conexus:rdr-accept</code></a>. The status becomes <code>accepted</code>, and memory records it. Then, because the RDR has an Implementation Plan, Claude asks one question: build the tasks now? The default is yes. Say yes, and the rest happens without more input from you, in this order:</p>
+<p>Claude runs <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/rdr-accept-checklist/SKILL.md"><code>/conexus:rdr-accept</code></a>. The status becomes <code>accepted</code>, and memory records it. Then, because the RDR has an Implementation Plan, Claude asks one question: build the tasks now? The default is yes. Say yes, and the rest happens without more input from you, in this order:</p>
 <ol class="plain">
 <li>The planner agent turns each phase of the Implementation Plan into tasks in the <code>bd</code> task tracker. The tasks have dependencies between them, and all of them belong to one epic that names the RDR.</li>
 <li>The plan audit checks those tasks against the code as it is today: do the files exist, is the order possible, does the plan assume anything that the code contradicts.</li>

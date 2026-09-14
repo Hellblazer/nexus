@@ -2738,12 +2738,27 @@ class TestUpsertChunksPaging:
 
 class _StubDataTokenManager:
     """Deterministic stand-in for DataTokenManager -- avoids touching the
-    real credential/config machinery at this transport-boundary level."""
+    real credential/config machinery at this transport-boundary level.
+
+    nexus-umue1: extended with the 401 single-flight+futility guard's
+    surface (``invalidate_if_current`` / ``mark_remint_futile`` /
+    ``clear_remint_futile`` / ``is_remint_futile`` / ``is_configured``) so
+    this stub can stand in for tests exercising that guard's DECISION
+    logic without a real manager/cache. ``invalidate_if_current_result``
+    controls what ``invalidate_if_current`` returns absent an explicit
+    futile mark -- a test forcing the "sibling already re-minted" or
+    "nothing cached" branch sets it to ``False``.
+    """
 
     def __init__(self, token: str | None) -> None:
         self._token = token
         self.bearer_for_calls: list[tuple[str, str]] = []
         self.invalidate_calls: list[tuple[str, str]] = []
+        self.invalidate_if_current_calls: list[tuple[str, str, str]] = []
+        self.mark_remint_futile_calls: list[tuple[str, str]] = []
+        self.clear_remint_futile_calls: list[tuple[str, str]] = []
+        self.invalidate_if_current_result: bool = True
+        self._futile: set[tuple[str, str]] = set()
 
     def bearer_for(self, base_url: str, tenant: str) -> str | None:
         self.bearer_for_calls.append((base_url, tenant))
@@ -2752,9 +2767,31 @@ class _StubDataTokenManager:
     def invalidate(self, base_url: str, tenant: str) -> None:
         self.invalidate_calls.append((base_url, tenant))
 
+    def is_configured(self) -> bool:
+        return self._token is not None
+
+    def invalidate_if_current(self, base_url: str, tenant: str, sent_token: str) -> bool:
+        self.invalidate_if_current_calls.append((base_url, tenant, sent_token))
+        if (base_url, tenant) in self._futile:
+            return False
+        return self.invalidate_if_current_result
+
+    def mark_remint_futile(self, base_url: str, tenant: str) -> None:
+        self.mark_remint_futile_calls.append((base_url, tenant))
+        self._futile.add((base_url, tenant))
+
+    def clear_remint_futile(self, base_url: str, tenant: str) -> None:
+        self.clear_remint_futile_calls.append((base_url, tenant))
+        self._futile.discard((base_url, tenant))
+
+    def is_remint_futile(self, base_url: str, tenant: str) -> bool:
+        return (base_url, tenant) in self._futile
+
 
 class _FakeHttpResponse:
-    def __init__(self, body: dict, headers: dict[str, str] | None = None) -> None:
+    def __init__(
+        self, body: dict, headers: dict[str, str] | None = None, *, status: int = 200,
+    ) -> None:
         import json as _json
         self._raw = _json.dumps(body).encode()
         # nexus-ft04v.26 item 5: real urllib responses carry an
@@ -2764,6 +2801,10 @@ class _FakeHttpResponse:
         # headers at all (the common case) -- a bare dict already satisfies
         # that contract.
         self.headers: dict[str, str] = headers or {}
+        # nexus-umue1: real urllib responses carry .status (and the .code
+        # alias) -- _request_once's success path now reads it to clear the
+        # DataTokenManager futility flag on any non-401 response.
+        self.status = status
 
     def read(self) -> bytes:
         return self._raw
@@ -2823,7 +2864,16 @@ class TestDataTokenResolutionSeamRequestOnce:
         """_request's existing re-resolve-and-retry-once path (nexus-pebfx.1)
         must ALSO drop the DataTokenManager's cached entry for the endpoint
         the failed request used, so the retry actually re-mints instead of
-        replaying the same rejected token."""
+        replaying the same rejected token.
+
+        nexus-umue1: since this 401 is single-flight+futility guarded now,
+        the mechanism is ``invalidate_if_current`` (compare-and-invalidate
+        on the exact sent bearer), not the plain unconditional
+        ``invalidate`` -- see TestRemintSingleFlightT3 below for the guard's
+        own dedicated coverage. This test still pins the ORIGINAL claim
+        (a 401 retry re-mints, not replays the stale token) through the
+        new mechanism.
+        """
         import urllib.error
         import nexus.db.http_vector_client as hv
 
@@ -2849,7 +2899,587 @@ class TestDataTokenResolutionSeamRequestOnce:
 
         assert result == {"ok": True}
         assert len(calls) == 2
+        assert stub.invalidate_calls == [], "the guarded 401 path must not call the plain unconditional invalidate"
+        assert len(stub.invalidate_if_current_calls) == 1
+        assert stub.invalidate_if_current_calls[0][:2] == ("http://svc", "acme")
+
+    def test_connection_refused_keeps_the_unconditional_invalidate(self, monkeypatch) -> None:
+        """nexus-umue1: the single-flight+futility guard applies ONLY to
+        the 401 case -- a connection-class error keeps the pre-existing
+        unconditional ``invalidate()`` untouched, never
+        ``invalidate_if_current``."""
+        import nexus.db.http_vector_client as hv
+
+        monkeypatch.setattr(hv, "_resolve_endpoint", lambda: ("http://svc", "static-tok"))
+        stub = _StubDataTokenManager("minted-data-tok")
+        monkeypatch.setattr("nexus.db.data_token.get_data_token_manager", lambda: stub)
+        monkeypatch.setattr(hv, "_invalidate_endpoint", lambda: None)
+        monkeypatch.setattr(hv, "_wait_for_lease_republication", lambda: None)
+
+        calls: list[int] = []
+
+        def fake_once(method, path, *, tenant, timeout, body):
+            calls.append(1)
+            if len(calls) == 1:
+                raise ConnectionRefusedError("refused")
+            return {"ok": True}
+
+        monkeypatch.setattr(hv, "_request_once", fake_once)
+
+        result = hv._request("GET", "/v1/x", tenant="acme", timeout=10, body=None)
+
+        assert result == {"ok": True}
         assert stub.invalidate_calls == [("http://svc", "acme")]
+        assert stub.invalidate_if_current_calls == []
+        assert stub.mark_remint_futile_calls == []
+
+    def test_unconfigured_never_touches_the_guard_surface(self, monkeypatch) -> None:
+        """No mint_token configured (``bearer_for`` returns ``None``) --
+        the guard must never engage; a persistent 401 falls back to the
+        plain unconditional ``invalidate()`` exactly as before nexus-umue1
+        (byte-identical behavior for an unconfigured install)."""
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+
+        monkeypatch.setattr(hv, "_resolve_endpoint", lambda: ("http://svc", "static-tok"))
+        stub = _StubDataTokenManager(None)  # unconfigured
+        monkeypatch.setattr("nexus.db.data_token.get_data_token_manager", lambda: stub)
+        monkeypatch.setattr(hv, "_invalidate_endpoint", lambda: None)
+        monkeypatch.setattr(hv, "_wait_for_lease_republication", lambda: None)
+
+        def fake_once(method, path, *, tenant, timeout, body):
+            raise urllib.error.HTTPError(
+                url="http://svc/v1/x", code=401, msg="unauthorized", hdrs={}, fp=None,
+            )
+
+        monkeypatch.setattr(hv, "_request_once", fake_once)
+
+        with pytest.raises(urllib.error.HTTPError):
+            hv._request("GET", "/v1/x", tenant="acme", timeout=10, body=None)
+
+        assert stub.invalidate_calls == [("http://svc", "acme")]
+        assert stub.invalidate_if_current_calls == []
+        assert stub.mark_remint_futile_calls == []
+
+    def test_still_401_after_remint_marks_futile(self, monkeypatch) -> None:
+        """The retry-still-401s case: ``invalidate_if_current`` reported a
+        genuine re-mint (``True``) and the retry STILL 401'd -- the key
+        must be marked futile.
+
+        Mutation check: removing the
+        ``if manager is not None and reminted and retry_exc.code == 401``
+        guard in ``_request``'s except block (calling
+        ``mark_remint_futile`` unconditionally, or never) makes this
+        test fail while test_skipped_sibling_remint_never_marks_futile
+        below keeps passing -- the two conditions are independent.
+        """
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+
+        monkeypatch.setattr(hv, "_resolve_endpoint", lambda: ("http://svc", "static-tok"))
+        stub = _StubDataTokenManager("minted-data-tok")
+        stub.invalidate_if_current_result = True
+        monkeypatch.setattr("nexus.db.data_token.get_data_token_manager", lambda: stub)
+        monkeypatch.setattr(hv, "_invalidate_endpoint", lambda: None)
+        monkeypatch.setattr(hv, "_wait_for_lease_republication", lambda: None)
+
+        def fake_once(method, path, *, tenant, timeout, body):
+            raise urllib.error.HTTPError(
+                url="http://svc/v1/x", code=401, msg="unauthorized", hdrs={}, fp=None,
+            )
+
+        monkeypatch.setattr(hv, "_request_once", fake_once)
+
+        with pytest.raises(urllib.error.HTTPError):
+            hv._request("GET", "/v1/x", tenant="acme", timeout=10, body=None)
+
+        assert stub.mark_remint_futile_calls == [("http://svc", "acme")]
+
+    def test_skipped_sibling_remint_never_marks_futile(self, monkeypatch) -> None:
+        """When ``invalidate_if_current`` reports ``False`` (a sibling
+        already re-minted, or the key is already futile), THIS caller's
+        still-401 retry must NOT mark the key futile a second time --
+        only the caller that actually performed the invalidate does."""
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+
+        monkeypatch.setattr(hv, "_resolve_endpoint", lambda: ("http://svc", "static-tok"))
+        stub = _StubDataTokenManager("minted-data-tok")
+        stub.invalidate_if_current_result = False
+        monkeypatch.setattr("nexus.db.data_token.get_data_token_manager", lambda: stub)
+        monkeypatch.setattr(hv, "_invalidate_endpoint", lambda: None)
+        monkeypatch.setattr(hv, "_wait_for_lease_republication", lambda: None)
+
+        def fake_once(method, path, *, tenant, timeout, body):
+            raise urllib.error.HTTPError(
+                url="http://svc/v1/x", code=401, msg="unauthorized", hdrs={}, fp=None,
+            )
+
+        monkeypatch.setattr(hv, "_request_once", fake_once)
+
+        with pytest.raises(urllib.error.HTTPError):
+            hv._request("GET", "/v1/x", tenant="acme", timeout=10, body=None)
+
+        assert stub.mark_remint_futile_calls == []
+
+
+# ── nexus-umue1: the 401 data-token re-mint is single-flighted + bounded ────
+# (prophylactic port of nexus-r0d37 defect 2's T1 guard, T3 half). Unlike the
+# stub-based sequencing tests above, these drive a REAL DataTokenManager
+# singleton (env-configured mint_token) and a REAL local HTTP fake service
+# through the ACTUAL urllib transport, and count real mint round trips --
+# mirroring tests/db/test_refreshable_client.py::TestRemintSingleFlight's
+# measured (not reasoned about) approach, T3-side.
+
+
+import json as _umue1_json  # noqa: E402 — grouped with this section's own fake-server helpers, not module imports
+import socket as _umue1_socket  # noqa: E402
+import threading as _umue1_threading  # noqa: E402
+from http.server import BaseHTTPRequestHandler as _Umue1Handler  # noqa: E402
+from http.server import HTTPServer as _Umue1HTTPServer  # noqa: E402
+from http.server import ThreadingHTTPServer as _Umue1ThreadingHTTPServer  # noqa: E402
+
+class _FakeMonotonicClock:
+    """Injectable stand-in for ``DataTokenManager``'s ``clock`` kwarg
+    (nexus-umue1 review round 2, Sam's decision on futility expiry) --
+    lets a test advance the futility window deterministically instead of
+    a real ``time.sleep(60)``. File-local per this repo's test-helper
+    convention (mirrors the identically-shaped ``_FakeClock`` in
+    tests/db/test_data_token.py and tests/db/test_refreshable_client.py).
+    """
+
+    def __init__(self, start: float = 1_000_000.0) -> None:
+        self._now = start
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
+_T3_MINT_CREDENTIAL = "t3-test-mint-credential"
+_T3_MINT_CALLS = 0
+#: When True, GET /v1/x (any bearer) succeeds instead of 401ing -- lets
+#: test_futility_clears_once_a_call_stops_returning_401 toggle the server's
+#: behavior mid-test without patching the handler class itself.
+_T3_ECHO_HEALED = False
+#: nexus-umue1 (Sam's decision, review round 2): when set to a SPECIFIC
+#: token, GET /v1/x 401s a request carrying exactly that token even when
+#: _T3_ECHO_HEALED is True -- models "this particular token was revoked"
+#: independent of "the server is generally healthy again", which
+#: _T3_ECHO_HEALED alone cannot express (it heals EVERY token, including
+#: the one that should stay revoked). None (reset-per-test default) is a
+#: no-op for every other test.
+_T3_REJECT_TOKEN: str | None = None
+
+#: nexus-hddw2: set (only) by test_concurrent_401s_remint_bounded before it
+#: starts its threads. When armed, _T3AlwaysUnauthorizedHandler.do_GET
+#: holds a request carrying EXACTLY this bearer at
+#: ``_T3_ARRIVAL_GATE.wait()`` before 401ing it -- see _T3ArrivalGate
+#: below. None (the reset-per-test default) is a no-op for every other
+#: test in this section.
+_T3_ARRIVAL_GATE: "_T3ArrivalGate | None" = None
+_T3_ARRIVAL_GATE_BEARER: str | None = None
+
+
+def _t3_reset_fake_state() -> None:
+    global _T3_MINT_CALLS, _T3_ECHO_HEALED, _T3_REJECT_TOKEN
+    global _T3_ARRIVAL_GATE, _T3_ARRIVAL_GATE_BEARER
+    _T3_MINT_CALLS = 0
+    _T3_ECHO_HEALED = False
+    _T3_REJECT_TOKEN = None
+    _T3_ARRIVAL_GATE = None
+    _T3_ARRIVAL_GATE_BEARER = None
+
+
+class _T3ArrivalGate:
+    """nexus-hddw2: server-side rendezvous so N concurrent callers are
+    concurrent BY CONSTRUCTION -- see the byte-for-byte identical
+    ``_ArrivalGate`` in tests/db/test_refreshable_client.py (T2 half of
+    this same bead) for the full rationale, including why this is a
+    "release the first N, pass the rest" gate rather than a strict
+    ``threading.Barrier(n)`` (a legitimate (N+1)th arrival carrying the
+    same bearer -- a retry whose own ``bearer_for()`` call lands before
+    the winner's re-mint publishes a fresh token -- must not hang a
+    fixed-size barrier). File-local per this section's own convention
+    of duplicating small T3 test helpers rather than cross-importing
+    (see ``_FakeMonotonicClock``'s docstring above).
+    """
+
+    def __init__(self, n: int, timeout: float = 15.0) -> None:
+        self.n = n
+        self.timeout = timeout
+        self._lock = _umue1_threading.Lock()
+        self._count = 0
+        self._released = _umue1_threading.Event()
+        self.timed_out = False
+        self.arrived_at_timeout = 0
+
+    def wait(self) -> None:
+        with self._lock:
+            self._count += 1
+            if self._count >= self.n:
+                self._released.set()
+        if self._released.wait(timeout=self.timeout):
+            return
+        with self._lock:
+            if not self._released.is_set():
+                self.timed_out = True
+                self.arrived_at_timeout = self._count
+
+
+class _T3AlwaysUnauthorizedHandler(_Umue1Handler):
+    """Minimal fake nexus-service for T3: ``/v1/data-tokens/mint`` mints
+    normally; every OTHER path 401s UNCONDITIONALLY, regardless of the
+    bearer presented -- models the live nexus-r0d37 incident shape (a
+    stale-session-style 401 no re-mint can fix), ported to T3's transport.
+    """
+
+    def log_message(self, fmt, *args):  # noqa: A002 — matches BaseHTTPRequestHandler signature
+        pass  # suppress test noise
+
+    def _send(self, status: int, body: dict) -> None:
+        payload = _umue1_json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _handle_mint(self) -> None:
+        global _T3_MINT_CALLS
+        _T3_MINT_CALLS += 1
+        length = int(self.headers.get("Content-Length", "0"))
+        _ = _umue1_json.loads(self.rfile.read(length)) if length else {}
+        auth = self.headers.get("Authorization", "")
+        if auth != f"Bearer {_T3_MINT_CREDENTIAL}":
+            self._send(401, {"error": "invalid mint credential"})
+            return
+        self._send(200, {"data_token": f"t3-minted-{_T3_MINT_CALLS}", "expires_in_seconds": 300})
+
+    def do_POST(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if path == "/v1/data-tokens/mint":
+            self._handle_mint()
+            return
+        self._send(401, {"error": "unauthorized"})
+
+    def do_GET(self):  # noqa: N802
+        auth = self.headers.get("Authorization", "")
+        if _T3_REJECT_TOKEN is not None and auth == f"Bearer {_T3_REJECT_TOKEN}":
+            self._send(401, {"error": "revoked"})
+            return
+        if _T3_ECHO_HEALED:
+            self._send(200, {"ok": True})
+            return
+        # nexus-hddw2: hold a request carrying the arrival gate's known
+        # stale bearer until N have arrived -- see _T3ArrivalGate. A
+        # no-op unless test_concurrent_401s_remint_bounded armed it.
+        if _T3_ARRIVAL_GATE is not None and auth == _T3_ARRIVAL_GATE_BEARER:
+            _T3_ARRIVAL_GATE.wait()
+        self._send(401, {"error": "unauthorized"})
+
+
+def _t3_free_port() -> int:
+    with _umue1_socket.socket(_umue1_socket.AF_INET, _umue1_socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _t3_start_server(threaded: bool = False) -> tuple[_Umue1HTTPServer, int]:
+    port = _t3_free_port()
+    cls = _Umue1ThreadingHTTPServer if threaded else _Umue1HTTPServer
+    server = cls(("127.0.0.1", port), _T3AlwaysUnauthorizedHandler)
+    thread = _umue1_threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, port
+
+
+def _t3_stop_server(server: _Umue1HTTPServer) -> None:
+    server.shutdown()
+    server.server_close()
+
+
+class TestRemintSingleFlightT3:
+    """nexus-umue1, T3 half. See TestRemintSingleFlight in
+    tests/db/test_refreshable_client.py for the T2 half and
+    tests/db/test_data_token.py for the shared primitive's own tests.
+    """
+
+    def _reset_manager(self) -> None:
+        from nexus.db.data_token import reset_data_token_manager
+
+        reset_data_token_manager()
+
+    def test_staggered_401s_remint_exactly_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """4 SEQUENTIAL calls against a server that 401s every request
+        regardless of bearer: the first call mints twice (the initial
+        cold-start mint, then the guarded re-mint on its own retry, which
+        also still 401s and marks the key futile); every later call must
+        decline the re-mint entirely -- 2 mints total, not 5.
+
+        Mutation check: removing the ``self._futile.get(key)``
+        short-circuit at the top of
+        ``DataTokenManager.invalidate_if_current`` makes this test fail
+        (5 mints: 2 for the first call + 1 per later call) while
+        test_concurrent_401s_remint_bounded below keeps passing.
+        """
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+
+        _t3_reset_fake_state()
+        self._reset_manager()
+        server, port = _t3_start_server()
+        try:
+            monkeypatch.setattr(hv, "_resolve_endpoint", lambda: (f"http://127.0.0.1:{port}", "static-tok"))
+            monkeypatch.setattr(hv, "_wait_for_lease_republication", lambda: None)
+            monkeypatch.setenv("NX_MINT_TOKEN", _T3_MINT_CREDENTIAL)
+
+            for i in range(4):
+                with pytest.raises(urllib.error.HTTPError):
+                    hv._request("GET", "/v1/x", tenant="acme", timeout=5, body=None)
+
+            assert _T3_MINT_CALLS == 2, (
+                f"4 staggered 401s must re-mint exactly TWICE (first call's "
+                f"cold-start + guarded retry; nothing after) -- saw "
+                f"{_T3_MINT_CALLS}"
+            )
+        finally:
+            self._reset_manager()
+            _t3_stop_server(server)
+
+    def test_concurrent_401s_remint_bounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """N genuinely concurrent callers against a THREADED fake server,
+        all 401ing regardless of bearer: the pre-existing
+        ``_mint_guarded`` flock already coalesces the FIRST cold-start
+        mint wave to one; the nexus-umue1 single-flight coalesces the
+        401-triggered invalidate to one as well, so exactly ONE caller's
+        retry re-mints -- 2 mints total, not one per thread.
+
+        Mutation check (MEASURED, not assumed): dropping the
+        ``or cached.token != sent_token`` half of ``invalidate_if_current``'s
+        compare DOES fail this test too (measured 8 mints for 7 threads,
+        not the guarded 2) -- under real thread interleaving the winner's
+        retry-wave mint can land WHILE a loser is still mid-invalidate, so
+        a loser's unconditional pop can invalidate the winner's fresh
+        token before its own retry reads it, cascading into extra mints.
+        test_staggered_401s_remint_exactly_once discriminates the SAME
+        mutation more cleanly (sequential calls give it a completely
+        deterministic 5-vs-2 signature); this test additionally exercises
+        it under genuine concurrency.
+
+        Arrival is made deterministic by a _T3ArrivalGate (nexus-hddw2):
+        the fake server holds every GET /v1/x request carrying the
+        cold-start-minted bearer until all threads_n of them have
+        arrived, then releases them together, so the N callers' 401-
+        triggered invalidate races are concurrent BY CONSTRUCTION --
+        the client-side threading.Barrier below only needs to get all N
+        threads INTO their call() bodies, not have them race the
+        (already-threaded) server unaided. The cold-start mint's own
+        result is deterministic without capturing it dynamically: this
+        is the FIRST mint of the test (``_t3_reset_fake_state()`` just
+        zeroed ``_T3_MINT_CALLS``) and ``_mint_guarded``'s flock
+        coalesces the whole 7-way cold-start race to exactly one actual
+        mint call, so the published token is always ``t3-minted-1``.
+        """
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+
+        threads_n = 7
+        _t3_reset_fake_state()
+        self._reset_manager()
+        server, port = _t3_start_server(threaded=True)
+        try:
+            monkeypatch.setattr(hv, "_resolve_endpoint", lambda: (f"http://127.0.0.1:{port}", "static-tok"))
+            monkeypatch.setattr(hv, "_wait_for_lease_republication", lambda: None)
+            monkeypatch.setenv("NX_MINT_TOKEN", _T3_MINT_CREDENTIAL)
+
+            global _T3_ARRIVAL_GATE, _T3_ARRIVAL_GATE_BEARER
+            _T3_ARRIVAL_GATE_BEARER = "Bearer t3-minted-1"
+            gate = _T3ArrivalGate(threads_n)
+            _T3_ARRIVAL_GATE = gate
+
+            failures: list[BaseException] = []
+            barrier = _umue1_threading.Barrier(threads_n)
+
+            def call() -> None:
+                barrier.wait(timeout=10)
+                try:
+                    # 30s, not 5: the arrival gate may hold this call up to
+                    # its own 15s timeout, and a client that gives up first
+                    # never reaches the 401 path under test (hddw2 CRE pass).
+                    hv._request("GET", "/v1/x", tenant="acme", timeout=30, body=None)
+                except urllib.error.HTTPError:
+                    pass  # every call 401s by construction; the COUNT is the assertion
+                except BaseException as exc:  # noqa: BLE001 — surfaced below, never swallowed
+                    failures.append(exc)
+
+            threads = [_umue1_threading.Thread(target=call) for _ in range(threads_n)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+
+            # Non-vacuity (hddw2 critic pass): timed_out is only set inside the
+            # gate's wait, so a gate that never engaged (a path or bearer match
+            # gone stale) would leave it False and this test would pass on
+            # scheduling luck again. Every held request must have arrived.
+            assert gate._count >= gate.n, (
+                f"the arrival gate saw {gate._count} of {gate.n} stale-bearer "
+                f"requests: they never reached it, so this run proved nothing "
+                f"about concurrent 401s"
+            )
+            assert not gate.timed_out, (
+                f"arrival gate timed out after {gate.timeout}s: only "
+                f"{gate.arrived_at_timeout}/{threads_n} concurrent requests "
+                f"carrying the cold-start-minted bearer arrived -- box too "
+                f"loaded to produce genuine concurrency, or the cold-start "
+                f"mint did not publish the predicted 't3-minted-1' token"
+            )
+            assert not failures, f"unexpected non-401 failures: {failures}"
+            assert all(not t.is_alive() for t in threads), "a worker thread hung"
+            assert _T3_MINT_CALLS == 2, (
+                f"{threads_n} concurrent 401s must re-mint exactly TWICE "
+                f"(one cold-start wave + one guarded-retry wave) -- saw "
+                f"{_T3_MINT_CALLS}"
+            )
+        finally:
+            _T3_ARRIVAL_GATE = None
+            _T3_ARRIVAL_GATE_BEARER = None
+            self._reset_manager()
+            _t3_stop_server(server)
+
+    def test_futility_clears_once_a_call_stops_returning_401(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The skip lasts exactly as long as the condition: once the
+        server starts accepting the current bearer, the NEXT genuine 401
+        (server flips back to always-401, e.g. a real out-of-band
+        session staleness) must re-mint again, never staying stuck
+        futile forever."""
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+
+        global _T3_ECHO_HEALED
+        _t3_reset_fake_state()
+        self._reset_manager()
+        server, port = _t3_start_server()
+        try:
+            monkeypatch.setattr(hv, "_resolve_endpoint", lambda: (f"http://127.0.0.1:{port}", "static-tok"))
+            monkeypatch.setattr(hv, "_wait_for_lease_republication", lambda: None)
+            monkeypatch.setenv("NX_MINT_TOKEN", _T3_MINT_CREDENTIAL)
+
+            with pytest.raises(urllib.error.HTTPError):
+                hv._request("GET", "/v1/x", tenant="acme", timeout=5, body=None)
+            after_first = _T3_MINT_CALLS
+            assert after_first == 2, "the first 401 must attempt the cold-start mint + one guarded re-mint"
+
+            with pytest.raises(urllib.error.HTTPError):
+                hv._request("GET", "/v1/x", tenant="acme", timeout=5, body=None)
+            assert _T3_MINT_CALLS == after_first, "a known-futile re-mint must decline, not fire again"
+
+            # Server heals: accept ANY bearer from here on (models a real
+            # session becoming valid again).
+            _T3_ECHO_HEALED = True
+            result = hv._request("GET", "/v1/x", tenant="acme", timeout=5, body=None)
+            assert result == {"ok": True}
+
+            # Server goes back to always-401 -- a GENUINE post-heal 401
+            # (out-of-band staleness) must re-mint normally again.
+            _T3_ECHO_HEALED = False
+            with pytest.raises(urllib.error.HTTPError):
+                hv._request("GET", "/v1/x", tenant="acme", timeout=5, body=None)
+            assert _T3_MINT_CALLS == after_first + 1, "a genuine post-heal 401 must re-mint"
+        finally:
+            self._reset_manager()
+            _t3_stop_server(server)
+
+    def test_unconfigured_install_never_touches_the_guard(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No mint_token configured -- persistent 401s propagate on every
+        call exactly as before nexus-umue1, and no mint is ever attempted
+        (there is nothing to guard)."""
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+
+        _t3_reset_fake_state()
+        self._reset_manager()
+        server, port = _t3_start_server()
+        try:
+            monkeypatch.setattr(hv, "_resolve_endpoint", lambda: (f"http://127.0.0.1:{port}", "static-tok"))
+            monkeypatch.setattr(hv, "_wait_for_lease_republication", lambda: None)
+            monkeypatch.delenv("NX_MINT_TOKEN", raising=False)
+
+            for _ in range(3):
+                with pytest.raises(urllib.error.HTTPError):
+                    hv._request("GET", "/v1/x", tenant="acme", timeout=5, body=None)
+            assert _T3_MINT_CALLS == 0
+        finally:
+            self._reset_manager()
+            _t3_stop_server(server)
+
+    def test_critical1_transient_futility_heals_within_the_window(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path,
+    ) -> None:
+        """Critic Critical 1 (nexus-umue1 review round 2, Sam's decision):
+        a fresh re-mint that ALSO 401s (e.g. a transient rejection during
+        a key rotation) must not leave every T3 call 401ing until the
+        cached token's own natural TTL-refresh point -- it must heal
+        within one futility window.
+
+        WOULD FAIL against the pre-fix (unbounded-futile) code: without
+        expiry, phase 2 would 401 forever regardless of how far the clock
+        advances (mutation check (a) reproduces exactly this).
+        """
+        import urllib.error
+        import nexus.db.http_vector_client as hv
+        from nexus.db.data_token import DataTokenManager
+        import nexus.db.data_token as dt_mod
+
+        global _T3_REJECT_TOKEN, _T3_ECHO_HEALED
+        _t3_reset_fake_state()
+        self._reset_manager()
+        server, port = _t3_start_server()
+        clock = _FakeMonotonicClock()
+        manager = DataTokenManager(
+            clock=clock, mint_credential=lambda: _T3_MINT_CREDENTIAL, config_dir=tmp_path,
+        )
+        try:
+            monkeypatch.setattr(hv, "_resolve_endpoint", lambda: (f"http://127.0.0.1:{port}", "static-tok"))
+            monkeypatch.setattr(hv, "_wait_for_lease_republication", lambda: None)
+            monkeypatch.setattr(dt_mod, "get_data_token_manager", lambda: manager)
+
+            # Phase 1: a 401 whose guarded re-mint ALSO 401s -- marks the
+            # key futile. (Cold-start mint #1 + guarded retry mint #2.)
+            with pytest.raises(urllib.error.HTTPError):
+                hv._request("GET", "/v1/x", tenant="acme", timeout=5, body=None)
+            assert _T3_MINT_CALLS == 2
+
+            # The token minted during phase 1's retry is now "revoked",
+            # but the server is otherwise healthy again -- a DIFFERENT
+            # fresh mint would be accepted, modeling the
+            # transient-rejection shape exactly (distinct from a
+            # persistently-401ing server).
+            _T3_ECHO_HEALED = True
+            _T3_REJECT_TOKEN = f"t3-minted-{_T3_MINT_CALLS}"
+
+            # Phase 2: within the window, futile -- 401s WITHOUT reminting.
+            with pytest.raises(urllib.error.HTTPError):
+                hv._request("GET", "/v1/x", tenant="acme", timeout=5, body=None)
+            assert _T3_MINT_CALLS == 2, "must not remint while the futility window is active"
+
+            # Phase 3: past the window, one remint is allowed and heals.
+            clock.advance(60.0)
+            result = hv._request("GET", "/v1/x", tenant="acme", timeout=5, body=None)
+            assert result == {"ok": True}
+            assert _T3_MINT_CALLS == 3, "exactly one re-mint after the window elapses, and it heals"
+        finally:
+            _T3_REJECT_TOKEN = None
+            _T3_ECHO_HEALED = False
+            self._reset_manager()
+            _t3_stop_server(server)
 
 
 # ── nexus-ft04v.26 item 5: X-Nexus-Skipped-Collections client-side logging ──

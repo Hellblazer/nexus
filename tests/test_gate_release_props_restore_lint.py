@@ -33,6 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCAN_DIRS = (REPO_ROOT / "tests" / "e2e", REPO_ROOT / "scripts")
 _GATE = REPO_ROOT / "tests" / "e2e" / "local-service-gate.sh"
 _JAR_SCRIPT = REPO_ROOT / "scripts" / "build-gate-jar.sh"
+_LEASE_LIB = REPO_ROOT / "scripts" / "lib" / "release-props-lease.sh"
 
 #: A ``git checkout`` COMMAND (leading whitespace, then the verb) that touches
 #: ``release.properties`` — not a comment that names it, and not a checkout of
@@ -72,15 +73,36 @@ def test_no_script_restores_release_props_via_git_checkout() -> None:
 
 
 def test_local_service_gate_snapshots_and_restores_bytes() -> None:
+    """Since nexus-iexvl the gate takes its byte snapshot and restores it
+    through scripts/lib/release-props-lease.sh, the helper run.sh and
+    build-gate-jar.sh share, instead of its own ``cp`` lines. Pin both halves:
+    the gate routes through the helper, and the helper copies bytes."""
     text = _GATE.read_text(encoding="utf-8")
-    assert re.search(r'^cp "\$RELEASE_PROPS" "\$RELEASE_PROPS_SNAPSHOT"$', text, re.M), (
-        "the gate no longer snapshots release.properties at start"
+    lib = _LEASE_LIB.read_text(encoding="utf-8")
+    assert re.search(r'^source "[^"]*scripts/lib/release-props-lease\.sh"', text, re.M), (
+        "the gate no longer sources the shared release-props helper"
     )
-    restores = re.findall(r'cp "\$RELEASE_PROPS_SNAPSHOT" "\$RELEASE_PROPS"', text)
+    assert re.search(
+        r'^\s*RELEASE_PROPS_SNAPSHOT="\$\(release_props_stamp_under_lease ', text, re.M
+    ), "the gate no longer snapshots release.properties through the shared helper"
+    restores = re.findall(
+        r'^\s*release_props_restore_and_release "\$RELEASE_PROPS" "\$RELEASE_PROPS_SNAPSHOT"',
+        text,
+        re.M,
+    )
     assert len(restores) >= 2, (
-        f"expected the mid-run _restore_props AND the EXIT backstop to restore from the "
-        f"snapshot; found {len(restores)} restore(s)"
+        f"expected every stamp exit path to restore through the helper; found {len(restores)}"
     )
-    # The snapshot must be taken before cleanup() is defined, or the EXIT
-    # trap can run with nothing to restore from.
-    assert text.index('cp "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT"') < text.index("cleanup() {")
+    # The EXIT backstop still restores bytes from the snapshot, and the
+    # snapshot variable exists before cleanup() is defined.
+    assert re.search(r'cp "\$RELEASE_PROPS_SNAPSHOT" "\$RELEASE_PROPS"', text), (
+        "the EXIT backstop no longer restores from the snapshot"
+    )
+    assert text.index('RELEASE_PROPS_SNAPSHOT=""') < text.index("cleanup() {")
+    # The helper itself snapshots and restores BYTES with cp.
+    assert re.search(r'^\s*cp "\$props" "\$snapshot"$', lib, re.M), (
+        "the shared helper no longer snapshots release.properties bytes"
+    )
+    assert re.search(r'^\s*cp "\$snapshot" "\$props"', lib, re.M), (
+        "the shared helper no longer restores release.properties bytes"
+    )

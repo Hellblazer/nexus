@@ -161,29 +161,56 @@ def test_semantic_chunk_offsets(chunker):
 
 # ── _split_large_section ────────────────────────────────────────────────────
 
-def test_split_large_section_truncates_oversized_part():
+# nexus-2s91y: an oversized non-code part used to be cut to max_chars and
+# its remainder never stored, so these tests asserted exactly 2 chunks for a
+# 10,000-char part. The part is now split; every word must survive and every
+# chunk still fits the same budget.
+_WORDS = [f"w{i:05d}" for i in range(1500)]
+
+
+def _missing_words(chunks) -> list[str]:
+    body = " ".join(c.text for c in chunks)
+    return [w for w in _WORDS if w not in body]
+
+
+def test_split_large_section_keeps_all_of_an_oversized_part():
     chunker = SemanticMarkdownChunker(chunk_size=10, chunk_overlap=0)
     section = {
         "level": 1, "header": "Big Section", "header_path": ["Big Section"],
-        "content_parts": [{"type": "text", "content": "x" * 10000, "is_code_block": False}],
+        "content_parts": [{"type": "text", "content": " ".join(_WORDS), "is_code_block": False}],
     }
     chunks = chunker._split_large_section(section, {}, start_index=0)
-    assert len(chunks) == 2
+    missing = _missing_words(chunks)
+    assert not missing, f"{len(missing)} words dropped, first {missing[:3]}"
     for chunk in chunks:
         assert len(chunk.text) <= chunker.max_chars + len("# Big Section") + 4
 
 
-def test_split_large_section_truncation_with_overlap():
+def test_split_large_section_keeps_all_of_an_oversized_part_with_overlap():
     chunker = SemanticMarkdownChunker(chunk_size=10, chunk_overlap=3)
     section = {
         "level": 1, "header": "Big", "header_path": ["Big"],
-        "content_parts": [{"type": "text", "content": "x" * 10000, "is_code_block": False}],
+        "content_parts": [{"type": "text", "content": " ".join(_WORDS), "is_code_block": False}],
     }
     chunks = chunker._split_large_section(section, {}, start_index=0)
-    assert len(chunks) == 2
+    missing = _missing_words(chunks)
+    assert not missing, f"{len(missing)} words dropped, first {missing[:3]}"
     budget = chunker.max_chars + len("# Big") + chunker.overlap_chars + 8
     for chunk in chunks:
         assert len(chunk.text) <= budget
+
+
+def test_a_paragraph_longer_than_max_chars_is_stored_whole():
+    """nexus-2s91y, through the public path at the default size. The
+    paragraph is about three times max_chars; every sentence must appear
+    whole in some chunk, so the split also has to land on sentence ends."""
+    sentences = [f"Sentence {i:04d} carries its own marker." for i in range(140)]
+    text = "# Title\n\nIntro paragraph.\n\n" + " ".join(sentences) + "\n"
+    chunker = SemanticMarkdownChunker()
+    assert len(" ".join(sentences)) > 3 * chunker.max_chars
+    joined = "\n".join(c.text for c in chunker.chunk(text, {}))
+    missing = [s for s in sentences if s not in joined]
+    assert not missing, f"{len(missing)} of {len(sentences)} sentences dropped, first {missing[:2]}"
 
 
 # ── dedup blocklist ──────────────────────────────────────────────────────────
@@ -217,15 +244,22 @@ def test_spurious_split_resolved():
 ], ids=["with-heading", "no-heading"])
 def test_md_chunker_byte_cap_enforced(text):
     from nexus.db.limits import SAFE_CHUNK_BYTES
-    text = text.format(code="x" * 15_000)
+    code = "BEGIN_MARK\n" + ("x" * 99 + "\n") * 150 + "END_MARK"
+    text = text.format(code=code)
     chunks = SemanticMarkdownChunker(preserve_code_blocks=True).chunk(text, {})
     # Byte-cap contract: at least one chunk, every chunk under the cap.
-    # Exact count varies by parametrization (with-heading splits to 2;
-    # no-heading is 1) and the value-under-test is the size cap, not
-    # the chunk count.
+    # Exact count varies by parametrization and the value-under-test is
+    # the size cap, not the chunk count.
     assert len(chunks) >= 1
     for c in chunks:
         assert len(c.text.encode()) <= SAFE_CHUNK_BYTES
+    # nexus-2s91y: the cap SPLITS an oversized chunk; it used to cut the
+    # tail off, so a code block the section splitter kept whole lost its end.
+    joined = "\n".join(c.text for c in chunks)
+    assert "BEGIN_MARK" in joined and "END_MARK" in joined
+    assert joined.count("x") == 99 * 150, "the split must neither drop nor duplicate text"
+    assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
+    assert [c.metadata["chunk_index"] for c in chunks] == list(range(len(chunks)))
 
 
 # ── overlap in _split_large_section ─────────────────────────────────────────

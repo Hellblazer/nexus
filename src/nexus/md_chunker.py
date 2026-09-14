@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 import yaml
 
+from nexus.chunker import split_text_to_char_cap, split_text_to_limits
 from nexus.db.limits import SAFE_CHUNK_BYTES
+
+if TYPE_CHECKING:
+    from nexus.embed_window import TokenWindow
 
 _log = structlog.get_logger()
 
@@ -153,10 +157,12 @@ class SemanticMarkdownChunker:
         chunk_size: int = 512,
         chunk_overlap: int = 50,
         preserve_code_blocks: bool = True,
+        token_window: TokenWindow | None = None,
     ) -> None:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.preserve_code_blocks = preserve_code_blocks
+        self.token_window = token_window
         self.max_chars = int(chunk_size * _CHARS_PER_TOKEN)
         self.overlap_chars = int(chunk_overlap * _CHARS_PER_TOKEN)
         self.md = MarkdownIt() if MARKDOWN_IT_AVAILABLE else None
@@ -173,11 +179,33 @@ class SemanticMarkdownChunker:
                 chunks = self._naive_chunking(text, metadata)
         else:
             chunks = self._naive_chunking(text, metadata)
-        # Byte cap post-pass: truncate any chunk that exceeds the storage limit.
+        return self._split_oversized_chunks(chunks)
+
+    def _split_oversized_chunks(self, chunks: list[MarkdownChunk]) -> list[MarkdownChunk]:
+        """Post-pass: split any chunk over the storage byte cap or the
+        embedding model's token window, then renumber. It used to truncate,
+        which dropped the end of a code block the section splitter had
+        deliberately kept whole (nexus-2s91y); the window keeps every chunk
+        inside what the embedder reads (nexus-spujb)."""
+        window = self.token_window
+        out: list[MarkdownChunk] = []
         for c in chunks:
-            if len(c.text.encode()) > SAFE_CHUNK_BYTES:
-                c.text = c.text.encode()[:SAFE_CHUNK_BYTES].decode("utf-8", errors="ignore")
-        return chunks
+            if len(c.text.encode()) <= SAFE_CHUNK_BYTES and (window is None or window.fits(c.text)):
+                out.append(c)
+                continue
+            out.extend(
+                MarkdownChunk(
+                    text=piece,
+                    chunk_index=c.chunk_index,
+                    metadata=dict(c.metadata),
+                    header_path=c.header_path,
+                )
+                for piece in split_text_to_limits(c.text, SAFE_CHUNK_BYTES, window)
+            )
+        for i, c in enumerate(out):
+            c.chunk_index = i
+            c.metadata["chunk_index"] = i
+        return out
 
     # ── semantic path ─────────────────────────────────────────────────────────
 
@@ -340,7 +368,22 @@ class SemanticMarkdownChunker:
         section_end_char = section.get("end_char", 0)
         current_end_char = section_start_char
 
+        # nexus-2s91y: split an oversized part into max_chars pieces before
+        # packing. This used to truncate the part to max_chars and never store
+        # the rest. Preserved code blocks stay whole here; the byte cap
+        # post-pass in chunk() splits them only past the storage limit.
+        parts: list[dict] = []
         for part in section["content_parts"]:
+            keep_whole = self.preserve_code_blocks and part.get("is_code_block", False)
+            if len(part["content"]) > self.max_chars and not keep_whole:
+                parts.extend(
+                    {**part, "content": piece}
+                    for piece in split_text_to_char_cap(part["content"], self.max_chars)
+                )
+            else:
+                parts.append(part)
+
+        for part in parts:
             part_text = part["content"]
             part_tokens = len(part_text) / _CHARS_PER_TOKEN
             part_end_char = part.get("end_char", current_end_char)
@@ -349,13 +392,6 @@ class SemanticMarkdownChunker:
                 current_tokens += part_tokens
                 current_end_char = part_end_char
             else:
-                is_code = part.get("is_code_block", False)
-                if self.preserve_code_blocks and is_code:
-                    # Emit code blocks atomically — never truncate, even if oversized.
-                    pass
-                elif len(part_text) > self.max_chars:
-                    # Truncate oversized non-code parts to prevent unbounded chunk sizes.
-                    part_text = part_text[: self.max_chars]
                 if current_parts:
                     emitted_text = "\n\n".join(current_parts)
                     chunks.append(

@@ -8,14 +8,14 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 | Server | Entry point | Tools | Purpose |
 |---|---|---|---|
-| `nexus` | `nx-mcp` | 46 | Storage tiers, retrieval, operators, orchestration, diagnostics |
+| `nexus` | `nx-mcp` | 47 | Storage tiers, retrieval, operators, orchestration, diagnostics |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`) or the `.mcpb` extension. No separate install.
 
 **Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started § Install](getting-started.md#install) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
-## `nexus` — retrieval + storage (46 tools)
+## `nexus` — retrieval + storage (47 tools)
 
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
@@ -25,13 +25,13 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 |---|---|
 | `search` | Semantic chunk search over T3 collections. Supports `topic` for topic-scoped search, `cluster_by="semantic"` for topic grouping, automatic same-topic distance boost |
 | `query` | Document-level catalog-aware retrieval (scope by `author`, `content_type`, `subtree`, `follow_links`, `depth`). Link-aware + topic-aware ranking |
-| `search_metadata_scoped` | Combined-query (service mode): catalog-metadata-scoped vector search in one SQL statement (`content_type`, `author`, `year`, `subtree`, chunk-metadata `where`) |
-| `search_graph_hop` | Combined-query (service mode): BFS over `catalog_links` from seed tumblers + vector rank in one statement (`link_type`, `depth` ≤ 3, `direction`); `where` chunk-metadata equality filter applied post-BFS (catalog-012, equality-only — operator syntax rejected loudly) |
-| `search_topic_scoped` | Combined-query (service mode): topic-label-scoped chunk search via `topic_assignments` join |
-| `search_aspect_scoped` | Combined-query (service mode): vector rank + `document_aspects` predicate (`field`, `pattern`, `min_confidence`, chunk-metadata `where`) in one statement — retires the `search` + `operator_filter(source="aspects")` two-step for selective aspect predicates. Requires the doc's aspects row to carry a non-NULL `doc_id` (backfilled by exact `source_uri` match; legacy rows with no match are excluded, not a bug) |
-| `store_put` | Write a document into a T3 collection. Fires post-store hooks: batch chain auto-assigns to nearest topic; document-grain chain enqueues aspect extraction on `knowledge__*` (RDR-089) |
-| `store_get` | Retrieve a document by id from a T3 collection |
-| `store_get_many` | Batch hydration: given N ids, return N contents (with `missing` for not-found). Handles 300+ ids beyond the per-request 300-record limit |
+| `search_metadata_scoped` | Combined-query, requires an HttpVectorClient-backed T3 (every current local or cloud install): catalog-metadata-scoped vector search in one SQL statement (`content_type`, `author`, `year`, `subtree`, chunk-metadata `where`) |
+| `search_graph_hop` | Combined-query, requires an HttpVectorClient-backed T3: BFS over `catalog_links` from seed tumblers + vector rank in one statement (`link_type`, `depth` ≤ 3, `direction`); `where` chunk-metadata equality filter applied post-BFS (catalog-012, equality-only — operator syntax rejected loudly) |
+| `search_topic_scoped` | Combined-query, requires an HttpVectorClient-backed T3: topic-label-scoped chunk search via `topic_assignments` join |
+| `search_aspect_scoped` | Combined-query, requires an HttpVectorClient-backed T3: vector rank + `document_aspects` predicate (`field`, `pattern`, `min_confidence`, chunk-metadata `where`) in one statement — retires the `search` + `operator_filter(source="aspects")` two-step for selective aspect predicates. Requires the doc's aspects row to carry a non-NULL `doc_id` (backfilled by exact `source_uri` match; legacy rows with no match are excluded, not a bug) |
+| `store_put` | Write a document into a T3 collection. Fires post-store hooks: batch chain auto-assigns to nearest topic; document-grain chain enqueues aspect extraction on `knowledge__*` (RDR-089). A note too large for the collection embedding model's token window is written as several chunk pieces under one title instead of being refused or truncated (nexus-spujb) |
+| `store_get` | Retrieve a document by id from a T3 collection. Reassembles a `store_put`-split note transparently — the caller reads back the whole note, not one piece |
+| `store_get_many` | Batch hydration: given N ids, return N contents (with `missing` for not-found). Handles 300+ ids beyond the per-request 300-record limit. Also reassembles a split note whose piece ids are all passed together |
 | `store_list` | Paginate documents in a T3 collection |
 
 ### Memory (T2)
@@ -79,7 +79,7 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
 **Routing rule of thumb**: `tuple_rd`/`tuple_in` with `timeout_s=0` (the default) are the probe forms — never block. Pass `timeout_s>0` only when the caller intends to wait; a wait of minutes is a loop of parked calls (each capped at 25 s by default), never one long park. There are no separate probe-named tools (`tuple_rdp`/`tuple_inp`) — `timeout_s=0` covers that case on the same tool.
 
-**Failure modes**: the engine renders nine typed errors as `{"error": "<code>", "detail": "..."}`; the two most likely to surface from a tool call are `ParkCapExceeded` (429 — the per-claimant or global park cap is at capacity; back off and retry) and `TimeoutTooLong` (400 — `timeout_s` above the engine's cap). A 502/503/504 during an engine deploy is retried by the client transparently (`rd`/`out` freely, `in` with the same claimant); the deploy gap is a retry, not an error surfaced to the caller. See [Tuple Space § Errors](tuple-space.md#errors) for the full nine.
+**Failure modes**: the engine renders ten typed errors as `{"error": "<code>", "detail": "..."}`; the three most likely to surface from a tool call are `ParkCapExceeded` (429 — the per-claimant or global park cap is at capacity; back off and retry), `TimeoutTooLong` (400 — `timeout_s` above the engine's cap), and `TooLarge` (413 — a `tuple_out`/`tuple_ack` field, e.g. `body`, over the engine's size limit). A 502/503/504 during an engine deploy is retried by the client transparently (`rd`/`out` freely, `in` with the same claimant); the deploy gap is a retry, not an error surfaced to the caller. See [Tuple Space § Errors](tuple-space.md#errors) for the full ten.
 
 ### Operators (LLM-backed, RDR-079)
 
@@ -169,6 +169,34 @@ Some operations are intentionally not exposed as MCP tools — they are destruct
 
 The Python functions still exist in `src/nexus/mcp/core.py` and `src/nexus/mcp/catalog.py`; they just lack the `@mcp.tool()` decorator.
 
+## Choosing a retrieval tool
+
+Nine tools all answer some form of "find me relevant content"; each tool's
+own description names its nearest sibling, but this table is the single
+place to compare all of them at once.
+
+| You know... | Use |
+|---|---|
+| The exact id or title | `store_get` / `store_get_many` |
+| Metadata that resolves to a tumbler (owner, file path) | `nexus-catalog` `search` / `show` |
+| Only a text fragment to match | `search` |
+| You need to know WHICH DOCUMENTS match, not which passages | `query` |
+| A scope by `content_type`/`author`/`year`/`subtree` | `search_metadata_scoped` |
+| A scope by an extracted aspect field (`problem_formulation`, etc.) | `search_aspect_scoped` |
+| A scope by a topic label | `search(topic=...)`; only reach for `search_topic_scoped` when you need the structured chunk-hash ids directly |
+| Neighbours of known documents, ranked by content relevance | `search_graph_hop`; use `traverse` (or `nexus-catalog` `links`) instead when you only need the unranked reachable id set |
+| An answer that must be reduced/synthesized from many documents | `nx_answer` (minutes, not seconds — see its own description) |
+| A prior session's notes or working state | `scratch` (T1, this session only) |
+| A durable per-project note or decision | `memory_search` / `memory_get` (T2) |
+| Permanent cross-project knowledge | `store_get` / `search` against the `knowledge` corpus (T3) |
+
+`corpus="knowledge"` on `search` and `query`, and the `collection="knowledge"`
+default of `store_get`, `store_get_many`, `store_list`, and `nx_tidy`, mean the
+same scope: every live `knowledge__*` subject collection. A note `search`
+finds, `store_get` finds again with the same literal. With the bare name,
+`store_list` lists the subjects and their entry counts rather than every
+entry. Pass one subject collection's name to narrow any of these tools to it.
+
 ## Routing rule of thumb
 
 | Task | Server | Tool |
@@ -189,18 +217,18 @@ Content (chunks, documents, notes) is on `nexus`; metadata and relationships (en
 
 ## Pagination
 
-Three tools return paged results and accept `offset`: `search`, `store_list`, `memory_search`. Response footer:
+Seven tools return paged results and accept `offset`: `search`, `store_list`, `memory_search` and `plan_search` on the nexus server, and `search`, `list` and `link_query` on the nexus-catalog server. The nexus tools end with a footer; the catalog tools add a `_pagination` entry carrying `next_offset` instead. Footer:
 
 ```
 --- showing 1-20 of 57. next: offset=20
 --- showing 41-57 of 57. (end)
 ```
 
-Pass `offset=N` back to the same tool to fetch the next page. Default page size: 20 for list-style tools; `n_results` for `search`.
+Pass `offset=N` back to the same tool to fetch the next page. Default page size: 20 for list-style tools; `search`'s page-size parameter is `limit` (default 10).
 
 ## Permission auto-approval
 
-The plugin installs a `PermissionRequest` hook that auto-approves any tool call matching `mcp__plugin_conexus_.*`. This covers both servers plus the bundled `sequential-thinking` server. Dangerous system operations (force-push, `bd delete`, deploys) are not matched and stay behind the normal confirmation flow.
+The plugin installs a `PermissionRequest` hook that auto-approves tool calls matching `mcp__plugin_conexus_.*` against an explicit per-tool allowlist, not a blanket wildcard pass-through: `mcp__plugin_conexus_nexus__daemon_uninstall` is deliberately excluded, since it can tear down the storage-service autostart unit and, with `remove_data=true`, irreversibly delete the entire nexus config directory. This covers both servers plus the bundled `sequential-thinking` server. Dangerous system operations (force-push, `bd delete`, deploys) are not matched and stay behind the normal confirmation flow.
 
 To enforce stricter permission boundaries on a custom agent, narrow the matcher in `conexus/hooks/hooks.json`.
 
@@ -225,7 +253,7 @@ The `nx_answer` / `nx_tidy` / `nx_plan_audit` / `nx_enrich_beads` / `operator_*`
   - **Check**: the exception carries the first 300 chars of stderr, or the raw stdout snippet — enough to distinguish an auth/CLI problem from a schema-adherence problem.
   - **Fix**: if stderr shows an auth or CLI-not-found error, check that `claude` is on `PATH` for the environment the MCP server process itself runs in (not your interactive shell — see the Desktop-install PATH footgun in `docs/desktop-deployment.md` for the analogous class of bug). If it's a JSON-adherence failure, simplify the schema or the prompt.
   - **Verify**: re-run and confirm a `dict` is returned instead of an exception.
-- **Timeout clamping surprises**: because `_SUBAGENT_TIMEOUT_FLOOR = 300.0` silently raises any caller-supplied timeout below it, a subagent (plan-enricher, plan-auditor) that "already passed a timeout" may not be getting the value it thinks it is.
+- **Timeout clamping surprises**: because `_SUBAGENT_TIMEOUT_FLOOR = 300.0` silently raises any caller-supplied timeout below it, a caller of `nx_enrich_beads` or `nx_plan_audit` that "already passed a timeout" may not be getting the value it thinks it is.
   - **Check**: `subagent_timeout_clamped` in `mcp.log`, with `requested` and `floor` fields.
   - **Note**: this is expected behavior (nexus-7sbf), not a bug — the floor exists specifically to stop agents from re-introducing false-positive timeouts via low overrides.
 

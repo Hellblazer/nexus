@@ -328,6 +328,9 @@ def test_sentinel_absent_denies(tmp_env):
     decision = _decision(proc)
     assert decision["permissionDecision"] == "deny"
     assert "/conexus:phase-review-gate" in decision["reason"]
+    # nexus-cnzei.2 (S8): the escape is named, not handed over as this
+    # agent's own move.
+    assert "not yours to reach for" in decision["reason"]
 
 
 def test_sentinel_stale_denies(tmp_env):
@@ -393,6 +396,104 @@ def test_sentinel_corrupt_json_denies(tmp_env):
     )
     decision = _decision(proc)
     assert decision["permissionDecision"] == "deny"
+
+
+# ---------------------------------------------------------------------------
+# nexus-cnzei.2 (S2): configure hook logging before importing nexus.session
+#
+# ``_claude_pid()``'s ``nexus.session`` import is the ONLY nexus import in
+# this whole file, but every existing scenario test above passes
+# NX_FAKE_CLAUDE_PID, which short-circuits BEFORE that import ever runs --
+# so none of them exercise it. These two tests load the script as a module
+# (mirroring tests/hooks/test_rdr_hook.py's fixture pattern) and call
+# ``_claude_pid()`` directly with NX_FAKE_CLAUDE_PID unset, so the real
+# import path executes.
+# ---------------------------------------------------------------------------
+
+
+def _load_phase_review_close_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "phase_review_close_requires_gate_under_test", HOOK_SCRIPT,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_claude_pid_configures_hook_logging_before_importing_nexus_session(
+    monkeypatch,
+) -> None:
+    """Structlog's default logger_factory writes to STDOUT, the same
+    channel this PreToolUse hook's own JSON envelope goes out on -- a
+    debug line from the ``nexus.session`` import landing there ahead of
+    (or beside) that JSON would corrupt the payload the harness parses.
+    ``_hook_logging.configure_hook_logging()`` (nexus-cnzei.2 fix round 2:
+    the shared helper, not a hand-duplicated local block) must run before
+    that import, not after it or not at all."""
+    monkeypatch.delenv("NX_FAKE_CLAUDE_PID", raising=False)
+    mod = _load_phase_review_close_module()
+    calls: list[str] = []
+    monkeypatch.setattr(mod._hook_logging, "configure_hook_logging", lambda: calls.append("called"))
+    mod._claude_pid()
+    assert calls == ["called"]
+
+
+def test_claude_pid_survives_a_logging_setup_failure(monkeypatch) -> None:
+    """The OUTER ``except Exception: return os.getppid()`` in ``_claude_pid``
+    is a SEPARATE guarantee from ``_hook_logging.configure_hook_logging``'s
+    own internal best-effort catch (tested directly in
+    tests/hooks/test_hook_logging.py). This test bypasses the inner catch
+    entirely -- it replaces ``configure_hook_logging`` itself with a
+    function that raises, rather than making the REAL function's internal
+    ``nexus.logging_setup.configure_logging`` call fail -- so it fails if
+    the outer catch is ever removed, even though the inner one is untouched
+    (CRE Minor, nexus-cnzei.2 fix round 2: the previous version of this
+    test patched ``nexus.logging_setup.configure_logging`` to raise, which
+    the inner catch alone was enough to survive, so it never actually
+    exercised the outer catch)."""
+    monkeypatch.delenv("NX_FAKE_CLAUDE_PID", raising=False)
+    mod = _load_phase_review_close_module()
+
+    def boom():
+        raise RuntimeError("configure_hook_logging itself raised")
+
+    monkeypatch.setattr(mod._hook_logging, "configure_hook_logging", boom)
+    pid = mod._claude_pid()
+    assert isinstance(pid, int)
+
+
+def test_subprocess_stdout_is_pure_json_with_the_real_nexus_session_import(tmp_env) -> None:
+    """Genuine SUBPROCESS run (mirrors tests/hooks/test_rdr_hook.py::
+    test_subprocess_run_leaks_no_structlog_debug_lines_to_stdout), not an
+    in-process module import: pytest's own ``pytest_configure`` sets
+    structlog's ``wrapper_class`` at session start, which can mask a
+    stdout leak an in-process call would never actually reproduce. This
+    test omits NX_FAKE_CLAUDE_PID so ``_claude_pid()``'s real
+    ``nexus.session`` import path executes for real, then asserts stdout
+    is EXACTLY the hook's one-line JSON envelope -- a debug/warning line
+    from an unconfigured structlog landing on stdout ahead of (or beside)
+    that JSON would either break ``json.loads`` outright or, worse, sit
+    silently alongside a still-parseable JSON line."""
+    _write_bd_stub(tmp_env["bin_dir"], title="RDR-112 Phase 1 review gate")
+    # No sentinel written -- expect deny; NX_FAKE_CLAUDE_PID deliberately
+    # NOT passed in env_extra.
+    proc = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "bd close nexus-abc"}},
+        env_extra={},
+        bin_dir=tmp_env["bin_dir"],
+    )
+    assert proc.returncode == 0, proc.stderr
+    for leaked_marker in ("[debug", "[warning", "[info", "event="):
+        assert leaked_marker not in proc.stdout, (
+            f"structlog output leaked to stdout: {leaked_marker!r} found\n"
+            f"stdout:\n{proc.stdout}"
+        )
+    # Exactly one JSON object, no leading/trailing noise.
+    payload = json.loads(proc.stdout)
+    assert payload["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 # ---------------------------------------------------------------------------

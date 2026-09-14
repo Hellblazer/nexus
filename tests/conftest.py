@@ -189,6 +189,31 @@ def _scan_fixture_cache_files() -> set[Path]:
 _fixture_cache_baseline: set[Path] = set()
 
 
+#: ``NX_TEST_T2_SUBSTRATE`` values that name a deleted substrate, with the
+#: refusal ``_pin_t2_substrate`` raises for each. One table for both readers:
+#: ``_pin_t2_substrate`` refuses these by name, and ``_gate_on_build_lease``
+#: skips them because refusing a value boots nothing (nexus-fam6l). Adding a
+#: retired value here updates both; a second hand-kept list is how the gate
+#: once reported a build in progress for a run that had asked for a deleted
+#: substrate.
+_RETIRED_T2_SUBSTRATES: dict[str, str] = {
+    "sqlite": (
+        "NX_TEST_T2_SUBSTRATE=sqlite: the SQLite test substrate was "
+        "deleted with the SQLite T2 stores (nexus-i711w). The engine is "
+        "the only substrate. If you meant 'this test needs no T2 store', "
+        "that intent now has its own spelling: NX_TEST_T2_SUBSTRATE=none."
+    ),
+}
+
+
+def _selected_t2_substrate_boots_engine() -> bool:
+    """True when the session's ``NX_TEST_T2_SUBSTRATE`` leads
+    ``_pin_t2_substrate`` to provision the engine: anything except ``none``
+    (provision nothing) and a retired value (refused by name)."""
+    selected = os.environ.get("NX_TEST_T2_SUBSTRATE")
+    return selected != "none" and selected not in _RETIRED_T2_SUBSTRATES
+
+
 def _gate_on_build_lease() -> None:
     """Refuse the whole session ONCE while a service build holds the lease,
     or wait for it when asked (nexus-pv93h).
@@ -205,9 +230,13 @@ def _gate_on_build_lease() -> None:
     refused there; one that starts after every worker has booted is not
     seen by either (the shell lease's own residual, nexus-06fu4).
 
-    ``NX_TEST_T2_SUBSTRATE=none`` runs need no engine and are never gated.
+    Only a run that will boot the engine is gated
+    (``_selected_t2_substrate_boots_engine``). ``=none`` provisions nothing,
+    and a retired value such as ``=sqlite`` is refused by name without
+    booting anything; gating those first reported a build in progress
+    instead of the mistake the run actually made (nexus-fam6l).
     """
-    if os.environ.get("NX_TEST_T2_SUBSTRATE") == "none":
+    if not _selected_t2_substrate_boots_engine():
         return
     try:
         from tests.db._service_fixture import build_lease_wait_seconds, wait_for_build_lease
@@ -495,9 +524,18 @@ def pytest_sessionfinish(session, exitstatus):
 #: (nexus-wjkc7): it must NOT also appear in
 #: ``_REAL_CONFIG_DIR_ALLOWLIST_PREFIXES``, which would exempt it from the
 #: diff entirely and make this stricter, size-checked rule unreachable.
+#:
+#: ``dropped_writes.jsonl``: the best-effort drop meter. Its live writers are
+#: the conexus routing hook (``_record_dropped_routing_event``, which records
+#: every subagent git write on this box and appends here when its engine POST
+#: fails) and the session-end capability census (``record_drop``). Both open
+#: it O_APPEND and nothing rotates it. A peer session's worktree commit during
+#: a run therefore grows it with no test involved: a 19,372-pass run exited 1
+#: over one such line (nexus-ume6q batch, peer commit ca8d314b0).
 _APPEND_ONLY_REAL_CONFIG_LOGS = frozenset({
     "routing_log.jsonl",
     "index.log",
+    "dropped_writes.jsonl",
 })
 
 #: Directories under the real config dir that hold AMBIENT DAEMON OUTPUT --
@@ -780,6 +818,19 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # poll tick -- appear and vanish during any pytest run that overlaps
     # another session's /clear on this box. Observed 2026-08-21 (78blw run).
     "t1_handoff.",
+    # Mailbox push delivery state (epic nexus-6konb, live since 7.44.0):
+    # every armed `nx tuple watch` Monitor on the box rewrites its seen-set,
+    # cursor and lock files and its per-session instance registration
+    # (addresses.d/), the SessionStart hook writes session.<claude_pid> on
+    # every source and the arm-probe cache, and the UserPromptSubmit drain
+    # hook (conexus/hooks/scripts/mailbox_drain.py) keeps its pending and
+    # seen files here, all independent of pytest. MEASURED 2026-09-13: with
+    # live watchers armed by restarted sessions, every run of
+    # tests/test_native_smoke_client_probes.py failed this guard on
+    # tuple-watch/*.json while its tests passed. Unit tests pass state_dir
+    # or resolve the config dir through the autouse `_isolate_config_dir`
+    # tmp path, so they never write the real directory.
+    "tuple-watch/",
 )
 
 
@@ -1885,13 +1936,8 @@ def _pin_t2_substrate(request: pytest.FixtureRequest) -> None:
     selected = os.environ.get("NX_TEST_T2_SUBSTRATE")
     if selected == "none":
         return
-    if selected == "sqlite":
-        raise RuntimeError(
-            "NX_TEST_T2_SUBSTRATE=sqlite: the SQLite test substrate was "
-            "deleted with the SQLite T2 stores (nexus-i711w). The engine is "
-            "the only substrate. If you meant 'this test needs no T2 store', "
-            "that intent now has its own spelling: NX_TEST_T2_SUBSTRATE=none."
-        )
+    if selected in _RETIRED_T2_SUBSTRATES:
+        raise RuntimeError(_RETIRED_T2_SUBSTRATES[selected])
     request.getfixturevalue("t2_service_env")
 
 
@@ -2212,6 +2258,56 @@ def _isolate_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ``tests/test_service_catalog_isolation.py`` (nexus-1vt0b).
     """
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "test-catalog"))
+
+
+@pytest.fixture(autouse=True)
+def _fence_beads_prime_user_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Fence ``nexus.beads_prime``'s user-level PRIME.md path to a per-test
+    tmp dir for EVERY test (nexus-cnzei.8 CRE fix round, ship-blocker).
+
+    This module's own ``install_fence`` (``tests/_fence_home.py``, wired at
+    ``pytest_sessionstart`` above) shadows only ``.config/nexus`` -- every
+    OTHER top-level HOME entry (``Library`` on macOS, every other
+    ``.config/<x>`` on Linux) is symlinked straight through to the REAL
+    filesystem. ``nexus.beads_prime.user_prime_path()`` resolves to exactly
+    one of those un-shadowed locations by construction
+    (``~/Library/Application Support/beads/PRIME.md`` on macOS,
+    ``~/.config/beads/PRIME.md`` on Linux) -- the fence's one shadow never
+    covers it. A test that invokes ``nx init``/``nx upgrade`` (directly or
+    via ``CliRunner``) with no per-test stub, on a box with ``bd`` on
+    ``PATH``, writes for real into the operator's machine-wide beads
+    PRIME.md. Confirmed: ``tests/test_init_service_binary.py`` did exactly
+    this before this fixture existed (code review of commit 2fc27ad33,
+    reproduced end-to-end against scratch dirs only).
+
+    Patches the MODULE ATTRIBUTE ``nexus.beads_prime.user_prime_path`` --
+    every production call site (``install()``'s default arg,
+    ``health._check_beads_prime``'s deferred import, ``beads_prime.py``'s
+    own ``install_and_describe``) resolves this name fresh at call time via
+    the module namespace, so the patch reaches all of them, in every test
+    file, without a per-file stub to remember. Only the NO-ARGS call is
+    fenced: a call with an explicit ``platform=``/``home=``/``environ=``
+    kwarg (every case in ``TestUserPrimePath`` and
+    ``TestConftestHomeFence.test_explicit_args_bypass_the_fence``)
+    delegates to the REAL function, so those tests keep exercising the
+    genuine per-platform resolution logic against their own injected
+    fixtures rather than this fixture's fixed tmp path.
+
+    ``tests/test_beads_prime.py::TestConftestHomeFence`` is the guard test
+    that fails loud if this fixture is ever removed, narrowed, or bypassed.
+    """
+    import nexus.beads_prime as bp
+
+    real_user_prime_path = bp.user_prime_path
+    fenced_path = tmp_path / "beads-prime-fence" / "PRIME.md"
+
+    def _fenced_user_prime_path(**kwargs):
+        if kwargs:
+            return real_user_prime_path(**kwargs)
+        return fenced_path
+
+    monkeypatch.setattr(bp, "user_prime_path", _fenced_user_prime_path)
+    return fenced_path
 
 
 @pytest.fixture(autouse=True)

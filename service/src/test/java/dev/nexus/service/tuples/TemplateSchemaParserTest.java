@@ -207,4 +207,63 @@ class TemplateSchemaParserTest {
                 () -> TemplateSchemaParser.parse("broken.yaml", doc));
         assertTrue(ex.getMessage().contains("take.enabled"), ex.getMessage());
     }
+
+    // ── max_body_bytes (bead nexus-r7xao) ────────────────────────────────────
+
+    @Test
+    void maxBodyBytesAbsent_leavesFieldNull() {
+        TemplateSchema t = TemplateSchemaParser.parse("mailbox.yaml", validDoc());
+        assertEquals(null, t.maxBodyBytes());
+    }
+
+    @Test
+    void maxBodyBytesWithinRange_parsesVerbatim() {
+        Map<String, Object> doc = validDoc();
+        doc.put("max_body_bytes", 10L);
+        TemplateSchema t = TemplateSchemaParser.parse("mailbox.yaml", doc);
+        assertEquals(10L, t.maxBodyBytes());
+    }
+
+    @Test
+    void maxBodyBytesZero_parsesAsZero_notNull() {
+        Map<String, Object> doc = validDoc();
+        doc.put("max_body_bytes", 0L);
+        TemplateSchema t = TemplateSchemaParser.parse("ledger.yaml", doc);
+        assertEquals(0L, t.maxBodyBytes());
+    }
+
+    @Test
+    void maxBodyBytesAtGlobalCap_parsesVerbatim() {
+        Map<String, Object> doc = validDoc();
+        doc.put("max_body_bytes", (long) dev.nexus.service.db.TupleLimits.MAX_BODY_BYTES);
+        TemplateSchema t = TemplateSchemaParser.parse("mailbox.yaml", doc);
+        assertEquals((long) dev.nexus.service.db.TupleLimits.MAX_BODY_BYTES, t.maxBodyBytes());
+    }
+
+    @Test
+    void maxBodyBytesOneOverGlobalCap_isABreach() {
+        Map<String, Object> doc = validDoc();
+        doc.put("max_body_bytes", (long) dev.nexus.service.db.TupleLimits.MAX_BODY_BYTES + 1);
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("max_body_bytes"), ex.getMessage());
+    }
+
+    @Test
+    void maxBodyBytesNegative_isABreach() {
+        Map<String, Object> doc = validDoc();
+        doc.put("max_body_bytes", -1L);
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("max_body_bytes"), ex.getMessage());
+    }
+
+    @Test
+    void maxBodyBytesWrongType_isABreach() {
+        Map<String, Object> doc = validDoc();
+        doc.put("max_body_bytes", "not-a-number");
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("max_body_bytes"), ex.getMessage());
+    }
 }

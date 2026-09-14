@@ -1477,7 +1477,11 @@ def _first_lines(text: str, n: int) -> str:
 
 
 def _probe_mcp_server(
-    binary_path: str, expected_name: str, *, timeout: float = _MCP_PROBE_TIMEOUT_S
+    binary_path: str,
+    expected_name: str,
+    *,
+    timeout: float = _MCP_PROBE_TIMEOUT_S,
+    on_timeout: Callable[[int], None] | None = None,
 ) -> tuple[bool, str]:
     """Spawn *binary_path*, send a JSON-RPC ``initialize`` request on
     stdin, and verify the response's ``result.serverInfo.name`` matches
@@ -1505,6 +1509,20 @@ def _probe_mcp_server(
     fail-fast contract), while a process that is still alive and simply
     slow gets up to ``timeout * _MCP_PROBE_ALIVE_EXTENSION_FACTOR`` before
     the probe gives up and reports it as genuinely hung.
+
+    *on_timeout* (nexus-rqji3), when given, is called with the 1-based
+    poll count each time a ``subprocess.TimeoutExpired`` is caught below —
+    i.e. exactly the moment the probe has just confirmed "still alive, no
+    response yet" and is about to poll again. ``None`` (the default) is a
+    no-op; every production caller (``_check_mcp_entry_points``) leaves it
+    unset. It exists so a test can observe (or act on) the extension
+    actually engaging without inferring it from elapsed wall-clock time,
+    which is what made ``test_slow_but_alive_binary_recovers_within_extension``
+    flake once under a loaded ``-n auto`` run (nexus-jw44t's own class of
+    timing sensitivity, recurring under nexus-rqji3): a fixed real-seconds
+    margin between a fake binary's ``sleep`` and the extended cap can be
+    blown by scheduler delay alone, with the probe's actual logic
+    unaffected.
     """
     try:
         proc = subprocess.Popen(  # noqa: S603 — binary_path resolved via shutil.which, not attacker input
@@ -1539,6 +1557,7 @@ def _probe_mcp_server(
     deadline = time.monotonic() + max_wait
     stdout_text = ""
     stderr_text = ""
+    poll_count = 0
     try:
         while True:
             remaining = deadline - time.monotonic()
@@ -1563,6 +1582,9 @@ def _probe_mcp_server(
                 stdout_text, stderr_text = proc.communicate(timeout=min(poll_interval, remaining))
                 break  # process finished — answered or crashed; checked below
             except subprocess.TimeoutExpired:
+                poll_count += 1
+                if on_timeout is not None:
+                    on_timeout(poll_count)
                 continue  # still alive — poll again, no data lost (documented communicate() retry idiom)
     except OSError as exc:
         return False, f"probe error: {exc!r}"
@@ -5462,6 +5484,320 @@ def _check_tuple_sweep_freshness(
     return [HealthResult(label=label, ok=True, detail=detail)]
 
 
+_TUPLE_WATCH_COMMAND = "nx tuple watch"
+_TUPLE_WATCH_PERMISSION_LABEL = "tuples.watch_permission"
+_TUPLE_WATCH_DOCUMENTED_RULE = "Bash(nx tuple watch:*)"
+# Prefixes that, in Claude Code's `Bash(<prefix>:*)` permission grammar,
+# genuinely cover every `nx tuple watch` invocation: the documented entry
+# itself plus its two whitespace-delimited ancestors. `Bash(nx:*)` is not a
+# hypothetical -- it is the shape actually seen in a real operator's
+# settings.json, so it must be recognised, not just the exact entry.
+_TUPLE_WATCH_COVERING_PREFIXES = ("nx tuple watch", "nx tuple", "nx")
+
+
+def _bash_rule_covers_tuple_watch(rule: object) -> bool:
+    """True when *rule* is a permission pattern that covers ``nx tuple
+    watch`` -- either a ``Bash(<prefix>:*)`` pattern whose prefix is one of
+    :data:`_TUPLE_WATCH_COVERING_PREFIXES`, or the bare ``"Bash"`` rule
+    (nexus-rml7o, MM-3.4 critic finding S5; bare-``Bash`` recognition added
+    in the nexus-rml7o review pass). Used for BOTH ``permissions.allow`` and
+    ``permissions.deny`` matching -- whether a rule covers the command is
+    the same question regardless of which list it sits in.
+
+    Conservative by design, per the bead's own instruction: only the exact
+    documented entry, a genuinely broader ancestor prefix in the SAME
+    ``:*``-suffixed form, or the bare rule counts. A rule that merely
+    CONTAINS the command as a substring (``Bash(echo nx tuple watch:*)``),
+    a string-prefix that is not a whitespace boundary (``Bash(nx t:*)``),
+    or a rule with no trailing ``:*`` at all (other than the bare form),
+    does not -- this exists to confirm a named gap, not to guess at
+    coverage from an unfamiliar pattern shape.
+    """
+    if not isinstance(rule, str):
+        return False
+    if rule == "Bash":
+        return True
+    if not (rule.startswith("Bash(") and rule.endswith(":*)")):
+        return False
+    prefix = rule[len("Bash("):-len(":*)")]
+    return prefix in _TUPLE_WATCH_COVERING_PREFIXES
+
+
+def _claude_settings_path() -> Path:
+    """Resolve the USER ``~/.claude/settings.json``, honouring
+    ``CLAUDE_CONFIG_DIR``.
+
+    Nothing else in this codebase resolves the Claude settings path via
+    that variable today, but Claude Code itself honours it to relocate the
+    whole ``~/.claude`` tree, so a doctor row reading ``settings.json``
+    must follow it too rather than hardcoding the default location.
+    """
+    override = os.environ.get("CLAUDE_CONFIG_DIR")
+    base = Path(override).expanduser() if override else Path.home() / ".claude"
+    return base / "settings.json"
+
+
+def _claude_settings_paths(cwd: Path | None = None) -> list[tuple[str, Path]]:
+    """Every settings file Claude Code consults for permissions, in the
+    order this row checks them (nexus-rml7o review pass, T2
+    nexus/cleanup-batch-cre-pass-2026-09-13): USER
+    (``~/.claude/settings.json``, honouring ``CLAUDE_CONFIG_DIR``),
+    PROJECT (``<root>/.claude/settings.json``), and PROJECT-LOCAL
+    (``<root>/.claude/settings.local.json``) -- ``root`` being the git
+    top-level of *cwd* (default: the current working directory), falling
+    back to *cwd* itself outside a git repository.
+
+    Only the user check existed before this pass; project settings can
+    carry their own ``permissions.allow``/``.deny`` and this row was blind
+    to them.
+    """
+    from nexus.indexer_utils import find_repo_root  # noqa: PLC0415 — deferred: rare/branch-local path
+    base = cwd if cwd is not None else Path.cwd()
+    root = find_repo_root(base) or base
+    return [
+        ("user", _claude_settings_path()),
+        ("project", root / ".claude" / "settings.json"),
+        ("project-local", root / ".claude" / "settings.local.json"),
+    ]
+
+
+def _read_permission_rules(path: Path) -> tuple[list, list] | None:
+    """*(allow, deny)* lists from *path*'s ``permissions`` block, or
+    ``None`` when *path* cannot be read as a JSON object at all (missing, a
+    directory, unreadable bytes, malformed JSON, or not a JSON object) --
+    the caller treats that exactly like a file with no matching rules,
+    never a crash.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    permissions = data.get("permissions")
+    if not isinstance(permissions, dict):
+        return [], []
+    allow = permissions.get("allow")
+    deny = permissions.get("deny")
+    return (
+        allow if isinstance(allow, list) else [],
+        deny if isinstance(deny, list) else [],
+    )
+
+
+def _check_tuple_watch_permission(
+    settings_paths: list[tuple[str, Path]] | None = None,
+) -> list[HealthResult]:
+    """Informational doctor row (bead nexus-rml7o, MM-3.4 critic finding S5,
+    revised in the nexus-rml7o review pass -- T2
+    nexus/cleanup-batch-cre-pass-2026-09-13 and
+    nexus/cleanup-batch-critic-pass-2026-09-13): does a ``permissions.allow``
+    rule across every settings file Claude Code consults
+    (:func:`_claude_settings_paths`) cover ``nx tuple watch``, and does a
+    ``permissions.deny`` rule anywhere override it?
+
+    This row makes NO claim about whether arming raises a permission prompt,
+    in either direction. An earlier version claimed an auto-mode session
+    raised no prompt during the RDR-206 live verification as evidence that
+    an absent rule is harmless -- that claim was FALSE (T2
+    nexus/rdr-206-live-verification-correction-2026-09-13): that session's
+    own ``~/.claude/settings.json`` carries ``Bash(nx:*)``, which covers
+    ``nx tuple watch``, so the absence of a prompt that session observed
+    proved nothing about the no-rule case. The row now reports only
+    whether a covering rule is present, which file supplied it, and (the
+    dangerous direction: reporting covered while actually blocked) whether
+    a ``permissions.deny`` rule anywhere wins over it.
+
+    Read-only: this NEVER writes any settings file. A file that cannot be
+    read (missing, a directory, unreadable bytes, malformed JSON) is
+    treated as carrying no rules at all -- never a crash, never a reason
+    to fail ``nx doctor``.
+
+    Precedence: a matching ``permissions.deny`` rule in ANY of the three
+    files wins over a matching ``permissions.allow`` rule in any of them
+    (Claude Code's own deny-always-wins semantics), reported as "denied"
+    naming the denying file. Absent a deny, the FIRST file in
+    :func:`_claude_settings_paths`'s order (user, then project, then
+    project-local) that carries a covering allow rule is reported, named.
+    Absent both, the row reports "not configured", naming the entry to add.
+
+    Not applicable ONLY within the "not configured" outcome above -- no
+    covering allow anywhere and no deny anywhere either (bead nexus-7zhag,
+    found by the 7.45.0 release battery's fresh-install MVV leg 8/10, fixed
+    in two passes after the first pass's own ship-blocker, T2
+    nexus/7zhag-cre-2026-09-14): when the USER-level Claude config directory
+    -- the parent of the "user" entry in :func:`_claude_settings_paths`
+    (``CLAUDE_CONFIG_DIR``, or ``~/.claude``) -- does not exist, there is no
+    permission surface for this row to check yet, so it reports ``ok=True``
+    with no warning, naming why, INSTEAD OF the soft "not configured" warn.
+    This check runs LAST, after the full allow/deny scan across all three
+    files: a project or project-local ``permissions.deny``/``.allow`` is
+    read by Claude Code regardless of whether ``~/.claude`` exists, so a
+    covering rule anywhere -- deny or allow -- still wins exactly as before,
+    even with the user directory absent. It is keyed ONLY on the user-level
+    directory, never the project one: the project ``.claude`` directory
+    exists in this very checkout regardless of whether Claude Code has ever
+    run for the user, and a virgin box's real HOME carries no ``.claude`` at
+    all. The directory-existence check itself never raises: an unreadable
+    parent (e.g. permission-denied on stat) is treated as PRESENT, falling
+    through to the ordinary soft "not configured" warn -- conservative,
+    since "cannot tell" must never read as "nothing to check here" the way
+    "does not exist" does. Severity is per branch, never uniform and never
+    fatal: ``ok=True`` when a covering allow rule stands unchallenged by any
+    deny, or when the user directory is absent (not-applicable, no
+    override survives it); ``ok=False, warn=True`` (soft, never fatal) for
+    a deny override or a "not configured" outcome with the user directory
+    present (or unreadable).
+
+    Caveat: this row reads ``CLAUDE_CONFIG_DIR`` from ``nx doctor``'s OWN
+    process environment (:func:`_claude_settings_path`), which need not
+    match the environment of the Claude Code process actually running the
+    Monitor -- a Claude Code launched with a different ``CLAUDE_CONFIG_DIR``
+    than the shell invoking ``nx doctor`` makes this row look at the wrong
+    directory.
+    """
+    label = _TUPLE_WATCH_PERMISSION_LABEL
+    paths = settings_paths if settings_paths is not None else _claude_settings_paths()
+    hint_path = paths[0][1] if paths else _claude_settings_path()
+    hint = f"add {_TUPLE_WATCH_DOCUMENTED_RULE!r} to permissions.allow in {hint_path}"
+    all_paths_str = ", ".join(str(p) for _, p in paths)
+
+    covering: tuple[str, Path] | None = None
+    denying: tuple[str, Path] | None = None
+    for name, path in paths:
+        rules = _read_permission_rules(path)
+        if rules is None:
+            continue
+        allow, deny = rules
+        if denying is None and any(_bash_rule_covers_tuple_watch(r) for r in deny):
+            denying = (name, path)
+        if covering is None and any(_bash_rule_covers_tuple_watch(r) for r in allow):
+            covering = (name, path)
+
+    if denying is not None:
+        name, path = denying
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"denied -- {path} ({name}) carries a permissions.deny rule covering "
+                f"'{_TUPLE_WATCH_COMMAND}', which wins over any permissions.allow rule. "
+                f"Arming it as a Monitor will be refused by this rule."
+            ),
+        )]
+
+    if covering is not None:
+        name, path = covering
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"{path} ({name}) permissions.allow covers '{_TUPLE_WATCH_COMMAND}'",
+        )]
+
+    user_config_dir = hint_path.parent
+    try:
+        user_config_dir_exists = user_config_dir.is_dir()
+    except OSError:
+        user_config_dir_exists = True  # unreadable is not the same as absent -- stay conservative
+
+    if not user_config_dir_exists:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=(
+                f"not applicable -- {user_config_dir} does not exist, so Claude Code has "
+                "never run on this machine; there is no permissions.allow/.deny surface for "
+                f"'{_TUPLE_WATCH_COMMAND}' to check yet."
+            ),
+        )]
+
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(
+            f"not configured -- no permissions.allow rule across {all_paths_str} covers "
+            f"'{_TUPLE_WATCH_COMMAND}'. Arming it as a Monitor goes through the same "
+            f"permission machinery as Bash; {hint}."
+        ),
+    )]
+
+
+_BEADS_PRIME_LABEL = "Beads PRIME.md (user-level)"
+
+
+def _check_beads_prime() -> list[HealthResult]:
+    """Informational doctor row (nexus-cnzei.8): the state of the
+    machine-wide, conexus-managed ``beads`` PRIME.md at
+    :func:`nexus.beads_prime.user_prime_path`.
+
+    Returns ``[]`` when beads is not detected on this machine at all
+    (:func:`nexus.beads_prime.beads_detected`) -- nothing to report,
+    mirroring :func:`_check_plugin_name`'s not-applicable-here convention.
+
+    Otherwise reports one of the four :class:`~nexus.beads_prime.PrimeStatus`
+    states. ``absent`` and ``managed-stale`` are soft warnings naming
+    ``nx init`` / ``nx upgrade`` as the fix (both install/refresh it), and
+    also name the SAME undo/opt-out text (``nexus.beads_prime.UNDO_HINT``)
+    the CLI one-liner prints on an actual write, so a user who never saw
+    that line (or is reading this row cold) still learns it here (critic
+    fix round: disclosure previously lived in only one of the three
+    surfaces). ``user-authored`` is reported OK and explicitly left alone,
+    per the bead's own instruction -- covers BOTH a file with no marker at
+    all AND one whose marker's recorded hash no longer matches its body
+    (a human edit under an intact marker) -- this row must never suggest
+    overwriting a hand-written file either way. Read-only except for the
+    detection probe itself (``shutil.which`` + a filesystem glob); never
+    writes.
+    """
+    try:
+        from nexus.beads_prime import (  # noqa: PLC0415 — deferred to avoid module-load cost
+            UNDO_HINT,
+            PrimeStatus,
+            beads_detected,
+            status,
+            user_prime_path,
+        )
+        # ``which=shutil.which`` (this module's OWN import, not
+        # nexus.beads_prime's) so a test that patches
+        # ``nexus.health.shutil.which`` — the existing convention the "bd
+        # (beads, optional)" row above already relies on — reaches this
+        # row's detection too, instead of silently falling through to the
+        # real ambient PATH.
+        detected, _reason = beads_detected(which=shutil.which)
+        if not detected:
+            return []
+        path = user_prime_path()
+        current = status(path)
+    except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`; degraded to WARN, never silent-ok
+        _log.warning("doctor_beads_prime_check_failed", error=str(exc))
+        return [HealthResult(
+            label=_BEADS_PRIME_LABEL, ok=False, warn=True,
+            detail=f"check failed ({exc})",
+        )]
+
+    if current is PrimeStatus.MANAGED_CURRENT:
+        return [HealthResult(
+            label=_BEADS_PRIME_LABEL, ok=True, detail=f"up to date at {path}",
+        )]
+    if current is PrimeStatus.USER_AUTHORED:
+        return [HealthResult(
+            label=_BEADS_PRIME_LABEL, ok=True,
+            detail=f"user-authored at {path} (left alone)",
+        )]
+    if current is PrimeStatus.MANAGED_STALE:
+        return [HealthResult(
+            label=_BEADS_PRIME_LABEL, ok=False, warn=True,
+            detail=f"stale at {path}",
+            fix_suggestions=[f"run `nx upgrade` to refresh it. {UNDO_HINT}"],
+        )]
+    # ABSENT
+    return [HealthResult(
+        label=_BEADS_PRIME_LABEL, ok=False, warn=True,
+        detail=f"not installed (would be {path})",
+        fix_suggestions=[f"run `nx init` or `nx upgrade` to install it. {UNDO_HINT}"],
+    )]
+
+
 def _check_pending_rungs() -> list[HealthResult]:
     """RDR-185 P0.4 (nexus-n7u38.4): read-only upgrade-ladder surface.
 
@@ -7491,6 +7827,13 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     results.extend(_check_tuple_unclaimed_age())
     results.extend(_check_tuple_table_bloat())
     results.extend(_check_tuple_sweep_freshness())
+    # bead nexus-rml7o (MM-3.4 critic finding S5): read-only, always
+    # informational -- never gated by route_predates_floor, since it reads
+    # local Claude Code settings, not the engine.
+    results.extend(_check_tuple_watch_permission())
+    # nexus-cnzei.8: read-only informational row; [] when beads is not
+    # detected on this machine at all.
+    results.extend(_check_beads_prime())
     # RDR-185 P0.4: read-only pending-rungs surface (degrades internally).
     results.extend(_check_pending_rungs())
 

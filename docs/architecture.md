@@ -75,13 +75,15 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     └── Storage tiers ([RDR-120](rdr/rdr-120-storage-substrate-split.md) substrate split; service-mediated)
           T1: nexus-service HTTP (HttpScratchStore; session scratch, shared across agent processes; PG-only, no in-process opt-out — nexus-4lkmz)
           T2: nexus-service over Postgres (the write arbiter)
-                Eight domain stores + the catalog, all HTTP clients behind T2Database
+                Nine domain stores behind T2Database, all HTTP clients, plus
+                the catalog (reached separately via HttpCatalogClient)
                 Transport: HTTP to the nexus-service
                 (the SQLite + FTS5 `nx daemon t2` daemon is RETIRED — it
                  arbitrated a single SQLite writer; Postgres does that now)
                 memory · plans · taxonomy · telemetry · document_aspects ·
-                aspect_queue · document_highlights · catalog
-                (chash_index RETIRED — table dropped by RDR-187, v0.1.51)
+                aspect_queue · document_highlights · tuples · chash_index
+                (chash_index's PG table RETIRED: dropped by RDR-187, v0.1.51;
+                 the class remains a client-side shim)
           T3: Postgres 17 + pgvector behind the native nexus-service ── nx daemon service start
               Same service in BOTH modes; embedding is server-side
               (bge-768 in local mode, Voyage in managed-cloud mode).
@@ -631,7 +633,7 @@ discover_for_collection()          # taxonomy_cmd.py
   │  fetch ids + texts + embeddings from T3 (page_size=250)
   │  fall back to the local ONNX embedder (bge-768) re-embed only when T3 embeddings absent
   ▼
-CatalogTaxonomy.discover_topics()  # db/t2/catalog_taxonomy.py
+HttpTaxonomyStore.discover_topics()  # db/t2/http_taxonomy_store.py
   │  sklearn HDBSCAN on N×D float32
   │  c-TF-IDF labels (CountVectorizer + TfidfTransformer)
   │  persist: topics, topic_assignments → T2 (engine Postgres via HttpTaxonomyStore)
@@ -639,7 +641,7 @@ CatalogTaxonomy.discover_topics()  # db/t2/catalog_taxonomy.py
   ▼
 taxonomy_assign_hook()             # mcp_infra.py  (fires on every store_put)
   │  fetch new doc's T3 embedding
-  │  CatalogTaxonomy.assign_single(): ANN query against taxonomy__centroids
+  │  HttpTaxonomyStore.assign_single(): ANN query against taxonomy__centroids
   │  nearest centroid → topic_id → INSERT OR IGNORE topic_assignments
   ▼
 search_cross_corpus()              # search_engine.py
@@ -655,7 +657,7 @@ search_cross_corpus()              # search_engine.py
 
 ### Storage
 
-**T2 tables** (engine Postgres via `HttpTaxonomyStore`, owned by `CatalogTaxonomy`):
+**T2 tables** (engine Postgres via `HttpTaxonomyStore`; `CatalogTaxonomy` is the retired pre-RDR-158 name):
 
 | Table | Purpose |
 |-------|---------|
@@ -814,7 +816,7 @@ A Linda tuple space over Postgres — `out`/`rd`/`rdp`/`in`/`inp`/`ack`/`nack`/`
 
 ### Authentication: static token vs self-minted data tokens (conexus RDR-005 2a)
 
-Every HTTP storage client (T1 `HttpScratchStore`, the eight T2 `Http*Store`
+Every HTTP storage client (T1 `HttpScratchStore`, the nine T2 `Http*Store`
 classes via `RefreshableHttpStoreMixin`, T3 `HttpVectorClient`, and the
 catalog client) presents an `Authorization: Bearer <token>` header on every
 call. By default that token is the static `service_token` credential
@@ -1072,7 +1074,7 @@ Phase 2 consequences:
 - **Telemetry no longer interferes with search**: MCP relevance-log
   writes run on the telemetry connection, so `memory_search` is not
   blocked by access-tracking hooks.
-- **Cluster rebuilds don't freeze memory**: `CatalogTaxonomy.discover_topics`
+- **Cluster rebuilds don't freeze memory**: `HttpTaxonomyStore.discover_topics`
   runs on the taxonomy connection. The long numpy clustering phase holds
   no T2 locks, so interactive memory operations continue during the
   bulk of the rebuild. (The initial embedding-fetch snapshot still briefly
@@ -1246,12 +1248,12 @@ logged, not discarded.
 | **Taxonomy** | `db/t2/catalog_taxonomy.py`, `commands/taxonomy_cmd.py`, `taxonomy.py` (shim) | HDBSCAN topic discovery from T3 embeddings ([RDR-070](rdr/rdr-070-incremental-taxonomy-clustered-search.md)). T2 tables: `topics`, `topic_assignments`, `taxonomy_meta`, `topic_links`. Centroids on pgvector (`nexus.taxonomy_centroids`, unified single table since RDR-191 Phase 4) via nexus-service (`HttpCentroidStore`) for centroid ANN, since [RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4a.2. `discover_for_collection()` is the shared entry point for CLI and `nx index repo`. `taxonomy_assign_hook` in `mcp_infra.py` fires on every `store_put` for incremental assignment. `taxonomy.py` is a backward-compatibility shim that forwards old call sites to `db.taxonomy` |
 | **Hooks** | `commands/hooks.py`, `commands/hook.py` | `hooks.py`: Git hook install/uninstall/status, sentinel-bounded stanza management. `hook.py`: Claude Code SessionStart/SessionEnd lifecycle runners |
 | **Verification** | `config.py` (verification section), `conexus/hooks/scripts/stop_verification_hook.sh`, `conexus/hooks/scripts/pre_close_verification_hook.sh`, `conexus/hooks/scripts/read_verification_config.py` | Opt-in mechanical enforcement: Stop hook (session-end checks), PreToolUse hook (bd-close gate), standalone config reader. See [Verification config](configuration.md#verification) |
-| **MCP Servers** | `mcp/core.py`, `mcp/catalog.py`, `mcp_infra.py`, `mcp_server.py` (shim) | Multi-server FastMCP architecture ([RDR-062](rdr/rdr-062-mcp-interface-tiering.md), [RDR-139](rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md)). `nexus` core server (46 tools: storage, retrieval, operators, orchestration) + `nexus-catalog` (10 tools: catalog and link graph). (The RDR-139 Layer A' `nx-mcp-devonthink` proxy was retired 2026-07-07, nexus-goypg — clients connect to DEVONthink's own MCP server directly; its `dt_incorporate` composite lives on as `nx dt incorporate`.) Short-name convention: catalog tools drop the redundant `catalog_` prefix since the server namespace already provides context. Six destructive / maintenance operations are intentionally kept CLI-only. Backward-compat shim at `mcp_server.py` re-exports every function. `query()` has catalog-aware routing (author, content_type, subtree, follow_links, depth); singletons and test injection live in `mcp_infra.py`. **For the full tool catalog see [MCP Servers](mcp-servers.md).** |
+| **MCP Servers** | `mcp/core.py`, `mcp/catalog.py`, `mcp_infra.py`, `mcp_server.py` (shim) | Multi-server FastMCP architecture ([RDR-062](rdr/rdr-062-mcp-interface-tiering.md), [RDR-139](rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md)). `nexus` core server (47 tools: storage, retrieval, operators, orchestration) + `nexus-catalog` (10 tools: catalog and link graph). (The RDR-139 Layer A' `nx-mcp-devonthink` proxy was retired 2026-07-07, nexus-goypg — clients connect to DEVONthink's own MCP server directly; its `dt_incorporate` composite lives on as `nx dt incorporate`.) Short-name convention: catalog tools drop the redundant `catalog_` prefix since the server namespace already provides context. Six destructive / maintenance operations are intentionally kept CLI-only. Backward-compat shim at `mcp_server.py` re-exports every function. `query()` has catalog-aware routing (author, content_type, subtree, follow_links, depth); singletons and test injection live in `mcp_infra.py`. **For the full tool catalog see [MCP Servers](mcp-servers.md).** |
 | **Enrichment** | `bib_enricher.py`, `aspect_extractor.py`, `aspect_worker.py`, `commands/enrich.py` | Two enrichment surfaces. (1) Bibliographic via Semantic Scholar (`bib_enricher.py` lookup + `nx enrich bib` CLI). (2) Structured aspects via Claude CLI (`aspect_extractor.py` synchronous extractor + `aspect_worker.py` async-queue daemon worker registered as the document-grain post-store hook + `nx enrich aspects` CLI). Aspect extraction is `knowledge__*` only in Phase 1 ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md)); the worker drains `aspect_extraction_queue` and writes to `document_aspects` |
 | **Health** | `health.py`, `logging_setup.py` | `health.py`: health check data model and runner used by `nx doctor` and `nx console`. `logging_setup.py`: structured logging configuration for CLI, console, MCP, and hook entry points (stderr + rotating file handler) |
 | **Support** | `config.py`, `registry.py`, `corpus.py`, `session.py`, `hooks.py`, `ttl.py`, `formatters.py`, `types.py`, `errors.py`, `retry.py`, `commands/_helpers.py` | Configuration, naming, formatting, session lifecycle, transient-error retry. `_helpers.py`: shared CLI helpers (e.g. `default_db_path()`). (`_provision.py` — ChromaDB Cloud database provisioning — was DELETED at RDR-155 P4b P2; it had zero src callers.) |
-| **Engine: tuple space** | `service/src/main/java/dev/nexus/service/db/TupleRepository.java`, `.../db/TupleWaitRegistry.java`, `.../db/TupleException.java` + its nine subtypes, `.../http/TupleHandler.java`, `.../tuples/` (`TemplateRegistry.java`, `TemplateSchema.java`, `TemplateSchemaParser.java`, `MiniYaml.java`, `TemplateRegistryException.java`) | Java, engine-side ([RDR-205](rdr/rdr-205-linda-tuple-space-over-postgres.md), [RDR-206](rdr/rdr-206-tuple-claim-renew-and-reply-in-ack.md) for `renew` and `ack`'s reply). `TupleRepository` owns the eleven operations and the claim/sweep SQL; `TupleWaitRegistry` is the per-subspace park/wake mechanism; `TupleHandler` is the `/v1/tuples` HTTP surface, one route per operation; the `tuples/` package loads, validates, and digests the two v1 templates (`ledger/<session_id>`, `mailbox/<address>`) from classpath YAML at boot. See [T2 Domain Stores § Tuple space](#tuple-space-rdr-205) above and [Tuple space](tuple-space.md) for the full reference |
-| **Client: tuple space** | `db/t2/http_tuple_store.py` (`HttpTupleStore`, `db.tuples`), `commands/tuple_cmd.py` (`nx tuple`), `mcp/core.py` (nine `tuple_*` tools), `health.py` (three `tuples.*` doctor rows) | Python client ([RDR-205](rdr/rdr-205-linda-tuple-space-over-postgres.md) Phase 2, [RDR-206](rdr/rdr-206-tuple-claim-renew-and-reply-in-ack.md) Phase 2 for `renew` and `ack(reply=)`). The 8 KB pre-send guard and the nine-typed-error mapping live in `http_tuple_store.py`; `nx tuple` and the MCP tools are thin callers with no HTTP of their own. See [Tuple space § Client surface](tuple-space.md#client-surface) |
+| **Engine: tuple space** | `service/src/main/java/dev/nexus/service/db/TupleRepository.java`, `.../db/TupleWaitRegistry.java`, `.../db/TupleException.java` + its ten subtypes, `.../http/TupleHandler.java`, `.../tuples/` (`TemplateRegistry.java`, `TemplateSchema.java`, `TemplateSchemaParser.java`, `MiniYaml.java`, `TemplateRegistryException.java`) | Java, engine-side ([RDR-205](rdr/rdr-205-linda-tuple-space-over-postgres.md), [RDR-206](rdr/rdr-206-tuple-claim-renew-and-reply-in-ack.md) for `renew` and `ack`'s reply). `TupleRepository` owns the eleven operations and the claim/sweep SQL; `TupleWaitRegistry` is the per-subspace park/wake mechanism; `TupleHandler` is the `/v1/tuples` HTTP surface, one route per operation; the `tuples/` package loads, validates, and digests the two v1 templates (`ledger/<session_id>`, `mailbox/<address>`) from classpath YAML at boot. See [T2 Domain Stores § Tuple space](#tuple-space-rdr-205) above and [Tuple space](tuple-space.md) for the full reference |
+| **Client: tuple space** | `db/t2/http_tuple_store.py` (`HttpTupleStore`, `db.tuples`), `commands/tuple_cmd.py` (`nx tuple`), `mcp/core.py` (nine `tuple_*` tools), `health.py` (three `tuples.*` doctor rows) | Python client ([RDR-205](rdr/rdr-205-linda-tuple-space-over-postgres.md) Phase 2, [RDR-206](rdr/rdr-206-tuple-claim-renew-and-reply-in-ack.md) Phase 2 for `renew` and `ack(reply=)`). The 8 KB pre-send guard and the ten-typed-error mapping live in `http_tuple_store.py`; `nx tuple` and the MCP tools are thin callers with no HTTP of their own. See [Tuple space § Client surface](tuple-space.md#client-surface) |
 | **Client: mailbox push delivery** | `tuple_watch.py` (`nx tuple watch`: probe loop, per-address locks, per-session instance registration, cursor paging, stale-watcher self-stop), `mailbox_arm.py` (the SessionStart arm instruction and its bounded, cached tuple-surface probe), `hooks.py` (`session_start` emits it and writes the `tuple-watch/session.<claude_pid>` marker on every source), `conexus/hooks/scripts/mailbox_drain.py` (the `UserPromptSubmit` drain hook, consumer of record) | Python client and plugin hook ([epic nexus-6konb](tuple-space.md#push-delivery-rdr-205-ping-then-pull)). The watcher pings and never claims; the drain hook claims, acks and renders at each prompt, for the session-id mailbox and the instance mailbox the watcher registered for that session only. See [Tuple space § Push delivery](tuple-space.md#push-delivery-rdr-205-ping-then-pull) |
 
 ### Builtin plan templates
@@ -1289,7 +1291,7 @@ Every shipped template must be *offerable* — reachable by some question. A tem
 3. **Constructor injection** -- Dependencies via constructor, no global singletons.
 4. **Ported, not imported** -- SeaGOAT and Arcaneum patterns rewritten in Nexus module structure.
 5. **Session-id-scoped T1, service-backed** -- Historically ([RDR-149](rdr/rdr-149-unified-service-registry-substrate.md) P4) the MCP server's chroma lifespan started a per-session ChromaDB HTTP server and published a leased registry record at `~/.config/nexus/t1_addr.<session_id>`; that discovery mechanism retired with the chroma substrate ([RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4b). Today `get_t1_database` routes T1 to `HttpScratchStore` over the one `nexus-service`, scoped by the same Claude session-id (resolved from `~/.config/nexus/current_session`) — child agents and Bash-tool siblings resolve the same session-id and share T1 scratch across the agent tree; concurrent independent windows stay isolated via distinct session-ids. The in-process `NX_T1_ISOLATED=1` opt-out that survived that retirement is itself retired (nexus-4lkmz, Hal determination 2026-07-28: "T1 exists in PG only") — setting it now hard-fails with `T1IsolatedLegRetiredError` instead of opting into a private in-process `InMemoryVectorClient`; a process outside service-mode routing raises `T1ServerNotFoundError` rather than inventing a private store.
-6. **MCP tools over agent-spawns for utility operations** ([RDR-080](rdr/rdr-080-retrieval-layer-consolidation.md)) -- Operations that formerly required spawning a named agent are now MCP tools that execute in-process. Agent files are retained as stubs that redirect to the MCP tool.
+6. **MCP tools over agent-spawns for utility operations** ([RDR-080](rdr/rdr-080-retrieval-layer-consolidation.md)) -- Operations that formerly required spawning a named agent are now MCP tools that execute in-process. The superseded agent files (`knowledge-tidier`, `plan-auditor`, `plan-enricher`) were deleted outright (nexus-cnzei.4), not retained as stubs.
 
    **Boundary rule**: If an operation can be expressed as a deterministic function of its inputs and completes in under one API call, it is an MCP tool. If it requires multi-turn reasoning, tool selection, or context accumulation across turns, it is an agent.
 

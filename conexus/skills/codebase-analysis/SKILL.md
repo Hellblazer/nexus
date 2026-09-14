@@ -42,7 +42,7 @@ Architecture analysis with patterns and dependencies
 - [ ] Dependency relationships mapped
 ```
 
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md).
 
 ## Analysis Methodology
 

@@ -35,6 +35,7 @@
 # fresh — that is tests/e2e/published-client-write-gate.sh's axis (nexus-
 # 86mx2). Neither substitutes for the other.
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/require_container.sh"
 
 PREV_RELEASE="${PREV_RELEASE:?PREV_RELEASE must be set (e.g. 6.9.0)}"
 PREV_ENGINE_TAG="${PREV_ENGINE_TAG:?PREV_ENGINE_TAG must be set (e.g. engine-service-v0.1.42)}"
@@ -115,8 +116,18 @@ _diag() {
 }
 
 export NX_SERVICE_MAX_HEAP="${NX_SERVICE_MAX_HEAP:-1g}"
-git config --global user.email "package-upgrade@nexus.local" >/dev/null 2>&1 || true
-git config --global user.name  "nexus package-upgrade"       >/dev/null 2>&1 || true
+# Identity via env, never `git config --global`: this script is meant to run
+# INSIDE its container (Dockerfile.package-upgrade's ENTRYPOINT), where a
+# writable ~/.gitconfig is this box's own throwaway file -- but nothing here
+# enforces that, and on 2026-09-12 it ran on a real host and rewrote the
+# operator's actual ~/.gitconfig, reattributing every commit made afterward.
+# GIT_AUTHOR_*/GIT_COMMITTER_* env vars give any git invocation inside this
+# script's process tree the same identity with no config file mutated
+# anywhere, host or container alike.
+export GIT_AUTHOR_NAME="nexus package-upgrade"
+export GIT_AUTHOR_EMAIL="package-upgrade@nexus.local"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
 
 # ── Quarantine: nothing pre-staged (same posture as Dockerfile.cold) ─────────
 say "Quarantine — nothing pre-staged"

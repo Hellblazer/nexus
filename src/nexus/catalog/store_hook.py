@@ -15,11 +15,13 @@ Callers: ``mcp/core.py`` (MCP ``store_put`` tool),
 from __future__ import annotations
 
 import hashlib
+from typing import Any
 
 import httpx
 import structlog
 
 from nexus.aspect_readers import uri_for
+from nexus.embed_window import has_small_window, window_for_model
 
 _log = structlog.get_logger(__name__)
 
@@ -58,6 +60,132 @@ def single_chunk_manifest_metadata(content: str) -> tuple[str, list[dict]]:
         "chunk_end_char": len(content),
     }
     return doc_id, [metadata]
+
+
+def note_pieces(content: str, collection: str) -> list[str]:
+    """The chunks a stored note is written as (nexus-spujb).
+
+    ``[content]`` unless the collection's embedding model reads fewer tokens
+    than the note holds (bge-base reads 512); then pieces that each fit the
+    model's window, with ``"".join(pieces) == content``. A Voyage collection
+    never splits. The byte quota is :func:`raise_if_oversized`'s, unchanged.
+    """
+    from nexus.chunker import split_text_to_token_window  # noqa: PLC0415 — deferred, heavy import graph
+    from nexus.corpus import embedding_model_for_collection_calibrated  # noqa: PLC0415 — deferred to avoid import cycle
+
+    # Calibrated: the plain resolver reads a legacy two-segment local
+    # collection as Voyage (nexus-mc1l1), which would leave it unsplit.
+    window = window_for_model(embedding_model_for_collection_calibrated(collection))
+    if window is None or window.fits(content):
+        return [content]
+    return split_text_to_token_window(content, window)
+
+
+def note_manifest_metadata(pieces: list[str]) -> tuple[str, list[dict]]:
+    """``(first chunk id, manifest metadata per piece)`` for a note written
+    as *pieces*.
+
+    One piece is exactly :func:`single_chunk_manifest_metadata`, so a note
+    that fits writes the manifest it always did. Several pieces carry their
+    position and their span of the whole note.
+    """
+    if len(pieces) == 1:
+        return single_chunk_manifest_metadata(pieces[0])
+    metadatas: list[dict] = []
+    offset = 0
+    for i, piece in enumerate(pieces):
+        metadatas.append({
+            "chunk_text_hash": hashlib.sha256(piece.encode()).hexdigest(),
+            "chunk_index": i,
+            "chunk_start_char": offset,
+            "chunk_end_char": offset + len(piece),
+        })
+        offset += len(piece)
+    return metadatas[0]["chunk_text_hash"], metadatas
+
+
+def note_content_hash(content: str, manifest_metadatas: list[dict]) -> str:
+    """The content hash the fence and the manifest completion stamp key on.
+
+    A one-piece note keeps the derivation it always had, its manifest row's
+    ``chunk_text_hash`` (which is the whole note's hash); a split note uses
+    the whole note's hash, since no single chunk's hash names it.
+    """
+    if len(manifest_metadatas) == 1:
+        return manifest_metadatas[0].get("chunk_text_hash", "")
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
+def put_note_pieces(t3: Any, collection: str, pieces: list[str], **put_kwargs: Any) -> list[str]:
+    """Write each piece with ``t3.put`` under the same title, tags and
+    catalog document; returns the chunk ids in order.
+
+    A one-piece note is the single ``t3.put`` it always was. For several
+    pieces, a failure part-way would leave the pieces already written in T3
+    with no manifest, searchable and unlinked, so this deletes the pieces
+    the call newly wrote and re-raises. A piece that existed before the
+    call is identical text another note holds, and is left alone.
+    """
+    if len(pieces) == 1:
+        return [t3.put(collection=collection, content=pieces[0], **put_kwargs)]
+    preexisting = {
+        chash
+        for chash in (hashlib.sha256(p.encode()).hexdigest() for p in pieces)
+        if t3.get_by_id(collection, chash) is not None
+    }
+    written: list[str] = []
+    try:
+        for piece in pieces:
+            written.append(t3.put(collection=collection, content=piece, **put_kwargs))
+    except Exception:
+        orphans = [chash for chash in written if chash not in preexisting]
+        if orphans:
+            try:
+                t3.batch_delete(collection, orphans)
+            except Exception:  # noqa: BLE001 — compensation is best-effort; the put failure is what propagates
+                _log.warning(
+                    "store_put_split_compensation_failed",
+                    collection=collection,
+                    orphans=orphans,
+                    exc_info=True,
+                )
+        raise
+    return written
+
+
+def split_note_text(t3: Any, collection: str, chunk_ids: list[str]) -> tuple[str, str, int] | None:
+    """``(first chunk id, full text, chunk count)`` when *chunk_ids* are
+    chunks of ONE split note, else ``None`` (nexus-spujb).
+
+    One id resolves to the note it belongs to; several ids (a title lookup)
+    resolve only when all of them belong to one note. Only a collection
+    whose model has a small token window can hold a split note, so any other
+    collection returns ``None`` with no catalog round trip. A note missing
+    any of its chunks returns ``None``, never a partial text.
+    """
+    from nexus.corpus import embedding_model_for_collection_calibrated  # noqa: PLC0415 — deferred to avoid import cycle
+
+    if not chunk_ids or not has_small_window(embedding_model_for_collection_calibrated(collection)):
+        return None
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import at module load
+
+    reader = make_catalog_reader()
+    if reader is None:
+        return None
+    by_chash = reader.docs_for_chashes(list(chunk_ids))
+    for tumbler in sorted({t for ts in by_chash.values() for t in ts}):
+        rows = sorted(reader.get_manifest(tumbler), key=lambda r: r.position)
+        chashes = [r.chash for r in rows]
+        if len(chashes) < 2 or not set(chunk_ids) <= set(chashes):
+            continue
+        parts: list[str] = []
+        for chash in chashes:
+            entry = t3.get_by_id(collection, chash)
+            if entry is None:
+                return None
+            parts.append(entry.get("content", ""))
+        return chashes[0], "".join(parts), len(chashes)
+    return None
 
 
 def raise_if_oversized(content: str, *, doc_id: str, collection: str) -> None:

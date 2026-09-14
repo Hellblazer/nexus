@@ -22,6 +22,9 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -32,6 +35,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 
 import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
@@ -260,11 +264,29 @@ public final class TupleRepository {
     }
 
     private PreparedOut prepareOut(String subspace, Map<String, String> keys,
-                                   Map<String, String> dims, Long ttlSecondsOrNull,
+                                   Map<String, String> dims, String body, Long ttlSecondsOrNull,
                                    String nonce, boolean nonceDeferred) {
+        // Size checks first (bead nexus-r7xao, RDR-205 amendment): subspace, keys, dims,
+        // nonce, body vs the global cap, body vs the template's own (possibly lower) cap
+        // -- ALL of it before the existing schema validation below, which is what lets
+        // TooLarge fire ahead of validateOutShape's value-echoing SchemaViolation
+        // messages ("value '...' not in [...]") rather than echoing an oversized value
+        // into a log line or a response body.
+        checkFieldSize("subspace", subspace, TupleLimits.MAX_SUBSPACE_BYTES);
         TemplateSchema t = resolveOrThrow(subspace);
         Map<String, String> keysSafe = keys == null ? Map.of() : keys;
         Map<String, String> dimsSafe = dims == null ? Map.of() : dims;
+        for (var e : keysSafe.entrySet()) {
+            checkFieldSize("keys." + e.getKey(), e.getValue(), TupleLimits.MAX_FIELD_VALUE_BYTES);
+        }
+        for (var e : dimsSafe.entrySet()) {
+            checkFieldSize("dims." + e.getKey(), e.getValue(), TupleLimits.MAX_FIELD_VALUE_BYTES);
+        }
+        if (!nonceDeferred) {
+            checkFieldSize("nonce", nonce, TupleLimits.MAX_NONCE_BYTES);
+        }
+        validateBodySize(t, body);
+
         validateOutShape(t, keysSafe, dimsSafe);
         // The nonce check runs HERE, between the shape checks and the ttl checks,
         // because that is where the combined validateOut ran it before this split.
@@ -287,6 +309,45 @@ public final class TupleRepository {
         JSONB dimsJsonb = dimsSafe.isEmpty() ? null : toJsonb(dimsSafe);
         return new PreparedOut(t, subspace, keysSafe, dimsSafe, toJsonb(keysSafe), dimsJsonb,
                 interval(ttlSeconds), interval(t.retentionSeconds()));
+    }
+
+    /** One tuple field's UTF-8 byte length against *limitBytes*; a {@code null} value is
+     *  0 bytes and always passes. Never echoes *value* itself (bead nexus-r7xao). */
+    private static void checkFieldSize(String field, String value, int limitBytes) {
+        int len = TupleLimits.utf8Length(value);
+        if (len > limitBytes) {
+            throw new TooLargeException(field, len, limitBytes);
+        }
+    }
+
+    /** {@code keys_pattern} on {@code rd}/{@code rdp}/{@code in}/{@code inp}: every
+     *  supplied value against the same per-field cap {@code out}'s keys/dims use. */
+    private static void checkPatternSizes(Map<String, String> pattern) {
+        for (var e : pattern.entrySet()) {
+            checkFieldSize("keys_pattern." + e.getKey(), e.getValue(), TupleLimits.MAX_FIELD_VALUE_BYTES);
+        }
+    }
+
+    /**
+     * {@code body} against the template's own {@code max_body_bytes} when it declares
+     * one, else the global {@link TupleLimits#MAX_BODY_BYTES} cap. A template ceiling of
+     * 0 is satisfied by both {@code null} and {@code ""} (both are 0 bytes) and refuses
+     * anything else, with no special-casing needed here.
+     */
+    private static void validateBodySize(TemplateSchema t, String body) {
+        int len = TupleLimits.utf8Length(body);
+        long limit = t.maxBodyBytes() != null ? t.maxBodyBytes() : TupleLimits.MAX_BODY_BYTES;
+        if (len > limit) {
+            throw new TooLargeException("body", len, limit);
+        }
+    }
+
+    /** {@code claim_id}/{@code claimant} on {@code ack}/{@code nack}/{@code renew} (and
+     *  {@code ackWithReply}, which does not otherwise call {@code ack}'s own checks on
+     *  its reply-carrying path). */
+    private static void checkClaimIdentifiers(String claimId, String claimant) {
+        checkFieldSize("claim_id", claimId, TupleLimits.MAX_CLAIM_ID_BYTES);
+        checkFieldSize("claimant", claimant, TupleLimits.MAX_CLAIMANT_BYTES);
     }
 
     /**
@@ -328,7 +389,7 @@ public final class TupleRepository {
     /** {@code out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> id}. */
     public byte[] out(String tenant, String subspace, Map<String, String> keys, Map<String, String> dims,
                        String body, String nonce, Long ttlSecondsOrNull) {
-        PreparedOut prepared = prepareOut(subspace, keys, dims, ttlSecondsOrNull, nonce, false);
+        PreparedOut prepared = prepareOut(subspace, keys, dims, body, ttlSecondsOrNull, nonce, false);
         byte[] id = computeId(tenant, prepared.subspace(), prepared.template(),
                 prepared.keys(), prepared.dims(), nonce, body);
         byte[] result = tenantScope.withTenant(tenant, ctx -> writeOut(ctx, tenant, prepared, body, id));
@@ -516,12 +577,14 @@ public final class TupleRepository {
 
     private List<TupleRow> queryOnce(String tenant, String subspace, Map<String, String> pattern,
                                       int n, ReadCursor since) {
+        checkFieldSize("subspace", subspace, TupleLimits.MAX_SUBSPACE_BYTES);
         // RDR-205 review (nexus-em75s.35, M4): rd/rdp must refuse an unregistered
         // subspace exactly as out() and in()/inp() (via claimOnce) do -- this was
         // the one "Once" helper that never resolved the template, so a probe/read
         // against a bogus subspace silently read back empty instead of raising.
         resolveOrThrow(subspace);
         Map<String, String> patternSafe = pattern == null ? Map.of() : pattern;
+        checkPatternSizes(patternSafe);
         int limit = Math.min(n <= 0 ? 1 : n, readMax);
 
         return tenantScope.withTenant(tenant, ctx -> {
@@ -595,6 +658,10 @@ public final class TupleRepository {
 
     private Optional<ClaimedTuple> claimOnce(String tenant, String subspace, Map<String, String> pattern,
                                               String claimant, long leaseSeconds) {
+        checkFieldSize("subspace", subspace, TupleLimits.MAX_SUBSPACE_BYTES);
+        checkFieldSize("claimant", claimant, TupleLimits.MAX_CLAIMANT_BYTES);
+        Map<String, String> patternSafe = pattern == null ? Map.of() : pattern;
+        checkPatternSizes(patternSafe);
         TemplateSchema t = resolveOrThrow(subspace);
         if (!t.take().enabled()) {
             throw new TakeDisabledException(subspace, t.name());
@@ -606,7 +673,6 @@ public final class TupleRepository {
         if (maxLease != null && leaseSeconds > maxLease) {
             throw new LeaseTooLongException(leaseSeconds, maxLease, t.name());
         }
-        Map<String, String> patternSafe = pattern == null ? Map.of() : pattern;
         for (String k : t.keys()) {
             String v = patternSafe.get(k);
             if (v == null || v.isBlank()) {
@@ -736,6 +802,17 @@ public final class TupleRepository {
      * from nexus-h61dl.2, which is why {@code ackWithReply} could not have shipped before
      * this extraction: a reply written beside a consume that lost a race would be a reply
      * to a request someone else now holds.
+     *
+     * <p>The same UPDATE that sets {@code consumed_at} also sets {@code body} to NULL
+     * (bead nexus-8zoyp): the tuple space is a coordination and metadata store, not a
+     * value store, and a consumed row's body is already unreachable through the API
+     * ({@code rd}/{@code in} both filter {@code consumed_at IS NULL}), so there is no
+     * reason to keep it around for the row's remaining retention. The returned {@link
+     * TuplesRecord} was read BEFORE this update via {@link #liveClaimRow}, so its
+     * in-memory {@code body} still reflects the pre-consume value — {@code ackWithReply}
+     * relies on that only for {@code getId()}, never {@code getBody()}, so this clears
+     * nothing a caller of this method still needs. A reply written by {@code
+     * ackWithReply} is a separate row (via {@code writeOut}) and keeps its own body.
      */
     private TuplesRecord consumeClaim(DSLContext ctx, String tenant, String claimId, String claimant) {
         TuplesRecord row = liveClaimRow(ctx, tenant, claimId);
@@ -758,6 +835,7 @@ public final class TupleRepository {
         int updated = ctx.update(TUPLES)
                 .set(TUPLES.CONSUMED_AT, now)
                 .set(TUPLES.CONSUMED_BY, claimant)
+                .set(TUPLES.BODY, (String) null)
                 .where(liveClaimCondition(row.getId(), claimId))
                 .execute();
         if (updated == 0) {
@@ -770,6 +848,7 @@ public final class TupleRepository {
 
     /** {@code ack(claim_id, claimant)}. */
     public void ack(String tenant, String claimId, String claimant) {
+        checkClaimIdentifiers(claimId, claimant);
         tenantScope.withTenant(tenant, ctx -> consumeClaim(ctx, tenant, claimId, claimant));
     }
 
@@ -813,11 +892,12 @@ public final class TupleRepository {
      * it is refused rather than documented.
      */
     public byte[] ackWithReply(String tenant, String claimId, String claimant, ReplySpec reply) {
+        checkClaimIdentifiers(claimId, claimant);
         if (reply == null) {
             ack(tenant, claimId, claimant);
             return null;
         }
-        PreparedOut prepared = prepareOut(reply.subspace(), reply.keys(), reply.dims(),
+        PreparedOut prepared = prepareOut(reply.subspace(), reply.keys(), reply.dims(), reply.body(),
                 reply.ttlSeconds(), null, /* nonceDeferred */ true);
         if (prepared.template().idFrom() != TemplateSchema.IdFrom.KEYS_NONCE) {
             throw new SchemaViolationException("reply.subspace",
@@ -842,6 +922,7 @@ public final class TupleRepository {
 
     /** {@code nack(claim_id, claimant)} — releases the claim; counts an attempt. */
     public void nack(String tenant, String claimId, String claimant) {
+        checkClaimIdentifiers(claimId, claimant);
         tenantScope.withTenant(tenant, ctx -> {
             TuplesRecord row = liveClaimRow(ctx, tenant, claimId);
             if (row == null) {
@@ -895,6 +976,7 @@ public final class TupleRepository {
      * @return the new {@code lease_until}, at the precision the row stores.
      */
     public OffsetDateTime renew(String tenant, String claimId, String claimant, long leaseSeconds) {
+        checkClaimIdentifiers(claimId, claimant);
         // Refused before the transaction opens: a non-positive lease needs neither the
         // row nor the template to reject, so there is nothing to roll back. Same
         // placement rule Step 2 settled for reply refusals.
@@ -1130,9 +1212,33 @@ public final class TupleRepository {
                 long maxAttempts = (t == null || t.take().maxAttempts() == null)
                         ? Long.MAX_VALUE : t.take().maxAttempts();
                 int attempts = row.getAttempts() + 1;
-                ReleaseOutcome outcome = releaseOrDeadLetter(ctx, tenant, row.getSubspace(), row.getTemplate(),
-                        row.getId(), row.getClaimId(), row.getClaimant(), TRANSITION_EXPIRE, now,
-                        attempts, maxAttempts);
+                // Fix round (coordinator, sweep-isolation critical sibling): savepoint-
+                // guarded, so ONE row's failure (any exception -- a constraint
+                // violation, a transient statement error) cannot wedge the REST of this
+                // batch. Without the savepoint, a thrown exception here would leave
+                // Postgres's server-side transaction in the aborted state for every
+                // statement after it, including every OTHER row's release still to
+                // come in this loop and the SELECT above's own row lock; with it, only
+                // this row's own write is rolled back, and the loop moves on to the
+                // next selected row. A row that fails EVERY tick still sorts first
+                // (ORDER BY lease_until ASC) and is reselected every tick, but it no
+                // longer prevents this SAME batch's other (up to batchSize-1) rows from
+                // making progress the way the shared-transaction-abort failure mode
+                // did. Mirrors CatalogRepository#withSavepointFailOpen's exact
+                // mechanism (same doctrine: a sweep failure must never leave the
+                // surrounding transaction aborted for load-bearing work after it).
+                ReleaseOutcome outcome;
+                try {
+                    outcome = withRowSavepoint(ctx, () -> releaseOrDeadLetter(ctx, tenant, row.getSubspace(),
+                            row.getTemplate(), row.getId(), row.getClaimId(), row.getClaimant(),
+                            TRANSITION_EXPIRE, now, attempts, maxAttempts));
+                } catch (RuntimeException ex) {
+                    log.warn("event=tuple_sweep_release_row_failed tenant={} subspace={} tuple_id={} "
+                                    + "claim_id={} error={}",
+                            tenant, row.getSubspace(), HexFormat.of().formatHex(row.getId()), row.getClaimId(),
+                            ex.toString());
+                    continue;
+                }
                 switch (outcome) {
                     case DEAD_LETTERED -> deadLettered++;
                     case RELEASED -> released++;
@@ -1343,6 +1449,52 @@ public final class TupleRepository {
     }
 
     // ── shared helpers ───────────────────────────────────────────────────────
+
+    /**
+     * Run {@code body} under a JDBC SAVEPOINT taken on {@code ctx}'s own connection,
+     * rolling back to it (never releasing -- Postgres discards it at the enclosing
+     * transaction's own COMMIT/ROLLBACK regardless, same reasoning as {@code
+     * CatalogRepository#withSavepointFailOpen}) and RE-THROWING on any exception, so
+     * the surrounding transaction is restored to a workable state for whatever runs
+     * after this call rather than being left in Postgres's server-side aborted state.
+     *
+     * <p>Unlike {@code CatalogRepository#withSavepointFailOpen} this does NOT
+     * swallow the exception (no {@code fallback} value) -- {@link
+     * #releaseLapsedClaimsBatch}'s only caller here needs to know a row failed (to
+     * log it and skip to the next row without counting it as released or dead-
+     * lettered), not a silently substituted value. The savepoint is the shared
+     * mechanism between the two call sites; whether to swallow or rethrow is each
+     * caller's own policy.
+     *
+     * <p>Round-2 review finding (CRE pass 2, 2026-09-13): a row this rolls back is
+     * bounded by its own {@code expires_at}, NOT by {@code attempts} -- the
+     * {@code UPDATE ... SET attempts = ...} inside {@link #releaseOrDeadLetter} is
+     * itself part of what this savepoint rolls back on failure, so a row that fails
+     * on EVERY tick never advances {@code attempts} and can never reach {@code
+     * max_attempts} that way. It is reaped only by the independent {@link
+     * #purgeExpiredTuplesBatch} arm once its {@code expires_at} passes -- a raw
+     * DELETE immune to whatever made this row's release throw -- never by hitting a
+     * dead-letter threshold it can no longer count toward.
+     */
+    private static <T> T withRowSavepoint(DSLContext ctx, Callable<T> body) {
+        Connection conn = ctx.configuration().connectionProvider().acquire();
+        Savepoint sp = null;
+        try {
+            sp = conn.setSavepoint();
+            return body.call();
+        } catch (Exception e) {
+            if (sp != null) {
+                try {
+                    conn.rollback(sp);
+                } catch (SQLException se) {
+                    log.error("event=tuple_sweep_savepoint_rollback_failed error={}", se.getMessage(), se);
+                }
+            }
+            throw (e instanceof RuntimeException re) ? re : new RuntimeException(e);
+        } finally {
+            ctx.configuration().connectionProvider().release(conn);
+        }
+    }
 
     private TemplateSchema resolveOrThrow(String subspace) {
         TemplateSchema t = registry.resolve(subspace);

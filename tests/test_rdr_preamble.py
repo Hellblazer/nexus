@@ -497,13 +497,15 @@ class TestRdrAccept:
         assert "unclassified" in out
         assert "never defaulted" in out
         # nexus-yjf5l.10: the disposition clause is the SAME sentence in the
-        # skill, the command mirror, and this printed brief — one equality
-        # across all three rather than three separate substring checks that
-        # could each drift independently (the printed brief once dropped the
-        # "(with its fix check)" parenthetical the other two carried).
-        skill = (_PLUGIN_DIR / "skills" / "rdr-accept" / "SKILL.md").read_text()
-        cmd = (_PLUGIN_DIR / "commands" / "rdr-accept.md").read_text()
-        assert _disposition_clause(skill) == _disposition_clause(cmd) == _disposition_clause(out)
+        # skill and this printed brief — one equality rather than a
+        # substring check that could drift (the printed brief once dropped
+        # the "(with its fix check)" parenthetical the skill carried).
+        # nexus-cnzei.6 fix round (critic Significant 4): the command mirror
+        # dropped out of this equality — commands/rdr-accept.md now points
+        # to the rdr-accept-checklist skill for the procedure instead of
+        # carrying its own copy of this clause.
+        skill = (_PLUGIN_DIR / "skills" / "rdr-accept-checklist" / "SKILL.md").read_text()
+        assert _disposition_clause(skill) == _disposition_clause(out)
 
     def test_rdr_accept_preamble_opens_no_t2_client(self, rdr_env, monkeypatch) -> None:
         """nexus-yjf5l.8 / .18: preamble_rdr_accept prints instructions
@@ -2190,7 +2192,7 @@ class TestSkillFileGapCoverage:
     def test_gate_skill_lists_heading_variants(self) -> None:
         """rdr-gate SKILL.md must list both Problem and Problem Statement."""
         skill = (
-            Path(__file__).parent.parent / "conexus" / "skills" / "rdr-gate" / "SKILL.md"
+            Path(__file__).parent.parent / "conexus" / "skills" / "rdr-gate-checklist" / "SKILL.md"
         ).read_text()
         assert "Problem / Problem Statement" in skill
 

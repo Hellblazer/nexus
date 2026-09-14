@@ -47,6 +47,19 @@
 # is waited for, bounded by NX_BUILD_LEASE_WAIT (nexus-g6xpa); rc 75 names
 # the holder only once that bound is exhausted. See scripts/lib/build-lease.sh.
 #
+# STAMP GUARDED + HELD FOR ITS WHOLE LIFETIME (nexus-iexvl): once the lease
+# above is held, release.properties is checked against git HEAD before this
+# script backs anything up. A dirty file at that point means a PRIOR
+# process left the tree stamped without going through this same lease
+# discipline (the migration-rehearsal --guided/--shakeout-e2e/--candidate-
+# migration legs, before their own nexus-iexvl fix) — refuse loudly rather
+# than `cp`-backing-up whatever happens to be on disk, stamping over it,
+# and restoring THAT (someone else's) stamp on exit. The restore-then-
+# release trap below (release_props_restore_and_release) closes the other
+# half of the same incident: this script used to release the lease BEFORE
+# restoring the file, leaving its own short window where a second acquirer
+# could snapshot a still-stamped tree. See scripts/lib/release-props-lease.sh.
+#
 # GATE-JAR CACHE (nexus-g6xpa, 2026-09-07): a fresh worktree used to spend
 # ~9 minutes here rebuilding a jar byte-identical to the primary's. The
 # stamped jar is now cached in the git common dir keyed on the EXACT
@@ -70,6 +83,8 @@ props="$repo_root/service/src/main/resources/META-INF/nexus/release.properties"
 
 # shellcheck source=./lib/build-lease.sh disable=SC1091
 source "$repo_root/scripts/lib/build-lease.sh"
+# shellcheck source=./lib/release-props-lease.sh disable=SC1091
+source "$repo_root/scripts/lib/release-props-lease.sh"
 # shellcheck source=./lib/gate-jar-cache.sh disable=SC1091
 source "$repo_root/scripts/lib/gate-jar-cache.sh"
 build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" build-gate-jar.sh "$@"
@@ -79,6 +94,15 @@ build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" build-gate-jar.s
 trap 'build_lease_release service' EXIT
 
 test -f "$props" || { echo "release.properties missing at $props" >&2; exit 1; }
+
+# nexus-iexvl: now that the lease is ours, nobody else can legitimately be
+# mid-stamp — a dirty file here means a prior process left the tree
+# stamped without holding this lease for its whole stamp lifetime. Refuse
+# before ever backing anything up.
+if ! release_props_guard_clean "$props" service; then
+    build_lease_release service
+    exit 75
+fi
 
 ver=$(cd "$repo_root" && python3 -c "
 import pathlib, re
@@ -119,11 +143,14 @@ echo "gate jar cache MISS key=$cache_key — building"
 
 backup="$(mktemp)"
 cp "$props" "$backup"
-# Restore on ANY exit path: a stamped release.properties left in the tree is a
+# Restore on ANY exit path, BEFORE releasing the lease (nexus-iexvl — see
+# the header comment): a stamped release.properties left in the tree is a
 # tracked-file modification that would follow the developer into their next
 # commit, and it would make a subsequent `mvn package` silently produce a
-# release-looking JAR.
-trap 'build_lease_release service; cp "$backup" "$props"; rm -f "$backup"' EXIT
+# release-looking JAR. release_props_restore_and_release always restores
+# first and releases second, so no other process can ever observe a freed
+# lease while this file is still stamped.
+trap 'release_props_restore_and_release "$props" "$backup" service' EXIT
 
 tmp="$(mktemp)"
 grep -Ev '^release_version=|^build_ref=' "$props" > "$tmp"

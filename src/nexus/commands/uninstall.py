@@ -13,6 +13,12 @@ install shapes (auto-detected; each branch is a no-op when its target is absent)
 * **Managed-only client** (wigzi): clear the managed endpoint + token from
   ``config.yml`` and reset the capability-probe cache. SKIPs service-stop (no
   local service) and SKIPs data-wipe (the data lives in the remote tenant).
+* **User-level beads PRIME.md** (nexus-cnzei.8): removes the machine-wide
+  ``PRIME.md`` at ``nexus.beads_prime.user_prime_path()``, but ONLY when it
+  is still exactly what conexus installed (its marker's recorded body hash
+  still matches) -- a hand-edited or otherwise user-authored file at that
+  path is left in place, reported, never destroyed. Mode-agnostic and
+  unconditional, like the data-token lease sweep.
 
 ``nx uninstall`` is DRY-RUN by default — it prints what would be removed and
 touches nothing; pass ``--yes`` to perform the teardown (mirrors the
@@ -141,6 +147,52 @@ def _teardown_data_token_leases(*, confirm: bool) -> tuple[list[str], list[str]]
     return [f"Data-token leases: removed {removed} cached lease file(s)."], warnings
 
 
+def _teardown_beads_prime(*, confirm: bool) -> tuple[list[str], list[str]]:
+    """Remove the user-level beads PRIME.md (nexus-cnzei.8), ONLY when it is
+    still exactly what conexus installed. Returns (lines, warnings).
+
+    Unconditional -- runs regardless of local-vs-managed detection, mirroring
+    ``_teardown_data_token_leases``: whether beads is managed has nothing to
+    do with which serving mode this install uses.
+
+    Safety: a file whose marker hash no longer matches its body (a human
+    edited it, :data:`~nexus.beads_prime.PrimeStatus.USER_AUTHORED`) is
+    LEFT IN PLACE -- a clean uninstall must not destroy content the user
+    themselves wrote, even at a path conexus once wrote to first. Only
+    :data:`~nexus.beads_prime.PrimeStatus.MANAGED_CURRENT` or
+    :data:`~nexus.beads_prime.PrimeStatus.MANAGED_STALE` (both mean: the
+    body's hash still matches what the marker recorded, so nothing has
+    touched it since install) are removed.
+    """
+    from nexus.beads_prime import PrimeStatus, status, user_prime_path  # noqa: PLC0415 — deferred to avoid module-load cost
+
+    path = user_prime_path()
+    current = status(path)
+    if current is PrimeStatus.ABSENT:
+        return [], []
+    if current is PrimeStatus.USER_AUTHORED:
+        return (
+            [
+                f"Beads PRIME.md: left in place -- {path} is user-authored "
+                "or has been edited since install; not removed."
+            ],
+            [],
+        )
+
+    # MANAGED_CURRENT or MANAGED_STALE: genuinely ours, untouched since.
+    if not confirm:
+        return [f"Beads PRIME.md: would remove the conexus-managed file at {path}."], []
+
+    warnings: list[str] = []
+    try:
+        path.unlink()
+        lines = [f"Beads PRIME.md: removed the conexus-managed file at {path}."]
+    except OSError as exc:
+        warnings.append(f"could not remove {path}: {exc}")
+        lines = []
+    return lines, warnings
+
+
 @click.command("uninstall")
 @click.option(
     "--yes",
@@ -174,6 +226,16 @@ def uninstall_cmd(assume_yes: bool, remove_data: bool) -> None:
     for line in lease_lines:
         click.echo(line)
 
+    # User-level beads PRIME.md (nexus-cnzei.8) — unconditional, mode-
+    # agnostic, and best-effort: a detection/removal hiccup must not abort
+    # the rest of an otherwise-successful uninstall.
+    try:
+        beads_lines, beads_warnings = _teardown_beads_prime(confirm=assume_yes)
+    except Exception as exc:  # noqa: BLE001 — best-effort teardown step; never aborts uninstall
+        beads_lines, beads_warnings = [], [f"beads PRIME.md check failed: {exc}"]
+    for line in beads_lines:
+        click.echo(line)
+
     # Local branch (eu4u4) — stop the service stack + daemon, remove autostart +
     # marker, optionally wipe local data. GATED on local presence (auto-detect):
     # skipped entirely for a managed-only / fresh install so no spurious
@@ -181,7 +243,7 @@ def uninstall_cmd(assume_yes: bool, remove_data: bool) -> None:
     # Probe local presence ONCE — a second call could disagree under a concurrent
     # install (lease appears mid-run) and would re-pay the stat/SQLite cost.
     local_present = _local_service_present()
-    warnings: tuple[str, ...] = (*managed_warnings, *lease_warnings)
+    warnings: tuple[str, ...] = (*managed_warnings, *lease_warnings, *beads_warnings)
     if local_present:
         report = uninstall_daemon(confirm=assume_yes, remove_data=remove_data)
         click.echo(report.message)
@@ -197,7 +259,7 @@ def uninstall_cmd(assume_yes: bool, remove_data: bool) -> None:
                 "managed-only client; the remote tenant's data is untouched."
             )
 
-    if not managed_lines and not lease_lines and not local_present:
+    if not managed_lines and not lease_lines and not beads_lines and not local_present:
         click.echo("Nothing to uninstall — no managed config and no local service found.")
 
     for w in warnings:

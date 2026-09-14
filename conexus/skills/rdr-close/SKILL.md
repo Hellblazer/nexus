@@ -124,8 +124,8 @@ mcp__plugin_conexus_nexus__memory_put(
     project="{repo}_rdr",
     title="{rdr_id}-close-override-{YYYY-MM-DD}",
     content="critic_verdict: {outcome|skipped}\nuser_reason: {force_implemented_reason}\nfinal_close_reason: {close_reason}\ntimestamp: {ISO8601}\nrdr_id: {rdr_id}",
-    ttl="permanent",
     tags="rdr,close-override,rdr-{rdr_id}"
+    # omit ttl (memory_put's ttl is int|None; permanent by omission, not the string "permanent")
 )
 ```
 
@@ -175,7 +175,7 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
 
 ### Step 4: Update State
 
-1. Update T2 record: mcp__plugin_conexus_nexus__memory_put(content="... (same fields, status: Implemented, closed: YYYY-MM-DD, close_reason: Implemented, archived: true)", project="{repo}_rdr", title="NNN", ttl="permanent", tags="rdr,{type},closed"
+1. Update T2 record: mcp__plugin_conexus_nexus__memory_put(content="... (same fields, status: Implemented, closed: YYYY-MM-DD, close_reason: Implemented, archived: true)", project="{repo}_rdr", title="NNN", tags="rdr,{type},closed"  # omit ttl (memory_put's ttl is int|None; permanent by omission)
    If T3 archive fails, set `archived: false` — retryable by re-running `/conexus:rdr-close`
 
 2. **Flip the file frontmatter + README via the CLI (do NOT hand-edit):**
@@ -341,7 +341,7 @@ Seed link-context before the store_put call (Step 6) to ensure auto-linker conne
 Outputs produced by this skill directly:
 
 - **Console output**: Bead status gate table (if epic_bead in T2)
-- **T2 memory**: Close metadata via memory_put tool: project="{repo}_rdr", title="NNN", ttl="permanent", tags="rdr,{type},closed"
+- **T2 memory**: Close metadata via memory_put tool: project="{repo}_rdr", title="NNN", tags="rdr,{type},closed" (omit `ttl`; permanent by omission)
 - **T3 semantic index**: Conditionally refreshed via `nx index rdr` (CCE embeddings, section-level chunks) — only when the RDR body changed during close; frontmatter-only edits are skipped
 - **Filesystem**: Post-mortem at `$RDR_DIR/post-mortem/NNN-kebab-title.md`, updated README
 

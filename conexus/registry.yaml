@@ -147,7 +147,7 @@ agents:
     slash_command: /implement
     description: "TDD implementation with test-first methodology"
     triggers:
-      - "plan approved by plan-auditor"
+      - "plan approved by nx_plan_audit"
       - "user says implement"
       - "bead status is in_progress for implementation"
       - "executing phase from plan"
@@ -158,51 +158,6 @@ agents:
     typical_runtime: "varies by complexity"
     predecessors: [architect-planner]
     successors: [code-review-expert, test-validator]
-
-  knowledge-tidier:
-    model: haiku
-    version: "3.0"
-    color: mint
-    skill: knowledge-tidying
-    slash_command: /knowledge-tidy
-    description: "STUB — superseded by mcp__plugin_conexus_nexus__nx_tidy MCP tool (RDR-080)"
-    triggers:
-      - "call mcp__plugin_conexus_nexus__nx_tidy directly instead"
-    strengths:
-      - "See nx_tidy MCP tool"
-    typical_runtime: "n/a — stub"
-    predecessors: []
-    successors: []
-
-  plan-auditor:
-    model: sonnet
-    version: "3.0"
-    color: orange
-    skill: plan-validation
-    slash_command: /plan-audit
-    description: "STUB — superseded by mcp__plugin_conexus_nexus__nx_plan_audit MCP tool (RDR-080)"
-    triggers:
-      - "call mcp__plugin_conexus_nexus__nx_plan_audit directly instead"
-    strengths:
-      - "See nx_plan_audit MCP tool"
-    typical_runtime: "n/a — stub"
-    predecessors: []
-    successors: []
-
-  plan-enricher:
-    model: sonnet
-    version: "3.0"
-    color: emerald
-    skill: enrich-plan
-    slash_command: /enrich-plan
-    description: "STUB — superseded by mcp__plugin_conexus_nexus__nx_enrich_beads MCP tool (RDR-080)"
-    triggers:
-      - "call mcp__plugin_conexus_nexus__nx_enrich_beads directly instead"
-    strengths:
-      - "See nx_enrich_beads MCP tool"
-    typical_runtime: "n/a — stub"
-    predecessors: []
-    successors: []
 
   strategic-planner:
     model: opus
@@ -269,13 +224,28 @@ agents:
 # =============================================================================
 
 rdr_skills:
-  # Each rdr_skill has a corresponding commands/*.md file that injects live context
-  # (RDR dir from .nexus.yml, existing RDRs, T2 state, beads) before invoking the skill.
-  # RDR directory is read from .nexus.yml indexing.rdr_paths[0]; default docs/rdr.
+  # nexus-cnzei.6: rdr-gate/rdr-fix/rdr-accept/rdr-audit are a deliberately-
+  # kept dual surface — a command (real bash-injected preamble + $ARGUMENTS
+  # parsing, invoked as `/rdr-gate <id>`) and a skill carrying the same
+  # checklist content (TestRdrGateLoopRemedies pins verbatim clauses across
+  # both files; rdr-audit has its own dedicated test_rdr_audit_skill.py
+  # requiring the command to exist). Same name for both used to shadow the
+  # skill in the Skill-tool listing (nexus-cnzei.4's C1); the dict key below
+  # and the skill directory are now the `-checklist` suffixed name
+  # (rdr-gate-checklist etc.) while `slash_command:`/`command_file:` keep
+  # naming the unchanged, unrenamed `/rdr-gate` command — same rename
+  # strategy nexus-cnzei.4 already used for the "debug"/"research"/"review"
+  # verb skills. Every other name here now has EITHER a command_file (rdr-list —
+  # its skill was deleted; the command's `!`nx rdr preamble rdr-list`` bash
+  # injection is a live, tested E2E fixture, tests/cc-validation/scenarios/19
+  # and 23, and the skill was a documentation shell dependent on it having
+  # already run) OR no command_file at all (rdr-create, rdr-research,
+  # rdr-close, rdr-show, phase-review-gate — the command was deleted; the
+  # skill is independently executable via Bash/MCP tool calls, RDR directory
+  # is read from .nexus.yml indexing.rdr_paths[0], default docs/rdr).
 
   rdr-create:
     slash_command: /rdr-create
-    command_file: commands/rdr-create.md
     description: "Scaffold new RDR from template, assign ID, register in T2"
     triggers:
       - "create an RDR"
@@ -284,7 +254,6 @@ rdr_skills:
 
   rdr-research:
     slash_command: /rdr-research
-    command_file: commands/rdr-research.md
     description: "Add, track, and verify structured research findings"
     triggers:
       - "add research finding"
@@ -292,7 +261,7 @@ rdr_skills:
       - "verify assumption"
     dispatches_to: [deep-research-synthesizer, codebase-deep-analyzer]
 
-  rdr-gate:
+  rdr-gate-checklist:
     slash_command: /rdr-gate
     command_file: commands/rdr-gate.md
     description: "Run finalization gate: structural + assumption + AI critique"
@@ -302,7 +271,7 @@ rdr_skills:
       - "is this RDR ready"
     dispatches_to: [substantive-critic]
 
-  rdr-fix:
+  rdr-fix-checklist:
     slash_command: /rdr-fix
     command_file: commands/rdr-fix.md
     description: "Fix a gated RDR's findings: sites, diff since the gated commit, pre-edit research entry, fix check"
@@ -312,7 +281,7 @@ rdr_skills:
       - "fix RDR"
     dispatches_to: [substantive-critic]
 
-  rdr-accept:
+  rdr-accept-checklist:
     slash_command: /rdr-accept
     command_file: commands/rdr-accept.md
     description: "Accept a gated RDR — verify gate PASSED, update status, optional planning dispatch"
@@ -324,7 +293,6 @@ rdr_skills:
 
   rdr-close:
     slash_command: /rdr-close
-    command_file: commands/rdr-close.md
     description: "Close RDR with post-mortem, bead status advisory, T3 archive"
     triggers:
       - "close this RDR"
@@ -332,7 +300,7 @@ rdr_skills:
       - "finish RDR"
     dispatches_to: []  # knowledge-tidier superseded by mcp__plugin_conexus_nexus__nx_tidy MCP tool
 
-  rdr-audit:
+  rdr-audit-checklist:
     slash_command: /rdr-audit
     command_file: commands/rdr-audit.md
     description: "Audit a project's RDR lifecycle for silent-scope-reduction base rate, or inspect/manage scheduled periodic audits"
@@ -345,7 +313,6 @@ rdr_skills:
 
   phase-review-gate:
     slash_command: /phase-review-gate
-    command_file: commands/phase-review-gate.md
     description: "Cross-walk RDR §Approach against closing beads at a phase boundary; blocks silent scope reduction"
     triggers:
       - "phase review gate"
@@ -356,7 +323,7 @@ rdr_skills:
 
   rdr-list:
     slash_command: /rdr-list
-    command_file: commands/rdr-list.md
+    command_file: commands/rdr-list.md  # command-only (nexus-cnzei.4): skills/rdr-list deleted, see header note
     description: "List all RDRs with status, type, priority"
     triggers:
       - "list RDRs"
@@ -364,7 +331,6 @@ rdr_skills:
 
   rdr-show:
     slash_command: /rdr-show
-    command_file: commands/rdr-show.md
     description: "Display detailed RDR information"
     triggers:
       - "show RDR"
@@ -378,15 +344,12 @@ rdr_skills:
 # no predecessors/successors (not part of agent pipelines).
 
 standalone_skills:
-  test-authoring:
-    description: "Reference card for the nexus test suite — dev-loop layer routing (-n auto / -m lint / integration / scenario journeys) and test-authoring directives from the 2026-08-05 compression arc"
-    triggers:
-      - "writing or restructuring tests in the nexus repo"
-      - "choosing how to run the nexus test suite"
-      - "scenario-merge vs parametrize decision"
-      - "where a new T2 store contract test belongs"
-      - "test consolidation proposal"
-    tools: []
+  # nexus-cnzei.6: test-authoring MOVED to .claude/skills/test-authoring/ —
+  # it is entirely nexus-repo-specific (this repo's own test suite, dev-loop
+  # layers, tests/AGENTS.md) and was shipping to every conexus plugin user
+  # for no benefit outside this repo (injection audit S6). Repo-local skills
+  # like this one, plus release/ and engine-release/, live in .claude/skills/
+  # and are not part of the plugin's registry.
 
   query:
     description: "Use when a question needs multi-step retrieval via mcp__plugin_conexus_nexus__nx_answer"
@@ -395,12 +358,33 @@ standalone_skills:
       - "plan-match-first retrieval"
     tools: []
 
-  upgrade:
-    description: "Guided Chroma-to-service upgrade — preview then run nx migrate-to-service; thin surface over the nexus.migration engine (RDR-159)"
+  enrich-plan:
+    description: "RDR-080 P3 pointer skill — calls mcp__plugin_conexus_nexus__nx_enrich_beads directly, no agent spawn"
     triggers:
-      - "upgrade an existing Chroma store to the nexus service stack"
-      - "migrate permanent vectors off ChromaDB onto PG16+pgvector"
-      - "how to run the guided migration"
+      - "beads need enrichment with execution context"
+      - "file paths, code patterns, constraints, or test commands missing from a bead"
+    tools: []
+
+  knowledge-tidying:
+    description: "RDR-080 P3 pointer skill — calls mcp__plugin_conexus_nexus__nx_tidy (read-only) then store_put to persist the organized result to T3"
+    triggers:
+      - "validated findings need consolidation in the T3 knowledge store"
+    tools: []
+
+  plan-validation:
+    description: "RDR-080 P3 pointer skill — calls mcp__plugin_conexus_nexus__nx_plan_audit directly, no agent spawn"
+    triggers:
+      - "a plan needs validation before implementation"
+      - "catch gaps and codebase misalignment in a plan"
+    tools: []
+
+  upgrade:
+    description: "Guided upgrade — preview via nx upgrade --dry-run and nx doctor, then run nx upgrade; thin surface over the RDR-185 upgrade ladder"
+    triggers:
+      - "upgrade nexus"
+      - "migrate an existing store onto the service stack"
+      - "what upgrade steps does this install need"
+      - "blocked on a migration or holding an old/dormant install"
     tools: [Bash]
 
   serena-code-nav:
@@ -430,6 +414,14 @@ standalone_skills:
       - "sending a message to another agent's or instance's address"
       - "draining a mailbox before composing a hand-back"
       - "authoring or reviewing code against the mailbox/<address> template"
+    tools: []
+
+  peer-messaging:
+    description: "Messaging other Claude sessions and dispatched agents: channel choice between SendMessage, the mailbox and T2, request acknowledgement, the trust boundary on peer messages, and sharing one machine"
+    triggers:
+      - "sending to, waiting on, or answering another session or agent"
+      - "a message or relay from another session arrives"
+      - "two sessions need the same checkout, build, or test capacity"
     tools: []
 
   catalog:
@@ -507,7 +499,7 @@ standalone_skills:
     tools: [Bash, Read]
 
   composition-probe:
-    description: "Runtime composition smoke test for coordinator beads — dispatches a general-purpose subagent to generate a 30-50 line end-to-end test against the coordinator's entry point, runs it via project-native test runner (py/java/ts auto-detected), reports PASS or FAIL with dependency attribution. Fires on beads tagged metadata.coordinator=true (set by plan-enricher ≥2 deps heuristic). Read-only tool budget per RDR-066 Phase 1a CA-1 finding."
+    description: "Runtime composition smoke test for coordinator beads — dispatches a general-purpose subagent to generate a 30-50 line end-to-end test against the coordinator's entry point, runs it via project-native test runner (py/java/ts auto-detected), reports PASS or FAIL with dependency attribution. Fires on beads tagged metadata.coordinator=true (set by the nx_enrich_beads ≥2 deps heuristic). Read-only tool budget per RDR-066 Phase 1a CA-1 finding."
     triggers:
       - "run composition probe on bead X"
       - "verify coordinator bead composition"
@@ -524,16 +516,16 @@ standalone_skills:
       - "before decomposing an agentic pipeline"
     tools: [Read]
 
-  research:
-    description: "Verb skill for design / architecture / planning tasks — dispatches plan_match with dimensions={verb:research}, executes via plan_run with caller bindings"
+  design-to-code-trace:
+    description: "Verb skill for design / architecture / planning tasks — dispatches plan_match with dimensions={verb:research}, executes via plan_run with caller bindings. Renamed off the bare 'research' name (nexus-cnzei.4) which collided with the /conexus:research command's own skill registration."
     triggers:
       - "how does X work"
       - "design context for Y"
       - "trace Z from spec to code"
     tools: [Read]
 
-  review:
-    description: "Verb skill for critique / audit / code-review against a change set — dispatches plan_match with dimensions={verb:review}"
+  decision-drift-review:
+    description: "Verb skill for critique / audit against decision history for a change set — dispatches plan_match with dimensions={verb:review}. Renamed off the bare 'review' name (nexus-cnzei.4) which invited confusion with code review."
     triggers:
       - "review this change set"
       - "did the refactor drift from the RDR"
@@ -548,12 +540,12 @@ standalone_skills:
       - "rank candidates by criterion"
     tools: [Read]
 
-  debug:
-    description: "Verb skill for dev / debug from a failing code path — dispatches plan_match with dimensions={verb:debug}; intentionally flat (no traverse — Serena handles symbol navigation)"
+  why-was-this-written:
+    description: "Verb skill for the design intent behind a failing code path — dispatches plan_match with dimensions={verb:debug}; intentionally flat (no traverse — Serena handles symbol navigation). Renamed off the bare 'debug' name (nexus-cnzei.4) which collided with the /conexus:debug command's own skill registration."
     triggers:
-      - "debug this test failure"
       - "why is this handler failing"
       - "trace the stack of the panic"
+      - "what decision led to this code"
     tools: [Read]
 
   document:
@@ -569,6 +561,15 @@ standalone_skills:
 # =============================================================================
 # Common agent sequences for different work types
 
+# nexus-cnzei.6: this `sequence:` list is the ONE canonical pipeline order —
+# orchestration/SKILL.md's Quick Routing table and development/SKILL.md's
+# Post-Implementation Review section both point here rather than restating
+# their own copy (the audit behind nexus-cnzei found the two disagreeing:
+# orchestration omitted substantive-critic from the implement-code row while
+# development/SKILL.md § Post-Implementation Review always required both
+# reviewers). code-review-expert and substantive-critic are BOTH mandatory,
+# non-interchangeable, every implementation — see development/SKILL.md for
+# why (they catch different, non-overlapping classes of issue).
 pipelines:
   feature:
     description: "Full feature development from planning to validation"
@@ -577,6 +578,7 @@ pipelines:
       - architect-planner
       - developer
       - code-review-expert
+      - substantive-critic
       - test-validator
 
   bug:
@@ -585,6 +587,7 @@ pipelines:
       - debugger
       - developer
       - code-review-expert
+      - substantive-critic
       - test-validator
 
   research:
@@ -619,9 +622,8 @@ naming_aliases:
   /debug: debugging                    # Shorter, memorable
   /create-plan: strategic-planning     # Avoids built-in /plan collision
   /research: research-synthesis        # Common usage
-  /knowledge-tidy: knowledge-tidying   # Verb form preference
   /test-validate: test-validation      # Verb form preference
-  /plan-audit: plan-validation         # Action-oriented (stub — use nx_plan_audit MCP tool)
+  /plan-audit: plan-validation         # Action-oriented (RDR-080 pointer skill — nx_plan_audit MCP tool, no agent spawn)
   /analyze-code: codebase-analysis     # Different naming convention
 
 # =============================================================================
@@ -641,11 +643,10 @@ model_summary:
     - substantive-critic
     - deep-research-synthesizer
     - developer
-    - plan-auditor   # stub
-    - plan-enricher  # stub
     - test-validator
-  haiku: # Fast, cheap - utility agents
-    - knowledge-tidier  # stub
+  # knowledge-tidier/plan-auditor/plan-enricher stubs deleted (nexus-cnzei.4);
+  # their functions are the nx_tidy/nx_plan_audit/nx_enrich_beads MCP tools.
+  haiku: [] # Fast, cheap - utility agents (none currently)
 
 # =============================================================================
 # UTILITY COMMANDS
@@ -674,9 +675,9 @@ utility_commands:
     description: "Write a paste-ready continuation prompt under ~/.cache/nexus/continuations/ capturing session state, branch, beads, T2 entries, and next-step pointers"
     disable_model_invocation: false
 
-  upgrade:
-    slash_command: /upgrade
-    description: "Guided Chroma-to-service upgrade — preview via nx migrate-to-service --dry-run, then run the full guided migration (RDR-159)"
+  plan-audit:
+    slash_command: /plan-audit
+    description: "Audit a plan via mcp__plugin_conexus_nexus__nx_plan_audit (RDR-080, no agent spawn); command_file registration moved here after the plan-auditor stub agent was deleted (nexus-cnzei.4) — see naming_aliases for the /plan-audit -> plan-validation skill pairing"
     disable_model_invocation: false
 
 

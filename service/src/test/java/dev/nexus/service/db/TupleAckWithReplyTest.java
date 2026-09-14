@@ -139,6 +139,49 @@ class TupleAckWithReplyTest {
         assertThat(replies.get(0).body()).isEqualTo("the answer");
     }
 
+    /**
+     * Bead nexus-8zoyp: {@code ackWithReply} consumes the request through the SAME
+     * {@code consumeClaim} the plain {@code ack} path uses, so the request row's body
+     * is nulled exactly the same way -- while the reply, a SEPARATE row written by
+     * {@code writeOut}, keeps its own body untouched. The request is invisible to
+     * {@code rd}/{@code in} once consumed, so its body is checked via a raw
+     * superuser read of {@code nexus.tuples} (the same idiom {@code
+     * TupleRepositoryTest#ack_clearsBody_rawRowShowsNullBody} uses).
+     */
+    @Test
+    void ackWithReply_clearsRequestBody_replyRowKeepsItsOwnBody() throws Exception {
+        String asker = addr("asker");
+        String answerer = addr("answerer");
+        repo.out(TENANT, "mailbox/" + answerer, Map.of("to", answerer), Map.of("from", "asker"),
+                "the request", "nonce-" + UUID.randomUUID(), null);
+        byte[] requestId = repo.rd(TENANT, "mailbox/" + answerer, Map.of("to", answerer), 10, null, 0)
+                .get(0).id();
+        var claimed = repo.inp(TENANT, "mailbox/" + answerer, Map.of("to", answerer), "worker-clear", 60);
+        assertThat(claimed).isPresent();
+
+        byte[] replyId = repo.ackWithReply(TENANT, claimed.get().claimId(), "worker-clear",
+                reply(asker, "the answer", null));
+        assertThat(replyId).isNotNull();
+
+        try (Connection su = pg.createConnection("")) {
+            String requestBody = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .select(dev.nexus.service.jooq.nexus.Tables.TUPLES.BODY)
+                    .from(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(requestId))
+                    .fetchOne(dev.nexus.service.jooq.nexus.Tables.TUPLES.BODY);
+            assertThat(requestBody)
+                    .as("ackWithReply consumes the request through consumeClaim, which must "
+                            + "null its body the same way a plain ack does (bead nexus-8zoyp)")
+                    .isNull();
+        }
+
+        var replies = repo.rd(TENANT, "mailbox/" + asker, Map.of("to", asker), 10, null, 0);
+        assertThat(replies).as("exactly one reply row").hasSize(1);
+        assertThat(replies.get(0).body())
+                .as("the reply is a SEPARATE row written by writeOut and must keep its own body")
+                .isEqualTo("the answer");
+    }
+
     @Test
     void theReplyNonceIsTheConsumedRequestId_setByTheEngine() {
         String asker = addr("asker");
@@ -290,9 +333,15 @@ class TupleAckWithReplyTest {
         // replies to the same ledger keys would collide on one id and out's refire clamp
         // would silently discard the second one's body -- the exact failure class RDR-206
         // exists to close, which is why this is refused rather than merely documented.
+        //
+        // body is null, not a literal string (bead nexus-r7xao): ledger/<session_id>'s
+        // own max_body_bytes is 0, so a non-empty body would trip TooLarge (a SIZE check,
+        // run before the existing schema validation this test targets) before ever
+        // reaching the id_from=keys+nonce check below -- null keeps this test isolated to
+        // the ONE thing it is about.
         var keysOnly = new TupleRepository.ReplySpec(
                 "ledger/" + session, Map.of("agent_id", "a1", "kind", "report"),
-                Map.of("agent_type", "developer"), "body", null);
+                Map.of("agent_type", "developer"), null, null);
 
         assertThatExceptionOfType(SchemaViolationException.class)
                 .isThrownBy(() -> repo.ackWithReply(TENANT, claimId, "worker-1", keysOnly));

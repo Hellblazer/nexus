@@ -88,6 +88,8 @@ from dataclasses import dataclass
 
 from nexus.errors import PER_RECORD_SURVIVABLE_EXCEPTIONS
 
+from tests._lint_line_anchor import resolve_anchor, resolve_ledger
+
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 SRC_ROOT = REPO_ROOT / "src" / "nexus"
 ERRORS_FILE = SRC_ROOT / "errors.py"
@@ -169,24 +171,64 @@ class _LoopAllowlistEntry:
 #: triage. Disposition (delete vs. rewire vs. leave dead) is tracked as
 #: nexus-a1zv2, not resolved here -- this entry's job is only to make the
 #: tripwire's scope claim exhaustive rather than silently inherited.
-_LOOP_ALLOWLIST: dict[tuple[str, str, int], _LoopAllowlistEntry] = {
-    # Line numbers shifted 287/289 -> 303/305 (RDR-204 Phase 3,
-    # nexus-ft04v.26: db/embed_migrate.py grew via the row-based repoint
-    # of its collection-name parsing) -- same two sites, same reason,
-    # only the pin moved.
-    ("db/embed_migrate.py", "_default_reindex", 303): _LoopAllowlistEntry(
+#: CONTENT-KEYED, not line-keyed (nexus-vkpr3): the third tuple element
+#: is the call's own stripped source text PLUS its nearest preceding
+#: non-blank line (the mandatory two-line convention -- see
+#: ``tests._lint_line_anchor``'s MANDATORY TWO-LINE MINIMUM section),
+#: resolved to its CURRENT line number by
+#: ``tests._lint_line_anchor.resolve_anchor`` on every run. This entry
+#: set was itself retargeted once by line-shift arithmetic before the
+#: conversion (287/289 -> 303/305, RDR-204 Phase 3 growing
+#: db/embed_migrate.py above both sites) -- a content anchor makes that
+#: retargeting unnecessary, since an insertion above either call changes
+#: neither call's own text.
+_LOOP_ALLOWLIST: dict[tuple[str, str, tuple[str, ...]], _LoopAllowlistEntry] = {
+    (
+        "db/embed_migrate.py", "_default_reindex",
+        (
+            'if p.suffix.lower() == ".pdf":',
+            "count = index_pdf(p, corpus=corpus, collection_name=target_name, force=True)",
+        ),
+    ): _LoopAllowlistEntry(
         reason=(
             "unwired module, docstring claims nx init integration "
             "falsely — disposition tracked as nexus-a1zv2"
         ),
     ),
-    ("db/embed_migrate.py", "_default_reindex", 305): _LoopAllowlistEntry(
+    (
+        "db/embed_migrate.py", "_default_reindex",
+        (
+            "else:",
+            "count = index_markdown(p, corpus=corpus, collection_name=target_name, force=True)",
+        ),
+    ): _LoopAllowlistEntry(
         reason=(
             "unwired module, docstring claims nx init integration "
             "falsely — disposition tracked as nexus-a1zv2"
         ),
     ),
 }
+
+
+def _resolve_loop_allowlist() -> tuple[
+    dict[tuple[str, str, int], _LoopAllowlistEntry], list[str],
+]:
+    """Resolve every ``_LOOP_ALLOWLIST`` content anchor to its CURRENT
+    live line number (nexus-vkpr3). Returns ``(by_key, problems)`` where
+    ``by_key`` is keyed exactly like the pre-conversion ``_LOOP_ALLOWLIST``
+    (path, function, resolved lineno) so callers compare against
+    ``_find_loop_call_sites``'s ``_Site`` tuples unchanged; a ``problems``
+    entry (STALE or AMBIGUOUS) means the anchor did not resolve at all."""
+    items = [
+        (rel, content, (func, entry))
+        for (rel, func, content), entry in _LOOP_ALLOWLIST.items()
+    ]
+    resolved, problems = resolve_ledger(SRC_ROOT, items)
+    by_key: dict[tuple[str, str, int], _LoopAllowlistEntry] = {
+        (rel, func, lineno): entry
+        for rel, lineno, (func, entry) in resolved
+    }
+    return by_key, problems
 
 
 def _handler_is_safe(handler: ast.ExceptHandler) -> bool:
@@ -444,11 +486,19 @@ def test_every_per_record_loop_site_is_covered_or_allowlisted() -> None:
     (by name) or a broad Exception/BaseException catch, or carry an
     explicit, reasoned _LOOP_ALLOWLIST entry. An unlisted, uncovered site
     is exactly the nexus-2fyb/qo84l/9800y/hb10j regression class."""
+    resolved_allowlist, problems = _resolve_loop_allowlist()
+    assert not problems, (
+        f"{len(problems)} _LOOP_ALLOWLIST anchor(s) failed to resolve:\n  "
+        + "\n  ".join(problems)
+        + "\n\nRetarget with the call's current stripped text if it "
+        "moved (insertions above it do not require this), or drop the "
+        "entry if the site is now covered."
+    )
     sites = _find_loop_call_sites(SRC_ROOT, _SCAN_RELPATHS)
     offenders = [
         s for s in sites
         if not s.covered
-        and (s.rel_path, s.function, s.lineno) not in _LOOP_ALLOWLIST
+        and (s.rel_path, s.function, s.lineno) not in resolved_allowlist
     ]
     assert not offenders, (
         "nexus-rlkgu: per-record loop call site(s) to an index_*-family "
@@ -493,7 +543,9 @@ def test_scanner_finds_the_known_per_record_loop_sites() -> None:
     # allowlisted) is what turns an UNLISTED uncovered site red; this
     # assertion just pins today's known-uncovered set stays == today's
     # allowlist, so the two can't silently drift apart from each other.
-    assert uncovered == set(_LOOP_ALLOWLIST), (uncovered, set(_LOOP_ALLOWLIST))
+    resolved_allowlist, problems = _resolve_loop_allowlist()
+    assert not problems, problems
+    assert uncovered == set(resolved_allowlist), (uncovered, set(resolved_allowlist))
 
 
 def test_loop_allowlist_reasons_are_non_vacuous() -> None:
@@ -506,15 +558,78 @@ def test_loop_allowlist_reasons_are_non_vacuous() -> None:
 
 
 def test_loop_allowlist_has_no_stale_entries() -> None:
+    """Every _LOOP_ALLOWLIST content anchor must resolve (nexus-vkpr3:
+    neither STALE nor AMBIGUOUS) to a line that is STILL genuinely
+    uncovered -- a resolved-but-now-covered site is the same staleness
+    this test always caught, just via content instead of a line number."""
+    resolved_allowlist, problems = _resolve_loop_allowlist()
     sites = _find_loop_call_sites(SRC_ROOT, _SCAN_RELPATHS)
     live_uncovered = {
         (s.rel_path, s.function, s.lineno) for s in sites if not s.covered
     }
-    stale = sorted(set(_LOOP_ALLOWLIST) - live_uncovered)
-    assert not stale, (
+    stale = sorted(set(resolved_allowlist) - live_uncovered)
+    assert not stale and not problems, (
         "nexus-rlkgu: stale _LOOP_ALLOWLIST entry (site is now covered, "
-        f"renamed, or removed): {stale}"
+        f"renamed, or removed): {stale}; anchor resolution problems: "
+        f"{problems}"
     )
+
+
+def test_loop_allowlist_anchor_survives_insertion_above_it(tmp_path: pathlib.Path) -> None:
+    """nexus-vkpr3 regression, against THIS file's real scanner
+    (``_find_loop_call_sites``): inserting a line above an allowlisted,
+    genuinely-uncovered call must not silently move the allowlist entry
+    onto a DIFFERENT, unreviewed uncovered call that happens to shift
+    into the old stored line number."""
+    fixture = tmp_path / "fixture_reindex.py"
+    original = (
+        "def index_pdf(*a, **kw):\n"
+        "    ...\n"
+        "\n"
+        "def index_markdown(*a, **kw):\n"
+        "    ...\n"
+        "\n"
+        "def _default_reindex(records, corpus, target_name):\n"
+        "    for p in records:\n"
+        "        if p.suffix == '.pdf':\n"
+        "            count = index_pdf(p, corpus=corpus, collection_name=target_name, force=True)\n"
+        "        else:\n"
+        "            count = index_markdown(p, corpus=corpus, collection_name=target_name, force=True)\n"
+    )
+    fixture.write_text(original, encoding="utf-8")
+
+    allowed_content = (
+        "count = index_markdown(p, corpus=corpus, collection_name=target_name, force=True)",
+    )
+    lineno, err = resolve_anchor(tmp_path, "fixture_reindex.py", allowed_content)
+    assert (lineno, err) == (12, "")
+
+    sites_before = _find_loop_call_sites(tmp_path, ("fixture_reindex.py",))
+    uncovered_before = sorted(s.lineno for s in sites_before if not s.covered)
+    assert uncovered_before == [10, 12]
+
+    # Insert exactly enough lines above both calls to shift the OTHER
+    # uncovered call (index_pdf, originally line 10) onto the allowlisted
+    # entry's OLD stored line number (12).
+    shift = lineno - uncovered_before[0]
+    assert shift > 0
+    modified = "\n".join(f"# inserted {i}" for i in range(shift)) + "\n" + original
+    fixture.write_text(modified, encoding="utf-8")
+
+    sites_after = _find_loop_call_sites(tmp_path, ("fixture_reindex.py",))
+    uncovered_after = sorted(s.lineno for s in sites_after if not s.covered)
+    assert uncovered_after[0] == 12, (
+        "fixture stopped demonstrating the hazard -- the index_pdf call "
+        "must now sit at the allowlisted entry's old stored line (12)"
+    )
+
+    # A stale line-number key (12) would now silently allowlist the
+    # index_pdf call. The content anchor instead resolves to the real,
+    # shifted index_markdown call and nothing else.
+    lineno, err = resolve_anchor(tmp_path, "fixture_reindex.py", allowed_content)
+    assert err == ""
+    assert lineno == 12 + shift
+    assert lineno != 12  # never the other call's (post-shift) line
 
 
 # ── Gate 1 kill controls (tmp_path fixtures) ────────────────────────────────

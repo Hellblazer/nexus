@@ -206,6 +206,7 @@ from nexus.db.managed_endpoint import (
     probe_managed_service,
     resolve_managed_endpoint,
 )
+from nexus.db.service_endpoint import PROD_WRITE_OPT_IN_ENV, ProductionWriteGuardError
 from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 
 _REMEDY = (
@@ -1334,6 +1335,21 @@ def record_deploy_from_gate_report_leg(
     provenance is resolved from the LIVE version's tag after that probe --
     ``check_floor`` only proves ``live >= floor``, so the floor tag may not be
     what is running.
+
+    nexus-jzyt3: the tracker write itself
+    (``deploy_tracker.write_deployed_engine_tracker``) is an HTTP T2 write,
+    so on a dev-checkout box it can hit ``guard_production_write`` and raise
+    :class:`ProductionWriteGuardError` -- distinct from every
+    ``DeployTrackerError`` subclass above (those are refusals BEFORE any
+    write is attempted) and from ``ManagedServiceError`` (the live re-read).
+    Uncaught, this propagated as a bare Python traceback whose last line
+    (``nexus.db.service_endpoint.ProductionWriteGuardError: STOP: ...``)
+    does not start with an ALL-CAPS verdict token, so
+    ``tests/e2e/release-preflight.sh``'s ``check()`` detail-extraction
+    matched nothing and printed "(no verdict line matched)" instead of the
+    actual refusal -- observed cutting conexus 7.44.0. Caught here so it
+    goes through the same choreography path (and the same ALL-CAPS
+    ``TRACKER NOT RECORDED`` verdict shape) as every other tracker refusal.
     """
     try:
         result = deploy_tracker.record_deploy_from_gate_report(
@@ -1354,6 +1370,10 @@ def record_deploy_from_gate_report_leg(
     except ManagedServiceError as exc:
         return _choreo.emit_choreography(
             "record_deploy_from_gate_report_leg", {"outcome": "managed_service_error"}, {"exc": str(exc)},
+        )
+    except ProductionWriteGuardError as exc:
+        return _choreo.emit_choreography(
+            "record_deploy_from_gate_report_leg", {"outcome": "production_write_guard"}, {"exc": str(exc)},
         )
     for advisory in result.report.advisories:
         print(f"  STEP-6 advisory ({result.report.basename}): {deploy_tracker.format_advisory(advisory)}")

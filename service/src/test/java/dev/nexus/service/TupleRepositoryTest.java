@@ -230,6 +230,82 @@ class TupleRepositoryTest {
         assertThat(rows).isEmpty();
     }
 
+    // ── ledger dims: commit / t2_ref / verify (bead nexus-d9k5h) ─────────────
+
+    @Test
+    void out_ledgerWithCommitT2RefVerifyDims_succeeds_readBack() {
+        Map<String, String> keys = Map.of("agent_id", "agent-dims-1", "kind", "report");
+        repo.out(TENANT_A, "ledger/session-dims-1", keys,
+                Map.of("agent_type", "developer", "commit", "abc1234",
+                        "t2_ref", "nexus/8zoyp-d9k5h-engine-riders-2026-09-13", "verify", "present"),
+                null, null, null);
+
+        var rows = repo.rdp(TENANT_A, "ledger/session-dims-1", keys, 10, null);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).dims())
+                .containsEntry("commit", "abc1234")
+                .containsEntry("t2_ref", "nexus/8zoyp-d9k5h-engine-riders-2026-09-13")
+                .containsEntry("verify", "present");
+    }
+
+    /**
+     * Bead nexus-d9k5h: none of {@code commit}/{@code t2_ref}/{@code verify} is
+     * {@code required: true}, so a ledger row written the OLD way -- carrying only
+     * {@code agent_type}, as every pre-existing row does -- must still write and
+     * read unchanged.
+     */
+    @Test
+    void out_ledgerWithoutNewDims_stillSucceeds_readBack() {
+        Map<String, String> keys = Map.of("agent_id", "agent-dims-2", "kind", "start");
+        repo.out(TENANT_A, "ledger/session-dims-2", keys, Map.of("agent_type", "developer"),
+                null, null, null);
+
+        var rows = repo.rdp(TENANT_A, "ledger/session-dims-2", keys, 10, null);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).dims()).containsEntry("agent_type", "developer");
+        assertThat(rows.get(0).dims()).doesNotContainKeys("commit", "t2_ref", "verify");
+    }
+
+    @Test
+    void out_ledgerVerifyOutsideAllowedSet_schemaViolation_namesVerify_noRowWritten() {
+        Map<String, String> keys = Map.of("agent_id", "agent-dims-3", "kind", "report");
+        // nexus-y4dmz: assert the ALLOWED-SET refusal, which only a declared
+        // verify with values [present, absent] produces. An undeclared verify is
+        // refused too, but as "not a declared dimension", so the old
+        // hasMessageContaining("verify") passed with the dim reverted.
+        assertThatThrownBy(() -> repo.out(TENANT_A, "ledger/session-dims-3", keys,
+                Map.of("agent_type", "developer", "verify", "maybe"), null, null, null))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("field 'verify'")
+                .hasMessageContaining("not in [present, absent]");
+
+        var rows = repo.rdp(TENANT_A, "ledger/session-dims-3", keys, 10, null);
+        assertThat(rows).isEmpty();
+    }
+
+    @Test
+    void out_ledgerCommitDimOver256Bytes_tooLarge_namesDimsCommit_noRowWritten() {
+        // nexus-y4dmz: prepareOut's size check runs before the unknown-dimension
+        // check and ignores the dim's name, so 257 bytes alone is TooLarge
+        // whether or not commit is declared. The 256-byte write at the limit is
+        // what only a declared commit accepts: undeclared, it is refused.
+        Map<String, String> atLimit = Map.of("agent_id", "agent-dims-4a", "kind", "report");
+        repo.out(TENANT_A, "ledger/session-dims-4", atLimit,
+                Map.of("agent_type", "developer", "commit", "x".repeat(256)), null, null, null);
+        assertThat(repo.rdp(TENANT_A, "ledger/session-dims-4", atLimit, 10, null)).hasSize(1);
+
+        Map<String, String> keys = Map.of("agent_id", "agent-dims-4", "kind", "report");
+        String over = "x".repeat(257);
+        assertThatThrownBy(() -> repo.out(TENANT_A, "ledger/session-dims-4", keys,
+                Map.of("agent_type", "developer", "commit", over), null, null, null))
+                .isInstanceOf(dev.nexus.service.db.TooLargeException.class)
+                .satisfies(e -> assertThat(((dev.nexus.service.db.TooLargeException) e).field())
+                        .isEqualTo("dims.commit"));
+
+        var rows = repo.rdp(TENANT_A, "ledger/session-dims-4", keys, 10, null);
+        assertThat(rows).isEmpty();
+    }
+
     /**
      * RDR-205 Phase 1 review (nexus-em75s.7, the RDR-110 C3 class recurring):
      * {@code computeId}'s ORIGINAL join delimited each field with a fixed separator
@@ -322,6 +398,88 @@ class TupleRepositoryTest {
         assertThat(repo.inp(TENANT_A, "mailbox/" + to, Map.of("to", to), "someone-else", 60)).isEmpty();
     }
 
+    /**
+     * Bead nexus-8zoyp: {@code consumeClaim}'s own UPDATE now sets {@code body} to
+     * NULL in the SAME statement that sets {@code consumed_at}. A consumed row is
+     * invisible to every read ({@code ack_setsConsumedAt_invisibleToRdAndIn} above),
+     * so the only way to observe the cleared body is a raw superuser read of
+     * {@code nexus.tuples} that bypasses the {@code consumed_at IS NULL} filter
+     * every {@code rd}/{@code in} query applies.
+     */
+    @Test
+    void ack_clearsBody_rawRowShowsNullBody() throws Exception {
+        String to = "agent-ack-clear-" + UUID.randomUUID();
+        byte[] id = repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+                Map.of("from", "sender-ack-clear"), "sensitive-body", "nonce-ack-clear-1", null);
+        var claimed = repo.inp(TENANT_A, "mailbox/" + to, Map.of("to", to), "claimant-ack-clear", 60);
+        assertThat(claimed).isPresent();
+
+        repo.ack(TENANT_A, claimed.get().claimId(), "claimant-ack-clear");
+
+        try (Connection su = pg.createConnection("")) {
+            String body = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .select(dev.nexus.service.jooq.nexus.Tables.TUPLES.BODY)
+                    .from(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(id))
+                    .fetchOne(dev.nexus.service.jooq.nexus.Tables.TUPLES.BODY);
+            assertThat(body)
+                    .as("consumeClaim's UPDATE must null the body in the same statement "
+                            + "that sets consumed_at (bead nexus-8zoyp)")
+                    .isNull();
+        }
+    }
+
+    /**
+     * Bead nexus-8zoyp: a {@code nack} releases the claim but never consumes the
+     * row -- only {@code ack} (via {@code consumeClaim}) clears the body, so a
+     * nacked-but-still-available row must keep it.
+     */
+    @Test
+    void nack_keepsBody() {
+        String to = "agent-nack-keep-" + UUID.randomUUID();
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+                Map.of("from", "sender-nack-keep"), "keep-me", "nonce-nack-keep-1", null);
+        var claimed = repo.inp(TENANT_A, "mailbox/" + to, Map.of("to", to), "claimant-nack-keep", 60);
+        assertThat(claimed).isPresent();
+
+        repo.nack(TENANT_A, claimed.get().claimId(), "claimant-nack-keep");
+
+        var rows = repo.rdp(TENANT_A, "mailbox/" + to, Map.of("to", to), 10, null);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).body())
+                .as("a nack must never clear the body -- only ack consumes the row "
+                        + "(bead nexus-8zoyp)")
+                .isEqualTo("keep-me");
+    }
+
+    /**
+     * Bead nexus-8zoyp: a claim whose lease lapses is released (by the claim
+     * loop's own lapsed-lease branch, on the next claim attempt) and re-taken as a
+     * fresh claim -- an {@code expire} transition, never a consume -- so its body
+     * must survive untouched.
+     */
+    @Test
+    void claimLapsed_thenReclaimed_keepsBody() throws Exception {
+        String to = "agent-lapse-keep-" + UUID.randomUUID();
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
+                Map.of("from", "sender-lapse-keep"), "lapse-body", "nonce-lapse-keep-1", null);
+
+        var first = repo.inp(TENANT_A, "mailbox/" + to, Map.of("to", to), "claimant-lapse-keep", 1);
+        assertThat(first).isPresent();
+
+        Thread.sleep(1_500); // let the 1-second lease lapse
+
+        var second = repo.inp(TENANT_A, "mailbox/" + to, Map.of("to", to), "claimant-lapse-keep-2", 60);
+        assertThat(second).isPresent();
+
+        var rows = repo.rdp(TENANT_A, "mailbox/" + to, Map.of("to", to), 10, null);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).body())
+                .as("a lapsed-then-reclaimed row must keep its body -- only ack clears it "
+                        + "(bead nexus-8zoyp)")
+                .isEqualTo("lapse-body");
+    }
+
     @Test
     void ackOrNack_byNonHolder_claimOwnership_secondAck_claimNotFound() {
         String to = "agent-ownership-1";
@@ -345,7 +503,7 @@ class TupleRepositoryTest {
     void nack_maxAttemptsTimes_deadLettered_noFurtherIn_rdReturnsWithDeadState() {
         String to = "agent-deadletter-" + UUID.randomUUID();
         repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to),
-                Map.of("from", "sender-dl"), "body", "nonce-dl-1", null);
+                Map.of("from", "sender-dl"), "dead-letter-body", "nonce-dl-1", null);
 
         // mailbox/<address> max_attempts is 3 (RDR-205 v1 template).
         for (int i = 0; i < 3; i++) {
@@ -359,6 +517,12 @@ class TupleRepositoryTest {
         var rows = repo.rdp(TENANT_A, "mailbox/" + to, Map.of("to", to), 10, null);
         assertThat(rows).hasSize(1);
         assertThat(rows.get(0).claimState()).isEqualTo("dead");
+        // Bead nexus-8zoyp: dead-lettering is reached via nack/expire, never a
+        // consume, so the body must survive intact even in the terminal dead state.
+        assertThat(rows.get(0).body())
+                .as("a dead-lettered row must keep its body -- only ack clears it "
+                        + "(bead nexus-8zoyp)")
+                .isEqualTo("dead-letter-body");
 
         var stats = repo.subspaceStats(TENANT_A, "mailbox/" + to);
         assertThat(stats.dead()).isEqualTo(1);
@@ -1127,6 +1291,28 @@ class TupleRepositoryTest {
         return id;
     }
 
+    /** Raw-SQL read via a superuser connection (bypasses RLS), for asserting a
+     *  row's post-sweep state directly rather than through the repo's own API. */
+    private String claimStateOf(byte[] id) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .select(dev.nexus.service.jooq.nexus.Tables.TUPLES.CLAIM_STATE)
+                    .from(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(id))
+                    .fetchOne(dev.nexus.service.jooq.nexus.Tables.TUPLES.CLAIM_STATE);
+        }
+    }
+
+    private int attemptsOf(byte[] id) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .select(dev.nexus.service.jooq.nexus.Tables.TUPLES.ATTEMPTS)
+                    .from(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                    .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(id))
+                    .fetchOne(dev.nexus.service.jooq.nexus.Tables.TUPLES.ATTEMPTS);
+        }
+    }
+
     @Test
     void purgeExpiredTuplesBatch_respectsBatchSize_multipleCallsDrainTheRest() throws Exception {
         String tenant = "tuple-tenant-purge-batch-" + UUID.randomUUID();
@@ -1175,6 +1361,107 @@ class TupleRepositoryTest {
         assertThat(result.scanned()).isEqualTo(1);
         assertThat(result.released()).isEqualTo(1);
         assertThat(result.deadLettered()).isZero();
+    }
+
+    /**
+     * Round-2 verification (CRE pass 2, 2026-09-13): the CatalogRepository#
+     * withSavepointFailOpen precedent this bead's {@code withRowSavepoint} mirrors
+     * has a test that forces a REAL SQL error (a REVOKE'd privilege) and proves the
+     * fail-open mechanism -- {@code CatalogManifestSweepRepositoryTest#
+     * writeManifestMany_sweepTrue_deletePermissionDenied_failsOpen_...}. Nothing in
+     * this bead's own tree had an equivalent for {@code withRowSavepoint} until
+     * this test. A REVOKE alone cannot isolate ONE row from another in the SAME
+     * table+column (it would refuse every row's release identically) -- an
+     * additional per-row Postgres error path is needed, so this seeds a real
+     * {@code BEFORE UPDATE} trigger that raises for exactly one row's id, a
+     * genuine server-side exception thrown by Postgres itself, not a fabricated
+     * Java one, the same "real error, not a mock" standard the REVOKE precedent
+     * holds to.
+     */
+    @Test
+    void releaseLapsedClaimsBatch_oneRowsReleaseThrowsARealError_theOtherRowStillReleasesAndCommits()
+            throws Exception {
+        String tenant = "tuple-tenant-savepoint-" + UUID.randomUUID();
+        OffsetDateTime now = OffsetDateTime.now(java.time.ZoneOffset.UTC);
+
+        String goodTo = "agent-savepoint-good-" + UUID.randomUUID();
+        byte[] goodId = repo.out(tenant, "mailbox/" + goodTo, Map.of("to", goodTo), Map.of("from", "sender-good"),
+                null, "nonce-savepoint-good", null);
+        String poisonTo = "agent-savepoint-poison-" + UUID.randomUUID();
+        byte[] poisonId = repo.out(tenant, "mailbox/" + poisonTo, Map.of("to", poisonTo),
+                Map.of("from", "sender-poison"), null, "nonce-savepoint-poison", null);
+
+        // Force BOTH rows into an already-lapsed claimed state, exactly like the
+        // single-row test above.
+        try (Connection su = pg.createConnection("")) {
+            var dsl = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            for (var pair : java.util.List.of(
+                    Map.entry(goodId, "worker-savepoint-good"), Map.entry(poisonId, "worker-savepoint-poison"))) {
+                dsl.update(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                        .set(dev.nexus.service.jooq.nexus.Tables.TUPLES.CLAIM_STATE, "claimed")
+                        .set(dev.nexus.service.jooq.nexus.Tables.TUPLES.CLAIMANT, pair.getValue())
+                        .set(dev.nexus.service.jooq.nexus.Tables.TUPLES.CLAIM_ID, "claim-" + pair.getValue())
+                        .set(dev.nexus.service.jooq.nexus.Tables.TUPLES.LEASE_UNTIL, now.minusMinutes(5))
+                        .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(pair.getKey()))
+                        .execute();
+            }
+        }
+
+        // A real, server-side per-row failure: a BEFORE UPDATE trigger that raises
+        // for exactly poisonId's row and no other -- not a REVOKE (which cannot
+        // distinguish one row from another in the same table+column) and not a
+        // fabricated Java exception.
+        String poisonHex = java.util.HexFormat.of().formatHex(poisonId);
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                    "CREATE OR REPLACE FUNCTION nexus_test_poison_tuple_row() RETURNS trigger AS $$ "
+                    + "BEGIN IF OLD.id = decode('" + poisonHex + "', 'hex') THEN "
+                    + "RAISE EXCEPTION 'nexus_test_poison_row: forced failure for row %', OLD.id; "
+                    + "END IF; RETURN NEW; END; $$ LANGUAGE plpgsql");
+            su.createStatement().execute(
+                    "CREATE TRIGGER nexus_test_poison_tuple_row_trigger BEFORE UPDATE ON nexus.tuples "
+                    + "FOR EACH ROW EXECUTE FUNCTION nexus_test_poison_tuple_row()");
+        }
+
+        try {
+            var result = repo.releaseLapsedClaimsBatch(tenant, 300, null);
+
+            // Both rows were selected; only the healthy one actually released.
+            assertThat(result.scanned()).isEqualTo(2);
+            assertThat(result.released()).isEqualTo(1);
+            assertThat(result.deadLettered()).isZero();
+
+            // The good row committed: released, claim cleared.
+            assertThat(claimStateOf(goodId)).isNull();
+
+            // The poisoned row's own update rolled back to the savepoint: it is left
+            // EXACTLY as it was before this call -- still claimed, still lapsed, its
+            // attempts counter UNCHANGED (the attempts UPDATE is itself what the
+            // savepoint undoes) -- ready to be picked up again on a later tick, not
+            // wedged and not silently dead-lettered.
+            assertThat(claimStateOf(poisonId)).isEqualTo("claimed");
+            assertThat(attemptsOf(poisonId)).isZero();
+
+            // A LATER tick, once whatever made the row fail is gone, releases it --
+            // bounded by a later attempt succeeding, not by attempts exhausting
+            // (attempts never advanced above).
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute("DROP TRIGGER nexus_test_poison_tuple_row_trigger ON nexus.tuples");
+            }
+            var secondResult = repo.releaseLapsedClaimsBatch(tenant, 300, null);
+            assertThat(secondResult.scanned()).isEqualTo(1);
+            assertThat(secondResult.released()).isEqualTo(1);
+            assertThat(claimStateOf(poisonId)).isNull();
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute(
+                        "DROP TRIGGER IF EXISTS nexus_test_poison_tuple_row_trigger ON nexus.tuples");
+                su.createStatement().execute("DROP FUNCTION IF EXISTS nexus_test_poison_tuple_row()");
+            }
+        }
     }
 
     @Test

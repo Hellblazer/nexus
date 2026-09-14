@@ -30,8 +30,8 @@ NX_SERVICE_URL=http://<host-reachable-address>:<port>
 NX_SERVICE_TOKEN=<bearer>
 ```
 
-Every storage client — the ten T2 domain stores, the catalog client,
-the T1 scratch store, and the T3 vector client — resolves its endpoint
+Every storage client (the nine T2 domain stores, the catalog client,
+the T1 scratch store, and the T3 vector client) resolves its endpoint
 through the same resolver (`src/nexus/db/service_endpoint.py` /
 `http_vector_client._resolve_endpoint`): `NX_SERVICE_URL` +
 `NX_SERVICE_TOKEN` env first, then the supervisor's lease file, then

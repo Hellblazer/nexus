@@ -13,7 +13,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
 TEMPLATE = REPO_ROOT / "conexus" / "resources" / "rdr_process" / "INCIDENT-TEMPLATE.md"
-SKILL = REPO_ROOT / "conexus" / "skills" / "rdr-audit" / "SKILL.md"
+SKILL = REPO_ROOT / "conexus" / "skills" / "rdr-audit-checklist" / "SKILL.md"
 
 
 def _template_text() -> str:

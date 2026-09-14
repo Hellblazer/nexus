@@ -1,13 +1,19 @@
 ---
 type: tool_used
 tool: Skill
-input_match: '"skill"\s*:\s*"(conexus:)?(test-authoring|test-validation)"'
+input_match: '"skill"\s*:\s*"(conexus:)?test-validation"'
 min: 0
 max: 0
 ---
 
 Absorption stress on the bare word "test" appearing outside any actual
-testing context.
+testing context. Was also checking `test-authoring` in the same
+alternation; that skill moved to `.claude/skills/test-authoring/`
+(repo-local, nexus-cnzei.6 — it was nexus-repo-specific content shipping
+to every conexus plugin user for no benefit outside this repo) and is no
+longer part of the plugin's `Skill(skill="conexus:...")` surface at all,
+so a `conexus:test-authoring` match is now permanently impossible here
+rather than a meaningful negative check.
 
 GRADER TYPE CORRECTED 2026-08-23. This was `type: llm` with criteria that
 began "Fail if the transcript contains a Skill tool call...". An `llm`

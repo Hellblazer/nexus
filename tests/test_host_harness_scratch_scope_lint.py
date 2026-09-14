@@ -133,6 +133,13 @@ _ANY_INVOCATION_RE = re.compile(
 #: test_ledger_matches_live_count) -- a stale high entry is a free slot a
 #: future unguarded site could occupy unreviewed.
 ALLOWLIST: dict[str, tuple[int, str]] = {
+    # nexus-cnzei.5: imports nexus.mcp.core only to read each tool's
+    # signature and schema for the committed wire snapshot; it calls no tool
+    # and writes nothing, so it touches no tenant.
+    "scripts/mcp_wire_snapshot.py": (
+        1,
+        "imports nexus.mcp.core to read tool signatures for the wire snapshot; no tool call, no write",
+    ),
     # ── MARKER+SNAPSHOT: the one harness that deliberately targets the
     # operator's live cloud service. Does all three things the module
     # docstring names: BENCH_MARKER="benchidx-" scoped owner names,

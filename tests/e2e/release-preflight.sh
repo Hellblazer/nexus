@@ -110,7 +110,11 @@ echo "== release preflight =="
 # NOT RECORDED") by design (nexus-nx3l5) until it is told where conexus's
 # STEP-6 gate reports live. Export NX_GATE_REPORT_DIR=<conexus checkout>/deploy
 # before running this script, or the floor leg reds for a reason that is not a
-# release problem. Local-mode boxes need nothing.
+# release problem. On a DEV CHECKOUT this leg's tracker write is also an HTTP
+# T2 write, so it additionally needs a reasoned NX_ALLOW_PROD_WRITE="<why>"
+# opt-in past the production-write guard (nexus-a2qhz) -- without it the leg
+# reds with "TRACKER NOT RECORDED ... refused by the production-write guard"
+# naming both required env vars (nexus-jzyt3). Local-mode boxes need neither.
 if [ -n "${NX_PAIRED_DEPLOY:-}" ]; then
     check "engine-release-floor"  uv run python scripts/check_engine_release_floor.py --paired-deploy "$NX_PAIRED_DEPLOY"
 else

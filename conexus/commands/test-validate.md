@@ -46,4 +46,4 @@ Test coverage report with gap analysis: mapping of source files to test files, i
 - [ ] All tests pass (verified by running test suite)
 ```
 
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../resources/agent-shared/RELAY_TEMPLATE.md).

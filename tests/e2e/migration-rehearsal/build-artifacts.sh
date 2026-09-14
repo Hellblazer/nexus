@@ -67,9 +67,17 @@ print(".".join(m.groups()) if m else "")
 IDENTITY_JSON="$(python3 "$SCRIPT_DIR/../lib/tree_identity.py" "$REPO_ROOT")"
 echo "[artifacts] tree $(python3 -c 'import json,sys;d=json.loads(sys.argv[1]);print(d["tree_hash"][:12], "HEAD", d["head_sha"][:12], "dirty" if d["dirty"] else "clean", d["file_count"], "files")' "$IDENTITY_JSON")"
 
-# shellcheck source=../../../scripts/lib/build-lease.sh disable=SC1091
-source "$REPO_ROOT/scripts/lib/build-lease.sh"
+# shellcheck source=../../../scripts/lib/release-props-lease.sh disable=SC1091
+source "$REPO_ROOT/scripts/lib/release-props-lease.sh"
 build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" build-artifacts.sh "$OUT"
+# nexus-iexvl: now that the lease is ours, nobody else can legitimately be
+# mid-stamp -- a dirty file here means a prior process left the tree
+# stamped without holding this lease for its whole stamp lifetime. Refuse
+# before ever snapshotting it as "the" pre-stamp baseline.
+if ! release_props_guard_clean "$RELEASE_PROPS" service; then
+  build_lease_release service
+  exit 75
+fi
 PROPS_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/release.properties.snapshot.XXXXXX")"
 cp "$RELEASE_PROPS" "$PROPS_SNAPSHOT"
 _restore() {

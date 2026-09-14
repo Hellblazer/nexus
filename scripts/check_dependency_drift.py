@@ -152,8 +152,23 @@ def _leading_component(version: str) -> str:
     """The version's leading dot-component, e.g. ``"2.13.0"`` -> ``"2"``.
     Works for plain semver majors and for calver/date-based schemes (e.g.
     structlog's ``25.5.0``) alike -- both use the leading component as the
-    boundary a `<NEXT_MAJOR>` pyproject.toml cap is meant to hold at."""
-    return version.split(".", 1)[0]
+    boundary a `<NEXT_MAJOR>` pyproject.toml cap is meant to hold at.
+
+    For a ``0.x`` version this returns ``"0.<minor>"`` instead of the bare
+    ``"0"`` (nexus-oqh4s). Under semver a 0.x MINOR bump is licensed to
+    break -- ``fastembed`` 0.7.4 -> 0.8.0 (2026-03-23) was exactly that
+    shape, resolved fresh by every install while uv.lock and every gate
+    stayed on 0.7.4. The bare-major form collapsed every 0.x release into
+    one ``"0"`` bucket, so that bump crossed no boundary this watch could
+    see -- true of ANY 0.x package, not only ones hand-listed in
+    ``SHAPE_SENSITIVE`` (a narrower, patch-level pattern reserved for
+    output-fixture-locked packages; see that dict's own docstring). A
+    version ``>=1.0`` is unaffected: only a genuine major bump crosses the
+    boundary there."""
+    parts = version.split(".")
+    if parts[0] == "0" and len(parts) > 1:
+        return f"0.{parts[1]}"
+    return parts[0]
 
 
 def run_uv_dry_run_upgrade(

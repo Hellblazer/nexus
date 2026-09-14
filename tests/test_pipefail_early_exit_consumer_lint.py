@@ -153,6 +153,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._lint_line_anchor import resolve_anchor, resolve_ledger
+
 pytestmark = pytest.mark.lint
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -750,14 +752,34 @@ def test_scope_precondition_a_script_with_the_hazard_shape_but_no_pipefail_is_no
 
 # ── ratchet exemption set ───────────────────────────────────────────────
 #
-# Format: "relative/path.sh:LINENO" -> each block below documents WHY the
-# entry is exempted rather than fixed in this pass. This set may only
-# SHRINK (a line gets fixed and its entry removed) or grow with a new,
-# individually-documented entry AND a conscious bump of
+# Format: (relative/path.sh, content-anchor) -> each block below documents
+# WHY the entry is exempted rather than fixed in this pass. This set may
+# only SHRINK (a line gets fixed and its entry removed) or grow with a
+# new, individually-documented entry AND a conscious bump of
 # `_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING` in the same diff -- see
 # `test_mode_declarations_are_explicit.py`'s ratchet for the pattern this
 # mirrors. A bare growth with no rationale comment is exactly the
 # grandfathering this mechanism exists to prevent.
+#
+# CONTENT-KEYED, not line-keyed (nexus-vkpr3): the second tuple element
+# is the exempted line's own stripped source text PLUS its nearest
+# preceding non-blank line (the MANDATORY two-line minimum -- see
+# `tests._lint_line_anchor`'s MANDATORY TWO-LINE MINIMUM section for
+# why a single line, even one unique in today's snapshot, is not
+# enough), resolved to its CURRENT line number by
+# `tests._lint_line_anchor.resolve_anchor` on every run. Before this
+# conversion, this exact set was the incident that filed nexus-vkpr3: two
+# unrelated same-day insertions into rehearse_package_upgrade.sh (+11-13
+# lines, then +17 more) shifted all twelve of that file's entries, and
+# the recovery only avoided silently mis-exempting an unreviewed site
+# because it retargeted every entry BY CONTENT rather than by an
+# arithmetic line offset. The per-block comments below carry only a
+# one-sentence summary of any pre-conversion retargeting history (the
+# original sprawling "Retargeted ... shifting every site below by +N"
+# paragraphs, one per historical edit, are gone) plus each block's
+# substantive exemption reason -- an insertion above any of these
+# entries no longer requires retargeting anything, since the anchor
+# tracks the content, not the number.
 #
 # nexus-wbeyi remediation sweep (2026-08-10): every entry below is a REAL,
 # confirmed instance of the defect class (not a false positive) that was
@@ -777,7 +799,7 @@ def test_scope_precondition_a_script_with_the_hazard_shape_but_no_pipefail_is_no
 # "run tests/e2e/migration-rehearsal/run.sh --shakeout as the fix's own
 # verification" so each transform is checked against a real rehearsal
 # rather than reviewed by inspection alone.
-_PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
+_PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[tuple[str, tuple[str, ...]]] = frozenset(
     {
         # --- tests/e2e/migration-rehearsal/*.sh (138 entries): Docker-
         # rehearsal-only, pre-tag release battery (AGENTS.md
@@ -795,188 +817,157 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # dedicated remediation bead scoped to "run --shakeout as the
         # fix's own verification" so each transform is checked against a
         # real rehearsal rather than reviewed by inspection alone.
-        "tests/e2e/migration-rehearsal/rehearse.sh:125",
-        "tests/e2e/migration-rehearsal/rehearse.sh:166",
-        "tests/e2e/migration-rehearsal/rehearse.sh:186",
-        "tests/e2e/migration-rehearsal/rehearse.sh:192",
-        "tests/e2e/migration-rehearsal/rehearse.sh:257",
-        "tests/e2e/migration-rehearsal/rehearse.sh:279",
-        "tests/e2e/migration-rehearsal/rehearse.sh:305",
-        "tests/e2e/migration-rehearsal/rehearse.sh:306",
-        "tests/e2e/migration-rehearsal/rehearse_acquire.sh:122",
-        "tests/e2e/migration-rehearsal/rehearse_acquire.sh:80",
-        "tests/e2e/migration-rehearsal/rehearse_cold.sh:113",
-        "tests/e2e/migration-rehearsal/rehearse_cold.sh:77",
-        "tests/e2e/migration-rehearsal/rehearse_era_hop.sh:143",
-        "tests/e2e/migration-rehearsal/rehearse_era_hop.sh:199",
-        "tests/e2e/migration-rehearsal/rehearse_era_hop.sh:249",
-        "tests/e2e/migration-rehearsal/rehearse_era_hop.sh:265",
-        "tests/e2e/migration-rehearsal/rehearse_era_hop.sh:452",
-        "tests/e2e/migration-rehearsal/rehearse_era_hop.sh:479",
-        "tests/e2e/migration-rehearsal/rehearse_era_hop.sh:484",
-        "tests/e2e/migration-rehearsal/rehearse_era_hop.sh:501",
-        "tests/e2e/migration-rehearsal/rehearse_era_hop.sh:503",
-        "tests/e2e/migration-rehearsal/rehearse_era_hop.sh:86",
-        "tests/e2e/migration-rehearsal/rehearse_fullstack.sh:177",
-        "tests/e2e/migration-rehearsal/rehearse_fullstack.sh:21",
-        "tests/e2e/migration-rehearsal/rehearse_fullstack.sh:36",
-        "tests/e2e/migration-rehearsal/rehearse_fullstack.sh:48",
-        "tests/e2e/migration-rehearsal/rehearse_fullstack.sh:57",
-        "tests/e2e/migration-rehearsal/rehearse_fullstack.sh:58",
-        "tests/e2e/migration-rehearsal/rehearse_fullstack.sh:85",
-        "tests/e2e/migration-rehearsal/rehearse_fullstack.sh:90",
-        "tests/e2e/migration-rehearsal/rehearse_fullstack.sh:91",
-        "tests/e2e/migration-rehearsal/rehearse_fullstack.sh:94",
-        "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh:101",
-        "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh:175",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:155",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:210",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:221",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:277",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:295",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:301",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:318",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:345",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:415",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:422",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:109",
-        "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh:133",
-        # gap-8/gap-15 (T2 [22511]): retargeted after the `-e` addition +
-        # per-command dispositions (run_check's internal capture, several
-        # `VAR=$(cmd) || true` additions). The former :111 site (the
-        # health-poll `nx daemon service status | grep -qiE ... && {
-        # healthy=1; break; }`) is GONE from this list -- it was itself
-        # fixed in this pass by appending `|| true` (the poll's expected
-        # not-yet-healthy iteration was a bare `&&` with no `||`, which
-        # would have died on iteration 1 under the new `-e`), so it moved
-        # to the `_PIPEFAIL_OR_TRUE_SITES` guarded ratchet below instead.
-        # 13 entries -> 12; see the ceiling adjustment below.
-        # nexus-l8xnz: retargeted -- the Phase F header (candidate-shakeout
-        # journey summary) gained 12 lines describing the new native-smoke.sh
-        # probe-set phase, shifting every site below by +12. Numbers
-        # regenerated from the detector itself (_early_exit_consumer_hits),
-        # not arithmetic.
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:133",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:230",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:233",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:243",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:249",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:254",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:260",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:269",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:280",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:288",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:292",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:374",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:142",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:193",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:238",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:239",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:346",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:405",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:538",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:544",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:551",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:630",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:631",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:649",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:652",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:658",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:661",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:664",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:100",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:123",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:146",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:148",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:151",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:154",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:157",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:168",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:185",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:191",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:233",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:278",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:291",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:305",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:307",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:308",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:309",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:339",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:347",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:361",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:377",
-        "tests/e2e/migration-rehearsal/rehearse_stranded.sh:80",
-        # Retargeted (nexus-lgdel.l2): the CHASH_WINDOW leg's own
-        # `ls -t dist/conexus-*.whl | head -1` site was one of these six --
-        # deleting the leg (rehearse_chash_window.sh, Dockerfile.chash-window,
-        # and every CHASH_WINDOW branch in run.sh) removed that site outright,
-        # leaving 5, and shifted every remaining site upward by the deleted
-        # lines. Numbers regenerated from the detector itself
-        # (_early_exit_consumer_hits), not arithmetic.
-        # run.sh: two `VAR="$(... | head -1)"` version extractions (self
-        # version from pyproject, REQUIRED_ENGINE_VERSION from the source)
-        # and five `cp "$(ls -t dist/conexus-*.whl | head -1)"` wheel picks
-        # -- `ls -t` has finished writing by the time `head` exits. Lines
-        # retargeted 2026-08-21 after nexus-c00dw's lease wiring shifted the
-        # file (+46 below the source point); the two version extractions had
-        # been live hits before that edit and were never listed.
-        # Retargeted again 2026-08-22 (7.15.0 cut): the PREV_RELEASE
-        # derivation gained an engine-comparison walk, shifting the five
-        # wheel picks +34 and the version extractions +4/+9. Two NEW sites
-        # came with that edit (:168, :187, :200) and are the same shape:
-        # :168 and :187 extract a
-        # version tuple inside `$()`, and :200 takes the
-        # lower of two versions via `sort -V | head -1` -- sort cannot emit
-        # anything until it has consumed all input, so head can never
-        # truncate a producer still doing work. This list is line-pinned, so
-        # ANY edit to run.sh restale-izes it; that fragility is the lint's
-        # own known shape, not a defect introduced here.
-        # Retargeted 2026-09-06 (nexus-mfage fix B): the --artifacts
-        # option block shifted the version extractions +9, and the five
-        # `cp "$(ls -t dist/conexus-*.whl | head -1)"` wheel picks collapsed
-        # into ONE site inside the stage_wheel() seam (:701 after items 2-3). Four entries
-        # retired with the four duplicate sites; ceiling 136 -> 132.
-        "tests/e2e/migration-rehearsal/run.sh:190",
-        "tests/e2e/migration-rehearsal/run.sh:208",
-        "tests/e2e/migration-rehearsal/run.sh:209",
-        "tests/e2e/migration-rehearsal/run.sh:222",
-        "tests/e2e/migration-rehearsal/run.sh:233",
-        "tests/e2e/migration-rehearsal/run.sh:704",
+        ("tests/e2e/migration-rehearsal/rehearse.sh", ('for i in $(seq 1 30); do', 'if nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|status.*ok|running"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse.sh", ('if nx memory put "comprehensive shakeout $MARK widget sprocket note" -p ddshakeout -t "note-$MARK" --tags rehearsal >"$DD" 2>&1; then', 'if nx memory search "$MARK" 2>/dev/null | grep -q "$MARK"; then ok "T2 memory put+search round-trip"')),
+        ("tests/e2e/migration-rehearsal/rehearse.sh", ('| nx store put - -c rehearsal -t "shakeout-$MARK" --tags rehearsal >"$DD" 2>&1; then', 'if nx search "widgets and sprockets for retrieval" --corpus knowledge -m 5 2>/dev/null | grep -q "$MARK"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse.sh", ('# T3 collection listing reflects the new knowledge collection', 'if nx collection list 2>/dev/null | grep -qi "knowledge"; then ok "nx collection list shows the knowledge collection"')),
+        ("tests/e2e/migration-rehearsal/rehearse.sh", ('# signed bundle `nx init` extracted (<config>/pg-bundle/**/bin/psql).', 'PSQL="$(find "$HOME/.config/nexus/pg-bundle" -type f -name psql 2>/dev/null | head -1)"')),
+        ("tests/e2e/migration-rehearsal/rehearse.sh", ('if grep -qiE "database is locked|deadlock|lock.*timeout|HTTP 5[0-9][0-9]|connection refused|could not connect|MEMFAIL|STOREFAIL|BURSTFAIL" "$errlog"; then', 'bad "concurrency errors under tandem load"; note "$(grep -iE \'locked|deadlock|timeout|5[0-9][0-9]|refused|FAIL\' "$errlog" | sort | uniq -c | head -6 | tr \'\\n\' \' \')"')),
+        ("tests/e2e/migration-rehearsal/rehearse.sh", ('# Assertion 3: service healthy after the storm (no CPU-peg/stall/crash).', 'if nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|running|status.*ok"; then ok "service healthy after stress"')),
+        ("tests/e2e/migration-rehearsal/rehearse.sh", ('if nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|running|status.*ok"; then ok "service healthy after stress"', 'else bad "service unhealthy after stress"; note "$(nx daemon service status 2>&1 | head -3)"; fi')),
+        ("tests/e2e/migration-rehearsal/rehearse_acquire.sh", ('for _ in $(seq 1 10); do', 'if nx search "acquire-gate probe pgvector" 2>&1 | grep -qi "acquire-gate-probe"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_acquire.sh", ('for _ in $(seq 1 30); do', 'if nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|status.*ok|running"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_cold.sh", ('[ "$GU_RC" = 0 ] && ok "nx guided-upgrade exited 0" || bad "nx guided-upgrade exited $GU_RC"', 'printf \'%s\' "$GU_OUT" | grep -q "Migration VERIFIED and unlocked" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_cold.sh", ('for _ in $(seq 1 30); do', 'if nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|status.*ok|running"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_era_hop.sh", ('for _ in $(seq 1 "$tries"); do', 'if "$REAL_NX" daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|status.*ok|running"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_era_hop.sh", ('say "Stage 4 — package upgrade to the working tree (the ONLY manual step in the story)"', 'WHEEL="$(ls "$HOME"/worktree-wheel/conexus-*.whl 2>/dev/null | head -1)"')),
+        ("tests/e2e/migration-rehearsal/rehearse_era_hop.sh", ('printf \'%s\\n\' "$DRY_OUT" | sed \'s/^/       /\'', 'if printf \'%s\' "$DRY_OUT" | grep -q "rung \'substrate-etl\' pending"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_era_hop.sh", ('# P4.2, live: the everyday output must not advertise a verb demoted out of --help.', 'if printf \'%s\' "$UP_OUT" | grep -qE \'nx (guided-upgrade|migrate-to-service|migration-audit)\'; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_era_hop.sh", ('[ "$UP2_RC" = 0 ] && ok "the second nx upgrade exited 0" || bad "the second nx upgrade exited $UP2_RC"', 'if printf \'%s\' "$UP2_OUT" | grep -q "rung \'substrate-etl\' converged and verified"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_era_hop.sh", ('printf \'%s\\n\' "$DOC_OUT" | grep -iE \'upgrade ladder|chunk-id era\' | sed \'s/^/       /\' || true', 'if printf \'%s\' "$DOC_OUT" | grep -qiE \'pending upgrade rung\'; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_era_hop.sh", ('fi', 'if printf \'%s\' "$DOC_OUT" | grep -qE \'nx (guided-upgrade|migrate-to-service|migration-audit)\'; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_era_hop.sh", ("# this leg's first run pass over zero migrated collections.", 'if ! printf \'%s\' "$DOC_OUT" | grep -qi \'chunk-id era\'; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_era_hop.sh", ('bad "nx doctor printed no chunk-id era census row — the census did not run, so the debt assertion below would pass vacuously"', 'elif printf \'%s\' "$DOC_OUT" | grep -qi \'legacy chunk ids\'; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_era_hop.sh", ('fi', 'GOT_VER="$(nx --version 2>&1 | grep -oE \'[0-9]+\\.[0-9]+\\.[0-9]+\' | head -1)"')),
+        ("tests/e2e/migration-rehearsal/rehearse_fullstack.sh", ('# 8. Service healthy after the full-stack run.', 'nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|running" && ok "service healthy after full-stack run" || bad "service unhealthy"')),
+        ("tests/e2e/migration-rehearsal/rehearse_fullstack.sh", ('nx --version >/dev/null 2>&1 && ok "nx installed ($(nx --version 2>&1))" || bad "nx --version failed"', 'claude --version >/dev/null 2>&1 && ok "claude CLI installed ($(claude --version 2>&1 | head -1))" || bad "claude CLI missing"')),
+        ("tests/e2e/migration-rehearsal/rehearse_fullstack.sh", ('healthy=0', 'for i in $(seq 1 30); do nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|running" && { healthy=1; break; }; sleep 2; done')),
+        ("tests/e2e/migration-rehearsal/rehearse_fullstack.sh", ('# signed bundle `nx init` extracted (<config>/pg-bundle/**/bin/psql).', 'PSQL="$(find "$HOME/.config/nexus/pg-bundle" -type f -name psql 2>/dev/null | head -1)"')),
+        ("tests/e2e/migration-rehearsal/rehearse_fullstack.sh", ('authout="$(claude -p \'Reply with exactly the token AUTHOK and nothing else.\' --dangerously-skip-permissions 2>&1)"', 'if printf \'%s\' "$authout" | grep -q "AUTHOK"; then ok "claude -p authenticated (mounted oauth works in-container)"')),
+        ("tests/e2e/migration-rehearsal/rehearse_fullstack.sh", ('if printf \'%s\' "$authout" | grep -q "AUTHOK"; then ok "claude -p authenticated (mounted oauth works in-container)"', 'else bad "claude -p auth failed — cannot drive the MCP/extraction"; note "$(printf \'%s\' "$authout" | head -3 | tr \'\\n\' \' \')"; say "ABORT (no claude auth)"; printf \'REHEARSAL FAILED\\n\'; exit 1; fi')),
+        ("tests/e2e/migration-rehearsal/rehearse_fullstack.sh", ('note "claude workload tail: $(printf \'%s\' "$wlout" | tail -3 | tr \'\\n\' \' \' | cut -c1-280)"', 'printf \'%s\' "$wlout" | grep -q "WORKLOADDONE" && ok "MCP workload completed (claude drove the tools)" || bad "MCP workload did not finish cleanly"')),
+        ("tests/e2e/migration-rehearsal/rehearse_fullstack.sh", ('sleep 3', 'if nx collection list 2>/dev/null | grep -qi "knowledge"; then ok "store_put materialized a knowledge collection (MCP tools really executed)"; STORED_OK=1')),
+        ("tests/e2e/migration-rehearsal/rehearse_fullstack.sh", ('if nx collection list 2>/dev/null | grep -qi "knowledge"; then ok "store_put materialized a knowledge collection (MCP tools really executed)"; STORED_OK=1', 'else bad "no knowledge collection — claude did NOT actually call store_put (MCP connect / allowedTools issue)"; note "$(nx collection list 2>&1 | head -3 | tr \'\\n\' \' \')"; STORED_OK=0; fi')),
+        ("tests/e2e/migration-rehearsal/rehearse_fullstack.sh", ('# 3c. nx_answer produced a grounded composed answer (from the workload).', 'printf \'%s\' "$wlout" | grep -qiE "widget|sprocket|gadget" && ok "nx_answer (MCP) returned a grounded composed answer" || note "nx_answer answer not evident in workload output"')),
+        ("tests/e2e/migration-rehearsal/rehearse_hole_punch.sh", ('for _ in $(seq 1 30); do', 'if nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|status.*ok|running"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_hole_punch.sh", ('[ "$GU_RC" = 0 ] && ok "nx guided-upgrade exited 0" || { bad "nx guided-upgrade exited $GU_RC"; say "ABORT"; exit 1; }', 'printf \'%s\' "$GU_OUT" | grep -q "Migration VERIFIED and unlocked" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh", ('for i in $(seq 1 "$tries"); do', 'if nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|status.*ok|running"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh", ('say "Stage 4 — PACKAGE upgrade only (uv pip install --reinstall <$UPGRADE_TARGET_LABEL wheel>)"', 'WHEEL="$(ls "$HOME"/worktree-wheel/conexus-*.whl 2>/dev/null | head -1)"')),
+        ("tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh", ('if [ -n "$TARGET_RELEASE" ]; then', 'GOT_CLIENT_VER="$(nx --version 2>&1 | grep -oE \'[0-9]+\\.[0-9]+\\.[0-9]+\' | head -1)"')),
+        ("tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh", ('# engine-naming error (branch b) — never a bare/opaque failure.', 'if printf \'%s\' "$SKEW_PUT" | grep -qiE "converg|engine"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh", ('elif [ "$SKEW_GET_RC" != 0 ]; then', 'if printf \'%s\' "$SKEW_GET" | grep -qiE "converg|engine"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh", ('fi', 'elif ! printf \'%s\' "$SKEW_GET" | grep -q "$SKEW_MARKER"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh", ('[ "$RS_RC" = 0 ] && ok "nx daemon restart-stale exited 0" || bad "nx daemon restart-stale exited $RS_RC"', 'printf \'%s\' "$RS_OUT" | grep -q "converged engine" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh", ('# did nothing on this box before the /proc fallback -- assert it ran.', 'printf \'%s\' "$RS_OUT" | grep -q "$SKEW_SHAPE" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh", ('POST_ID="$(printf \'%s\\n\' "$POST_PUT" | sed -n \'s/^Stored: \\([0-9a-fA-F-]\\{8,\\}\\).*/\\1/p\' | tail -1)"', 'if [ -n "$POST_ID" ] && nx scratch get "$POST_ID" 2>/dev/null | grep -q "$POST_MARKER"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh", ('PRE_CONTENT="$(nx scratch get "$PRE_ID" 2>&1)"', 'if printf \'%s\' "$PRE_CONTENT" | grep -q "$MARKER"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh", ("printf '       [status --json]\\n'", "nx daemon service status --json 2>&1 | head -40 | sed 's/^/       /'")),
+        ("tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh", ('fi', 'GOT_VER="$(nx --version 2>&1 | grep -oE \'[0-9]+\\.[0-9]+\\.[0-9]+\' | head -1)"')),
+        # gap-8/gap-15 (T2 [22511]): the former health-poll site here
+        # (`nx daemon service status | grep -qiE ... && { healthy=1;
+        # break; }`) was fixed by appending `|| true` and moved to the
+        # `_PIPEFAIL_OR_TRUE_SITES` guarded ratchet below (13 entries ->
+        # 12). Pre-nexus-vkpr3 this block also carried a multi-paragraph
+        # line-shift retargeting history (the `-e` addition, then
+        # nexus-l8xnz's Phase F header growth); dropped, since content
+        # anchors make retargeting unnecessary going forward.
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout.sh", ('out="$("$@" 2>&1)" || true', 'if printf \'%s\' "$out" | grep -qiE "$want"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout.sh", ('UNMINTED_OUT="$(NX_T1_SESSION=unminted-probe nx scratch list 2>&1)" || true', 'if printf \'%s\' "$UNMINTED_OUT" | grep -q "Traceback"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout.sh", ('printf \'%s\\n\' "$UNMINTED_OUT" | sed \'s/^/       | /\' | tail -6', 'elif printf \'%s\' "$UNMINTED_OUT" | grep -q "nx daemon service start"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout.sh", ('printf \'# Shakeout probe\\n\\nThe amaranthine zeppelin quotient verifies retrieval.\\n\' > "$PROBE_MD"', 'if nx store put "$PROBE_MD" --collection knowledge__shakeout --title "shakeout-probe" --tags shakeout 2>&1 | grep -q "Stored:"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout.sh", ('sleep 2', 'nx search "amaranthine zeppelin quotient" --corpus knowledge -m 2 2>/dev/null | grep -q "shakeout-probe" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout.sh", ('DEL_OUT="$(yes | nx store delete --title "shakeout-probe" --collection knowledge__shakeout 2>&1)" || true', 'if printf \'%s\' "$DEL_OUT" | grep -qiE "delet"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout.sh", ('fi', 'nx search "amaranthine zeppelin quotient" --corpus knowledge -m 1 2>/dev/null | grep -q "shakeout-probe" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout.sh", ('PLAN_SEED_OUT="$(nx plan reseed 2>&1)" || true  # gap-15: content-checked below, not rc-gated', 'printf \'%s\' "$PLAN_SEED_OUT" | grep -qE "Seeded [0-9]+ new builtin row" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout.sh", ('PLAN_LIST_OUT="$(nx plan list 2>&1)" || true  # gap-15: content-checked below, not rc-gated', 'if printf \'%s\' "$PLAN_LIST_OUT" | grep -qiE "builtin"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout.sh", ('# Catalog + collections + taxonomy + doctor surfaces', 'nx catalog stats 2>/dev/null | grep -qE "Documents:" && ok "catalog stats" || bad "catalog stats"')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout.sh", ('DOCTOR_OUT="$(nx doctor 2>&1)" || true  # gap-15: content (traceback presence) checked below, not rc-gated', 'printf \'%s\\n\' "$DOCTOR_OUT" | grep -q "Traceback" && bad "doctor raised a traceback" || ok "doctor runs traceback-free"')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout.sh", ('fi', 'nx search "flux capacitor array" --corpus docs -m 2 2>/dev/null | grep -qi "doc" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh", ('nx --version >/dev/null 2>&1 && ok "nx installed ($(nx --version 2>&1))" || bad "nx --version failed"', 'claude --version >/dev/null 2>&1 && ok "claude CLI installed ($(claude --version 2>&1 | head -1))" || bad "claude CLI missing"')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh", ('healthy=0', 'for i in $(seq 1 30); do nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|running" && { healthy=1; break; }; sleep 2; done')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh", ('LADDER_OUT="$(nx doctor 2>&1)"', 'if printf \'%s\' "$LADDER_OUT" | grep -qi "no pending rung"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh", ('if printf \'%s\' "$LADDER_OUT" | grep -qi "no pending rung"; then', 'ok "upgrade ladder converged at init ($(printf \'%s\' "$LADDER_OUT" | grep -io \'no pending rung[a-z ]*([0-9]* registered)\' | head -1))"')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh", ('if [ -z "$RUN_LOG" ]; then', 'RUN_LOG="$(find "$HOME/.config/nexus/logs" -maxdepth 1 -name \'index-*.log\' -newer "$MARKER_FILE" 2>/dev/null | head -1)"')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh", ('# nexus-e9ru2 class: T3-only assertions miss a broken catalog write).', 'if nx catalog list 2>/dev/null | grep -q "$MARK\\|big_filler\\|small_sentinel\\|notes"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh", ('# identifier — so a failure here means retrieval is actually broken.', 'if nx search "widgets and sprockets" --corpus code -c -m 5 2>/dev/null | grep -q "small_sentinel"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh", ('fi', 'if nx search "$MARK widgets sprockets" --corpus docs -c -m 5 2>/dev/null | grep -q "$MARK"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh", ('if [ "${PDF_INDEXED:-0}" = 1 ]; then', 'if nx search "shakeout-e2e pdf sentinel $MARK" --corpus docs -c -m 5 2>/dev/null | grep -q "$MARK"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh", ('authout="$(claude -p \'Reply with exactly the token AUTHOK and nothing else.\' --dangerously-skip-permissions 2>&1)"', 'if printf \'%s\' "$authout" | grep -q "AUTHOK"; then ok "claude -p authenticated (mounted oauth works in-container)"')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh", ('if printf \'%s\' "$authout" | grep -q "AUTHOK"; then ok "claude -p authenticated (mounted oauth works in-container)"', 'else bad "claude -p auth failed — cannot drive the MCP tool surface"; note "$(printf \'%s\' "$authout" | head -3 | tr \'\\n\' \' \')"; say "ABORT (no claude auth)"; printf \'SHAKEOUT-E2E FAILED\\n\'; exit 1; fi')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh", ('note "claude workload tail: $(printf \'%s\' "$wlout" | tail -4 | tr \'\\n\' \' \' | cut -c1-320)"', 'printf \'%s\' "$wlout" | grep -q "WORKLOADDONE" && ok "MCP workload completed (claude drove the tools)" || bad "MCP workload did not finish cleanly"')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh", ('sleep 2', 'if nx collection list 2>/dev/null | grep -qi "knowledge"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh", ('fi', 'printf \'%s\' "$wlout" | grep -qiE "widget|sprocket|gadget" && ok "MCP search/nx_answer output is grounded (widget/sprocket/gadget present)" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh", ('|| bad "MCP workload output does not mention widget/sprocket/gadget — not grounded"', 'printf \'%s\' "$wlout" | grep -q "$MARK" && ok "MCP query tool retrieved the Step 2 repo corpus sentinel ($MARK) — document-level catalog-aware retrieval of the REAL corpus works" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh", ('|| bad "MCP query tool output does not contain the Step 2 corpus sentinel ($MARK) — the query leg of Step 4 is unproven"', 'nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|running" && ok "service healthy after the full shakeout" || bad "service unhealthy after the shakeout"')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('fi', 'GOT_VER="$(nx --version 2>&1 | grep -oE \'[0-9]+\\.[0-9]+\\.[0-9]+\' | head -1)"')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('say "Stage 4 — package-upgrade to the working tree (uv pip install --reinstall <worktree wheel>)"', 'WHEEL="$(ls "$HOME"/worktree-wheel/conexus-*.whl 2>/dev/null | head -1)"')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('|| bad "nx doctor exited 0 on a stranded box — the fatal check did not gate the exit code"', 'printf \'%s\' "$DOCTOR_OUT" | grep -q "unmigrated pre-PG data" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('&& ok "message names the pre-PG data" || bad "message missing \'unmigrated pre-PG data\'"', 'printf \'%s\' "$DOCTOR_OUT" | grep -q "conexus==$PIN_RELEASE" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('|| bad "message missing the exact pin \'conexus==$PIN_RELEASE\'"', 'printf \'%s\' "$DOCTOR_OUT" | grep -q \'run `nx upgrade` there\' \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('|| bad "message missing the exact verb clause \'run \\`nx upgrade\\` there\'"', 'printf \'%s\' "$DOCTOR_OUT" | grep -q "upgrade back to this version" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('|| bad "message missing the third-hop clause"', 'printf \'%s\' "$DOCTOR_OUT" | grep -qE \'\\[stranded-install\\]\' \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('|| bad "nx init exited 0 on a stranded box"', 'printf \'%s\' "$INIT_OUT" | grep -q "conexus==$PIN_RELEASE" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('# perfectly silent box.', 'if printf \'%s\' "$FRESH_OUT" | grep -qE \'\\[stranded-install\\]|This install carries unmigrated\'; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('fi', 'printf \'%s\' "$FRESH_OUT" | grep -qi "stranded pre-pg install: no unmigrated" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('fi', 'GOT_VER2="$(nx --version 2>&1 | grep -oE \'[0-9]+\\.[0-9]+\\.[0-9]+\' | head -1)"')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('# the retrievability assert in Stage 10b below.', 'printf \'%s\\n%s\' "$INIT_PIN_OUT" "$UPGRADE_OUT" | grep -qE "rung \'substrate-etl\'.*(converged and verified|verified)" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('SEARCH_OUT="$(nx search "onnx chunk" 2>&1)"', 'if printf \'%s\' "$SEARCH_OUT" | grep -q "onnx chunk"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('POST_DOCTOR="$(nx doctor 2>&1)"', 'printf \'%s\' "$POST_DOCTOR" | grep -qi "upgrade ladder: no pending rungs" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('&& ok "upgrade ladder reports no pending rungs post-migration" \\', '|| note "doctor\'s ladder-summary wording differs — see raw output above if this matters: $(printf \'%s\' "$POST_DOCTOR" | grep -i \'upgrade ladder\' | head -3)"')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('|| note "doctor\'s ladder-summary wording differs — see raw output above if this matters: $(printf \'%s\' "$POST_DOCTOR" | grep -i \'upgrade ladder\' | head -3)"', 'printf \'%s\' "$POST_DOCTOR" | grep -qi "migration reports" \\')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('printf \'%s\' "$POST_DOCTOR" | grep -qi "migration reports" \\', '&& note "migration-reports check: $(printf \'%s\' "$POST_DOCTOR" | grep -i \'migration reports\' | head -1)"')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('fi', 'GOT_VER3="$(nx --version 2>&1 | grep -oE \'[0-9]+\\.[0-9]+\\.[0-9]+\' | head -1)"')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('printf \'%s\\n\' "$HOP3_DOCTOR_OUT" | grep -i stranded | sed \'s/^/       /\'', 'if printf \'%s\' "$HOP3_DOCTOR_OUT" | grep -qE \'\\[stranded-install\\]|This install carries unmigrated\'; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('HOP3_INIT_OUT="$(nx init --yes 2>&1)"; HOP3_INIT_RC=$?', 'if printf \'%s\' "$HOP3_INIT_OUT" | grep -qE \'\\[stranded-install\\]|This install carries unmigrated|Refusing to initialize\'; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('HOP3_CLI_OUT="$(nx doctor --help 2>&1)"', 'if printf \'%s\' "$HOP3_CLI_OUT" | grep -qE \'\\[stranded-install\\]\'; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_stranded.sh", ('for i in $(seq 1 "$tries"); do', 'if nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|status.*ok|running"; then')),
+        # run.sh (7 entries): the CHASH_WINDOW leg's own wheel-pick site
+        # (deleted with the leg, nexus-lgdel.l2) aside, the remaining
+        # sites are two `VAR="$(... | head -1)"` version extractions
+        # (self version from pyproject, REQUIRED_ENGINE_VERSION from the
+        # source), a `sort -V | head -1` lower-of-two-versions pick
+        # (`sort` cannot emit before consuming all input, so `head` can
+        # never truncate a still-writing producer here), and a wheel-pick
+        # `cp "$(ls -t dist/conexus-*.whl | head -1)"` inside the
+        # stage_wheel() seam. Pre-nexus-vkpr3 this block carried a long
+        # line-shift retargeting history across several unrelated run.sh
+        # edits (nexus-c00dw's lease wiring, the 7.15.0 engine-comparison
+        # walk, nexus-mfage's --artifacts option block); dropped, since
+        # content anchors make retargeting unnecessary going forward.
+        ("tests/e2e/migration-rehearsal/run.sh", ("| sed -n 's/^REQUIRED_ENGINE_VERSION[^(]*(\\([0-9]*\\), *\\([0-9]*\\), *\\([0-9]*\\)).*/\\1.\\2.\\3/p' \\", '| head -1')),
+        ("tests/e2e/migration-rehearsal/run.sh", ('local self_version cur_engine rel tuple', 'self_version="$(sed -n \'s/^version = "\\(.*\\)"/\\1/p\' "$(pwd)/pyproject.toml" | head -1)"')),
+        ("tests/e2e/migration-rehearsal/run.sh", ('self_version="$(sed -n \'s/^version = "\\(.*\\)"/\\1/p\' "$(pwd)/pyproject.toml" | head -1)"', 'cur_engine="$(sed -n \'s/^REQUIRED_ENGINE_VERSION[^(]*(\\([0-9]*\\), *\\([0-9]*\\), *\\([0-9]*\\)).*/\\1.\\2.\\3/p\' "$(pwd)/src/nexus/engine_version.py" | head -1)"')),
+        ("tests/e2e/migration-rehearsal/run.sh", ('[ "$tuple" = "$cur_engine" ] && continue', 'if [ "$(printf \'%s\\n%s\\n\' "$tuple" "$cur_engine" | sort -V | head -1)" = "$tuple" ]; then')),
+        ("tests/e2e/migration-rehearsal/run.sh", ('tuple="$(git show "v$rel:src/nexus/engine_version.py" 2>/dev/null \\', '| sed -n \'s/^REQUIRED_ENGINE_VERSION[^(]*(\\([0-9]*\\), *\\([0-9]*\\), *\\([0-9]*\\)).*/\\1.\\2.\\3/p\' | head -1)"')),
+        # nexus-og52j: stage_wheel/stage_native moved verbatim out of run.sh
+        # into lib/stage_artifacts.sh (a sourced file) so a unit test could
+        # drive stage_native directly; this anchor followed it.
+        ("tests/e2e/migration-rehearsal/lib/stage_artifacts.sh", ('if [ -n "$ARTIFACTS" ]; then cp "$ARTIFACT_WHEEL" "$1/"', 'else cp "$(ls -t dist/conexus-*.whl | head -1)" "$1/"; fi   # keep real PEP 427 name')),
         # --- tests/e2e/mac-signed-binary-gate.sh (7 entries): needs an
         # actually-signed macOS binary + `spctl`/`codesign` on real macOS
         # to safely verify a rewrite of the signature-inspection logic.
-        "tests/e2e/mac-signed-binary-gate.sh:117",
-        "tests/e2e/mac-signed-binary-gate.sh:118",
-        "tests/e2e/mac-signed-binary-gate.sh:127",
-        "tests/e2e/mac-signed-binary-gate.sh:135",
-        "tests/e2e/mac-signed-binary-gate.sh:148",
-        "tests/e2e/mac-signed-binary-gate.sh:149",
-        "tests/e2e/mac-signed-binary-gate.sh:190",
+        ("tests/e2e/mac-signed-binary-gate.sh", ('SIGINFO="$(codesign -dv --verbose=4 "$BIN" 2>&1 || true)"', 'if echo "$SIGINFO" | grep -q "TeamIdentifier=" && ! echo "$SIGINFO" | grep -q "TeamIdentifier=not set"; then')),
+        ("tests/e2e/mac-signed-binary-gate.sh", ('if echo "$SIGINFO" | grep -q "TeamIdentifier=" && ! echo "$SIGINFO" | grep -q "TeamIdentifier=not set"; then', 'ok "Developer ID signed ($(echo "$SIGINFO" | grep -o \'TeamIdentifier=[^ ]*\' | head -1))"')),
+        ("tests/e2e/mac-signed-binary-gate.sh", ('# this gate is vacuous — the JNI loads would succeed for the wrong reason.', 'if echo "$SIGINFO" | grep -qE "flags=.*runtime"; then')),
+        ("tests/e2e/mac-signed-binary-gate.sh", ('ENTS="$(codesign -d --entitlements - --xml "$BIN" 2>/dev/null || true)"', 'if echo "$ENTS" | grep -q "com.apple.security.cs.disable-library-validation"; then')),
+        ("tests/e2e/mac-signed-binary-gate.sh", ('# "Killed: 9" further down.', 'if spctl -a -t exec -vv "$BIN" 2>&1 | tee "$WORK/spctl.out" | grep -q "accepted"; then')),
+        ("tests/e2e/mac-signed-binary-gate.sh", ('if spctl -a -t exec -vv "$BIN" 2>&1 | tee "$WORK/spctl.out" | grep -q "accepted"; then', 'ok "spctl accepted ($(grep -o \'source=.*\' "$WORK/spctl.out" | head -1))"')),
+        ("tests/e2e/mac-signed-binary-gate.sh", ('bad "LIBRARY VALIDATION REFUSAL detected in the smoke log — this IS nexus-2oh5q:', '$(grep -iE \'not valid for use in process|library validation|UnsatisfiedLinkError|code signature.*invalid\' "$SMOKE_LOG" | head -3)"')),
         # --- service/native-smoke.sh (8 entries): native-image
         # release-only smoke; needs a real GraalVM native build to
-        # safely verify a rewrite. Retargeted (nexus-cm5km): the two
-        # inline `uv run python -c '...'` heredocs (T1, then memory/
-        # plans/taxonomy/chash) were extracted into standalone files
-        # under service/smoke-probes/ so tests/test_native_smoke_client_
-        # probes.py can run the identical code against the unit suite's
-        # engine substrate -- this shrank the script from 497 to 391
-        # lines and shifted every site below the first extraction point
-        # (:107 in the pre-edit file). Numbers regenerated from the
-        # detector itself (_early_exit_consumer_hits), not arithmetic.
-        # Retargeted again (nexus-9gaj7): a 2-line comment landed ahead
-        # of the "$BIN" launch line (-Duser.timezone=UTC defense-in-depth),
-        # shifting every site below it by +2.
-        "service/native-smoke.sh:91",
-        "service/native-smoke.sh:144",
-        "service/native-smoke.sh:205",
-        "service/native-smoke.sh:257",
-        # Retargeted again (nexus-ft04v.16 fix round, c7f2ecda2): the
-        # /v1/vectors/embed probe grew three lines, shifting every site
-        # below it by +3.
-        "service/native-smoke.sh:364",
-        "service/native-smoke.sh:402",
-        "service/native-smoke.sh:408",
-        "service/native-smoke.sh:411",
+        # safely verify a rewrite. Pre-nexus-vkpr3 this block carried a
+        # line-shift retargeting history across three unrelated edits
+        # (nexus-cm5km's smoke-probe extraction, nexus-9gaj7's launch-line
+        # comment, nexus-ft04v.16's embed-probe growth); dropped, since
+        # content anchors make retargeting unnecessary going forward.
+        ("service/native-smoke.sh", ('echo "version: $VER"', 'echo "$VER" | grep -qE \'"schema_changeset_count":[1-9]\' || { echo "FAIL: migration did not apply"; tail -40 /tmp/native-smoke-svc.log; exit 1; }')),
+        ("service/native-smoke.sh", ('PUT_RESP=$(curl -fsS "${T1[@]}" "${J[@]}" -X POST -d \'{"id":"native-smoke-t1-id","session_id":"native-smoke-t1","content":"t1 native smoke","tags":"","flagged":false}\' "$U/v1/t1/put")', 'echo "$PUT_RESP" | grep -q \'"id"\' && echo "  ok   t1/put (INSERT) -> 200" || { echo "  FAIL t1/put -> $PUT_RESP"; fail=1; }')),
+        ("service/native-smoke.sh", ('rm -rf "$T1_PY_TMPDIR"', 'if echo "$PY_OUT" | grep -q "^OK$"; then')),
+        ("service/native-smoke.sh", ('rm -rf "$T2_PY_TMPDIR"', 'if echo "$PY_OUT" | grep -q "^OK$"; then')),
+        ("service/native-smoke.sh", ('if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-svc.log; then', 'echo "FAIL: native runtime error in service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-svc.log | head; fail=1')),
+        ("service/native-smoke.sh", ('else', 'echo "  FAIL voyage mode not selected:"; grep embedding_mode_banner /tmp/native-smoke-voyage.log | head; fail=1')),
+        ("service/native-smoke.sh", ('else', 'echo "  FAIL egress proxy not configured from HTTPS_PROXY:"; grep egress_proxy /tmp/native-smoke-voyage.log | head; fail=1')),
+        ("service/native-smoke.sh", ('if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-voyage.log; then', 'echo "FAIL: native runtime error in voyage-mode service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-voyage.log | head; fail=1')),
         # --- service/linux-native-verify.sh:43 (1 entry): a GENUINE
         # FALSE POSITIVE, not a "needs live infra" deferral -- the
         # matched pipe (`native-image --version | head -1`) sits inside a
@@ -995,19 +986,18 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # `sh -c` (checked at authoring time via
         # `grep -ln 'bash -c\\|sh -c'` across every file contributing to
         # this exemption set).
-        "service/linux-native-verify.sh:43",
+        ("service/linux-native-verify.sh", ('set -e', 'echo "=== container: $(native-image --version | head -1) ==="')),
         # --- tests/e2e/fresh-install-mvv.sh (2 entries): release-battery
         # gate (AGENTS.md "Cutting a release" step 1b); needs a real
         # fresh-HOME wheel install to safely verify a rewrite of its
         # dist-info sniffing. The former third entry (the `--version`
         # banner sniff) was FIXED rather than exempted -- it needed no
         # live infra, being a plain capture-then-parameter-expansion.
-        #   Retargeted (nexus-gqrg0 round 2: the always-on resolver-bound
-        #   leg 8c + the formula-index block moved before leg 9, +72 lines
-        #   before this region): :589 -> :661, :615 -> :687. Same 2 sites,
-        #   same rationale -- only an earlier, unrelated section grew.
-        "tests/e2e/fresh-install-mvv.sh:661",
-        "tests/e2e/fresh-install-mvv.sh:687",
+        # Pre-nexus-vkpr3 this block was retargeted once (nexus-gqrg0
+        # round 2, an unrelated earlier section growing +72 lines);
+        # dropped, since content anchors make retargeting unnecessary.
+        ("tests/e2e/fresh-install-mvv.sh", ('SITE_PACKAGES="$("$PROBE_PYTHON" -c \'import sysconfig; print(sysconfig.get_path("purelib"))\')"', 'MCP_DIST_INFO="$(find "$SITE_PACKAGES" -maxdepth 1 -name \'mcp-*.dist-info\' 2>/dev/null | head -1)"')),
+        ("tests/e2e/fresh-install-mvv.sh", ('fi', 'CONEXUS_DIST_INFO="$(find "$SITE_PACKAGES" -maxdepth 1 -name \'conexus-*.dist-info\' 2>/dev/null | head -1)"')),
         # --- tests/e2e/local-index-memory-gate.sh (1 entry): owned by a
         # concurrent agent in the authoring session (nexus-wbeyi itself)
         # -- reported to that hand-off, not fixed here. This is a
@@ -1015,7 +1005,7 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # already-fixed line 555: a `| head -1` inside a bare
         # `VAR=$(...)` assignment (propagates through errexit) found by
         # this lint's own authoring sweep.
-        "tests/e2e/local-index-memory-gate.sh:916",
+        ("tests/e2e/local-index-memory-gate.sh", ('if [ -z "$RUN_LOG" ]; then', 'RUN_LOG="$(find "$ISOLATED_CONFIG_DIR/logs" -maxdepth 1 -name \'index-*.log\' -newer "$MARKER_FILE" 2>/dev/null | head -1)"')),
         # --- tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh
         # (10 entries, nexus-z0ylb): the CANDIDATE-MIGRATION rehearsal --
         # a locally-built candidate's Liquibase walk over a POPULATED
@@ -1030,67 +1020,40 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # diagnostic `printf | head -N | sed` dump inside a failure
         # branch that runs strictly AFTER the real grep -q decision has
         # already been made).
-        # Retargeted (live-acceptance remediation, 2026-08-14): the
-        # --all + non-vacuous-topic-count fix (Stage 3d) and the
-        # PG-superuser diag_sql rewrite (CLUSTER 2) shifted every one of
-        # these; a NEW site (:308) was added by the Stage 3d topic-count
-        # parse (`grep -oE ... | grep -oE ... | head -1`), itself a
-        # genuine control-flow-gating pipe (feeds the loud-abort decision
-        # on zero parsed topics) -- same class as the rest of this set,
-        # not display-only, so EXEMPT rather than `|| true`.
-        # Retargeted AGAIN (nexus-lgdel.l2): the header comment lost 5 lines
-        # (a stale --chash-window cross-reference, deleted along with that
-        # leg) shifting every site below by -5. Numbers regenerated from the
-        # detector itself (_early_exit_consumer_hits), not arithmetic.
-        # Retargeted AGAIN (nexus-ft04v.10, RDR-204 P1.9): Stage 3e (a new
-        # ~56-line block seeding the code/docs corpus the Minimum Viable
-        # Validation asserts) was inserted before every site below,
-        # shifting each by +56 -- regenerated from the detector itself,
-        # not arithmetic. 3 NEW sites join the set (:624, :634, :637):
-        # the MVV's own two `printf | grep -q` marker/string checks
-        # gating an if/else (clauses 2/3 and 3/3), same established shape
-        # as every other site in this file, plus a diagnostic
-        # `printf | head -8 | sed` dump inside clause 3/3's failure
-        # branch, identical shape to the pre-existing :412/:542 sites.
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:105",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:156",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:303",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:413",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:416",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:507",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:543",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:546",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:562",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:567",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:572",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:628",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:638",
-        "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh:641",
+        # Two shape notes worth keeping (not retargeting mechanics): the
+        # Stage 3d topic-count parse (`grep -oE ... | grep -oE ... |
+        # head -1`) is a genuine control-flow-gating pipe (feeds the
+        # loud-abort decision on zero parsed topics), EXEMPT rather than
+        # `|| true`; the MVV's two `printf | grep -q` marker/string
+        # checks and their diagnostic `printf | head -8 | sed` dump are
+        # the same established if/else-gating shape as the rest of this
+        # file. Pre-nexus-vkpr3 this block carried a three-round
+        # line-shift retargeting history (the live-acceptance
+        # remediation, nexus-lgdel.l2's leg deletion, nexus-ft04v.10's
+        # Stage 3e block); dropped, since content anchors make
+        # retargeting unnecessary going forward.
+        ("tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh", ('test -x "$SVC_NATIVE_DIR/nexus-service" && ok "candidate native binary staged at $SVC_NATIVE_DIR (positioned only at Stage 4)" || { bad "candidate binary missing at $SVC_NATIVE_DIR"; exit 1; }', 'WHEEL="$(ls "$HOME"/worktree-wheel/conexus-*.whl 2>/dev/null | head -1)"')),
+        ("tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh", ('for _ in $(seq 1 "$tries"); do', 'if nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|status.*ok|running"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh", ('# asserts, when discovery genuinely produced nothing.', 'TOTAL_TOPICS="$(printf \'%s\' "$DISCOVER_OUT" | grep -oE \'Total: [0-9]+ topics\' | grep -oE \'[0-9]+\' | head -1)"')),
+        ("tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh", ('PRE_SEARCH="$(nx search "$MARKER1" --corpus knowledge -m 3 2>&1)"', 'if printf \'%s\' "$PRE_SEARCH" | grep -q "candmigmarker1populate"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh", ('else', 'printf \'%s\\n\' "$PRE_SEARCH" | head -8 | sed \'s/^/       /\'')),
+        ("tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh", ('printf \'%s\\n\' "$RESTALE_OUT" | sed \'s/^/       /\'', 'if printf \'%s\' "$RESTALE_OUT" | grep -qi "engine: converged"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh", ('POST_SEARCH="$(nx search "$MARKER1" --corpus knowledge -m 3 2>&1)"', 'if printf \'%s\' "$POST_SEARCH" | grep -q "candmigmarker1populate"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh", ('else', 'printf \'%s\\n\' "$POST_SEARCH" | head -8 | sed \'s/^/       /\'')),
+        ("tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh", ('printf \'%s\\n\' "$DOC_OUT" | grep -iE \'upgrade ladder|engine convergence\' | sed \'s/^/       /\' || true', 'if printf \'%s\' "$DOC_OUT" | grep -q "Traceback"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh", ('fi', 'if printf \'%s\' "$DOC_OUT" | grep -qi "pending upgrade rung"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh", ('fi', 'if printf \'%s\' "$DOC_OUT" | grep -qi "engine convergence pending"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh", ('note "MVV clause 2/3 — register(embedding_model=voyage-code-3, content_type=code, owner=$MVV_CODE_OWNER, name=$MVV_CODE_NAME) -> $MVV_REGISTER_OUT"', 'if printf \'%s\' "$MVV_REGISTER_OUT" | grep -q "RESULT:STATUS=422"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh", ('MVV_SEARCH_OUT="$(nx search "$MVV_MARKER" --corpus code -m 3 2>&1)"', 'if printf \'%s\' "$MVV_SEARCH_OUT" | grep -q "$MVV_MARKER"; then')),
+        ("tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh", ('else', 'printf \'%s\\n\' "$MVV_SEARCH_OUT" | head -8 | sed \'s/^/       /\'')),
     }
 )
-# 157: +1 for rehearse_package_upgrade.sh:186 -- the 898d41762 axis-naming
-# stage added a GOT_CLIENT_VER extraction that is the same rc-irrelevant
-# `nx --version | grep | head` derivation pattern as the pre-existing :98 site.
-# 167: +10 for rehearse_candidate_migration.sh (nexus-z0ylb) -- see the
-# entries' own comment above.
-# 168: +1 net for run.sh's --candidate-migration wiring (nexus-z0ylb) -- 5
-# pre-existing `ls | head -1` sites retargeted for the +27-line shift, plus
-# 1 new site of the identical shape (--candidate-migration's own
-# worktree-wheel staging line) -- see the retargeting comment above.
-# 169: +1 for rehearse_candidate_migration.sh's live-acceptance
-# remediation (nexus-z0ylb) -- the Stage 3d topic-count parse added one
-# new early-exit-consumer pipe (`grep -oE ... | head -1`); every other
-# site in that file's set was retargeted in place, net count unchanged.
-# nexus-lgdel.l2: -21 (rehearse_chash_window.sh, file deleted), -15
-# (rehearse_guided.sh, file deleted), and -1 (run.sh's own CHASH_WINDOW-leg
-# `head -1` site, deleted with the leg) removed entries wholesale:
-# 169 - 21 - 15 - 1 = 132. The remaining 5 run.sh sites were retargeted in
-# place, not counted as a change.
-# 132: +3 for rehearse_candidate_migration.sh (nexus-ft04v.10, RDR-204
-# P1.9) -- the Minimum Viable Validation's two `printf | grep -q` clause
-# checks plus one diagnostic `printf | head -8 | sed` dump in a failure
-# branch; every pre-existing site in that file's set was retargeted in
-# place for the +56-line shift, not counted as a change. 132 + 3 = 135.
+# The ceiling has moved several times as real sites were added (a new
+# GOT_CLIENT_VER extraction, rehearse_candidate_migration.sh's ten
+# entries, its Stage 3d topic-count parse, its MVV Stage 3e additions)
+# and removed (rehearse_chash_window.sh and rehearse_guided.sh deleted
+# whole-file at nexus-lgdel.l2); see git blame on this constant for the
+# historical count derivation. 135 is the current live count.
 _PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 135
 
 
@@ -1104,24 +1067,45 @@ def test_pipefail_early_exit_exempt_ratchet() -> None:
     )
 
 
+def _resolve_content_keyed_sites(
+    entries: frozenset[tuple[str, tuple[str, ...]]],
+) -> tuple[dict[str, set[int]], list[str]]:
+    """Resolve every ``(path, content-anchor)`` entry in *entries* to its
+    CURRENT live line number (nexus-vkpr3). Returns ``(by_file,
+    problems)``: ``by_file`` maps path -> the set of resolved line
+    numbers; a ``problems`` entry (STALE or AMBIGUOUS) means the anchor
+    did not resolve at all -- a caller must treat that as a hard
+    failure, never as "nothing to exempt here". Shared by both
+    ``_PIPEFAIL_EARLY_EXIT_EXEMPT`` and ``_PIPEFAIL_OR_TRUE_SITES``."""
+    items = [(path, content, None) for path, content in entries]
+    resolved, problems = resolve_ledger(REPO_ROOT, items)
+    by_file: dict[str, set[int]] = {}
+    for path, lineno, _payload in resolved:
+        by_file.setdefault(path, set()).add(lineno)
+    return by_file, problems
+
+
 def test_pipefail_early_exit_exempt_entries_are_live_violations() -> None:
-    """Every exempt entry must still name a REAL, currently-detected
-    violation -- a stale entry (the line was fixed, or moved, or the
-    pipeline shape changed) is a free, unrationalized exemption slot for
-    whoever edits this set next, exactly the failure the ratchet's exact-
+    """Every exempt entry's content anchor must resolve to a unique,
+    current line (nexus-vkpr3: neither STALE -- the anchor text no
+    longer occurs -- nor AMBIGUOUS -- it occurs more than once), and
+    that resolved line must still name a REAL, currently-detected
+    violation. Either failure is a free, unrationalized exemption slot
+    for whoever edits this set next, exactly what the ratchet's exact-
     equality ceiling exists to prevent (mirrors
     ``test_mode_lint_exclude_nodeids_all_resolve``)."""
-    dead: list[str] = []
-    by_file: dict[str, set[int]] = {}
-    for entry in _PIPEFAIL_EARLY_EXIT_EXEMPT:
-        path, _, lineno = entry.rpartition(":")
-        by_file.setdefault(path, set()).add(int(lineno))
+    by_file, problems = _resolve_content_keyed_sites(_PIPEFAIL_EARLY_EXIT_EXEMPT)
+    assert not problems, (
+        f"{len(problems)} _PIPEFAIL_EARLY_EXIT_EXEMPT anchor(s) failed to "
+        "resolve:\n  " + "\n  ".join(problems) + "\n\nRetarget with the "
+        "line's current stripped text if it moved (insertions above it "
+        "do not require this), or delete the entry and lower "
+        "`_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING` if it was fixed."
+    )
 
+    dead: list[str] = []
     for rel_path, linenos in by_file.items():
         full = REPO_ROOT / rel_path
-        if not full.is_file():
-            dead.extend(f"{rel_path}:{n} -> no such file" for n in linenos)
-            continue
         lines = full.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
         hit_lines = {n for n, _ in _early_exit_consumer_hits(lines)}
         for n in sorted(linenos):
@@ -1129,11 +1113,64 @@ def test_pipefail_early_exit_exempt_entries_are_live_violations() -> None:
                 dead.append(f"{rel_path}:{n} -> no early-exit-consumer pipe detected there")
 
     assert not dead, (
-        f"{len(dead)} pipefail-early-exit exemption(s) no longer name a "
-        "live violation:\n  " + "\n  ".join(dead) + "\n\nRetarget if the "
-        "line moved, or delete the entry and lower "
+        f"{len(dead)} pipefail-early-exit exemption(s) resolve to a line "
+        "that is no longer a live violation:\n  " + "\n  ".join(dead)
+        + "\n\nDelete the entry and lower "
         "`_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING` if it was fixed."
     )
+
+
+def test_exempt_anchor_survives_insertion_above_it(tmp_path: Path) -> None:
+    """THE nexus-vkpr3 REGRESSION, against THIS file's real scanner
+    (``_early_exit_consumer_hits``): inserting lines above an exempted
+    site must not silently move the exemption onto a DIFFERENT,
+    unreviewed early-exit-consumer pipe that happens to shift into the
+    old stored line number -- this is precisely the incident the bead
+    reports (a WHEEL-extraction line, never reviewed, slid onto a
+    version-probe line's stale exemption after an unrelated insertion).
+    """
+    sample = tmp_path / "sample.sh"
+    original = (
+        "#!/usr/bin/env bash\n"
+        "set -o pipefail\n"
+        'WHEEL="$(ls dist/conexus-*.whl | head -1)"\n'          # DECOY, never exempted
+        "noop\n"
+        'GOT_CLIENT_VER="$(nx --version 2>&1 | grep -oE "[0-9.]+" | head -1)"\n'  # VICTIM, exempted
+    )
+    sample.write_text(original, encoding="utf-8")
+
+    victim_content = (
+        'GOT_CLIENT_VER="$(nx --version 2>&1 | grep -oE "[0-9.]+" | head -1)"',
+    )
+    lineno, err = resolve_anchor(tmp_path, "sample.sh", victim_content)
+    assert (lineno, err) == (5, "")
+
+    hits_before = dict(_early_exit_consumer_hits(original.splitlines(keepends=True)))
+    assert set(hits_before) == {3, 5}
+
+    # Insert exactly enough lines above both sites to shift the DECOY
+    # (originally line 3) onto VICTIM's OLD stored line number (5) --
+    # the exact shape of the nexus-vkpr3 incident.
+    shift = lineno - 3
+    assert shift > 0
+    modified = "\n".join(f"# inserted {i}" for i in range(shift)) + "\n" + original
+    sample.write_text(modified, encoding="utf-8")
+
+    hits_after = dict(_early_exit_consumer_hits(modified.splitlines(keepends=True)))
+    modified_lines = modified.splitlines()
+    assert 5 in hits_after and "WHEEL" in modified_lines[4], (
+        "fixture stopped demonstrating the hazard -- the WHEEL decoy "
+        "line must now sit at VICTIM's old stored line number (5)"
+    )
+
+    # A stale line-number key (5) would now silently exempt the WHEEL
+    # decoy under the version-probe's own rationale. The content anchor
+    # instead resolves to VICTIM's real, shifted location and nothing
+    # else.
+    lineno, err = resolve_anchor(tmp_path, "sample.sh", victim_content)
+    assert err == ""
+    assert lineno == 5 + shift
+    assert lineno != 5  # never the decoy's (post-shift) line
 
 
 # ── ratchet: `|| true`-guarded early-exit-consumer sites (gap #1) ──────────
@@ -1160,7 +1197,13 @@ def test_pipefail_early_exit_exempt_entries_are_live_violations() -> None:
 # `||` CONTROL-FLOW position, and none feeds a variable that later gates
 # a pass/fail decision -- each truncates or extracts output for
 # human-readable pretty-printing / cosmetic summary counters only.
-_PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
+#
+# CONTENT-KEYED, not line-keyed (nexus-vkpr3) -- same shape and same
+# rationale as `_PIPEFAIL_EARLY_EXIT_EXEMPT` above: the second tuple
+# element is a content anchor (one or more trailing stripped source
+# lines) resolved to its CURRENT line by `resolve_anchor`, immune to an
+# insertion above the site.
+_PIPEFAIL_OR_TRUE_SITES: frozenset[tuple[str, tuple[str, ...]]] = frozenset(
     {
         # scripts/rdr152-sandbox/prod-copy.sh (3 entries): each truncates
         # a per-table ETL error dump to 20 lines for terminal
@@ -1169,9 +1212,9 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         # migrate`'s own exit code / summary further down is what
         # actually surfaces failure, this is supplementary diagnostic
         # noise-truncation only.
-        "scripts/rdr152-sandbox/prod-copy.sh:148",
-        "scripts/rdr152-sandbox/prod-copy.sh:159",
-        "scripts/rdr152-sandbox/prod-copy.sh:169",
+        ("scripts/rdr152-sandbox/prod-copy.sh", ('uv run nx storage migrate telemetry \\', '--db "${PROD_MEMORY_DB}" \\', '--service-url "${NX_SERVICE_URL}" 2>&1 | grep -v "row_failed" | head -20 || true')),
+        ("scripts/rdr152-sandbox/prod-copy.sh", ('--catalog-db "${PROD_CATALOG_DIR}/.catalog.db" \\', '--service-url "${NX_SERVICE_URL}" 2>&1 | grep -v "row_failed" | head -20 || true')),
+        ("scripts/rdr152-sandbox/prod-copy.sh", ('uv run nx storage migrate taxonomy \\', '--db "${PROD_MEMORY_DB}" \\', '--service-url "${NX_SERVICE_URL}" 2>&1 | grep -v "row_failed" | head -20 || true')),
         # tests/containers/lib/verdict.sh:40 (1 entry): extracts a junit
         # <testsuite> attribute string to accumulate the run's test totals.
         #
@@ -1189,58 +1232,40 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         # what the zero-tests check, the reported-shard-count check, and the
         # floor exist to fail on. Swallowing the grep's status cannot hide a
         # short run; it produces one, and the checks below catch it.
-        "tests/containers/lib/verdict.sh:40",
+        ("tests/containers/lib/verdict.sh", ('if [ -f "$xml" ]; then', 'suite_tag="$(grep -o \'<testsuite [^>]*>\' "$xml" | head -1 || true)"')),
         # tests/e2e/migration-rehearsal/rehearse_shakeout.sh (2 entries):
-        #
-        #   :264 -- prints staleness/skip diagnostic lines for human
-        #   eyeballing in a "run-2 log tail for diagnosis" block -- the
-        #   actual indexed-content-searchable assertion runs on the next
-        #   (unrelated) line via a fresh, unguarded `nx search | grep -qi`.
-        #   Retargeted (gap-8/gap-15, T2 [22511]) after the `-e` addition
-        #   shifted the file; same site, same rationale as before.
-        #
-        #   :128 -- gap-15 NEW entry: the Phase A health-poll loop,
-        #   `nx daemon service status | grep -qiE "health.*ok|status.*live"
-        #   && { healthy=1; break; } || true`. This is a poll-and-retry
-        #   loop body, not an `if`/`elif` condition (so
-        #   `_if_condition_or_true_bug_hits` does not apply) -- the
-        #   EXPECTED "not yet healthy" iteration is a bare `&&` failure
-        #   with no trailing `||`, which the new `set -e` would abort on
-        #   at iteration 1 without this guard. The real pass/fail
-        #   assertion is the SEPARATE post-loop line,
-        #   `[ "$healthy" = 1 ] && ok ... || { bad ...; exit 1; }` --
-        #   this guarded site itself gates nothing.
-        #   Retargeted AGAIN (nexus-l8xnz): +12 for the Phase F header
-        #   addition described above -- :264 -> :276, :128 -> :140.
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:372",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:186",
+        # one prints staleness/skip diagnostic lines for human eyeballing
+        # in a "run-2 log tail for diagnosis" block -- the actual
+        # indexed-content-searchable assertion runs on the next
+        # (unrelated) line via a fresh, unguarded `nx search | grep -qi`.
+        # The other is the Phase A health-poll loop, `nx daemon service
+        # status | grep -qiE "health.*ok|status.*live" && { healthy=1;
+        # break; } || true` -- a poll-and-retry loop body, not an
+        # `if`/`elif` condition (so `_if_condition_or_true_bug_hits` does
+        # not apply): the EXPECTED "not yet healthy" iteration is a bare
+        # `&&` failure with no trailing `||`, which `set -e` would abort
+        # on at iteration 1 without this guard. The real pass/fail
+        # assertion is the SEPARATE post-loop line, `[ "$healthy" = 1 ]
+        # && ok ... || { bad ...; exit 1; }` -- this guarded site itself
+        # gates nothing. Pre-nexus-vkpr3 this block was retargeted twice
+        # by line-shift arithmetic; dropped, since content anchors make
+        # retargeting unnecessary going forward.
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout.sh", ('note "run-2 staleness/skip lines:"', 'grep -iE "stale|skip|unchanged|cache" "$IDX2" | sed \'s/^/       | /\' | head -10 || true')),
+        ("tests/e2e/migration-rehearsal/rehearse_shakeout.sh", ('# polling up to 30 times. `|| true` restores the intended poll-and-wait.', 'nx daemon service status 2>&1 | grep -qiE "health.*ok|status.*live" && { healthy=1; break; } || true')),
         # tests/e2e/release-sandbox.sh (3 entries): the already-commented
         # `|| true: head is an early-exit consumer...` idiom this file's
         # own docstring cites as the sanctioned shape -- readback for
         # human eyeballing only; the actual FAIL/bad decision for each
         # surrounding block is made from a separately-captured variable
         # or a dedicated gate elsewhere, never from these truncated
-        # echoes. Retargeted (gap-8/gap-15, T2 [22511]) after this pass's
-        # edits shifted the file; same 3 sites, same rationale.
-        #   Retargeted AGAIN (7.15.0 release fix a1f6bf7c4 shifted the
-        #   file +7 lines): :1103 -> :1110, :1107 -> :1114, :1155 -> :1162.
-        #   Retargeted AGAIN (nexus-utpuw.8 rewrote the comment explaining
-        #   why the sandbox activates $HOME first, +6 lines): :1110 -> :1116,
-        #   :1114 -> :1120, :1162 -> :1168. Same 3 sites, same rationale --
-        #   only the prose above them changed.
-        #   Retargeted AGAIN (nexus-b1v9z: --check-schema's smoke/shakedown
-        #   loops now build a per-check args array so --fail-on-violation
-        #   can be appended only for --check-schema, +11 lines before this
-        #   region): :1130 -> :1141, :1134 -> :1145, :1182 -> :1193. Same 3
-        #   sites, same rationale -- only an earlier, unrelated loop grew.
-        #   Retargeted AGAIN (nexus-gqrg0 round 2: widened
-        #   _mineru_doctor_verdict's filter to any "MinerU" line plus two
-        #   new self-test cases, +15 lines before this region): :1242 ->
-        #   :1257, :1246 -> :1261, :1294 -> :1309. Same 3 sites, same
-        #   rationale -- only an earlier, unrelated function grew.
-        "tests/e2e/release-sandbox.sh:1257",
-        "tests/e2e/release-sandbox.sh:1261",
-        "tests/e2e/release-sandbox.sh:1309",
+        # echoes. Pre-nexus-vkpr3 this block was retargeted four times
+        # across unrelated edits (the 7.15.0 release fix, a $HOME-
+        # activation comment rewrite, --check-schema's per-check args
+        # array, nexus-gqrg0's widened MinerU filter); dropped, since
+        # content anchors make retargeting unnecessary going forward.
+        ("tests/e2e/release-sandbox.sh", ('# bookkeeping below (nexus-6zxfb, same class as nexus-i66g4).', 'echo "$MEMORY_GET_OUT" | head -3 | sed \'s/^/  /\' || true')),
+        ("tests/e2e/release-sandbox.sh", ('else', 'echo "$MEMORY_GET_OUT" | head -3 | sed \'s/^/  /\' || true')),
+        ("tests/e2e/release-sandbox.sh", ('# over the same catalog state runs explicitly at 11/11 below.', "nx catalog stats 2>&1 | head -15 | sed 's/^/  /' || true")),
     }
 )
 _PIPEFAIL_OR_TRUE_SITES_CEILING = 9
@@ -1259,22 +1284,25 @@ def test_pipefail_or_true_sites_ratchet() -> None:
 
 
 def test_pipefail_or_true_sites_are_live_or_true_guarded_hits() -> None:
-    """Every `_PIPEFAIL_OR_TRUE_SITES` entry must still name a REAL,
+    """Every `_PIPEFAIL_OR_TRUE_SITES` entry's content anchor must resolve
+    to a unique, current line (nexus-vkpr3: neither STALE nor
+    AMBIGUOUS), and that resolved line must still name a REAL,
     currently-detected `|| true`-guarded early-exit-consumer pipe -- same
     liveness discipline as `test_pipefail_early_exit_exempt_entries_are_
     live_violations` above, for the same reason: a stale entry is a free,
     unrationalized escape-hatch slot for whoever edits this set next."""
-    dead: list[str] = []
-    by_file: dict[str, set[int]] = {}
-    for entry in _PIPEFAIL_OR_TRUE_SITES:
-        path, _, lineno = entry.rpartition(":")
-        by_file.setdefault(path, set()).add(int(lineno))
+    by_file, problems = _resolve_content_keyed_sites(_PIPEFAIL_OR_TRUE_SITES)
+    assert not problems, (
+        f"{len(problems)} _PIPEFAIL_OR_TRUE_SITES anchor(s) failed to "
+        "resolve:\n  " + "\n  ".join(problems) + "\n\nRetarget with the "
+        "line's current stripped text if it moved (insertions above it "
+        "do not require this), or delete the entry and lower "
+        "`_PIPEFAIL_OR_TRUE_SITES_CEILING` if the `|| true` was removed."
+    )
 
+    dead: list[str] = []
     for rel_path, linenos in by_file.items():
         full = REPO_ROOT / rel_path
-        if not full.is_file():
-            dead.extend(f"{rel_path}:{n} -> no such file" for n in linenos)
-            continue
         lines = full.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
         hit_lines = {n for n, _ in _or_true_guarded_early_exit_hits(lines)}
         for n in sorted(linenos):
@@ -1283,8 +1311,9 @@ def test_pipefail_or_true_sites_are_live_or_true_guarded_hits() -> None:
 
     assert not dead, (
         f"{len(dead)} `|| true`-guarded-site entr{'y' if len(dead) == 1 else 'ies'} "
-        "no longer name a live guarded hit:\n  " + "\n  ".join(dead)
-        + "\n\nRetarget if the line moved, or delete the entry and lower "
+        "resolve to a line that is no longer a live guarded hit:\n  "
+        + "\n  ".join(dead)
+        + "\n\nDelete the entry and lower "
         "`_PIPEFAIL_OR_TRUE_SITES_CEILING` if the `|| true` was removed "
         "(or the pipe eliminated)."
     )
@@ -1297,6 +1326,14 @@ def test_no_pipefail_script_pipes_into_an_early_exit_consumer() -> None:
     scripts = _tracked_shell_scripts()
     assert len(scripts) >= 10, f"suspicious sweep: only {len(scripts)} scripts enumerated"
 
+    # Resolved once, outside the per-script loop -- an anchor that fails
+    # to resolve (STALE/AMBIGUOUS) excludes nothing here (fail-safe
+    # toward MORE reported violations, never fewer); the dedicated
+    # liveness tests above are what make a resolution failure loud in
+    # its own right.
+    exempt_by_file, _exempt_problems = _resolve_content_keyed_sites(_PIPEFAIL_EARLY_EXIT_EXEMPT)
+    or_true_by_file, _or_true_problems = _resolve_content_keyed_sites(_PIPEFAIL_OR_TRUE_SITES)
+
     pipefail_scripts = 0
     violations: list[str] = []
     or_true_violations: list[str] = []
@@ -1307,16 +1344,16 @@ def test_no_pipefail_script_pipes_into_an_early_exit_consumer() -> None:
         pipefail_scripts += 1
         lines = text.splitlines(keepends=True)
         rel = script.relative_to(REPO_ROOT).as_posix()
+        exempt_linenos = exempt_by_file.get(rel, set())
+        or_true_linenos = or_true_by_file.get(rel, set())
         for lineno, snippet in _early_exit_consumer_hits(lines):
-            entry = f"{rel}:{lineno}"
-            if entry in _PIPEFAIL_EARLY_EXIT_EXEMPT:
+            if lineno in exempt_linenos:
                 continue
-            violations.append(f"{entry}  ({snippet})")
+            violations.append(f"{rel}:{lineno}  ({snippet})")
         for lineno, snippet in _or_true_guarded_early_exit_hits(lines):
-            entry = f"{rel}:{lineno}"
-            if entry in _PIPEFAIL_OR_TRUE_SITES:
+            if lineno in or_true_linenos:
                 continue
-            or_true_violations.append(f"{entry}  ({snippet})")
+            or_true_violations.append(f"{rel}:{lineno}  ({snippet})")
 
     # Non-vacuity: the pipefail-precondition filter must actually be
     # letting a meaningful subset of the corpus through, not silently

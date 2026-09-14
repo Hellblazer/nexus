@@ -11,7 +11,9 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.SchemaViolationException;
+import dev.nexus.service.db.TooLargeException;
 import dev.nexus.service.db.TupleException;
+import dev.nexus.service.db.TupleLimits;
 import dev.nexus.service.db.TupleRepository;
 import dev.nexus.service.tuples.TemplateRegistry;
 import dev.nexus.service.tuples.TemplateSchema;
@@ -355,6 +357,9 @@ public final class TupleHandler implements HttpHandler {
         take.put("max_attempts", t.take().maxAttempts());
         m.put("take", take);
         m.put("retention_seconds", t.retentionSeconds());
+        if (t.maxBodyBytes() != null) {
+            m.put("max_body_bytes", t.maxBodyBytes());
+        }
         return m;
     }
 
@@ -445,9 +450,44 @@ public final class TupleHandler implements HttpHandler {
 
     // ── request parsing ──────────────────────────────────────────────────────
 
+    /**
+     * Bounded read (bead nexus-r7xao): the whole serialised request body on every
+     * {@code /v1/tuples} route is capped at {@link TupleLimits#MAX_REQUEST_BODY_BYTES},
+     * refused BEFORE any JSON parsing — same pattern as {@code InstallPingHandler}'s own
+     * {@code MAX_BODY_BYTES} guard ({@code readNBytes(cap + 1)}, refuse on overflow).
+     * A present {@code Content-Length} header above the cap is refused immediately,
+     * without touching the stream; a missing, malformed, or under-cap header falls
+     * through to the bounded read either way, so a caller cannot bypass the cap by
+     * lying about (or omitting) the header.
+     *
+     * <p>CRE minor (accepted trade-off, not a bug): on refusal, this does NOT drain
+     * whatever bytes remain beyond the cap before the try-with-resources closes the
+     * stream — the JDK httpserver most likely closes rather than reuses the
+     * keep-alive connection for an oversized request, same as {@code
+     * InstallPingHandler}'s identical shape. Deliberate: draining an attacker-sized
+     * body just to preserve a connection that refused the request buys the client
+     * nothing and costs the server the exact unbounded read this guard exists to
+     * avoid.
+     */
     private Map<String, Object> readBody(HttpExchange ex) throws IOException {
+        String contentLength = ex.getRequestHeaders().getFirst("Content-Length");
+        if (contentLength != null) {
+            try {
+                long declared = Long.parseLong(contentLength.trim());
+                if (declared > TupleLimits.MAX_REQUEST_BODY_BYTES) {
+                    throw new TooLargeException("request body", declared, TupleLimits.MAX_REQUEST_BODY_BYTES);
+                }
+            } catch (NumberFormatException ignored) {
+                // Malformed header: fall through to the bounded read below, which
+                // enforces the cap regardless of what the header claimed.
+            }
+        }
         try (InputStream is = ex.getRequestBody()) {
-            return MAPPER.readValue(is, MAP_TYPE);
+            byte[] raw = is.readNBytes(TupleLimits.MAX_REQUEST_BODY_BYTES + 1);
+            if (raw.length > TupleLimits.MAX_REQUEST_BODY_BYTES) {
+                throw new TooLargeException("request body", raw.length, TupleLimits.MAX_REQUEST_BODY_BYTES);
+            }
+            return MAPPER.readValue(raw, MAP_TYPE);
         }
     }
 

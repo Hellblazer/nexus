@@ -1,6 +1,6 @@
 ---
 name: using-nx-skills
-description: Use when work matches a conexus skill's territory. Something is broken or two fix attempts have failed; work spans modules or needs design before code; code, tests, or a plan need a quality gate; an answer must be reduced from many documents rather than looked up; prior work in T1/T2/T3 has not been checked; or a validated finding is about to go unstored.
+description: Use when work matches a conexus skill's territory — something broke, two fixes failed, work spans modules or needs design, code/tests/a plan need a quality gate, an answer needs many documents reduced, T1/T2/T3 is unchecked, or a finding is unstored.
 effort: low
 ---
 
@@ -25,7 +25,7 @@ After a successful pipeline:
 Before code:
 - About to implement with no design of record → `/conexus:brainstorming-gate` (mandatory; a locked T2 memo, accepted RDR, or reviewed bead is the approved design, so implement it without re-gating)
 - Multi-step → `/conexus:create-plan`
-- Needs design across modules → `/conexus:architecture` then `/conexus:create-plan`
+- Needs design across modules → `/conexus:create-plan` then `/conexus:architecture` (architecture/SKILL.md's own Pipeline Position: strategic-planner -> nx_plan_audit -> architect-planner)
 
 Something broken:
 - Failure, exception, or unexpected behaviour → `/conexus:debug` immediately
@@ -57,15 +57,16 @@ Measured cost (n=142 executed runs, 2026-04 to 2026-08; T2 `nexus/nx-answer-capa
 Two return shapes (RDR-200, landing with the Phase 1 go-live; headless is the only live shape as of this writing). Headless (the default; `continuation` unset or `False`) runs the terminal synthesis server-side in a `claude -p` subprocess and returns a finished answer. The cost figures above describe this shape and nothing here changes it. Continuation (opt-in `continuation=True`, not yet live: nexus-4e75w.4 built and tested the assembly behind a closed go-live gate and nexus-4e75w.5 wires the return path) stops after server-side retrieval and returns an envelope carrying the exact prompt and schema the synthesis would have dispatched, plus evidence provenance, so the calling session performs the reduction in its own context instead of paying a second subprocess. This does not change when to call `nx_answer`. The routing decision below (reduce-from-many-documents versus `search` or `query`) is unaffected, and `nexus-h33x8.6`'s narrowing stands.
 
 - Reduce-from-many-documents questions ("what approaches to X appear in…", "tradeoffs across…", "compare… across the corpus") → `/conexus:query`
-- Design walks from concept to code → `/conexus:research`
-- Critique a change set → `/conexus:review`
+- Design walks from concept to code (retrieval, not a synthesizer dispatch) → `/conexus:design-to-code-trace`
+- Broad topic research across nx store, web, and codebase (dispatches deep-research-synthesizer) → `/conexus:research`
+- Critique a change set against decision history → `/conexus:decision-drift-review`
 - Cross-corpus synthesis or ranking → `/conexus:analyze`
-- Why was this written this way → `/conexus:debug`
+- Why was this written this way (design-intent retrieval, not a debugger dispatch) → `/conexus:why-was-this-written`
 - Documentation gaps → `/conexus:document`
-- 3+ validated findings to keep → `/conexus:knowledge-tidy`
+- 3+ validated findings to keep → `/conexus:knowledge-tidying`
 - PDF to index → `/conexus:pdf-process`
 
-RDR lifecycle: `/conexus:rdr-create` → `/conexus:rdr-research` → `/conexus:rdr-gate` → (`/conexus:rdr-fix` per finding, then re-gate) → `/conexus:rdr-accept` → (implementation phases) → `/conexus:rdr-close`. List and show: `/conexus:rdr-list`, `/conexus:rdr-show NNN`. Audit: `/conexus:rdr-audit`.
+RDR lifecycle: `/conexus:rdr-create` → `/conexus:rdr-research` → `/conexus:rdr-gate` → (`/conexus:rdr-fix` per finding, then re-gate) → `/conexus:rdr-accept` → (implementation phases) → `/conexus:rdr-close`. List and show: `/conexus:rdr-list`, `/conexus:rdr-show NNN`. Audit: `/conexus:rdr-audit`. Every name above still resolves the same way after the nexus-cnzei.4/.6 collision fix rounds — `rdr-gate`/`rdr-fix`/`rdr-accept`/`rdr-audit` kept both a command and a skill (deliberately, both files real; the skill side is renamed to `rdr-gate-checklist`/`rdr-fix-checklist`/`rdr-accept-checklist`/`rdr-audit-checklist` so it no longer shares the command's exact name), `rdr-list` kept only its command, and `rdr-create`/`rdr-research`/`rdr-close`/`rdr-show` kept only their skill.
 
 Phase boundary inside an implementation arc: every phase-review bead, before close, runs `/conexus:phase-review-gate <rdr-id> --phase N`. Pass 1 enumerates the RDR's numbered §Approach items; Pass 2 validates that each has a closing-bead pointer (`ItemN=nexus-xxxx`) or an explicit `none` deferral. BLOCKED on any unaccounted item. Not optional. It prevents the silent scope reduction class (RDR-112 Phase 1 / nexus-52lb, 2026-05-15: the T3 daemon was silently dropped from a 6-bead close, found three phases later, at a cost of 2 to 3 days of replanning).
 
@@ -75,7 +76,7 @@ Catalog and linking: entries, links, tumblers, link-context seeding → `/conexu
 
 Reference (no agent dispatch): `/conexus:serena-code-nav`, `/conexus:nexus`, `/conexus:cli-controller`, `/conexus:writing-nx-skills`.
 
-Sending or draining a tuple-space message to an agent's or instance's mailbox → `/conexus:mailbox`.
+Messaging, waiting on, or answering another session or agent, or sharing a checkout, build, or test capacity with one → `/conexus:peer-messaging`. The tuple-space mailbox protocol itself → `/conexus:mailbox`.
 
 ## Essential MCP Tools (always available)
 
@@ -86,12 +87,12 @@ Conexus Storage Tiers: check before any work, and write your findings back. Read
 - T2 `nx memory`: project decisions, findings, session context. Check before project work.
 - T1 `nx scratch`: this session's discoveries, shared across all sibling agents. Check before duplicating sibling work.
 
-Write path: T1 (immediate, shared with siblings) → `--persist` flag to T2 (survives the session) → `/conexus:knowledge-tidy` to T3 (permanent, cross-project). Findings not stored are findings lost: call `store_put` (T3) or `memory_put` (T2) before returning a result you would want a future session to know.
+Write path: T1 (immediate, shared with siblings) → `--persist` flag to T2 (survives the session) → T3 (permanent, cross-project) via `store_put`, after using `/conexus:knowledge-tidying` (`nx_tidy`, read-only) to consolidate against what is already there. Findings not stored are findings lost: call `store_put` (T3) or `memory_put` (T2) before returning a result you would want a future session to know.
 
-**T2 ttl convention (every `memory_put` names its lifetime; the default is 30 days and reads are the only thing that extend it):**
+**T2 ttl convention (reversed 2026-09-12, nexus-473mx: omitting `ttl` now means permanent, not 30 days; a clock is something you ask for):**
 
-- `ttl=None` for a record of record: a handoff, a decision, a directive, a ship record, a coordination brief, a research finding a future session must find. Omitting `ttl` does NOT make an entry permanent.
-- the default (omit `ttl`) for a session finding, an interim result, a review round, a probe; it should expire unless someone reads it again.
+- Omit `ttl` (or pass `ttl=None` explicitly, same effect) for a record of record: a handoff, a decision, a directive, a ship record, a coordination brief, a research finding a future session must find.
+- Pass an explicit `ttl=N` (days) for a session finding, an interim result, a review round, a probe that should expire unless someone reads it again. Reads extend it (`effective_ttl = ttl * (1 + ln(access_count + 1))`); silence does not buy one.
 - `tags` name the bead or RDR the entry serves, so the entry can be found by the work, not only by the title.
 
 ## Common Mistakes
@@ -103,7 +104,7 @@ Write path: T1 (immediate, shared with siblings) → `--persist` flag to T2 (sur
 | `nx_answer` for a file:line, single-fact, or already-in-T2 question | `search` / `query` (seconds; mean about 8s, tail to about 45s) or Serena. `nx_answer`'s p50 is 80s |
 | Researching from scratch without checking T3 | `nx search` first (seconds); prior sessions may have already answered |
 | Returning findings without storing them | `store_put` (T3) or `memory_put` (T2) before returning |
-| `memory_put` with no `ttl` for a decision, handoff or directive | `ttl=None`; the default is 30 days, and omitting `ttl` never means permanent |
+| `memory_put` with a `ttl` for a decision, handoff or directive | omit `ttl` (or pass `ttl=None`); omitting it now means permanent (reversed 2026-09-12, nexus-473mx) |
 | `store_put(collection="knowledge")` or any placeholder (`default`, `test`, a session, a source app) | `collection="<subject>"`: a durable subject area a reader would browse (`distributed-systems`); reuse an existing one (`nx collection list`) before minting; rules in docs/collections.md |
 | Test fails → try a different fix | `/conexus:debug` |
 | Implement undesigned work without brainstorming-gate | `brainstorming-gate` first (unless a design of record exists) |

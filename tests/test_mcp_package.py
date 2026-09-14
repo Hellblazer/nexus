@@ -73,6 +73,101 @@ def test_catalog_registered_tools():
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 
 
+# ── Wire-level registration correctness (nexus-cnzei.1) ──────────────────────
+#
+# nexus-cnzei.1: commit 4b756c8c7 inserted the private helper
+# ``_file_path_matches`` between the ``@mcp.tool(name="search", ...)``
+# decorator and ``def catalog_search`` in src/nexus/mcp/catalog.py. Python
+# decorator binding is purely positional (the decorator applies to the very
+# next ``def``), so the catalog "search" tool silently became
+# ``_file_path_matches`` — a two-argument boolean matcher with an
+# ``entry_path``/``wanted`` signature — while ``catalog_search`` itself
+# (query/content_type/author/corpus/owner/file_path/limit/offset) was never
+# registered at all. ``test_catalog_registered_tools`` above only pins the
+# *name* "search" is present in the registry; a name collision like this one
+# passes that check while every real caller (skills, hooks, ~45 call sites
+# passing ``query=``) fails wire-level input validation. These two tests read
+# the LIVE FastMCP registry the way an actual MCP client does — resolved
+# name, backing function, and JSON schema — so a decorator/def mismatch of
+# this shape cannot recur silently.
+
+
+def test_catalog_search_tool_schema_matches_catalog_search_not_a_private_helper():
+    """The nexus-catalog "search" tool's wire schema is catalog_search's,
+    not _file_path_matches's.
+
+    Reads the live registry (mirrors what an MCP client sees via
+    tools/list): the registered Tool's ``.fn`` must be the real
+    ``catalog_search`` function, and its ``inputSchema`` (``.parameters``)
+    must expose ``query`` — never ``entry_path``/``wanted``, the
+    _file_path_matches signature this bug wired up instead.
+    """
+    from nexus.mcp.catalog import catalog_search, mcp
+
+    tools = {t.name: t for t in mcp._tool_manager.list_tools()}
+    assert "search" in tools, "catalog 'search' tool not registered at all"
+    search_tool = tools["search"]
+
+    assert search_tool.fn is catalog_search, (
+        f"catalog 'search' tool is backed by {search_tool.fn!r} "
+        f"({search_tool.fn.__module__}.{search_tool.fn.__qualname__}), "
+        f"not catalog_search — a decorator/def misplacement wired the "
+        f"wrong function to the 'search' name (nexus-cnzei.1)"
+    )
+
+    props = set(search_tool.parameters.get("properties", {}))
+    expected_props = {
+        "query", "content_type", "author", "corpus",
+        "owner", "file_path", "limit", "offset",
+    }
+    assert expected_props <= props, (
+        f"catalog 'search' tool's inputSchema properties {sorted(props)} "
+        f"are missing {sorted(expected_props - props)} — every real caller "
+        f"(skills, hooks) passes query=/content_type=/author=/corpus= and "
+        f"would fail wire-level input validation against this schema"
+    )
+    assert "entry_path" not in props and "wanted" not in props, (
+        f"catalog 'search' tool's inputSchema still carries "
+        f"_file_path_matches's entry_path/wanted parameters: {sorted(props)}"
+    )
+
+
+def test_no_registered_mcp_tool_is_backed_by_a_private_function():
+    """Class-level guard: no @mcp.tool() on either server resolves to a
+    function whose ``__name__`` starts with "_".
+
+    A private helper landing between a decorator and its intended target
+    (as _file_path_matches did) is exactly the failure mode this catches,
+    mechanically, for every current and future tool on both servers — not
+    just the one instance found by hand. Non-vacuity: the tool counts are
+    asserted well above the current registry (47 core / 10 catalog) so a
+    collection regression (e.g. an import error silently emptying the
+    registry) fails loud rather than passing on an empty set.
+    """
+    from nexus.mcp.catalog import mcp as catalog_mcp
+    from nexus.mcp.core import mcp as core_mcp
+
+    for label, server_mcp, floor in (
+        ("core", core_mcp, 40),
+        ("catalog", catalog_mcp, 5),
+    ):
+        tools = server_mcp._tool_manager.list_tools()
+        assert len(tools) > floor, (
+            f"{label} server registered only {len(tools)} tools (floor "
+            f"{floor}) — registry census may be broken rather than the "
+            f"tool count actually having dropped"
+        )
+        private_backed = [
+            (t.name, t.fn.__name__) for t in tools if t.fn.__name__.startswith("_")
+        ]
+        assert not private_backed, (
+            f"{label} server: tool(s) registered under a private backing "
+            f"function (name -> __name__): {private_backed} — a decorator "
+            f"almost certainly landed on the wrong def (nexus-cnzei.1 class "
+            f"of bug)"
+        )
+
+
 def test_demoted_core_functions_callable():
     """Demoted core functions are importable and callable (not registered)."""
     from nexus.mcp.core import store_delete, collection_info, collection_verify

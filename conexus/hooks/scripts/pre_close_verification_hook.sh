@@ -779,17 +779,17 @@ lines.append(
 lines.append('marker to T1 scratch (this session; the MCP scratch tool and the CLI converge):')
 lines.append('  nx scratch put \"review-completed: <bead-id> reviewers=code-review-expert,substantive-critic\" --tags \"review-completed,<bead-id>\"')
 lines.append('The marker MUST name both reviewers; naming one (or neither) is refused. T2 memory markers do not satisfy this gate (nexus-fgekf).')
-lines.append('then re-run this close.')
-lines.append('Deliberate override (audited): set NX_REVIEW_GATE_OVERRIDE=1 and re-run.')
+lines.append('then re-run this close. A subagent hands the close back to its orchestrator instead of writing this marker itself (CONTEXT_PROTOCOL.md: the marker is reserved to the gate-owning session).')
+lines.append('An override (NX_REVIEW_GATE_OVERRIDE=1) exists for this gate, but only on explicit instruction from the user to use it -- it is not yours to reach for.')
 print(chr(10).join(lines))
-" 2>/dev/null || echo "Close blocked: coverage could not be verified in T1 scratch. Set NX_REVIEW_GATE_OVERRIDE=1 to override.")
+" 2>/dev/null || echo "Close blocked: coverage could not be verified in T1 scratch. An override (NX_REVIEW_GATE_OVERRIDE=1) exists, but only on the user's explicit instruction to use it.")
     deny "$DENY_MSG"
 fi
 
 if [[ -n "$UNCERTAIN_SPACE" ]]; then
     _stamp_ids "$COVERED_SPACE" "passed" "review-completed marker verified at close"
     _stamp_ids "$UNCERTAIN_SPACE" "unverified" "T1 scratch unreachable at close time (capability gap, not a time-budget issue)"
-    allow "WARNING: could not verify review-completed coverage in T1 scratch for $UNCERTAIN_SPACE — T1 unreachable (the nx binary is absent, or 'nx scratch list' failed; post-nexus-f7xyq that includes a dead CLI T1 lease failing loud — check 'nx doctor --check-t1'). Closing anyway (a broken verification path must not brick every bead close) but stamped verification=unverified for those ids, NOT passed. If review truly happened this is a capability gap, not a review gap. To silence this deliberately, set NX_REVIEW_GATE_OVERRIDE=1."
+    allow "WARNING: could not verify review-completed coverage in T1 scratch for $UNCERTAIN_SPACE -- T1 unreachable (the nx binary is absent, or 'nx scratch list' failed; post-nexus-f7xyq that includes a dead CLI T1 lease failing loud, check 'nx doctor --check-t1'). Closing anyway (a broken verification path must not brick every bead close) but stamped verification=unverified for those ids, NOT passed. If review truly happened this is a capability gap, not a review gap. An override (NX_REVIEW_GATE_OVERRIDE=1) exists for this gate, but only on explicit instruction from the user to use it."
 fi
 
 _stamp_ids "$COVERED_SPACE" "passed" "review-completed marker verified at close"

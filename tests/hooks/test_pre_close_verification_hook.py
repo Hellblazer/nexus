@@ -490,6 +490,13 @@ class TestDenyOnMissingMarker:
         assert "nexus-abc12" in _get_reason(parsed)
         assert "review-completed" in _get_reason(parsed).lower()
         assert "NX_REVIEW_GATE_OVERRIDE" in _get_reason(parsed)
+        # nexus-cnzei.2 (S8): the override is NAMED (an operator reading
+        # the deny must know it exists) but not HANDED to the gated party
+        # as something to just go use.
+        assert "not yours to reach for" in _get_reason(parsed)
+        # nexus-cnzei.2 (S9): the marker-write remedy names the
+        # subagent-hands-back alternative, not just "run this command".
+        assert "hands the close back to its orchestrator" in _get_reason(parsed)
 
     def test_denies_when_marker_exists_for_a_different_bead_in_either_source(
         self, mock_config_env, fake_nx

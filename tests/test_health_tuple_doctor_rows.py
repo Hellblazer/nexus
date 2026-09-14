@@ -17,6 +17,7 @@ informational (ok=True); above it, the identical absence is a loud WARN.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -520,6 +521,409 @@ class TestCheckTupleSweepFreshness:
         )[0]
         assert r.ok is False and r.warn is True
         assert "engine unreachable" in r.detail
+
+
+# ── row 4: _check_tuple_watch_permission (bead nexus-rml7o) ─────────────────
+#
+# MM-3.4 critic finding S5 (T2 mm34-phase3-critic-pass-2026-09-13): a Monitor
+# running ``nx tuple watch`` goes through the same permission machinery as
+# Bash. This row reads every settings file Claude Code consults for
+# permissions -- user (``~/.claude/settings.json``, honouring
+# ``CLAUDE_CONFIG_DIR``), project (``<root>/.claude/settings.json``), and
+# project-local (``<root>/.claude/settings.local.json``), ``root`` being the
+# git top-level of the cwd, falling back to the cwd itself outside a repo --
+# and reports whether a covering ``permissions.allow`` rule exists, and
+# separately whether a ``permissions.deny`` rule anywhere overrides it
+# (nexus-rml7o review pass, T2 nexus/cleanup-batch-cre-pass-2026-09-13 and
+# nexus/cleanup-batch-critic-pass-2026-09-13). It makes NO claim about
+# whether arming raises a permission prompt in either direction -- only
+# whether a covering rule is present, which file supplied it, and what the
+# rule is for. Always informational (never fatal): ``warn=True`` when no
+# covering rule is found or a deny rule wins, ``ok=True`` when a covering
+# allow rule stands unchallenged by any deny.
+
+
+def _write_settings(path: Path, payload: dict) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _three_files(
+    tmp_path: Path, *, user: dict | None = None, project: dict | None = None,
+    project_local: dict | None = None,
+) -> list[tuple[str, Path]]:
+    """Three (label, path) pairs, each written only when its payload is given
+    -- an omitted file stays absent, exercising the same "not configured,
+    never a crash" path a missing file always has.
+    """
+    paths = [
+        ("user", tmp_path / "user-home" / "settings.json"),
+        ("project", tmp_path / "repo" / ".claude" / "settings.json"),
+        ("project-local", tmp_path / "repo" / ".claude" / "settings.local.json"),
+    ]
+    for (name, path), payload in zip(paths, (user, project, project_local), strict=True):
+        if payload is not None:
+            _write_settings(path, payload)
+    return paths
+
+
+class TestCheckTupleWatchPermission:
+    # ── not applicable: Claude Code never ran on this box (nexus-7zhag) ──
+
+    def test_user_config_dir_absent_is_not_applicable_never_warns(self, tmp_path) -> None:
+        # _three_files() with no payloads creates nothing at all -- not even
+        # the "user-home" parent directory. This is the real fresh-install
+        # MVV shape: a scrubbed HOME that has never had Claude Code write to
+        # it. Was "not configured, warn=True" before nexus-7zhag; a virgin
+        # box has no permission surface to be missing a rule from.
+        paths = _three_files(tmp_path)
+        assert not paths[0][1].parent.exists()
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is True and r.warn is not True and r.fatal is False
+        assert "not applicable" in r.detail
+        assert "not configured" not in r.detail
+
+    def test_user_config_dir_absent_but_project_allow_covers_is_ok_not_na(self, tmp_path) -> None:
+        # ship-blocker fix (T2 nexus/7zhag-cre-2026-09-14): the allow/deny
+        # scan across all three files runs BEFORE the not-applicable check.
+        # A project file's rules are read by Claude Code regardless of
+        # whether ~/.claude exists, so a covering allow there must still be
+        # reported as ok, never masked by the user directory's absence.
+        paths = _three_files(tmp_path, project={"permissions": {"allow": ["Bash(nx tuple:*)"]}})
+        assert not paths[0][1].parent.exists()
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is True and r.warn is not True
+        assert "(project)" in r.detail
+        assert "not applicable" not in r.detail
+
+    def test_user_config_dir_absent_but_project_deny_covers_is_denied(self, tmp_path) -> None:
+        # Same ship-blocker: a deny in a project file must still win over
+        # the not-applicable branch when the user directory does not exist.
+        paths = _three_files(tmp_path, project={"permissions": {"deny": ["Bash(nx tuple watch:*)"]}})
+        assert not paths[0][1].parent.exists()
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is False and r.warn is True
+        assert "denied" in r.detail
+        assert "(project)" in r.detail
+        assert "not applicable" not in r.detail
+
+    def test_user_config_dir_absent_with_no_covering_rule_anywhere_is_na(self, tmp_path) -> None:
+        # Keyed on the USER directory only, in the ABSENCE of any covering
+        # rule elsewhere: a project .claude with unrelated (non-covering)
+        # content must not change the not-applicable verdict.
+        paths = _three_files(tmp_path, project={"env": {}})
+        assert not paths[0][1].parent.exists()
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is True and r.warn is not True
+        assert "not applicable" in r.detail
+
+    def test_unreadable_user_config_dir_is_treated_as_present_soft_warns(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        # The directory-existence check is new, and unlike a plain missing
+        # directory, a permission-denied stat must not silently read as
+        # not-applicable. Simulate the OSError by monkeypatching Path.is_dir
+        # for just this one path -- an actual chmod 000 is not reliable
+        # here since root and some CI sandboxes ignore that bit.
+        paths = _three_files(tmp_path)
+        user_dir = paths[0][1].parent
+        real_is_dir = Path.is_dir
+
+        def _flaky_is_dir(self: Path) -> bool:
+            if self == user_dir:
+                raise PermissionError("simulated: stat denied")
+            return real_is_dir(self)
+
+        monkeypatch.setattr(Path, "is_dir", _flaky_is_dir)
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is False and r.warn is True
+        assert "not configured" in r.detail
+        assert "not applicable" not in r.detail
+
+    def test_default_paths_are_not_applicable_when_claude_config_dir_is_absent(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        missing = tmp_path / "never-existed"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(missing))
+        r = h._check_tuple_watch_permission()[0]
+        assert r.ok is True and r.warn is not True
+        assert "not applicable" in r.detail
+
+    def test_default_paths_are_not_applicable_when_home_has_no_dot_claude(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        assert not (tmp_path / ".claude").exists()
+        r = h._check_tuple_watch_permission()[0]
+        assert r.ok is True and r.warn is not True
+        assert "not applicable" in r.detail
+
+    # ── absence / unreadable, once the user dir exists, never a crash ────
+
+    def test_user_dir_present_with_no_files_at_all_is_not_configured(self, tmp_path) -> None:
+        paths = _three_files(tmp_path)
+        paths[0][1].parent.mkdir(parents=True)
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is False and r.warn is True
+        assert "not configured" in r.detail
+
+    def test_directory_in_place_of_a_file_is_skipped_never_crashes(self, tmp_path) -> None:
+        paths = _three_files(tmp_path, project=None)
+        as_dir = paths[0][1]
+        as_dir.parent.mkdir(parents=True, exist_ok=True)
+        as_dir.mkdir()
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is False and r.warn is True
+        assert "not configured" in r.detail
+
+    def test_malformed_json_in_one_file_is_skipped_others_still_read(self, tmp_path) -> None:
+        paths = _three_files(tmp_path, project={"permissions": {"allow": ["Bash(nx:*)"]}})
+        user_path = paths[0][1]
+        user_path.parent.mkdir(parents=True, exist_ok=True)
+        user_path.write_text("{not json", encoding="utf-8")
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is True
+        assert "project" in r.detail
+
+    def test_no_permissions_block_is_not_configured(self, tmp_path) -> None:
+        paths = _three_files(tmp_path, user={"env": {}})
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is False and r.warn is True
+        assert "not configured" in r.detail
+
+    def test_unrelated_rules_are_not_configured(self, tmp_path) -> None:
+        paths = _three_files(tmp_path, user={"permissions": {"allow": ["Bash(git:*)", "Read"]}})
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is False and r.warn is True
+        assert "not configured" in r.detail
+
+    # ── allow-rule matching (per-file, first covering file reported) ────
+
+    def test_exact_documented_rule_in_user_file_is_ok_and_names_user(self, tmp_path) -> None:
+        paths = _three_files(tmp_path, user={"permissions": {"allow": ["Bash(nx tuple watch:*)"]}})
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is True
+        assert "covers" in r.detail
+        assert "(user)" in r.detail
+
+    def test_covering_rule_in_project_file_names_project(self, tmp_path) -> None:
+        paths = _three_files(tmp_path, project={"permissions": {"allow": ["Bash(nx tuple:*)"]}})
+        paths[0][1].parent.mkdir(parents=True)  # user dir present, just no user rule
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is True
+        assert "(project)" in r.detail
+
+    def test_covering_rule_in_project_local_file_names_project_local(self, tmp_path) -> None:
+        paths = _three_files(
+            tmp_path, project_local={"permissions": {"allow": ["Bash(nx tuple watch:*)"]}},
+        )
+        paths[0][1].parent.mkdir(parents=True)  # user dir present, just no user rule
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is True
+        assert "(project-local)" in r.detail
+
+    def test_broader_nx_rule_is_ok(self, tmp_path) -> None:
+        # Sam's own real settings.json shape (Bash(nx:*)) -- the broader-rule
+        # branch this check exists to recognise, not a hypothetical.
+        paths = _three_files(tmp_path, user={"permissions": {"allow": ["Bash(nx:*)"]}})
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is True
+
+    def test_bare_bash_allow_rule_covers(self, tmp_path) -> None:
+        paths = _three_files(tmp_path, user={"permissions": {"allow": ["Bash"]}})
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is True
+
+    def test_first_covering_file_in_order_wins_when_several_cover(self, tmp_path) -> None:
+        paths = _three_files(
+            tmp_path,
+            user={"permissions": {"allow": ["Bash(nx:*)"]}},
+            project={"permissions": {"allow": ["Bash(nx tuple watch:*)"]}},
+        )
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is True
+        assert "(user)" in r.detail
+
+    def test_loose_substring_match_does_not_count(self, tmp_path) -> None:
+        paths = _three_files(
+            tmp_path, user={"permissions": {"allow": ["Bash(echo nx tuple watch:*)"]}},
+        )
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is False and r.warn is True
+
+    def test_partial_word_prefix_does_not_count(self, tmp_path) -> None:
+        # "nx t" is a string-prefix of "nx tuple watch" but not a word-
+        # boundary prefix -- must not count (conservative by design).
+        paths = _three_files(tmp_path, user={"permissions": {"allow": ["Bash(nx t:*)"]}})
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is False and r.warn is True
+
+    def test_rule_with_no_trailing_colon_star_does_not_count(self, tmp_path) -> None:
+        paths = _three_files(tmp_path, user={"permissions": {"allow": ["Bash(nx tuple watch)"]}})
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is False and r.warn is True
+
+    # ── deny overrides allow, wins across files (the dangerous direction) ─
+
+    def test_deny_in_same_file_as_allow_wins(self, tmp_path) -> None:
+        paths = _three_files(
+            tmp_path,
+            user={"permissions": {
+                "allow": ["Bash(nx tuple watch:*)"], "deny": ["Bash(nx tuple watch:*)"],
+            }},
+        )
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is False and r.warn is True
+        assert "denied" in r.detail
+
+    def test_deny_in_a_different_file_wins_over_allow_elsewhere(self, tmp_path) -> None:
+        paths = _three_files(
+            tmp_path,
+            user={"permissions": {"allow": ["Bash(nx:*)"]}},
+            project_local={"permissions": {"deny": ["Bash(nx tuple watch:*)"]}},
+        )
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is False and r.warn is True
+        assert "denied" in r.detail
+        assert "(project-local)" in r.detail
+
+    def test_deny_names_the_denying_file(self, tmp_path) -> None:
+        paths = _three_files(
+            tmp_path,
+            user={"permissions": {"allow": ["Bash(nx:*)"]}},
+            project={"permissions": {"deny": ["Bash(nx tuple:*)"]}},
+        )
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert "(project)" in r.detail
+
+    def test_deny_recognised_forms(self, tmp_path) -> None:
+        for deny_rule in (
+            "Bash(nx:*)", "Bash(nx tuple:*)", "Bash(nx tuple watch:*)", "Bash",
+        ):
+            paths = _three_files(
+                tmp_path,
+                user={"permissions": {
+                    "allow": ["Bash(nx tuple watch:*)"], "deny": [deny_rule],
+                }},
+            )
+            r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+            assert r.ok is False and r.warn is True, deny_rule
+            assert "denied" in r.detail, deny_rule
+
+    def test_unrelated_deny_rule_does_not_override_a_covering_allow(self, tmp_path) -> None:
+        paths = _three_files(
+            tmp_path,
+            user={"permissions": {"allow": ["Bash(nx tuple watch:*)"], "deny": ["Bash(git:*)"]}},
+        )
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert r.ok is True
+
+    # ── no prompt claim, either direction ────────────────────────────────
+
+    def test_not_configured_detail_makes_no_claim_about_prompts(self, tmp_path) -> None:
+        paths = _three_files(tmp_path)
+        paths[0][1].parent.mkdir(parents=True)  # user dir present, so this hits not-configured
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert "prompt" not in r.detail.lower()
+
+    def test_denied_detail_makes_no_claim_about_prompts(self, tmp_path) -> None:
+        paths = _three_files(tmp_path, user={"permissions": {"deny": ["Bash(nx:*)"]}})
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert "prompt" not in r.detail.lower()
+
+    def test_no_causal_claim_about_a_prior_auto_mode_session(self, tmp_path) -> None:
+        """nexus-rml7o review CRITICAL: the earlier text claimed an
+        auto-mode session raised no prompt during the RDR-206 live
+        verification, as evidence an absent rule is harmless -- FALSE (T2
+        nexus/rdr-206-live-verification-correction-2026-09-13: that
+        session's own settings.json carries Bash(nx:*), which covers nx
+        tuple watch, so the absent prompt it saw proved nothing about the
+        no-rule case). The RUNTIME detail text a doctor run actually shows
+        must never repeat the claim in either the not-configured or the
+        denied branch. The docstring may record the correction for future
+        maintainers (this codebase's own convention), but only labelled as
+        a correction, never re-asserted as a current justification.
+        """
+        import inspect
+        no_rule_paths = _three_files(tmp_path)
+        no_rule_paths[0][1].parent.mkdir(parents=True)  # user dir present, so not-configured
+        not_configured = h._check_tuple_watch_permission(settings_paths=no_rule_paths)[0]
+        denied = h._check_tuple_watch_permission(
+            settings_paths=_three_files(tmp_path, user={"permissions": {"deny": ["Bash"]}}),
+        )[0]
+        for detail in (not_configured.detail, denied.detail):
+            assert "auto-mode" not in detail.lower()
+            assert "raised no prompt" not in detail.lower()
+            assert "raised none" not in detail.lower()
+
+        docstring = (inspect.getdoc(h._check_tuple_watch_permission) or "").lower()
+        if "auto-mode" in docstring:
+            # Mentioning it is fine ONLY as a labelled correction, never
+            # restated as if still a justification.
+            assert "false" in docstring
+
+    # ── severity ──────────────────────────────────────────────────────────
+
+    def test_severity_is_always_informational_never_fatal(self, tmp_path) -> None:
+        no_rule_paths = _three_files(tmp_path)
+        no_rule_paths[0][1].parent.mkdir(parents=True)  # user dir present, so not-configured
+        not_configured = h._check_tuple_watch_permission(settings_paths=no_rule_paths)[0]
+        assert not_configured.fatal is False
+        denied = h._check_tuple_watch_permission(
+            settings_paths=_three_files(tmp_path, user={"permissions": {"deny": ["Bash"]}}),
+        )[0]
+        assert denied.fatal is False
+        covered = h._check_tuple_watch_permission(
+            settings_paths=_three_files(tmp_path, user={"permissions": {"allow": ["Bash(nx:*)"]}}),
+        )[0]
+        assert covered.fatal is False
+
+    def test_names_the_exact_entry_to_add(self, tmp_path) -> None:
+        paths = _three_files(tmp_path)
+        paths[0][1].parent.mkdir(parents=True)  # user dir present, so not-configured
+        r = h._check_tuple_watch_permission(settings_paths=paths)[0]
+        assert "Bash(nx tuple watch:*)" in r.detail
+
+    # ── default path resolution (no injection) ──────────────────────────
+
+    def test_default_settings_paths_has_user_project_and_project_local(self) -> None:
+        labels = [name for name, _ in h._claude_settings_paths()]
+        assert labels == ["user", "project", "project-local"]
+
+    def test_default_user_path_honours_claude_config_dir_env_var(self, tmp_path, monkeypatch) -> None:
+        config_dir = tmp_path / "custom-claude-home"
+        config_dir.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+        paths = dict(h._claude_settings_paths())
+        assert paths["user"] == config_dir / "settings.json"
+
+    def test_default_user_path_is_home_dot_claude_settings_json(self, monkeypatch) -> None:
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        assert h._claude_settings_path() == Path.home() / ".claude" / "settings.json"
+
+    def test_project_paths_use_git_toplevel(self, tmp_path, monkeypatch) -> None:
+        fake_root = tmp_path / "fake-repo-root"
+        import nexus.indexer_utils as iu
+        monkeypatch.setattr(iu, "find_repo_root", lambda _p: fake_root)
+        paths = dict(h._claude_settings_paths(cwd=tmp_path / "somewhere" / "deep"))
+        assert paths["project"] == fake_root / ".claude" / "settings.json"
+        assert paths["project-local"] == fake_root / ".claude" / "settings.local.json"
+
+    def test_project_paths_fall_back_to_cwd_outside_a_repo(self, tmp_path, monkeypatch) -> None:
+        import nexus.indexer_utils as iu
+        monkeypatch.setattr(iu, "find_repo_root", lambda _p: None)
+        cwd = tmp_path / "not-a-repo"
+        paths = dict(h._claude_settings_paths(cwd=cwd))
+        assert paths["project"] == cwd / ".claude" / "settings.json"
+
+
+def test_watch_permission_row_is_registered_in_run_health_checks() -> None:
+    import inspect
+
+    source = inspect.getsource(h.run_health_checks)
+    assert "_check_tuple_watch_permission()" in source
 
 
 # ── registration ─────────────────────────────────────────────────────────────

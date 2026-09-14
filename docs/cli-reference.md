@@ -616,7 +616,7 @@ For each unique `source_title` in the collection: extracts DOI / arXiv ID from c
 | Flag | Description |
 |------|-------------|
 | `COLLECTION` (positional) | Fully-qualified T3 collection name (e.g. `knowledge__papers`) |
-| `--source {semantic-scholar\|openalex}` | Bibliographic backend (default: `semantic-scholar`) |
+| `--source {auto\|s2\|openalex\|dt}` | Bibliographic backend (default: `auto`) |
 | `--delay SECONDS` | Delay between API calls (default: 0.5s). Increase to avoid rate limiting |
 | `--limit N` | Maximum number of titles to enrich (default: 0 = unlimited) |
 | `--backfill-catalog` | Re-drive the catalog write from ALREADY-enriched chunk metadata — no external API calls. Populates the catalog Document rows' `bib_*` fields (surfaced by `catalog_search` / `catalog_list` / `nx catalog show`) for collections enriched before those columns had a writer. Idempotent; titles whose chunks carry bib metadata but have no matching catalog row are reported separately as skipped |
@@ -1816,11 +1816,13 @@ echo "# Cache Strategy" | nx store put - --collection distributed-systems --titl
 
 | Flag | Description |
 |------|-------------|
-| `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`) |
+| `-c` / `--collection NAME` | Collection name or prefix (required) |
 | `-t` / `--title TITLE` | Entry title (required when SOURCE is `-`) |
 | `--tags TAG,TAG` | Comma-separated tags |
 | `--category LABEL` | Category label |
 | `--ttl TTL` | Time to live (`30d`, `4w`, `permanent`; default: `permanent`) |
+
+A note whose text is too large for the collection's embedding model's token window (small-window local embedders such as bge-base; a Voyage collection never splits, nexus-spujb) is written as several chunk pieces under one title rather than refused or truncated. `put` writes each piece and links them to one catalog document; `get` and the MCP `store_get`/`store_get_many` tools detect a split note by its chunk ids and transparently reassemble the full text, so a caller never has to know the note was split to read it back whole.
 
 **`list` flags:**
 
@@ -1935,7 +1937,7 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 | `expire` | Remove expired entries |
 | `promote ID --collection NAME` | Promote entry to T3 by ID |
 
-**`put` flags:** `--tags`, `--ttl` (default: `30d`), `--merge` (canonical-fact merge: fold into an existing high-overlap entry instead of creating a duplicate, non-destructive), `--merge-threshold FLOAT` (word-set Jaccard threshold for `--merge`, default: `0.5`)
+**`put` flags:** `--tags`, `--ttl` (default: `permanent`, reversed 2026-09-12 by nexus-473mx: a caller now asks for a clock explicitly; `--ttl 0` is rejected, not coerced), `--merge` (canonical-fact merge: fold into an existing high-overlap entry instead of creating a duplicate, non-destructive), `--merge-threshold FLOAT` (word-set Jaccard threshold for `--merge`, default: `0.5`)
 
 **`list` flags:** `--project NAME` (filter by project), `-a` / `--agent NAME` (filter by agent name)
 
@@ -1990,7 +1992,7 @@ promotion result as `Promoted <id> -> <project>/<title> (action=<ACTION>)`.
 Two actions are possible today:
 
 - `action=new` — no similar entry found under the target project. Clean write.
-- `action=overlap_detected` — an FTS5 keyword scan found a similar entry in the
+- `action=overlap_detected` — a keyword scan (PostgreSQL full-text search) found a similar entry in the
   target project under a different title. The new row is **still** written to
   T2 as a separate entry — the report is an advisory, not a rejection.
   Agents should decide whether to manually merge via `memory_consolidate(action="merge", ...)`.
@@ -2060,7 +2062,7 @@ tqdm progress bar renders in an interactive terminal (auto-disabled on
 non-TTY CI logs).
 
 Scale reference: a full `--all` on a 278k-chunk / 136-collection corpus
-takes ~25–70 minutes on ChromaDB Cloud. Maintenance-window operation.
+takes ~25–70 minutes against the pgvector service. Maintenance-window operation.
 
 **`re-embed` flags:**
 
@@ -2218,6 +2220,7 @@ nx init --service             # DEPRECATED — plain `nx init` now does this by 
 | `--yes` / `-y` | Accept the service-autostart registration non-interactively (local mode). The autostart unit is installed as the **sole** starter; `nx init` waits for it to come up rather than also starting a session supervisor. |
 | `--no-autostart` | Do not register the autostart unit; start a session supervisor only (local mode). Takes precedence over `--yes`. |
 | `--service` | **DEPRECATED** (RDR-174 P3.1) — plain `nx init` now provisions the local service backend by default; the flag still works (and prints a deprecation notice) but will be removed in a future release. Provisions the local Postgres + pgvector cluster the RDR-152 service backend uses, locks the embedder to bge-768, acquires + verifies the native service binary, fetches the bge-768 ONNX, and starts the service. Idempotent. The binary + PG bundle are acquired automatically from the wheel's pinned engine tag (override: `NEXUS_SERVICE_TAG` env or a prior `nx daemon service install-binary`). |
+| `--no-beads-prime` | Skip installing/refreshing the user-level beads PRIME.md this run (nexus-cnzei.8) — see below. Explicit decline always wins, like `--no-autostart`. For a standing opt-out (every future run, every command) use `nx config set beads_prime.manage false` instead. |
 
 **First-run ladder convergence (nexus-9xfx5):** once the backend is serving,
 `nx init` converges the upgrade ladder as its final step, so a virgin box's
@@ -2332,6 +2335,47 @@ the voyage collection. This is the same underlying gap tracked as a
 follow-up in nexus-ddmfg (the engine's voyage-only-mode-flip after
 restart) — that bead's scope now explicitly includes this stale/orphaned
 bge-data-after-a-keyed-write case, not just the engine-restart case.
+
+**Beads PRIME.md (user-level)** (nexus-cnzei.8). Runs unconditionally,
+independent of the local/managed/cloud dispatch above: when `bd` is on
+`PATH` or the beads Claude Code plugin is installed (either of its two real
+layouts — a marketplace checkout under `plugins/marketplaces/<name>/plugins/
+beads/`, or the version-pinned `plugins/cache/<name>/beads/<version>/`),
+`nx init` installs or refreshes a generic, conexus-managed `PRIME.md` at the
+OS user config directory `bd` falls back to when a repo has no
+`.beads/PRIME.md` of its own (macOS
+`~/Library/Application Support/beads/PRIME.md`; Linux
+`$XDG_CONFIG_HOME/beads/PRIME.md` or `~/.config/beads/PRIME.md`; Windows
+`%AppData%/beads/PRIME.md`).
+
+The first line of the installed file is a marker,
+`<!-- conexus-managed beads PRIME v<N> sha256:<hex> -->`, recording a hash
+of the body as installed. A body edited by hand while the marker line is
+left intact no longer matches that recorded hash, and is treated exactly
+like a file with no marker at all — reported `left alone (user-authored)`,
+never silently overwritten on the next run (this was a ship-blocker fixed
+before release: staleness used to be decided by a bare byte-compare against
+the current template, so a hand-edited-but-still-marked file looked
+"stale" and got clobbered). Replacing an existing managed file first backs
+up its previous content to a single rolling `PRIME.md.bak` sibling
+(overwritten each time, not timestamped). An installed file whose marker
+version is NEWER than this install's packaged template (a downgrade) is
+left alone rather than regressed backward.
+
+This file is **machine-wide** — it affects every beads repo on the box, not
+only the current one — and beads 1.2.x still **appends its own `bd
+remember` memories** after this file's text; installing it does not stop
+that. A repo-level `.beads/PRIME.md` always wins when one exists. Opt out
+with `--no-beads-prime` for one run, or persist the decision with
+`nx config set beads_prime.manage false`; deleting the installed file
+restores `bd`'s own default until the next un-declined `nx init`/
+`nx upgrade`. Best-effort: a failure prints a one-line warning and never
+fails `nx init`. On a write, the printed line names the path and repeats
+this same undo/disclosure text; a no-op (`up to date`, `left alone (...)`)
+prints a shorter line; nothing prints when beads is not detected at all.
+`nx doctor`'s "Beads PRIME.md (user-level)" row reports the durable state
+and names the same fix/undo. See `docs/contributing.md` § Git Workflow for
+the full contract.
 
 ---
 
@@ -2487,7 +2531,9 @@ so a sweep that printed genuine ✗ lines exited `0` and any script gating on
 **Supplementary checks (new in 7.11.0).** After the default sweep prints its
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
-`aspect-queue`, and `t1`. Before 7.11.0 all fourteen `--check-*` modes were
+`aspect-queue`, `t1`, `engine-activity`, `index-failures`, and
+`fanout-floor` (the last has no `--check-fanout-floor` flag; it only runs
+as part of this supplementary set). Before 7.11.0 all fourteen `--check-*` modes were
 opt-in only, so a real backlog was invisible unless an operator happened to
 run its exact flag (the motivating case: an aspect-queue throwing hundreds of
 claim failures while nothing in the default run watched it). These are
@@ -2551,6 +2597,20 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 **Garbage sweep (7.32.0; Sam, 2026-09-05).** Two rows on every run. `Local garbage` reaps, in place, the litter nothing else touches: `t1_mint_<session>.lock` files older than a day whose session holds no lease (706 had accumulated since July), rotated logs (`*.log.N`) older than 14 days, and `operator-timeout-*` / `operator-budget-*` dispatch dumps older than 7. `Catalog garbage` counts orphaned links (an endpoint that resolves to no live document) and tombstoned documents plus stranded chunks past **one** day; a non-zero count is a ⚠ naming `nx doctor --fix`, and an unreachable engine is a ⚠ too, never a clean row. Each litter class this repo produces is a row in `nexus.garbage`; a new class is a new row there, not a new command.
 
 The `--fix` flag first reclaims the catalog garbage the sweep counted (deletes every orphaned link, then runs the one-day `purge-trash`; fails loud on an engine error), then retroactively applies HNSW `search_ef` tuning to all existing local-mode collections. New collections get this automatically. In cloud mode (SPANN), prints a skip message — SPANN defaults are adequate.
+
+**`Beads PRIME.md (user-level)`** (nexus-cnzei.8). Reports `[]` (no row at
+all) when neither `bd` nor the beads Claude Code plugin is detected on this
+machine. Otherwise reports the state of the machine-wide, conexus-managed
+`PRIME.md` [`nx init`/`nx upgrade` install](#nx-init): OK when up to date,
+OK ("user-authored, left alone") for a hand-written file at that path OR
+one whose marker's recorded body hash no longer matches its actual body (a
+hand edit under an intact marker) — never a suggestion to overwrite either
+— and a soft warning naming `nx init` or `nx upgrade` as the fix, plus the
+same undo text `nx init` prints on a write (delete the file, `--no-beads-
+prime`, or `nx config set beads_prime.manage false`), when the file is
+missing or genuinely stale (marker hash matches its own body, but that
+body predates the currently-packaged template). Never fatal; read-only
+except for the detection probe itself.
 
 ```
 nx doctor --check-schema          # Report where the T2 schema lives
@@ -2642,7 +2702,9 @@ nx doctor --check-quotas            # Vector-store limits + embedder caps + rera
 nx doctor --check-quotas --json     # Structured output for dashboards / CI gates
 ```
 
-The `--check-quotas` flag (introduced 4.9.0, nexus-c590) emits a four-section pre-flight report: (1) `vector_store` — the per-request limits from `nexus.db.limits.QUOTAS` (`MAX_QUERY_RESULTS`, `MAX_RECORDS_PER_WRITE`, `MAX_CONCURRENT_*`, document size caps), which remain the authoritative chunking and paging caps, plus a reachability probe of the T3 vector store; (2) `voyage` — per-model token and dimension caps (`voyage-3`, `voyage-code-3`, `voyage-context-3`); (3) `cross_encoder` — the reranker's model info; (4) `retry` — the cumulative accumulator from `nexus.retry.get_retry_stats()`, so transient-error backoffs observed in the current process surface alongside the static limits.
+The `--check-quotas` flag (introduced 4.9.0, nexus-c590) emits a four-section pre-flight report: (1) `vector_store` — the per-request limits from `nexus.db.limits.QUOTAS` (`MAX_QUERY_RESULTS`, `MAX_RECORDS_PER_WRITE`, `MAX_CONCURRENT_*`, document size caps), which remain the authoritative chunking and paging caps, plus a reachability probe of the T3 vector store; (2) `voyage` — per-model token and dimension caps (`voyage-3`, `voyage-code-3`, `voyage-context-3` in cloud mode, the active local embedder in local mode); (3) `cross_encoder` — the reranker's model info; (4) `retry` — the cumulative accumulator from `nexus.retry.get_retry_stats()`, so transient-error backoffs observed in the current process surface alongside the static limits.
+
+For a small-window local embedder (nexus-ajvjx, nexus-spujb), the `voyage` section also reports the model's token window: `max_tokens`, whether chunks are actually checked against it (`enforced`), and the tokenizer file that decides that. When the tokenizer cannot be loaded from disk, `enforced` is `false` and the human-readable report prints a warning line naming the missing tokenizer path — chunks past the model's token window are silently left out of the vector rather than refused, so this line is the visible backstop for that warn-and-skip behavior; the fix is to re-provision the local model (`nx init`).
 
 Exit codes:
 - `0` — the T3 vector store is reachable.
@@ -3331,6 +3393,7 @@ nx upgrade --yes                  # Unattended: pre-approve the billed re-embed 
 | `--auto` | Quiet mode for the SessionStart hook. The engine install is skipped (hook timeout budget); exit 0 always |
 | `--skip-t3` | Skip T3 upgrade steps for a fast T2-only run. Also suppresses the precondition stage's engine install and process cycle (verdicts are still reported) |
 | `--yes` | Assume yes to the **billed re-embed** consent prompt only (equivalent to `NX_ASSUME_YES=1`) — the unattended channel for a walk that would otherwise block on the cost preview. Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic |
+| `--no-beads-prime` | Skip installing/refreshing the user-level beads PRIME.md this run (nexus-cnzei.8) — see [`nx init`](#nx-init). For a standing opt-out use `nx config set beads_prime.manage false` instead |
 
 **Plugin update (nexus-2uwag).** After the ladder, `nx upgrade` reads
 Claude Code's plugin registry (`~/.claude/plugins/installed_plugins.json`)
@@ -3360,6 +3423,12 @@ precondition axis. Unlike the others, this one is never suppressed by
 edits a template, so it is re-derived every time rather than gated behind a
 flag. Failure is non-fatal and reported (a stale plan library degrades
 retrieval; it does not block the upgrade or fail the invocation).
+
+**Beads PRIME.md (user-level)** (nexus-cnzei.8). Same install/refresh as
+[`nx init`](#nx-init) — see there for the full contract — gated the same
+way as the git-hooks refresh: only when `not --auto` and `not --dry-run`.
+Best-effort; a failure prints a one-line warning and never fails the
+upgrade.
 
 **Ladder position is derived, never stored.** How far an install is from current has exactly two answers, by class: DATA-rung state comes solely from the ladder position derived from per-rung completion records; PRECONDITION freshness (package, engine, processes) comes solely from a fresh comparison of on-disk installed state against required, and is deliberately stateless — re-derived at every invocation, never recorded. A rung is recorded complete only when its own verify passed ([RDR-142](rdr/rdr-142-migration-completeness-vs-version-row.md)), so the position never advances past deferred or failed work.
 
@@ -3433,6 +3502,13 @@ and handling BOTH install shapes — each branch is a no-op when its target is a
   `data_token_lease.*` file under `nexus_config_dir()` unconditionally —
   mode-agnostic (a `mint_token` credential can be configured in either
   local or managed mode), not gated on `--remove-data`.
+- **User-level beads PRIME.md** (nexus-cnzei.8): removes the machine-wide
+  `PRIME.md` at `nexus.beads_prime.user_prime_path()`, but ONLY when it is
+  still exactly what conexus installed (its marker's recorded body hash
+  still matches). A hand-edited or otherwise user-authored file at that
+  path is left in place and reported, never destroyed. Mode-agnostic and
+  unconditional, like the data-token lease sweep, and independent of
+  `--remove-data`.
 
 ```
 nx uninstall                  # DRY RUN (default): preview what would be removed
@@ -3488,7 +3564,7 @@ nx context show
 |------|-------------|
 | `--global` | Generate a single global cache (all collections) instead of per-repo |
 
-The per-repo cache is stored at `~/.config/nexus/context/<repo>-<hash>.txt`. The global cache (via `--global`) is at `~/.config/nexus/context_l1.txt`. Both `show` and the SessionStart/SubagentStart hooks resolve the per-repo path first, falling back to global. The cache is automatically regenerated after `nx taxonomy discover` and `nx index repo`.
+The per-repo cache is stored at `~/.config/nexus/context/<repo>-<hash>.txt`. The global cache (via `--global`) is at `~/.config/nexus/context_l1.txt`. `nx context show` and the SessionStart hook resolve the per-repo path first, falling back to the global file; the SubagentStart hook no longer falls back to it (`subagent-start.sh`) and reads only the per-repo cache. The cache is automatically regenerated after `nx taxonomy discover` and `nx index repo`.
 
 ---
 
@@ -3585,11 +3661,13 @@ nx tuple out SUBSPACE [--key KEY=VALUE ...] [--dim KEY=VALUE ...] [--body TEXT] 
 
 Write a tuple into `SUBSPACE`. Idempotent by construction: the tuple id is derived from the template's `id_from` fields only (never the insert time), so a retry lands on the same tuple. Prints the tuple id (lowercase hex).
 
+The tuple space is a coordination and metadata store, not a value store: `--body` is at most 4096 bytes UTF-8 (a template may set a lower cap; the ledger's is 0), a `--key`/`--dim` value at most 256 bytes, `SUBSPACE` at most 256 bytes, `--nonce` at most 128 bytes — refused as `TooLarge` over the limit, never echoing the oversized value. Longer content goes in T2 (`nx memory put`) or T3 (`nx store put`), with the tuple carrying a reference.
+
 | Flag | Description |
 |------|-------------|
 | `--key KEY=VALUE` | A pinned key field (repeatable; every key the template requires) |
 | `--dim KEY=VALUE` | A dimension field (repeatable) |
-| `--body TEXT` | Tuple payload |
+| `--body TEXT` | Tuple payload — a short message or signal, at most 4096 bytes UTF-8 (see above) |
 | `--nonce TEXT` | Caller-minted nonce, for templates whose `id_from` includes it |
 | `--ttl-seconds N` | Explicit TTL, capped at the template's retention ceiling (`TtlTooLong` if it isn't) |
 
@@ -3632,7 +3710,7 @@ nx tuple ack CLAIM_ID --claimant ID [--reply-subspace SUBSPACE] [--reply-key KEY
 
 Consume a claimed tuple. The row is invisible to `rd`/`in` after this.
 
-With `--reply-subspace`, the engine writes a reply into that subspace in the same transaction that consumes the claim (RDR-206), and the confirmation gains a `reply_id=` line carrying the reply's tuple id. Without any `--reply-*` flag the confirmation is unchanged. `--reply-subspace` must resolve to a `keys+nonce` template — a keys-only target (e.g. the ledger) is refused as `SchemaViolation` before the transaction opens, so the request is left still claimed and still ackable. There is no `--reply-nonce` flag: the engine sets the reply's nonce itself, to the request's tuple id. Every other `--reply-*` flag requires `--reply-subspace`; using one without it is a usage error, not a silently dropped flag.
+With `--reply-subspace`, the engine writes a reply into that subspace in the same transaction that consumes the claim (RDR-206), and the confirmation gains a `reply_id=` line carrying the reply's tuple id. Without any `--reply-*` flag the confirmation is unchanged. `--reply-subspace` must resolve to a `keys+nonce` template — a keys-only target (e.g. the ledger) is refused as `SchemaViolation` before the transaction opens, so the request is left still claimed and still ackable. There is no `--reply-nonce` flag: the engine sets the reply's nonce itself, to the request's tuple id. Every other `--reply-*` flag requires `--reply-subspace`; using one without it is a usage error, not a silently dropped flag. Same size limits as `out` apply to the reply and are refused as `TooLarge` before the transaction opens, leaving the request still claimed: `--reply-body` at most 4096 bytes UTF-8, `--reply-subspace` at most 256, a `--reply-key`/`--reply-dim` value at most 256.
 
 | Flag | Description |
 |------|-------------|
@@ -3640,7 +3718,7 @@ With `--reply-subspace`, the engine writes a reply into that subspace in the sam
 | `--reply-subspace SUBSPACE` | Write a reply into this subspace as part of the ack's own transaction |
 | `--reply-key KEY=VALUE` | A pinned key field for the reply (repeatable; requires `--reply-subspace`) |
 | `--reply-dim KEY=VALUE` | A dimension field for the reply (repeatable; requires `--reply-subspace`) |
-| `--reply-body TEXT` | Reply payload (requires `--reply-subspace`) |
+| `--reply-body TEXT` | Reply payload — a short message or signal, at most 4096 bytes UTF-8 (requires `--reply-subspace`) |
 | `--reply-ttl-seconds N` | Explicit TTL for the reply, capped at its template's retention ceiling (requires `--reply-subspace`) |
 
 ### nx tuple nack
@@ -3714,7 +3792,7 @@ nx tuple watch [ADDRESS...] [--instance NAME] [--interval SECONDS] [--reemit-aft
 
 A ping-then-pull mailbox watcher, built to be the source of a Claude Code Monitor: every stdout line it prints is one notification that wakes the watching session. It probes `mailbox/ADDRESS` once per `--interval` with a zero-timeout `rd` (no park slot held), fetching many rows and filtering on `claim_state`, so a dead-lettered row at the head of the address cannot hide newer mail. It never claims, never acks, and never prints a body.
 
-An empty probe prints nothing. A newly seen tuple prints one line carrying the address, sender, kind, correlation id and tuple id, plus the drain instruction; the tuple id is for correlation only, because a mailbox claim is address-wide. At most five such lines per cycle, then one coalesced line naming the rest. Beyond that, a rolling budget of eight stdout lines per twenty-second window, shared across every cycle and every watched address, caps a sustained flood: once the window is spent, a whole cycle's new mail collapses to a single line naming the count, so a burst costs at most one line per cycle no matter how many rows arrived, comfortably under the harness's own auto-stop threshold. A tuple still present after `--reemit-after` is pinged again, up to `--max-emits` times, then it goes silent and is counted. A dead-lettered row the watcher never saw alive is announced on stdout and re-announced on the same window as a live row, because it is mail that will never be delivered and you have heard nothing about it; a row that was pinged while alive and later died reports its death on stderr, since that is a status update on a message you already know about. The seen-set is a JSON file per address under `<state-dir>/tuple-watch/`; losing it re-pings and never loses a message.
+An empty probe prints nothing. A newly seen tuple prints one line carrying the address, sender, kind, correlation id and tuple id, plus the drain instruction — `mcp__plugin_conexus_nexus__tuple_in` on the address, then `tuple_ack` (with `reply` for a request) or `tuple_nack`, the same MCP tools the SessionStart arm instruction and the mailbox skill already use, never the `nx tuple in` CLI form (nexus-dyfg8: the CLI form named no ack step at all); the tuple id is for correlation only, because a mailbox claim is address-wide. At most five such lines per cycle, then one coalesced line naming the rest. Beyond that, a rolling budget of eight stdout lines per twenty-second window, shared across every cycle and every watched address, caps a sustained flood: once the window is spent, a whole cycle's new mail collapses to a single line naming the count, so a burst costs at most one line per cycle no matter how many rows arrived, comfortably under the harness's own auto-stop threshold. A tuple still present after `--reemit-after` is pinged again, up to `--max-emits` times, then it goes silent and is counted. A dead-lettered row the watcher never saw alive is announced on stdout and re-announced on the same window as a live row, because it is mail that will never be delivered and you have heard nothing about it; a row that was pinged while alive and later died reports its death on stderr, since that is a status update on a message you already know about. The seen-set is a JSON file per address under `<state-dir>/tuple-watch/`; losing it re-pings and never loses a message.
 
 Each probe reads up to 300 rows, ordered `(created_at, id)` ascending, the same paging cap every other `rd` call in this reference is capped at. An address that never holds more than that is scanned from the top every cycle. The first time a probe comes back full (300 rows, meaning there may be more beyond it), that address permanently switches to a persisted cursor: every following probe resumes strictly after the last row safe to advance past, rather than re-reading the same head every cycle. "Safe to advance past" holds back the newest ten seconds of rows on every advance, because the engine stamps `created_at` before commit and two concurrent `out` calls to the same address can commit slightly out of the order their timestamps suggest, so a handful of the most recent rows are re-probed each cycle rather than risked. A row that ages out of that ten-second margin without ever becoming safe to cursor past is never pinged by this watcher; it is not lost mail, only a missed ping, because `conexus/hooks/scripts/mailbox_drain.py`'s own floor probes the address independently of this cursor on every prompt.
 
@@ -3756,6 +3834,8 @@ A watcher does not need to be told to stop. `nx hook session-start` writes a mar
 ```
 
 This is user-global operator config, not something a hook or the plugin writes on your behalf — `nx hook session-start` (see `nexus.mailbox_arm`) emits the arm instruction itself but never touches `settings.json`.
+
+`nx doctor`'s `tuples.watch_permission` row (bead nexus-rml7o, MM-3.4 critic finding S5) checks this for you: it reads every settings file Claude Code consults for permissions — user `~/.claude/settings.json` (honouring `CLAUDE_CONFIG_DIR`), project `<root>/.claude/settings.json`, and project-local `<root>/.claude/settings.local.json` (`root` is the git top-level of the cwd, falling back to the cwd itself outside a repo) — never writing any of them. A file that cannot be read is treated as carrying no rules, never a crash. The order of the verdict, evaluated in this sequence, never fatal: first, a matching `permissions.deny` rule in ANY of the three files wins over a covering allow anywhere else, reported as denied, naming the denying file — the dangerous direction, since reporting covered while actually blocked would be worse than staying silent; second, absent a deny, a covering `permissions.allow` rule — the exact entry above, a genuinely broader `Bash(<prefix>:*)` ancestor such as `Bash(nx tuple:*)` or `Bash(nx:*)`, or a bare `Bash` rule — is reported ok, naming which file supplied it; third, absent both anywhere across all three files, the row reports "not configured" (a soft warning) — UNLESS the user-level Claude config directory (`CLAUDE_CONFIG_DIR`, or `~/.claude`) does not exist at all, in which case it reports "not applicable" instead, with no warning: Claude Code has never run on this machine, so there is no permission surface to be missing a rule from yet (bead nexus-7zhag). That not-applicable check runs LAST and only within the "not configured" outcome — a covering project or project-local rule still wins even when the user directory is absent, since Claude Code reads those regardless of `~/.claude`. Caveat: the row reads `CLAUDE_CONFIG_DIR` from `nx doctor`'s own process environment, so a Claude Code process running with a different `CLAUDE_CONFIG_DIR` than the shell invoking `nx doctor` can make the row look at the wrong directory. The row makes no claim about whether arming raises a permission prompt, in either direction — only whether a covering rule is present, which file supplied it, and what the rule is for.
 
 ## nx service
 

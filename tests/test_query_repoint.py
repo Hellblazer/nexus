@@ -674,7 +674,7 @@ class TestQueryFallbackLocalMode:
 
     def test_local_mode_with_catalog_params_is_loud_rejected(self, monkeypatch):
         """Non-service mode + catalog params: no dance to fall back to —
-        query() returns a loud error naming service mode, and calls neither
+        query() returns a loud error naming the HttpVectorClient requirement, and calls neither
         the combined-query functions nor search_cross_corpus."""
         import nexus.search_engine as se
 
@@ -711,8 +711,8 @@ class TestQueryFallbackLocalMode:
         result = core.query("q", author="Alice")
 
         assert isinstance(result, str)
-        assert "service mode" in result
-        assert "pgvector" in result
+        assert "HttpVectorClient-backed" in result
+        assert "in-memory test double" in result
         assert not cross_called, "no dance left — search_cross_corpus must NOT be called"
         assert not t3.meta_calls, "search_metadata_scoped must NOT be called in local mode"
         assert not t3.graph_calls, "search_graph_hop must NOT be called in local mode"

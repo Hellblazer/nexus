@@ -59,7 +59,6 @@ DOC_ONLY_FILES=(
     "scripts/lib/build-lease_test.sh"
     "scripts/mvnw-leased_test.sh"
     "scripts/lib/gate-jar-cache_test.sh"
-    "conexus/skills/orchestration/SKILL.md"
     "conexus/skills/composition-probe/SKILL.md"
     "scripts/validate/integration-stack.sh"
 )
@@ -72,6 +71,7 @@ SELF_GUARDED_FILES=(
     "scripts/mvnw-leased.sh"
     "scripts/build-gate-jar.sh"
     "tests/e2e/migration-rehearsal/build-artifacts.sh"   # build_lease_acquire service at its top (nexus-mfage fix B); was red here since it landed
+    "tests/e2e/local-service-gate.sh"   # build_lease_acquire_wait service at line 508, before the ./mvnw at line 532 (nexus-q1upi)
 )
 
 # Explicit allowlist: file|line-substring|reason. A hit is allowed when its

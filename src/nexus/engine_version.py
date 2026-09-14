@@ -480,7 +480,19 @@ from __future__ import annotations
 #: this client tag (nexus-1emxn choreography (a)); cloud-client-path-gate leg H
 #: probed renew and ack-with-reply through the edge, 7/7. Local-mode installs
 #: get renew and reply-in-ack ONLY through this pin.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 117)
+#: ->(0,1,118) 2026-09-14: paired with conexus 7.45.0 (RDR-205 amendment:
+#: tuple size limits, nexus-r7xao; acked tuple bodies cleared, nexus-8zoyp;
+#: optional commit/t2_ref/verify ledger dims, nexus-d9k5h). NOT additive: the
+#: engine now refuses a tuple body over 4096 bytes and oversized keys, dims,
+#: subspaces and identifiers with the new TooLarge (413), so the deploy relay
+#: was ARMED with conexus before this client tag
+#: (docs/release-arming/engine-service-v0.1.118.json, nexus-1emxn choreography
+#: (b)). Five new changesets (tuples-003-1..4, tuples-004-1); the PITR fork
+#: walk ran those 5 plus the 12 runAlways changesets. The engine logs
+#: reexecuted_changesets=25 on that walk because production carries 13
+#: historical duplicate changelog rows (nexus-jl08t, fixed after this tag).
+#: Local-mode installs get the size limits ONLY through this pin.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 118)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

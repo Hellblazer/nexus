@@ -409,15 +409,19 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
     sibling modules with heavy import graphs."""
     from nexus.catalog.store_hook import (  # noqa: PLC0415 — deferred, sibling with heavy import graph
         catalog_store_hook_tracked,
+        note_manifest_metadata,
+        note_pieces,
+        put_note_pieces,
         raise_if_oversized,
-        single_chunk_manifest_metadata,
         store_put_manifest_direct,
     )
     from nexus.doc_indexer import _fence_begin, _fence_fail  # noqa: PLC0415 — deferred; test patch target
 
     col_name = target_collection_for(rec["collection"], t3)
     content = rec["content"]
-    chunk_id, manifest_metadatas = single_chunk_manifest_metadata(content)
+    # nexus-spujb: split to the collection model's token window, as store_put does.
+    pieces = note_pieces(content, col_name)
+    chunk_id, manifest_metadatas = note_manifest_metadata(pieces)
     # nexus-xzyr3 fold-in: refuse an over-quota record BEFORE minting a
     # catalog row for it — see store_hook.raise_if_oversized's docstring.
     # A recovery-bundle restore that hits this fails loud on the offending
@@ -428,15 +432,15 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
     catalog_doc_id, minted = catalog_store_hook_tracked(
         title=rec["title"], doc_id=chunk_id, collection_name=col_name,
     )
-    content_hash = (
-        manifest_metadatas[0].get("chunk_text_hash", "") if manifest_metadatas else ""
-    )
+    from nexus.catalog.store_hook import note_content_hash  # noqa: PLC0415 — deferred, sibling module
+
+    # nexus-spujb: the whole note's hash, whether it was split or not.
+    content_hash = note_content_hash(content, manifest_metadatas)
     if catalog_doc_id:
         _fence_begin(catalog_doc_id, content_hash, col_name)
     try:
-        doc_id = t3.put(
-            collection=col_name,
-            content=content,
+        doc_ids = put_note_pieces(
+            t3, col_name, pieces,
             title=rec["title"],
             tags=rec.get("tags", ""),
             category=rec.get("category", ""),
@@ -464,12 +468,28 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
 
     hooks = HookRegistry()
     install_default_hooks(hooks)
-    hooks.fire_store_chains(
-        [doc_id], col_name, [content],
-        metadatas=manifest_metadatas,
-        catalog_doc_id=catalog_doc_id,
-        manifest_complete={catalog_doc_id: content_hash} if catalog_doc_id else None,
-    )
+    manifest_complete = {catalog_doc_id: content_hash} if catalog_doc_id else None
+    if len(pieces) == 1:
+        hooks.fire_store_chains(
+            doc_ids, col_name, pieces,
+            metadatas=manifest_metadatas,
+            catalog_doc_id=catalog_doc_id,
+            manifest_complete=manifest_complete,
+        )
+    else:
+        # nexus-spujb: a note written as several pieces fires in MCP
+        # store_put's shape. The single and batch chains see every piece;
+        # the document chain sees the note once, whole, so aspect
+        # extraction reads the full text (fire_store_chains would fire it
+        # once per fragment). Inline, so the fence above covers this
+        # fire_batch in the same function (nexus-vw594 gate).
+        for piece_id, piece in zip(doc_ids, pieces, strict=True):
+            hooks.fire_single(piece_id, col_name, piece)
+        hooks.fire_batch(
+            doc_ids, col_name, pieces, None, manifest_metadatas,
+            catalog_doc_id=catalog_doc_id, manifest_complete=manifest_complete,
+        )
+        hooks.fire_document(doc_ids[0], col_name, content, doc_id=catalog_doc_id)
 
 
 def _resolve_link_endpoint(reader: Any, t3: Any, uri: str) -> Any:

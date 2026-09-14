@@ -187,7 +187,12 @@ restating the number.
 | `abstract-themes` | query / abstract-themes | CheapRAG community-summary pipeline: broad over-fetch (`mode: broad`) → `groupby` by BERTopic centroid label → per-group `aggregate` → `summarize` coalesce. Routes "main themes / overview / give a summary" question shapes. RDR-098. |
 
 The first 5 are the "verb" scenarios: they correspond to the 5
-RDR-078 verb skills (`/conexus:research`, `/conexus:review`, …).
+RDR-078 verb skills (`/conexus:design-to-code-trace` for verb `research`,
+`/conexus:decision-drift-review` for verb `review`, …). The verb string
+each skill passes to `dimensions={"verb": ...}` is unchanged; only the
+skill's own name moved (nexus-cnzei.4), off the bare verb name that
+collided with the deep-research-synthesizer/code-review-adjacent
+command names of the same name.
 `find-by-author`, `citation-traversal`, and `type-scoped-search` are
 `research`-verb variants for narrower question shapes. `document-discovery`
 and `corpus-coverage-check` (nexus-h33x8.6) are single-`query`-step fast
@@ -282,7 +287,7 @@ backfilled by the (since-deleted) 4.9.13 client migration
 Each verb skill dispatches `plan_match` scoped to its verb:
 
 ```
-/conexus:research "how does projection quality work?"
+/conexus:design-to-code-trace "how does projection quality work?"
     │
     ▼  (under the hood)
 plan_match(intent="...", dimensions={verb: "research"}, n=1, min_confidence=0.40)

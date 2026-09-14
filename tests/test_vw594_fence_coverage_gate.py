@@ -111,6 +111,24 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
         ),
         same_function=False,
     ),
+    ("commands/store.py", "put_cmd"): _Coverage(
+        reason=(
+            "producer 10, nx store put, split-note path (nexus-spujb): a "
+            "note written as several chunks fires fire_batch inline; "
+            "_fence_begin is called in this same function before the first "
+            "piece is written. A one-piece note still rides "
+            "fire_store_chains."
+        ),
+        same_function=True,
+    ),
+    ("catalog/recovery_bundle.py", "_default_import_doc"): _Coverage(
+        reason=(
+            "recovery-bundle import, split-note path (nexus-spujb): same "
+            "shape as nx store put; _fence_begin is called in this same "
+            "function before the first piece is written."
+        ),
+        same_function=True,
+    ),
     ("code_indexer.py", "index_code_file"): _Coverage(
         reason=(
             "producer 5 (nx index repo, code, legacy per-file fallback "

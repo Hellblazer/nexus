@@ -839,6 +839,36 @@ def _seed_builtin_plans_best_effort() -> None:
         click.echo(f"Seeded {seeded} builtin plan template(s).")
 
 
+def _install_beads_prime_best_effort(*, no_beads_prime: bool = False) -> None:
+    """Install/refresh the user-level ``beads`` PRIME.md when beads is
+    detected on this machine (nexus-cnzei.8).
+
+    Mode-independent (unlike the ladder/plan-seed steps): whether this
+    install is a repo, converts to managed mode, or provisions nothing
+    locally, has no bearing on whether ``beads`` is installed on the box.
+    Best-effort, mirroring the sibling best-effort steps' contract — a
+    detection or write hiccup must never fail an otherwise-successful
+    ``nx init``. ``nx doctor``'s "Beads PRIME.md (user-level)" row is the
+    durable, always-visible signal if this ever fails silently.
+
+    *no_beads_prime* is ``--no-beads-prime``'s value: an explicit decline
+    that always wins, exactly like ``--no-autostart`` above. A persisted
+    ``beads_prime.manage: false`` (``nx config set``) is consulted inside
+    ``install_and_describe`` itself, so either route to opting out reaches
+    the same place.
+    """
+    from nexus.beads_prime import install_and_describe  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    try:
+        message = install_and_describe(disabled=no_beads_prime)
+    except Exception as exc:  # noqa: BLE001 — best-effort init step; never fails init
+        click.echo(f"\nBeads PRIME.md install skipped ({exc}).", err=True)
+        _log.warning("init_beads_prime_failed", error=str(exc))
+        return
+    if message:
+        click.echo(message)
+
+
 def _converge_ladder_best_effort() -> None:
     """Finish first-run setup with a converged upgrade ladder (nexus-9xfx5).
 
@@ -903,6 +933,15 @@ def _converge_ladder_best_effort() -> None:
         "~/.config/nexus/pg_credentials. Idempotent: safe to re-run."
     ),
 )
+@click.option(
+    "--no-beads-prime",
+    "no_beads_prime",
+    is_flag=True,
+    default=False,
+    help="Do not install/refresh the user-level beads PRIME.md this run "
+    "(nexus-cnzei.8). Explicit decline always wins, like --no-autostart; "
+    "for a standing opt-out use `nx config set beads_prime.manage false`.",
+)
 @click.pass_context
 def init_cmd(
     ctx: click.Context,
@@ -910,6 +949,7 @@ def init_cmd(
     assume_yes: bool,
     no_autostart: bool,
     provision_service: bool,
+    no_beads_prime: bool,
 ) -> None:
     """Guided first-run setup — one command that provisions the right backend.
 
@@ -956,6 +996,11 @@ def init_cmd(
             "works but will be removed in a future release.",
             err=True,
         )
+
+    # nexus-cnzei.8: mode-independent — runs regardless of which branch below
+    # is taken, since whether beads is installed has nothing to do with
+    # local vs managed vs cloud dispatch.
+    _install_beads_prime_best_effort(no_beads_prime=no_beads_prime)
 
     # RDR-174 P1.3 dispatch. PRIMARY oracle is the gate-locked mode helper
     # (_resolve_init_mode — service_url-based, NOT is_local_mode which is

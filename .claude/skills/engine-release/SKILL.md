@@ -97,6 +97,28 @@ closes the "release-workflow-only procedures rot silently" gap for the
 *script's own assertions*, not for signing/codesign/cosign/PG-bundle
 packaging defects, which remain `--acquire`-only by construction (see below).
 
+**Also runs the release-workflow SHAPE check now, automatically (nexus-xihsm).**
+Right after `run.sh`'s own native-build step (the `-Ob` candidate plus jOOQ
+codegen), `--shakeout` calls `scripts/check_release_workflow_shape.py`
+against the just-built native candidate via
+`tests/e2e/migration-rehearsal/lib/shakeout_shape_check.sh`. On a host that
+cannot execute that Linux candidate (a macOS host, where the `-Ob` build
+runs in a container) phase (a) boots the same build's JVM jar through a
+shim instead; phase (a) tests the checkout classification, which does not
+depend on native versus JVM. A missing jar there is a FAILED verdict. This does NOT
+live inside `rehearse_shakeout.sh`: that script runs inside the `--shakeout`
+container, which is a `uv`-tool-installed wheel with no `.git`/`pyproject.toml`
+ancestor by design, so the check's phase (a) non-vacuity assert could only
+ever refuse there, and phase (b) has no `service/mvnw` or JDK in that image
+at all. `run.sh` is the one place both preconditions hold. A failure prints
+`[shakeout] release-workflow SHAPE check: FAILED` and exits `run.sh` nonzero
+before the container ever starts, so it gates `--shakeout`'s own exit code,
+and its verdict line appears in the same terminal output as everything else
+`--shakeout` prints. See AGENTS.md's engine-release section for the full
+contract. Still uncovered even when wired: cosign signing, the
+`promote-release` all-21-assets gate, and mac-arm64's genuine no-Docker
+GitHub-hosted runner, none of which run on a box `--shakeout` builds on.
+
 **`--candidate-migration` — MANDATORY whenever this cut's `service/` delta
 touches `db/changelog/**` (a new or modified Liquibase changeset); optional
 otherwise** (a cut that only touches Java handler/repository code with no
@@ -135,7 +157,32 @@ re-validation plus this leg's EXACT row-invariant asserts, now spanning
 chunks, catalog manifest/documents, taxonomy centroids AND
 `topic_assignments`).
 
-It structurally CANNOT catch two classes, by construction of what this leg
+**Tuple space (bead nexus-58vc9, added for the v0.1.118 cut that carries
+tuples-003 + nexus-8zoyp).** Stage 3h seeds `nexus.tuples` through the
+FLOOR engine before the swap: mailbox rows in every claim state
+(unclaimed, claimed-and-left, consumed with and without a reply,
+dead-lettered via 3 claim/nack cycles), an over-4096-byte body (written
+past the working-tree client's own mirrored 4096-byte pre-check, since
+the floor enforces no size limit at all), an exactly-4096-byte body, and
+ledger rows — under a second tenant too when the floor's `nx tenant
+create` supports minting one. Post-walk it asserts: the over-cap row is
+gone with its claim-log history surviving at `tuple_id=NULL`
+(`tuple_claim_log_tuple_fk`'s `ON DELETE SET NULL`); the at-cap row is
+untouched; unconsumed and dead-lettered bodies are untouched;
+`chk_tuples_body_size` is VALIDATED; RLS is ENABLE+FORCE on both
+tuple-space tables; and the candidate can still claim and ack a surviving
+row. The consumed-body assert counts the row together with its NULL body
+(`1:1`), so a changeset that deleted consumed rows instead of clearing
+their bodies fails rather than reading as an empty body. The PASSED and
+FAILED lines name how many tenants the tuple population covered
+(`tuple_tenants=1|2`). The scheduled sweep itself (6h interval,
+6h initial delay) cannot fire inside this leg's wall-clock budget, so
+"the candidate can run the sweep" is asserted structurally (the
+dead-lettered row's `claim_state`/`attempts` shape matches what the
+sweep's own release/purge arms key their `WHERE` clauses on), not by
+observing a scheduled pass execute.
+
+It structurally CANNOT catch four classes, by construction of what this leg
 seeds:
 - **Cross-shard PK collision** (the "cross-shard collision" `DO $$` guards
   that vectors-004/taxonomy-007-style changesets carry) — this leg seeds
@@ -147,6 +194,16 @@ seeds:
   class is pinned at the JAVA layer instead:
   `SchemaMigratorIntegrationTest::rdr180Rewrite_leavesPlannerStatsFresh`
   (`service/src/test/java/dev/nexus/service/SchemaMigratorIntegrationTest.java`).
+- **Scheduled tuple-sweep execution** (6h interval, 6h initial delay): the
+  sweep never fires inside this leg, so its per-arm isolation and per-row
+  savepoint recovery are not exercised here. Covered by
+  `NexusServiceTupleSweepTest` and `NexusServiceTupleSweepIsolationTest` in
+  the Java suite.
+- **Tuple-table scan duration at live volume**: Stage 3h seeds about 20
+  tuple rows, against about 2150 live ledger rows across 37 subspaces
+  (2026-09-13). tuples-003's DELETE and VALIDATE and tuples-004's
+  consumed-body UPDATE scan the whole table; their lock duration at real
+  volume is the PITR-fork walk's to measure, not this leg's.
 
 This is strictly stronger than the `--guided` gate it replaces. It performs the
 same native-image build — the `-Ob` quick build has the SAME reachability
@@ -319,7 +376,7 @@ git tag -a engine-service-vX.Y.Z -m "engine-service X.Y.Z" <commit>   # <commit>
 git push origin engine-service-vX.Y.Z
 ```
 
-Tag-push fires `engine-service-release.yml` → builds + cosign-signs the 3 native binaries for the supported targets (`linux-amd64`, `linux-arm64`, `mac-arm64`) plus their PG bundles, and publishes the GitHub release. The release is created as a DRAFT and promoted by the final `promote-release` job only after both matrices succeed and `scripts/promote_engine_release.sh` finds all 21 assets (nexus-cl14i); until then no consumer can resolve the tag, `check_engine_release_floor.py` reads it as unpublished, and a failed leg on any platform (mac-arm64 is the slowest) holds the whole release as a draft: rerun the failed jobs and promote runs again. (Intel macOS / `mac-amd64` is NOT a supported target — not built.) Publishes nothing to PyPI. Wait for the workflow to finish publishing before Step 5 (prior runs ~30 min).
+Tag-push fires `engine-service-release.yml` → builds + cosign-signs the 3 native binaries for the supported targets (`linux-amd64`, `linux-arm64`, `mac-arm64`) plus their PG bundles, and publishes the GitHub release. The release is created as a DRAFT and promoted by the final `promote-release` job only after both matrices succeed and `scripts/promote_engine_release.sh` finds all 21 assets (nexus-cl14i); until then no consumer can resolve the tag, `check_engine_release_floor.py` reads it as unpublished, and a failed leg on any platform (mac-arm64 is the slowest) holds the whole release as a draft: rerun the failed jobs and promote runs again. (Intel macOS / `mac-amd64` is NOT a supported target — not built.) Publishes nothing to PyPI. Wait for the workflow to finish publishing before Step 5 (prior runs about 35 to 65 min (v0.1.118 took 36, a single measurement)).
 
 ### 5. POST-PUBLISH gate: `--acquire` (the leg that drives the PUBLISHED bytes)
 

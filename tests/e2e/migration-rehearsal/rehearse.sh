@@ -28,6 +28,7 @@
 # daily-driver surface against Voyage; see run.sh's own header for the
 # tracked gap.
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/require_container.sh"
 
 CHROMA_LOCAL="${CHROMA_LOCAL:-/home/nexus/legacy-chroma}"
 SEED_N="${SEED_N:-12}"
@@ -316,8 +317,15 @@ RAN_PHASES+=("B" "C")
 # Legacy-era catalog code (and, on era legs, the era release's own nx) may run
 # `git init`/commits in the catalog dir; give git an identity. The current
 # seed_legacy.py itself seeds raw SQLite only (Catalog was deleted, i711w).
-git config --global user.email "rehearsal@nexus.local" >/dev/null 2>&1 || true
-git config --global user.name  "nexus rehearsal"       >/dev/null 2>&1 || true
+# Identity via env, never `git config --global` (nexus-oqh4s, sibling of the
+# rehearse_package_upgrade.sh incident, 2026-09-12, that rewrote a real
+# ~/.gitconfig): this script is meant to run INSIDE its container, but
+# nothing enforces that, and env vars reach the same subprocesses without
+# mutating any config file.
+export GIT_AUTHOR_NAME="nexus rehearsal"
+export GIT_AUTHOR_EMAIL="rehearsal@nexus.local"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
 
 seed_args=("$CHROMA_LOCAL" "--n" "$SEED_N")
 [ "$WITH_CLOUD" = 1 ] && seed_args+=("--with-cloud")

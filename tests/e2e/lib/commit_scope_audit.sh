@@ -79,7 +79,12 @@ EOF
   <pathspec>   One or more allowed path prefixes / patterns. A commit
                is IN SCOPE only if every file it touches matches at
                least one pathspec (prefix match on a directory, exact
-               match, or a shell glob pattern).
+               match, or a shell glob pattern). The repo-root
+               .gitignore and CLAUDE.md are always in scope.
+EOF
+    # Split again at nexus-5h3df: each heredoc body stays under the 512B
+    # degraded pipe capacity (tests/hooks/test_heredoc_pipe_budget.py).
+    cat >&2 <<'EOF'
 
 Exit status: 0 if every commit in range stayed within the allowlist;
              1 if any commit touched a file outside it (flagged inline);
@@ -103,6 +108,17 @@ fi
 
 _matches_allowlist() {
     local file="$1" spec norm
+    # nexus-5h3df (conexus-7rzd ruling, Sam 2026-09-13): the repo-root
+    # .gitignore and CLAUDE.md are always in scope. Over conexus main, 21
+    # commits touched one of them, 18 alongside other files, every one
+    # germane and none ever split, so flagging them reported a class
+    # nobody acts on. Exactly these two root paths: a nested .gitignore or
+    # any other root config still has to match a pathspec.
+    case "$file" in
+    .gitignore | CLAUDE.md)
+        return 0
+        ;;
+    esac
     for spec in "${PATHSPECS[@]}"; do
         norm="${spec%/}"
         if [[ "$file" == "$spec" || "$file" == "$norm"/* ]]; then

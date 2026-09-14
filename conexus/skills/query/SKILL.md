@@ -4,18 +4,7 @@ description: Use when an analytical question's answer must be reduced from many 
 effort: medium
 ---
 
-**Tier-aware discipline** — apply at session start and before every major step:
-
-1. **Read** widest → narrowest before duplicating effort:
-   - T3 (cross-project): `mcp__plugin_conexus_nexus__search(...)` for the check itself (tier checks use `search`, not `nx_answer`); reach for `nx_answer` only when the answer must be reduced from many documents.
-   - T2 (project): `mcp__plugin_conexus_nexus__memory_search(query="<topic>", project="<repo>")`.
-   - T1 (siblings, this session): `mcp__plugin_conexus_nexus__scratch(action="search", query="<topic>")`.
-2. **Reuse plans** before dispatching multiple agents: `mcp__plugin_conexus_nexus__plan_search(query="<task>", limit=3)`.
-3. **Write back at end** — findings not stored are findings lost. Pick the tier that matches the audience:
-   - `mcp__plugin_conexus_nexus__scratch(action="put", ..., tags="<topic>")` for sibling agents downstream THIS session (T1, narrowest scope, cheapest write).
-   - `mcp__plugin_conexus_nexus__memory_put(...)` for project-scoped decisions, future sessions same project (T2).
-   - `mcp__plugin_conexus_nexus__store_put(...)` for permanent cross-project knowledge, future sessions everywhere (T3).
-   - `mcp__plugin_conexus_nexus__plan_save(...)` for multi-agent pipeline outcomes (so future callers hit plan-match).
+**Tier-aware discipline** — before starting, check T3 (`search`), T2 (`memory_search`), and T1 (`scratch` search) widest to narrowest so you don't duplicate work already done; reuse a matching plan via `plan_search` before dispatching multiple agents. Before returning, write findings back at the tier matching their audience (`scratch` for siblings this session, `memory_put` for this project, `store_put` for permanent cross-project knowledge). Full checklist: [resources/tier-discipline.md](../../resources/tier-discipline.md) (shared across every skill that prescribes it — nexus-cnzei.6).
 
 # Query
 
@@ -103,11 +92,16 @@ project synthesis — route through `nx_answer`.
 
 ## Verb-scoped shortcuts
 
-The five verb skills (`/conexus:research`, `/conexus:review`, `/conexus:analyze`,
-`/conexus:debug`, `/conexus:document`) each pin a `dimensions={"verb": …}`
-filter so the plan matcher narrows to the right template family.
-Pick the verb that matches the question shape; fall back to this
-plain `/conexus:query` skill when no verb cleanly fits.
+The five verb skills (`/conexus:design-to-code-trace` [verb: research],
+`/conexus:decision-drift-review` [verb: review], `/conexus:analyze`,
+`/conexus:why-was-this-written` [verb: debug], `/conexus:document`) each pin a
+`dimensions={"verb": …}` filter so the plan matcher narrows to the right
+template family — the skill's own name no longer matches its verb string for
+three of the five (nexus-cnzei.4: renamed off the bare verb name to stop
+colliding with, respectively, the `/conexus:research` and `/conexus:debug`
+agent-dispatch commands, and to stop inviting confusion with
+`/conexus:review-code`). Pick the verb that matches the question shape; fall
+back to this plain `/conexus:query` skill when no verb cleanly fits.
 
 ## Anti-patterns
 

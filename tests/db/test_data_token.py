@@ -589,3 +589,303 @@ def test_reset_data_token_manager_yields_a_fresh_instance() -> None:
         assert a is not b
     finally:
         reset_data_token_manager()
+
+
+# ── nexus-umue1: invalidate_if_current / futility (prophylactic port of ────
+# nexus-r0d37 defect 2's T1 guard to the shared manager) ────────────────────
+#
+# T1's fix put both guards in PER-INSTANCE state because T1 has exactly one
+# instance per session. T2's nine Http*Store instances and T3's module-level
+# client all share ONE cached token per (base_url, tenant) key through this
+# manager, so the guards live here instead -- these tests pin the primitive
+# directly, independent of either client's plumbing (which its own test
+# files pin separately).
+
+
+def test_invalidate_if_current_pops_when_token_matches() -> None:
+    """The ordinary case: the caller's sent bearer is still the cached one."""
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
+    poster.queue(200, {"data_token": "tok-2", "expires_in_seconds": 300})
+    mgr = _manager(poster, _FakeClock())
+
+    token = mgr.bearer_for(BASE_URL, TENANT)
+    assert token == "tok-1"
+
+    popped = mgr.invalidate_if_current(BASE_URL, TENANT, token)
+    assert popped is True
+
+    second = mgr.bearer_for(BASE_URL, TENANT)
+    assert second == "tok-2"
+    assert len(poster.calls) == 2
+
+
+def test_invalidate_if_current_skips_when_nothing_cached() -> None:
+    """No mint has ever happened for this key -- nothing to compare against."""
+    poster = _FakePoster()
+    mgr = _manager(poster, _FakeClock())
+
+    assert mgr.invalidate_if_current(BASE_URL, TENANT, "Bearer whatever") is False
+    assert poster.calls == []
+
+
+def test_invalidate_if_current_skips_when_sent_token_already_rotated() -> None:
+    """Discriminates the single-flight compare: a caller holding a STALE
+    sent_token (a sibling already invalidated-and-reminted since this
+    caller's request went out) must retry on the sibling's fresh token
+    instead of invalidating it and minting a competing replacement.
+
+    Mutation check: replacing the ``cached.token != sent_token`` compare
+    with an unconditional pop makes this test fail (it would report
+    ``True`` and mint a THIRD token) while
+    test_invalidate_if_current_pops_when_token_matches keeps passing.
+    """
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
+    poster.queue(200, {"data_token": "tok-2", "expires_in_seconds": 300})
+    mgr = _manager(poster, _FakeClock())
+
+    first = mgr.bearer_for(BASE_URL, TENANT)
+    assert first == "tok-1"
+    # A sibling invalidates-and-reminted meanwhile.
+    mgr.invalidate(BASE_URL, TENANT)
+    second = mgr.bearer_for(BASE_URL, TENANT)
+    assert second == "tok-2"
+
+    # This caller's own (now-stale) sent bearer no longer matches.
+    stale_popped = mgr.invalidate_if_current(BASE_URL, TENANT, first)
+    assert stale_popped is False
+    assert len(poster.calls) == 2, "the stale caller must not mint a third token"
+    # The fresh (sibling's) token is untouched and still cached.
+    assert mgr.has_live_token(BASE_URL, TENANT) is True
+
+
+def test_invalidate_if_current_concurrent_single_flight() -> None:
+    """N concurrent callers all holding the SAME sent bearer must produce
+    exactly ONE ``True`` (one invalidate) — every other caller sees the
+    cache already empty and retries without invalidating anything.
+
+    Mirrors nexus-r0d37's T1 ``TestRemintSingleFlight`` shape: mutation
+    check is test_invalidate_if_current_skips_when_sent_token_already_rotated
+    above, which pins the compare half; this pins the concurrency half.
+    """
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
+    mgr = _manager(poster, _FakeClock())
+
+    token = mgr.bearer_for(BASE_URL, TENANT)
+    sent = token  # invalidate_if_current compares against the RAW token
+
+    n = 7
+    barrier = threading.Barrier(n)
+    results: list[bool] = [False] * n
+
+    def worker(i: int) -> None:
+        barrier.wait(timeout=10)
+        results[i] = mgr.invalidate_if_current(BASE_URL, TENANT, sent)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert all(not t.is_alive() for t in threads), "a worker thread hung"
+    assert sum(results) == 1, f"expected exactly ONE invalidate, saw {sum(results)}"
+    assert mgr.has_live_token(BASE_URL, TENANT) is False, "the winner popped the cache"
+
+
+def test_is_remint_futile_false_by_default() -> None:
+    poster = _FakePoster()
+    mgr = _manager(poster, _FakeClock())
+    assert mgr.is_remint_futile(BASE_URL, TENANT) is False
+
+
+def test_mark_remint_futile_blocks_invalidate_if_current() -> None:
+    """Discriminates the futility guard: once marked, invalidate_if_current
+    returns False even for a caller holding the exact CURRENT token —
+    minting again cannot fix whatever is actually wrong.
+
+    Mutation check: removing the ``self._is_futile_locked(key)``
+    short-circuit at the top of ``invalidate_if_current`` makes this test
+    fail (it would report ``True`` and pop the cache) while the
+    single-flight tests above keep passing — the two guards fail
+    independently.
+    """
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
+    mgr = _manager(poster, _FakeClock())
+
+    token = mgr.bearer_for(BASE_URL, TENANT)
+    mgr.mark_remint_futile(BASE_URL, TENANT)
+    assert mgr.is_remint_futile(BASE_URL, TENANT) is True
+
+    popped = mgr.invalidate_if_current(BASE_URL, TENANT, token)
+    assert popped is False
+    assert mgr.has_live_token(BASE_URL, TENANT) is True, "the cache must be untouched while futile"
+    assert len(poster.calls) == 1
+
+
+def test_clear_remint_futile_lifts_the_skip() -> None:
+    """A resolved condition lifts the skip IMMEDIATELY, without waiting
+    out the rest of the window — pinned so the negative cache can never
+    become a permanent disabling of a heal that works in other failure
+    modes. (This is the EARLY-CLEAR path; window EXPIRY is pinned
+    separately below by test_futility_mark_expires_after_the_window --
+    Sam's decision, nexus-umue1 review round 2.)"""
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
+    poster.queue(200, {"data_token": "tok-2", "expires_in_seconds": 300})
+    mgr = _manager(poster, _FakeClock())
+
+    token = mgr.bearer_for(BASE_URL, TENANT)
+    mgr.mark_remint_futile(BASE_URL, TENANT)
+    mgr.clear_remint_futile(BASE_URL, TENANT)
+    assert mgr.is_remint_futile(BASE_URL, TENANT) is False
+
+    popped = mgr.invalidate_if_current(BASE_URL, TENANT, token)
+    assert popped is True
+    assert mgr.bearer_for(BASE_URL, TENANT) == "tok-2"
+
+
+def test_clear_remint_futile_on_unmarked_key_is_a_noop() -> None:
+    poster = _FakePoster()
+    mgr = _manager(poster, _FakeClock())
+    mgr.clear_remint_futile(BASE_URL, TENANT)  # never marked — must not raise
+    assert mgr.is_remint_futile(BASE_URL, TENANT) is False
+
+
+# ── Sam's decision (nexus-umue1 review round 2): futility EXPIRES ──────────
+#
+# Critic Critical 1: an unbounded futility mark trades a bounded per-call
+# mint-storm risk for an UNBOUNDED-until-natural-TTL-refresh outage risk on
+# T2/T3, where a re-mint is normally the correct remedy (unlike T1's
+# structurally-permanent stale-session 401). Fix: the mark carries a mark
+# TIME (the injectable, monotonic ``clock``) and expires after
+# ``remint_futile_window_seconds`` (default DEFAULT_REMINT_FUTILE_WINDOW_S
+# = 60s).
+
+
+def test_futility_mark_expires_after_the_window() -> None:
+    """Discriminates the window-expiry guard (Sam's decision): a mark past
+    the window is not futile, and a fresh invalidate_if_current on the
+    still-cached (never actually re-minted, because it stayed marked)
+    token succeeds again."""
+    from nexus.db.data_token import DEFAULT_REMINT_FUTILE_WINDOW_S
+
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 3600})
+    poster.queue(200, {"data_token": "tok-2", "expires_in_seconds": 3600})
+    clock = _FakeClock()
+    mgr = _manager(poster, clock)
+
+    token = mgr.bearer_for(BASE_URL, TENANT)
+    mgr.mark_remint_futile(BASE_URL, TENANT)
+    assert mgr.is_remint_futile(BASE_URL, TENANT) is True
+
+    clock.advance(DEFAULT_REMINT_FUTILE_WINDOW_S)  # AT the window: still expired (>=)
+    assert mgr.is_remint_futile(BASE_URL, TENANT) is False
+
+    popped = mgr.invalidate_if_current(BASE_URL, TENANT, token)
+    assert popped is True, "the window elapsed -- a fresh re-mint attempt must be allowed again"
+    assert mgr.bearer_for(BASE_URL, TENANT) == "tok-2"
+
+
+def test_futility_mark_still_active_just_before_the_window_elapses() -> None:
+    """Boundary pin: a mark 1s short of the window is STILL futile —
+    distinguishes '>=' (correct) from '>' in the expiry compare."""
+    from nexus.db.data_token import DEFAULT_REMINT_FUTILE_WINDOW_S
+
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 3600})
+    clock = _FakeClock()
+    mgr = _manager(poster, clock)
+
+    token = mgr.bearer_for(BASE_URL, TENANT)
+    mgr.mark_remint_futile(BASE_URL, TENANT)
+
+    clock.advance(DEFAULT_REMINT_FUTILE_WINDOW_S - 1.0)
+    assert mgr.is_remint_futile(BASE_URL, TENANT) is True
+    assert mgr.invalidate_if_current(BASE_URL, TENANT, token) is False
+
+
+def test_remint_futile_window_is_injectable() -> None:
+    """The window is a constructor kwarg, not a hardcoded module constant
+    baked into the manager -- a test (or an operator) can override it."""
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 3600})
+    clock = _FakeClock()
+    mgr = DataTokenManager(
+        clock=clock, poster=poster, mint_credential=lambda: "mintcred",
+        remint_futile_window_seconds=5.0,
+    )
+
+    mgr.bearer_for(BASE_URL, TENANT)
+    mgr.mark_remint_futile(BASE_URL, TENANT)
+    clock.advance(4.0)
+    assert mgr.is_remint_futile(BASE_URL, TENANT) is True, "still inside the custom 5s window"
+    clock.advance(1.0)
+    assert mgr.is_remint_futile(BASE_URL, TENANT) is False, "the custom 5s window has elapsed"
+
+
+def test_mark_remint_futile_resets_the_window_on_a_re_mark() -> None:
+    """Re-marking (e.g. a second caller's own re-mint also 401ing) resets
+    the window's start time — the mark does not expire on the ORIGINAL
+    mark's schedule once it has been refreshed."""
+    from nexus.db.data_token import DEFAULT_REMINT_FUTILE_WINDOW_S
+
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 3600})
+    clock = _FakeClock()
+    mgr = _manager(poster, clock)
+
+    mgr.bearer_for(BASE_URL, TENANT)
+    mgr.mark_remint_futile(BASE_URL, TENANT)
+    clock.advance(DEFAULT_REMINT_FUTILE_WINDOW_S - 1.0)
+    assert mgr.is_remint_futile(BASE_URL, TENANT) is True
+    mgr.mark_remint_futile(BASE_URL, TENANT)  # re-mark: window restarts from now
+
+    clock.advance(DEFAULT_REMINT_FUTILE_WINDOW_S - 1.0)  # would be past the ORIGINAL window
+    assert mgr.is_remint_futile(BASE_URL, TENANT) is True, "the re-mark's own window has not elapsed yet"
+
+
+# ── CRE Minor: the "cached is None" cross-instance interleave ──────────────
+
+
+def test_invalidate_if_current_when_cache_popped_by_a_sibling_mid_flight() -> None:
+    """CRE Minor (nexus-umue1 review): the 'cached is None' branch,
+    exercised for the actual cross-instance interleave it is meant to
+    cover -- a SIBLING pops the entry between this caller's request going
+    out and this caller calling invalidate_if_current, not merely 'nothing
+    was ever cached' (already pinned by
+    test_invalidate_if_current_skips_when_nothing_cached above)."""
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
+    poster.queue(200, {"data_token": "tok-2", "expires_in_seconds": 300})
+    mgr = _manager(poster, _FakeClock())
+
+    token = mgr.bearer_for(BASE_URL, TENANT)
+    assert token == "tok-1"
+
+    # A sibling races ahead: its own invalidate_if_current call (holding
+    # the SAME sent_token, having 401'd on the identical cached bearer)
+    # wins and pops the entry, leaving the cache genuinely EMPTY -- not
+    # "never populated".
+    sibling_popped = mgr.invalidate_if_current(BASE_URL, TENANT, token)
+    assert sibling_popped is True
+    assert mgr.has_live_token(BASE_URL, TENANT) is False
+
+    # THIS caller's own request 401'd on the SAME stale token and now
+    # calls invalidate_if_current with the identical sent_token -- the
+    # cache is None because a SIBLING already popped it. Must decline
+    # rather than double-invalidating (there is nothing left to compare).
+    late_popped = mgr.invalidate_if_current(BASE_URL, TENANT, token)
+    assert late_popped is False
+
+    # The caller then retries via bearer_for(), which is lock-serialized
+    # with the sibling's own mint-on-miss (_mint_guarded) -- it observes
+    # the sibling's fresh token rather than resending the rejected one
+    # forever, and no THIRD mint happens.
+    healed = mgr.bearer_for(BASE_URL, TENANT)
+    assert healed == "tok-2"
+    assert len(poster.calls) == 2, "exactly one re-mint total across both callers"

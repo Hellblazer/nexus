@@ -1001,7 +1001,7 @@ class TestStaleBearerOnHealedRetry:
         )
         # The wrwb7 re-mint "succeeds" (bearer side healed) -- but the
         # session token stays stale, so the retry still 401s.
-        monkeypatch.setattr(store, "_remint_data_token_and_rebuild", lambda: True)
+        monkeypatch.setattr(store, "_remint_data_token_and_rebuild", lambda *_: True)
 
         with pytest.raises(RuntimeError) as excinfo:
             store.put("remint-heal suffix attribution")
@@ -1010,3 +1010,352 @@ class TestStaleBearerOnHealedRetry:
         assert SESSION_UNAUTHORIZED_MARKER in text
         assert HEAL_REMINT_SUFFIX in text, "the re-mint heal must be attributed to wrwb7"
         assert HEAL_ADOPTED_SUFFIX not in text, "the lease-adoption suffix must not fire for a re-mint heal"
+
+
+# ── nexus-r0d37 defect 2: the 401 data-token re-mint is single-flighted ──────
+#
+# Measured 2026-09-13 (session 483d96c9, cloud mode): after a /clear then a
+# /resume back into the original session, T1 401'd on a stale session id and
+# seven concurrent scratch calls drew "data-token mint failed (429) ... rate
+# limit exceeded" from the managed edge.
+#
+# WHICH ARRIVAL PATTERN PRODUCES THE STORM, measured here rather than assumed
+# (the first reading of this bug got the emphasis wrong). With both guards
+# removed:
+#
+#   staggered / sequential callers  -> ONE MINT PER CALL (4 calls, 4 mints)
+#   7 maximally concurrent callers  -> 2 mints
+#
+# The difference is _mint_guarded's non-blocking flock. It coalesces TRUE
+# racers, so a thundering herd is mostly absorbed; but a caller that arrives
+# after the previous one finished is legitimately cold and alone, mints, and
+# in doing so invalidates the token the previous caller just published (the
+# compare-and-delete matches, so that fresh lease goes too). Nothing bounds
+# that, and it is the shape a stale session actually produces: calls trickling
+# in over the life of the window, each one cold.
+#
+# So the futility flag is the guard that ends the live 429; the sent-bearer
+# single-flight takes the concurrent case from 2 mints to 1. Both are pinned
+# below, and each test says which of the two it discriminates.
+
+
+class _AlwaysUnauthorizedHandler(_MintAwareScratchHandler):
+    """Mint endpoint works; every T1 call 401s regardless of bearer.
+
+    Models the live failure exactly: the 401 comes from the require-minted
+    SESSION gate on a stale session id, which no data token can satisfy, so
+    the re-mint heal can never resolve it however many times it fires.
+    """
+
+    def _check_auth(self) -> bool:
+        self._send(401, {"error": "unauthorized"})
+        return False
+
+
+@pytest.fixture
+def always_401_mint_server():
+    _reset_mint_state()
+    with fake_http_server(_AlwaysUnauthorizedHandler) as url:
+        yield url
+    _reset_mint_state()
+
+
+class _ArrivalGate:
+    """nexus-hddw2: server-side rendezvous so N concurrent HTTP callers
+    are concurrent BY CONSTRUCTION, not by assumption about client-side
+    thread-start timing.
+
+    ``threading.Barrier(self.THREADS)`` in the test only synchronizes
+    when the N *client* threads START; it says nothing about whether
+    their requests actually arrive at the server while the bearer is
+    still stale. Under ``pytest -n auto`` on a loaded box, a thread can
+    be scheduled far enough ahead that it completes its ENTIRE round
+    trip (send, 401, re-mint, retry, mark futile) before a sibling
+    thread even calls ``_current_authorization_header()`` -- at which
+    point the sibling reads the ALREADY-healed bearer and never
+    contends for the guard at all. Measured 2026-09-13 (nexus-58's run):
+    0 re-mints for 7 threads against an expected 1 (see nexus-hddw2).
+
+    This gate closes that hole from the other end: the handler holds a
+    request carrying the KNOWN stale bearer at ``wait()`` until ``n`` of
+    them have arrived, then releases every held request together AND
+    lets any FURTHER matching request through immediately (never
+    blocking a later wave). That "release the first N, pass the rest"
+    shape -- not a strict ``threading.Barrier(n)`` -- matters even here,
+    where T1's guard runs its whole invalidate-and-rebuild under one
+    lock (unlike T2's narrower compare-then-mint window): a strict
+    N-sized barrier still hangs on any legitimate (N+1)th arrival
+    (e.g. a retry that happens to reuse the same header value), where
+    this design just lets it through unheld.
+
+    Since ``sent_bearer`` is fixed by the CLIENT before the request is
+    ever sent (``HttpScratchStore._post`` resolves
+    ``_current_authorization_header()`` immediately before
+    ``self._client.post(...)``), and none of the N INITIAL callers can
+    have reacted to a 401 they have not yet received, holding the
+    RESPONSE is sufficient to guarantee all N captured the identical
+    stale bearer on their first attempt -- regardless of box load.
+
+    A bounded timeout protects against a genuine hang: if fewer than
+    ``n`` ever arrive, every blocked ``wait()`` returns after
+    ``timeout`` seconds and ``timed_out``/``arrived_at_timeout`` record
+    exactly how many did, so the test fails loudly naming the count
+    instead of silently measuring a smaller, non-N storm or hanging
+    outright.
+    """
+
+    def __init__(self, n: int, timeout: float = 15.0) -> None:
+        self.n = n
+        self.timeout = timeout
+        self._lock = threading.Lock()
+        self._count = 0
+        self._released = threading.Event()
+        self.timed_out = False
+        self.arrived_at_timeout = 0
+
+    def wait(self) -> None:
+        with self._lock:
+            self._count += 1
+            if self._count >= self.n:
+                self._released.set()
+        if self._released.wait(timeout=self.timeout):
+            return
+        with self._lock:
+            if not self._released.is_set():
+                self.timed_out = True
+                self.arrived_at_timeout = self._count
+
+
+#: Set by test_concurrent_401s_remint_exactly_once before starting its
+#: threads; consulted by _ArrivalGatedUnauthorizedHandler.do_POST. None
+#: outside that test -- every other consumer of _AlwaysUnauthorizedHandler
+#: (and its subclass here) never touches it.
+_ARRIVAL_GATE: _ArrivalGate | None = None
+_ARRIVAL_GATE_BEARER: str | None = None
+
+
+class _ArrivalGatedUnauthorizedHandler(_AlwaysUnauthorizedHandler):
+    """Like ``_AlwaysUnauthorizedHandler``, but holds a ``/v1/t1/put``
+    request carrying exactly ``_ARRIVAL_GATE_BEARER`` at ``_ARRIVAL_GATE
+    .wait()`` before answering it -- see ``_ArrivalGate``. Only the
+    storm's FIRST wave (the original stale bearer) is gated; the
+    post-remint retry wave carries a freshly-minted, DIFFERENT bearer
+    and passes straight through un-gated, exactly like the mint
+    endpoint and every other path.
+    """
+
+    def do_POST(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        if path == "/v1/t1/put" and _ARRIVAL_GATE is not None:
+            auth = self.headers.get("Authorization", "")
+            if auth == _ARRIVAL_GATE_BEARER:
+                _ARRIVAL_GATE.wait()
+        super().do_POST()
+
+
+class TestRemintSingleFlight:
+    """nexus-r0d37 defect 2."""
+
+    THREADS = 7  # the count that tripped the edge in the live incident
+
+    def _reset_manager(self) -> None:
+        from nexus.db.data_token import reset_data_token_manager
+        reset_data_token_manager()
+
+    def _store(self, url, monkeypatch, tmp_path) -> HttpScratchStore:
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_SERVICE_TOKEN", TOKEN)
+        monkeypatch.setenv("NX_MINT_TOKEN", _MINT_CREDENTIAL)
+        self._reset_manager()
+        # _token is NOT passed, so the store stays UNPINNED and swaps the
+        # env bearer for a self-minted data token -- pinning it would make
+        # every re-mint a no-op and the assertions vacuous.
+        return HttpScratchStore(
+            base_url=url, tenant=DEFAULT_TENANT, session_id=SESSION,
+        )
+
+    def test_concurrent_401s_remint_exactly_once(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """N concurrent calls that all 401 must produce exactly ONE re-mint.
+
+        Discriminates 1 from 2, not 1 from N: with both guards removed this
+        harness measures 2 mints for 7 concurrent callers, because
+        _mint_guarded's flock coalesces true racers. The once-per-call storm
+        is the STAGGERED case, pinned by
+        test_futile_remint_is_not_repeated_on_the_next_call (4 calls, 4
+        mints without the guards). Kept separate because the two guards fail
+        independently and a single test would not say which one broke.
+
+        Arrival is made deterministic by an _ArrivalGate (nexus-hddw2):
+        the fake server holds every /v1/t1/put request carrying the
+        original stale bearer until all THREADS of them have arrived,
+        then releases them together, so the N callers are concurrent BY
+        CONSTRUCTION -- the client-side threading.Barrier below only
+        needs to get all N threads INTO their call() bodies, not have
+        them race the server unaided. A THREADED fake server is required
+        to host that gate at all: a plain HTTPServer processes one
+        connection to completion before accepting the next, so it could
+        never hold N requests in flight simultaneously.
+        """
+        global _ARRIVAL_GATE, _ARRIVAL_GATE_BEARER
+        _reset_mint_state()
+        try:
+            with fake_http_server(_ArrivalGatedUnauthorizedHandler, threaded=True) as url:
+                store = self._store(url, monkeypatch, tmp_path)
+                mints_after_construction = _MINT_CALLS
+                assert mints_after_construction == 1, "ctor mints exactly one bearer"
+
+                _ARRIVAL_GATE_BEARER = store._headers["Authorization"]
+                gate = _ArrivalGate(self.THREADS)
+                _ARRIVAL_GATE = gate
+
+                barrier = threading.Barrier(self.THREADS)
+                failures: list[BaseException] = []
+
+                def call() -> None:
+                    barrier.wait(timeout=10)
+                    try:
+                        store.put("storm")
+                    except RuntimeError:
+                        pass  # every call 401s by construction; the COUNT is the assertion
+                    except BaseException as exc:  # noqa: BLE001 — surfaced below, never swallowed
+                        failures.append(exc)
+
+                threads = [threading.Thread(target=call) for _ in range(self.THREADS)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=30)
+
+                # Non-vacuity (hddw2 critic pass): timed_out is only set inside the
+                # gate's wait, so a gate that never engaged (a path or bearer match
+                # gone stale) would leave it False and this test would pass on
+                # scheduling luck again. Every held request must have arrived.
+                assert gate._count >= gate.n, (
+                    f"the arrival gate saw {gate._count} of {gate.n} stale-bearer "
+                    f"requests: they never reached it, so this run proved nothing "
+                    f"about concurrent 401s"
+                )
+                assert not gate.timed_out, (
+                    f"arrival gate timed out after {gate.timeout}s: only "
+                    f"{gate.arrived_at_timeout}/{self.THREADS} concurrent "
+                    f"requests carrying the stale bearer arrived -- box too "
+                    f"loaded to produce genuine concurrency, or a client-side "
+                    f"regression stopped a caller from ever sending the "
+                    f"original bearer"
+                )
+                assert not failures, f"unexpected non-401 failures: {failures}"
+                assert all(not t.is_alive() for t in threads), "a worker thread hung"
+                assert _MINT_CALLS == mints_after_construction + 1, (
+                    f"{self.THREADS} concurrent 401s must re-mint exactly ONCE "
+                    f"(saw {_MINT_CALLS - mints_after_construction} re-mints; "
+                    f"2 is the unguarded value for this arrival pattern)"
+                )
+        finally:
+            _ARRIVAL_GATE = None
+            _ARRIVAL_GATE_BEARER = None
+            self._reset_manager()
+            _reset_mint_state()
+
+    def test_remint_helper_is_single_flighted_on_the_sent_bearer(
+        self, always_401_mint_server, monkeypatch, tmp_path
+    ) -> None:
+        """Isolates the single-flight from the futility flag.
+
+        The futility flag is only ever set at the raise site, so calling the
+        helper directly can never engage it -- what this pins is purely the
+        "another thread already re-minted, retry on its token" branch.
+        """
+        try:
+            store = self._store(always_401_mint_server, monkeypatch, tmp_path)
+            baseline = _MINT_CALLS
+            stale_bearer = store._headers["Authorization"]
+            assert store._token_pinned is False, "store must be UNPINNED to re-mint at all"
+
+            barrier = threading.Barrier(self.THREADS)
+            results: list[bool] = []
+            results_lock = threading.Lock()
+
+            def call() -> None:
+                barrier.wait(timeout=10)
+                healed = store._remint_data_token_and_rebuild(stale_bearer)
+                with results_lock:
+                    results.append(healed)
+
+            threads = [threading.Thread(target=call) for _ in range(self.THREADS)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+
+            assert len(results) == self.THREADS, "a worker thread hung"
+            assert all(results), (
+                "every caller must report healed: the winner re-minted and the "
+                "losers retry on the winner's token"
+            )
+            assert _MINT_CALLS == baseline + 1, (
+                f"expected ONE re-mint across {self.THREADS} concurrent callers, "
+                f"saw {_MINT_CALLS - baseline}"
+            )
+        finally:
+            self._reset_manager()
+
+    def test_futile_remint_is_not_repeated_on_the_next_call(
+        self, always_401_mint_server, monkeypatch, tmp_path
+    ) -> None:
+        """A re-mint whose retry still 401s must not re-mint again.
+
+        THIS is the live storm: measured at 4 mints for 4 staggered calls
+        with the guards removed, one per call, unbounded for as long as the
+        session stays stale. The bearer was never the cause, so every one of
+        those mints was spent on a 401 it could not fix.
+        """
+        from nexus.db.http_scratch_store import (
+            HEAL_DECLINED_SUFFIX,
+            HEAL_REMINT_SUFFIX,
+        )
+
+        try:
+            store = self._store(always_401_mint_server, monkeypatch, tmp_path)
+            baseline = _MINT_CALLS
+
+            with pytest.raises(RuntimeError) as first:
+                store.put("first")
+            assert HEAL_REMINT_SUFFIX in str(first.value), (
+                "the first 401 must attempt the re-mint heal"
+            )
+            after_first = _MINT_CALLS
+            assert after_first == baseline + 1
+
+            for attempt in range(3):
+                with pytest.raises(RuntimeError) as later:
+                    store.put(f"later-{attempt}")
+                assert HEAL_DECLINED_SUFFIX in str(later.value), (
+                    "a known-futile re-mint must decline, not fire again"
+                )
+            assert _MINT_CALLS == after_first, (
+                f"no further mints once the re-mint is known futile "
+                f"(saw {_MINT_CALLS - after_first})"
+            )
+        finally:
+            self._reset_manager()
+
+    def test_futility_clears_once_a_call_stops_returning_401(
+        self, mint_fake_server, monkeypatch, tmp_path
+    ) -> None:
+        """The skip lasts exactly as long as the condition.
+
+        Pinned so the negative cache can never become a permanent disabling
+        of a heal that does work in other failure modes.
+        """
+        try:
+            store = self._store(mint_fake_server, monkeypatch, tmp_path)
+            store._remint_futile = True
+
+            assert store.put("healthy call") , "the server accepts this bearer"
+            assert store._remint_futile is False, (
+                "a non-401 response must clear the futility flag"
+            )
+        finally:
+            self._reset_manager()

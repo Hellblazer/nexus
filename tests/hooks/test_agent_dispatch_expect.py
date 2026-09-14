@@ -309,12 +309,16 @@ class TestPairsWithSubagentStart:
         # BLINDSPOT is the last line of the TSV-only report; the
         # space-backed extension (nexus-em75s.19) always appends exactly
         # one more line after it (SPACE_PRESENT/_NEVER_RAN/_OUTSIDE_WINDOW/
-        # _BLINDSPOT/_FALLBACK, depending on what the box can reach) — so
-        # BLINDSPOT is the second-to-last line, never the last.
+        # _BLINDSPOT/_FALLBACK, depending on what the box can reach), and
+        # the verify-absent extension (bead nexus-cnzei.6 fix round 1,
+        # item 3) appends exactly one more line after THAT
+        # (VERIFY_ABSENT_COUNT/_UNVERIFIABLE/_FALLBACK) — so BLINDSPOT is
+        # the third-to-last line, never the last or second-to-last.
         census_lines = census.stdout.rstrip().splitlines()
         blindspot_idx = census_lines.index("BLINDSPOT\tchecked=1 recognized=1 unrecognized=0")
-        assert blindspot_idx == len(census_lines) - 2
-        assert census_lines[-1].startswith("SPACE_"), census_lines[-1]
+        assert blindspot_idx == len(census_lines) - 3
+        assert census_lines[-2].startswith("SPACE_"), census_lines[-2]
+        assert census_lines[-1].startswith("VERIFY_"), census_lines[-1]
         assert "\tdeclared\n" in census.stdout
         undeclared = _lib_call("expectations_undeclared", tmp_path, SESSION)
         assert undeclared.returncode == 0

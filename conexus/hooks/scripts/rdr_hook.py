@@ -41,6 +41,12 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from collections import Counter
 from pathlib import Path
 
+# Shared hook-logging bridge lives next to this script (nexus-cnzei.2 fix
+# round 2: was a hand-duplicated local function; see _hook_logging.py's
+# docstring for the class-level defect this closes).
+sys.path.insert(0, os.path.dirname(__file__))
+import _hook_logging  # noqa: E402
+
 _EXCLUDE_FILES = {
     "readme.md", "template.md", "index.md", "overview.md",
     "workflow.md", "templates.md", "agents.md",
@@ -368,6 +374,7 @@ def main() -> None:
         sys.exit(0)
 
     repo_name = root.name
+    _hook_logging.configure_hook_logging()
     rdr_collection = _resolve_rdr_collection(root)
     indexed = bool(rdr_collection) and _collection_exists(rdr_collection)
 

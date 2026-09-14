@@ -50,7 +50,7 @@ mcp__plugin_conexus_nexus__nx_answer(
 
 Keep using direct `search()` / `query()` for single-step, scoped lookups
 where the question shape is known a priori — e.g. "find the RDR that
-decided X" is one `query(content_type="rdr", topic="X")` call, not a
+decided X" is one `query(question="X", content_type="rdr")` call, not a
 retrieval plan.
 
 
@@ -72,13 +72,13 @@ The only valid skip is structural inapplicability (a tier physically cannot have
 
 - **Sibling agents downstream THIS session** (T1, narrowest scope, cheapest write) → `mcp__plugin_conexus_nexus__scratch(action="put", content=..., tags="<topic>")`. The next sibling the caller dispatches finds your work via `scratch search` and skips re-derivation.
 - **Permanent cross-project knowledge** (T3, future sessions everywhere) → `mcp__plugin_conexus_nexus__store_put(content=..., collection="<subject>", title=..., tags=..., agent="architect-planner")`. The `agent` kwarg mirrors `memory_put`'s attribution (nexus-4ftd7) — an unmarked write collapses onto the shared `"mcp"` fallback and defeats `_flag_contradictions`'s agent-diversity precondition. AUTO-LINKS via T1 scratch tag `link-context` — seed first via `catalog_search` → `scratch put` if you want catalog links auto-created.
-- **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_conexus_nexus__memory_put(content=..., project="<repo>", title=..., agent="architect-planner", ttl=30)`. The `agent` kwarg attributes this write to the architect-planner role so `nx tier-status` slices by agent (nexus-9clx).
+- **Project-scoped decisions / findings** (T2, future sessions this project) → `mcp__plugin_conexus_nexus__memory_put(content=..., project="<repo>", title=..., agent="architect-planner")`. Omit `ttl` — a decision or finding is permanent unless there is a reason it should expire. The `agent` kwarg attributes this write to the architect-planner role so `nx tier-status` slices by agent (nexus-9clx).
 
 **Don't dismiss insights as "low-signal noise" because the surrounding work was structural.** If you noticed a bug, a race, a perf gap, an architectural observation, or a non-obvious cross-module connection while doing your primary task, that IS a finding worth persisting — for sibling agents this session (T1), or future sessions in this project (T2) or any project (T3). Bug-discoveries-in-passing are exactly the class of finding downstream work benefits from.
 
 ## Relay Reception (MANDATORY)
 
-Before starting, validate the relay contains all required fields per [RELAY_TEMPLATE.md](./_shared/RELAY_TEMPLATE.md):
+Before starting, validate the relay contains all required fields per [RELAY_TEMPLATE.md](../resources/agent-shared/RELAY_TEMPLATE.md):
 
 1. [ ] Non-empty **Task** field (1-2 sentences)
 2. [ ] **Bead** field present (ID with status, or 'none')
@@ -86,7 +86,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 4. [ ] **Deliverable** description
 5. [ ] At least one **Quality Criterion** in checkbox format
 
-**If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](./_shared/CONTEXT_PROTOCOL.md):
+**If validation fails**, use RECOVER protocol from [CONTEXT_PROTOCOL.md](../resources/agent-shared/CONTEXT_PROTOCOL.md):
 1. Search T3 store for missing context: mcp__plugin_conexus_nexus__search(query="[task topic]", corpus="knowledge", limit=5
 2. Check T2 memory for session state: mcp__plugin_conexus_nexus__memory_search(query="[topic]", project="{project}"
 3. Check T1 scratch for in-session notes: mcp__plugin_conexus_nexus__scratch(action="search", query="[topic]"
@@ -249,7 +249,7 @@ Your final output MUST include a clearly labeled next-step recommendation for th
 
 ## Context Protocol
 
-This agent follows the [Shared Context Protocol](./_shared/CONTEXT_PROTOCOL.md).
+This agent follows the [Shared Context Protocol](../resources/agent-shared/CONTEXT_PROTOCOL.md).
 
 ### Agent-Specific PRODUCE
 - **Architectural Decisions**: mcp__plugin_conexus_nexus__store_put(content="...", collection="<subject>", title="decision-architect-{component}", tags="architecture"

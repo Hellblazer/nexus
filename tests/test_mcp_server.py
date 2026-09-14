@@ -2180,8 +2180,7 @@ class TestQueryCatalogRouting:
         t3.put(collection=collection, content=content, title="t")
         result = query(question=content.split(":")[0] if ":" in content else content[:20], **kwargs)
         assert result.startswith("Error:")
-        assert "service mode" in result
-        assert "pgvector" in result
+        assert "HttpVectorClient-backed" in result
 
     def test_catalog_params_without_catalog(self, t3, monkeypatch):
         import nexus.mcp.core as mod
@@ -2199,7 +2198,7 @@ class TestQueryCatalogRouting:
         loud reject, not a dance-produced 'no documents found'."""
         result = query(question="anything", **kwargs)
         assert result.startswith("Error:")
-        assert "service mode" in result
+        assert "HttpVectorClient-backed" in result
 
 
 # ── Cluster output (RDR-056) ────────────────────────────────────────────────
@@ -2465,6 +2464,14 @@ async def test_mcp_catalog_server_round_trip():
             # Smoke test
             r = await session.call_tool("stats", {})
             assert r.content[0].text
+
+            # nexus-cnzei.1: `search` over the wire takes the arguments every
+            # skill passes. For three weeks it was backed by a private
+            # two-argument helper and only an in-process import was tested.
+            tools = {t.name: t for t in (await session.list_tools()).tools}
+            assert "query" in tools["search"].inputSchema.get("properties", {})
+            r = await session.call_tool("search", {"query": "nexus"})
+            assert not r.isError, r.content
 
 
 def test_mcp_shim_imports():

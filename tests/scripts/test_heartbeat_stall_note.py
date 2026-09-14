@@ -37,6 +37,10 @@ _HEALTHY = (
     "2026-09-12 20:34:38,008 nexus.daemon.storage_service_daemon INFO "
     "event='storage_service_lease_published' scope='1000' generation=1"
 )
+_STARTED = (
+    "2026-09-12 20:34:37,512 nexus.daemon.storage_service_daemon INFO "
+    "event='storage_service_supervisor_started' pid=412 launch_kind='native'"
+)
 
 
 def _note(log_path: Path | str) -> str:
@@ -249,13 +253,37 @@ class TestHeartbeatCensus:
             "an absent log must not be rendered as a zero count"
         )
 
-    def test_a_clean_readable_log_reports_a_real_zero(self, tmp_path) -> None:
+    def test_a_clean_log_with_a_supervisor_start_reports_a_real_zero(self, tmp_path) -> None:
+        log = tmp_path / "storage_service.log"
+        log.write_text("\n".join([_STARTED, _HEALTHY]) + "\n")
+        out = self._census(log)
+        assert "missed_ttl=0 slow=0 supervisor_starts=1" in out
+        assert "a real zero over 1 supervisor start(s)" in out
+        assert "not tick coverage" in out, (
+            "a healthy tick logs nothing, so the zero must not be upgraded "
+            "to a claim about ticks"
+        )
+        assert "UNREADABLE" not in out
+        assert "MEASURED NOTHING" not in out
+
+    def test_a_readable_log_with_no_supervisor_start_measured_nothing(self, tmp_path) -> None:
+        """nexus-39etc. A healthy tick logs nothing, so zero heartbeat lines
+        come equally from a clean run and from a file nothing ever ticked
+        against. Without a supervisor start in the file the census cannot
+        tell those apart, and must not call the result a real zero."""
         log = tmp_path / "storage_service.log"
         log.write_text(_HEALTHY + "\n")
         out = self._census(log)
-        assert "missed_ttl=0 slow=0" in out
-        assert "a real zero, read from a readable log" in out
-        assert "UNREADABLE" not in out
+        assert "supervisor_starts=0" in out
+        assert "MEASURED NOTHING" in out
+        assert "a real zero" not in out
+
+    def test_an_empty_readable_log_measured_nothing(self, tmp_path) -> None:
+        log = tmp_path / "storage_service.log"
+        log.write_text("")
+        out = self._census(log)
+        assert "MEASURED NOTHING" in out
+        assert "a real zero" not in out
 
     def test_slow_ticks_are_counted_and_printed_verbatim(self, tmp_path) -> None:
         """A count discards the stamp.* breakdown, which is the entire

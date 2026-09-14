@@ -1199,6 +1199,16 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard() -> 
                 "--no-header",
             ],
             cwd=_REPO_ROOT,
+            # Collection still runs the child's session-start build-lease
+            # gate. A lease root that does not exist reads as "no lease", so
+            # a Maven run elsewhere on the box cannot refuse this probe
+            # (nexus-fam6l). Nothing in the child writes a lease.
+            env={
+                **{k: v for k, v in os.environ.items() if k != "NX_BUILD_LEASE_WAIT"},
+                "NX_BUILD_LEASE_ROOT": str(
+                    pathlib.Path(tempfile.gettempdir()) / f"nexus-no-build-lease-{os.getpid()}"
+                ),
+            },
             capture_output=True,
             text=True,
             # Generous, and a HANG bound rather than a performance assertion.

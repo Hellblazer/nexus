@@ -11,6 +11,7 @@ import liquibase.Liquibase;
 import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
+import liquibase.resource.ClassLoaderResourceAccessor;
 import liquibase.resource.DirectoryResourceAccessor;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
@@ -25,6 +26,7 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Set;
 
@@ -196,6 +198,35 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * ({@code uv run python scripts/gen_rehearsal_hop_manifest.py}) and
      * re-deriving the data leg's seed coverage — the Python seed-coverage
      * lint (nexus-gm38i) fails loudly until both are done.
+     *
+     * <p><strong>2026-09-13 rotation check (nexus-t1qbs): NOT rotated, and
+     * cannot be until the divergence point moves.</strong> The deployed
+     * engine has advanced to {@code engine-service-v0.1.117}; this pin was
+     * checked against the two structural facts above and both fail. {@code
+     * git diff engine-service-v0.1.117 HEAD -- service/src/main/resources/
+     * db/changelog} is EMPTY — v0.1.117's changelog tree is byte-identical
+     * to HEAD's, so it cannot serve as an "old" tree at all (a hop from it
+     * applies zero changesets). More generally, {@code catalog-013-chash-
+     * checks-validate.xml} first shipped at {@code engine-service-v0.1.33}
+     * (commit {@code e1cd25f1}, verified via {@code git cat-file -e
+     * <tag>:<path>}: v0.1.32 lacks it, v0.1.33 has it; catalog-014 follows
+     * at v0.1.35) — so EVERY tag from v0.1.33 through the current v0.1.117
+     * already contains catalog-013, and none of them can pass this test's own
+     * preconditions ({@code changesetApplied(..., "catalog-013-2", ...)
+     * .isFalse()} for the schema leg; the data leg's coverage-vacuity guard
+     * for the row-DML changesets). {@code engine-service-v0.1.17} therefore
+     * remains the only tag on the "previously-deployed" side of this
+     * project's tag history that predates the divergence-injection point,
+     * and stays pinned here rather than rotating to a tag that would make
+     * the rehearsal vacuous. The ROTATION POLICY above is not wrong, it is
+     * just inert for this particular injection point: it can fire again
+     * only once a NEW guard-bearing changeset newer than catalog-013/014 is
+     * chosen as the injection point for a future generation of this
+     * rehearsal (at which point OLD_TAG would move forward to whatever tag
+     * predates THAT changeset, not necessarily v0.1.17). No manifest/seed-
+     * coverage regeneration was needed for this check (OLD_TAG did not
+     * change); {@code uv run pytest tests/test_rehearsal_seed_coverage_lint.py}
+     * and this class both stayed green throughout.
      */
     private static final String OLD_TAG = "engine-service-v0.1.17";
 
@@ -450,6 +481,8 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   hygiene-002-1 nexus-ft04v.4
                 //   hygiene-004-1 nexus-ztafa
                 //   hygiene-005-3 nexus-uxd2a
+                //   tuples-003-2 nexus-r7xao
+                //   tuples-004-1 nexus-8zoyp
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -988,6 +1021,59 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .isEqualTo(0);
                 }
 
+                // ── nexus-r7xao seed-coverage follow-up: tuples-003-2's target table
+                // (nexus.tuples) does not exist until PARTWAY through this SAME hop,
+                // unlike every table seeded above -- migrate up to just before
+                // tuples-003-2, seed its input rows directly (see migrateUpTo's own
+                // javadoc for why this is safe to resume from), THEN let the normal
+                // whole-hop migrate below finish tuples-003-2 through the rest of
+                // HEAD exactly as it would have run in one shot. ────────────────────
+                byte[] tuplesOversizedId = HexFormat.of()
+                    .parseHex("c0ffee0000000000000000000000000000000000000000000000000000f00d");
+                byte[] tuplesAtCapId = HexFormat.of()
+                    .parseHex("c0ffee1111111111111111111111111111111111111111111111111111f00d");
+                String tuplesTenant = "tuples-rehearsal-tenant";
+                String tuplesLegacyClaimId = "rehearsal-legacy-claim-id";
+                migrateUpTo(adminDs, "tuples-003-2");
+                try (Connection su = pg.createConnection("")) {
+                    su.setAutoCommit(true);
+                    seedTupleBodySizeLimitRows(su, tuplesTenant, tuplesOversizedId, tuplesAtCapId,
+                        tuplesLegacyClaimId);
+                }
+                try (Connection admin = adminDs.getConnection()) {
+                    assertThat(count(admin, "SELECT count(*) FROM nexus.tuples"))
+                        .as("FORCE RLS must hide both seeded nexus.tuples rows from the "
+                            + "non-BYPASSRLS owner -- tuples-003-2's own toggle-wrap target")
+                        .isEqualTo(0);
+                }
+
+                // ── nexus-8zoyp seed-coverage follow-up: tuples-004-1's UPDATE
+                // (nulling body on already-consumed rows) -- same shape as
+                // tuples-003-2's own follow-up above, one changeset further --
+                // migrate up to just before tuples-004-1 (this also applies
+                // tuples-003-2/3/4, still pending from the migrateUpTo call
+                // above, so chk_tuples_body_size already exists and is
+                // validated by this point), seed a consumed row WITH a body and
+                // an unconsumed row WITH a body directly (both well under the
+                // 4096-byte cap), THEN let the normal whole-hop migrate below
+                // finish tuples-004-1 through the rest of HEAD exactly as it
+                // would have run in one shot. ──────────────────────────────────
+                byte[] tuplesConsumedId = HexFormat.of()
+                    .parseHex("c0ffee4444444444444444444444444444444444444444444444444444f00d");
+                byte[] tuplesUnconsumedId = HexFormat.of()
+                    .parseHex("c0ffee5555555555555555555555555555555555555555555555555555f00d");
+                migrateUpTo(adminDs, "tuples-004-1");
+                try (Connection su = pg.createConnection("")) {
+                    su.setAutoCommit(true);
+                    seedTupleConsumedBodyCleanupRows(su, tuplesTenant, tuplesConsumedId, tuplesUnconsumedId);
+                }
+                try (Connection admin = adminDs.getConnection()) {
+                    assertThat(count(admin, "SELECT count(*) FROM nexus.tuples"))
+                        .as("FORCE RLS must hide every seeded nexus.tuples row from the "
+                            + "non-BYPASSRLS owner -- tuples-004-1's own toggle-wrap target")
+                        .isEqualTo(0);
+                }
+
                 // ── HEAD LEG over a populated database. This is the leg the
                 // v0.1.33 outage proved was untested: catalog-013-0's naked DML
                 // no-ops under RLS here exactly as it did in production; only
@@ -999,6 +1085,66 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         + "row-DML changeset in the hop must actually take effect for the "
                         + "NOBYPASSRLS owner, not silently no-op into a failing backstop")
                     .doesNotThrowAnyException();
+
+                // ── tuples-003-2's own effect, mirroring TuplesBaselineSchemaLiquibaseTest's
+                // dedicated Liquibase-level proof: the over-cap row is gone, the at-cap
+                // row survives untouched, the referencing claim-log row survives with
+                // tuple_id nulled (tuple_claim_log_tuple_fk's ON DELETE SET NULL), and
+                // chk_tuples_body_size ends VALIDATED. ───────────────────────────────
+                try (Connection su = pg.createConnection("")) {
+                    var ctx = DSL.using(su, SQLDialect.POSTGRES);
+                    assertThat(ctx.fetchExists(ctx.selectFrom(
+                        dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                        .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(tuplesOversizedId))))
+                        .as("the legacy oversized row must be deleted by tuples-003-2")
+                        .isFalse();
+
+                    var atCapRow = ctx.selectFrom(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                        .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(tuplesAtCapId))
+                        .fetchOne();
+                    assertThat(atCapRow).as("the at-cap row must survive tuples-003-2 untouched").isNotNull();
+                    assertThat(atCapRow.getBody()).hasSize(4096);
+
+                    var tupleLogRow = ctx.selectFrom(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG)
+                        .where(dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG.CLAIM_ID.eq(tuplesLegacyClaimId))
+                        .fetchOne();
+                    assertThat(tupleLogRow)
+                        .as("the referencing tuple_claim_log row must survive the tuple's deletion")
+                        .isNotNull();
+                    assertThat(tupleLogRow.getTupleId())
+                        .as("tuple_claim_log_tuple_fk's ON DELETE SET NULL must have fired")
+                        .isNull();
+
+                    assertThat(PgCatalogProbes.constraintExists(ctx, "chk_tuples_body_size")).isTrue();
+                    assertThat(PgCatalogProbes.constraintValidated(ctx, "chk_tuples_body_size"))
+                        .as("VALIDATE must succeed once tuples-003-2 has removed the only violator")
+                        .isTrue();
+                }
+
+                // ── tuples-004-1's own effect: the pre-existing consumed row's body
+                // is nulled, the pre-existing unconsumed row's body survives
+                // untouched. ─────────────────────────────────────────────────────
+                try (Connection su = pg.createConnection("")) {
+                    var ctx = DSL.using(su, SQLDialect.POSTGRES);
+                    var consumedRow = ctx.selectFrom(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                        .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(tuplesConsumedId))
+                        .fetchOne();
+                    assertThat(consumedRow)
+                        .as("the pre-existing consumed row must survive tuples-004-1").isNotNull();
+                    assertThat(consumedRow.getBody())
+                        .as("tuples-004-1 must null the body of an already-consumed row")
+                        .isNull();
+
+                    var unconsumedRow = ctx.selectFrom(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+                        .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.ID.eq(tuplesUnconsumedId))
+                        .fetchOne();
+                    assertThat(unconsumedRow)
+                        .as("the pre-existing unconsumed row must survive tuples-004-1 untouched")
+                        .isNotNull();
+                    assertThat(unconsumedRow.getBody())
+                        .as("tuples-004-1 must leave an unconsumed row's body intact")
+                        .isEqualTo("still-here");
+                }
 
                 // ── Ground truth as superuser: the DML took EFFECT (rows changed),
                 // not merely "the migration didn't crash". ───────────────────────
@@ -2197,6 +2343,161 @@ class SchemaUpgradeRehearsalIntegrationTest {
             .as("old leg must have applied exactly the changesets it reported pending")
             .isEqualTo(oldLegPending);
         return oldLegApplied;
+    }
+
+    /**
+     * HEAD LEG, PARTIAL: runs the classpath (HEAD) master changelog up to
+     * (but NOT including) {@code changesetId} -- the same {@code migrateUpTo}
+     * idiom {@code VectorsUnifyChunksIntegrationTest}/{@code
+     * Hygiene001NotNullMigrationRlsTest} already use, retargeted at {@link
+     * dev.nexus.service.db.SchemaMigrator#MASTER_CHANGELOG}'s own classpath
+     * resource (a {@link ClassLoaderResourceAccessor}, not the {@link
+     * DirectoryResourceAccessor} {@link #applyOldLeg} uses for the OLD tree)
+     * so it sees this checkout's OWN changelog, exactly what a later {@link
+     * SchemaMigrator#migrate} call over the SAME connection pool resumes
+     * from -- Liquibase's own {@code databasechangelog} bookkeeping makes that
+     * resumption safe (idempotent re-application of already-run changesets
+     * is the whole premise a production upgrade relies on).
+     *
+     * <p>nexus-r7xao seed-coverage follow-up (tuples-003-2): a hop changeset
+     * whose target table does not exist until PARTWAY through the SAME hop
+     * (unlike every other {@code DECLARED_SEED_COVERAGE} entry, which seeds
+     * rows for a table the OLD leg already created) cannot be seeded in the
+     * single SEED block above {@link #applyOldLeg} and the whole-hop {@link
+     * SchemaMigrator#migrate} call -- the table simply is not there yet at
+     * that point. This helper is the template for a table created MID-WALK:
+     * migrate up to just before the changeset that needs a specific
+     * pre-existing population, seed directly (nexus.tuples/tuple_claim_log
+     * are freshly created by tuples-001-baseline/tuples-002-* by this point,
+     * with no CHECK constraint yet -- an oversized body inserts cleanly), then
+     * let the normal {@code SchemaMigrator.migrate(adminDs)} call finish the
+     * rest of the hop exactly as it would have run the whole thing in one
+     * shot.
+     */
+    private static void migrateUpTo(HikariDataSource ds, String changesetId) throws Exception {
+        try (Connection conn = ds.getConnection()) {
+            Database database = DatabaseFactory.getInstance()
+                .findCorrectDatabaseImplementation(new JdbcConnection(conn));
+            try (Liquibase liquibase = new Liquibase(
+                    MASTER_CHANGELOG_RELATIVE,
+                    new ClassLoaderResourceAccessor(),
+                    database)) {
+                List<liquibase.changelog.ChangeSet> unrun =
+                    liquibase.listUnrunChangeSets(new Contexts(), new LabelExpression());
+                int idx = -1;
+                for (int i = 0; i < unrun.size(); i++) {
+                    if (changesetId.equals(unrun.get(i).getId())) {
+                        idx = i;
+                        break;
+                    }
+                }
+                assertThat(idx)
+                    .as("%s must be present and still pending in the HEAD changelog", changesetId)
+                    .isGreaterThanOrEqualTo(0);
+                liquibase.update(idx, new Contexts(), new LabelExpression());
+            }
+        }
+    }
+
+    /**
+     * nexus-r7xao seed-coverage follow-up: tuples-003-2's own input shape --
+     * an over-cap body row, an at-cap body row, and a claim-log row
+     * referencing the over-cap tuple -- mirroring {@code
+     * TuplesBaselineSchemaLiquibaseTest#
+     * tuplesBodySizeCheckCleanup_deletesLegacyOversizedRows_keepsAtCapRow_thenValidates}'s
+     * fixture exactly, the dedicated Liquibase-level test for this same
+     * changeset. Runs on a superuser connection (bypasses FORCE RLS
+     * automatically, same as every other seed helper in this file) at the
+     * point in the hop where nexus.tuples/tuple_claim_log exist but carry no
+     * CHECK constraint yet, so the oversized insert succeeds cleanly --
+     * modeling a genuine legacy row written before this bead's engine-side
+     * cap ever existed.
+     */
+    private static void seedTupleBodySizeLimitRows(Connection su, String tenant, byte[] oversizedId,
+                                                    byte[] atCapId, String legacyClaimId) throws Exception {
+        java.time.OffsetDateTime now = java.time.OffsetDateTime.now();
+        try (var ps = su.prepareStatement(
+                "INSERT INTO nexus.tuples (id, tenant_id, subspace, template, keys, body, expires_at, created_at) "
+                + "VALUES (?, ?, ?, ?, '{}'::jsonb, ?, ?, ?)")) {
+            ps.setBytes(1, oversizedId);
+            ps.setString(2, tenant);
+            ps.setString(3, "mailbox/rehearsal-oversized");
+            ps.setString(4, "mailbox/<address>");
+            ps.setString(5, "x".repeat(5000));
+            ps.setObject(6, now.plusDays(7));
+            ps.setObject(7, now);
+            ps.executeUpdate();
+        }
+        try (var ps = su.prepareStatement(
+                "INSERT INTO nexus.tuples (id, tenant_id, subspace, template, keys, body, expires_at, created_at) "
+                + "VALUES (?, ?, ?, ?, '{}'::jsonb, ?, ?, ?)")) {
+            ps.setBytes(1, atCapId);
+            ps.setString(2, tenant);
+            ps.setString(3, "mailbox/rehearsal-at-cap");
+            ps.setString(4, "mailbox/<address>");
+            ps.setString(5, "x".repeat(4096));
+            ps.setObject(6, now.plusDays(7));
+            ps.setObject(7, now);
+            ps.executeUpdate();
+        }
+        try (var ps = su.prepareStatement(
+                "INSERT INTO nexus.tuple_claim_log "
+                + "(tenant_id, subspace, template, tuple_id, claim_id, claimant, transition, at, expires_at) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
+            ps.setString(1, tenant);
+            ps.setString(2, "mailbox/rehearsal-oversized");
+            ps.setString(3, "mailbox/<address>");
+            ps.setBytes(4, oversizedId);
+            ps.setString(5, legacyClaimId);
+            ps.setString(6, "rehearsal-claimant");
+            ps.setString(7, "claim");
+            ps.setObject(8, now);
+            ps.setObject(9, now.plusDays(180));
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * nexus-8zoyp seed-coverage: tuples-004-1's own input shape -- a consumed
+     * row carrying a body, and an unconsumed row carrying a body -- modeling
+     * the population tuples-004-1's one-shot cleanup exists to fix: rows
+     * consumed before {@code TupleRepository.consumeClaim} started nulling
+     * body itself. Runs on a superuser connection (bypasses FORCE RLS
+     * automatically, same as every other seed helper in this file); both
+     * bodies are well under the 4096-byte {@code chk_tuples_body_size} cap,
+     * already enforced by this point in the walk (tuples-003-3/4 ran as part
+     * of the {@code migrateUpTo("tuples-004-1")} call above).
+     */
+    private static void seedTupleConsumedBodyCleanupRows(Connection su, String tenant, byte[] consumedId,
+                                                          byte[] unconsumedId) throws Exception {
+        java.time.OffsetDateTime now = java.time.OffsetDateTime.now();
+        try (var ps = su.prepareStatement(
+                "INSERT INTO nexus.tuples (id, tenant_id, subspace, template, keys, body, "
+                + "consumed_at, consumed_by, expires_at, created_at) "
+                + "VALUES (?, ?, ?, ?, '{}'::jsonb, ?, ?, ?, ?, ?)")) {
+            ps.setBytes(1, consumedId);
+            ps.setString(2, tenant);
+            ps.setString(3, "mailbox/rehearsal-consumed");
+            ps.setString(4, "mailbox/<address>");
+            ps.setString(5, "already-consumed");
+            ps.setObject(6, now);
+            ps.setString(7, "rehearsal-claimant");
+            ps.setObject(8, now.plusDays(7));
+            ps.setObject(9, now);
+            ps.executeUpdate();
+        }
+        try (var ps = su.prepareStatement(
+                "INSERT INTO nexus.tuples (id, tenant_id, subspace, template, keys, body, expires_at, created_at) "
+                + "VALUES (?, ?, ?, ?, '{}'::jsonb, ?, ?, ?)")) {
+            ps.setBytes(1, unconsumedId);
+            ps.setString(2, tenant);
+            ps.setString(3, "mailbox/rehearsal-unconsumed");
+            ps.setString(4, "mailbox/<address>");
+            ps.setString(5, "still-here");
+            ps.setObject(6, now.plusDays(7));
+            ps.setObject(7, now);
+            ps.executeUpdate();
+        }
     }
 
     // ── Helpers: git plumbing ────────────────────────────────────────────────

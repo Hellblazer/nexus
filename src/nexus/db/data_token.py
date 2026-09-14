@@ -152,6 +152,57 @@ still sent when ``mint_tenant`` is unconfigured (today's behavior,
 unchanged). ``mint_token`` and ``mint_tenant`` travel as a PAIR: configuring
 one without the other is a valid but likely wrong half-provisioned state
 whenever the credential's bound tenant is not literally ``"default"``.
+
+401 re-mint single-flight + futility (nexus-umue1, porting nexus-r0d37
+defect 2's T1 guard to the shared manager): T1's ``HttpScratchStore`` fix
+put both guards in PER-INSTANCE state (``self._remint_futile``,
+single-flight on ``self._refresh_lock``) because T1 has exactly one
+instance per session. T2 and T3 do not — nine T2 ``Http*Store`` instances
+and T3's module-level client all resolve the SAME cached token per
+``(base_url, tenant)`` key through this one manager, so the guards have to
+live HERE to coordinate across them; per-instance state would just let
+each store re-mint independently, reproducing the exact storm T1 fixed for
+itself.
+
+:meth:`invalidate_if_current` is the single-flight primitive: a caller
+passes the ``Authorization`` bearer its OWN failed request actually sent,
+and the cached entry for that key is popped ONLY when it still holds that
+exact token — a caller whose bearer was already replaced by a winning
+sibling (or whose key is currently marked futile, see below) retries on
+the CURRENT token instead of invalidating it and minting a competing
+replacement.
+
+Futility EXPIRES (Sam's decision, nexus-umue1 review round 2, superseding
+the original "lasts exactly as long as the condition" design): T1's 401 is
+authored by the require-minted-session gate on a stale SESSION id, which a
+data-token re-mint structurally can never fix — permanent-until-healthy
+futility is correct there. T2/T3's 401 is measured (engine AuthFilter
+trace, 2026-09-13) to be TOKEN-bound in the overwhelming case — the
+non-token 401 reasons (``session_not_minted`` / ``cross_tenant_session``)
+require an ``X-Nexus-Session`` header neither T2 nor T3 ever sends — so for
+T2/T3 a re-mint is normally the correct remedy and a permanent futility
+mark trades a bounded per-call mint-storm risk for an UNBOUNDED outage:
+once ANY caller's re-mint+retry both 401 (e.g. a transient rejection
+during a key rotation, immediately followed by the OLD cached token
+becoming genuinely bad), every OTHER caller sharing the key was refused a
+re-mint attempt until the cached token's own natural TTL-refresh point —
+up to ~48 minutes at the 3600s default TTL's 20% :data:`_REFRESH_THRESHOLD`.
+:meth:`mark_remint_futile` therefore records a MARK TIME (via the same
+injectable, monotonic ``clock`` the TTL bookkeeping already uses — never
+wall-clock ``time.time``), and :meth:`is_remint_futile` /
+:meth:`invalidate_if_current` treat a mark older than
+:data:`DEFAULT_REMINT_FUTILE_WINDOW_S` (default 60s, injectable via
+``remint_futile_window_seconds`` — see :meth:`DataTokenManager.__init__`)
+as NOT futile, dropping the stale mark rather than leaking it forever.
+:meth:`clear_remint_futile` (called by every consumer on any non-401
+response for the key) still lifts the mark immediately when the condition
+resolves before the window elapses. Net bound, stated honestly rather than
+claimed exact: a PERSISTENT misconfiguration (the bearer is genuinely,
+durably invalid) costs roughly one wasted mint attempt per window per key
+— not one per call, and not unbounded; a TRANSIENT rejection heals within
+one window, never the old ~48-minute worst case. See
+``nexus.db.t2._refreshable_client`` and ``nexus.db.http_vector_client``
+for the two call sites.
 """
 
 from __future__ import annotations
@@ -186,6 +237,16 @@ DEFAULT_TTL_SECONDS: int = 3600
 #: Refresh a cached token once less than this fraction of its granted TTL
 #: window remains (design of record: "<20% of TTL remains").
 _REFRESH_THRESHOLD: float = 0.20
+
+#: Default window (Sam's decision, nexus-umue1 review round 2) a
+#: :meth:`DataTokenManager.mark_remint_futile` mark stays in effect before
+#: :meth:`DataTokenManager.is_remint_futile` / :meth:`invalidate_if_current`
+#: treat it as expired and drop it -- see the module docstring's "Futility
+#: EXPIRES" section for why an unbounded mark is wrong for T2/T3 (unlike
+#: T1's structurally-permanent 401 cause). Measured against the injectable,
+#: monotonic ``clock`` (never wall-clock ``time.time``), so a test can
+#: control it exactly via a fake clock rather than a real sleep.
+DEFAULT_REMINT_FUTILE_WINDOW_S: float = 60.0
 
 #: Transport timeout for the mint POST (design of record: "~10s").
 _MINT_TIMEOUT_S: float = 10.0
@@ -469,6 +530,15 @@ class DataTokenManager:
             ``nexus.db.t1._lock_guarded_mint_or_borrow``'s own deadline,
             which stays wired to real time regardless of any test clock
             injected for cache-TTL purposes.
+        remint_futile_window_seconds: How long a
+            :meth:`mark_remint_futile` mark stays in effect before
+            :meth:`is_remint_futile` / :meth:`invalidate_if_current` treat
+            it as expired (Sam's decision, nexus-umue1 review round 2 --
+            see the module docstring's "Futility EXPIRES" section).
+            Defaults to :data:`DEFAULT_REMINT_FUTILE_WINDOW_S` (60s).
+            Measured against the injectable ``clock`` above (monotonic,
+            never wall-clock) -- injectable here so a test controls the
+            window via a fake clock rather than a real sleep.
     """
 
     def __init__(
@@ -483,6 +553,7 @@ class DataTokenManager:
         config_dir: Path | None = None,
         wall_clock: Callable[[], float] = time.time,
         lock_wait_ceiling_seconds: float = _MINT_LOCK_WAIT_CEILING_S,
+        remint_futile_window_seconds: float = DEFAULT_REMINT_FUTILE_WINDOW_S,
     ) -> None:
         self._clock = clock
         self._poster = poster
@@ -493,6 +564,7 @@ class DataTokenManager:
         self._config_dir = config_dir
         self._wall_clock = wall_clock
         self._lock_wait_ceiling_seconds = lock_wait_ceiling_seconds
+        self._remint_futile_window_seconds = remint_futile_window_seconds
         # nexus-7qz06: sharded per-(base_url, tenant) locks rather than one
         # process-wide lock — see _lock_for. _registry_lock guards only the
         # dict's own get-or-create, never the check-then-mint sequence a
@@ -500,6 +572,14 @@ class DataTokenManager:
         self._registry_lock = threading.Lock()
         self._key_locks: dict[tuple[str, str], threading.Lock] = {}
         self._cache: dict[tuple[str, str], _CachedToken] = {}
+        # nexus-umue1 (porting nexus-r0d37 defect 2, WINDOWED per Sam's
+        # review-round-2 decision): per-key futility MARK TIME for the 401
+        # re-mint guard -- see the module docstring's "Futility EXPIRES"
+        # section. Guarded by the SAME per-key lock as ``_cache``
+        # (``_lock_for``), never a separate lock. Stores the ``clock()``
+        # value at mark time, not a bare bool -- :meth:`_is_futile_locked`
+        # is what turns this into a bounded yes/no.
+        self._futile_marked_at: dict[tuple[str, str], float] = {}
 
     # ── Credential resolution ────────────────────────────────────────────────
 
@@ -628,6 +708,119 @@ class DataTokenManager:
         if popped is not None:
             self._delete_lease(base_url, tenant, expected_token=popped.token)
             _log.info("data_token_invalidated", tenant=tenant, endpoint=_host(base_url))
+
+    def _is_futile_locked(self, key: tuple[str, str]) -> bool:
+        """The windowed futility check (Sam's decision, nexus-umue1 review
+        round 2 — see the module docstring's "Futility EXPIRES" section).
+
+        MUST be called with ``self._lock_for(key)`` already held — this is
+        a private helper, never a public entry point of its own. A mark
+        younger than :attr:`_remint_futile_window_seconds` is futile; an
+        absent mark is not futile; a mark AT OR PAST the window is dropped
+        (the dict entry is deleted, not merely ignored) and reported as
+        not futile — a stale mark must never leak forever, and dropping it
+        here means the NEXT call, not just this one, sees a clean slate.
+        """
+        marked_at = self._futile_marked_at.get(key)
+        if marked_at is None:
+            return False
+        if self._clock() - marked_at >= self._remint_futile_window_seconds:
+            del self._futile_marked_at[key]
+            return False
+        return True
+
+    def invalidate_if_current(self, base_url: str, tenant: str, sent_token: str) -> bool:
+        """Single-flighted, futility-aware compare-and-invalidate for the
+        401 self-heal path (nexus-umue1, porting nexus-r0d37 defect 2).
+
+        *sent_token* is the RAW data-token string (never the
+        ``"Bearer <token>"``-prefixed header value — the cache stores raw
+        tokens, exactly what :meth:`bearer_for` itself returns) the
+        caller's OWN failed request carried. A caller holding only the
+        full ``Authorization`` header value must strip the ``"Bearer "``
+        prefix before calling this method. Returns ``True`` only when
+        THIS call actually popped the cache entry — the caller should
+        then call :meth:`bearer_for` to mint a fresh one and retry.
+        Returns ``False`` (never invalidates) when either:
+
+        - the key is currently marked futile AND STILL WITHIN THE WINDOW
+          (:meth:`is_remint_futile`, bounded per the module docstring's
+          "Futility EXPIRES" section) — a prior re-mint already healed the
+          bearer and the retry still 401'd, so minting again within the
+          window is unlikely to help; past the window the mark is dropped
+          and a fresh re-mint attempt is allowed again — or
+        - the in-process cache no longer holds *sent_token* — a sibling
+          caller (another T2 store instance, or T3) already invalidated
+          and re-minted while this caller was in flight, so retrying on
+          the winner's fresh token is correct and minting a second,
+          competing replacement is not.
+
+        Callers retry EITHER way — the retry simply resends whatever
+        :meth:`bearer_for` currently returns, which is a fresh mint when
+        this call returned ``True`` and the unchanged current token
+        otherwise (see the module docstring). The whole check-then-pop
+        sequence (futility peek + cache compare + pop) is atomic under
+        this key's :meth:`_lock_for` lock — the same lock
+        :meth:`bearer_for` and :meth:`invalidate` use — so a concurrent
+        winner's ``bearer_for`` mint-on-miss and a loser's
+        ``invalidate_if_current`` can never interleave to both invalidate.
+        """
+        key = (base_url.rstrip("/"), tenant)
+        with self._lock_for(key):
+            if self._is_futile_locked(key):
+                return False
+            cached = self._cache.get(key)
+            if cached is None or cached.token != sent_token:
+                return False
+            popped = self._cache.pop(key)
+        self._delete_lease(base_url, tenant, expected_token=popped.token)
+        _log.info("data_token_invalidated", tenant=tenant, endpoint=_host(base_url))
+        return True
+
+    def mark_remint_futile(self, base_url: str, tenant: str) -> None:
+        """Mark ``(base_url, tenant)`` as futile-to-remint (nexus-umue1),
+        starting a :attr:`_remint_futile_window_seconds`-long window.
+
+        Called by a consumer after :meth:`invalidate_if_current` returned
+        ``True`` (this call actually re-minted) and the retry on the fresh
+        token STILL 401'd — evidence (not proof — see the module
+        docstring's "Futility EXPIRES" section) that the bearer was not
+        the cause. Every other caller sharing this key skips its own
+        re-mint attempt (see :meth:`invalidate_if_current`) until either
+        :meth:`clear_remint_futile` (a non-401 response) lifts it early,
+        or the window elapses and the NEXT call is allowed to try again.
+        Re-marking (calling this again while already futile) resets the
+        window's start time to now — a fresh re-mint attempt that ALSO
+        401s is fresh evidence, not a continuation of the old one.
+        """
+        key = (base_url.rstrip("/"), tenant)
+        with self._lock_for(key):
+            self._futile_marked_at[key] = self._clock()
+
+    def clear_remint_futile(self, base_url: str, tenant: str) -> None:
+        """Clear the futility mark for ``(base_url, tenant)`` (nexus-umue1).
+
+        Called by a consumer on ANY non-401 response for this key (a 404
+        counts — the bearer and tenant both resolved, the endpoint merely
+        had nothing there) so a resolved condition lifts the skip
+        IMMEDIATELY rather than waiting out the rest of the window. A
+        no-op when the key was never marked futile (or its mark had
+        already expired).
+        """
+        key = (base_url.rstrip("/"), tenant)
+        with self._lock_for(key):
+            self._futile_marked_at.pop(key, None)
+
+    def is_remint_futile(self, base_url: str, tenant: str) -> bool:
+        """True when ``(base_url, tenant)`` is currently marked futile-to-
+        remint AND the mark is still within its window (nexus-umue1) — a
+        PEEK, mints nothing; DOES drop an expired mark as a side effect
+        (see :meth:`_is_futile_locked`), which is itself side-effect-free
+        from every caller's observable perspective (an expired mark was
+        never going to report ``True`` again regardless)."""
+        key = (base_url.rstrip("/"), tenant)
+        with self._lock_for(key):
+            return self._is_futile_locked(key)
 
     def has_fresh_lease(self, base_url: str, tenant: str) -> bool:
         """True when a fresh (not due-for-refresh) cross-process lease-file

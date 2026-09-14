@@ -36,6 +36,11 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(__file__))
 import _lib  # noqa: E402
 
+# Shared hook-logging bridge lives one directory up, alongside this script's
+# sibling _endpoint_resolve.py (nexus-cnzei.2 fix round 2).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _hook_logging  # noqa: E402
+
 RULE_NAME = "phase_review_close_requires_gate"
 
 _BD_CLOSE_RE = re.compile(
@@ -83,6 +88,24 @@ def _claude_pid() -> int:
         except ValueError:
             pass
     try:
+        # nexus-cnzei.2 (S2, fix round 2): bridge structlog to stderr/logfile
+        # BEFORE importing nexus.session below, via the SHARED helper (was a
+        # hand-duplicated local try/except; see _hook_logging.py's docstring
+        # for the class-level defect this closes). Structlog's default
+        # PrintLoggerFactory writes to STDOUT, the same channel this
+        # PreToolUse hook's own JSON envelope goes out on, and a debug line
+        # landing there ahead of (or beside) that JSON would corrupt the
+        # payload the harness parses.
+        #
+        # _hook_logging.configure_hook_logging() carries its OWN internal
+        # best-effort catch (never raises); the outer `except Exception:
+        # return os.getppid()` below is a SEPARATE, independent guarantee --
+        # it also covers a total absence of _hook_logging itself and the
+        # `nexus.session` import/call that follows. See
+        # test_claude_pid_survives_a_logging_setup_failure, which asserts
+        # the outer catch specifically by bypassing the inner one.
+        _hook_logging.configure_hook_logging()
+
         from nexus.session import find_immediate_claude_pid
 
         return find_immediate_claude_pid()
@@ -172,8 +195,9 @@ def _redirect_message(rdr_id: str | None, phase: str | None, reason: str) -> str
     return (
         f"Phase-review close blocked: {reason}. Run the gate first:\n"
         f"  /conexus:phase-review-gate {rdr_part} --phase {phase_part}\n"
-        f"Then re-run `bd close ...`. To override, append "
-        f"`# routing-allow: <reason>` (>=8 chars) to the command."
+        f"Then re-run `bd close ...`. An escape (`# routing-allow: <reason>`) "
+        f"exists for this guard, but only on the user's explicit "
+        f"instruction to use it -- it is not yours to reach for."
     )
 
 

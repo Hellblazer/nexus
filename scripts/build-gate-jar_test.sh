@@ -17,7 +17,7 @@ repo="$WORKDIR/repo"
 props_rel="service/src/main/resources/META-INF/nexus/release.properties"
 mkdir -p "$repo/scripts/lib" "$repo/service/src/main/resources/META-INF/nexus" "$repo/src/nexus"
 cp "$HERE/build-gate-jar.sh" "$repo/scripts/"
-cp "$HERE/lib/build-lease.sh" "$HERE/lib/gate-jar-cache.sh" "$repo/scripts/lib/"
+cp "$HERE/lib/build-lease.sh" "$HERE/lib/release-props-lease.sh" "$HERE/lib/gate-jar-cache.sh" "$repo/scripts/lib/"
 chmod +x "$repo/scripts/build-gate-jar.sh"
 printf 'release_version=\nbuild_ref=\nname=nexus\n' > "$repo/$props_rel"
 echo 'REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 107)' > "$repo/src/nexus/engine_version.py"
@@ -75,11 +75,23 @@ out3="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc3=$?
 if [[ "$repo/service/target/nexus-service-1.0-SNAPSHOT.jar" -nt "$repo/service/A.java" ]]; then ok "copied jar is newer than the sources (freshness gate satisfied)"; else bad "copied jar older than sources"; fi
 [[ "$out3" == *"built "* ]] && ok "hit prints the built line callers grep for" || bad "no built line on hit"
 
-echo "Test 4: a leftover stamp in release.properties does not defeat the key"
+echo "Test 4: a leftover stamp in release.properties REFUSES (nexus-iexvl guard) instead of silently serving a cache hit"
+# Before nexus-iexvl this scenario ("does not defeat the key") was treated
+# as tolerable: a dirty tree still served a HIT. That is exactly the
+# incident this bead fixes -- a dirty tree with the lease free means a
+# PRIOR process left it stamped without holding this same lease for its
+# whole stamp lifetime, and silently building on top of it is how a
+# concurrent gate's leftover stamp went unnoticed. The correct behavior
+# now is a loud refusal, not a quiet HIT.
 printf 'release_version=9.9.9\nbuild_ref=stale+1-2\nname=nexus\n' > "$repo/$props_rel"
 out4="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc4=$?
-[[ $rc4 -eq 0 && "$out4" == *"HIT"* ]] && ok "still a HIT with a polluted stamp (key normalized)" || bad "polluted stamp changed the key: $out4"
+[[ $rc4 -eq 75 ]] && ok "leftover stamp refuses (rc 75)" || bad "leftover stamp returned rc $rc4 (expected 75): $out4"
+[[ "$out4" == *"REFUSED"* ]] && ok "refusal is disclosed (REFUSED)" || bad "no REFUSED text: $out4"
+[[ "$out4" == *"release_version=9.9.9"* ]] && ok "refusal shows the offending stamped value" || bad "refusal does not show the stamped value: $out4"
+[[ ! -d "$repo/.git/nexus-build-lease/service" ]] && ok "lease not left held after the refusal" || bad "lease still held after the refusal"
 git -C "$repo" checkout -q -- "$props_rel"
+out4b="$(cd "$repo" && scripts/build-gate-jar.sh 2>&1)"; rc4b=$?
+[[ $rc4b -eq 0 && "$out4b" == *"HIT"* ]] && ok "a clean tree after git checkout serves a HIT again" || bad "clean tree after checkout did not HIT (rc $rc4b): $out4b"
 
 echo "Test 5: a service/ change misses and rebuilds; NX_GATE_JAR_CACHE=off always builds"
 echo 'class B {}' > "$repo/service/B.java"

@@ -142,7 +142,7 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # suite when it drifts. Following the old wording blocked the 7.6.0 release
 # battery (2026-08-10). A prose comment that contradicts a mechanical test
 # loses to the test.
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.117}"
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.118}"
 # nexus-cfgo9: the PACKAGE-UPGRADE leg's starting point — a REAL, already
 # published PyPI release + the engine tag ITS OWN PINNED_SERVICE_TAG
 # resolves to (see CHANGELOG.md's "[6.9.0]" entry: "Ships with (and
@@ -356,10 +356,20 @@ _guided_restore() {
   fi
   rm -f "$RELEASE_PROPS_SNAPSHOT" 2>/dev/null || true
 }
-# nexus-iws18: snapshot release.properties' actual bytes before any leg can
-# stamp it; _guided_restore puts exactly these back on exit.
-RELEASE_PROPS_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/release.properties.snapshot.XXXXXX")"
-cp "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT"
+# nexus-iexvl: deliberately NOT snapshotted here. Taking the restore
+# baseline this early -- before the "service" build lease is acquired and
+# release_props_guard_clean has passed -- can capture a CONCURRENT
+# stamper's in-flight dirty bytes as "the true baseline"; this script then
+# restores THAT stamp on exit instead of the real one, reintroducing an
+# abandoned stamp after the true clean bytes were already restored. That
+# was the code-review finding on commit 40963aeb5 (a residual instance of
+# the exact incident nexus-iexvl exists to close, reproduced via this
+# code path). RELEASE_PROPS_SNAPSHOT is populated only inside the guided-
+# family stamp block below, by release_props_stamp_under_lease, once the
+# lease is ours and the guard has passed. Declared empty here (never left
+# unset, under `set -u`) so _guided_restore is safely callable from any
+# exit path, including one that fires before the stamp block ever runs.
+RELEASE_PROPS_SNAPSHOT=""
 trap 'diag_exit_guard; _guided_restore' EXIT
 
 [ "$COLD" = 1 ] && [ "$GUIDED" = 1 ] && { echo "--cold and --guided are different flows; pick one" >&2; exit 2; }
@@ -543,8 +553,21 @@ lock_acquire "$LOCKDIR" || exit 1
 # fix note this replaces) so every trap reassignment from here on can
 # chain build_lease_release in as a failure-path backstop; the acquire
 # itself happens locally around the docker invocation, not here.
-# shellcheck source=../../../scripts/lib/build-lease.sh disable=SC1091
-source "$SCRIPT_DIR/../../../scripts/lib/build-lease.sh"
+# shellcheck source=../../../scripts/lib/release-props-lease.sh disable=SC1091
+source "$SCRIPT_DIR/../../../scripts/lib/release-props-lease.sh"
+# nexus-iexvl: set once a guided-family leg (--guided/--shakeout-e2e/
+# --candidate-migration) has acquired the "service" build lease around its
+# release.properties STAMP (below), so the later native-build step does
+# not try to re-acquire the same lease from this same process (which would
+# deadlock — build_lease_acquire_wait would wait on itself forever) and so
+# it knows to leave the lease held rather than releasing it early. Every
+# EXIT trap in this file already runs `_guided_restore` (restore the
+# bytes) BEFORE `build_lease_release service` (see the trap reassignment
+# just below) -- that ordering was already correct; the only defect was
+# acquiring the lease too late, well after the stamp was already sitting
+# in the tree unprotected. 0 = never acquired for a stamp; the native
+# build's own acquire/release stays exactly as it was for every other leg.
+NX_STAMP_LEASE_HELD=0
 # Code-review CRITICAL fix: the trap installed at the top of the script
 # (before LOCKDIR existed) referenced $LOCKDIR unconditionally — any of the
 # 12 argument-conflict guards ABOVE this point firing `exit 2` would invoke
@@ -592,10 +615,24 @@ if [ "$GUIDED" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ] || [ "$CANDIDATE_MIGRATION" = 1 
     # manifest above); nothing in this tree is touched.
     echo "[stamp] artifacts already carry release_version=$GUIDED_STAMP_VERSION — no stamp, no rebuild"
   else
-  echo "[stamp] stamping $RELEASE_PROPS release_version=$GUIDED_STAMP_VERSION (restored on exit)…"
-  grep -v '^release_version=' "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp"
-  printf 'release_version=%s\n' "$GUIDED_STAMP_VERSION" >> "$RELEASE_PROPS.tmp"
-  mv "$RELEASE_PROPS.tmp" "$RELEASE_PROPS"
+  # nexus-iexvl: routed through scripts/lib/release-props-lease.sh's
+  # release_props_stamp_under_lease -- one code path, shared with
+  # build-artifacts.sh and build-gate-jar.sh -- so the SNAPSHOT this leg
+  # restores from is taken only after the "service" lease is ours and
+  # release_props_guard_clean has passed, never before (see the comment
+  # above RELEASE_PROPS_SNAPSHOT's declaration for why "before" is
+  # unsafe). The lease is held via NX_STAMP_LEASE_HELD and released right
+  # after the native build below, not at this whole leg's EXIT -- see the
+  # substantive-critic finding on 40963aeb5: the old wide hold covered
+  # docker image staging, the container run, and the migration walk too,
+  # which stalls every other build or pytest session on the box
+  # (tests/conftest.py's _gate_on_build_lease) for the length of the whole
+  # leg instead of just the ~2-3m compile. This script's own EXIT trap
+  # still runs _guided_restore + build_lease_release as a crash-only
+  # backstop; both are no-ops once the post-build release below has run.
+  RELEASE_PROPS_SNAPSHOT="$(release_props_stamp_under_lease "$RELEASE_PROPS" service "${NX_BUILD_LEASE_WAIT:-3600}" "release_version=$GUIDED_STAMP_VERSION")" || exit $?
+  NX_STAMP_LEASE_HELD=1
+  echo "[stamp] stamped $RELEASE_PROPS release_version=$GUIDED_STAMP_VERSION (restored right after the native build)"
   # Force a fresh native build so the stamp is baked in.
   rm -f service/target/nexus-service
   fi
@@ -649,7 +686,10 @@ elif [ "$DO_BUILD" = 1 ]; then
     # -Pnative's Testcontainers jOOQ codegen reach the host daemon (DooD);
     # TESTCONTAINERS_HOST_OVERRIDE + the host-gateway alias make the build
     # container reach the sibling pgvector. -Ob = quick-build (correctness gate,
-    # not a perf binary). Output: service/target/nexus-service + its *.so siblings.
+    # not a perf binary). Output: service/target/nexus-service alone since
+    # nexus-223oj cut native-image's AWT reachability roots (measured: 7 .so
+    # siblings -> 0); stage_native (lib/stage_artifacts.sh) fails loud if one
+    # reappears (nexus-og52j).
     # Builder heap: the pom default (native.image.maxheap=5632m) is sized for
     # the 7GB CI runner; locally it GC-thrashes (403 GCs / 6.8% of build time
     # observed on the 8GB-VM default, 2026-07-13). Auto-size to ~70% of the
@@ -665,7 +705,18 @@ elif [ "$DO_BUILD" = 1 ]; then
     # bounded by NX_BUILD_LEASE_WAIT like every other producer (nexus-pv93h:
     # --shakeout used to exit 75 the instant a cached gate-jar copy held
     # the lease); rc 75 names the holder only once the bound is exhausted.
-    build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" docker-native-build migration-rehearsal
+    # nexus-iexvl: a guided-family leg already acquired this SAME lease
+    # before stamping above (NX_STAMP_LEASE_HELD=1) and holds it through
+    # the native build below -- re-acquiring here would be this same
+    # process waiting on a lease it already holds itself
+    # (build_lease_acquire_wait would block until NX_BUILD_LEASE_WAIT
+    # expired, then refuse). It releases (restore + release) right after
+    # the build, below, not at this whole leg's EXIT. Every other leg
+    # that reaches this branch (the default, non-stamping rehearse.sh
+    # path) never set the flag and acquires/releases exactly as before.
+    if [ "$NX_STAMP_LEASE_HELD" = 0 ]; then
+      build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" docker-native-build migration-rehearsal
+    fi
     docker run --rm --entrypoint bash \
       --add-host=host.docker.internal:host-gateway \
       -v "$PWD":/src -w /src/service \
@@ -674,7 +725,21 @@ elif [ "$DO_BUILD" = 1 ]; then
       -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
       "$GRAAL_IMAGE" \
       -c "./mvnw -B -Pnative -DskipTests -Dnative.image.opt=-Ob -Dnative.image.maxheap=${NATIVE_MAXHEAP} package"
-    build_lease_release service
+    if [ "$NX_STAMP_LEASE_HELD" = 1 ]; then
+      # nexus-iexvl (critic finding 2 on 40963aeb5): restore + release
+      # right here, the instant the native build that needed the lease is
+      # done -- not at this whole leg's EXIT. The candidate binary just
+      # produced already has the stamp baked in; nothing downstream of
+      # this point (docker image staging, the container run, the
+      # migration walk) re-reads the source-tree release.properties, so
+      # holding the shared lease through all of that only stalls other
+      # builds and pytest sessions on the box for no benefit.
+      release_props_restore_and_release "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT" service
+      RELEASE_PROPS_SNAPSHOT=""
+      NX_STAMP_LEASE_HELD=0
+    else
+      build_lease_release service
+    fi
   else
     # nexus-ndve9: when we DO reuse, say how old the artifact is — the failing
     # shakeout's log recorded only "candidate native binary present", which
@@ -684,6 +749,29 @@ elif [ "$DO_BUILD" = 1 ]; then
   fi
 else
   echo "[1-2/3] --no-build: reusing existing wheel + native binary"
+fi
+
+# nexus-xihsm (critic follow-up, nexus-vpl9c riders): the release-workflow
+# SHAPE check was landing unwired -- run by nobody, the exact rot class it
+# exists to close. --shakeout is where the just-built native candidate +
+# freshly generated jOOQ sources are already sitting on THIS host checkout
+# (see lib/shakeout_shape_check.sh's header for why this cannot live inside
+# rehearse_shakeout.sh instead). Scoped to --shakeout only: every other leg
+# either builds nothing here (COLD/HOLE_PUNCH/PACKAGE_UPGRADE/ERA_HOP/
+# ACQUIRE/STRANDED) or has its own pre-tag posture already.
+if [ "$SHAKEOUT" = 1 ]; then
+  # The JVM jar from the same build, for a host that cannot execute the
+  # Linux candidate (see lib/shakeout_shape_check.sh).
+  if [ -n "$ARTIFACTS" ]; then
+    _shakeout_shape_bin="$ARTIFACTS/native/nexus-service"
+    _shakeout_shape_jar="$(find "$ARTIFACTS/jar" -maxdepth 1 -name 'nexus-service-*.jar' -type f 2>/dev/null | sort | tail -1)"
+  else
+    _shakeout_shape_bin="$PWD/service/target/nexus-service"
+    _shakeout_shape_jar="$(find "$PWD/service/target" -maxdepth 1 -name 'nexus-service-*.jar' ! -name 'original-*' -type f 2>/dev/null | sort | tail -1)"
+  fi
+  # shellcheck source=lib/shakeout_shape_check.sh disable=SC1091
+  source "$HERE/lib/shakeout_shape_check.sh"
+  shakeout_release_workflow_shape_check "$_shakeout_shape_bin" "$_shakeout_shape_jar" || exit 1
 fi
 
 # nexus-nyry9.13 (2026-08-21): --acquire is a cold-acquire leg too — it stages
@@ -698,18 +786,12 @@ fi
 
 # nexus-mfage: the two artifact-staging seams. Every leg below stages its
 # wheel and (where it consumes one) its native candidate through these, so
-# the artifacts/dist choice is made in exactly one place each.
-stage_wheel() {  # stage_wheel <dest-dir>
-  if [ -n "$ARTIFACTS" ]; then cp "$ARTIFACT_WHEEL" "$1/"
-  else cp "$(ls -t dist/conexus-*.whl | head -1)" "$1/"; fi   # keep real PEP 427 name
-}
-stage_native() {  # stage_native <dest-dir>: the binary + its native-image .so siblings
-  local src="service/target"
-  [ -n "$ARTIFACTS" ] && src="$ARTIFACTS/native"
-  mkdir -p "$1"
-  cp "$src/nexus-service" "$1/"
-  if compgen -G "$src/*.so" > /dev/null; then cp "$src"/*.so "$1/"; fi
-}
+# the artifacts/dist choice is made in exactly one place each. Extracted to
+# lib/stage_artifacts.sh (nexus-og52j) so a unit test can drive stage_native
+# directly against a fixture directory -- see that file for the function
+# bodies and the nexus-og52j .so-assertion rationale.
+# shellcheck source=lib/stage_artifacts.sh disable=SC1091
+source "$HERE/lib/stage_artifacts.sh"
 
 # ── Pre-flight Docker disk-pressure check (nexus-h8rf6.13) ────────────────────
 # The recurring barf is Docker Desktop's capped VM disk, not the host:
@@ -895,8 +977,8 @@ elif [ "$FULLSTACK" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ]; then
   cp "$HERE/rehearse_fullstack.sh" "$HERE/rehearse_shakeout_e2e.sh" "$HERE/seed_legacy.py" "$STAGE/"
 elif [ "$CANDIDATE_MIGRATION" = 1 ]; then
   # nexus-z0ylb: BOTH staging shapes at once — the native/ candidate (like
-  # the default/--shakeout path: the locally-built, now-stamped -Ob binary
-  # + its .so siblings, hand-swapped in at Stage 4) AND the working-tree
+  # the default/--shakeout path: the locally-built, now-stamped -Ob binary,
+  # hand-swapped in at Stage 4) AND the working-tree
   # wheel under its own subdirectory (like --era-hop/--package-upgrade:
   # installed via `uv tool install` at runtime, never
   # colliding with anything `pip`/`uv` resolves from real PyPI — this leg
@@ -912,11 +994,13 @@ elif [ "$CANDIDATE_MIGRATION" = 1 ]; then
   cp "$HERE/rehearse_candidate_migration.sh" "$STAGE/"
   cp -R "$HERE/lib" "$STAGE/lib"   # assert_build_ref.sh (nexus-mfage)
 else
-  # The native binary travels into the image. A LOCAL -Pnative -Ob quick build also
-  # emits native-image .so siblings (libjvm/libawt/liblcms/...) that must be
-  # co-located (native-image dlopen's JDK libs from the executable's own dir); a
-  # RELEASE binary (engine-service-v*) is self-contained with NO .so siblings. So
-  # the .so copy is best-effort — present them when they exist, skip when they don't.
+  # The native binary travels into the image, and ONLY the binary: a RELEASE
+  # binary (engine-service-v*) is self-contained with no .so siblings, and
+  # since nexus-223oj cut native-image's AWT reachability roots a correct
+  # LOCAL -Pnative -Ob quick build ships none either (measured: 7 -> 0). If
+  # one somehow reappears, stage_native (lib/stage_artifacts.sh) fails loud
+  # instead of silently staging a library the release would never ship
+  # (nexus-og52j).
   stage_native "$STAGE/native"
   cp "$HERE/Dockerfile" "$HERE/rehearse.sh" "$HERE/rehearse_shakeout.sh" "$HERE/seed_legacy.py" "$STAGE/"
   # nexus-l8xnz: the SAME service/native-smoke.sh the release workflow runs

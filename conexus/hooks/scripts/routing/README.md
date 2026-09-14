@@ -129,7 +129,9 @@ Every hook in this directory MUST honor:
             )
             _lib.deny(
                 "Redirect message naming the preferred invocation. "
-                "Escape with `# routing-allow: <reason>` (>=8 chars)."
+                "An escape (`# routing-allow: <reason>`, >=8 chars) exists "
+                "for this guard, but only on the user's explicit "
+                "instruction to use it -- it is not yours to reach for."
             )
         _lib.allow()
 

@@ -11,9 +11,11 @@
 #
 #   Phase A  provision + serve the candidate  (nx init --service, bge-768)
 #   Phase B  CLI verb matrix                  (store/search/memory/scratch/
-#                                              catalog/collection/taxonomy,
-#                                              incl. the umvh2 delete-by-title
-#                                              regression)
+#                                              catalog/collection/taxonomy/
+#                                              tuple, incl. the umvh2
+#                                              delete-by-title regression and
+#                                              the RDR-206 renew + ack-with-
+#                                              reply surface, nexus-6flt7)
 #   Phase C  index + staleness                (index a synthetic repo; assert
 #                                              zero staleness-cache failures;
 #                                              re-index must be incremental,
@@ -69,6 +71,7 @@
 # commands (binary positioning, etc.) were left bare on purpose — those
 # SHOULD abort loud.
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/require_container.sh"
 
 # nexus-s71lr: Phase C/D's `nx index repo` calls redirect their whole
 # stdout+stderr into a log file and only tail it (or grep it) AFTER the
@@ -152,8 +155,14 @@ cp "$SVC_NATIVE_DIR"/* "$SVC_WELL_KNOWN_DIR/" && chmod +x "$SVC_WELL_KNOWN_DIR/n
   && ok "candidate positioned at well-known location" || { bad "positioning failed"; exit 1; }
 
 export NX_SERVICE_MAX_HEAP="${NX_SERVICE_MAX_HEAP:-1g}"
-git config --global user.email "shakeout@nexus.local" >/dev/null 2>&1 || true
-git config --global user.name  "nexus shakeout"       >/dev/null 2>&1 || true
+# Identity via env, never `git config --global` (nexus-oqh4s, sibling of the
+# rehearse_package_upgrade.sh incident, 2026-09-12, that rewrote a real
+# ~/.gitconfig): this script is meant to run INSIDE its container, but
+# nothing enforces that.
+export GIT_AUTHOR_NAME="nexus shakeout"
+export GIT_AUTHOR_EMAIL="shakeout@nexus.local"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
 
 # init is idempotent (RDR-174); the -Ob quick-build binary's FIRST boot
 # (native init + 144 Liquibase changesets on fresh PG) can exceed the
@@ -290,6 +299,120 @@ nx collection list >/dev/null 2>&1 && ok "collection list" || bad "collection li
 nx taxonomy status >/dev/null 2>&1 && ok "taxonomy status" || bad "taxonomy status"
 DOCTOR_OUT="$(nx doctor 2>&1)" || true  # gap-15: content (traceback presence) checked below, not rc-gated
 printf '%s\n' "$DOCTOR_OUT" | grep -q "Traceback" && bad "doctor raised a traceback" || ok "doctor runs traceback-free"
+
+# ── nx tuple verb matrix (nexus-6flt7 fix round 2) ───────────────────────────
+# The Phase F comment above documents that native-smoke.sh's T1 / memory-
+# plans-taxonomy-chash real-Python-client blocks self-skip inside this image
+# (no uv/pyproject.toml), and that the gap is closed because THIS phase
+# proves the same routing+backend-together property through the installed
+# wheel's `nx` CLI against the SAME served candidate. That was never true for
+# /v1/tuples: native-smoke.sh's tuples real-client block (nexus-6flt7) self-
+# skips here exactly like T1/T2, but nothing in Phase B called `nx tuple`
+# before this fix round -- so this container's native candidate had ZERO
+# tuple coverage, the precise "first native proof of a surface is post-tag"
+# shape that burned v0.1.77 (see the Phase F comment). `nx tuple` calls
+# through the SAME HttpTupleStore real client the Python probe does, driven
+# by the installed wheel rather than a checkout, so this is not a narrower
+# proof than the Python probe gives elsewhere -- it is the SAME proof
+# through the surface this container actually has available.
+#
+# Unique addresses (python3 uuid4, matching tuples_real_client.py's own
+# reasoning): a fixed address across shakeout reruns on a shared external
+# Postgres (this phase's NX_DB_URL, per Phase F's own comment) would either
+# collide with a still-claimed prior run's row or make the "exactly one row"
+# rd assertion below depend on a PRIOR run's leftovers rather than this run's
+# own write.
+TUPLE_REQ_TO="shakeout-tuple-req-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')"
+TUPLE_REPLY_TO="shakeout-tuple-reply-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')"
+TUPLE_NONCE="nonce-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+TUPLE_CLAIMANT="shakeout-tuple-claimant"
+
+# out
+TUPLE_OUT_ID="$(nx tuple out "mailbox/$TUPLE_REQ_TO" --key to="$TUPLE_REQ_TO" \
+  --dim from=shakeout-asker --body "shakeout tuple probe" --nonce "$TUPLE_NONCE" 2>&1)" || true
+if grep -qE '^[0-9a-f]{64}$' <<<"$TUPLE_OUT_ID"; then
+  ok "tuple out (64-hex id)"
+else
+  bad "tuple out"
+  printf '%s\n' "$TUPLE_OUT_ID" | sed 's/^/       | /' | tail -6
+fi
+
+# in (claim) -- --json so lease_until is readable, same shape _row_dict prints.
+# stdout/stderr captured SEPARATELY here (unlike the plain-text checks above):
+# a JSON parse must see only the JSON click.echo writes to stdout, never a
+# stray stderr line merged in ahead of it.
+TUPLE_IN_ERR=/tmp/tuple-in.err
+TUPLE_IN_JSON="$(nx tuple in "mailbox/$TUPLE_REQ_TO" --pattern to="$TUPLE_REQ_TO" \
+  --claimant "$TUPLE_CLAIMANT" --lease-s 60 --json 2>"$TUPLE_IN_ERR")" || true
+TUPLE_CLAIM_ID="$(printf '%s' "$TUPLE_IN_JSON" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+print(d.get("claim_id") or "")' 2>/dev/null)" || true
+TUPLE_LEASE_BEFORE="$(printf '%s' "$TUPLE_IN_JSON" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+print((d.get("tuple") or {}).get("lease_until") or "")' 2>/dev/null)" || true
+if [ -n "$TUPLE_CLAIM_ID" ] && [ -n "$TUPLE_LEASE_BEFORE" ]; then
+  ok "tuple in (claim)"
+else
+  bad "tuple in (claim)"
+  printf 'stdout: %s\nstderr: %s\n' "$TUPLE_IN_JSON" "$(cat "$TUPLE_IN_ERR" 2>/dev/null)" | sed 's/^/       | /' | tail -12
+fi
+
+# renew: prints the engine's lease_until bare (tuple_cmd.py's
+# `click.echo(lease_until.isoformat())`) -- assert it parses as an ISO-8601
+# instant AND that it moved forward from the claim's own lease_until above.
+# Both timestamps come from the same server with the same OffsetDateTime
+# rendering, so a lexicographic string compare orders them the same as a
+# chronological one.
+TUPLE_RENEW_OUT="$(nx tuple renew --claim-id "$TUPLE_CLAIM_ID" --claimant "$TUPLE_CLAIMANT" --lease-s 120 2>&1)" || true
+if grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' <<<"$TUPLE_RENEW_OUT" \
+   && [[ "$TUPLE_RENEW_OUT" > "$TUPLE_LEASE_BEFORE" ]]; then
+  ok "tuple renew (lease_until printed and moved forward: $TUPLE_LEASE_BEFORE -> $TUPLE_RENEW_OUT)"
+else
+  bad "tuple renew"
+  printf 'before: %s\nrenew printed: %s\n' "$TUPLE_LEASE_BEFORE" "$TUPLE_RENEW_OUT" | sed 's/^/       | /'
+fi
+
+# typed refusal: mailbox.yaml's take.max_lease_seconds is 900 -- a renew
+# above it is refused as LeaseTooLong, never clamped (must run BEFORE ack:
+# TupleRepository.renew checks liveClaimRow -- and so ClaimNotFound -- before
+# the max-lease check, so renewing an already-consumed claim would refuse
+# ClaimNotFound instead and prove nothing about LeaseTooLong specifically).
+TUPLE_RENEW_REFUSAL_OUT="$(nx tuple renew --claim-id "$TUPLE_CLAIM_ID" --claimant "$TUPLE_CLAIMANT" --lease-s 99999 2>&1)" \
+  && TUPLE_RENEW_REFUSAL_RC=0 || TUPLE_RENEW_REFUSAL_RC=$?
+if [ "$TUPLE_RENEW_REFUSAL_RC" != "0" ] && grep -q "LeaseTooLong" <<<"$TUPLE_RENEW_REFUSAL_OUT"; then
+  ok "tuple renew over max_lease_seconds refused (LeaseTooLongError, exit $TUPLE_RENEW_REFUSAL_RC)"
+else
+  bad "tuple renew over max_lease_seconds should refuse with LeaseTooLong"
+  printf 'rc=%s\n%s\n' "$TUPLE_RENEW_REFUSAL_RC" "$TUPLE_RENEW_REFUSAL_OUT" | sed 's/^/       | /' | tail -8
+fi
+
+# ack with a reply -- consumes the still-live claim (the refusal above never
+# opened its transaction) and writes a reply into a SECOND unique mailbox.
+TUPLE_ACK_OUT="$(nx tuple ack "$TUPLE_CLAIM_ID" --claimant "$TUPLE_CLAIMANT" \
+  --reply-subspace "mailbox/$TUPLE_REPLY_TO" --reply-key to="$TUPLE_REPLY_TO" \
+  --reply-dim from=shakeout-answerer --reply-body "shakeout tuple reply" 2>&1)" || true
+TUPLE_REPLY_ID="$(printf '%s' "$TUPLE_ACK_OUT" | sed -n 's/^reply_id=//p')"
+if grep -qxF "Acked claim $TUPLE_CLAIM_ID" <<<"$TUPLE_ACK_OUT" \
+   && grep -qE '^[0-9a-f]{64}$' <<<"$TUPLE_REPLY_ID"; then
+  ok "tuple ack with reply (reply_id=$TUPLE_REPLY_ID)"
+else
+  bad "tuple ack with reply"
+  printf '%s\n' "$TUPLE_ACK_OUT" | sed 's/^/       | /' | tail -8
+fi
+
+# rd of the reply address at n=2 -- exactly the one row the ack just wrote,
+# not merely "no more than 2" (a smaller n would trivially cap the count).
+# Same stdout/stderr split as the `in` JSON capture above.
+TUPLE_RD_ERR=/tmp/tuple-rd.err
+TUPLE_RD_JSON="$(nx tuple rd "mailbox/$TUPLE_REPLY_TO" --pattern to="$TUPLE_REPLY_TO" -n 2 --json 2>"$TUPLE_RD_ERR")" || true
+TUPLE_RD_COUNT="$(printf '%s' "$TUPLE_RD_JSON" | python3 -c 'import json,sys
+print(len(json.load(sys.stdin)))' 2>/dev/null)" || true
+if [ "$TUPLE_RD_COUNT" = "1" ]; then
+  ok "tuple rd reply address (-n 2, exactly one row)"
+else
+  bad "tuple rd reply address (want exactly 1 row, got '$TUPLE_RD_COUNT')"
+  printf 'stdout: %s\nstderr: %s\n' "$TUPLE_RD_JSON" "$(cat "$TUPLE_RD_ERR" 2>/dev/null)" | sed 's/^/       | /' | tail -12
+fi
 
 # ── Phase C: index + staleness (incremental must work) ──────────────────────
 say "Phase C — index a synthetic repo; staleness must make re-index incremental"
@@ -583,11 +706,19 @@ say "Phase F — native-smoke.sh probe set against the CANDIDATE (pre-tag, not r
 # local coverage today). The bge-768 embed section runs FOR REAL (the same
 # model this image bakes in for Phases A/C); the cross-encoder rerank
 # section takes its documented LOUD-degrade path (that model is not baked
-# into this image); the T1 / memory-plans-taxonomy-chash real-Python-client
-# blocks self-skip via native-smoke.sh's own documented WARN (no service/
-# tree or pyproject.toml in this image) -- that exact coverage (routing +
-# backend together, against this SAME candidate through this SAME real
-# client code) is already proven by Phase B's CLI verb matrix above.
+# into this image); the T1 / memory-plans-taxonomy-chash / tuples
+# real-Python-client blocks self-skip via native-smoke.sh's own documented
+# WARN (no service/ tree or pyproject.toml in this image) -- that exact
+# coverage (routing + backend together, against this SAME candidate through
+# this SAME real client code) is already proven by Phase B's CLI verb matrix
+# above. nexus-6flt7 fix round 2: this was true for T1/memory-plans-taxonomy-
+# chash from the start, but was NOT true for tuples when native-smoke.sh's
+# tuples block first landed -- Phase B had no `nx tuple` coverage at all, so
+# the tuples real-client probe's self-skip here left this container's own
+# native binary with ZERO tuple coverage, the exact "first native proof is
+# post-tag" shape that burned v0.1.77 above. Phase B's tuple verb matrix
+# (out/in/renew/ack-with-reply/rd, plus a LeaseTooLong refusal) closes that;
+# see its own comment block for why the CLI, not curl, backstops this here.
 NATIVE_SMOKE_LOG=/tmp/native-smoke.log
 NATIVE_SMOKE_RC=0
 # gap-15 shape: rc captured explicitly via `||`, never left bare under -e --

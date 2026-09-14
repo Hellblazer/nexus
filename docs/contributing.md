@@ -179,6 +179,7 @@ Do not bump these without testing the full chunking pipeline.
 - `main` is fully PR-gated, release version-bumps included (nexus-mkj6u replaced the prior direct-to-main carve-out). See Release Process below.
 - **Pushing `develop` from the shared checkout goes through `scripts/git-push-develop.sh <sha>...`** (nexus-9wxu6). Every session commits as the same git user, so the outbound range cannot be attributed by author; the script fetches, lists `origin/develop..develop`, and pushes only when that range equals the commits you vouch for on the command line. An unvouched commit, a vouched commit that is not in the range, or a diverged branch refuses with a `PUSH_REFUSED_*` line and pushes nothing. From a detached worktree based on `origin/develop`, `NX_PUSH_SOURCE=HEAD` pushes your worktree's commits and leaves the local `develop` (a peer's in-flight tree) alone. `git commit --amend` in the primary checkout is refused by the user-level policy hook when HEAD is not a commit this session made (`tests/fixtures/hal_git_policy_hook.py` rule 3); amend in a worktree you own, or make a new commit. The same hook (rule 4) denies a bare `git push` to `develop` in any repo whose toplevel carries the script, so the script is the only unblocked path; `# routing-allow: <reason>` is the audited escape.
 - Use `bd` (beads, **≥ 1.0.0**: `brew install beads` or `brew upgrade beads`) for task tracking. Earlier 0.x versions reject the comma-separated `--status` flag the close-skill preamble uses; the bead advisory will silently report no open beads on stale installs.
+- **`nx init` / `nx upgrade` install a machine-wide `bd prime` file** (nexus-cnzei.8) when `bd` or the beads Claude Code plugin is detected: a short, generic, conexus-managed `PRIME.md` at the OS user config directory `bd` itself falls back to when no repo-level `.beads/PRIME.md` exists (macOS `~/Library/Application Support/beads/PRIME.md`; Linux `$XDG_CONFIG_HOME/beads/PRIME.md` or `~/.config/beads/PRIME.md`; Windows `%AppData%/beads/PRIME.md`). This is separate from — and applies to every beads repo on the machine, not only — this repo's own tracked `.beads/PRIME.md`, which still wins when present. beads 1.2.x still appends its own `bd remember` memories after this file; installing it does not stop that. The installed marker records a hash of its body, so a hand edit under an intact marker is detected and never overwritten (same protection as an unmarked hand-authored file); `nx uninstall` removes the file only when that hash still matches. Opt out per-run with `--no-beads-prime`, or persistently with `nx config set beads_prime.manage false`; deleting the file restores `bd`'s own default. `nx doctor`'s "Beads PRIME.md (user-level)" row reports its state and the same undo text.
 - **Code review**: Plans include review tasks after implementation phases. Use `/conexus:review-code` or dispatch `code-review-expert` at the designated plan steps.
 
 Both `main` and `develop` carry branch protection. Configure at
@@ -261,20 +262,10 @@ Every step below is **required**. Missing any one of them has caused problems in
    Sequencing a remediation behind a commit remains a bead-authoring
    convention (`requires-commit: <sha>`); it is no longer a release gate.
 
-1. **Verify the full release test battery passes**
-   ```bash
-   uv run pytest                                             # unit suite (no API keys)
-   tests/e2e/local-service-gate.sh                           # integration incl. the local-service functional gate
-   tests/e2e/migration-rehearsal/run.sh --package-upgrade    # ONE-engine convergence MVV (nexus-cfgo9)
-   tests/e2e/fresh-install-mvv.sh                             # VIRGIN-journey gate (nexus-nolqs), LOCAL WHEEL layer
-   ```
-   All must pass. Bare `uv run pytest -m integration` is not enough on its
-   own: the local-service round-trip family self-provisions inside
-   `local-service-gate.sh` and otherwise skip-gates silently on an absent
-   service (the 74/516 ambient-degradation class the gate was built to end).
-   Integration is excluded from CI — this battery is your last line of
-   defense before tag-push. See `.claude/skills/release/SKILL.md` Step 1 for
-   the authoritative, up-to-date version of this list.
+1. **Verify the full release test battery passes.** See `AGENTS.md` §
+   Cutting a release, step 1, for the authoritative command list (the
+   release skill's Step 1 restates it) — it changes independently
+   of this pointer and a copy here would drift.
 
 2. **Audit docs against changes since last release**
    Run `git log --oneline v<prev>..HEAD` and check each feature/fix against the docs:

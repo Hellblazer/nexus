@@ -20,7 +20,7 @@ Reference skill for agent routing and pipeline coordination. See [reference.md](
 
 1. Consult [reference.md](./reference.md) for the routing graph and decision framework
 2. Match the request to the appropriate agent or pipeline
-3. Dispatch the agent directly using the relay format from [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md)
+3. Dispatch the agent directly using the relay format from [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md)
 
 There is no orchestrator agent. The caller (main conversation or skill) dispatches agents directly using the routing tables.
 
@@ -68,6 +68,7 @@ REJECTED: <each rejected alternative + the concrete reason it breaks something, 
 - <lint command>
 - Report the collected test COUNT, not a description.
 - Verification runs FOREGROUND inside the agent's own turn. Never `run_in_background`, never `Monitor`. A dispatched subagent cannot receive Monitor events or background-task-completion notifications; those route to the MAIN loop only. Waiting on either strands the agent (nexus-dn9xs).
+- Close the hand-back with a VERIFY block in the § VERIFY Line Convention shape below — one line per claim, not prose.
 
 ## WRITE-BACK (mandatory, before returning)
 mcp__plugin_conexus_nexus__scratch(action="put", content="<bead> <phase> ...", tags="<bead>,<role>,<phase>")
@@ -100,17 +101,29 @@ This is one of exactly two v1 parked callers (the other is Phase 6's instance wa
 
 ## Sending a Mid-Turn Message to an Agent (RDR-205 Phase 5)
 
-To send a directive or other message to a dispatched agent while it works, `tuple_out` to `mailbox/<agent id>` with a sender-minted nonce; the agent drains its mailbox with `tuple_in` before composing any hand-back, and a resend of the same nonce lands on the same tuple rather than piling up. Full convention, dead-letter rule, and the template shape: `/conexus:mailbox`.
+To send a directive or other message to a dispatched agent while it works, `tuple_out` to `mailbox/<agent id>` with a sender-minted nonce; the agent drains its mailbox with `tuple_in` before composing any hand-back, and a resend of the same nonce lands on the same tuple rather than piling up. Full convention, dead-letter rule, and the template shape: `/conexus:mailbox`. Choosing between `SendMessage`, the mailbox and T2, and messaging peer sessions rather than your own agents: `/conexus:peer-messaging`.
 
 ## VERIFY Line Convention (MANDATORY)
 
-Agent write-backs end with a machine-checkable line, not prose (nexus-pjzz8, T2 [21371] §Q5):
+Every implementation or review hand-back ends with a machine-checkable VERIFY block, one line per claim, never prose (nexus-pjzz8, T2 [21371] §Q5; extended by nexus-cnzei.6 item 1 after a 2026-09-13 measurement: reports arrived on time but made false claims — a docs agent reported changing a CLI default it had not touched, and an implementation agent's gate record omitted the one test that would have caught its own NameError. Delivery was never the gap; verification was).
+
+Three line shapes, any number of lines, in any order:
 
 ```
-VERIFY: <command> => <count> passed
+VERIFY: commit=<sha>
+VERIFY: <exact command> => rc=<code> <count> passed
+VERIFY: t2=<project>/<title>
 ```
 
-The orchestrator re-runs that ONE command once per round, before accepting the round. It never trusts the reported count. Divergence is surfaced, not silently accepted.
+- `commit=<sha>` names the sha the change actually landed on — never "will land on" or a branch name.
+- `<exact command> => rc=<code> <count> passed` names the command verbatim (copy-pasteable, not paraphrased), its exit code, and the count it reported.
+- `t2=<project>/<title>` names a T2 write-back the orchestrator can `memory_get` to confirm.
+
+An agent with nothing checkable to claim (a pure read, a recommendation with no code touched) says so explicitly rather than omitting the block. The RDR-205 ledger's own `verify` dim (`present`/`absent`, filled by `tuple_ledger_project.py` parsing these lines from the transcript — nexus-cnzei.6 item 2) records the omission either way, so an absent block is never silently indistinguishable from "nothing to verify."
+
+The orchestrator re-runs each reported COMMAND once per round, before accepting the round — it never trusts the reported count — and runs `scripts/check_agent_verify_claims.py <session_id> --path <touched-path>...` (nexus-cnzei.6 item 3) before accepting any round with a VERIFY block. **What the checker confirms**: each reported COMMIT exists and touches at least one of the `--path` values named (existence only, with a named-in-its-own-output caveat, if `--path` is omitted); each reported `t2_ref` resolves to a real T2 entry; every report row carries a present VERIFY block at all. **What it does NOT confirm, and never can from the ledger alone**: whether a claimed command actually ran, whether it passed, or whether it was the RIGHT command for the change under review — a fabricated `rc=0 12 passed` line for a command that was never run, or a real but too-narrow command that would not have caught the regression it claims to verify, both read identically to the checker. Reading the command line and re-running it yourself remains the orchestrator's own job; the checker only makes the commit/t2_ref/presence half mechanical.
+
+Below `engine-service-v0.1.118` (nexus-d9k5h) the connected engine's ledger template does not declare `commit`/`t2_ref`/`verify` at all, and the checker detects this itself (via the engine's own tuple template registry) rather than assuming from this repo's checked-out template: it reports UNVERIFIABLE with a distinct exit code and checks nothing, rather than reading every well-behaved report as a false `verify=absent` finding. Divergence the checker DOES report is surfaced, not silently accepted.
 
 ## Review Rounds (MANDATORY)
 
@@ -140,7 +153,7 @@ full-review rounds and surface it, rather than celebrating the speed.
 
 ## Scope Discipline (cross-reference)
 
-See [CONTEXT_PROTOCOL.md § Scope](../../agents/_shared/CONTEXT_PROTOCOL.md).
+See [CONTEXT_PROTOCOL.md § Scope](../../resources/agent-shared/CONTEXT_PROTOCOL.md).
 Deliver at the scope intended: a plan or bead graph is a record of intended
 work, not a standing order; goal-met is a stop, not a license to continue; a
 blast radius exploding mid-flight (more than about 20 tests broken by one
@@ -160,16 +173,23 @@ dispatch below.
 - Design gate first: when a plan marks an item DESIGN DECISION FIRST, the orchestrator locks the design-of-record in T1 before any code dispatch; deviations from a plan's recommendation need the human's nod, named fallbacks do not.
 - Review at every seam: each arc gets the stacked dual review independently; cross-arc integration points get named in reviewer briefs.
 - Commit order: arcs commit pathspec-limited in dependency order (lib contract before doc text referencing it), one arc per commit.
-- service/ builds: one builder at a time. Never dispatch a bare `./mvnw`/`mvn` invocation while another agent might also be building `service/`; both write `service/target` and a collision corrupts jOOQ codegen mid-build (nexus-c00dw). Any ad hoc Maven call goes through `scripts/mvnw-leased.sh <args>` (it takes the `scripts/lib/build-lease.sh` lease, cds into `service/`, and passes args through); a substrate-backed `pytest` on the box refuses to start with exit 75 while that lease is held (set `NX_BUILD_LEASE_WAIT=<seconds>` to wait, nexus-pv93h); `scripts/build-gate-jar.sh` takes the same lease internally for the stamped-jar path. The lease is shared by every worktree of the repo (git common dir, nexus-g6xpa), and a live holder is waited for (bounded by `NX_BUILD_LEASE_WAIT`, default 3600s; 0 refuses immediately with rc 75 naming the holder) — one engine build or suite per box, never bypassed. `build-gate-jar.sh` serves a cached jar when service/ content is unchanged (`NX_GATE_JAR_CACHE=off` disables). Worktree agents run only the tests scoped to their change; the full engine suite runs once, in the primary, at cherry-pick time. A queued build can outlive the Bash tool's 600s ceiling, so a build or suite an agent dispatches goes through `run_in_background` (the suite alone already exceeds that ceiling); the waiting line names the holder's pid, label and command. Coverage (every in-repo caller, not just these two) is enforced by `scripts/lib/bare_mvnw_lint_test.sh`.
+- service/ builds: one builder at a time. Share a mutable build-output directory across agents and serialize around it, the way you would a database migration or a generated-code directory — parallelizing it corrupts the build mid-way, it doesn't just race harmlessly. This repo's own mechanics (a build-lease script, the exact env vars, which lint enforces coverage) are nexus-specific and live in this repo's own AGENTS.md § Engine-service release, not restated here.
 
 ## Quick Routing
+
+The pipeline order below is `registry.yaml`'s own `pipelines:` section, not a
+second copy — this table restates it for quick lookup; `registry.yaml` is
+the one place to change it. `feature`/`bug` there always run BOTH reviewers
+(non-interchangeable, see development/SKILL.md § Post-Implementation
+Review); an "Implement code" pipeline that omits either one is a stale
+drift, not a variant.
 
 | Request Type | Primary Agent | Pipeline |
 |-------------|---------------|----------|
 | Plan a feature | strategic-planner | -> nx_plan_audit -> architect-planner |
-| Implement code | developer | -> code-review-expert -> test-validator |
+| Implement code | developer | -> code-review-expert -> substantive-critic -> test-validator |
 | Debug issue | debugger | -> (if cross-cutting) deep-analyst |
-| Review code | code-review-expert | -> substantive-critic (always, both reviewers) |
+| Review code | code-review-expert | -> substantive-critic (always, both reviewers — same gate as "Implement code" above) |
 | Research topic | deep-research-synthesizer | -> store_put (direct) |
 | Analyze system | codebase-deep-analyzer | -> (if deep) deep-analyst |
 
@@ -219,10 +239,13 @@ sweep that fits in one shell command is one shell command; never dispatch a
 subagent to verify your own work.
 
 This restraint does NOT apply to the two-reviewer gate
-(`code-review-expert` + `substantive-critic`, `~/.claude/CLAUDE.md` §
-Review Discipline) or to independent-state fork fleets (disjoint files, no
-shared mutable state). Both do genuinely more than "a handful of tool
-calls" worth of independent work, and serializing either buys no safety
-(see `~/.claude/CLAUDE.md` § Testing, "serial-vs-parallel: share a mutable
-resource -> serialize"). See § Parallel-Orchestration Discipline for the
-fleet-size cap that bounds the second case.
+(`code-review-expert` + `substantive-critic`, mandatory and non-
+interchangeable — see § Quick Routing above and development/SKILL.md §
+Post-Implementation Review + Commit) or to independent-state fork fleets
+(disjoint files, no shared mutable state). Both do genuinely more than "a
+handful of tool calls" worth of independent work, and serializing either
+buys no safety — the opposite case, sharing a mutable resource, IS where
+serialization is required: see "service/ builds: one builder at a time"
+above (§ Parallel-Orchestration Discipline items) for the concrete example.
+See § Parallel-Orchestration Discipline for the fleet-size cap that bounds
+the second case.

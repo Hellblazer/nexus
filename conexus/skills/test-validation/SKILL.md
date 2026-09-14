@@ -41,7 +41,7 @@ Test coverage report with gap analysis
 - [ ] Every regression test FALSIFIED, or an explicit NOT FALSIFIED reason
 ```
 
-For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../agents/_shared/RELAY_TEMPLATE.md).
+For full relay structure and optional fields, see [RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md).
 
 ## Validation Methodology
 

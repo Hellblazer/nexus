@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from nexus.hooks import session_end, session_end_flush, session_start
+from nexus.hooks import render_session_start, session_end, session_end_flush, session_start
 from nexus.mailbox_arm import mailbox_arm_instruction
 
 
@@ -441,8 +441,9 @@ def test_session_start_carries_no_migration_notice(monkeypatch):
 
 
 class _FakeStaleProcess:
-    def __init__(self, kind: str) -> None:
+    def __init__(self, kind: str, pid: int = 1) -> None:
         self.kind = kind
+        self.pid = pid
 
 
 class _FakeSkewReport:
@@ -452,6 +453,13 @@ class _FakeSkewReport:
 
 
 class TestStaleMcpHostSessionStartNudge:
+    """nexus-cnzei.2 (S4): the note used to count nx-mcp hosts MACHINE-WIDE,
+    including other, unrelated sessions', so these tests now also pin
+    `find_immediate_claude_pid`/`find_mcp_sibling_pids`, the same ancestry
+    primitive :func:`nexus.hooks._write_t1_handoff_markers` already uses, to
+    prove the note fires ONLY for a stale host that is actually THIS
+    session's own MCP sibling."""
+
     def test_no_stale_processes_appends_nothing(self, monkeypatch) -> None:
         from unittest.mock import patch as _patch
 
@@ -483,6 +491,27 @@ class TestStaleMcpHostSessionStartNudge:
             output = session_start(claude_session_id="s-otnvr-other-kind")
         assert "NOTE" not in output
 
+    def test_stale_mcp_host_of_another_session_appends_nothing(self, monkeypatch) -> None:
+        """The machine-wide regression this bead fixes: a stale nx-mcp host
+        exists SOMEWHERE on the box, but its pid is not among THIS
+        session's own MCP siblings: the note must stay silent."""
+        from unittest.mock import patch as _patch
+
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch(
+                "nexus.upgrade_finish.detect_stale_processes",
+                return_value=_FakeSkewReport(
+                    stale=[_FakeStaleProcess("mcp-host", pid=42424)],
+                    installed_version="7.5.0",
+                ),
+            ),
+            _patch("nexus.session.find_immediate_claude_pid", return_value=9999),
+            _patch("nexus.session.find_mcp_sibling_pids", return_value=[111, 222]),
+        ):
+            output = session_start(claude_session_id="s-otnvr-foreign-stale")
+        assert "NOTE" not in output
+
     def test_stale_mcp_host_appends_warning_with_version_and_mcp_hint(
         self, monkeypatch
     ) -> None:
@@ -493,17 +522,24 @@ class TestStaleMcpHostSessionStartNudge:
             _patch(
                 "nexus.upgrade_finish.detect_stale_processes",
                 return_value=_FakeSkewReport(
-                    stale=[_FakeStaleProcess("mcp-host"), _FakeStaleProcess("mcp-host")],
+                    stale=[
+                        _FakeStaleProcess("mcp-host", pid=111),
+                        _FakeStaleProcess("mcp-host", pid=222),
+                    ],
                     installed_version="7.5.0",
                 ),
             ),
+            _patch("nexus.session.find_immediate_claude_pid", return_value=9999),
+            _patch("nexus.session.find_mcp_sibling_pids", return_value=[111, 222]),
         ):
             output = session_start(claude_session_id="s-otnvr-stale")
         assert "Nexus ready" in output
         assert "NOTE" in output
         assert "2 nx-mcp process(es)" in output
         assert "7.5.0" in output
-        assert "/mcp" in output
+        # A slash-command hint means nothing to a model reading this text.
+        # Only the user can run it (nexus-cnzei.2 S4).
+        assert "ask the user to run /mcp" in output
 
     def test_probe_failure_never_breaks_session_start(self, monkeypatch) -> None:
         from unittest.mock import patch as _patch
@@ -517,6 +553,28 @@ class TestStaleMcpHostSessionStartNudge:
         ):
             output = session_start(claude_session_id="s-otnvr-probe-fail")
         assert "Nexus ready" in output
+        assert "NOTE" not in output
+
+    def test_ancestry_scan_failure_suppresses_note_rather_than_falling_back_unscoped(
+        self, monkeypatch
+    ) -> None:
+        """A crash in the ancestry lookup must never fall back to the OLD
+        machine-wide behavior: that would silently reopen the exact bug
+        this scoping closes."""
+        from unittest.mock import patch as _patch
+
+        def boom():
+            raise RuntimeError("ps unavailable")
+
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch(
+                "nexus.upgrade_finish.detect_stale_processes",
+                return_value=_FakeSkewReport(stale=[_FakeStaleProcess("mcp-host", pid=111)]),
+            ),
+            _patch("nexus.session.find_immediate_claude_pid", side_effect=boom),
+        ):
+            output = session_start(claude_session_id="s-otnvr-ancestry-boom")
         assert "NOTE" not in output
 
 
@@ -602,6 +660,24 @@ class TestGuidanceByteBudgetIntegration:
     #: out of this bead's scope — see nexus-h33x8.5 dev notes).
     _TOTAL_BUDGET_BYTES = 2000
 
+    #: nexus-cnzei.2 item 3/S4: this is a SEPARATE, honestly-derived ceiling
+    #: for the rare branch where the stale-MCP NOTE actually fires. It is
+    #: NOT the same 2000B number as above, and that is a documented,
+    #: deliberate finding, not an oversight: the no-note baseline below
+    #: already measures 1969B, leaving 31B of headroom, and the shortest
+    #: note text that (a) names the process count, (b) names the installed
+    #: version (real diagnostic value: "predates WHAT?"), and (c) carries
+    #: the bead's own mandated wording "ask the user to run /mcp" verbatim
+    #: measures 157B on its own with a single-digit count and a short
+    #: version string. The minimum possible with that exact phrase and NO
+    #: other content at all is still ~33B, already 2B over the 31B margin.
+    #: Meeting a literal <2000B total in the with-note branch would require
+    #: either dropping the mandated wording or omitting the process
+    #: count/version, both worse outcomes than a wider budget for a branch
+    #: that most sessions never hit. 2200 leaves headroom over the measured
+    #: ~2126B (1969 + 157) for this fixture.
+    _WITH_NOTE_BUDGET_BYTES = 2200
+
     #: nexus-6konb.12 (MM-3.4 fix 2): a uuid4()-shaped, 36-char session id --
     #: the real ``CLAUDE_CODE_SESSION_ID`` / ``generate_session_id()`` shape
     #: (session.py) -- not a short synthetic literal. code-review-expert's
@@ -620,25 +696,27 @@ class TestGuidanceByteBudgetIntegration:
     def test_session_start_output_under_byte_budget_with_imperative_first(
         self, monkeypatch
     ) -> None:
-        from unittest.mock import patch as _patch
-
+        """nexus-cnzei.2 item 8: measures the pure, side-effect-free
+        :func:`render_session_start` directly. No need to mock
+        ``write_claude_session_id`` any more, since the render never calls
+        it (only ``session_start()``'s write-performing wrapper does, and
+        that wrapper is not under test here)."""
         monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
         with (
-            _patch("nexus.hooks.write_claude_session_id"),
-            _patch(
+            patch(
                 "nexus.upgrade_finish.detect_stale_processes",
                 return_value=_FakeSkewReport(stale=[]),
             ),
-            # nexus-6konb.9: the arm block's availability PROBE is ambient
-            # (the autouse substrate is live), so it is mocked, but the block
-            # is mocked to its REAL text, never to "": a budget that measures
-            # an emitter with its largest block removed is not a budget.
-            _patch(
-                "nexus.mailbox_arm.arm_block",
-                return_value=mailbox_arm_instruction(self._REAL_SESSION_ID),
-            ),
         ):
-            output = session_start(claude_session_id=self._REAL_SESSION_ID)
+            output = render_session_start(
+                self._REAL_SESSION_ID,
+                # nexus-6konb.9: the arm block's availability PROBE is
+                # ambient; the RENDER never probes it (item 8), so the
+                # caller supplies the REAL text directly here, never "".
+                # A budget that measures an emitter with its largest block
+                # silently absent is not a budget.
+                mailbox_arm_text=f"\n\n{mailbox_arm_instruction(self._REAL_SESSION_ID)}",
+            )
         n = len(output.encode("utf-8"))
         assert n < self._TOTAL_BUDGET_BYTES, (
             f"nx hook session-start emitted {n} bytes, budget is "
@@ -659,6 +737,87 @@ class TestGuidanceByteBudgetIntegration:
         # sentence it pins changed.
         head = output.encode("utf-8")[:500].decode("utf-8", errors="ignore")
         assert "Conexus skills carry this project's accumulated practice" in head
+
+    def test_session_start_output_with_stale_note_under_honest_budget(
+        self, monkeypatch
+    ) -> None:
+        """nexus-cnzei.2 item 3/S4: the OLD version of this test class
+        mocked the stale-process probe to ALWAYS return empty, so the
+        emitter's largest conditional block (the stale-MCP NOTE) never
+        once counted against the budget it claimed to guard. Real
+        sessions with a genuinely stale nx-mcp measured 2,121B against a
+        2,000B ceiling nothing here ever caught. This test exercises that
+        branch for real, against the honest ``_WITH_NOTE_BUDGET_BYTES``
+        ceiling documented above."""
+        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+        with (
+            patch(
+                "nexus.upgrade_finish.detect_stale_processes",
+                return_value=_FakeSkewReport(
+                    stale=[_FakeStaleProcess("mcp-host", pid=111)],
+                    installed_version="9.9.9",
+                ),
+            ),
+            patch("nexus.session.find_immediate_claude_pid", return_value=9999),
+            patch("nexus.session.find_mcp_sibling_pids", return_value=[111]),
+        ):
+            output = render_session_start(
+                self._REAL_SESSION_ID,
+                mailbox_arm_text=f"\n\n{mailbox_arm_instruction(self._REAL_SESSION_ID)}",
+            )
+        assert "NOTE" in output
+        assert "ask the user to run /mcp" in output
+        n = len(output.encode("utf-8"))
+        assert n < self._WITH_NOTE_BUDGET_BYTES, (
+            f"nx hook session-start (stale-note branch) emitted {n} bytes, "
+            f"budget is {self._WITH_NOTE_BUDGET_BYTES}"
+        )
+
+
+# ── nexus-cnzei.2 item 8: render_session_start is genuinely side-effect-free ─
+#
+# Origin: a coordinator session called ``session_start()`` directly from an
+# ad hoc script outside pytest's ``_isolate_config_dir`` autouse fence (HOME
+# unset), to hand-measure a byte budget. Its unconditional
+# ``_write_tuple_watch_session_marker`` call wrote a marker under the REAL
+# ``~/.config/nexus`` naming a stale fixture session id, and the live
+# mailbox watcher, which watches for exactly that marker, stopped itself
+# on its next poll. Two sessions hit this the same day. This test proves
+# the NEW pure-render function cannot repeat that: it must leave an empty
+# config dir empty, so a future writer accidentally added to the render
+# path fails this test immediately rather than waiting for the next
+# ad hoc script to rediscover it live.
+
+
+class TestRenderSessionStartIsPure:
+    def test_writes_nothing_to_an_empty_config_dir(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / ".config" / "nexus"))
+        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+
+        assert list(tmp_path.iterdir()) == []
+
+        output = render_session_start(
+            "61710488-41ff-491f-b656-183042eb1f1b",
+            mailbox_arm_text="\n\nMAILBOX WATCH: arm once, now.",
+        )
+
+        assert "Nexus ready" in output
+        assert list(tmp_path.iterdir()) == [], (
+            "render_session_start wrote something under HOME -- it must "
+            "compute text only; writes belong to session_start()'s wrapper"
+        )
+
+    def test_session_start_still_performs_the_writes_render_does_not(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The wrapper is not neutered by the split: it still calls
+        ``write_claude_session_id`` exactly as before."""
+        mock_write = MagicMock()
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        with patch("nexus.hooks.write_claude_session_id", mock_write):
+            session_start(claude_session_id="wrapper-still-writes")
+        mock_write.assert_called_once_with("wrapper-still-writes")
 
 
 # ── nexus-6konb.9 (MM-3.1): SessionStart mailbox-watch arm instruction ──────

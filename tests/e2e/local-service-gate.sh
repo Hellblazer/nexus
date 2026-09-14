@@ -301,6 +301,8 @@ REAL_HOME="$HOME"
 # shellcheck source=tests/e2e/lib/fence_home.sh
 source "$REPO_ROOT/tests/e2e/lib/fence_home.sh"
 source "$REPO_ROOT/tests/e2e/lib/gate_advisory.sh"   # passed_by_default (nexus-1c7oq)
+# shellcheck source=./scripts/lib/release-props-lease.sh disable=SC1091
+source "$REPO_ROOT/scripts/lib/release-props-lease.sh"   # nexus-56qvf: holds the lease across stamp+package+restore, not just the mvn call
 GATE_HOME="$SCRATCH/home"
 fence_home "$REAL_HOME" "$GATE_HOME" ".config/nexus"
 export HOME="$GATE_HOME"
@@ -354,15 +356,26 @@ if [ -n "${NEXUS_GATE_NO_VOYAGE:-}" ]; then
   passed_by_default local-service-gate "NEXUS_GATE_NO_VOYAGE=1: the voyage/CCE subset is skipped, a green here does not cover it"
 fi
 
-# nexus-iws18: snapshot release.properties' ACTUAL BYTES now, and restore those
-# on every exit path. The old `git checkout -- <path>` reverted to HEAD, which
+# nexus-iws18: restore release.properties' pre-invocation BYTES on every
+# exit path -- the old `git checkout -- <path>` reverted to HEAD, which
 # silently destroyed any UNCOMMITTED edit to that file on every gate run (it
-# bit the nexus-308ph implementer twice mid-verification). Same byte-snapshot
-# shape scripts/build-gate-jar.sh uses; the two stay separate because this
-# gate's restore choreography differs (mid-run _restore_props + EXIT backstop).
+# bit the nexus-308ph implementer twice mid-verification).
+#
+# nexus-iexvl: RELEASE_PROPS_SNAPSHOT is declared but deliberately NOT
+# populated here. Taking the restore baseline this early -- before the
+# "service" build lease is acquired and release_props_guard_clean has
+# passed, in the stamp step below -- can capture a CONCURRENT stamper's
+# in-flight dirty bytes as "the true baseline"; cleanup() would then
+# restore THAT stamp instead of the real one after the true clean bytes
+# were already restored. That was the code-review finding on commit
+# 40963aeb5 (a residual instance of the exact incident nexus-iexvl exists
+# to close, reproduced via this code path). Declared empty here, never
+# left unset under `set -u`, so cleanup() is always safe to call, even
+# from an exit path that fires before the stamp step below ever runs (the
+# native-binary launch path, or NX_GATE_ARTIFACTS, never populate it at
+# all).
 RELEASE_PROPS="$REPO_ROOT/service/src/main/resources/META-INF/nexus/release.properties"
-RELEASE_PROPS_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/release.properties.snapshot.XXXXXX")"
-cp "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT"
+RELEASE_PROPS_SNAPSHOT=""
 
 # shellcheck disable=SC2329  # invoked indirectly via the EXIT trap below
 cleanup() {
@@ -381,6 +394,11 @@ cleanup() {
   # Restore the pre-invocation BYTES, never HEAD (nexus-iws18).
   cp "$RELEASE_PROPS_SNAPSHOT" "$RELEASE_PROPS" 2>/dev/null || true
   rm -f "$RELEASE_PROPS_SNAPSHOT"
+  # nexus-56qvf: backstop release of the build lease this gate may hold
+  # across its stamp+package+restore step below — safe to call
+  # unconditionally (a no-op if this process never acquired it, or already
+  # released it on the success path), per build_lease_release's own contract.
+  build_lease_release service
   echo "[gate] cleaned up"
 }
 trap cleanup EXIT
@@ -434,7 +452,9 @@ NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx daemon service stop
 #    (step 5b) for no real reason. Stamp/restore release.properties around
 #    the build so the jar always carries exactly these two values.
 JAR="$REPO_ROOT/service/target/nexus-service-1.0-SNAPSHOT.jar"
-# RELEASE_PROPS + its byte snapshot are set once, above cleanup() (nexus-iws18).
+# RELEASE_PROPS is set once, above cleanup() (nexus-iws18); its byte
+# snapshot is taken later, inside the stamp step below, only once the
+# build lease is held and the guard has passed (nexus-iexvl).
 GATE_STAMP="$(python3 -c '
 import re, pathlib
 src = pathlib.Path("src/nexus/engine_version.py").read_text()
@@ -470,24 +490,79 @@ print(jar_freshness_skip_reason() or "")
   # smoke-leg compare, and the restore choreography differs) — keep in step.
   GATE_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
   GATE_BUILD_REF="${GATE_SHA}+$(date +%s)-$$"
+  # nexus-56qvf: hold the SINGLE-BUILDER lease across the WHOLE compound
+  # step below (stamp -> package -> assert -> restore), not just the mvn
+  # call. Before this fix, mvnw-leased.sh acquired its OWN lease around
+  # bare `./mvnw` alone, leaving the stamp (above) and the restore (below)
+  # unprotected: a concurrent build-gate-jar.sh (or another local-service-
+  # gate.sh) could stamp its own values, build, and restore its OWN
+  # snapshot in that window, landing this gate's `./mvnw` on a
+  # release.properties it never wrote. Acquiring here means this call must
+  # be the BARE `./mvnw`, never scripts/mvnw-leased.sh (which would try to
+  # re-acquire the same named lease from a DIFFERENT pid — this script's
+  # subprocess — and deadlock against the lease this process already
+  # holds). This does not itself explain the 2026-09-07 incident (a peer
+  # session confirmed no concurrent Maven/build-gate-jar.sh ran in that
+  # window) — it closes the CONCURRENT-CLOBBER hazard the bead names as
+  # fixable, not that specific unreplicated occurrence.
+  # nexus-iexvl round 3: routed through scripts/lib/release-props-lease.sh's
+  # release_props_stamp_under_lease -- the SAME shared helper run.sh and
+  # build-artifacts.sh use -- instead of a hand-rolled acquire+guard+
+  # snapshot+sed sequence with local _restore_props/_restore_props_and_
+  # release_lease functions. Those hand-rolled restores never cleared
+  # RELEASE_PROPS_SNAPSHOT or removed the snapshot file, so this script's
+  # own cleanup() EXIT trap (which unconditionally restores from
+  # RELEASE_PROPS_SNAPSHOT and releases the lease) re-applied the STALE
+  # snapshot a second time at the gate's own final exit, potentially
+  # minutes later and with no ownership check -- clobbering a concurrent
+  # legitimate stamper's in-flight bytes. release_props_stamp_under_lease
+  # acquires the lease, guards clean, snapshots, and stamps in one call;
+  # release_props_restore_and_release (below) restores AND removes the
+  # snapshot file before releasing, so cleanup()'s trailing restore is a
+  # genuine no-op once RELEASE_PROPS_SNAPSHOT is cleared to "" after each
+  # restore call, exactly as run.sh does for its own guided-family stamp.
+  RELEASE_PROPS_SNAPSHOT="$(release_props_stamp_under_lease "$RELEASE_PROPS" service "${NX_BUILD_LEASE_WAIT:-3600}" "release_version=$GATE_STAMP" "build_ref=$GATE_BUILD_REF")" || exit $?
   echo "[gate] rebuilding service jar (release_version=$GATE_STAMP build_ref=$GATE_BUILD_REF)..."
-  # Pre-invocation bytes, never `git checkout` (nexus-iws18: HEAD is not
-  # what was in the tree when the gate started).
-  _restore_props() { cp "$RELEASE_PROPS_SNAPSHOT" "$RELEASE_PROPS"; }
-  sed -e "s/^release_version=.*/release_version=${GATE_STAMP}/" \
-      -e "s/^build_ref=.*/build_ref=${GATE_BUILD_REF}/" \
-      "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp" \
-    && mv "$RELEASE_PROPS.tmp" "$RELEASE_PROPS"
-  # nexus-c00dw: mvnw-leased.sh takes the single-builder lease around this
-  # ./mvnw call itself (cds into service/ internally) — never call the bare
-  # ./mvnw here, or this gate can collide with a concurrent build.
-  if ! "$REPO_ROOT/scripts/mvnw-leased.sh" -q package -DskipTests; then
-    _restore_props
+  # Bare mvnw, deliberately (see the lease comment above) — this process
+  # already holds the lease scripts/mvnw-leased.sh would otherwise acquire.
+  if ! (cd "$REPO_ROOT/service" && ./mvnw -q package -DskipTests); then
+    release_props_restore_and_release "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT" service
+    RELEASE_PROPS_SNAPSHOT=""
     echo "[gate] ERROR: service jar rebuild failed — fix the Maven build and re-run:" >&2
     echo "         scripts/mvnw-leased.sh package -DskipTests" >&2
     exit 2
   fi
-  _restore_props
+  # nexus-56qvf: assert the BUILT ARTIFACTS actually carry the stamp this
+  # run just wrote, before trusting either one — the 2026-09-07 incident
+  # was exactly a stamped SOURCE file next to an unstamped BUILT jar, which
+  # nothing checked until the smoke leg failed several steps later. Check
+  # both target/classes (what -DskipTests actually produces from the
+  # resources phase) and the packaged jar itself; fail loud, naming which
+  # one and what it actually contained, rather than proceeding on a jar
+  # this run cannot prove is the one it just stamped.
+  GATE_CLASSES_PROPS="$REPO_ROOT/service/target/classes/META-INF/nexus/release.properties"
+  if ! grep -qx "release_version=${GATE_STAMP}" "$GATE_CLASSES_PROPS" 2>/dev/null \
+     || ! grep -qx "build_ref=${GATE_BUILD_REF}" "$GATE_CLASSES_PROPS" 2>/dev/null; then
+    echo "[gate] FATAL: target/classes/META-INF/nexus/release.properties does not carry the stamp this run just wrote (release_version=$GATE_STAMP build_ref=$GATE_BUILD_REF); actual contents:" >&2
+    cat "$GATE_CLASSES_PROPS" >&2 2>/dev/null || echo "  (file missing)" >&2
+    release_props_restore_and_release "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT" service
+    RELEASE_PROPS_SNAPSHOT=""
+    exit 2
+  fi
+  # Command substitution (not a pipe into grep -q) so pipefail can never
+  # promote unzip's own exit status over a short-circuited consumer
+  # (nexus-i66g4/nexus-6zxfb/nexus-wbeyi class, tests/test_pipefail_early_
+  # exit_consumer_lint.py) -- `$(...)` always drains its producer to EOF.
+  JAR_RELEASE_PROPS="$(unzip -p "$JAR" META-INF/nexus/release.properties 2>/dev/null || true)"
+  if [[ "$JAR_RELEASE_PROPS" != *"release_version=${GATE_STAMP}"* ]]; then
+    echo "[gate] FATAL: $JAR's packaged release.properties does not carry release_version=$GATE_STAMP; actual contents:" >&2
+    printf '%s\n' "${JAR_RELEASE_PROPS:-  (entry missing)}" >&2
+    release_props_restore_and_release "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT" service
+    RELEASE_PROPS_SNAPSHOT=""
+    exit 2
+  fi
+  release_props_restore_and_release "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT" service
+  RELEASE_PROPS_SNAPSHOT=""
 fi
 
 # 3. Resolve a launch artifact: installed native binary wins; dev jar fallback.

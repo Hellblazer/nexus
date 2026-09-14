@@ -336,6 +336,19 @@ RELEASE_MESSAGES: dict[str, str] = {
         "TRACKER NOT RECORDED (exit 3): the live /version re-read failed "
         "([exc])"
     ),
+    "record_deploy_from_gate_report_leg::tracker_production_write_guard": (
+        # Kept under 160 chars up front on purpose: tests/e2e/release-
+        # preflight.sh's check() truncates its one-line dashboard detail at
+        # 160 chars (`cut -c1-160`), so both required env var names must
+        # appear before that cut for the dashboard itself to be useful
+        # without re-running this leg alone (nexus-jzyt3).
+        "TRACKER NOT RECORDED (exit 3): production-write guard refused the "
+        f"tracker write. Set {_floor.deploy_tracker.GATE_REPORT_DIR_ENV} + a "
+        f"reasoned {_floor.PROD_WRITE_OPT_IN_ENV} ([exc]). This box's nexus resolves "
+        "from a dev checkout, so the tracker write (an HTTP T2 write) is "
+        "presumed to target the operator's real, live store -- see "
+        f"{_floor.PROD_WRITE_OPT_IN_ENV}=\"<why this write is deliberate>\"."
+    ),
     "record_deploy_from_gate_report_leg::tracker_recorded": (
         "deployed-engine-version recorded from [report.basename]: [content]"
     ),

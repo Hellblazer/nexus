@@ -135,11 +135,29 @@ _MINT_CALLS: int = 0
 #: When set, /v1/data-tokens/mint responds with this status instead of
 #: minting -- used to test a mint failure surfacing loud.
 _MINT_FORCE_STATUS: int | None = None
+#: nexus-umue1 (Sam's decision, review round 2): when set to a SPECIFIC
+#: token value, /v1/echo 401s a request carrying exactly that token even
+#: though it would otherwise be accepted (matches _VALID_BEARER or is the
+#: current _MINTED_DATA_TOKEN) -- models "this particular token was
+#: revoked" independent of "what the most recent mint happened to be",
+#: which _ALWAYS_401 cannot express (it 401s EVERY token, including a
+#: fresh mint that should heal). None (the reset-per-test default) is a
+#: no-op for every other test in this file.
+_REJECT_TOKEN: str | None = None
+
+#: nexus-hddw2: set (only) by test_concurrent_401s_remint_bounded before it
+#: starts its threads. When armed, _FakeHandler._check_bearer holds a
+#: request carrying EXACTLY this bearer at ``_ARRIVAL_GATE.wait()`` before
+#: 401ing it -- see _ArrivalGate below. None (the reset-per-test default) is
+#: a no-op for every other test in this file.
+_ARRIVAL_GATE: "_ArrivalGate | None" = None
+_ARRIVAL_GATE_BEARER: str | None = None
 
 
 def _reset_fake_service_state() -> None:
     global _VALID_BEARER, _ALWAYS_401, _MINTED_DATA_TOKEN, _MINT_CALLS, _MINT_FORCE_STATUS
-    global _HOLD_ECHO_EVENT, _ECHO_ENTERED_EVENT, _HOOK_FAILURE_RECORD_DELAY_S
+    global _HOLD_ECHO_EVENT, _ECHO_ENTERED_EVENT, _HOOK_FAILURE_RECORD_DELAY_S, _REJECT_TOKEN
+    global _ARRIVAL_GATE, _ARRIVAL_GATE_BEARER
     _VALID_BEARER = _INITIAL_BEARER
     _ALWAYS_401 = False
     _REQUEST_COUNT.clear()
@@ -151,8 +169,81 @@ def _reset_fake_service_state() -> None:
     _ECHO_ENTERED_EVENT = None
     _RECEIVED_TENANTS.clear()
     _HOOK_FAILURE_RECORD_DELAY_S = 0.0
+    _REJECT_TOKEN = None
+    _ARRIVAL_GATE = None
+    _ARRIVAL_GATE_BEARER = None
     with _HELD_ECHO_COUNT_LOCK:
         _HELD_ECHO_COUNT.clear()
+
+
+class _ArrivalGate:
+    """nexus-hddw2: server-side rendezvous so N concurrent HTTP callers
+    are concurrent BY CONSTRUCTION, not by assumption about client-side
+    thread-start timing alone.
+
+    ``threading.Barrier(threads_n)`` in the test only synchronizes when
+    the N *client* threads START; it says nothing about whether their
+    requests actually arrive at the server while the bearer is still
+    stale. Under ``pytest -n auto`` on a loaded box, a thread can be
+    scheduled far enough ahead that it completes its ENTIRE round trip
+    (send, 401, re-mint, retry) before a sibling thread even resolves
+    its own Authorization header -- at which point the sibling never
+    contends for the guard with the original bearer at all. Measured
+    2026-09-13 (nexus-58's run): 2 re-mints for 7 threads against an
+    expected 1 (see nexus-hddw2).
+
+    This gate closes that hole from the server side: it holds a request
+    carrying the KNOWN stale bearer until ``n`` of them have arrived,
+    then releases every held request together AND lets any further
+    matching request through immediately (never blocking a THIRD wave).
+    That "release the first N, pass the rest" shape -- not a strict
+    ``threading.Barrier(n)`` -- is deliberate: MEASURED (not assumed)
+    against this exact handler, a retrying caller can legitimately
+    resolve the STILL-stale bearer a second time if its own
+    ``bearer_for()`` call lands before the winner's re-mint has
+    published a fresh token (the very race
+    test_concurrent_401s_remint_bounded exists to exercise) -- an
+    (N+1)th arrival carrying the identical stale bearer is a real,
+    valid retry, not a test-harness bug, and a strict N-sized Barrier
+    would time out on it instead of the storm it was built to gate.
+
+    Since the bearer a request carries is fixed by the CLIENT before
+    the request is ever sent, and none of the N INITIAL callers can
+    have reacted to a 401 they have not yet received, holding the
+    RESPONSE is sufficient to guarantee all N captured the identical
+    stale bearer on their first attempt -- regardless of box load. A
+    THREADED fake server (``_start_threaded_fake_server``) is required
+    to host this at all: a plain single-threaded ``HTTPServer`` can
+    never have more than one request in flight to hold.
+
+    A bounded timeout protects against a genuine hang: if fewer than
+    ``n`` ever arrive, every blocked ``wait()`` returns after
+    ``timeout`` seconds and ``timed_out``/``arrived_at_timeout`` record
+    exactly how many did, so the test fails loudly naming the count
+    instead of silently measuring a smaller, non-N storm or hanging
+    outright.
+    """
+
+    def __init__(self, n: int, timeout: float = 15.0) -> None:
+        self.n = n
+        self.timeout = timeout
+        self._lock = threading.Lock()
+        self._count = 0
+        self._released = threading.Event()
+        self.timed_out = False
+        self.arrived_at_timeout = 0
+
+    def wait(self) -> None:
+        with self._lock:
+            self._count += 1
+            if self._count >= self.n:
+                self._released.set()
+        if self._released.wait(timeout=self.timeout):
+            return
+        with self._lock:
+            if not self._released.is_set():
+                self.timed_out = True
+                self.arrived_at_timeout = self._count
 
 
 class _FakeHandler(BaseHTTPRequestHandler):
@@ -180,10 +271,18 @@ class _FakeHandler(BaseHTTPRequestHandler):
 
     def _check_bearer(self) -> bool:
         auth = self.headers.get("Authorization", "")
+        if _REJECT_TOKEN is not None and auth == f"Bearer {_REJECT_TOKEN}":
+            self._send(401, {"error": "revoked"})
+            return False
         valid = {f"Bearer {_VALID_BEARER}"}
         if _MINTED_DATA_TOKEN:
             valid.add(f"Bearer {_MINTED_DATA_TOKEN}")
         if _ALWAYS_401 or auth not in valid:
+            # nexus-hddw2: hold a request carrying the arrival gate's
+            # known stale bearer until N have arrived -- see _ArrivalGate.
+            # A no-op unless test_concurrent_401s_remint_bounded armed it.
+            if _ARRIVAL_GATE is not None and auth == _ARRIVAL_GATE_BEARER:
+                _ARRIVAL_GATE.wait()
             self._send(401, {"error": "unauthorized"})
             return False
         return True
@@ -337,6 +436,24 @@ class _FakeServerHandle:
     def __init__(self, server: HTTPServer, port: int) -> None:
         self.server = server
         self.port = port
+
+
+class _FakeMonotonicClock:
+    """Injectable stand-in for ``DataTokenManager``'s ``clock`` kwarg
+    (nexus-umue1 review round 2, Sam's decision on futility expiry) --
+    lets a test advance the futility window deterministically instead of a
+    real ``time.sleep(60)``. Mirrors ``tests/db/test_data_token.py``'s own
+    ``_FakeClock`` (kept file-local rather than imported cross-file, per
+    this repo's convention of test-file-local helper duplication)."""
+
+    def __init__(self, start: float = 1_000_000.0) -> None:
+        self._now = start
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
 
 
 @pytest.fixture
@@ -2118,3 +2235,488 @@ class TestSharedClient:
                     os.environ["NX_SERVICE_URL"] = saved_url
         finally:
             _stop_fake_server(server)
+
+
+# ── nexus-umue1: the 401 data-token re-mint is single-flighted + bounded ────
+# (prophylactic port of nexus-r0d37 defect 2's T1 guard to the shared
+# DataTokenManager -- T1's own tests are
+# tests/db/test_http_scratch_store.py::TestRemintSingleFlight). Both guards
+# now live in DataTokenManager itself (invalidate_if_current /
+# mark_remint_futile / clear_remint_futile, tests/db/test_data_token.py),
+# because T2's nine Http*Store instances (and T3) share ONE cached token per
+# (base_url, tenant) key through that one manager -- these tests pin the
+# CLIENT-SIDE wiring at both 401 call sites this mixin has: the general
+# retry path (_send's idempotent branch, "site b") and the tjvgf/ig3qe
+# non-idempotent carve-out (_send's ``idempotent=False`` branch, "site a").
+#
+# T1 MEASURED its own numbers rather than reasoning about them (the bead's
+# own docstring corrects an earlier wrong-emphasis reading); these tests do
+# the same for T2's shape rather than assuming T1's numbers transfer
+# unchanged -- T2 layers invalidate_if_current on top of
+# DataTokenManager.bearer_for's PRE-EXISTING _mint_guarded flock, which is a
+# different coalescing mechanism than T1's own per-instance lock.
+
+
+class TestRemintSingleFlight:
+    """nexus-umue1."""
+
+    def _reset_manager(self) -> None:
+        from nexus.db.data_token import reset_data_token_manager
+
+        reset_data_token_manager()
+
+    def _configured_store(self, monkeypatch: pytest.MonkeyPatch) -> Any:
+        """An UNPINNED echo store against the module fake service, with a
+        mint_token credential configured -- ctor mints exactly once."""
+        monkeypatch.setenv("NX_MINT_TOKEN", _MINT_CREDENTIAL)
+        self._reset_manager()
+        return _make_echo_store()
+
+    # ── site (b): the general idempotent retry path ─────────────────────
+
+    def test_staggered_401s_remint_exactly_once(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Discriminates the FUTILITY guard: N SEQUENTIAL calls that all
+        401 regardless of bearer (the server 401s unconditionally --
+        models a stale-session-shaped 401 no re-mint can fix) must
+        re-mint only on the FIRST one.
+
+        Mutation check: removing the ``self._futile.get(key)``
+        short-circuit at the top of
+        ``DataTokenManager.invalidate_if_current`` makes this test fail
+        (every call would re-mint, 4 mints instead of 1) while
+        test_concurrent_401s_remint_bounded below keeps passing.
+        """
+        global _ALWAYS_401
+        try:
+            store = self._configured_store(monkeypatch)
+            baseline = _MINT_CALLS
+            assert baseline == 1, "ctor mints exactly one bearer"
+
+            _ALWAYS_401 = True
+            for i in range(4):
+                with pytest.raises(httpx.HTTPStatusError):
+                    store.echo_post(f"call-{i}")
+
+            assert _MINT_CALLS == baseline + 1, (
+                f"4 staggered 401s must re-mint exactly ONCE (saw "
+                f"{_MINT_CALLS - baseline} re-mints)"
+            )
+        finally:
+            _ALWAYS_401 = False
+            self._reset_manager()
+
+    def test_concurrent_401s_remint_bounded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Discriminates the SINGLE-FLIGHT compare
+        (``invalidate_if_current``'s ``cached.token != sent_token``
+        check): N genuinely concurrent 401s against a THREADED fake
+        server must not each independently invalidate-and-remint.
+
+        Mutation check: replacing that compare with an unconditional pop
+        makes this test fail (every thread invalidates its own sent
+        token before checking, so the mint count scales with thread
+        count) while test_staggered_401s_remint_exactly_once above keeps
+        passing (its guard is the OTHER one).
+
+        Arrival is made deterministic by an _ArrivalGate (nexus-hddw2):
+        the fake server holds every /v1/echo request carrying the
+        original stale bearer until all threads_n of them have arrived,
+        then releases them together, so the N callers are concurrent BY
+        CONSTRUCTION -- the client-side threading.Barrier below only
+        needs to get all N threads INTO their call() bodies, not have
+        them race the (already-threaded) server unaided.
+        """
+        global _ALWAYS_401, _ARRIVAL_GATE, _ARRIVAL_GATE_BEARER
+        threads_n = 7
+        server, port = _start_threaded_fake_server()
+        try:
+            monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+            monkeypatch.setenv("NX_SERVICE_PORT", str(port))
+            monkeypatch.setenv("NX_SERVICE_TOKEN", _VALID_BEARER)
+            monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+            _reset_fake_service_state()
+            store = self._configured_store(monkeypatch)
+            baseline = _MINT_CALLS
+            assert baseline == 1
+
+            _ALWAYS_401 = True
+            _ARRIVAL_GATE_BEARER = f"Bearer {store._token}"
+            gate = _ArrivalGate(threads_n)
+            _ARRIVAL_GATE = gate
+
+            failures: list[BaseException] = []
+            barrier = threading.Barrier(threads_n)
+
+            def call() -> None:
+                barrier.wait(timeout=10)
+                try:
+                    store.echo_post("storm")
+                except httpx.HTTPStatusError:
+                    pass  # every call 401s by construction; the COUNT is the assertion
+                except BaseException as exc:  # noqa: BLE001 — surfaced below, never swallowed
+                    failures.append(exc)
+
+            threads = [threading.Thread(target=call) for _ in range(threads_n)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+
+            # Non-vacuity (hddw2 critic pass): timed_out is only set inside the
+            # gate's wait, so a gate that never engaged (a path or bearer match
+            # gone stale) would leave it False and this test would pass on
+            # scheduling luck again. Every held request must have arrived.
+            assert gate._count >= gate.n, (
+                f"the arrival gate saw {gate._count} of {gate.n} stale-bearer "
+                f"requests: they never reached it, so this run proved nothing "
+                f"about concurrent 401s"
+            )
+            assert not gate.timed_out, (
+                f"arrival gate timed out after {gate.timeout}s: only "
+                f"{gate.arrived_at_timeout}/{threads_n} concurrent requests "
+                f"carrying the stale bearer arrived -- box too loaded to "
+                f"produce genuine concurrency, or a client-side regression "
+                f"stopped a caller from ever sending the original bearer"
+            )
+            assert not failures, f"unexpected non-401 failures: {failures}"
+            assert all(not t.is_alive() for t in threads), "a worker thread hung"
+            assert _MINT_CALLS == baseline + 1, (
+                f"{threads_n} concurrent 401s must re-mint exactly ONCE "
+                f"(saw {_MINT_CALLS - baseline} re-mints)"
+            )
+        finally:
+            _ALWAYS_401 = False
+            _ARRIVAL_GATE = None
+            _ARRIVAL_GATE_BEARER = None
+            self._reset_manager()
+            _stop_fake_server(server)
+
+    def test_futility_clears_once_a_call_stops_returning_401(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The skip lasts exactly as long as the condition: once a call
+        stops 401ing, the NEXT genuine 401 (an out-of-band revoke) must
+        re-mint normally again, never staying stuck futile forever."""
+        global _ALWAYS_401, _MINTED_DATA_TOKEN
+        try:
+            store = self._configured_store(monkeypatch)
+
+            _ALWAYS_401 = True
+            with pytest.raises(httpx.HTTPStatusError):
+                store.echo_post("first")
+            after_first = _MINT_CALLS
+            assert after_first == 2, "the first 401 must attempt the re-mint heal"
+
+            with pytest.raises(httpx.HTTPStatusError):
+                store.echo_post("second")
+            assert _MINT_CALLS == after_first, "a known-futile re-mint must decline, not fire again"
+
+            _ALWAYS_401 = False
+            result = store.echo_post("healed")
+            assert result == {"echo": {"value": "healed"}}
+
+            _MINTED_DATA_TOKEN = "revoked-elsewhere"  # a genuine out-of-band rotation
+            result2 = store.echo_post("after revoke")
+            assert result2 == {"echo": {"value": "after revoke"}}
+            assert _MINT_CALLS == after_first + 1, "a genuine post-heal 401 must re-mint"
+        finally:
+            _ALWAYS_401 = False
+            self._reset_manager()
+
+    # ── site (a): the tjvgf/ig3qe non-idempotent 401 carve-out ──────────
+
+    def test_non_idempotent_staggered_401s_remint_exactly_once(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The SAME futility guard applies to the ``idempotent=False``
+        carve-out (nexus-ig3qe) -- the aspect-worker claim path that
+        motivated that carve-out is exactly the kind of long-running,
+        many-call-in-a-row caller a stale-session storm would hit."""
+        global _ALWAYS_401
+        try:
+            store = self._configured_store(monkeypatch)
+            baseline = _MINT_CALLS
+            assert baseline == 1
+
+            _ALWAYS_401 = True
+            for i in range(4):
+                with pytest.raises(httpx.HTTPStatusError):
+                    store._post("/v1/echo", {"value": f"claim-{i}"}, idempotent=False)
+
+            assert _MINT_CALLS == baseline + 1, (
+                f"4 staggered non-idempotent 401s must re-mint exactly ONCE "
+                f"(saw {_MINT_CALLS - baseline} re-mints)"
+            )
+        finally:
+            _ALWAYS_401 = False
+            self._reset_manager()
+
+    def test_non_idempotent_futility_clears_on_heal(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        global _ALWAYS_401
+        try:
+            store = self._configured_store(monkeypatch)
+
+            _ALWAYS_401 = True
+            with pytest.raises(httpx.HTTPStatusError):
+                store._post("/v1/echo", {"value": "claim-1"}, idempotent=False)
+            after_first = _MINT_CALLS
+            assert after_first == 2
+
+            with pytest.raises(httpx.HTTPStatusError):
+                store._post("/v1/echo", {"value": "claim-2"}, idempotent=False)
+            assert _MINT_CALLS == after_first
+
+            _ALWAYS_401 = False
+            result = store._post("/v1/echo", {"value": "claim-3"}, idempotent=False)
+            assert result == {"echo": {"value": "claim-3"}}
+        finally:
+            _ALWAYS_401 = False
+            self._reset_manager()
+
+    # ── guard scope: unconfigured / pinned instances see NO behavior change ──
+
+    def test_unconfigured_install_never_touches_the_guard(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No mint_token configured -> the guard never engages; a
+        persistent 401 propagates on every call, exactly as it always
+        has (pre-existing, un-mint-related behavior, unaffected by
+        nexus-umue1)."""
+        global _ALWAYS_401
+        self._reset_manager()
+        try:
+            store = _make_echo_store()
+            _ALWAYS_401 = True
+            for i in range(3):
+                with pytest.raises(httpx.HTTPStatusError):
+                    store.echo_post(f"call-{i}")
+            assert _MINT_CALLS == 0
+        finally:
+            _ALWAYS_401 = False
+            self._reset_manager()
+
+    def test_pinned_token_store_never_touches_the_guard(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A test-fixture-pinned ``_token`` never applies the data-token
+        override (see ``_apply_data_token_override``), so the guard must
+        not engage for it either -- both halves pinned means a 401 is
+        simply not recoverable and raises immediately (pre-existing
+        behavior)."""
+        monkeypatch.setenv("NX_MINT_TOKEN", _MINT_CREDENTIAL)
+        self._reset_manager()
+        global _ALWAYS_401
+        try:
+            store = _make_echo_store(
+                base_url=f"http://127.0.0.1:{os.environ['NX_SERVICE_PORT']}",
+                _token=_VALID_BEARER,
+            )
+            _ALWAYS_401 = True
+            with pytest.raises(RuntimeError, match="cannot self-heal"):
+                store.echo_post("pinned")
+            assert _MINT_CALLS == 0, "a fully pinned store never touches the mint manager"
+        finally:
+            _ALWAYS_401 = False
+            self._reset_manager()
+
+    def test_futile_mark_lands_on_the_original_key_when_base_url_drifts_mid_retry(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """CRE Significant (nexus-umue1 review round 2):
+        ``_invalidate_data_token_on_401`` must capture
+        ``(self._base_url, self._tenant)`` ONCE, before
+        ``_invalidate_and_reresolve()`` can reassign ``self._base_url`` --
+        otherwise ``mark_remint_futile`` marks a key that was never the
+        subject of the ``invalidate_if_current`` call whose
+        ``reminted=True`` result is being used to justify the mark. Models
+        a coincidental supervisor restart landing a NEW port between the
+        401 and the retry.
+
+        Mutation check: reverting to reading ``self._base_url`` AFTER
+        ``_invalidate_and_reresolve()`` (in the closing except block)
+        makes this test fail -- the mark lands on the DRIFTED base_url
+        instead of the original one.
+        """
+        from nexus.db.data_token import get_data_token_manager
+        from nexus.db.t2 import _refreshable_client as rc
+
+        monkeypatch.setenv("NX_MINT_TOKEN", _MINT_CREDENTIAL)
+        self._reset_manager()
+        global _ALWAYS_401
+        # A SECOND real server (same always-401-when-armed handler) to drift
+        # onto -- the retry must reach a REAL server and get a REAL 401 for
+        # the closing except block's mark_remint_futile branch to even fire;
+        # a nonexistent drifted URL would raise a connection error instead
+        # and never exercise the bug this test targets.
+        drifted_server, drifted_port = _start_fake_server()
+        try:
+            store = _make_echo_store()
+            original_base_url = store._base_url
+            manager = get_data_token_manager()
+            assert manager.is_configured()
+
+            drifted_base_url = f"http://127.0.0.1:{drifted_port}"
+
+            def _fake_resolve(*, wait_budget_s: float = 0.0):  # noqa: ARG001, ANN001
+                return drifted_base_url, store._token
+
+            monkeypatch.setattr(rc, "resolve_service_endpoint", _fake_resolve)
+
+            _ALWAYS_401 = True
+            with pytest.raises(httpx.HTTPStatusError):
+                store.echo_post("drift")
+
+            assert manager.is_remint_futile(original_base_url, store._tenant) is True, (
+                "the ORIGINAL key (the one invalidate_if_current actually "
+                "acted on) must be marked futile"
+            )
+            assert manager.is_remint_futile(drifted_base_url, store._tenant) is False, (
+                "the DRIFTED key must never be marked -- it was never "
+                "the subject of invalidate_if_current"
+            )
+        finally:
+            _ALWAYS_401 = False
+            self._reset_manager()
+            _stop_fake_server(drifted_server)
+
+    def test_critical1_transient_futility_heals_within_the_window(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch, tmp_path,
+    ) -> None:
+        """Critic Critical 1 (nexus-umue1 review round 2, Sam's decision):
+        a fresh re-mint that ALSO 401s (e.g. a transient rejection during
+        a key rotation) must not leave every T2 call 401ing until the
+        cached token's own natural TTL-refresh point (up to ~48min at the
+        default TTL) -- it must heal within one futility window.
+
+        WOULD FAIL against the pre-fix (unbounded-futile) code: without
+        expiry, the second phase's call would 401 forever regardless of
+        how far the clock advances (mutation check (a) below reproduces
+        exactly this).
+        """
+        from nexus.db.data_token import DataTokenManager
+        import nexus.db.data_token as dt_mod
+
+        global _ALWAYS_401, _REJECT_TOKEN
+        monkeypatch.setenv("NX_MINT_TOKEN", _MINT_CREDENTIAL)
+        self._reset_manager()
+        clock = _FakeMonotonicClock()
+        manager = DataTokenManager(clock=clock, mint_credential=lambda: _MINT_CREDENTIAL, config_dir=tmp_path)
+        monkeypatch.setattr(dt_mod, "get_data_token_manager", lambda: manager)
+        try:
+            store = _make_echo_store()
+            assert _MINT_CALLS == 1, "ctor mints exactly once"
+
+            # Phase 1: a 401 whose guarded re-mint ALSO 401s -- proof (per
+            # the old design) that the bearer was not the cause; marks the
+            # key futile.
+            _ALWAYS_401 = True
+            with pytest.raises(httpx.HTTPStatusError):
+                store.echo_post("first")
+            _ALWAYS_401 = False
+            assert _MINT_CALLS == 2, "cold-start mint + one guarded re-mint"
+
+            # The token minted during phase 1's retry is now the one that
+            # must be treated as "revoked" going forward -- the server
+            # would happily accept a DIFFERENT fresh mint, but not this
+            # cached one, modeling the transient-rejection shape exactly.
+            _REJECT_TOKEN = _MINTED_DATA_TOKEN
+
+            # Phase 2: within the window, the guard is futile -- the call
+            # 401s WITHOUT attempting a re-mint (mint count unchanged).
+            with pytest.raises(httpx.HTTPStatusError):
+                store.echo_post("within-window")
+            assert _MINT_CALLS == 2, "must not remint while the futility window is active"
+
+            # Phase 3: advance the clock past the window -- the NEXT call
+            # is allowed to remint once, and (since the fresh mint is not
+            # in the reject list) that remint heals the call.
+            clock.advance(60.0)
+            result = store.echo_post("after-window")
+            assert result == {"echo": {"value": "after-window"}}
+            assert _MINT_CALLS == 3, "exactly one re-mint after the window elapses, and it heals"
+        finally:
+            _ALWAYS_401 = False
+            _REJECT_TOKEN = None
+            self._reset_manager()
+
+
+class TestRemintSingleFlightCrossSurface:
+    """nexus-umue1 Sam's decision follow-up (critic Critical 2): the
+    coordination this bead ports into DataTokenManager lives in that ONE
+    shared singleton, not in any store's or client's own state -- so two
+    genuinely DIFFERENT T2 store CLASSES plus T3's module-level client, all
+    resolving the SAME ``(base_url, tenant)`` key, must draw from the SAME
+    cache/futility state. Every OTHER test in this file (and in T3's own
+    TestRemintSingleFlightT3) hammers ONE store/endpoint repeatedly; this
+    test is the one that spans stores/surfaces.
+    """
+
+    def _reset_manager(self) -> None:
+        from nexus.db.data_token import reset_data_token_manager
+
+        reset_data_token_manager()
+
+    def test_two_t2_stores_plus_t3_share_one_key_one_mint_per_window(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch, tmp_path,
+    ) -> None:
+        import urllib.error
+        from nexus.db.data_token import DataTokenManager
+        import nexus.db.data_token as dt_mod
+        import nexus.db.http_vector_client as hv
+        from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
+
+        class _EchoStoreA(RefreshableHttpStoreMixin):
+            def echo(self) -> Any:
+                return self._get("/v1/echo")
+
+        class _EchoStoreB(RefreshableHttpStoreMixin):
+            def echo(self) -> Any:
+                return self._get("/v1/echo")
+
+        global _ALWAYS_401
+        monkeypatch.setenv("NX_MINT_TOKEN", _MINT_CREDENTIAL)
+        self._reset_manager()
+        clock = _FakeMonotonicClock()
+        manager = DataTokenManager(clock=clock, mint_credential=lambda: _MINT_CREDENTIAL, config_dir=tmp_path)
+        monkeypatch.setattr(dt_mod, "get_data_token_manager", lambda: manager)
+        # Point T3's independent endpoint resolution at the SAME fake
+        # service T2's env-based resolution already targets, so both
+        # surfaces genuinely share one (base_url, tenant) key.
+        monkeypatch.setattr(
+            hv, "_resolve_endpoint",
+            lambda: (f"http://127.0.0.1:{fake_service.port}", _VALID_BEARER),
+        )
+        try:
+            store_a = _EchoStoreA()
+            assert _MINT_CALLS == 1, "store A's construction mints once (genuine cache miss)"
+            store_b = _EchoStoreB()
+            assert _MINT_CALLS == 1, "store B -- a DIFFERENT store class -- reuses the SAME cached token"
+
+            _ALWAYS_401 = True
+            with pytest.raises(httpx.HTTPStatusError):
+                store_a.echo()
+            assert _MINT_CALLS == 2, "store A's own guarded retry re-mints once"
+
+            with pytest.raises(httpx.HTTPStatusError):
+                store_b.echo()
+            assert _MINT_CALLS == 2, "store B shares the now-futile key -- must not re-mint"
+
+            with pytest.raises(urllib.error.HTTPError):
+                hv._request("GET", "/v1/echo", tenant="default", timeout=5, body=None)
+            assert _MINT_CALLS == 2, "T3 shares the same futile key too -- must not re-mint"
+
+            clock.advance(60.0)
+            with pytest.raises(httpx.HTTPStatusError):
+                store_a.echo()
+            assert _MINT_CALLS == 3, (
+                "after the window elapses, exactly ONE more re-mint total "
+                "across all three surfaces sharing the key"
+            )
+        finally:
+            _ALWAYS_401 = False
+            self._reset_manager()

@@ -39,6 +39,8 @@ The `query` MCP tool has catalog-aware routing: `author`, `content_type`, `subtr
 | `dt_link_generator.py` | DEVONthink semantic + structural link generation (RDR-139 Layer B) — writes `relates` edges from DT 'See Also' similarity and author-curated item links; gated on `devonthink.available`. |
 | `collection_name.py` | `CollectionName` value object (RDR-103 Phase 1) — the four-segment `(content_type, owner_id, embedding_model, model_version)` tuple rendered as `<content_type>__<owner_id>__<embedding_model>__v<n>`; `parse` is strict. |
 | `rdr_canonical.py` | RDR-201 Phase 3.1 (nexus-j9z30.20) canonical-tumbler resolution — see § RDR canonical-tumbler rule below. |
+| `owner_scope.py` | Resolves a scope argument that may be an owner NAME to its tumbler prefix, so `query(subtree=...)`, `nx_answer(scope=...)`, `catalog_resolve(owner=...)`, and `nx search --repo` all accept either form (GH #1527, nexus-qiah5). |
+| `recovery_bundle.py` | Export/import for the catalog link graph and `store_put`-origin knowledge content across a reinstall, as one human-inspectable JSONL bundle (nexus-xn3fr, GH #1419 Issue 9). |
 
 Deleted in nexus-i711w (RDR-158 P4 terminal deletion): `catalog.py` (the local `Catalog` class), `catalog_db.py`, `event_log.py`, `projector.py`, `events.py`, `catalog_owners.py`, `catalog_sync.py`, `catalog_links.py`, `catalog_docs.py`, `catalog_backup.py`, `catalog_git.py`, `catalog_writes.py` (ManifestRow relocated to `types.py`), `consolidation.py`, `collections_owner_backfill.py`, `synthesizer.py`.
 

@@ -1244,6 +1244,123 @@ else:
     return 0
 }
 
+# _expectations_census_verify_absent <session_id> — bead nexus-cnzei.6 item 3
+# (the DESIGN's own promise: "the census counts verify=absent as a finding,
+# not a pass"). Printed AFTER the SPACE_* lines above, same "report, not
+# verdict" rule: NEVER affects expectations_census's own exit code (its
+# `return $rc` below is the awk verdict captured before this function ever
+# runs, exactly like _expectations_census_space's placement).
+#
+# GATED on the CONNECTED ENGINE's ledger template actually declaring the
+# `verify` dimension (fix round 1, critic Critical 2, 2026-09-13): a
+# below-floor engine (older than engine-service-v0.1.118, nexus-d9k5h)
+# strips commit/t2_ref/verify from EVERY report row at write time
+# (tuple_ledger_project.py's schema fallback), so counting verify=absent
+# rows against such an engine would report a false finding on 100% of
+# well-behaved reports -- exactly the false-positive class
+# scripts/check_agent_verify_claims.py's own UNVERIFIABLE branch exists to
+# avoid. Checked the SAME way that script does (the ledger template's
+# declared dimensions from `nx tuple templates --json`), so the two
+# surfaces never disagree about whether the check applies.
+#
+#   VERIFY_ABSENT_COUNT n=<N>       -- N report rows with dims.verify !=
+#       "present" (explicitly absent, or the dim missing entirely).
+#   VERIFY_UNVERIFIABLE reason=...  -- the connected engine does not
+#       declare the verify dimension yet; no count would be meaningful.
+#   VERIFY_FALLBACK reason=...      -- the registry or the rows could not
+#       be read at all (no nx on PATH, engine unreachable, unparseable
+#       output); the named reason is the fallback's whole point, same
+#       posture as SPACE_FALLBACK above.
+_expectations_census_verify_absent() {
+    local sid="$1"
+    local target="ledger/${sid}"
+
+    if ! command -v nx &>/dev/null; then
+        printf 'VERIFY_FALLBACK\treason=PATH has no nx\n'
+        return 0
+    fi
+
+    local nx_timeout_s="${NX_EXPECT_CENSUS_NX_TIMEOUT_S:-45}"
+    local templates_json rc
+    _expectations_run_bounded "$nx_timeout_s" templates_json \
+        nx tuple templates --json
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+        local reason
+        reason="$(printf '%s' "${templates_json:-no output}" | tr '\n\t' '  ' | tr -s ' ')"
+        printf 'VERIFY_FALLBACK\treason=nx tuple templates --json failed (rc=%d): %s\n' \
+            "$rc" "$reason"
+        return 0
+    fi
+
+    local declares_verify
+    declares_verify="$(python3 -c '
+import json
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("error")
+    sys.exit(0)
+
+templates = data.get("templates") if isinstance(data, dict) else None
+if not isinstance(templates, list):
+    print("error")
+    sys.exit(0)
+
+for t in templates:
+    if isinstance(t, dict) and t.get("name") == "ledger/<session_id>":
+        dims = t.get("dimensions")
+        print("yes" if isinstance(dims, dict) and "verify" in dims else "no")
+        sys.exit(0)
+print("no")
+' <<<"$templates_json")"
+
+    if [[ "$declares_verify" == "error" ]]; then
+        printf 'VERIFY_FALLBACK\treason=unparseable JSON from nx tuple templates\n'
+        return 0
+    fi
+    if [[ "$declares_verify" != "yes" ]]; then
+        printf 'VERIFY_UNVERIFIABLE\treason=connected engine ledger template does not declare verify yet (below engine-service-v0.1.118)\n'
+        return 0
+    fi
+
+    local rows_json
+    _expectations_run_bounded "$nx_timeout_s" rows_json \
+        nx tuple rd "$target" --pattern kind=report -n 300 --json
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+        local reason
+        reason="$(printf '%s' "${rows_json:-no output}" | tr '\n\t' '  ' | tr -s ' ')"
+        printf 'VERIFY_FALLBACK\treason=nx tuple rd %s --pattern kind=report failed (rc=%d): %s\n' \
+            "$target" "$rc" "$reason"
+        return 0
+    fi
+
+    python3 -c '
+import json
+import sys
+
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    print("VERIFY_FALLBACK\treason=unparseable JSON from nx tuple rd")
+    sys.exit(0)
+
+if not isinstance(rows, list):
+    print("VERIFY_FALLBACK\treason=nx tuple rd --json did not return an array")
+    sys.exit(0)
+
+n = sum(
+    1 for r in rows
+    if isinstance(r, dict) and (r.get("dims") or {}).get("verify") != "present"
+)
+print(f"VERIFY_ABSENT_COUNT\tn={n}")
+' <<<"$rows_json"
+    return 0
+}
+
 # expectations_census <session_id> — the scripted census (nexus-hybv1: the
 # hand-count method under-reported a real BLOCKED as 0 on bfbfa2fe and
 # over-reported resolved blocks as failures on b819e8f3; .19 and every
@@ -1430,6 +1547,7 @@ expectations_census() {
     ' "$file" 2>/dev/null
     local rc=$?
     _expectations_census_space "$sid" "$file"
+    _expectations_census_verify_absent "$sid"
     return $rc
 }
 

@@ -54,10 +54,13 @@ MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 #: WHY EACH CONEXUS ENTRY IS IN. hooks/commands/skills/agents are loaded or read
 #: by Claude Code from $CLAUDE_PLUGIN_ROOT. resources/ is here because it is
 #: dereferenced AT RUNTIME by files that are themselves in the surface --
-#: conexus/commands/rdr-create.md and conexus/skills/rdr-create/SKILL.md both
+#: conexus/skills/rdr-create/SKILL.md and conexus/skills/rdr-close/SKILL.md both
 #: copy templates from `$CLAUDE_PLUGIN_ROOT/resources/rdr/`, so a template edit
 #: is exactly as inert as a hook edit. (Review finding, 2026-07-25: it was
-#: originally omitted with no stated reason.)
+#: originally omitted with no stated reason. The rdr-create COMMAND this
+#: comment originally named was itself deleted at nexus-cnzei.4 -- rdr-create
+#: is skill-only now -- so the example was updated to two files that still
+#: exist.)
 #:
 #: WHY THE REST OF conexus/ IS OUT, stated rather than left to luck:
 #:   CHANGELOG.md / README.md  docs; stale docs in a shipped plugin are

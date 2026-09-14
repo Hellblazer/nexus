@@ -305,14 +305,21 @@ def _parse_epoch(created_at: str) -> float | None:
 
 
 def ping_line(address: str, row: Any) -> str:
+    """One ping line (bead nexus-dyfg8): names the MCP drain -- the same
+    tools the SessionStart arm instruction (:mod:`nexus.mailbox_arm`) and
+    ``conexus/skills/mailbox/SKILL.md`` already tell the model to use --
+    never the ``nx tuple in`` CLI form this line used to carry, which
+    named no ack step at all.
+    """
     dims = row.dims or {}
     return (
         f"{PING_PREFIX} new mail at mailbox/{address}"
         f" from={dims.get('from', '?')} kind={dims.get('kind', '-')}"
         f" correlation_id={dims.get('correlation_id', '-')} tuple_id={row.id}."
-        f" Drain it now with the mailbox drain (claiming is address-wide, the tuple id"
-        f" is for correlation only): nx tuple in mailbox/{address} --pattern to={address}"
-        f" --claimant <your-id> --lease-s 60"
+        f" Drain it now (claiming is address-wide, the tuple id is for correlation"
+        f" only): mcp__plugin_conexus_nexus__tuple_in on mailbox/{address}, then"
+        f" mcp__plugin_conexus_nexus__tuple_ack (reply for a request) or"
+        f" mcp__plugin_conexus_nexus__tuple_nack."
     )
 
 

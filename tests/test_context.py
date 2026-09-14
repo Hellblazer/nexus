@@ -280,22 +280,42 @@ class TestSubagentHookInjection:
     HOOK_PATH = Path(__file__).parent.parent / "conexus" / "hooks" / "scripts" / "subagent-start.sh"
 
     def test_hook_emits_knowledge_map(self, tmp_path: Path) -> None:
-        """SubagentStart hook outputs the cached knowledge map content."""
+        """SubagentStart hook outputs the cached knowledge map content.
+
+        nexus-cnzei.2 (S6): the hook resolves the project root via
+        `git rev-parse --git-common-dir` (worktree-safe -- the shared `.git`
+        resolves to the SAME directory from a linked worktree or the primary
+        checkout, unlike `--show-toplevel`, which resolves to the worktree's
+        own directory and would never match the main repo's cache filename).
+        The fixture repo must therefore be a REAL git repository -- a bare
+        directory with no `.git` makes `--git-common-dir` fail (no output,
+        `REPO_ROOT_KM` stays empty), and the hook silently skips the whole
+        Knowledge Map section, which is exactly the failure this test
+        exists to catch.
+        """
         import subprocess
 
         # Write a fake context cache
         context_dir = tmp_path / ".config" / "nexus" / "context"
         context_dir.mkdir(parents=True)
-        # The hook uses $(pwd -P) to compute the repo hash — we override HOME
-        # so it reads from our temp dir, and run from a known cwd so the hash
-        # is deterministic.
+        # The hook resolves the repo root from git-common-dir, not $(pwd -P)
+        # directly -- a plain (non-worktree) repo's git-common-dir still
+        # resolves back to the repo's own root, so a `git init` here mirrors
+        # the hook's resolution exactly (see the class-level note above).
         repo_dir = tmp_path / "fakerepo"
         repo_dir.mkdir()
+        subprocess.run(
+            ["git", "init", "-q"], cwd=str(repo_dir), check=True,
+            capture_output=True, text=True,
+        )
 
-        # Compute expected filename the same way the hook does
+        # Compute expected filename the same way the hook does: basename +
+        # sha1 of the RESOLVED repo root (the same root git-common-dir
+        # resolution lands on for a plain, non-worktree repo).
         import hashlib
-        repo_hash = hashlib.sha1(str(repo_dir.resolve()).encode()).hexdigest()[:8]
-        cache_file = context_dir / f"fakerepo-{repo_hash}.txt"
+        repo_root = repo_dir.resolve()
+        repo_hash = hashlib.sha1(str(repo_root).encode()).hexdigest()[:8]
+        cache_file = context_dir / f"{repo_root.name}-{repo_hash}.txt"
         cache_file.write_text("## Knowledge Map\n\ncode: Test Topic (42)\n")
 
         result = subprocess.run(
@@ -327,19 +347,34 @@ class TestSubagentHookInjection:
         assert result.returncode == 0
         assert "Knowledge Map" not in result.stdout
 
-    def test_hook_falls_back_to_global(self, tmp_path: Path) -> None:
-        """Hook uses global context_l1.txt when no per-repo file exists."""
+    def test_hook_does_not_fall_back_to_global(self, tmp_path: Path) -> None:
+        """Hook must NOT use the legacy global context_l1.txt (audit S6).
+
+        The global fallback was deleted on purpose (nexus-cnzei.2, audit
+        finding S6): ~/.config/nexus/context_l1.txt is whatever unrelated
+        repo's `nx context refresh` last happened to write, months-old and
+        foreign to this project -- showing it here is worse than showing
+        nothing. This asserts the negative directly: with only the global
+        file present and no per-repo cache, the hook must emit no Knowledge
+        Map section at all, not a stale one from a different codebase.
+        """
         import subprocess
 
-        # Write only the global fallback
+        # Write ONLY the legacy global fallback file -- no per-repo cache.
         config_dir = tmp_path / ".config" / "nexus"
         config_dir.mkdir(parents=True)
         (config_dir / "context_l1.txt").write_text(
             "## Knowledge Map\n\ncode: Global Topic (99)\n"
         )
 
+        # A real repo (git-common-dir must resolve for the hook to look for
+        # a per-repo cache at all), but deliberately no cache file for it.
         repo_dir = tmp_path / "noperrepo"
         repo_dir.mkdir()
+        subprocess.run(
+            ["git", "init", "-q"], cwd=str(repo_dir), check=True,
+            capture_output=True, text=True,
+        )
 
         result = subprocess.run(
             ["/bin/bash", str(self.HOOK_PATH)],  # /bin/bash 3.2 — homebrew bash 5.3 deadlocks on the NXTOOLS heredoc
@@ -348,7 +383,14 @@ class TestSubagentHookInjection:
             env={**__import__("os").environ, "HOME": str(tmp_path)},
         )
 
-        assert "Global Topic (99)" in result.stdout
+        assert "Global Topic (99)" not in result.stdout, (
+            "the hook must never fall back to the legacy global "
+            f"context_l1.txt. stdout={result.stdout[:500]}"
+        )
+        assert "## Knowledge Map" not in result.stdout, (
+            "no per-repo cache exists, so no Knowledge Map section should "
+            f"be emitted at all. stdout={result.stdout[:500]}"
+        )
 
 
 class TestSessionHookInjection:

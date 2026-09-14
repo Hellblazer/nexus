@@ -31,7 +31,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-_SHARED = REPO_ROOT / "conexus" / "agents" / "_shared" / "CONTEXT_PROTOCOL.md"
+_SHARED = REPO_ROOT / "conexus" / "resources" / "agent-shared" / "CONTEXT_PROTOCOL.md"
 #: The agents actually dispatched as the halves of a stacked review gate.
 _GATE_REVIEWERS = (
     REPO_ROOT / "conexus" / "agents" / "code-review-expert.md",

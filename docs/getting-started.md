@@ -71,7 +71,7 @@ See [Document Catalog](catalog.md) for details.
 
 ## Claude Code plugin (optional)
 
-The conexus plugin gives Claude Code agents access to all three storage tiers, 13 specialized agents, and 43 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows.
+The conexus plugin gives Claude Code agents access to all three storage tiers, 10 specialized agents, and 44 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows.
 
 **Plugin-only prerequisite: [Node.js](https://nodejs.org/).** The plugin's `sequential-thinking` and `context7` MCP servers are spawned via `npx -y …` and silently fail to start without `node`/`npm` on PATH. Install with `brew install node` (macOS) or your platform's installer before running the plugin commands below.
 
@@ -92,7 +92,7 @@ claude --plugin-dir ./conexus
 
 ## Cloud mode (optional)
 
-Local mode embeds with the on-device bge-768 ONNX model (768-dim) the service provisions; the bundled minilm-384 remains a zero-download fallback. The managed-cloud deployment embeds server-side with Voyage AI (1024d), cross-chunk context (CCE), and reranking.
+Local mode embeds with the on-device bge-768 ONNX model (768-dim) the service provisions; the bundled minilm-384 remains a zero-download fallback. The managed-cloud deployment embeds server-side with Voyage AI (1024d) and cross-chunk context (CCE). Both modes rerank server-side (RDR-188): local mode with an `ms-marco-MiniLM` cross-encoder, cloud mode with `voyage-rerank-2.5`.
 
 In managed-cloud mode there is no local service and no local Postgres: `nx` talks HTTPS to a hosted nexus service that owns its cloud Postgres + pgvector and embeds with Voyage AI server-side. You do not create a ChromaDB Cloud account or supply a Voyage key yourself (the service owns it).
 
@@ -268,6 +268,19 @@ conexus` on a generation box.
 collection that has vanished, and rollback, which is always yours to invoke.
 
 After `/plugin update`, run both steps so the CLI matches the plugin.
+
+### Beads (`bd`) task tracking (optional)
+
+If `bd` (or its Claude Code plugin) is on this machine, both `nx init` and
+`nx upgrade` install or refresh a small, generic `PRIME.md` at `bd`'s
+machine-wide user config path — the fallback it reads when a repo has no
+`.beads/PRIME.md` of its own (which always wins when present). This
+applies to **every beads repo on this machine**, not just this one, and
+`bd` 1.2.x still appends its own `bd remember` memories after this file —
+installing it does not stop that. It never overwrites a file you edited by
+hand. Opt out with `--no-beads-prime` on either command, or persistently
+with `nx config set beads_prime.manage false`; deleting the file restores
+`bd`'s own default. See [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md#nx-init) § nx init for the full contract.
 
 ### Upgrading from a pre-PG install
 

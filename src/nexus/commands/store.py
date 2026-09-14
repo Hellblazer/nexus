@@ -113,7 +113,10 @@ def put_cmd(
     # nexus-kmb6; for single-chunk MCP docs chunk_text == content).
     # The hook returns the catalog tumbler string (or "" when the
     # catalog is absent).
-    chunk_chroma_id, manifest_metadatas = _single_chunk_manifest_metadata(content)
+    # nexus-spujb: a note longer than the collection model's token window
+    # is written as several chunks under one catalog document.
+    pieces = _note_pieces(content, col_name)
+    chunk_chroma_id, manifest_metadatas = _note_manifest_metadata(pieces)
     # nexus-xzyr3 fold-in: refuse an over-quota document BEFORE minting a
     # catalog row for it (db.put() already refuses it too, but only after
     # paying for a wasted mint + rollback round trip), and surface a clean
@@ -138,7 +141,7 @@ def put_cmd(
     # single_chunk_manifest_metadata already derived (chunk_text_hash IS
     # content_hash for a single-chunk store); fence begin BEFORE db.put,
     # matching the memo's T0-before-first-chunk-upsert ordering.
-    content_hash = manifest_metadatas[0].get("chunk_text_hash", "") if manifest_metadatas else ""
+    content_hash = _note_content_hash(content, manifest_metadatas)  # nexus-spujb
     if catalog_doc_id:
         from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
         _fence_begin(catalog_doc_id, content_hash, col_name)
@@ -165,9 +168,8 @@ def put_cmd(
     # the original error. The compensation never raises.
     try:
         try:
-            doc_id = db.put(
-                collection=col_name,
-                content=content,
+            doc_ids = _put_note_pieces(
+                db, col_name, pieces,
                 title=title,
                 tags=tags,
                 category=category,
@@ -176,6 +178,7 @@ def put_cmd(
                 ttl_days=ttl_days,
                 catalog_doc_id=catalog_doc_id,
             )
+            doc_id = doc_ids[0]
         except PutOversizedError as put_exc:
             # nexus-xzyr3 fold-in: the pre-check above catches this for
             # every normal call, but db.put() keeps its own check as the
@@ -282,12 +285,28 @@ def put_cmd(
     # a repeat failure is swallowed by fire_batch's per-hook isolation
     # and the fence stays at the 'failed' stamp _fence_fail already
     # wrote above, never silently 'indexing' forever either way.
-    hooks.fire_store_chains(
-        [doc_id], col_name, [content],
-        metadatas=manifest_metadatas,
-        catalog_doc_id=catalog_doc_id,
-        manifest_complete={catalog_doc_id: content_hash} if catalog_doc_id else None,
-    )
+    manifest_complete = {catalog_doc_id: content_hash} if catalog_doc_id else None
+    if len(pieces) == 1:
+        hooks.fire_store_chains(
+            doc_ids, col_name, pieces,
+            metadatas=manifest_metadatas,
+            catalog_doc_id=catalog_doc_id,
+            manifest_complete=manifest_complete,
+        )
+    else:
+        # nexus-spujb: a note written as several pieces fires in MCP
+        # store_put's shape. The single and batch chains see every piece;
+        # the document chain sees the note once, whole, so aspect
+        # extraction reads the full text (fire_store_chains would fire it
+        # once per fragment). Inline, so the fence above covers this
+        # fire_batch in the same function (nexus-vw594 gate).
+        for piece_id, piece in zip(doc_ids, pieces, strict=True):
+            hooks.fire_single(piece_id, col_name, piece)
+        hooks.fire_batch(
+            doc_ids, col_name, pieces, None, manifest_metadatas,
+            catalog_doc_id=catalog_doc_id, manifest_complete=manifest_complete,
+        )
+        hooks.fire_document(doc_ids[0], col_name, content, doc_id=catalog_doc_id)
     if manifest_error:
         # CRE Imp 3: 'nx catalog reconcile' is a verified no-op for this
         # failure mode (heal_manifest_gaps' candidate filter excludes
@@ -299,7 +318,8 @@ def put_cmd(
             f"chunk_count=0; retry 'nx store put' with the same content "
             f"(idempotent dedup makes retry safe)."
         )
-    click.echo(f"Stored: {doc_id}  →  {col_name}")
+    split_note = f"  ({len(pieces)} chunks, split to the embedding model's token window)" if len(pieces) > 1 else ""
+    click.echo(f"Stored: {doc_id}  →  {col_name}{split_note}")
 
 
 # nexus-8g79.10 (V1): catalog_store_hook moved to
@@ -312,6 +332,12 @@ from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook  
 from nexus.catalog.store_hook import catalog_store_hook_tracked as _catalog_store_hook_tracked  # noqa: E402
 from nexus.catalog.store_hook import rollback_minted_catalog_entry as _rollback_minted_catalog_entry  # noqa: E402
 from nexus.catalog.store_hook import store_put_manifest_direct as _store_put_manifest_direct  # noqa: E402
+# nexus-spujb: split a note to the collection model's token window.
+from nexus.catalog.store_hook import note_content_hash as _note_content_hash  # noqa: E402
+from nexus.catalog.store_hook import note_manifest_metadata as _note_manifest_metadata  # noqa: E402
+from nexus.catalog.store_hook import note_pieces as _note_pieces  # noqa: E402
+from nexus.catalog.store_hook import put_note_pieces as _put_note_pieces  # noqa: E402
+from nexus.catalog.store_hook import split_note_text as _split_note_text  # noqa: E402
 # GH #1370 Defect 4b: shared with MCP store_put — see store_hook.py's
 # docstring for why real metadatas (not None) must reach fire_store_chains.
 from nexus.catalog.store_hook import single_chunk_manifest_metadata as _single_chunk_manifest_metadata  # noqa: E402
@@ -446,6 +472,10 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
     entry = db.get_by_id(col_name, doc_id)
     if entry is None:
         raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}")
+    # nexus-spujb: a note split to its model's token window reads back whole.
+    split = _split_note_text(db, col_name, [entry["id"]])
+    if split is not None:
+        entry = {**entry, "content": split[1], "chunk_count": split[2]}
 
     if json_out:
         import json  # noqa: PLC0415 — stdlib import kept branch-local

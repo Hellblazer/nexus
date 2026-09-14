@@ -55,6 +55,16 @@ class TemplateRegistryTest {
         assertFalse(ledger.take().enabled());
         assertEquals(7_776_000L, ledger.retentionSeconds());
         assertEquals(TemplateSchema.IdFrom.KEYS, ledger.idFrom());
+        // Bead nexus-d9k5h: commit/t2_ref/verify are optional string dims (no
+        // required: true), so their absence from a produced row is never a
+        // schema violation -- only verify's own values allow-list is checked.
+        assertEquals("string", ledger.dimensions().get("commit").type());
+        assertFalse(ledger.dimensions().get("commit").required());
+        assertEquals("string", ledger.dimensions().get("t2_ref").type());
+        assertFalse(ledger.dimensions().get("t2_ref").required());
+        assertEquals("string", ledger.dimensions().get("verify").type());
+        assertFalse(ledger.dimensions().get("verify").required());
+        assertEquals(List.of("present", "absent"), ledger.dimensions().get("verify").values());
 
         TemplateSchema mailbox = registry.templates().stream()
                 .filter(t -> t.name().equals("mailbox/<address>")).findFirst().orElseThrow();

@@ -147,7 +147,7 @@ For questions that require multiple retrieval steps — comparing sources, extra
 
 ### Verb skills
 
-The verb skills (`/conexus:research`, `/conexus:review`, `/conexus:analyze`, `/conexus:debug`, `/conexus:document`) route directly to `plan_match` scoped to the matching verb, falling through to `/conexus:query` on miss. See [plan-centric-retrieval.md](plan-centric-retrieval.md) for the full verb-routing table.
+The verb skills (`/conexus:design-to-code-trace` [verb: research], `/conexus:decision-drift-review` [verb: review], `/conexus:analyze`, `/conexus:why-was-this-written` [verb: debug], `/conexus:document`) route directly to `plan_match` scoped to the matching verb, inline-planning on a miss. Three of the five carry a name distinct from their verb string (nexus-cnzei.4) because the bare verb name collided with an agent-dispatch command of the same name, or invited confusion with routine code review. See [plan-centric-retrieval.md](plan-centric-retrieval.md) for the full verb-routing table.
 
 ### Example analytical queries
 

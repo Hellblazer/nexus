@@ -14,7 +14,7 @@ format (RDR-169 G3), not a dependency. Pinned by
 | File | Purpose |
 |---|---|
 | `t1.py` | `T1Database` — session scratch. PG-backed `HttpScratchStore` by default (RDR-152); session-id lease discovery via its own `t1_session_lease.<session_id>` flat file (`publish_t1_session_lease` / `read_t1_session_lease` / `clear_t1_session_lease`), published by the MCP lifespan and refreshed periodically. `daemon/t1_lease.py` (the RDR-149 P4 `ServiceRegistry(tier="t1")` lease this replaced) is retired (nexus-8zfwv, 2026-08-07) — T1 no longer rides the daemon-lifecycle primitive at all. |
-| `t2/` | Package: eight domain stores + `T2Database` facade. See **T2 domain stores** below. |
+| `t2/` | Package: nine domain stores + `T2Database` facade. See **T2 domain stores** below. |
 | `t3.py` | `T3Database` — a facade retained for INJECTED clients (tests, `--dry-run`). Production `make_t3()` returns `HttpVectorClient` unconditionally and constructs no vector client of its own (RDR-155 P4a.2). |
 | `http_vector_client.py` | `HttpVectorClient` — the production T3: every vector op over `/v1/vectors`, pgvector storage, server-side embedding and rerank (RDR-188). |
 | `inmemory_vector_store.py` | `InMemoryVectorClient` — the in-process substitute for tests, the plan-match session cache, and `nx index --dry-run`. Chroma-parity semantics (cosine, `$eq`/`$in`/`$and` where-grammar, upsert/dedup, dimension pinning) are differentially verified, not assumed. |
@@ -33,8 +33,9 @@ format (RDR-169 G3), not a dependency. Pinned by
 | `HttpDocumentAspectsStore` | Structured aspect rows (RDR-089). |
 | `HttpAspectQueue` | Queue drained by the aspect-worker daemon (PG `FOR UPDATE SKIP LOCKED`). |
 | `HttpDocumentHighlightsStore` | Per-document DEVONthink highlight/mention notes, keyed by catalog tumbler (RDR-139 Layer E). Dedicated table, not `document_aspects`. |
+| `HttpTupleStore` | Linda tuple space client over `/v1/tuples` (RDR-205). Service-only from birth. |
 
-All eight are HTTP clients over the engine's PG tables. The SQLite store
+All nine are HTTP clients over the engine's PG tables. The SQLite store
 classes are DELETED (RDR-158 P4, nexus-i711w), and the
 `NX_STORAGE_BACKEND[_<store>]=sqlite` opt-out that selected them
 hard-errors with the stranded-install redirect (P3, nexus-7bomn).

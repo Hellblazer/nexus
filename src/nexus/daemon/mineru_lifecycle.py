@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -99,10 +100,12 @@ def _read_warming_marker() -> dict | None:
         return None
 
 
-def _stamp_warming_marker(pid: int) -> None:
+def _stamp_warming_marker(
+    pid: int, wall_time: Callable[[], float] = time.time,
+) -> None:
     try:
         _warming_marker_path().write_text(
-            json.dumps({"pid": pid, "ts": time.time()}),
+            json.dumps({"pid": pid, "ts": wall_time()}),
         )
     except OSError:
         pass  # marker is an optimization; never let it break the spawn
@@ -146,12 +149,21 @@ def spawn_policy_allows(url: str | None = None) -> bool:
 def ensure_mineru_running(
     *,
     wait_healthy_s: float = _ENSURE_HEALTH_WAIT_S,
+    _monotonic: Callable[[], float] = time.monotonic,
+    _wall_time: Callable[[], float] = time.time,
+    _sleep: Callable[[float], None] = time.sleep,
 ) -> str | None:
     """Return a healthy MinerU server URL, spawning one if permitted.
 
     ``None`` means "no server available" — the caller degrades exactly as
     it always has (the in-process fallback); this function only ever adds
     the recovery path, never a new failure mode.
+
+    ``_monotonic``/``_wall_time``/``_sleep`` are a test seam (nexus-dee61):
+    production always uses the real ``time`` functions; tests can inject a
+    fake, deterministic clock so the shared warm-up budget (nexus-m45o6)
+    is asserted by counting waits, not by measuring wall-clock elapsed
+    time, which a loaded box can inflate independently of any regression.
     """
     from nexus.config import get_mineru_server_url  # noqa: PLC0415 — deferred: circular-dep avoidance
 
@@ -194,7 +206,7 @@ def ensure_mineru_running(
                     _log.warning("mineru_autostart_binary_missing")
                     return None
                 spawned = True
-                _stamp_warming_marker(proc.pid)
+                _stamp_warming_marker(proc.pid, _wall_time)
                 _log.info(
                     "mineru_autostarted", pid=proc.pid, port=port,
                 )
@@ -203,7 +215,7 @@ def ensure_mineru_running(
         return None
 
     # Await health OUTSIDE the election (model warm-up can be slow).
-    deadline = time.monotonic() + wait_healthy_s
+    deadline = _monotonic() + wait_healthy_s
     if not spawned:
         # nexus-m45o6: share the spawner's warm-up budget. Without this,
         # every per-document PDFExtractor re-enters and re-waits a full
@@ -219,17 +231,17 @@ def ensure_mineru_running(
                 _clear_warming_marker()
                 marker = None
         if marker is not None:
-            remaining = float(marker.get("ts", 0)) + wait_healthy_s - time.time()
+            remaining = float(marker.get("ts", 0)) + wait_healthy_s - _wall_time()
             if remaining <= 0:
                 _log.warning(
                     "mineru_warmup_budget_exhausted",
-                    marker_age_s=round(time.time() - float(marker.get("ts", 0))),
+                    marker_age_s=round(_wall_time() - float(marker.get("ts", 0))),
                     note="server still warming; this document falls back without re-waiting",
                 )
                 return None
-            deadline = min(deadline, time.monotonic() + remaining)
+            deadline = min(deadline, _monotonic() + remaining)
 
-    while time.monotonic() < deadline:
+    while _monotonic() < deadline:
         url = get_mineru_server_url()  # re-resolve: pid file has the port
         if _healthy(url):
             _clear_warming_marker()
@@ -250,7 +262,7 @@ def ensure_mineru_running(
                 _pid_file_path().unlink(missing_ok=True)
             _clear_warming_marker()
             return None
-        time.sleep(_HEALTH_POLL_S)
+        _sleep(_HEALTH_POLL_S)
     _log.warning(
         "mineru_ensure_health_timeout",
         waited_s=wait_healthy_s, spawned=spawned,

@@ -31,7 +31,7 @@ The skill body should:
 3. **Load the canonical prompt** from T2 `nexus_rdr/067-canonical-prompt-v1` and substitute `{project}` + `{transcript_excerpts}`
 4. **Dispatch `deep-research-synthesizer`** via Agent tool with the substituted prompt as the task body
 5. **Parse the subagent output** for verdict, incident count, confidence, drift distribution
-6. **The skill body owns `memory_put`** — persist the full output to T2 `rdr_process/audit-<project>-<YYYY-MM-DD>` with `ttl=0`. Do NOT rely on the subagent to self-persist (Phase 1b finding: 0/3 runs self-persisted).
+6. **The skill body owns `memory_put`** — persist the full output to T2 `rdr_process/audit-<project>-<YYYY-MM-DD>` permanently (omit `ttl`). Do NOT rely on the subagent to self-persist (Phase 1b finding: 0/3 runs self-persisted).
 7. **Surface a compact summary** to the user: verdict, rate, confidence, drift distribution, T2 record id for the full record
 8. **Discrepancy check**: `memory_search(project="rdr_process", query="audit-<project>")` — if this audit contradicts a prior one (different verdict category or dominant drift category), flag it for user review before returning
 

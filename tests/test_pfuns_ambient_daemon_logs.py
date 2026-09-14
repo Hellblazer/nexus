@@ -121,3 +121,16 @@ def test_a_mixed_batch_is_split_not_collapsed() -> None:
     state, appends = _split(changed, before, after)
     assert state == [("MODIFIED", "last_seen_version")]
     assert appends == [("MODIFIED", "logs/aspect_worker_daemon.log")]
+
+
+def test_dropped_writes_log_grows_benign_and_shrinks_fail() -> None:
+    """The drop meter's live writers (the conexus routing hook and the
+    session-end capability census) append with O_APPEND and never rotate,
+    so growth during a run is a peer session's hook firing, not a test. A
+    shrink is still a truncation and still fails."""
+    rel = "dropped_writes.jsonl"
+    assert rel in _APPEND_ONLY_REAL_CONFIG_LOGS
+    state, appends = _split([rel], {rel: (1, 700)}, {rel: (2, 952)})
+    assert state == [] and appends == [("MODIFIED", rel)]
+    state, appends = _split([rel], {rel: (1, 952)}, {rel: (2, 10)})
+    assert state == [("MODIFIED", rel)] and appends == []

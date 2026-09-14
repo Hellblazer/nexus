@@ -22,6 +22,32 @@ def _pdf_cfg(autostart=True):
     return cfg
 
 
+class _FakeClock:
+    """Deterministic clock/sleep seam for ``ensure_mineru_running``
+    (nexus-dee61).
+
+    Advances only when the code under test calls ``sleep`` — never on
+    real wall-clock time — so a timing-sensitive assertion can count
+    waits instead of measuring elapsed seconds, which a loaded box can
+    inflate (scheduler delay, contention) independently of whether the
+    guarded logic is intact.
+    """
+
+    def __init__(self, start: float = 1_700_000_000.0):
+        self.t = start
+        self.sleep_calls = 0
+
+    def monotonic(self) -> float:
+        return self.t
+
+    def time(self) -> float:
+        return self.t
+
+    def sleep(self, seconds: float) -> None:
+        self.sleep_calls += 1
+        self.t += seconds
+
+
 class TestEnsureShortCircuits:
     def test_healthy_server_returns_immediately(self):
         with patch("nexus.config.get_mineru_server_url",
@@ -81,7 +107,8 @@ class TestEnsureShortCircuits:
 
 class TestEnsureSpawns:
     def _run(self, tmp_path, monkeypatch, *, healthy_after_spawn=True,
-             workers=1, calls=1, wait_healthy_s=3.0, proc_poll=None):
+             workers=1, calls=1, wait_healthy_s=3.0, proc_poll=None,
+             clock=None):
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setenv("NX_MINERU_AUTOSTART", "1")  # spawn path under test (conftest pins 0)
         spawned = []
@@ -119,16 +146,26 @@ class TestEnsureSpawns:
                       return_value=True), \
                 patch("nexus._mineru_spawn.spawn_server_process",
                       side_effect=fake_spawn):
+            clock_kwargs = {}
+            if clock is not None:
+                clock_kwargs = dict(
+                    _monotonic=clock.monotonic,
+                    _wall_time=clock.time,
+                    _sleep=clock.sleep,
+                )
             if workers == 1:
                 for _ in range(calls):
-                    t0 = time.monotonic()
+                    t0 = clock.monotonic() if clock else time.monotonic()
                     results.append(
-                        ensure_mineru_running(wait_healthy_s=wait_healthy_s))
-                    durations.append(time.monotonic() - t0)
+                        ensure_mineru_running(
+                            wait_healthy_s=wait_healthy_s, **clock_kwargs))
+                    now = clock.monotonic() if clock else time.monotonic()
+                    durations.append(now - t0)
             else:
                 threads = [
                     threading.Thread(target=lambda: results.append(
-                        ensure_mineru_running(wait_healthy_s=wait_healthy_s)))
+                        ensure_mineru_running(
+                            wait_healthy_s=wait_healthy_s, **clock_kwargs)))
                     for _ in range(workers)
                 ]
                 for t in threads:
@@ -172,17 +209,33 @@ class TestEnsureSpawns:
     def test_warmup_budget_is_shared_across_documents(self, tmp_path, monkeypatch):
         """nexus-m45o6: a second document arriving during (or after) the
         warm-up window must NOT re-wait a fresh full budget — the marker
-        caps the batch's total stall at one budget."""
-        spawned, results, durations = self._run(
+        caps the batch's total stall at one budget.
+
+        nexus-dee61: asserted via an injected ``_FakeClock``, not
+        wall-clock elapsed time. The original version measured real
+        ``time.monotonic()`` deltas and failed once in a full-suite run
+        under heavy scheduler/CPU contention (2026-09-13) — the box, not
+        the code, added the extra second. The fake clock only advances
+        when ``ensure_mineru_running`` calls ``_sleep``, so "the second
+        document re-waited" now shows up as an extra sleep call,
+        deterministically, on any box under any load.
+        """
+        clock = _FakeClock()
+        spawned, results, _ = self._run(
             tmp_path, monkeypatch, healthy_after_spawn=False,
-            calls=2, wait_healthy_s=2.0,
+            calls=2, wait_healthy_s=2.0, clock=clock,
         )
         assert spawned == [8010]  # second call sees the live pid, no respawn
         assert results == [None, None]
-        assert durations[0] >= 2.0  # the spawner pays the budget once
-        assert durations[1] < 1.0, (
-            f"second document re-waited {durations[1]:.1f}s — the warm-up "
-            f"stall multiplied across documents"
+        # wait_healthy_s == _HEALTH_POLL_S here, so the spawner's own
+        # health-wait loop sleeps exactly once before timing out. A
+        # second sleep call means the second document paid a fresh
+        # budget instead of sharing the first one's marker.
+        assert clock.sleep_calls == 1, (
+            f"expected exactly one shared warm-up sleep across both "
+            f"documents, got {clock.sleep_calls} — the second document "
+            f"re-waited a fresh budget, the warm-up stall multiplied "
+            f"across documents"
         )
 
 

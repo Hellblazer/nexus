@@ -367,6 +367,9 @@ public final class TemplateRegistry {
         }
         m.put("take", take);
         m.put("retention_seconds", t.retentionSeconds());
+        if (t.maxBodyBytes() != null) {
+            m.put("max_body_bytes", t.maxBodyBytes());
+        }
         return m;
     }
 }

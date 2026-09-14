@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """AST-based code chunking with line-based fallback."""
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from nexus.db.limits import SAFE_CHUNK_BYTES
+
+if TYPE_CHECKING:
+    from nexus.embed_window import TokenWindow
 
 _log = structlog.get_logger()
 
@@ -193,25 +198,130 @@ def _line_chunk(
     return chunks
 
 
+def _natural_cut(head: str) -> int:
+    """Where to end a piece of *head*: after its last newline, sentence end or
+    space when one falls in the back half, else at the end of *head*."""
+    floor = len(head) // 2
+    for sep in ("\n", ". ", " "):
+        idx = head.rfind(sep)
+        if idx >= floor:
+            return idx + len(sep)
+    return len(head)
+
+
+def split_text_to_char_cap(text: str, max_chars: int) -> list[str]:
+    """Split *text* into pieces of at most *max_chars* characters.
+
+    ``"".join(pieces) == text``: nothing is dropped (nexus-2s91y, where a
+    truncating cap lost the tail of every long markdown paragraph).
+    """
+    pieces: list[str] = []
+    rest = text
+    while len(rest) > max_chars:
+        cut = _natural_cut(rest[:max_chars])
+        pieces.append(rest[:cut])
+        rest = rest[cut:]
+    if rest:
+        pieces.append(rest)
+    return pieces
+
+
+def split_text_to_byte_cap(text: str, max_bytes: int) -> list[str]:
+    """Split *text* into pieces of at most *max_bytes* UTF-8 bytes.
+
+    ``"".join(pieces) == text``: the byte window backs off to a whole
+    character rather than cutting through one (nexus-2s91y).
+    """
+    pieces: list[str] = []
+    rest = text
+    while len(rest.encode()) > max_bytes:
+        head = rest.encode()[:max_bytes].decode("utf-8", errors="ignore") or rest[0]
+        cut = _natural_cut(head)
+        pieces.append(rest[:cut])
+        rest = rest[cut:]
+    if rest:
+        pieces.append(rest)
+    return pieces
+
+
+def split_text_to_token_window(text: str, window: TokenWindow) -> list[str]:
+    """Split *text* into pieces that each fit *window* (nexus-spujb).
+
+    ``"".join(pieces) == text``. Each piece is the longest prefix that fits,
+    backed off to a newline, sentence end or space in its back half.
+    """
+    pieces: list[str] = []
+    rest = text
+    while not window.fits(rest):
+        lo, hi = 1, len(rest)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if window.fits(rest[:mid]):
+                lo = mid
+            else:
+                hi = mid - 1
+        cut = _natural_cut(rest[:lo])
+        if not window.fits(rest[:cut]):
+            cut = lo
+        pieces.append(rest[:cut])
+        rest = rest[cut:]
+    if rest:
+        pieces.append(rest)
+    return pieces
+
+
+def split_text_to_limits(
+    text: str, max_bytes: int, window: TokenWindow | None = None,
+) -> list[str]:
+    """Split *text* to the byte cap, then each piece to *window* when set.
+    ``"".join(pieces) == text``."""
+    pieces = split_text_to_byte_cap(text, max_bytes)
+    if window is None:
+        return pieces
+    return [q for p in pieces for q in split_text_to_token_window(p, window)]
+
+
+def split_line_chunks_to_window(
+    raw_chunks: list[tuple[int, int, str]], window: TokenWindow,
+) -> list[tuple[int, int, str]]:
+    """Split ``(line_start, line_end, text)`` chunks that overflow *window*,
+    keeping line numbers (nexus-spujb, the prose indexer's line path)."""
+    as_dicts = [{"line_start": ls, "line_end": le, "text": t} for ls, le, t in raw_chunks]
+    return [
+        (c["line_start"], c["line_end"], c["text"])
+        for c in _enforce_byte_cap(as_dicts, token_window=window)
+    ]
+
+
 def _enforce_byte_cap(
     chunks: list[dict[str, Any]],
     max_bytes: int = _CHUNK_MAX_BYTES,
+    token_window: TokenWindow | None = None,
 ) -> list[dict[str, Any]]:
-    """Post-process a chunk list and split any entry that exceeds *max_bytes*.
+    """Post-process a chunk list and split any entry that exceeds *max_bytes*
+    or, when set, *token_window* (nexus-spujb).
 
     Used for AST-produced chunks where CodeSplitter may emit a single node
     (e.g. a 400-line function body) that is larger than the storage limit.
-    Renumbers chunk_index and chunk_count across the returned list.
+    Splits by whole lines; a single line over a limit is split within the
+    line, never truncated. Renumbers chunk_index and chunk_count across the
+    returned list.
     """
+
+    def fits(t: str) -> bool:
+        return len(t.encode()) <= max_bytes and (
+            token_window is None or token_window.fits(t)
+        )
+
     result: list[dict[str, Any]] = []
     for chunk in chunks:
         text: str = chunk["text"]
-        if len(text.encode()) <= max_bytes:
+        if fits(text):
             result.append(chunk)
             continue
 
         # Oversized node: expand long lines (minified code), then re-split
-        # line-by-line with binary-search byte cap.
+        # line-by-line with a binary search for the largest window that fits.
         text = _expand_long_lines(text, max_bytes=max_bytes)
         base_ls: int = chunk.get("line_start", 1)
         lines = text.splitlines()
@@ -220,20 +330,25 @@ def _enforce_byte_cap(
             lo, hi = 1, len(lines) - pos
             while lo < hi:
                 mid = (lo + hi + 1) // 2
-                if len("\n".join(lines[pos : pos + mid]).encode()) <= max_bytes:
+                if fits("\n".join(lines[pos : pos + mid])):
                     lo = mid
                 else:
                     hi = mid - 1
             take = max(1, lo)
             sub_text = "\n".join(lines[pos : pos + take])
-            if len(sub_text.encode()) > max_bytes:
-                sub_text = sub_text.encode()[:max_bytes].decode("utf-8", errors="ignore")
-            result.append({
-                **chunk,
-                "text": sub_text,
-                "line_start": base_ls + pos,
-                "line_end": base_ls + pos + take - 1,
-            })
+            line_no = base_ls + pos
+            if fits(sub_text):
+                result.append({
+                    **chunk,
+                    "text": sub_text,
+                    "line_start": line_no,
+                    "line_end": line_no + take - 1,
+                })
+            else:
+                result.extend(
+                    {**chunk, "text": piece, "line_start": line_no, "line_end": line_no}
+                    for piece in split_text_to_limits(sub_text, max_bytes, token_window)
+                )
             pos += take
 
     # Renumber indices across the (possibly expanded) list.
@@ -244,7 +359,12 @@ def _enforce_byte_cap(
     return result
 
 
-def chunk_file(file: Path, content: str, chunk_lines: int | None = None) -> list[dict[str, Any]]:
+def chunk_file(
+    file: Path,
+    content: str,
+    chunk_lines: int | None = None,
+    token_window: TokenWindow | None = None,
+) -> list[dict[str, Any]]:
     """Chunk *file* content; use AST splitter for known extensions, else lines.
 
     Each returned dict contains:
@@ -289,7 +409,7 @@ def chunk_file(file: Path, content: str, chunk_lines: int | None = None) -> list
                     result.append(meta)
                 # Post-process: split any AST node that exceeds the byte cap
                 # (e.g. a single function body longer than _CHUNK_MAX_BYTES).
-                return _enforce_byte_cap(result)
+                return _enforce_byte_cap(result, token_window=token_window)
         except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
             _log.debug("AST chunking failed, falling back to line chunks", file=str(file), exc_info=True)
 
@@ -312,4 +432,6 @@ def chunk_file(file: Path, content: str, chunk_lines: int | None = None) -> list
                 "text": text,
             }
         )
+    if token_window is not None:
+        return _enforce_byte_cap(result, token_window=token_window)
     return result

@@ -236,6 +236,49 @@ def _write_tuple_watch_session_marker(new_session_id: str) -> None:
 
 # -- SessionStart -------------------------------------------------------------
 
+def render_session_start(session_id: str, *, mailbox_arm_text: str = "") -> str:
+    """The SessionStart text for *session_id*: computation only.
+
+    nexus-cnzei.2 item 8: split out of :func:`session_start` after a
+    coordinator session called ``session_start()`` directly from an ad
+    hoc script (outside pytest's ``_isolate_config_dir`` autouse fence,
+    HOME unset) to hand-measure byte budgets, and its unconditional
+    :func:`_write_tuple_watch_session_marker` call wrote a marker under
+    the REAL ``~/.config/nexus`` naming a stale fixture session id,
+    which is exactly what :func:`nexus.tuple_watch.run_watch` watches
+    for, and it stopped the live mailbox watcher on the next poll. Two
+    sessions hit this same trap the same day.
+
+    This function performs NO writes: no ``current_session`` file, no T1
+    handoff marker, no tuple-watch session marker, no T1 lease. It calls
+    only :func:`_stale_mcp_host_warning` (process-table reads via ``ps``)
+    and :func:`_guidance_imperative_block` (reads ``hooks.json``), both
+    already read-only. It is therefore safe to call directly against ANY
+    HOME/NEXUS_CONFIG_DIR, including manually, outside pytest, with no
+    risk of touching another session's state.
+
+    *mailbox_arm_text* is passed in rather than computed here because
+    :func:`_mailbox_arm_block` (:func:`nexus.mailbox_arm.arm_block`)
+    performs a real network probe of the tuple-space engine and writes a
+    probe-result cache file under ``<config>/tuple-watch/``: genuine
+    I/O this function must never perform on its own. :func:`session_start`
+    computes it once and threads it through; a caller measuring the pure
+    render (byte budgets, ad hoc inspection) passes "" or a literal
+    fixture string instead of triggering that probe.
+
+    No ``source`` parameter: the SessionStart ``source`` field
+    (startup/resume/clear/compact) only ever decided which WRITE fired in
+    the old combined function (see :func:`session_start`'s docstring); it
+    never changed this text, so a pure render has nothing to do with it.
+    """
+    return (
+        f"Nexus ready (session: {session_id})."
+        f"{_stale_mcp_host_warning()}"
+        f"{_guidance_imperative_block()}"
+        f"{mailbox_arm_text}"
+    )
+
+
 def session_start(claude_session_id: str | None = None, source: str | None = None) -> str:
     """Execute the SessionStart hook.
 
@@ -286,18 +329,18 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
     # RDR-155 P4b: the substrate-migration bridge notice (nexus-0rwwv) died
     # with the migration machinery; stranded pre-PG installs are redirected
     # to the LAST_MIGRATION_CAPABLE release by the stranded-install detector.
-    return (
-        f"Nexus ready (session: {session_id})."
-        f"{_stale_mcp_host_warning()}"
-        f"{_guidance_imperative_block()}"
-        f"{_mailbox_arm_block(session_id)}"
-    )
+    #
+    # nexus-cnzei.2 item 8: the writes above are this function's whole job;
+    # everything text-shaped is delegated to the side-effect-free
+    # :func:`render_session_start`. The mailbox-arm probe is the one
+    # remaining piece of real I/O (network probe + cache write), computed
+    # here rather than inside the pure render.
+    return render_session_start(session_id, mailbox_arm_text=_mailbox_arm_block(session_id))
 
 
 def _stale_mcp_host_warning() -> str:
-    """One-line SessionStart nudge when a live nx-mcp/nx-mcp-catalog process
-    (this session's or ANOTHER live session's — machine-wide, unscoped)
-    predates the installed conexus distribution.
+    """One-line SessionStart nudge when THIS session's own nx-mcp/
+    nx-mcp-catalog process predates the installed conexus distribution.
 
     nexus-otnvr item 5 (substantive-critic 2026-08-08): ``nx doctor``'s
     "Process freshness" check (:func:`nexus.health._check_process_skew`,
@@ -308,11 +351,24 @@ def _stale_mcp_host_warning() -> str:
     session-start`` is the one hook-surface invocation that already runs
     the FULL installed ``nx`` (not a bare, package-less interpreter like
     the other SessionStart scripts), so this is the cheapest proactive
-    close for that gap: every NEW session announces it if ANY nx-mcp
-    process anywhere on the box is stale — reusing
-    :func:`nexus.upgrade_finish.detect_stale_processes` directly, the
-    identical primitive doctor calls, so the two surfaces can never
-    diverge on what "stale" means.
+    close for that gap: reusing :func:`nexus.upgrade_finish.
+    detect_stale_processes` directly, the identical primitive doctor
+    calls, so the two surfaces can never diverge on what "stale" means.
+
+    nexus-cnzei.2 (S4): the machine-wide form of this note counted every
+    live nx-mcp host on the box, including OTHER sessions'. A session
+    with a perfectly fresh MCP host would still see "N nx-mcp process(es)
+    ... predate ..." because a sibling terminal's server was stale, which
+    is neither this session's business nor actionable from inside it.
+    Scoped down to THIS session's own MCP siblings via the same
+    ancestry primitive :func:`_write_t1_handoff_markers` already uses
+    (:func:`nexus.session.find_immediate_claude_pid` ->
+    :func:`nexus.session.find_mcp_sibling_pids`): only a stale host that
+    is a live, immediate child of the Claude process running THIS hook
+    counts. A ``run /mcp`` instruction also only ever means anything to
+    the human user, never to a model reading this text, reworded to say
+    so. Never a network call, never a write: both ancestry lookups and
+    the process scan are read-only.
 
     Never raises — a probe failure here must not break session start
     (mirrors every other best-effort leg in this module).
@@ -322,13 +378,29 @@ def _stale_mcp_host_warning() -> str:
         report = detect_stale_processes()
     except Exception:  # noqa: BLE001 — session start must never break on this probe
         return ""
-    hosts = [p for p in report.stale if p.kind == "mcp-host"]
+    candidate_hosts = [p for p in report.stale if p.kind == "mcp-host"]
+    if not candidate_hosts:
+        return ""
+    # Ancestry scan (a second process-table read) only runs when there is
+    # something to scope: the overwhelmingly common case (no stale hosts
+    # anywhere) costs nothing beyond the probe above.
+    try:
+        from nexus.session import (  # noqa: PLC0415 -- deferred import, only needed on this path
+            find_immediate_claude_pid,
+            find_mcp_sibling_pids,
+        )
+
+        claude_pid = find_immediate_claude_pid()
+        sibling_pids = set(find_mcp_sibling_pids(claude_pid)) if claude_pid > 0 else set()
+    except Exception:  # noqa: BLE001 -- an ancestry-scan failure means "no note", not "fall back to unscoped"
+        sibling_pids = set()
+    hosts = [p for p in candidate_hosts if p.pid in sibling_pids]
     if not hosts:
         return ""
     return (
-        f" NOTE: {len(hosts)} nx-mcp process(es) on this box predate the "
-        f"installed conexus {report.installed_version} — if tool calls "
-        f"start failing with import errors, run /mcp to reconnect."
+        f" NOTE: {len(hosts)} nx-mcp process(es) for this session predate "
+        f"the installed conexus {report.installed_version}: ask the user "
+        f"to run /mcp if tool calls start failing with import errors."
     )
 
 

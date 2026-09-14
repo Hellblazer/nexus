@@ -39,6 +39,15 @@ import java.util.Objects;
  *                           be declared {@code required: true} in {@link #dimensions}
  * @param take              claim policy
  * @param retentionSeconds  {@code out}'s default TTL and its ceiling; required, positive
+ * @param maxBodyBytes      optional per-template ceiling on {@code body}, UTF-8 bytes
+ *                           (bead nexus-r7xao). {@code null} means the global {@link
+ *                           dev.nexus.service.db.TupleLimits#MAX_BODY_BYTES} cap applies
+ *                           unchanged. When present it must be {@code 0 <=
+ *                           maxBodyBytes <= MAX_BODY_BYTES} — {@link TemplateSchemaParser}
+ *                           refuses to load a template declaring a value outside that
+ *                           range, and a template can only LOWER the ceiling, never raise
+ *                           it. {@code 0} means every {@code out}/reply against this
+ *                           template must carry a null or empty body.
  */
 public record TemplateSchema(
         String name,
@@ -49,7 +58,8 @@ public record TemplateSchema(
         IdFrom idFrom,
         List<String> idDims,
         Take take,
-        long retentionSeconds) {
+        long retentionSeconds,
+        Long maxBodyBytes) {
 
     public TemplateSchema {
         Objects.requireNonNull(name, "name");

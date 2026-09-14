@@ -461,6 +461,34 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # Hygiene005GcRegistrationFromOriginRowDataCorrectionTest's
         # dedicated HEAD-schema fixtures.
         ("hygiene-005-3", "nexus-uxd2a"),
+        # nexus-r7xao (RDR-205 amendment, tuple size limits): tuples-003-2's
+        # DELETE under FORCE RLS (the legacy-oversized-body cleanup ahead of
+        # the CHECK constraint's ADD+VALIDATE). nexus.tuples does not exist
+        # at OLD_TAG -- unlike every other entry above, this one cannot be
+        # seeded in the single SEED block alongside the OLD-leg tables, since
+        # the table is created PARTWAY through this same hop
+        # (tuples-001-baseline/tuples-002-*). The data leg instead migrates
+        # the HEAD changelog up to (not including) tuples-003-2 via a new
+        # migrateUpTo helper (the same idiom VectorsUnifyChunksIntegrationTest/
+        # Hygiene001NotNullMigrationRlsTest already use for a mid-walk table),
+        # seeds an over-cap body row, an at-cap body row, and a referencing
+        # claim-log row directly, then lets the normal whole-hop migrate call
+        # finish tuples-003-2 onward; effect-asserted (over-cap row gone,
+        # at-cap row survives at exactly 4096 bytes, the claim-log row
+        # survives with tuple_id nulled by tuple_claim_log_tuple_fk's ON
+        # DELETE SET NULL, chk_tuples_body_size exists and is VALIDATED).
+        ("tuples-003-2", "nexus-r7xao"),
+        # nexus-8zoyp: tuples-004-1's UPDATE nulling body on already-consumed
+        # rows -- same shape as tuples-003-2's own follow-up above (nexus.tuples
+        # exists from tuples-001-baseline onward, so this is another table
+        # created PARTWAY through this hop). Seeded via a SECOND migrateUpTo
+        # call, one changeset further than tuples-003-2's own (up to, not
+        # including, tuples-004-1 -- so chk_tuples_body_size already exists and
+        # is validated by this point): a consumed row carrying a body and an
+        # unconsumed row carrying a body, both directly. Effect-asserted (the
+        # consumed row's body is NULL, the unconsumed row's body survives
+        # untouched).
+        ("tuples-004-1", "nexus-8zoyp"),
     }
 )
 

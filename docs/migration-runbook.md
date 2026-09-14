@@ -60,11 +60,12 @@ machinery that performed that migration no longer ships:
    one. The pin has to be IN the command: a bare `nx self install` installs
    the newest release, which is the hop this procedure exists to avoid
 2. `nx upgrade` there, which performs the Chroma to PG copy (copy-not-move;
-   the Chroma directory is left intact as a rollback artifact)
+   the Chroma directory is left on disk afterward, untouched)
 3. upgrade to current normally
 
-Frozen Chroma directories on disk are untouched rollback artifacts. They are
-not a live source, and nothing in this release reads them.
+Frozen Chroma directories left on disk after that copy are relics, not a
+rollback option: nothing in this release reads them, and there is no path
+back to the Chroma/SQLite era (Sam, 2026-08-29).
 
 ## A stranded migration banner
 

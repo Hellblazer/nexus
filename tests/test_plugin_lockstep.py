@@ -511,6 +511,12 @@ def quiet_upgrade():
           patch("nexus.commands.upgrade._converge_preconditions"),
           patch("nexus.commands.upgrade._refresh_all_git_hooks"),
           patch("nexus.commands.upgrade._migrate_repos_json_to_catalog")):
+        # nexus-cnzei.8 CRE fix round: the beads-prime patch that used to
+        # sit here is REMOVED (redundant). Real safety now comes from
+        # ``tests/conftest.py::_fence_beads_prime_user_path``, a class-wide
+        # autouse fixture that fences ``nexus.beads_prime.user_prime_path()``
+        # to a per-test tmp dir for every test in the suite, this file's
+        # unstubbed `nx upgrade` invocations included.
         yield
 
 

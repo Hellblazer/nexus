@@ -169,6 +169,141 @@ async def test_borrowed_lease_does_not_start_a_refresh_task(monkeypatch) -> None
     assert "session_id" not in core._OWNED_T1_SESSION
 
 
+@pytest.mark.asyncio
+async def test_resume_into_previously_owned_session_re_mints_not_borrows(
+    monkeypatch,
+) -> None:
+    """nexus-r0d37 DEFECT 1: a /clear (A -> B) followed by a /resume back
+    into A, in the SAME mcp_pid, must not silently borrow A's own
+    now-unrefreshed lease.
+
+    When this process handed off A -> B, it cancelled ITS OWN refresh task
+    for A (the only thing that was ever refreshing A's token) but left A's
+    published lease file on disk -- still 'fresh' per its own stored
+    expiry, with nobody left to renew it. Without the fix, the B -> A
+    handoff back reads that lease, sees it has not technically expired
+    yet, and BORROWS it (mirrors the genuine-sibling-owns-it case this
+    module intentionally never re-mints for) -- so no refresh task starts
+    for A post-resume, and A's token silently runs out its original TTL
+    with nothing renewing it (the observed ~50-minute-later 401 in the
+    bead). The fix must recognize that THIS process was A's sole owner,
+    clear A's now-orphaned lease when abandoning it, and mint fresh (with
+    a live refresh loop) when A is handed back.
+    """
+    from nexus.db import t1 as t1_mod
+
+    monkeypatch.setattr(
+        "nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID,
+    )
+    config_dir = nexus_config_dir()
+
+    mint_calls: list[str] = []
+
+    def _mint(session_id_arg: str, *, context: str = "") -> dict:
+        mint_calls.append(session_id_arg)
+        return _fake_mint(session_id_arg)
+
+    monkeypatch.setattr(t1_mod, "mint_t1_session_token", _mint)
+
+    # This process already owns and is refreshing "sess-a" -- mirrors
+    # _t1_lifespan's Branch 0 mint branch having run at MCP startup.
+    os.environ["NX_T1_SESSION_ID"] = "sess-a"
+    os.environ["NX_T1_SESSION"] = "tok-sess-a"
+    t1_mod.publish_t1_session_lease(
+        "sess-a", "tok-sess-a", config_dir, ttl_seconds=3600,
+    )
+    core._OWNED_T1_SESSION["session_id"] = "sess-a"
+    core._T1_SESSION_REFRESH_TASK = MagicMock()
+
+    # /clear: A -> B.
+    write_handoff_marker(
+        _MCP_PID, new_session_id="sess-b", claude_pid=_CLAUDE_PID,
+        config_dir=config_dir,
+    )
+    log = MagicMock()
+    await core._t1_handoff_tick(_MCP_PID, log)
+
+    assert os.environ["NX_T1_SESSION_ID"] == "sess-b"
+    assert mint_calls == ["sess-b"]
+    assert core._OWNED_T1_SESSION.get("session_id") == "sess-b"
+
+    # /resume: B -> A, same mcp_pid, same round trip the bead describes.
+    write_handoff_marker(
+        _MCP_PID, new_session_id="sess-a", claude_pid=_CLAUDE_PID,
+        config_dir=config_dir,
+    )
+    await core._t1_handoff_tick(_MCP_PID, log)
+
+    assert os.environ["NX_T1_SESSION_ID"] == "sess-a"
+    # The critical assertion: a SECOND mint for "sess-a" must have
+    # happened -- proving the stale pre-/clear lease was not blindly
+    # borrowed -- and this process must own + refresh it going forward.
+    assert mint_calls == ["sess-b", "sess-a"]
+    assert core._OWNED_T1_SESSION.get("session_id") == "sess-a"
+    assert core._T1_SESSION_REFRESH_TASK is not None
+
+
+@pytest.mark.asyncio
+async def test_abandoning_a_session_does_not_delete_a_siblings_fresher_lease(
+    monkeypatch,
+) -> None:
+    """nexus-r0d37 fix-round finding 1: the abandoned-lease clear must be a
+    compare-then-delete (``clear_t1_session_lease_if_matches``), not
+    ``clear_t1_session_lease``'s unconditional unlink.
+
+    Between this process's own belief about `old_session_id`'s lease and
+    the delete running, a live SIBLING MCP process (another window/host
+    resolved to the same session id) can independently win
+    `_lock_guarded_mint_or_borrow`'s flock and publish a FRESH lease for
+    it. An unconditional delete at that point would erase the sibling's
+    live lease, not this process's stale one -- forcing the sibling's
+    next reader to mint a COMPETING token, exactly the persistent
+    401-rotation churn nexus-jwqjm's flock exists to prevent.
+
+    Modeled here by publishing a lease for "sess-a" under a DIFFERENT
+    token than the one this process's own env holds, immediately before
+    the handoff tick runs: from the compare-then-delete's point of view
+    this is indistinguishable from a race landing mid-tick, since it
+    only ever compares against the lease file's CURRENT content, never a
+    timestamp or an in-memory belief about when the race happened.
+    """
+    from nexus.db import t1 as t1_mod
+
+    monkeypatch.setattr(
+        "nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID,
+    )
+    config_dir = nexus_config_dir()
+    monkeypatch.setattr(t1_mod, "mint_t1_session_token", _fake_mint)
+
+    # This process believes it owns and refreshes "sess-a" with token
+    # "tok-sess-a" -- same setup as the resume-round-trip test above.
+    os.environ["NX_T1_SESSION_ID"] = "sess-a"
+    os.environ["NX_T1_SESSION"] = "tok-sess-a"
+    core._OWNED_T1_SESSION["session_id"] = "sess-a"
+    core._T1_SESSION_REFRESH_TASK = MagicMock()
+
+    # A sibling process wins the flock and republishes a FRESH lease for
+    # "sess-a" under a DIFFERENT token -- this process's own env is now
+    # stale relative to disk, but it has no way to know that yet.
+    t1_mod.publish_t1_session_lease(
+        "sess-a", "tok-from-sibling", config_dir, ttl_seconds=3600,
+    )
+
+    # /clear: A -> B, from this process's point of view.
+    write_handoff_marker(
+        _MCP_PID, new_session_id="sess-b", claude_pid=_CLAUDE_PID,
+        config_dir=config_dir,
+    )
+    log = MagicMock()
+    await core._t1_handoff_tick(_MCP_PID, log)
+
+    assert os.environ["NX_T1_SESSION_ID"] == "sess-b"
+    # The sibling's fresher lease for "sess-a" must survive untouched.
+    assert (
+        t1_mod.read_t1_session_lease("sess-a", config_dir) == "tok-from-sibling"
+    )
+
+
 # ── no marker present: silent no-op (steady state) ──────────────────────────
 
 

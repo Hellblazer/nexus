@@ -257,6 +257,85 @@ out8b="$(bash -c "source '$repo8/scripts/lib/build-lease.sh'; build_lease_acquir
 rc8b=$?
 if [[ $rc8b -eq 0 && "$out8b" == *WARNING* ]]; then ok "an old pid-less lease dir is reclaimed with a WARNING"; else bad "old pid-less dir rc $rc8b: $out8b"; fi
 
+# ── Test 9: the lease held across a WHOLE compound stamp->build->restore ──
+# step (nexus-56qvf) actually serializes two gate-shaped wrappers against a
+# SHARED fake "release.properties", never just the build call inside it.
+# Models tests/e2e/local-service-gate.sh's fixed shape directly: acquire
+# the SAME named lease before stamping, hold it through a (fake, sleeping)
+# build, restore, THEN release -- a concurrent second wrapper must WAIT for
+# the whole span, not just for a narrower "build" sub-step, so it can never
+# observe the first wrapper's stamp mid-flight or race its own stamp/
+# restore against it.
+echo "Test 9: lease held across a full stamp->build->restore span serializes two gate-shaped wrappers"
+repo9="$WORKDIR/repo9"
+_fake_repo "$repo9"
+props9="$repo9/service/target/fake-release.properties"
+mkdir -p "$(dirname "$props9")"
+printf 'release_version=\nbuild_ref=\n' > "$props9"
+baseline9="$(cat "$props9")"
+
+# A gate-shaped wrapper: acquire -> stamp -> sleep (stand-in for `./mvnw
+# package`) -> restore -> release. Mirrors the ORDER local-service-gate.sh's
+# fixed sequence now uses (bare build under an already-held lease, never a
+# nested build_lease_acquire_wait call -- see that script's own comment on
+# why nesting would deadlock instead of serializing).
+_gate_wrapper9() {
+    local repo="$1" stamp="$2" sleep_s="$3" out_file="$4"
+    bash -c "
+        source '$repo/scripts/lib/build-lease.sh'
+        build_lease_acquire_wait service 60 fake-gate-$stamp || exit \$?
+        printf 'release_version=%s\nbuild_ref=%s\n' '$stamp' '$stamp' > '$props9'
+        sleep $sleep_s
+        # the OBSERVED content while this wrapper holds the lease, for the
+        # OTHER wrapper's out_file -- proves what was visible during the hold
+        cat '$props9' > '$out_file.mid'
+        printf 'release_version=\nbuild_ref=\n' > '$props9'
+        build_lease_release service
+    "
+}
+
+obs_a="$WORKDIR/obs_a"
+obs_b="$WORKDIR/obs_b"
+_gate_wrapper9 "$repo9" "STAMP-A" 2 "$obs_a" &
+wrapper_a=$!
+# Give A a head start on the acquire so B is the one forced to wait.
+for _ in $(seq 1 50); do
+    [[ -f "$repo9/service/.build-lease/service/pid" ]] && break
+    sleep 0.05
+done
+start9=$SECONDS
+_gate_wrapper9 "$repo9" "STAMP-B" 0 "$obs_b" &
+wrapper_b=$!
+wait "$wrapper_a" "$wrapper_b"
+took9=$((SECONDS - start9))
+
+if (( took9 >= 1 )); then
+    ok "B's acquire genuinely waited for A's whole span (${took9}s), not just A's build sub-step"
+else
+    bad "B returned in ${took9}s -- it did not wait for A's stamp+build+restore at all"
+fi
+if [[ -f "$obs_a.mid" && "$(cat "$obs_a.mid")" == *"STAMP-A"* ]]; then
+    ok "A observed its OWN stamp while holding the lease"
+else
+    bad "A did not observe its own stamp: $(cat "$obs_a.mid" 2>/dev/null)"
+fi
+if [[ -f "$obs_b.mid" && "$(cat "$obs_b.mid")" == *"STAMP-B"* ]]; then
+    ok "B observed its OWN stamp while holding the lease (never A's, and never a blank clobber)"
+else
+    bad "B did not observe its own stamp cleanly: $(cat "$obs_b.mid" 2>/dev/null)"
+fi
+final9="$(cat "$props9")"
+if [[ "$final9" == "$baseline9" ]]; then
+    ok "props file is back to the pre-invocation baseline after both wrappers finished"
+else
+    bad "props file left stamped/corrupted after both wrappers finished: $final9"
+fi
+if [[ ! -d "$repo9/service/.build-lease/service" ]]; then
+    ok "lease released after both wrappers finished"
+else
+    bad "lease dir still present after both wrappers finished"
+fi
+
 echo
 echo "build-lease_test.sh: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

@@ -207,16 +207,16 @@ Returns `{"verified": bool, "reason": str, "citations": [str, ...]}`.
 
 ### nx_tidy / nx_enrich_beads / nx_plan_audit
 
-Background hygiene tools — each spawns a long-lived `claude -p` subprocess. Call and move on; these are slow (minutes, not seconds).
+Each spawns a `claude -p` subprocess (300-600s timeout) and requires real arguments — none of the three runs with no args. For T2 consolidation (overlaps, stale entries), use `memory_consolidate` instead — it operates on T2 directly with no subprocess.
 
-- **`nx_tidy`** — T2 memory consolidation sweep (overlaps, stale entries).
-- **`nx_enrich_beads`** — auto-fills missing `design` / `notes` sections on open beads.
-- **`nx_plan_audit`** — plan library quality audit (missing required fields, low match confidence, stale entries).
+- **`nx_tidy(topic, collection="knowledge")`** — read-only. Semantic-searches ONE T3 collection for entries matching `topic`, then dispatches a tool-free subprocess to identify duplicates/contradictions/outdated entries among what it found. Returns a consolidated summary plus suggested actions; performs no writes itself — acting on a suggestion (e.g. deleting a stale entry) is a separate `store_put`/deletion the caller makes.
+- **`nx_enrich_beads(bead_description, context="")`** — enriches the ONE bead description passed in with codebase-derived execution context (file paths, test commands, constraints). Returns enriched markdown as a string; does not read or write beads itself — the caller passes the description in and writes the result back (e.g. `bd update`).
+- **`nx_plan_audit(plan_json, context="")`** — audits ONE plan (passed as `plan_json`) for file-path/dependency/assumption correctness against the current codebase. Not a scan of the stored plan library.
 
 ```
-mcp__plugin_conexus_nexus__nx_tidy()
-mcp__plugin_conexus_nexus__nx_enrich_beads()
-mcp__plugin_conexus_nexus__nx_plan_audit()
+mcp__plugin_conexus_nexus__nx_tidy(topic="chromadb quotas", collection="<subject>")
+mcp__plugin_conexus_nexus__nx_enrich_beads(bead_description="<bead title + description text>")
+mcp__plugin_conexus_nexus__nx_plan_audit(plan_json='{"steps": [...]}')
 ```
 
 ### store_put
@@ -280,11 +280,11 @@ Store a memory entry in T2 (service-backed Postgres). Upserts by (project, title
 | `project` | str | required | Project namespace |
 | `title` | str | required | Entry title (unique within project) |
 | `tags` | str | `""` | Comma-separated tags |
-| `ttl` | int | `30` | Time-to-live in days (0 for permanent) |
+| `ttl` | int \| None | `None` | Time-to-live in days. Omit for permanent (the default, nexus-473mx); a positive integer expires the row in that many days, extended on read. `ttl<=0` (0 included) is refused with a 400 — there is no "0 means permanent" coercion. |
 
 ```
 mcp__plugin_conexus_nexus__memory_put(content="content", project="{repo}", title="findings.md"
-mcp__plugin_conexus_nexus__memory_put(content="content", project="{repo}", title="findings.md", ttl=0
+mcp__plugin_conexus_nexus__memory_put(content="content", project="{repo}", title="findings.md", ttl=14
 ```
 
 **Project naming**: Use purpose-specific suffixes:

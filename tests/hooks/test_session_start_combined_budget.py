@@ -109,6 +109,34 @@ _FIXTURE_KNOWLEDGE_MAP = (
 #: mechanical, non-negotiable check the bead calls for.
 _COMBINED_BUDGET_BYTES = 6000
 
+#: nexus-cnzei.6 fix round (critic Critical 2 / CRE 3): this is NOT a full
+#: SessionStart census and must never be called one — the real total is
+#: ~13.1-13.6KB (T2 nexus/llm-guidance-audit-injection-2026-09-13), and this
+#: constant bounds a specific set of BOUNDED components, some real and some
+#: fixture-sized. See test_sessionstart_bounded_components_under_budget's
+#: own docstring for exactly which is which, with each excluded or
+#: fixture-sized component's approximate real size. Measured 2026-09-13:
+#: guidance 1969B + hook fixture 2778B + sn static 748B + bd-prime 992B =
+#: 6487B, stable (bd-prime and sn are static files; guidance and hook's two
+#: real sub-renders do not touch live-varying state; hook's two fixtures are
+#: fixed strings). ~8% headroom: 6487 * 1.08 ~= 7006, rounded.
+_BOUNDED_SESSIONSTART_BUDGET_BYTES = 7000
+
+_SN_SESSION_START_SECTION = (
+    Path(__file__).resolve().parents[2] / "sn" / "hooks" / "scripts" / "session-start-section.md"
+)
+
+#: bd prime's REPO-LEVEL PRIME.md — the file bd actually prints byte-for-
+#: byte in THIS repo, per src/nexus/beads_prime.py's own docstring ("A
+#: repo-level .beads/PRIME.md always wins over this [machine-wide] file --
+#: bd reads repo-level first"). A plain, deterministic file read: this repo
+#: commits this file, so there is nothing live to render and nothing to
+#: mock. This is NOT nexus.beads_prime.load_template() (the generic
+#: machine-wide template nexus-cnzei.8 installs elsewhere) — that function
+#: is real and callable too, but its output is not what a session in THIS
+#: checkout actually sees, since the repo-level file overrides it.
+_BD_PRIME_REPO_FILE = Path(__file__).resolve().parents[2] / ".beads" / "PRIME.md"
+
 
 def _fixture_session_start_hook_output() -> str:
     """Assemble session_start_hook.py's REPRESENTATIVE combined output:
@@ -132,34 +160,32 @@ _REAL_SESSION_ID = "8154ea0d-6649-4a18-9ef7-ea42818188b0"
 
 
 def _real_guidance_emitter_output() -> str:
-    """The REAL ``nx hook session-start`` emitter output (deterministic:
-    stale-process probe mocked, matching
-    ``TestGuidanceByteBudgetIntegration`` in tests/test_hooks.py). The
-    mailbox-arm block's own availability PROBE is mocked to ``True`` and
-    its text to the REAL rendered instruction (never ``""``) for the same
-    reason ``TestGuidanceByteBudgetIntegration`` mocks it: a budget that
-    measures an emitter with its largest conditional block silently
-    absent, because the ambient probe happened to fail in this run, is
-    not a budget."""
-    from nexus.hooks import session_start
+    """The REAL ``nx hook session-start`` emitter output, via the
+    side-effect-free :func:`nexus.hooks.render_session_start`
+    (nexus-cnzei.2 item 8: no writer to mock any more, the render never
+    calls ``write_claude_session_id`` or any marker/lease writer, so this
+    no longer needs to patch it). Stale-process probe mocked, matching
+    ``TestGuidanceByteBudgetIntegration`` in tests/test_hooks.py; the
+    mailbox-arm text is supplied directly as the REAL rendered
+    instruction (never ``""``) for the same reason
+    ``TestGuidanceByteBudgetIntegration`` does: a budget that measures an
+    emitter with its largest conditional block silently absent is not a
+    budget."""
+    from nexus.hooks import render_session_start
     from nexus.mailbox_arm import mailbox_arm_instruction
 
     class _FakeSkewReport:
         def __init__(self) -> None:
             self.stale: list = []
 
-    with (
-        patch("nexus.hooks.write_claude_session_id"),
-        patch(
-            "nexus.upgrade_finish.detect_stale_processes",
-            return_value=_FakeSkewReport(),
-        ),
-        patch(
-            "nexus.mailbox_arm.arm_block",
-            return_value=mailbox_arm_instruction(_REAL_SESSION_ID),
-        ),
+    with patch(
+        "nexus.upgrade_finish.detect_stale_processes",
+        return_value=_FakeSkewReport(),
     ):
-        return session_start(claude_session_id=_REAL_SESSION_ID)
+        return render_session_start(
+            _REAL_SESSION_ID,
+            mailbox_arm_text=f"\n\n{mailbox_arm_instruction(_REAL_SESSION_ID)}",
+        )
 
 
 def test_combined_sessionstart_total_under_6000_bytes(monkeypatch) -> None:
@@ -176,6 +202,61 @@ def test_combined_sessionstart_total_under_6000_bytes(monkeypatch) -> None:
         f"combined SessionStart total {combined}B "
         f"(guidance {guidance_bytes}B + session_start_hook.py fixture "
         f"{hook_bytes}B) >= budget {_COMBINED_BUDGET_BYTES}B"
+    )
+
+
+def test_sessionstart_bounded_components_under_budget(monkeypatch) -> None:
+    """nexus-cnzei.6 fix round (critic Critical 2 / CRE 3): this bounds
+    FOUR components of a real SessionStart, not the whole ~13.1-13.6KB
+    payload (T2 nexus/llm-guidance-audit-injection-2026-09-13). Renamed
+    from ``test_full_sessionstart_census_under_budget`` — that name
+    claimed more than the test measures, which is exactly the defect this
+    fix round exists to close. Per component:
+
+    - guidance (``nx hook session-start``, via the side-effect-free
+      ``render_session_start()``): REAL, ~1969B.
+    - sn's static ``session-start-section.md``: REAL (plain file read),
+      ~748B.
+    - bd prime's repo-level ``.beads/PRIME.md``: REAL (plain file read;
+      this repo commits it, and it wins over the generic machine-wide
+      template bd would otherwise print — see ``_BD_PRIME_REPO_FILE``
+      above), ~992B.
+    - ``session_start_hook.py``'s combined output: PARTIALLY FIXTURE.
+      ``_render_ready_beads``/``_build_capabilities_block`` are real
+      renders of fixture input; the T2-memory block and Knowledge Map are
+      hardcoded fixture STRINGS, not live renders, because both depend on
+      this box's live T2/bead state (see ``_FIXTURE_T2_MEMORY_BLOCK`` and
+      ``_FIXTURE_KNOWLEDGE_MAP`` above for why hardcoding was chosen over
+      flakiness). Approximate real sizes as separately measured 2026-08-20:
+      T2-memory block ~847B (fixture here is ~626B, slightly under);
+      Knowledge Map ~657B (fixture here is sized to match).
+
+    EXCLUDED entirely, not measured here at all: bd prime's own
+    post-PRIME-text ``bd remember`` memory dump (beads 1.2.x appends this
+    unless ``--no-memories`` is passed; not suppressed by this repo's
+    hook), and the three conditional emitters (preflight.py, rdr_hook.py,
+    version_lockstep_hook.py) that carve out to 0B in the common case per
+    the bead's own measured baseline (module docstring above)."""
+    assert _SN_SESSION_START_SECTION.exists(), (
+        f"{_SN_SESSION_START_SECTION} missing — sn plugin layout changed; "
+        "update this census's file list"
+    )
+    assert _BD_PRIME_REPO_FILE.exists(), (
+        f"{_BD_PRIME_REPO_FILE} missing — this repo's repo-level PRIME.md "
+        "was removed; update this test's file list (bd prime would then "
+        "fall through to the generic machine-wide template instead)"
+    )
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    guidance_bytes = len(_real_guidance_emitter_output().encode("utf-8"))
+    hook_bytes = len(_fixture_session_start_hook_output().encode("utf-8"))
+    sn_bytes = len(_SN_SESSION_START_SECTION.read_bytes())
+    bd_prime_bytes = len(_BD_PRIME_REPO_FILE.read_bytes())
+    total = guidance_bytes + hook_bytes + sn_bytes + bd_prime_bytes
+    assert total < _BOUNDED_SESSIONSTART_BUDGET_BYTES, (
+        f"bounded SessionStart components {total}B (guidance {guidance_bytes}B + "
+        f"session_start_hook.py fixture {hook_bytes}B + sn static "
+        f"{sn_bytes}B + bd-prime {bd_prime_bytes}B) >= budget "
+        f"{_BOUNDED_SESSIONSTART_BUDGET_BYTES}B"
     )
 
 

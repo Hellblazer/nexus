@@ -1,6 +1,15 @@
 #!/bin/bash
 # Auto-approve nexus MCP tools — explicit full tool names, no wildcards.
 # No set -e — a failed parse must not kill the hook (user just sees the prompt).
+#
+# nexus-cnzei.5: mcp__plugin_conexus_nexus__daemon_uninstall is deliberately
+# ABSENT from this list. It can tear down the storage-service OS autostart
+# unit and, with remove_data=true, irreversibly delete the entire nexus
+# config directory (notes, plans, catalog) — its own confirm=true parameter
+# is a trivial self-gate an agent satisfies with one more tool call, not a
+# human-in-the-loop check. Every other destructiveHint tool here (memory_delete,
+# memory_consolidate's merge, plan_delete, tuple_in/ack/nack) is scoped to a
+# single entry or claim and reversible-ish, so those stay auto-approved.
 
 INPUT=$(cat)
 TOOL_NAME=$(echo "$INPUT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('tool_name',''))" 2>/dev/null || echo "")
@@ -34,7 +43,6 @@ case "$TOOL_NAME" in
   mcp__plugin_conexus_nexus__nx_tidy|\
   mcp__plugin_conexus_nexus__nx_enrich_beads|\
   mcp__plugin_conexus_nexus__nx_plan_audit|\
-  mcp__plugin_conexus_nexus__daemon_uninstall|\
   mcp__plugin_conexus_nexus__operator_summarize|\
   mcp__plugin_conexus_nexus__operator_extract|\
   mcp__plugin_conexus_nexus__operator_rank|\

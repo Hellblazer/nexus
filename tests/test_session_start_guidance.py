@@ -77,7 +77,10 @@ _PRE_INVERSION_DESTINATIONS = frozenset(
         "/conexus:finishing-branch",
         "/conexus:git-worktrees",
         "/conexus:implement",
-        "/conexus:knowledge-tidy",
+        # nexus-cnzei.4: /conexus:knowledge-tidy (command) was deleted and
+        # merged into the /conexus:knowledge-tidying skill, which is now the
+        # sole entry point — the destination moved, not dropped.
+        "/conexus:knowledge-tidying",
         "/conexus:nexus",
         "/conexus:pdf-process",
         "/conexus:phase-review-gate",
@@ -93,7 +96,11 @@ _PRE_INVERSION_DESTINATIONS = frozenset(
         "/conexus:rdr-show",
         "/conexus:receiving-review",
         "/conexus:research",
-        "/conexus:review",
+        # nexus-cnzei.4: the bare-verb "review" skill (nx_answer verb=review,
+        # decision-history retrieval) was renamed to decision-drift-review —
+        # "review" invited confusion with code review. Destination moved,
+        # not dropped.
+        "/conexus:decision-drift-review",
         "/conexus:review-code",
         "/conexus:serena-code-nav",
         "/conexus:substantive-critique",

@@ -44,7 +44,7 @@ The **only** way to retire an RDR is the `status:` flip. **Never delete an RDR f
 Supersedes edges are part of the lifecycle and of indexing (Sam, 2026-09-04, nexus-y8bkt): `nx rdr set-status <id> superseded` writes the successor's `supersedes` catalog edge itself, and `nx index repo` re-feeds any RDR whose content changed to the dependency link generator, so a `supersedes:` / `superseded_by:` frontmatter edit seeds its edges at the next index rather than only on first registration. The needs-reexamination walk runs successor to predecessor over those edges.
 ## RDR scale and scope
 
-`docs/rdr/` is large (~2.7MB). Most of that is draft and historical content from earlier design cycles. Don't load every RDR you find — the directory's volume can dominate context budgets.
+`docs/rdr/` is large (~6.8MB). Most of that is draft and historical content from earlier design cycles. Don't load every RDR you find — the directory's volume can dominate context budgets.
 
 If you need to find an RDR by topic, prefer the index in `docs/rdr/README.md` over a wide grep. The index lists every RDR with its current status; an RDR that isn't in the index is suspect.
 

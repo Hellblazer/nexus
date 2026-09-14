@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-36 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
+47 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
 RDR-182 consent-gated ``forensics``/``remediate`` pair (nexus-ykzbj.10/.11)
 was deleted at nexus-lgdel — the chash-rekey upgrade rung it steered
 operators toward no longer exists.
@@ -13,11 +13,12 @@ import json
 import threading
 import time
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import Annotated, Any
 
 import structlog
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
+from pydantic import Field
 
 try:  # nexus-vc5yb: UNEXPORTED SDK internal — absence must not kill startup
     from mcp.server.fastmcp.server import Settings as _FastMCPSettings
@@ -881,6 +882,11 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
         return
 
     old_session_id = _os.environ.get("NX_T1_SESSION_ID", "").strip() or None
+    # Captured now, before any env swap below (nexus-r0d37 fix-round): the
+    # token THIS process itself still holds for `old_session_id`, used
+    # later to compare-then-delete its lease rather than blindly unlink
+    # it -- see `clear_t1_session_lease_if_matches`'s docstring.
+    old_session_token = _os.environ.get("NX_T1_SESSION", "").strip() or None
     if old_session_id == new_session_id:
         # Nothing to do (e.g. a re-tick that raced the previous one's own
         # consume, or a resume that lands back on the id already active).
@@ -1027,6 +1033,81 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     # the cancelled task can never race a re-mint against the swap below
     # (mirrors the ordering `_t1_lifespan`'s own teardown already uses:
     # cancel the refresh task before touching session state).
+    #
+    # nexus-r0d37 DEFECT 1: capture ownership of `old_session_id` BEFORE
+    # clearing `_OWNED_T1_SESSION` below. If this process was the one
+    # refreshing it, it is now the ONLY thing that was ever going to
+    # refresh it -- cancelling the task above stops that for good, but
+    # the published lease FILE for `old_session_id` is untouched and
+    # still reads as "fresh" per its own stored `expires_at` (set at an
+    # earlier mint/refresh). Without clearing it here, a LATER handoff
+    # back to `old_session_id` (a `/resume` following this `/clear`, the
+    # exact round trip the bead reports) reads that still-technically-
+    # fresh lease and BORROWS it -- indistinguishable, from
+    # `_lock_guarded_mint_or_borrow`'s point of view, from the genuine
+    # "a live sibling MCP already owns and is refreshing this session"
+    # case that borrowing exists for (see
+    # `test_borrowed_lease_does_not_start_a_refresh_task`). A borrow
+    # never starts a refresh loop (by design: re-minting a session this
+    # process does not own would rotate another owner's live token out
+    # from under it, `_t1_session_refresh_loop`'s own docstring) -- so
+    # the resumed session ends up bound to a token nobody is renewing,
+    # which silently expires once its ORIGINAL, pre-/clear TTL runs out
+    # with no self-heal (the observed 401 roughly an hour after resume).
+    #
+    # Clearing the lease file here is a CLIENT-SIDE-only action -- no
+    # server-side revoke/close_session -- so it does not touch JDR-001's
+    # "old session rows strand and age out via the T1 TTL sweep, never
+    # revoke the token" decision; it only forces the NEXT reader of
+    # `old_session_id` (a resume-back handoff, or an unrelated CLI
+    # invocation) to mint fresh and take real, refreshed ownership again,
+    # exactly as if no lease had ever been published for it. Best-effort:
+    # a failure to clear just leaves an orphaned lease that self-heals
+    # once its own TTL genuinely elapses, same as today.
+    #
+    # nexus-r0d37 fix-round finding 1: NOT `clear_t1_session_lease`'s
+    # unconditional unlink -- that function's own contract requires
+    # PERMANENT sole ownership (genuine process teardown), which a
+    # handoff-away is not. Between this tick checking `_OWNED_T1_SESSION`
+    # above and the delete running, a live sibling MCP process (another
+    # window/host resolved to the SAME `old_session_id`) could
+    # independently win `_lock_guarded_mint_or_borrow`'s flock and
+    # publish a FRESH lease for it -- an unconditional delete here would
+    # erase THAT sibling's live lease, not this process's stale one,
+    # forcing its next reader to mint a competing token (the persistent
+    # 401-rotation churn nexus-jwqjm's flock exists to prevent).
+    # `clear_t1_session_lease_if_matches` closes that window: under the
+    # SAME per-session flock the mint-or-borrow path uses, it deletes
+    # the lease only if it still holds the exact token THIS process
+    # published/refreshed (`old_session_token`, captured above before
+    # any swap) -- a sibling's fresher lease is left untouched.
+    #
+    # Out of scope (by design, not an oversight): a sibling MCP HOST
+    # process (e.g. `nx-mcp-catalog`) that only ever BORROWED
+    # `old_session_id`'s lease -- never owned/refreshed it -- can be
+    # transiently left without a borrowable lease between this clear and
+    # its own next handoff tick or mint-or-borrow call; it self-heals by
+    # minting fresh on its own next T1 touch (at most one
+    # `_T1_HANDOFF_WATCH_INTERVAL_S` tick later for a handoff-watching
+    # sibling). And a `/resume` into a BRAND-NEW process (no prior
+    # handoff history, no `_OWNED_T1_SESSION` entry for the id it
+    # inherits) is not covered by this fix at all -- it always mints or
+    # borrows fresh at `_t1_lifespan` startup, never touching a lease
+    # this function abandoned.
+    if old_session_id is not None and (
+        _OWNED_T1_SESSION.get("session_id") == old_session_id
+    ):
+        try:
+            from nexus.db.t1 import clear_t1_session_lease_if_matches  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            clear_t1_session_lease_if_matches(
+                old_session_id, config_dir, old_session_token or "",
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort; a failed clear just leaves a lease that self-heals via its own TTL, must not crash the handoff
+            log.warning(
+                "t1_handoff_abandoned_lease_clear_failed",
+                mcp_pid=mcp_pid, old_session_id=old_session_id, error=str(exc),
+            )
+
     global _T1_SESSION_REFRESH_TASK
     if _T1_SESSION_REFRESH_TASK is not None:
         _T1_SESSION_REFRESH_TASK.cancel()
@@ -2338,95 +2419,109 @@ def _truncated_chars_dropped(capped_text: str, tool: str) -> tuple[bool, int]:
     return True, dropped
 
 
+# HISTORY (nexus-6jlki spike; kept out of the tool description, which the
+# harness truncates at 2048 chars — see AGENTS.md § MCP tools).
+# ``structured_output=False`` on the ``@mcp.tool()`` registration turns OFF
+# FastMCP's own return-type auto-detection — left on, the ``str | dict``
+# return annotation gets silently auto-wrapped as
+# ``structuredContent: {"result": <value>}`` (verified against the pinned
+# mcp==1.27.1; the nexus-r90ao audit, T2 [23357], narrowed the affected set:
+# ``str``, ``str | dict`` unions, and ``list[...]`` returns were
+# auto-wrapped, while bare unparameterized ``dict`` returns never were —
+# nobody designed the wrapping, no client is documented to rely on it).
+# This tool is the first to replace that accident with a deliberate shape.
+#
+# Business logic lives in ``_search_render`` (unchanged since before this
+# tool existed) — plan-runner, ``nx doc cite``, and this repo's test suite
+# call ``_search_render`` directly and see EXACTLY the same ``str``/``dict``
+# contract as before. Only a real MCP-wire call (an actual ``tools/call``,
+# not an in-process Python call) goes through this wrapper and can observe
+# the new ``structuredContent`` field; the reason for the split is that a
+# ``CallToolResult`` return is the only SDK-level way to give a caller
+# byte-identical human text AND separate machine data in one response
+# (confirmed via spike — a bare-dict/str return ties ``content`` and
+# ``structuredContent`` to the SAME serialization, which would replace
+# today's human-readable rendering with a JSON dump).
+#
+# Default (``structured=False``): ``content`` is ``_search_render``'s
+# human-readable string, byte-identical to what this tool returned before
+# nexus-6jlki. ``structuredContent`` carries the same
+# ``{ids, tumblers, distances, collections, chunk_collections,
+# chunk_text_hash}`` shape ``structured=True`` has always returned (fetched
+# via the page-turn cache, no extra vector-store round trip), plus
+# ``truncated``/``truncated_chars`` reflecting whether the 250K text cap
+# (``_cap_text_result``) fired.
+#
+# Two channels, two consumers, ONE response (nexus-0bmhd, nexus-ypmb6):
+# ``content``/``structuredContent["text"]`` is the PRESENTATION channel and
+# carries the render-layer file-diversity cap (at most 2 chunks per file
+# lead the page); the ``ids``/``tumblers``/``distances`` arrays are the
+# MACHINE channel — identical to ``structured=True`` — and are deliberately
+# UNCAPPED. The two can disagree on order within a page by design.
+#
+# ``structured=True`` is UNCHANGED: bare dict, no ``CallToolResult``, no
+# ``structuredContent`` wrapping — the plan-runner's in-process contract
+# (``$stepN.ids``/``$stepN.tumblers``/``$stepN.distances``).
 @mcp.tool(
     title="Semantic Search",
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
 def search(
-    query: str,
-    corpus: str = "knowledge,code,docs",
-    limit: int = 10,
-    offset: int = 0,
-    where: str = "",
-    cluster_by: str = "",
-    topic: str = "",
-    structured: bool = False,
-    threshold: float | None = None,
+    query: Annotated[str, Field(description="Search query text, up to 256 characters.")],
+    corpus: Annotated[str, Field(
+        description=(
+            "Corpus prefixes or full collection names, comma-separated; \"all\" for "
+            "every corpus. \"knowledge\" means every live knowledge__* subject "
+            "collection, the same scope store_get/store_list give it."
+        ),
+    )] = "knowledge,code,docs",
+    limit: Annotated[int, Field(description="Page size, at most 300.")] = 10,
+    offset: Annotated[int, Field(description="Results to skip, for pagination.")] = 0,
+    where: Annotated[str, Field(
+        description="Metadata filter as KEY=VALUE[,KEY=VALUE...]; operators = >= <= > < !=.",
+    )] = "",
+    cluster_by: Annotated[str, Field(
+        description="\"semantic\" to cluster results by topic; \"\" (default) disables clustering.",
+    )] = "",
+    topic: Annotated[str, Field(
+        description="Restrict to documents in this topic label (see `nx taxonomy discover`).",
+    )] = "",
+    structured: Annotated[bool, Field(
+        description=(
+            "Return the {ids, tumblers, distances, collections} dict instead of the "
+            "human-readable string; the plan runner uses this so $stepN.ids resolves."
+        ),
+    )] = False,
+    threshold: Annotated[float | None, Field(
+        description=(
+            "Override the per-collection distance cutoff uniformly (raw cosine "
+            "distance, lower is stricter); float('inf') disables filtering. "
+            "None (default) uses per-corpus config thresholds."
+        ),
+    )] = None,
 ) -> "str | dict | CallToolResult":
-    """Semantic search across T3 collections. Paged results (``offset=N`` for next page).
+    """Semantic search across T3 chunks; returns matching text fragments, not whole documents.
 
-    nexus-6jlki spike: the wire-facing tool. ``structured_output=False`` on
-    the ``@mcp.tool()`` registration turns OFF FastMCP's own return-type
-    auto-detection — left on, the ``str | dict`` return annotation gets
-    silently auto-wrapped as ``structuredContent: {"result": <value>}``
-    (verified against the pinned mcp==1.27.1; the nexus-r90ao audit,
-    T2 [23357], narrowed the affected set: ``str``, ``str | dict`` unions,
-    and ``list[...]`` returns were auto-wrapped, while bare unparameterized
-    ``dict`` returns never were — nobody designed the wrapping, no client
-    is documented to rely on it).
-    This tool is the first to replace that accident with a deliberate shape.
+    Use `query` instead when the question is which DOCUMENTS match, not which
+    passages. Use `search_metadata_scoped`, `search_aspect_scoped`, or
+    `search_graph_hop` when the search should be scoped by catalog metadata,
+    an extracted aspect field, or graph neighbours, respectively.
 
-    Business logic lives in ``_search_render`` (unchanged since before this
-    tool existed) — plan-runner, ``nx doc cite``, and this repo's test
-    suite call ``_search_render`` directly and see EXACTLY the same
-    ``str``/``dict`` contract as before. Only a real MCP-wire call (an
-    actual ``tools/call``, not an in-process Python call) goes through this
-    wrapper and can observe the new ``structuredContent`` field; the reason
-    for the split is that a ``CallToolResult`` return is the only SDK-level
-    way to give a caller byte-identical human text AND separate machine
-    data in one response (confirmed via spike — a bare-dict/str return
-    ties ``content`` and ``structuredContent`` to the SAME serialization,
-    which would replace today's human-readable rendering with a JSON dump).
+    Returns a ranked, human-readable list of chunks by default, or, when
+    `structured=True`, `{ids, tumblers, distances, collections,
+    chunk_collections, chunk_text_hash, truncated, truncated_chars, text}`:
+    `truncated`/`truncated_chars` say whether the text rendering cut the
+    page and by how much, and `text` is that rendering.
 
-    Default (``structured=False``, the path every existing MCP caller
-    exercises today): ``content`` is ``_search_render``'s human-readable
-    string, byte-identical to what this tool returned before nexus-6jlki.
-    ``structuredContent`` is NEW — the same ``{ids, tumblers, distances,
-    collections, chunk_collections, chunk_text_hash}`` shape
-    ``structured=True`` has always returned (fetched via the page-turn
-    cache, so this costs no extra vector-store round trip), plus
-    ``truncated``/``truncated_chars`` reflecting whether the 250K text cap
-    (``_cap_text_result``) fired — visible in the structured shape even
-    though the cap marker itself only lives in the text.
-
-    Two channels, two consumers, ONE response (nexus-0bmhd, nexus-ypmb6):
-    ``content`` / ``structuredContent["text"]`` is the PRESENTATION
-    channel and carries the render-layer file-diversity cap (at most 2
-    chunks per file lead the page); the ``ids``/``tumblers``/``distances``
-    arrays are the MACHINE channel — identical to ``structured=True`` —
-    and are deliberately UNCAPPED, because a consumer parsing those arrays
-    is reading ranked evidence, not skimming a list. The two therefore
-    disagree on order within the same page by design; a client that wants
-    the capped set as ids must derive it from the text.
-
-    ``structured=True``: UNCHANGED. Returns the bare dict exactly as
-    before — no ``CallToolResult``, no new keys, no ``structuredContent``
-    wrapping. This is the plan-runner's in-process contract
-    (``$stepN.ids`` / ``$stepN.tumblers`` / ``$stepN.distances``
-    references) and it is explicitly out of scope for this change.
-
-    Older/non-structuredContent-aware MCP clients are unaffected either
-    way: an unrecognized response field is ignored per the protocol, and
-    ``outputSchema`` is no longer advertised for this tool (fine — it was
-    advertising the wrong, auto-wrapped shape before).
-
-    Args:
-        query: Search query string
-        corpus: Corpus prefixes or collection names, comma-separated. "all" for everything.
-        limit: Page size (default 10)
-        offset: Skip N results for pagination (default 0)
-        where: Metadata filter (KEY=VALUE, comma-separated). Ops: = >= <= > < !=
-        cluster_by: "semantic" for topic/Ward clustering (default), empty to disable
-        topic: Pre-filter to documents in this topic label (from nx taxonomy discover)
-        structured: Return ``{ids, tumblers, distances, collections}`` dict instead
-            of human-readable string (unchanged; see docstring above).  Used by
-            the plan runner so ``$stepN.ids`` references resolve to actual chunk IDs.
-        threshold: Override the per-collection distance threshold uniformly
-            (raw cosine distance, lower is stricter). Pass ``float('inf')``
-            to disable filtering entirely. ``None`` (default) uses per-corpus
-            config thresholds. RDR-087 Phase 1.1 workaround for silent
-            threshold-drop on dense-prose collections.
+    Constraints:
+    - Paged: `limit` <= 300 per call; advance with `offset`.
+    - `corpus="knowledge"` means every `knowledge__*` subject collection,
+      the same scope the store read tools give `collection="knowledge"`.
+    - `cluster_by` defaults to "" (no clustering).
+    - The text and `structuredContent` channels can disagree on ranking order
+      within a page: text applies a per-file diversity cap, structuredContent
+      does not.
     """
     result = _search_render(
         query, corpus=corpus, limit=limit, offset=offset, where=where,
@@ -2911,75 +3006,82 @@ def _dedup_by_id_keep_best(rows: list[dict], limit: int) -> list[dict]:
     return _dedup_by_id(rows)[:limit]
 
 
+# HISTORY (RDR-156 P4 Decision 5, catalog-008; nexus-3l6gz/nexus-hg745
+# multi-model merge; nexus-zekpl tracks a tumbler-aware hydration path).
+# The single-statement unification of the ``query`` tool's catalog-routing
+# dance: ``nexus.search_metadata_scoped_<dim>`` joins the chunk table to the
+# catalog manifest + documents and filters by catalog metadata in one query
+# (HNSW survives the join). The ``catalog_documents.corpus`` filter the SQL
+# function supports is NOT exposed here (``corpus`` is the collection-routing
+# arg); add it explicitly if needed. Multi-model merge: when *corpus*
+# resolves to collections spanning more than one embedding model (e.g.
+# ``code`` + ``docs`` -> voyage-code-3 + voyage-context-3), this tool issues
+# one combined-query call PER model group and merges via
+# :func:`_grouped_combined_query`, ALL-OR-NOTHING (a group's exception
+# aborts the whole merge, no partial results).
 @mcp.tool(
     title="Metadata-Scoped Combined Search",
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
 def search_metadata_scoped(
-    query: str,
-    corpus: str = "knowledge,code,docs",
-    limit: int = 10,
-    content_type: str = "",
-    author: str = "",
-    year: int = 0,
-    subtree: str = "",
-    where: str = "",
-    structured: bool = False,
+    query: Annotated[str, Field(description="Search query text.")],
+    corpus: Annotated[str, Field(
+        description="Corpus prefixes or full collection names, comma-separated; \"all\" for all.",
+    )] = "knowledge,code,docs",
+    limit: Annotated[int, Field(description="Max rows returned, after per-document dedup.")] = 10,
+    content_type: Annotated[str, Field(description="Catalog content_type filter; \"\" = no filter.")] = "",
+    author: Annotated[str, Field(
+        description="Catalog author substring filter, case-insensitive; \"\" = no filter.",
+    )] = "",
+    year: Annotated[int, Field(description="Catalog year filter; 0 = no filter.")] = 0,
+    subtree: Annotated[str, Field(
+        description=(
+            "Tumbler-prefix scope, e.g. \"1.2\" matches the descendants of 1.2 "
+            "(root-exclusive); \"\" = no filter."
+        ),
+    )] = "",
+    where: Annotated[str, Field(
+        description=(
+            "Chunk-metadata equality filter, KEY=VALUE comma-separated "
+            "(e.g. \"lang=java,kind=fn\"); \"\" = no filter. Equality only."
+        ),
+    )] = "",
+    structured: Annotated[bool, Field(
+        description="Return {ids, tumblers, distances, collections, contents, chashes} instead of text.",
+    )] = False,
 ) -> "str | dict":
-    """Metadata-scoped combined search (RDR-156 P4, Decision 5; catalog-008).
+    """Vector search over T3 chunks, filtered by catalog metadata in one query.
 
-    The single-statement unification of the ``query`` tool's catalog-routing
-    dance: ``nexus.search_metadata_scoped_<dim>`` joins the chunk table to the
-    catalog manifest + documents and filters by catalog metadata in one query
-    (HNSW survives the join). Document-level results (``id`` is the tumbler),
-    deduped to one row per tumbler at the best (nearest) distance. Each row also
-    carries the matched chunk's ``chash`` (RDR-086 ``chunk_text_hash`` source).
+    Use this instead of `query`'s catalog-routing params when ranked vector
+    search and metadata filtering must combine in one call. Use
+    `search_aspect_scoped` to filter by an extracted `document_aspects`
+    field instead of catalog metadata.
 
-    Service-mode only — the combined-query functions live in the pgvector
-    Postgres; in local/Chroma mode this returns an error.
+    Returns one row per matching document (deduped to its best-distance
+    chunk) as a human-readable list, or
+    `{ids, tumblers, distances, collections, contents, chashes}` when
+    `structured=True`.
 
-    PLAN-RUNNER CAVEAT: the structured ``ids``/``tumblers`` are document tumblers,
-    NOT chunk chashes. The runner's auto-hydration (``store_get_many``) is
-    chash-keyed, so feeding ``$stepN.ids`` straight into an operator returns empty
-    content — use a tumbler-aware hydration path (tracked: nexus-zekpl). The
-    ``catalog_documents.corpus`` filter the SQL function supports is NOT exposed
-    here (``corpus`` is the collection-routing arg); add it explicitly if needed.
-
-    MULTI-MODEL CORPUS (nexus-3l6gz): when *corpus* resolves to collections
-    spanning more than one embedding model (e.g. ``code`` + ``docs`` ->
-    voyage-code-3 + voyage-context-3), this tool issues one combined-query
-    call PER model group and merges the results — see
-    :func:`_grouped_combined_query`. The merge is ALL-OR-NOTHING: if any
-    group's call raises, the whole tool call fails (via the outer
-    try/except -> ``_mcp_tool_error``) and returns NO partial rows from
-    groups that already succeeded. The merge also ranks rows by raw cosine
-    distance across DIFFERENT embedding-model vector spaces when more than
-    one group contributes — those distances are not rigorously comparable
-    across models, so cross-model ordering can carry a systematic per-model
-    bias (same accepted caveat as ``search_topic_scoped``'s merge).
-
-    Args:
-        query: Search query string.
-        corpus: Corpus prefixes or collection names, comma-separated; "all" for all.
-        limit: Max rows.
-        content_type: Catalog content_type filter ("" = no filter).
-        author: Catalog author SUBSTRING filter, case-insensitive (ILIKE; "" = no filter).
-        year: Catalog year filter (0 = no filter).
-        subtree: Tumbler-prefix scope, e.g. "1.2" → the DESCENDANTS of 1.2 (root-exclusive,
-            matching the catalog's descendants()); alias rows excluded ("" = no filter).
-        where: Chunk-metadata equality filter, ``KEY=VALUE`` comma-separated, e.g.
-            "lang=java,kind=fn" ("" = no filter). Equality only (matches the service
-            ``where`` semantics); applied as JSONB containment on chunk metadata.
-        structured: Return ``{ids, tumblers, distances, collections, contents, chashes}``.
+    Constraints:
+    - Requires an HttpVectorClient-backed T3 (every local and cloud install
+      since RDR-155 P4b); returns an error string only against the legacy
+      in-memory test double.
+    - `ids`/`tumblers` in the structured result are document tumblers, not
+      chunk hashes — use the returned `contents`/`chashes`, not
+      `store_get_many`'s chash-keyed hydration, to read the matched text.
+    - `where` is equality-only; comparison operators are rejected.
+    - When `corpus` spans more than one embedding model, distances merge
+      across model-specific vector spaces and cross-model ordering can carry
+      a systematic bias.
     """
     try:
         from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
         t3 = _get_t3()
         if not is_service_backed(t3):
-            return ("Error: search_metadata_scoped requires service mode "
-                    "(pgvector); not available in local/Chroma mode")
+            return ("Error: search_metadata_scoped requires an HttpVectorClient-backed "
+                    "T3 (unavailable only against the in-memory test double)")
         target = _resolve_corpus_target(corpus, t3)
         if not target:
             return f"No collections match corpus {corpus!r}"
@@ -3055,47 +3157,56 @@ def search_metadata_scoped(
         return _mcp_tool_error("search_metadata_scoped", e)
 
 
+# HISTORY (RDR-156 P4 Decision 5; nexus-sa14p: topic membership is
+# chunk-level). ``nexus.search_topic_scoped_<dim>`` joins the chunk table to
+# ``topic_assignments`` on chunk chash and ranks by vector distance,
+# resolved across every collection in *corpus* (topics are per-collection —
+# a label belongs to one collection's taxonomy, so the multi-collection
+# loop is usually single-hit). NOTE: the merge is
+# per-collection-limit-then-merge-then-truncate, so for a label genuinely
+# present in multiple collections the global top-N can drop a collection's
+# (limit+1)th row that would have ranked; over-fetch per collection if that
+# case becomes real.
 @mcp.tool(
     title="Topic-Scoped Combined Search",
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
 def search_topic_scoped(
-    query: str,
-    topic: str,
-    corpus: str = "knowledge,code,docs",
-    limit: int = 10,
-    structured: bool = False,
+    query: Annotated[str, Field(description="Search query text.")],
+    topic: Annotated[str, Field(description="Topic label (see `nx taxonomy discover`).")],
+    corpus: Annotated[str, Field(
+        description="Corpus prefixes or full collection names, comma-separated; \"all\" for all.",
+    )] = "knowledge,code,docs",
+    limit: Annotated[int, Field(description="Max rows returned.")] = 10,
+    structured: Annotated[bool, Field(
+        description="Return {ids, tumblers, distances, collections} for the plan runner.",
+    )] = False,
 ) -> "str | dict":
-    """Topic-scoped combined search (RDR-156 P4, Decision 5).
+    """Vector search restricted to chunks already assigned to a topic label.
 
-    ``nexus.search_topic_scoped_<dim>`` joins the chunk table to
-    ``topic_assignments`` on chunk chash (topic membership is chunk-level,
-    nexus-sa14p) and ranks by vector distance. Chunk-level results (``id`` is
-    the chunk chash). Resolved across every collection in *corpus* (topics are
-    per-collection — a label belongs to one collection's taxonomy, so the
-    multi-collection loop is usually single-hit), merged by distance. NOTE: the
-    merge is per-collection-limit-then-merge-then-truncate, so for a label genuinely
-    present in multiple collections the global top-N can drop a collection's
-    (limit+1)th row that would have ranked; over-fetch per collection if that case
-    becomes real.
+    Use `search(topic=...)` instead when you want ranked semantic search
+    with a topic pre-filter and don't need chunk-level ids; use this tool
+    only when the caller needs the structured chunk-chash ids directly.
+    Returns a human-readable ranked list, or
+    `{ids, tumblers, distances, collections, contents}` (`tumblers` is always empty —
+    results are chunk-level, not document-level) when `structured=True`.
 
-    Service-mode only.
-
-    Args:
-        query: Search query string.
-        topic: Topic label (from ``nx taxonomy discover``).
-        corpus: Corpus prefixes or collection names, comma-separated; "all" for all.
-        limit: Max rows.
-        structured: Return ``{ids, tumblers, distances, collections}`` for the plan runner.
+    Constraints:
+    - Requires an HttpVectorClient-backed T3 (every local and cloud install
+      since RDR-155 P4b).
+    - `ids` are chunk hashes, not document tumblers.
+    - A topic label present in more than one collection can drop a
+      just-below-`limit` row from a collection whose true rank would have
+      included it — see the module comment above this tool for why.
     """
     try:
         from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
         t3 = _get_t3()
         if not is_service_backed(t3):
-            return ("Error: search_topic_scoped requires service mode "
-                    "(pgvector); not available in local/Chroma mode")
+            return ("Error: search_topic_scoped requires an HttpVectorClient-backed "
+                    "T3 (unavailable only against the in-memory test double)")
         target = _resolve_corpus_target(corpus, t3)
         if not target:
             return f"No collections match corpus {corpus!r}"
@@ -3134,71 +3245,68 @@ def search_topic_scoped(
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
+# HISTORY (RDR-156 P4 follow-on Decision 5, bead nexus-houg9). The
+# single-statement unification of the ``query`` tool's ``follow_links``
+# dance: ``nexus.search_graph_hop_<dim>`` joins the unified ``nexus.chunks``
+# table (post-RDR-191; the function keeps its ``_<dim>`` suffix, but the
+# table it joins is no longer a per-dim shard), replacing the app-side
+# graphBFS + per-collection search + re-join. Each row carries the MATCHED
+# chunk's ``chash`` so the `query()` repoint populates the RDR-086
+# ``chunk_text_hash`` from it, never a per-doc manifest guess. `where`
+# matches `search_metadata_scoped`'s equality-only semantics (nexus-7ndh3
+# critique; nexus-889ff pattern for the loud rejection of comparison ops).
 def search_graph_hop(
-    query: str,
-    seeds: list[str] | str,
-    corpus: str = "knowledge,code,docs",
-    limit: int = 10,
-    link_type: str = "",
-    depth: int = 1,
-    direction: str = "both",
-    where: str = "",
-    structured: bool = False,
+    query: Annotated[str, Field(description="Search query text.")],
+    seeds: Annotated[list[str] | str, Field(
+        description="Seed document tumbler(s) to traverse from (a list, or a single string).",
+    )],
+    corpus: Annotated[str, Field(
+        description="Corpus prefixes or full collection names, comma-separated; \"all\" for all.",
+    )] = "knowledge,code,docs",
+    limit: Annotated[int, Field(description="Max rows returned, after per-document dedup.")] = 10,
+    link_type: Annotated[str, Field(
+        description="Catalog link_type filter; \"\" (default) follows every edge type.",
+    )] = "",
+    depth: Annotated[int, Field(description="BFS depth, clamped to [1,3].")] = 1,
+    direction: Annotated[str, Field(description="Traversal direction: \"out\", \"in\", or \"both\".")] = "both",
+    where: Annotated[str, Field(
+        description=(
+            "Chunk-metadata equality filter, KEY=VALUE comma-separated; "
+            "\"\" = no filter. Equality only."
+        ),
+    )] = "",
+    structured: Annotated[bool, Field(
+        description="Return {ids, tumblers, distances, collections, contents, chashes} instead of text.",
+    )] = False,
 ) -> "str | dict":
-    """Graph-hop combined search (RDR-156 P4 follow-on, Decision 5, bead nexus-houg9).
+    """Vector search restricted to documents reachable from seed tumblers by a graph hop.
 
-    The single-statement unification of the ``query`` tool's ``follow_links`` dance:
-    ``nexus.search_graph_hop_<dim>`` runs a ``WITH RECURSIVE`` BFS over
-    ``catalog_links`` from *seeds* to *depth* hops, collects the reachable document
-    set, joins the unified ``nexus.chunks`` table (post-RDR-191; the function keeps
-    its ``_<dim>`` suffix, but the table it joins is no longer a per-dim shard) and
-    vector-ranks — replacing the app-side graphBFS +
-    per-collection search + re-join. Document-level results (``id`` is the tumbler),
-    deduped to one row per tumbler at the best (nearest) distance. Each row also carries
-    the MATCHED chunk's ``chash`` (so the query() repoint populates the RDR-086
-    ``chunk_text_hash`` from it, never a per-doc manifest guess).
+    Use this instead of `query`'s `follow_links` parameter when the traversal
+    result should also be vector-ranked in one call; use `traverse` when you
+    only need the reachable id set with no ranking. Runs a `WITH RECURSIVE`
+    BFS over catalog links from `seeds` to `depth` hops, then vector-ranks
+    the reachable documents.
 
-    Seeds are document tumblers; ``depth`` is clamped to [1,3] service-side; an empty
-    ``link_type`` follows all edge types; ``direction`` is ``"out"``/``"in"``/``"both"``
-    (default ``"both"``, matching ``Catalog.graph`` / the ``query`` tool's follow_links).
+    Returns one row per matching document (deduped to its best-distance
+    chunk) as a human-readable list, or
+    `{ids, tumblers, distances, collections, contents, chashes}` when
+    `structured=True`.
 
-    Service-mode only — the combined-query functions live in the pgvector Postgres; in
-    local/Chroma mode this returns an error.
-
-    MULTI-MODEL CORPUS (nexus-3l6gz): when *corpus* resolves to collections
-    spanning more than one embedding model (e.g. ``code`` + ``docs`` ->
-    voyage-code-3 + voyage-context-3), this tool issues one combined-query
-    call PER model group and merges the results — see
-    :func:`_grouped_combined_query`. The merge is ALL-OR-NOTHING: if any
-    group's call raises, the whole tool call fails (via the outer
-    try/except -> ``_mcp_tool_error``) and returns NO partial rows from
-    groups that already succeeded. The merge also ranks rows by raw cosine
-    distance across DIFFERENT embedding-model vector spaces when more than
-    one group contributes — those distances are not rigorously comparable
-    across models, so cross-model ordering can carry a systematic per-model
-    bias (same accepted caveat as ``search_topic_scoped``'s merge).
-
-    Args:
-        query: Search query string.
-        seeds: Seed document tumbler(s) to traverse from (list, or a single string).
-        corpus: Corpus prefixes or collection names, comma-separated; "all" for all.
-        limit: Max rows.
-        link_type: Catalog link_type filter ("" = follow all edge types).
-        depth: BFS depth (clamped to [1,3]).
-        direction: "out" | "in" | "both".
-        where: Chunk-metadata equality filter, ``KEY=VALUE`` comma-separated
-            ("" = no filter). Equality only — applied as JSONB containment on
-            chunk metadata in the post-BFS rank, matching
-            ``search_metadata_scoped``'s ``where`` semantics (nexus-7ndh3).
-        structured: Return ``{ids, tumblers, distances, collections, contents, chashes}``.
+    Constraints:
+    - Requires an HttpVectorClient-backed T3 (every local and cloud install
+      since RDR-155 P4b).
+    - `where` is equality-only; comparison operators are rejected.
+    - When `corpus` spans more than one embedding model, distances merge
+      across model-specific vector spaces and cross-model ordering can carry
+      a systematic bias.
     """
     try:
         from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
         t3 = _get_t3()
         if not is_service_backed(t3):
-            return ("Error: search_graph_hop requires service mode "
-                    "(pgvector); not available in local/Chroma mode")
+            return ("Error: search_graph_hop requires an HttpVectorClient-backed "
+                    "T3 (unavailable only against the in-memory test double)")
         seed_list = [seeds] if isinstance(seeds, str) else list(seeds)
         seed_list = [s for s in seed_list if s]
         if not seed_list:
@@ -3268,105 +3376,100 @@ def search_graph_hop(
         return _mcp_tool_error("search_graph_hop", e)
 
 
+# HISTORY (RDR-156 Decision 5, bead nexus-ubnwk). Unifies the ``search`` +
+# ``operator_filter(source="aspects")`` two-step app-side path for the case
+# where the aspect predicate is selective: that two-step path filters AFTER
+# the vector top-N truncation and can silently miss a distant match the
+# aspect predicate would otherwise have kept. This tool applies
+# field/pattern/min_confidence/where INSIDE the same statement as the
+# vector rank, so selectivity gates the scan instead of the truncation.
+#
+# DOC_ID PRECONDITION: a document with no ``document_aspects`` row, or whose
+# row's ``doc_id`` is still NULL, never joins and is excluded — by design.
+# This does NOT retire ``operator_filter(source="aspects")`` (keyed on
+# ``source_uri``, not ``doc_id`` — it sees rows this tool cannot, and vice
+# versa); both remain available.
+#
+# REAL COVERAGE OF THE doc_id BACKFILL (structural, by corpus, not edge-case
+# drift): the backfill attributes a row only when
+# ``document_aspects.source_uri`` is byte-for-byte equal to the catalog
+# document's own ``source_uri``. Holds for file-keyed corpora
+# (``code__``/``docs__``/``rdr__``). Does NOT hold for ``knowledge__``
+# collections (the dominant aspects corpus): the catalog's ``source_uri``
+# there is derived from the document TITLE
+# (``src/nexus/catalog/store_hook.py``), while the aspect extractor's
+# ``source_uri`` is built from ``source_path``
+# (``src/nexus/aspect_readers.py``, often itself a content-hash string) —
+# two different identity fields for the same document family. The large
+# majority of ``knowledge__`` ``document_aspects`` rows therefore stay
+# ``doc_id`` NULL and only become visible to this tool as they are
+# RE-EXTRACTED under nexus-x1de2's go-forward stamping (does not
+# retroactively fix legacy rows). Gap-fill for the ``knowledge__`` family
+# is tracked as nexus-bocft.
 @mcp.tool(
     title="Aspect-Scoped Combined Search",
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
 def search_aspect_scoped(
-    query: str,
-    corpus: str = "knowledge,code,docs",
-    limit: int = 10,
-    field: str = "",
-    pattern: str = "",
-    min_confidence: float = 0.0,
-    where: str = "",
-    structured: bool = False,
+    query: Annotated[str, Field(description="Search query text.")],
+    corpus: Annotated[str, Field(
+        description="Corpus prefixes or full collection names, comma-separated; \"all\" for all.",
+    )] = "knowledge,code,docs",
+    limit: Annotated[int, Field(description="Max rows returned, after per-document dedup.")] = 10,
+    field: Annotated[str, Field(
+        description=(
+            "One of: problem_formulation, proposed_method, experimental_datasets, "
+            "experimental_baselines, experimental_results. \"\" = no field-text "
+            "filter (confidence/where only)."
+        ),
+    )] = "",
+    pattern: Annotated[str, Field(
+        description="Substring to match (case-insensitive) within `field`; ignored when `field` is \"\".",
+    )] = "",
+    min_confidence: Annotated[float, Field(description="Aspects confidence floor, inclusive; 0.0 = no floor.")] = 0.0,
+    where: Annotated[str, Field(
+        description=(
+            "Chunk-metadata equality filter, KEY=VALUE comma-separated; \"\" = no "
+            "filter. Orthogonal to the aspects predicate, not a substitute for it."
+        ),
+    )] = "",
+    structured: Annotated[bool, Field(
+        description="Return {ids, tumblers, distances, collections, contents, chashes} instead of text.",
+    )] = False,
 ) -> "str | dict":
-    """Aspect-scoped combined search (RDR-156 Decision 5, bead nexus-ubnwk).
+    """Vector search over T3 chunks, filtered by an extracted `document_aspects` field.
 
-    The single-statement unification of the ``search`` + ``operator_filter(source=
-    "aspects")`` two-step app-side path, for the case where the aspect predicate is
-    selective: that path filters AFTER the vector top-N truncation and can silently
-    miss a distant match the aspect predicate would otherwise have kept (RECALL loss
-    exactly when the predicate is selective). ``nexus.search_aspect_scoped_<dim>``
-    joins the chunk table to the catalog manifest + documents + ``document_aspects``
-    (on ``doc_id = tumbler``) and applies *field*/*pattern*/*min_confidence*/*where*
-    inside the SAME statement as the vector rank, so selectivity gates the scan.
-    Document-level results (``id`` is the tumbler), deduped to one row per tumbler at
-    the best (nearest) distance. Each row also carries the matched chunk's ``chash``
-    (RDR-086 ``chunk_text_hash`` source).
+    Use this instead of `search` + `operator_filter(source="aspects")` when
+    the aspect predicate is selective — that two-step path filters after
+    vector truncation and can miss a distant match this tool would keep.
+    Use `search_metadata_scoped` to filter by catalog metadata instead of an
+    extracted aspect.
 
-    DOC_ID PRECONDITION: a document with no ``document_aspects`` row, or whose row's
-    ``doc_id`` is still NULL, never joins and is excluded — by design, not a bug.
-    This tool does NOT retire ``operator_filter(source="aspects")`` (keyed on
-    ``source_uri``, not ``doc_id`` — it can see rows this tool cannot, and vice versa
-    for the recall case above); both remain available, each covering a case the
-    other does not.
+    Returns one row per matching document (deduped to its best-distance
+    chunk) as a human-readable list, or
+    `{ids, tumblers, distances, collections, contents, chashes}` when
+    `structured=True`.
 
-    REAL COVERAGE OF THE doc_id BACKFILL (not edge-case drift — structural, by
-    corpus): ``aspects-004-doc-id-backfill.xml`` attributes a row only when
-    ``document_aspects.source_uri`` is byte-for-byte equal to the catalog document's
-    own ``source_uri``. Holds for file-keyed corpora (``code__``/``docs__``/``rdr__``,
-    both sides key off the same ``file://`` path). Does NOT hold for ``knowledge__``
-    collections (the dominant aspects corpus): the catalog's ``source_uri`` there is
-    derived from the document TITLE (``src/nexus/catalog/store_hook.py:286``), while
-    the aspect extractor's ``source_uri`` is built from ``source_path``
-    (``src/nexus/aspect_readers.py:172``, often itself a content-hash string) — two
-    different identity fields for the same document family, not one field spelled
-    two ways. The large majority of ``knowledge__`` ``document_aspects`` rows
-    therefore stay ``doc_id`` NULL after the backfill and only become visible to
-    this tool as they are RE-EXTRACTED under ``nexus-x1de2``'s go-forward stamping
-    (which keys off the extraction queue's own ``doc_id``, not ``source_uri``, so it
-    does not retroactively fix legacy rows). Gap-fill for the ``knowledge__`` family
-    is tracked as ``nexus-bocft``.
-
-    FIELD ALLOWLIST (locked wire contract, identical to
-    ``HttpVectorClient.ASPECT_SCOPED_FIELD_ALLOWLIST``, the Java 400-guard, and the
-    SQL function's CASE): ``problem_formulation``, ``proposed_method``,
-    ``experimental_datasets``, ``experimental_baselines``, ``experimental_results``.
-    NOT ``extras`` or ``salient_sentences`` — both are ``jsonb`` (aspects-003-type-
-    hygiene.xml), not plain text, and the pre-existing two-step path
-    (``AspectRepository.ALLOWED_ASPECT_COLUMNS``) already excludes them from
-    substring filtering for the same reason. An unrecognized *field* is rejected
-    here BEFORE the network call (the engine also 400s, a second, independent line
-    of defense).
-
-    Service-mode only — the combined-query functions live in the pgvector Postgres;
-    in local/Chroma mode this returns an error.
-
-    PLAN-RUNNER CAVEAT (nexus-zekpl, same as ``search_metadata_scoped`` /
-    ``search_graph_hop``): the structured ``ids``/``tumblers`` are document
-    tumblers, NOT chunk chashes — the runner's chash-keyed auto-hydration
-    (``store_get_many``) needs a tumbler-aware hydration path to consume them.
-
-    MULTI-MODEL CORPUS (nexus-3l6gz): when *corpus* resolves to collections
-    spanning more than one embedding model, this tool issues one combined-query
-    call PER model group and merges the results — see :func:`_grouped_combined_query`.
-    The merge is ALL-OR-NOTHING (same accepted caveat as every sibling combined-query
-    tool's merge, including the cross-model raw-cosine-distance caveat).
-
-    Args:
-        query: Search query string.
-        corpus: Corpus prefixes or collection names, comma-separated; "all" for all.
-        limit: Max rows.
-        field: One of the field allowlist above ("" = no field-text filter, i.e.
-            confidence/where only).
-        pattern: Substring to match (case-insensitive) within *field*; ignored when
-            *field* is "".
-        min_confidence: Aspects confidence floor, inclusive (0.0 = no floor).
-        where: Chunk-metadata equality filter, ``KEY=VALUE`` comma-separated
-            ("" = no filter). Equality only; applied as JSONB containment on chunk
-            metadata — orthogonal to the aspects predicate, not a substitute for it.
-        structured: Return ``{ids, tumblers, distances, collections, contents, chashes}``.
+    Constraints:
+    - Requires an HttpVectorClient-backed T3 (every local and cloud install
+      since RDR-155 P4b).
+    - Excludes any document with no `document_aspects` row or a NULL
+      `doc_id` there — by design, not a bug; coverage is uneven across
+      corpora (weakest for `knowledge__` collections; see the module
+      comment above this tool).
+    - `field` must be one of the five allowlisted columns; an unrecognized
+      value is rejected before the network call.
+    - `ids`/`tumblers` in the structured result are document tumblers, not
+      chunk hashes.
     """
     try:
         from nexus.db.http_vector_client import HttpVectorClient, is_service_backed  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
         t3 = _get_t3()
         if not is_service_backed(t3):
-            return ("Error: search_aspect_scoped requires service mode "
-                    "(pgvector); not available in local/Chroma mode")
+            return ("Error: search_aspect_scoped requires an HttpVectorClient-backed "
+                    "T3 (unavailable only against the in-memory test double)")
         if field and field not in HttpVectorClient.ASPECT_SCOPED_FIELD_ALLOWLIST:
             return (f"Error: search_aspect_scoped field {field!r} is not a known "
                     f"aspect field; allowed: "
@@ -3469,91 +3572,79 @@ def search_aspect_scoped(
 _MAX_GRAPH_HOP_SEEDS = 6000
 
 
+# HISTORY. Multi-model corpus (nexus-3l6gz/nexus-hg745): when a catalog
+# param is set AND *corpus* spans more than one embedding model, the
+# catalog-param branch issues one combined-query call per model group and
+# merges (see :func:`_grouped_combined_query`) — same ALL-OR-NOTHING and
+# cross-model distance caveats as `search_metadata_scoped`/`search_graph_hop`.
+# Catalog-param path (nexus-rzqto; RDR-156 P4.2c/nexus-2bqpn deleted the old
+# app-side local/Chroma fallback dance) routes through the same combined-query
+# SQL functions as those two tools and carries only
+# (id, content, distance, collection, chash) — no frecency/bib_citation_count
+# to boost with, unlike the plain corpus path's `hybrid_score` blend
+# (vector distance + frecency_score, honouring `.nexus.yml` [tuning] weights
+# resolved from THIS MCP SERVER PROCESS'S OWN LAUNCH DIRECTORY + the RDR-055
+# bibliographic quality boost, via `search_engine.apply_ranking_boosts`).
 @mcp.tool(
     title="Catalog-Aware Document Query",
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
 def query(
-    question: str,
-    corpus: str = "knowledge",
-    where: str = "",
-    limit: int = 10,
-    author: str = "",
-    content_type: str = "",
-    follow_links: str = "",
-    depth: int = 1,
-    subtree: str = "",
-    structured: bool = False,
+    question: Annotated[str, Field(description="Natural-language research question.")],
+    corpus: Annotated[str, Field(
+        description=(
+            "Corpus prefix or full collection name. \"knowledge\" (default) means "
+            "every knowledge__* collection, not code/docs; \"all\" for every corpus. "
+            "Overridden by the resolved catalog collections when a catalog param "
+            "(author, content_type, follow_links, subtree) is set."
+        ),
+    )] = "knowledge",
+    where: Annotated[str, Field(
+        description=(
+            "Metadata filter, KEY=VALUE comma-separated (e.g. \"tags=arch\"). "
+            "Comparison operators and $and/$or are supported only when no catalog "
+            "param is set; combined with one, `where` is equality-only."
+        ),
+    )] = "",
+    limit: Annotated[int, Field(description="Maximum documents to return.")] = 10,
+    author: Annotated[str, Field(description="Filter to documents by this author (catalog metadata).")] = "",
+    content_type: Annotated[str, Field(
+        description="Filter to documents of this type (code, paper, rdr, knowledge; catalog metadata).",
+    )] = "",
+    follow_links: Annotated[str, Field(
+        description=(
+            "Follow catalog links of this type from matched documents (e.g. "
+            "\"cites\", \"implements\"). Linked collections merge with seed "
+            "collections, ranked together by distance."
+        ),
+    )] = "",
+    depth: Annotated[int, Field(description="BFS depth for `follow_links` traversal.")] = 1,
+    subtree: Annotated[str, Field(description="Tumbler prefix; search only documents in this subtree (e.g. \"1.1\").")] = "",
+    structured: Annotated[bool, Field(description="Return the structured dict instead of the human-readable string.")] = False,
 ) -> "str | dict":
-    """Document-level semantic search for analytical questions.
+    """Document-level semantic search: which documents match, not which passages.
 
-    Results are capped at ``limit``. When more documents match, a footer line shows
-    the total count. Increase ``limit`` to see more.
+    Groups chunk hits by source document and returns the best-matching
+    snippet per document, with metadata (title, year, citations, page
+    count). Use `search` instead when you need matching text fragments, not
+    document identity. Use `author`/`content_type`/`follow_links`/`subtree`
+    to route through the catalog for a metadata- or graph-scoped query.
 
-    Unlike ``search`` which returns individual chunks, ``query`` groups results
-    by source document and returns the best-matching snippet per document along
-    with full metadata (title, year, citations, page count, extraction method).
+    Returns a human-readable ranked list capped at `limit` (a footer line
+    names the total match count when more exist), or a structured dict when
+    `structured=True`.
 
-    Use this for research questions where you need to know WHICH documents match,
-    not just which text fragments. The calling agent handles analysis/synthesis.
-
-    Catalog-aware routing (optional — all require an initialized catalog AND
-    service mode (pgvector); RDR-156 P4.2c removed the local/Chroma-mode
-    fallback these params used to have — a non-service T3 with any catalog
-    param set returns a loud error instead):
-        author: Filter to documents by this author (catalog metadata search)
-        content_type: Filter to documents of this type (code, paper, rdr, knowledge)
-        follow_links: Follow links of this type from catalog results (e.g. "cites", "implements").
-            Linked collections are merged (interleaved) with seed collections — results
-            are ranked by semantic distance across all collections, not separated by source.
-        depth: BFS depth for follow_links traversal (default 1)
-        subtree: Tumbler prefix — search only documents in this subtree (e.g. "1.1")
-
-    MULTI-MODEL CORPUS (nexus-3l6gz / nexus-hg745): when a catalog param is
-    set AND *corpus* resolves to collections spanning more than one
-    embedding model (e.g. ``corpus="all"`` or ``"code,docs"``), this tool's
-    catalog-param branch issues one combined-query call PER model group and
-    merges — see :func:`_grouped_combined_query`. Same ALL-OR-NOTHING
-    semantics and cross-model raw-cosine-distance caveat as
-    ``search_metadata_scoped`` / ``search_graph_hop``.
-
-    Ranking: on the plain corpus-based path (no catalog
-    params), both the winning chunk per document and the document order are
-    chosen by ``hybrid_score`` — vector similarity blended with
-    ``frecency_score`` (honouring ``.nexus.yml`` ``[tuning]`` weights
-    resolved from THIS MCP SERVER PROCESS'S OWN LAUNCH DIRECTORY, not the
-    repo the caller may be asking about) and the RDR-055 bibliographic
-    quality boost, via ``search_engine.apply_ranking_boosts`` (the same
-    function ``nx search`` calls) — not by raw distance. The per-document
-    ``distance`` field reported in output is still the raw vector distance
-    of that winning chunk, unaffected by the boost. The CATALOG-PARAM path
-    (author, content_type, follow_links, subtree) does NOT apply this
-    boost: its rows come from the engine's SQL combined-query functions and
-    carry only ``(id, content, distance, collection, chash)`` — no
-    ``frecency_score`` or ``bib_citation_count`` to boost with.
-
-    Args:
-        question: Natural-language research question
-        corpus: Corpus prefix or full collection name (default: knowledge).
-                Use "all" for all corpora.
-                Note: when catalog params (author, content_type, subtree) are provided,
-                corpus is overridden by the resolved catalog collections.
-        where: Metadata filter — KEY=VALUE, comma-separated.
-               Example: "tags=arch" (equality only).
-               Comparison operators (e.g. "bib_year>=2020") and operator-shaped
-               filters ($and/$or) are supported ONLY when no catalog param
-               (author, content_type, follow_links, subtree) is set — combined
-               with a catalog param, `where` is equality-only (the combined-query
-               path applies it as JSONB containment) and an operator shape
-               returns a loud error naming the workarounds (equality `where`,
-               the `search` tool, or dropping the catalog params).
-        limit: Maximum documents to return (default 10)
-        author: Filter by author (catalog metadata)
-        content_type: Filter by content type (catalog metadata)
-        follow_links: Follow link type from matched documents (catalog graph)
-        depth: BFS depth for follow_links (default 1)
-        subtree: Tumbler prefix to scope search to a subtree
+    Constraints:
+    - `corpus` defaults to "knowledge" only, not code/docs.
+    - Every catalog param requires an initialized catalog plus an
+      HttpVectorClient-backed T3 (every local and cloud install since
+      RDR-155 P4b); it errors rather than falling back without one.
+    - With a catalog param set, `where` is equality-only; without one,
+      comparison operators and $and/$or are supported.
+    - Ranking differs by path: the plain corpus path boosts by frecency and
+      bibliographic quality; the catalog-param path ranks by raw vector
+      distance only.
     """
     try:
         from nexus.config import get_tuning_config, load_config  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -3628,8 +3719,8 @@ def query(
             if not is_service_backed(t3):
                 return (
                     "Error: query catalog params (author, content_type, "
-                    "follow_links, subtree) require service mode (pgvector); "
-                    "not available in local/Chroma mode"
+                    "follow_links, subtree) require an HttpVectorClient-backed "
+                    "T3 (unavailable only against the in-memory test double)"
                 )
             _where_dict = _parse_where_str(where)
             _operator_where = bool(_where_dict) and (
@@ -4185,77 +4276,90 @@ def _annotation_line_for_entry(entry) -> str:
     )
 
 
+# HISTORY. Empty-title semantics (nexus-sdp0u): re-putting the same
+# (collection, title) pair reconciles onto the existing document (manifest
+# replaced, not duplicated) instead of minting a sibling; "replaced, not
+# duplicated" is a CATALOG-level guarantee only — the OLD T3 chunk itself
+# is not deleted and may remain independently visible via raw vector
+# search until a future sweep (nexus-39upx class) reaps it. Placeholder
+# refusal is nexus-0fw11: there is no default subject, because "default"
+# is what minted `knowledge__knowledge`. `agent` attribution defaulting to
+# the "mcp" marker (never blank, never the indexer's own "nexus-indexer"
+# default) is nexus-4ftd7, load-bearing for
+# `search_engine._flag_contradictions`'s agent-diversity precondition
+# (RDR-057 Phase 3a), which can only ever fire between two DIFFERENT
+# non-empty `source_agent` values.
 @mcp.tool(
     title="Store Knowledge Document",
     annotations={"readOnlyHint": False, "destructiveHint": False},
     structured_output=False,
 )
 def store_put(
-    content: str,
-    collection: str,
-    title: str = "",
-    tags: str = "",
-    category: str = "",
-    ttl: str = "permanent",
-    agent: str = "",
-    session: str = "",
+    content: Annotated[str, Field(
+        description=(
+            "Text to store, capped at 16,384 UTF-8 bytes (~3,000-4,000 words). "
+            "Split an oversized note into titled parts "
+            "(e.g. \"my-note (1/2)\", \"(2/2)\") with the same tags instead of "
+            "one oversized call."
+        ),
+    )],
+    collection: Annotated[str, Field(
+        description=(
+            "REQUIRED. The bare subject area the note belongs to (e.g. "
+            "\"distributed-systems\"), never a four-segment name or model "
+            "token. Reuse an existing subject before minting one (see "
+            "`nx collection list`); placeholders default/knowledge/notes/"
+            "tmp/test are refused. Rules: docs/collections.md."
+        ),
+    )],
+    title: Annotated[str, Field(
+        description=(
+            "Document title (recommended). Non-empty makes catalog identity "
+            "stable: re-putting the same (collection, title) replaces the "
+            "document's manifest rather than duplicating it. Empty always "
+            "registers a new, untitled document."
+        ),
+    )] = "",
+    tags: Annotated[str, Field(description="Comma-separated tags.")] = "",
+    category: Annotated[str, Field(
+        description=(
+            "Document category for filtered queries (e.g. \"rdr_postmortem\"); "
+            "stamped on chunk metadata for where={\"category\": \"<value>\"} filtering."
+        ),
+    )] = "",
+    ttl: Annotated[str, Field(description="Time-to-live: \"Nd\" (days), \"Nw\" (weeks), or \"permanent\".")] = "permanent",
+    agent: Annotated[str, Field(
+        description=(
+            "Optional subagent/role attribution (e.g. \"developer\"). Falls back "
+            "to the NX_AGENT env var, then the \"mcp\" marker."
+        ),
+    )] = "",
+    session: Annotated[str, Field(
+        description="Optional explicit session_id override. Falls back to the NX_SESSION_ID env var.",
+    )] = "",
 ) -> str:
-    """Store content in the T3 permanent knowledge store.
+    """Store content as a permanent T3 knowledge document.
 
-    Args:
-        content: Text content to store. This tool is single-chunk by
-            construction (no multi-chunk write path exists), so content is
-            capped at ``QUOTAS.MAX_DOCUMENT_BYTES`` (16,384 UTF-8 bytes,
-            roughly 3,000-4,000 words) — an over-quota call raises
-            ``PutOversizedError`` before any write. If a note runs over
-            that, split it into titled parts and call store_put once per
-            part with the same tags (e.g. title "my-note (1/2)",
-            "my-note (2/2)") rather than one oversized call.
-        collection: REQUIRED. The bare SUBJECT the note belongs to
-            (``distributed-systems``), never a four-segment name or a model
-            token; the catalog renders the rest. A knowledge collection is
-            a durable subject area a reader would browse, not a document,
-            session, task, or source app, and existing subjects are reused
-            before a new one is created (``nx collection list``). The
-            placeholders default/knowledge/notes/tmp/test are refused
-            (nexus-0fw11): there is no default, because the default is what
-            minted ``knowledge__knowledge``. Rules: docs/collections.md.
-        title: Document title (recommended for deduplication). A non-empty
-            title makes catalog identity stable: re-putting the same
-            (collection, title) pair reconciles onto the existing document
-            (its manifest is replaced with the new content, not duplicated)
-            instead of minting a sibling (nexus-sdp0u). An empty title
-            synthesizes no catalog identity — every empty-title put always
-            registers a new document, since a title-less identity would
-            collapse all untitled documents together. Note: "replaced, not
-            duplicated" is a CATALOG-level guarantee — the OLD T3 chunk
-            itself is not deleted and may remain independently visible via
-            raw vector search (``nx search`` / ``search()``) until a future
-            sweep (nexus-39upx class) reaps it; catalog-aware query paths
-            (``query()``, catalog-scoped search) follow the manifest and see
-            only the new content.
-        tags: Comma-separated tags
-        category: Document category for filtered queries (e.g.
-            ``rdr_postmortem``). Stamped on the chunk metadata so callers
-            can filter via ``where={"category": "<value>"}`` without
-            isolating the documents in their own collection.
-        ttl: Time-to-live: Nd (days), Nw (weeks), or "permanent"
-        agent: Optional subagent / role attribution (e.g. "developer",
-            "architect-planner"), mirroring ``memory_put``'s parameter.
-            When empty, falls back to ``NX_AGENT`` env; when that is ALSO
-            empty, lands the distinct ``"mcp"`` marker rather than an
-            empty string or the T3 write path's own "nexus-indexer"
-            indexer default (nexus-4ftd7) — an unmarked MCP write must
-            never collapse onto either value, since
-            ``search_engine._flag_contradictions``'s ``agent_a !=
-            agent_b`` precondition (RDR-057 Phase 3a) can only ever fire
-            between two DIFFERENT non-empty ``source_agent`` values, and
-            a shared constant (or both blank) makes it permanently dead
-            on the MCP-written population.
-        session: Optional explicit session_id override, mirroring
-            ``memory_put``'s parameter. When empty, falls back to
-            ``NX_SESSION_ID`` env (subagents carry this via
-            ``claude_dispatch``, RDR-094).
+    Use `memory_put` instead for a project-scoped T2 note with a shorter
+    lifetime; use `scratch` for an ephemeral, session-only T1 note.
+
+    Returns "Stored: <id> -> <collection>" (for a split note, the first
+    chunk's id, plus "(N chunks, split to the embedding model's token
+    window)"), or an explicit error naming what did not land (e.g. content
+    stored but not cataloged).
+
+    Constraints:
+    - `content` is capped at 16,384 UTF-8 bytes (~3,000-4,000 words).
+    - On a collection whose embedding model has a small token window
+      (bge-base-en-v1.5 at 512 tokens, MiniLM at 256; both local mode), a
+      note longer than the window is stored as several chunks under one
+      catalog document. Voyage collections never split.
+    - `collection` must be a bare subject area, never a placeholder or a
+      pre-rendered four-segment/model-token name.
+    - A non-empty `title` reconciles onto the existing (collection, title)
+      document instead of duplicating it; an empty title always creates a
+      new document.
+    - `ttl` accepts "Nd", "Nw", or "permanent" (default).
     """
     try:
         if not content:
@@ -4307,12 +4411,18 @@ def store_put(
         # fire_batch below needs real metadatas regardless of catalog_doc_id.
         from nexus.catalog.store_hook import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             catalog_store_hook_tracked,
+            note_manifest_metadata,
+            note_pieces,
+            put_note_pieces,
             raise_if_oversized,
             rollback_minted_catalog_entry,
-            single_chunk_manifest_metadata,
             store_put_manifest_direct,
         )
-        chunk_chroma_id, manifest_metadatas = single_chunk_manifest_metadata(content)
+        # nexus-spujb: a note longer than the collection model's token
+        # window is written as several chunks under one catalog document;
+        # one piece is the single-chunk store it always was.
+        pieces = note_pieces(content, col_name)
+        chunk_chroma_id, manifest_metadatas = note_manifest_metadata(pieces)
         # nexus-xzyr3 fold-in: refuse an over-quota document BEFORE minting
         # a catalog row for it — put() already refuses it too, but only
         # after paying for a wasted mint + rollback round trip.
@@ -4338,7 +4448,10 @@ def store_put(
         # single-chunk store — see that function's docstring). Fence begin
         # BEFORE the vector put, mirroring every other producer's T0
         # ordering (memo §3.5); this path was previously entirely unfenced.
-        content_hash = manifest_metadatas[0].get("chunk_text_hash", "") if manifest_metadatas else ""
+        from nexus.catalog.store_hook import note_content_hash  # noqa: PLC0415 — deferred for startup cost, as above
+
+        # nexus-spujb: the whole note's hash, whether it was split or not.
+        content_hash = note_content_hash(content, manifest_metadatas)
         if catalog_doc_id:
             from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
             _fence_begin(catalog_doc_id, content_hash, col_name)
@@ -4351,9 +4464,8 @@ def store_put(
         # the put deduped onto), then surface the original error. The
         # compensation never raises, so it cannot mask the put failure.
         try:
-            doc_id = t3.put(
-                collection=col_name,
-                content=content,
+            doc_ids = put_note_pieces(
+                t3, col_name, pieces,
                 title=title,
                 tags=tags,
                 category=category,
@@ -4362,6 +4474,7 @@ def store_put(
                 ttl_days=ttl_days,
                 catalog_doc_id=catalog_doc_id,
             )
+            doc_id = doc_ids[0]
         except Exception as put_exc:
             # nexus-vw594 F2 fix-round IMPORTANT (code-review-expert, T1
             # scratch d9173ec9): a dedup-hit store_put (catalog_row_minted
@@ -4452,15 +4565,17 @@ def store_put(
         # with a 1-element list so batch-shape consumers (taxonomy,
         # chash, manifest) see MCP ``store_put`` as a single-document
         # batch.
-        _hooks.fire_single(doc_id, col_name, content)
+        for piece_id, piece in zip(doc_ids, pieces, strict=True):
+            _hooks.fire_single(piece_id, col_name, piece)
         # nexus-vw594 F2: manifest_complete rides this existing call
         # through manifest_write_batch_hook's write_manifest_many
         # completion stamp (the SAME manifest rows store_put_manifest_
         # direct above already wrote — an idempotent re-UPSERT), no extra
-        # round trip. store_put is single-chunk by construction so the
-        # file-atomicity claim always holds.
+        # round trip. The batch carries every piece of the note
+        # (nexus-spujb), so the file-atomicity claim holds for a split
+        # note as it does for a single chunk.
         _hooks.fire_batch(
-            [doc_id], col_name, [content], None, manifest_metadatas,
+            doc_ids, col_name, pieces, None, manifest_metadatas,
             catalog_doc_id=catalog_doc_id,
             manifest_complete={catalog_doc_id: content_hash} if catalog_doc_id else None,
         )
@@ -4544,7 +4659,11 @@ def store_put(
                 f"may show chunk_count=0; retry store_put with the same "
                 f"content (idempotent dedup makes retry safe)."
             )
-        return f"Stored: {doc_id} -> {col_name}"
+        split_note = (
+            f" ({len(pieces)} chunks, split to the embedding model's token window)"
+            if len(pieces) > 1 else ""
+        )
+        return f"Stored: {doc_id} -> {col_name}{split_note}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("store_put", e)
 
@@ -4555,41 +4674,89 @@ def store_put(
     structured_output=False,
 )
 @degrade_loud_when_migrating
-def store_get(doc_id: str, collection: str = "knowledge") -> str:
-    """Retrieve the full content and metadata of a T3 knowledge entry by document ID or title.
+def store_get(
+    doc_id: Annotated[str, Field(
+        description=(
+            "64-char content-hash document id (from store_list/store_put/search), "
+            "or an exact title."
+        ),
+    )],
+    collection: Annotated[str, Field(
+        description=(
+            "Collection name or subject prefix. \"knowledge\" (default) means "
+            "every live knowledge__* collection, the same scope as search/"
+            "query's corpus=\"knowledge\"; a subject or full collection name "
+            "narrows the lookup to that one collection."
+        ),
+    )] = "knowledge",
+) -> str:
+    """Retrieve one T3 document's full content and metadata, by id or title.
 
-    Use after store_list or search to read the complete document.
+    Use after `store_list`, `search`, or `query` to read the complete
+    document those return only fragments or metadata of.
 
-    Args:
-        doc_id: Exact 64-char content-hash document ID (from store_list / store_put / search),
-                OR an exact title (looked up via metadata).
-        collection: Collection name or prefix (default: knowledge)
+    Returns the document's id, collection, title, tags, index date, and
+    full content as text. A note that `store_put` split comes back whole,
+    rebuilt in position order, with a "Chunks: N" line.
+
+    Constraints:
+    - `doc_id` is either a 64-char content-hash (any chunk of a split note
+      works) or an exact title; a title shared by one split note's chunks
+      resolves to that note.
+    - `collection="knowledge"` (default) looks in every knowledge__*
+      collection, as `search` does; a title found in more than one names
+      those collections instead of guessing.
+    - A title matching more than one document returns the candidate ids
+      instead of content; pass a content-hash to disambiguate.
     """
     try:
         if not doc_id:
             return "Error: doc_id is required"
         t3 = _get_t3()
-        col_name = t3_collection_name(collection, t3=t3)
-        entry = t3.get_by_id(col_name, doc_id)
-        if entry is None:
-            # Title fallback: 64 lowercase hex chars is the canonical id
-            # (RDR-180 full digest); 32 is a legacy half-digest reference —
-            # no longer resolvable (nexus-lgdel.l1 retired chash_alias),
-            # but still hash-SHAPED, so still never a title. Anything else,
-            # try treating it as an exact title.
-            looks_like_hash = len(doc_id) in (32, 64) and all(c in "0123456789abcdef" for c in doc_id)
-            if not looks_like_hash:
-                ids = t3.find_ids_by_title(col_name, doc_id)
-                if len(ids) == 1:
+        # nexus-mgqs8: the bare name spans every knowledge collection; any
+        # other name is one collection and behaves exactly as before.
+        scope = _read_scope(t3, collection)
+        col_name = scope[0]
+        # 64 lowercase hex chars is the canonical id (RDR-180 full digest);
+        # 32 is a legacy half-digest reference, no longer resolvable
+        # (nexus-lgdel.l1 retired chash_alias) but still hash-SHAPED, so
+        # never a title. Anything else is tried as an exact title.
+        looks_like_hash = len(doc_id) in (32, 64) and all(c in "0123456789abcdef" for c in doc_id)
+        entry = None
+        if looks_like_hash or len(scope) == 1:
+            for candidate in scope:
+                entry = t3.get_by_id(candidate, doc_id)
+                if entry is not None:
+                    col_name = candidate
+                    break
+        if entry is None and not looks_like_hash:
+            from nexus.catalog.store_hook import split_note_text  # noqa: PLC0415 — deferred for startup cost, as in store_put
+
+            matches = [(c, found) for c in scope if (found := t3.find_ids_by_title(c, doc_id))]
+            if len(matches) > 1:
+                return (
+                    f"Title {doc_id!r} matches documents in {len(matches)} collections: "
+                    + ", ".join(c for c, _ in matches)
+                    + ". Pass one as collection=, or a 64-char content-hash."
+                )
+            if matches:
+                col_name, ids = matches[0]
+                # nexus-spujb: every chunk of a split note carries its title,
+                # so several ids can be ONE note rather than an ambiguity.
+                split = split_note_text(t3, col_name, ids) if len(ids) > 1 else None
+                if split is not None:
+                    entry = t3.get_by_id(col_name, split[0])
+                elif len(ids) == 1:
                     entry = t3.get_by_id(col_name, ids[0])
-                elif len(ids) > 1:
+                else:
                     return (
                         f"Multiple documents with title {doc_id!r} in {col_name}: "
                         + ", ".join(ids[:5]) + (" …" if len(ids) > 5 else "")
                         + ". Pass a 64-char content-hash to disambiguate."
                     )
         if entry is None:
-            return f"Not found: {doc_id!r} in {col_name} (pass a 64-char content-hash from store_list/store_put/search, or an exact title)"
+            where = col_name if len(scope) == 1 else f"any of {len(scope)} knowledge collections"
+            return f"Not found: {doc_id!r} in {where} (pass a 64-char content-hash from store_list/store_put/search, or an exact title)"
         title = entry.get("title", "")
         tags = entry.get("tags", "")
         indexed_at = (entry.get("indexed_at") or "")[:10]
@@ -4609,11 +4776,34 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
             lines.append(f"Indexed:    {indexed_at}")
         if extraction_method:
             lines.append(f"Extractor:  {extraction_method}")
+        # nexus-spujb: a note split to its model's token window reads back whole.
+        from nexus.catalog.store_hook import split_note_text  # noqa: PLC0415 — deferred for startup cost, as in store_put
+
+        split = split_note_text(t3, col_name, [entry["id"]])
+        if split is not None:
+            lines.append(f"Chunks:     {split[2]} (split to the embedding model's token window)")
         lines.append("")
-        lines.append(entry.get("content", ""))
+        lines.append(split[1] if split is not None else entry.get("content", ""))
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("store_get", e)
+
+
+def _read_scope(t3, collection: str) -> list[str]:
+    """The collections a store read tool looks in for *collection*.
+
+    Bare ``"knowledge"`` means every live ``knowledge__*`` collection, the
+    scope ``search`` and ``query`` give ``corpus="knowledge"`` (nexus-mgqs8,
+    Sam's ruling 2026-09-13), so a note ``search`` found is found again by
+    ``store_get`` with the same literal. The legacy ``knowledge__knowledge``
+    placeholder is one member of that scope and stays reachable by its full
+    name. Anything else resolves to its one collection, as before.
+    """
+    if collection.strip() == "knowledge":
+        fanned = resolve_corpus("knowledge", _get_collection_names())
+        if fanned:
+            return fanned
+    return [t3_collection_name(collection, t3=t3)]
 
 
 def _unique_preserve_order(ids: Iterable[str]) -> list[str]:
@@ -4749,6 +4939,13 @@ def display_truncation_marker(cap: int) -> str:
     )
 
 
+# HISTORY. RDR-079 hydration primitive; RDR-097 P1.0/P1.1 added
+# `limit_per_source`. `section_types` in the structured result is
+# RDR-200 Phase 1c (nexus-4jj40): each entry is the hydrated chunk's
+# `section_type` metadata (e.g. "imports" for an import/package-only
+# chunk). The truncation marker text is nexus-lugwx: a cut body ends in
+# an ellipsis plus `display_truncation_marker(cap)` so a reader never
+# mistakes the cut for a defect.
 @mcp.tool(
     title="Batch-Retrieve Documents",
     annotations={"readOnlyHint": True},
@@ -4756,52 +4953,61 @@ def display_truncation_marker(cap: int) -> str:
 )
 @degrade_loud_when_migrating
 def store_get_many(
-    ids: str | list,
-    collections: str | list = "knowledge",
+    ids: Annotated[str | list, Field(
+        description=(
+            "Document ids to fetch: a comma-separated string, a flat list[str] "
+            "(single-stream), or a list[list[str]] (parallel-stream, pairs with "
+            "a list[int] limit_per_source)."
+        ),
+    )],
+    collections: Annotated[str | list, Field(
+        description=(
+            "Target collection name(s): a single name, comma-separated string, or "
+            "list. \"knowledge\" (default) means every live knowledge__* "
+            "collection, as in search/query. In single-stream "
+            "form a list aligned 1:1 with ids routes per-id; in parallel-stream "
+            "form a list aligned 1:1 with the outer ids length routes each "
+            "stream to its own collection."
+        ),
+    )] = "knowledge",
     *,
-    max_chars_per_doc: int = 4000,
-    structured: bool = False,
-    limit_per_source: int | list[int] | None = None,
+    max_chars_per_doc: Annotated[int, Field(description="Per-document truncation cap, in characters.")] = 4000,
+    structured: Annotated[bool, Field(
+        description=(
+            "Return {contents, missing, section_types} instead of the "
+            "human-readable string; section_types aligns 1:1 with contents/ids "
+            "(\"\" when missing or unstamped)."
+        ),
+    )] = False,
+    limit_per_source: Annotated[int | list[int] | None, Field(
+        description=(
+            "Cap input ids before hydration. None (default) = no truncation; "
+            "int truncates every stream to its first N entries; list[int] "
+            "(parallel-stream ids only) truncates each stream to its own cap "
+            "and must match the stream count."
+        ),
+    )] = None,
 ) -> str | dict:
-    """Batch-hydrate document content by ID. RDR-079 hydration primitive.
+    """Batch-hydrate document content by id in one call.
 
-    Args:
-        ids: Document IDs to fetch. Accepts:
-            - comma-separated string
-            - ``list[str]`` (single-stream form)
-            - ``list[list[str]]`` (parallel-stream form; pair with
-              ``list[int]`` ``limit_per_source``)
-        collections: Target collection name(s). Accepts a single name,
-            comma-separated string, or list. In single-stream form a list
-            aligned 1:1 with ``ids`` performs per-id collection routing;
-            in parallel-stream form a list aligned 1:1 with the outer
-            ``ids`` length performs per-stream collection routing
-            (each id in stream i is hydrated from ``collections[i]``).
-        max_chars_per_doc: Per-document truncation cap (default 4 KB). A cut
-            body ends in an ellipsis plus ``display_truncation_marker(cap)``
-            so a reader never mistakes the cut for a defect (nexus-lugwx).
-        structured: Return ``{contents, missing, section_types}`` dict when
-            True. ``section_types`` is aligned 1:1 with ``contents``/the
-            input id list -- each entry is the hydrated chunk's
-            ``section_type`` metadata (e.g. ``"imports"`` for an
-            import/package-only chunk, RDR-200 Phase 1c nexus-4jj40) or
-            ``""`` for a missing id or a chunk with no ``section_type``
-            stamped. When False (default), returns a human-readable
-            string: a ``Hydrated N/M docs`` header, each found document's
-            content under an ``[id]`` line (respecting
-            ``max_chars_per_doc`` and its truncation marker), and a
-            trailing ``Missing: ...`` line naming any unresolved ids.
-        limit_per_source: Cap input IDs before hydration (RDR-097 P1.0).
-            - ``None`` (default): no truncation; preserves prior behavior.
-            - ``int``: truncate ``ids`` to first N entries. With
-              parallel-stream ``ids``, broadcasts the cap across all
-              streams. Negative values raise ``ValueError``.
-            - ``list[int]``: requires parallel-stream ``ids``. Each
-              stream is truncated to its corresponding cap, then
-              flattened stream-major. ``len(limit_per_source)`` must
-              equal ``len(ids)`` or ``ValueError`` is raised. (Implemented
-              for contract symmetry; current consumers issue scalar calls
-              per stream — RDR-097 P1.1.)
+    Use this instead of repeated `store_get` calls when resolving many ids
+    at once (e.g. a plan step's `$stepN.ids` results). Returns a
+    human-readable "Hydrated N/M docs" listing with each document's content
+    under an `[id]` line and a trailing `Missing: ...` line, or, when
+    `structured=True`, `{contents, missing, section_types, source_notes}`
+    (`source_notes` names the collection each entry was found in), or
+    `{contents, missing, error}` if the batch fetch itself failed.
+
+    Constraints:
+    - `ids` accepts a comma-separated string, a flat list, or a list of
+      lists paired with a matching `limit_per_source` for per-stream
+      collection routing.
+    - `collections="knowledge"` (default) looks in every knowledge__*
+      collection, as `search` does.
+    - Each document body is capped at `max_chars_per_doc`; a cut body ends
+      with an explicit truncation marker, never a silent cut.
+    - Ids are chunk ids, so a note that `store_put` split comes back as its
+      separate pieces; use `store_get` for the whole note.
     """
     try:
         # Detect parallel-stream form: ids is a non-empty list of lists.
@@ -4946,38 +5152,46 @@ def store_get_many(
         # source note; aligned with ``entries``.
         entry_collections: list[str] = [""] * len(id_list)
 
-        if per_id_routing:
-            idxs_by_collection: dict[str, list[int]] = {}
-            for idx, cand in enumerate(coll_list):
-                col_name = t3_collection_name(cand, t3=t3)
-                idxs_by_collection.setdefault(col_name, []).append(idx)
+        # nexus-mgqs8: every candidate resolves to a LIST of collections
+        # (_read_scope); a bare "knowledge" is the whole knowledge scope.
+        # Per-id routing gives each id its own candidate's list; broadcast
+        # gives every id the candidates' lists concatenated in order. The
+        # routing decision above is still made on the caller's list, never
+        # the expanded one. Lookup runs in rounds: round r tries the r-th
+        # collection of each still-unresolved id's list, batched per
+        # collection, so a one-collection list is the single lookup it
+        # always was and broadcast keeps its first-match-wins order.
+        scope_cache: dict[str, list[str]] = {}
 
+        def _scope(cand: str) -> list[str]:
+            if cand not in scope_cache:
+                scope_cache[cand] = _read_scope(t3, cand)
+            return scope_cache[cand]
+
+        if per_id_routing:
+            candidates = [_scope(cand) for cand in coll_list]
+        else:
+            shared = _unique_preserve_order(c for cand in coll_list for c in _scope(cand))
+            candidates = [shared] * len(id_list)
+        remaining_idxs = list(range(len(id_list)))
+        depth = 0
+        while remaining_idxs:
+            idxs_by_collection: dict[str, list[int]] = {}
+            for idx in remaining_idxs:
+                if depth < len(candidates[idx]):
+                    idxs_by_collection.setdefault(candidates[idx][depth], []).append(idx)
+            if not idxs_by_collection:
+                break
             for col_name, idxs in idxs_by_collection.items():
                 batch_ids = _unique_preserve_order(id_list[idx] for idx in idxs)
                 id_to_entry = _batched_get_by_ids(t3, col_name, batch_ids)
                 for idx in idxs:
-                    entries[idx] = id_to_entry.get(id_list[idx])
-                    if entries[idx] is not None:
-                        entry_collections[idx] = col_name
-        else:
-            remaining_idxs = list(range(len(id_list)))
-            for cand in coll_list:
-                if not remaining_idxs:
-                    break
-                col_name = t3_collection_name(cand, t3=t3)
-                batch_ids = _unique_preserve_order(
-                    id_list[idx] for idx in remaining_idxs
-                )
-                id_to_entry = _batched_get_by_ids(t3, col_name, batch_ids)
-                still_remaining: list[int] = []
-                for idx in remaining_idxs:
                     found = id_to_entry.get(id_list[idx])
                     if found is not None:
                         entries[idx] = found
                         entry_collections[idx] = col_name
-                    else:
-                        still_remaining.append(idx)
-                remaining_idxs = still_remaining
+            remaining_idxs = [idx for idx in remaining_idxs if entries[idx] is None]
+            depth += 1
 
         # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, Sam's decision
         # 3): ``section_types`` rides along on the SAME per-id/broadcast
@@ -5071,26 +5285,51 @@ def store_get_many(
     structured_output=False,
 )
 def store_list(
-    collection: str = "knowledge",
-    limit: int = 20,
-    offset: int = 0,
-    docs: bool = False,
+    collection: Annotated[str, Field(
+        description=(
+            "Collection name or subject prefix. \"knowledge\" (default) lists "
+            "the knowledge subjects (every live knowledge__* collection, as in "
+            "search/query) with their entry counts; name one to list its entries."
+        ),
+    )] = "knowledge",
+    limit: Annotated[int, Field(description="Page size.")] = 20,
+    offset: Annotated[int, Field(description="Entries to skip, for pagination.")] = 0,
+    docs: Annotated[bool, Field(
+        description=(
+            "Show unique documents instead of individual chunks, deduplicated "
+            "by content_hash with title/chunk count/page count/extraction "
+            "method. Ignores offset/limit — scans the full collection."
+        ),
+    )] = False,
 ) -> str:
-    """List entries in a T3 knowledge collection.
+    """List entries in one T3 collection, paged by chunk or deduplicated by document.
 
-    Results are paged. Use offset to retrieve subsequent pages.
+    Use `store_get`/`store_get_many` afterward to read a listed entry's full
+    content. Use `search`/`query` instead when you want ranked, relevant
+    entries rather than every entry in a known collection.
 
-    Args:
-        collection: Collection name or prefix (default: knowledge)
-        limit: Page size (default 20)
-        offset: Skip this many entries (default 0). Use for pagination.
-        docs: If True, show unique documents instead of individual chunks.
-              Deduplicates by content_hash, shows title, chunk count, page count,
-              and extraction method. Ignores offset/limit (scans full collection).
+    Returns a paged, human-readable listing; advance with `offset`.
+
+    Constraints:
+    - `collection="knowledge"` (default) lists the knowledge subject
+      collections and their entry counts, the scope `search` uses; name one
+      to page its entries.
+    - `docs=True` scans the whole collection and ignores `limit`/`offset`.
     """
     try:
         t3 = _get_t3()
-        col_name = t3_collection_name(collection, t3=t3)
+        # nexus-mgqs8: the bare name spans every knowledge collection, so it
+        # lists the subjects rather than paging one collection's entries.
+        scope = _read_scope(t3, collection)
+        if len(scope) > 1:
+            counts = _get_collection_counts()
+            lines = [
+                f"{len(scope)} knowledge collections "
+                "(pass one as collection= to list its entries):"
+            ]
+            lines.extend(f"  {name}  {counts.get(name, '?')} entries" for name in scope)
+            return _cap_text_result("\n".join(lines), "store_list")
+        col_name = scope[0]
         try:
             info = t3.collection_info(col_name)
             total = info["count"]
@@ -5227,69 +5466,54 @@ def _verify_t2_write_landed(
     return "verified", ""
 
 
+# HISTORY: `ttl` default REVERSED 2026-09-12 (nexus-473mx, Sam's ruling) —
+# omitting `ttl` now means permanent, not 30 days. A live-store census that
+# day found 1,183 of 2,269 TTL-bearing T2 rows carrying exactly 30 (expiry
+# by omission, not decision); the whole tenant was swept to permanent to
+# stop the loss. `ttl=0` is RETIRED (RDR-194 D5, nexus-tk070.p6a): the
+# engine itself now rejects `ttl<=0` with a 400 for every caller, this tool
+# included — no more MCP-only "0 means permanent" coercion. `agent`
+# attribution is nexus-9clx (Phase 1B), letting `nx tier-status` slice
+# writes by persisting agent. NOTE: conexus/skills and agent-template
+# copies of this default (flagged nexus-cnzei's audit finding C2) are out
+# of this bead's scope — this docstring is the corrected source of truth.
 @mcp.tool(
     title="Store Memory Entry",
     annotations={"readOnlyHint": False, "destructiveHint": False},
     structured_output=False,
 )
 def memory_put(
-    content: str,
-    project: str,
-    title: str,
-    tags: str = "",
-    ttl: int | None = None,
-    agent: str = "",
-    session: str = "",
+    content: Annotated[str, Field(description="Text content to store.")],
+    project: Annotated[str, Field(description="Project namespace (e.g. \"nexus\", \"nexus_active\").")],
+    title: Annotated[str, Field(description="Entry title, unique within the project.")],
+    tags: Annotated[str, Field(description="Comma-separated tags.")] = "",
+    ttl: Annotated[int | None, Field(
+        description=(
+            "Time-to-live in days. None (default) is PERMANENT — omitting "
+            "ttl no longer expires the entry. An integer expires the row in "
+            "that many days, extended by reads (effective ttl grows with "
+            "access count). 0 or negative is rejected with an error."
+        ),
+    )] = None,
+    agent: Annotated[str, Field(
+        description="Optional subagent/role attribution (e.g. \"developer\"). Falls back to NX_AGENT env, then null.",
+    )] = "",
+    session: Annotated[str, Field(
+        description="Optional explicit session_id override. Falls back to the parent's session resolution chain.",
+    )] = "",
 ) -> str:
-    """Store a memory entry in T2. Upserts by (project, title).
+    """Store a T2 memory entry; upserts by (project, title).
 
-    Args:
-        content: Text content to store
-        project: Project namespace (e.g. "nexus", "nexus_active")
-        title: Entry title (unique within project)
-        tags: Comma-separated tags
-        ttl: Time-to-live in days. DEFAULT None (PERMANENT): an entry whose
-            call does not name a ttl is kept. A clock is now something a
-            caller ASKS for, never something silence buys — pass an integer
-            for one, and the row then expires in that many days, extended by
-            reads (effective ttl = ttl * (1 + ln(access_count + 1)), so the
-            row nobody reads is the one that goes). ``memory_get`` shows the
-            stored value on its ``TTL:`` line.
+    Use `store_put` instead for permanent T3 knowledge; use `scratch` for
+    ephemeral T1 session notes.
 
-            REVERSED 2026-09-12 (nexus-473mx, Sam's ruling), and the history
-            matters because this paragraph has been wrong in BOTH directions.
-            The default was 30, and nexus-sv152 hardened this text to say so
-            after an earlier version claimed omission meant permanent and
-            "every caller that believed it persisted nothing". That warning
-            was correct when written and is now obsolete: omission DOES mean
-            permanent. What changed is the default, not the documentation of
-            it. The evidence was a live-store census on 2026-09-12 — 1,183 of
-            2,269 TTL-bearing rows in the hosted T2 carried exactly 30, i.e.
-            expiry by omission rather than by decision, and the whole tenant
-            had to be swept to permanent to stop the loss. Retention inferred
-            from silence is the defect; RDR-194 §A14 ruled the same way about
-            ``0`` reading as "no TTL". See RDR-207 for the boundary question
-            this does NOT answer: what a manage phase should do before a row
-            is destroyed. ``ttl=0`` is RETIRED (RDR-194 D5, nexus-tk070.p6a): this tool
-            no longer coerces it to ``None``, and the engine itself now
-            REJECTS ``ttl=0`` (and any ``ttl<=0``) with a loud 400 naming the
-            fix, for every caller and every path — ``POST /v1/memory/put``
-            included, not just this MCP tool. That rejection propagates
-            through this function's error return (this tool does not
-            swallow it). Previously ``ttl=0`` was silently coerced to
-            permanent by THIS tool alone while the store and every other
-            caller stayed trapped (a stored ``0`` fed
-            ``effective_ttl = ttl * (1 + ln(access_count+1)) = 0``, deleted on
-            the next sweep) — that MCP-only shim is deleted; "0 means
-            permanent" is no longer true anywhere in this system.
-        agent: Optional subagent / role attribution (e.g. "developer",
-            "architect-planner"). When empty, falls back to
-            ``NX_AGENT`` env, then NULL. Phase 1B (nexus-9clx) — lets
-            ``nx tier-status`` slice tier writes by which agent did
-            the persisting.
-        session: Optional explicit session_id override. When empty,
-            falls back to the parent's session_id resolution chain
-            (``NX_SESSION_ID`` env → claude session file → NULL).
+    Returns "Stored: [<row_id>] <project>/<title> (ttl: ...)" once the
+    write is verified readable, or an explicit error/unverified notice.
+
+    Constraints:
+    - Upserts on the exact (project, title) pair.
+    - `ttl=None` (the default) is permanent; `ttl<=0` is rejected.
+    - `memory_get` shows the stored ttl on its `TTL:` line.
     """
     try:
         if not content:
@@ -5369,24 +5593,21 @@ def _render_ttl(ttl: object) -> str:
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
-def memory_get(project: str, title: str = "") -> str:
-    """Retrieve a memory entry by project and title.
+def memory_get(
+    project: Annotated[str, Field(description="Project namespace.")],
+    title: Annotated[str, Field(
+        description="Entry title, exact or unique prefix. Leave empty to list all entries (titles only).",
+    )] = "",
+) -> str:
+    """Retrieve one T2 memory entry, or list a project's entry titles.
 
-    Title resolution is exact-then-prefix (nexus-e59o): if ``title`` does
-    not match any entry exactly, a unique prefix match is returned. A
-    caller passing ``"088-research-1"`` gets the full
-    ``"088-research-1: <suffix>"`` entry as long as only one entry
-    starts with that prefix in the project. Ambiguous prefixes are
-    reported as a list so the caller can disambiguate rather than
-    silently pick one.
+    Use `memory_search` instead when you don't already know the title. Title
+    resolution is exact-then-prefix: an unmatched exact title falls back to
+    a unique prefix match; an ambiguous prefix returns the candidate list
+    instead of guessing.
 
-    When title is empty, lists all entries for the project (titles only — use
-    a second call with the specific title to get content).
-
-    Args:
-        project: Project namespace
-        title: Entry title, exact or unique prefix. Leave empty to LIST
-            all entries (titles only).
+    With `title` empty, returns titles only for the project — call again
+    with a specific title to get content.
     """
     try:
         with _t2_ctx() as db:
@@ -5433,12 +5654,14 @@ def memory_get(project: str, title: str = "") -> str:
     annotations={"readOnlyHint": False, "destructiveHint": True},
     structured_output=False,
 )
-def memory_delete(project: str, title: str) -> str:
-    """Delete a T2 memory entry by project and title.
+def memory_delete(
+    project: Annotated[str, Field(description="Project namespace.")],
+    title: Annotated[str, Field(description="Exact entry title to delete.")],
+) -> str:
+    """Permanently delete one T2 memory entry by exact (project, title).
 
-    Args:
-        project: Project namespace
-        title: Entry title to delete
+    Returns "Deleted: <project>/<title>", or "Not found: ..." if no entry
+    matched. There is no undo — re-store with `memory_put` to recreate.
     """
     try:
         if not project or not title:
@@ -5457,22 +5680,27 @@ def memory_delete(project: str, title: str) -> str:
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
-def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 0) -> str:
+def memory_search(
+    query: Annotated[str, Field(
+        description=(
+            "Plain-text search query, matched against title, content, and "
+            "tags. Not a query grammar — no operators. A query made entirely "
+            "of English stopwords (e.g. \"and\") is reported as an error, "
+            "not a silent empty result."
+        ),
+    )],
+    project: Annotated[str, Field(description="Optional project filter; \"\" searches every project.")] = "",
+    limit: Annotated[int, Field(description="Page size.")] = 20,
+    offset: Annotated[int, Field(description="Results to skip, for pagination.")] = 0,
+) -> str:
     """Full-text search across T2 memory entries.
 
-    Searches title, content, and tags fields via the engine's PostgreSQL
-    full-text search (SQLite/FTS5 is retired — RDR-158 P4). Plain natural-
-    language text, not a query grammar: there are no operators to learn.
-    Results are paged. Use offset to retrieve subsequent pages.
+    Use `memory_get` instead once you know the exact or prefix title. Use
+    `scratch` search for T1 session-local notes, or `search`/`query` for
+    permanent T3 knowledge.
 
-    Args:
-        query: Search query (plain text — matches tokens in title, content,
-            and tags; a query made entirely of English stopwords, e.g.
-            "and", finds nothing in content specifically and is reported as
-            an error rather than a silent empty result, nexus-senub)
-        project: Optional project filter
-        limit: Page size (default 20)
-        offset: Skip this many results (default 0). Use for pagination.
+    Returns a paged, human-readable list of matching entries with a
+    200-char content snippet each; advance with `offset`.
     """
     try:
         with _t2_ctx() as db:
@@ -5503,30 +5731,31 @@ def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 
     structured_output=False,
 )
 def memory_consolidate(
-    action: str,
-    project: str,
-    min_similarity: float = 0.7,
-    idle_days: int = 30,
-    keep_id: int = 0,
-    delete_ids: str = "",
-    merged_content: str = "",
-    limit: int = 50,
-    dry_run: bool = False,
-    confirm_destructive: bool = False,
+    action: Annotated[str, Field(description="One of \"find-overlaps\", \"merge\", \"flag-stale\".")],
+    project: Annotated[str, Field(description="T2 project namespace to operate on.")],
+    min_similarity: Annotated[float, Field(description="Jaccard similarity threshold for find-overlaps.")] = 0.7,
+    idle_days: Annotated[int, Field(description="Staleness threshold, in days, for flag-stale.")] = 30,
+    keep_id: Annotated[int, Field(description="Entry id to keep when merging.")] = 0,
+    delete_ids: Annotated[str, Field(description="Comma-separated entry ids to delete during merge.")] = "",
+    merged_content: Annotated[str, Field(description="Replacement content for the kept entry during merge.")] = "",
+    limit: Annotated[int, Field(description="Max pairs returned for find-overlaps.")] = 50,
+    dry_run: Annotated[bool, Field(description="For merge, preview without writing to T2.")] = False,
+    confirm_destructive: Annotated[bool, Field(
+        description="Required when a merge would delete more than one entry.",
+    )] = False,
 ) -> str:
-    """Memory consolidation tools (RDR-061 E6): find overlaps, merge entries, flag stale.
+    """Find, merge, or flag T2 memory entries within one project (RDR-061 E6).
 
-    Args:
-        action: One of "find-overlaps", "merge", "flag-stale"
-        project: T2 project namespace to operate on
-        min_similarity: Jaccard threshold for find-overlaps (default 0.7)
-        idle_days: Staleness threshold for flag-stale (default 30)
-        keep_id: Entry ID to keep when merging
-        delete_ids: Comma-separated IDs to delete during merge
-        merged_content: Replacement content for kept entry during merge
-        limit: Max results for find-overlaps (default 50)
-        dry_run: For merge, return a preview without modifying T2 (default False)
-        confirm_destructive: Required when merge would delete >1 entry (default False)
+    Use `find-overlaps` to locate near-duplicate entries by Jaccard
+    similarity, `merge` to keep one entry and delete the rest, or
+    `flag-stale` to list entries idle past `idle_days`.
+
+    Returns a human-readable summary of the pairs found, the merge outcome,
+    or the stale-entry list.
+
+    Constraints:
+    - `merge` deleting more than one entry requires `confirm_destructive=True`.
+    - `merge` with `dry_run=True` previews the outcome without writing.
     """
     try:
         if action == "find-overlaps":
@@ -5609,30 +5838,25 @@ def memory_consolidate(
     structured_output=False,
 )
 def scratch(
-    action: str,
-    content: str = "",
-    query: str = "",
-    tags: str = "",
-    entry_id: str = "",
-    limit: int = 10,
-    agent: str = "",
+    action: Annotated[str, Field(description="One of \"put\", \"search\", \"list\", \"get\", \"delete\".")],
+    content: Annotated[str, Field(description="Content to store (for \"put\").")] = "",
+    query: Annotated[str, Field(description="Search query (for \"search\").")] = "",
+    tags: Annotated[str, Field(description="Comma-separated tags (for \"put\").")] = "",
+    entry_id: Annotated[str, Field(description="Entry id or unique prefix (for \"get\", \"delete\").")] = "",
+    limit: Annotated[int, Field(description="Max results for \"search\"/\"list\".")] = 10,
+    agent: Annotated[str, Field(
+        description="Optional subagent/role attribution for \"put\" (e.g. \"developer\"). Falls back to NX_AGENT env.",
+    )] = "",
 ) -> str:
-    """T1 session scratch pad — ephemeral within-session storage.
+    """T1 session scratch pad: ephemeral, within-session-only notes.
 
-    For ``search`` and ``list``, results are capped at ``limit``. A footer
-    indicates when more entries exist.
+    Use `memory_put`/`memory_search` instead for anything that must survive
+    past this session; use `store_put` for permanent T3 knowledge. Use
+    `scratch_manage` to flag an entry for persistence or promote it to T2.
 
-    Args:
-        action: One of "put", "search", "list", "get", "delete"
-        content: Content to store (for "put")
-        query: Search query (for "search")
-        tags: Comma-separated tags (for "put")
-        entry_id: Entry ID (for "get", "delete")
-        limit: Max results for search/list (default 10)
-        agent: Optional subagent / role attribution for "put" (e.g.
-            "developer"). Empty falls back to ``NX_AGENT`` env, then
-            unspecified. Phase 1B follow-up (nexus-9clx) — lets
-            ``nx tier-status`` slice T1 writes by agent.
+    For "search"/"list", returns a human-readable list capped at `limit`
+    with a footer when more entries exist; other actions return a single
+    status or content line.
     """
     try:
         t1, isolated = _get_t1()
@@ -5728,18 +5952,17 @@ def scratch(
     structured_output=False,
 )
 def scratch_manage(
-    action: str,
-    entry_id: str,
-    project: str = "",
-    title: str = "",
+    action: Annotated[str, Field(description="One of \"flag\", \"promote\".")],
+    entry_id: Annotated[str, Field(description="Scratch entry id.")],
+    project: Annotated[str, Field(description="Target T2 project namespace (required for \"promote\").")] = "",
+    title: Annotated[str, Field(description="Target T2 entry title (required for \"promote\").")] = "",
 ) -> str:
-    """Manage scratch entries: flag for persistence or promote to T2.
+    """Flag a T1 scratch entry for persistence, or promote it to a T2 memory entry.
 
-    Args:
-        action: One of "flag", "promote"
-        entry_id: Scratch entry ID
-        project: Target project for promote (required for promote)
-        title: Target title for promote (required for promote)
+    Use this once a `scratch` note turns out to matter past the current
+    session; the entry is otherwise ephemeral and does not survive it.
+
+    Returns a status line naming the flag or promotion outcome.
     """
     try:
         t1, isolated = _get_t1()
@@ -5768,7 +5991,12 @@ def scratch_manage(
     structured_output=False,
 )
 def collection_list() -> str:
-    """List all T3 collections with document counts and embedding models."""
+    """List every T3 collection with its document count and embedding model.
+
+    Use `catalog_list` (the catalog server) instead for catalog-registered
+    documents filtered by owner or content_type. Returns one line per
+    collection, sorted by name.
+    """
     try:
         cols = _get_t3().list_collections()
         if not cols:
@@ -5782,46 +6010,56 @@ def collection_list() -> str:
         return _mcp_tool_error("collection_list", e)
 
 
+# HISTORY. Verb-dimensional library design is RDR-078; the required-verb
+# refusal is nexus-fiovt (a NULL-verb plan pollutes the library — 77/116
+# rows on the 2026-07-05 audit — false-matches non-verb-filtered nx_answer
+# questions via FTS, and is un-runnable by the plan runner). Save-time
+# schema validation is nexus-vtp8h (the drift audit's plan 138 was a
+# bead-dump that matched at 0.66-0.70 then crashed the runner on an
+# unknown tool).
 @mcp.tool(
     title="Save Query Plan",
     annotations={"readOnlyHint": False, "destructiveHint": False},
     structured_output=False,
 )
 def plan_save(
-    query: str,
-    plan_json: str,
-    verb: str = "",
-    project: str = "",
-    outcome: str = "success",
-    tags: str = "",
-    ttl: int | None = None,
-    scope_tags: str = "",
+    query: Annotated[str, Field(description="The original natural-language question the plan answers.")],
+    plan_json: Annotated[str, Field(
+        description=(
+            "JSON string of the execution plan: "
+            "{\"steps\": [...], \"tools_used\": [...], \"outcome_notes\": \"...\"}."
+        ),
+    )],
+    verb: Annotated[str, Field(
+        description=(
+            "REQUIRED retrieval verb (e.g. research, analyze, query, review, "
+            "debug, document). A verb-less save is refused."
+        ),
+    )] = "",
+    project: Annotated[str, Field(description="Project namespace for scoping (e.g. \"nexus\").")] = "",
+    outcome: Annotated[str, Field(description="Plan outcome: \"success\" or \"partial\".")] = "success",
+    tags: Annotated[str, Field(description="Comma-separated tags (e.g. operation types used).")] = "",
+    ttl: Annotated[int | None, Field(description="Time-to-live in days. None (default) is permanent.")] = None,
+    scope_tags: Annotated[str, Field(
+        description=(
+            "Comma-separated scope-tag string (e.g. \"rdr__arcaneum,code__nexus\"). "
+            "Empty infers from plan_json's retrieval steps."
+        ),
+    )] = "",
 ) -> str:
-    """Save a *retrieval* query-execution plan to the T2 plan library.
+    """Save a reusable retrieval query-execution plan to the T2 plan library.
 
-    The plan_json should be a JSON string with the execution plan structure.
-    Minimal schema: {"steps": [...], "tools_used": [...], "outcome_notes": "..."}
+    Use beads + `memory_put` instead for implementation, pipeline, or
+    phased-execution plans — this library is for retrieval plans only,
+    matched to a verb-shaped intent by `nx_answer`'s plan-match gate.
 
-    The library is verb-dimensional (RDR-078): a plan is matched to a
-    verb-shaped intent, so a ``verb`` is REQUIRED — a verb-less plan has no
-    dimensional identity, can never match a verb-filtered nx_answer question,
-    and only leaks in via raw FTS (the NULL-verb pollution class, nexus-fiovt).
-    This is for reusable *retrieval* plans; **implementation / pipeline / phased
-    execution plans belong in beads + T2 memory (``memory_put``), not here.**
+    Returns "Saved plan: [<id>] <query>", or a refusal naming why (missing
+    verb, invalid JSON, or a plan with no executable steps).
 
-    Args:
-        query: The original natural-language question the plan answers.
-        plan_json: JSON string of the execution plan (see schema above).
-        verb: REQUIRED retrieval verb (e.g. research / analyze / query / review
-            / debug / document). A verb-less save is refused.
-        project: Project namespace for scoping (e.g. "nexus").
-        outcome: Plan outcome, "success" or "partial".
-        tags: Comma-separated tags (e.g. operation types used).
-        ttl: Time-to-live in days. None means permanent (no expiry).
-        scope_tags: RDR-091 Phase 2a comma-separated scope-tag string
-            (e.g. ``"rdr__arcaneum,code__nexus"``). When empty, inferred
-            from plan_json retrieval steps. Normalized at save time:
-            trailing 8-char hex suffix and ``*`` globs are stripped.
+    Constraints:
+    - `verb` is required; a verb-less plan is refused outright.
+    - `plan_json` must be valid JSON with a non-empty `steps` list, each
+      step naming a tool.
     """
     try:
         if not query or not plan_json:
@@ -5891,16 +6129,19 @@ def plan_save(
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
-def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) -> str:
-    """Search the T2 plan library for similar query plans.
+def plan_search(
+    query: Annotated[str, Field(description="Search query, matched against plan query text and tags.")],
+    project: Annotated[str, Field(description="Optional project filter (e.g. \"nexus\").")] = "",
+    limit: Annotated[int, Field(description="Maximum results to return.")] = 5,
+    offset: Annotated[int, Field(description="Results to skip, for pagination.")] = 0,
+) -> str:
+    """Search the T2 plan library for similar saved retrieval plans, for a human to browse.
 
-    Results are paged. Response footer shows ``offset=N`` for next page.
+    Use `nx_answer`'s own plan-match gate instead when you want a plan
+    executed automatically rather than reviewed by a person.
 
-    Args:
-        query: Search query (matched against plan query text and tags)
-        project: Optional project filter (e.g. "nexus")
-        limit: Maximum results to return (default 5)
-        offset: Skip this many results (default 0). Use for pagination.
+    Returns a paged, human-readable list with outcome, tags, scope, and a
+    plan preview; a footer names the next `offset` when more results exist.
     """
     try:
         with _t2_ctx() as db:
@@ -5940,16 +6181,16 @@ def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) 
     annotations={"readOnlyHint": False, "destructiveHint": True},
     structured_output=False,
 )
-def plan_delete(plan_id: int) -> str:
-    """Delete a plan-library entry by id (nexus-v92zj).
+def plan_delete(
+    plan_id: Annotated[int, Field(description="Numeric plan id to delete (from `plan_search` or `nx plan list`).")],
+) -> str:
+    """Permanently delete one plan-library entry by id.
 
-    The counterpart to ``plan_save``: removes a throwaway or incorrect
-    entry (e.g. a shakeout probe) from the plan library without direct
-    DB access. Get the id from ``plan_search`` output (``[NN]`` prefix)
-    or ``nx plan list``.
+    The counterpart to `plan_save`: removes a throwaway or incorrect entry
+    (e.g. a shakeout probe) without direct DB access.
 
-    Args:
-        plan_id: Numeric plan id to delete.
+    Returns a confirmation naming the deleted plan's query, or an error if
+    the id does not exist.
     """
     try:
         with _t2_ctx() as db:
@@ -6031,33 +6272,42 @@ def _tuple_census_to_dict(c: Any) -> dict[str, Any]:
     structured_output=False,
 )
 def tuple_out(
-    subspace: str,
-    keys: dict[str, str],
-    dims: dict[str, str] | None = None,
-    body: str | None = None,
-    nonce: str | None = None,
-    ttl_seconds: int | None = None,
+    subspace: Annotated[str, Field(
+        description="The concrete subspace to write into (resolves to a registered template — see `tuple_registry`).",
+    )],
+    keys: Annotated[dict[str, str], Field(description="The template's pinned key fields (required, non-empty).")],
+    dims: Annotated[dict[str, str] | None, Field(description="Optional dimension fields the template declares.")] = None,
+    body: Annotated[str | None, Field(
+        description="Optional tuple payload — a short message or signal, not a document (see size limits below).",
+    )] = None,
+    nonce: Annotated[str | None, Field(
+        description=(
+            "Caller-minted nonce. Required for any template whose id_from is "
+            "keys+nonce (the mailbox); omit for a keys-only template (the "
+            "ledger). An id ingredient only, never echoed back on a read."
+        ),
+    )] = None,
+    ttl_seconds: Annotated[int | None, Field(
+        description="Optional explicit TTL, capped at the template's retention ceiling.",
+    )] = None,
 ) -> str:
-    """Write a tuple into the RDR-205 Linda tuple space (``out``).
+    """Write a tuple into the RDR-205 Linda tuple space (`out`).
+
+    The tuple space is a coordination and metadata store, not a value
+    store. Keep `body` a short message or signal. Put longer content in T2
+    (`memory_put`) or T3 (`store_put`) and pass a reference here (a
+    project/title or a document id), not the content itself.
 
     Idempotent by construction: the tuple id is derived from the
-    template's ``id_from`` fields only, so a retry lands on the same
-    tuple. Returns the tuple id, lowercase hex.
+    template's `id_from` fields only, so a retry lands on the same tuple.
+    Returns the tuple id, lowercase hex.
 
-    Args:
-        subspace: The concrete subspace to write into (resolves to a
-            registered template — see ``tuple_registry``).
-        keys: The template's pinned key fields (required, non-empty).
-        dims: Optional dimension fields the template declares.
-        body: Optional tuple payload.
-        nonce: Caller-minted nonce. REQUIRED for any template whose
-            ``id_from`` is ``keys+nonce`` (the mailbox) — an ``out`` with
-            no nonce on such a template is refused as ``SchemaViolation``;
-            omit it for a ``keys``-only template (the ledger). It is an id
-            ingredient only, never echoed back on a read (``rd``/``in``
-            and their probe forms return no ``nonce`` field).
-        ttl_seconds: Optional explicit TTL, capped at the template's
-            retention ceiling (``TtlTooLong`` if it isn't).
+    Size limits (refused with the `TooLarge` typed error before any write):
+    - `body`: at most 4096 bytes UTF-8 (a template may set a lower cap; the
+      ledger's is 0, null or empty only).
+    - Each `keys`/`dims` value: at most 256 bytes UTF-8.
+    - `subspace`: at most 256 bytes UTF-8.
+    - `nonce`: at most 128 bytes UTF-8.
     """
     try:
         tuple_id = _t2_index_write(
@@ -6077,32 +6327,28 @@ def tuple_out(
     structured_output=False,
 )
 def tuple_rd(
-    subspace: str,
-    keys_pattern: dict[str, str] | None = None,
-    n: int = 1,
-    since_created_at: str = "",
-    since_id: str = "",
-    timeout_s: int = 0,
+    subspace: Annotated[str, Field(description="The concrete subspace to read.")],
+    keys_pattern: Annotated[dict[str, str] | None, Field(
+        description="Optional key-equality filter (subset match); empty reads the whole subspace.",
+    )] = None,
+    n: Annotated[int, Field(description="Max rows to return.")] = 1,
+    since_created_at: Annotated[str, Field(
+        description="Paired with since_id to resume a (created_at, id) cursor; leave both empty to read from the start.",
+    )] = "",
+    since_id: Annotated[str, Field(description="See since_created_at.")] = "",
+    timeout_s: Annotated[int, Field(
+        description="Seconds to park when nothing matches immediately; 0 (default) never blocks.",
+    )] = 0,
 ) -> list[dict]:
-    """Non-destructive read from a subspace (``rd``).
+    """Read a subspace without claiming rows (`rd`); use `tuple_in` instead to claim one.
 
-    A probe (never blocks) when ``timeout_s=0`` (the default); parks up
-    to ``timeout_s`` seconds (capped by the engine, CA 3) when nothing
-    matches immediately and ``timeout_s>0``. Matches on equality over
-    whatever subset of the pinned keys ``keys_pattern`` supplies; an
-    empty pattern reads the whole subspace. Returns dead-lettered rows
-    too (dead-lettering is a claim state, not an exclusion).
+    A probe (never blocks) when `timeout_s=0` (the default); parks up to
+    `timeout_s` seconds (capped by the engine) when nothing matches
+    immediately. Matches on equality over whatever subset of the pinned
+    keys `keys_pattern` supplies.
 
-    Args:
-        subspace: The concrete subspace to read.
-        keys_pattern: Optional key-equality filter (subset match).
-        n: Max rows to return.
-        since_created_at: Paired with ``since_id`` to resume a
-            ``(created_at, id)`` cursor; leave both empty to read from
-            the start.
-        since_id: See ``since_created_at``.
-        timeout_s: Seconds to park when nothing matches immediately;
-            ``0`` (default) never blocks.
+    Returns a list of matching tuples, including dead-lettered rows
+    (dead-lettering is a claim state, not an exclusion).
     """
     since = (since_created_at, since_id) if since_created_at and since_id else None
     try:
@@ -6121,32 +6367,27 @@ def tuple_rd(
     structured_output=False,
 )
 def tuple_in(
-    subspace: str,
-    keys_pattern: dict[str, str],
-    claimant: str,
-    lease_s: int,
-    timeout_s: int = 0,
+    subspace: Annotated[str, Field(description="The concrete subspace to claim from.")],
+    keys_pattern: Annotated[dict[str, str], Field(description="Every pinned key the template declares, exact match.")],
+    claimant: Annotated[str, Field(description="This caller's identity (mailbox/agent id).")],
+    lease_s: Annotated[int, Field(
+        description="Claim lease length in seconds; refused above the template's max_lease_seconds.",
+    )],
+    timeout_s: Annotated[int, Field(
+        description="Seconds to park when nothing matches immediately; 0 (default) never blocks.",
+    )] = 0,
 ) -> dict | None:
-    """Destructive (claiming) read from a subspace (``in``).
+    """Claim a tuple from a subspace (`in`); use `tuple_rd` instead for a non-destructive read.
 
-    A probe (never blocks) when ``timeout_s=0`` (the default); parks up
-    to ``timeout_s`` seconds when nothing matches immediately and
-    ``timeout_s>0``. Unlike ``tuple_rd``, every key in ``keys_pattern``
-    must be pinned (no subset match) and dead-lettered rows are never
-    returned. Returns ``{"tuple": {...}, "claim_id": "..."}`` on a
-    claim, ``None`` on a probe miss. Ack or nack the claim with
-    ``tuple_ack``/``tuple_nack`` — the row stays claimed (and
-    unavailable to others) until then or until the lease lapses.
+    A probe (never blocks) when `timeout_s=0` (the default); parks up to
+    `timeout_s` seconds when nothing matches immediately. Unlike
+    `tuple_rd`, every key in `keys_pattern` must be pinned (no subset
+    match) and dead-lettered rows are never returned.
 
-    Args:
-        subspace: The concrete subspace to claim from.
-        keys_pattern: Every pinned key the template declares, exact match.
-        claimant: This caller's identity (mailbox/agent id).
-        lease_s: Claim lease length. Refused (``LeaseTooLong``) above the
-            template's ``take.max_lease_seconds``; clipped to the row's
-            remaining TTL.
-        timeout_s: Seconds to park when nothing matches immediately;
-            ``0`` (default) never blocks.
+    Returns `{"tuple": {...}, "claim_id": "..."}` on a claim, `None` on a
+    probe miss. Ack or nack the claim with `tuple_ack`/`tuple_nack` — the
+    row stays claimed and unavailable to others until then or until the
+    lease lapses.
     """
     try:
         result = _t2_index_write(
@@ -6204,34 +6445,32 @@ def _reply_spec_from_tool_arg(reply: dict[str, Any] | None) -> ReplySpec | None:
     structured_output=False,
 )
 def tuple_ack(
-    claim_id: str,
-    claimant: str,
-    reply: dict[str, Any] | None = None,
+    claim_id: Annotated[str, Field(description="The claim id returned by `tuple_in`.")],
+    claimant: Annotated[str, Field(description="Must match the identity that made the claim.")],
+    reply: Annotated[dict[str, Any] | None, Field(
+        description=(
+            "Optional reply object written atomically with the ack, e.g. "
+            "{\"subspace\": \"mailbox/<addr>\", \"keys\": {\"to\": \"<addr>\"}, "
+            "\"dims\": {\"from\": \"<me>\"}, \"body\": \"...\"}. Fields: subspace "
+            "and keys (required), dims/body/ttl_seconds (optional). No nonce — "
+            "the engine sets it to the request's tuple id."
+        ),
+    )] = None,
 ) -> str:
-    """Consume a claimed tuple (``ack``), optionally writing a reply in the
-    same transaction (RDR-206).
+    """Consume a claimed tuple (`ack`), optionally writing a reply in the same transaction (RDR-206).
 
-    Pass ``reply`` to write a reply as the request is consumed; both commit
-    together or not at all. Without it, behaviour is unchanged from before
-    RDR-206. ``reply`` carries the fields ``tuple_out`` takes, minus the
-    nonce: ``subspace`` and ``keys`` (required), ``dims``, ``body`` and
-    ``ttl_seconds`` (optional). The engine sets the reply's nonce itself to
-    the request's own tuple id, so a ``nonce`` key is refused here, as is any
-    other key the reply does not have.
+    Pass `reply` to write a reply as the request is consumed; both commit
+    together or not at all. The reply's target must resolve to a
+    keys+nonce template (e.g. a mailbox address); a keys-only target (e.g.
+    the RDR-184 ledger) is refused. A reply that fails validation leaves
+    the request still claimed and still ackable — nothing is written on
+    either side.
 
-    The reply's target must resolve to a ``keys+nonce`` template (e.g. a
-    mailbox address); a ``keys``-only target (e.g. the RDR-184 ledger) is
-    refused. A reply that fails validation (``UnknownSubspace``,
-    ``TtlTooLong``, ``SchemaViolation``, or a malformed ``reply`` object)
-    leaves the request still claimed and still ackable: nothing is written
-    on either side.
-
-    Args:
-        claim_id: The claim id returned by ``tuple_in``.
-        claimant: Must match the identity that made the claim.
-        reply: Optional reply object, e.g.
-            ``{"subspace": "mailbox/<addr>", "keys": {"to": "<addr>"},
-            "dims": {"from": "<me>"}, "body": "..."}``.
+    The reply's `body` has the same size limit as `tuple_out`: at most
+    4096 bytes UTF-8 (a template may set lower), `subspace` at most 256
+    bytes, each `keys`/`dims` value at most 256 bytes. Put longer content
+    in T2 (`memory_put`) or T3 (`store_put`) and reply with a reference,
+    not the content itself.
     """
     try:
         spec = _reply_spec_from_tool_arg(reply)
@@ -6251,14 +6490,15 @@ def tuple_ack(
     annotations={"readOnlyHint": False, "destructiveHint": True},
     structured_output=False,
 )
-def tuple_nack(claim_id: str, claimant: str) -> str:
-    """Release a claimed tuple back to available (``nack``). Counts an
-    attempt toward the template's ``max_attempts`` (dead-lettered at the
-    cap).
+def tuple_nack(
+    claim_id: Annotated[str, Field(description="The claim id returned by `tuple_in`.")],
+    claimant: Annotated[str, Field(description="Must match the identity that made the claim.")],
+) -> str:
+    """Release a claimed tuple back to available (`nack`).
 
-    Args:
-        claim_id: The claim id returned by ``tuple_in``.
-        claimant: Must match the identity that made the claim.
+    Use `tuple_ack` instead once the claimed work is done. Counts an
+    attempt toward the template's `max_attempts` (dead-lettered at the
+    cap). Returns a confirmation naming the claim.
     """
     try:
         _t2_index_write(
@@ -6274,27 +6514,24 @@ def tuple_nack(claim_id: str, claimant: str) -> str:
     annotations={"readOnlyHint": False, "destructiveHint": False},
     structured_output=False,
 )
-def tuple_renew(claim_id: str, claimant: str, lease_s: int) -> dict:
-    """Extend a live claim's lease (``renew``, RDR-206) before it lapses.
+def tuple_renew(
+    claim_id: Annotated[str, Field(description="The claim id returned by `tuple_in`.")],
+    claimant: Annotated[str, Field(description="Must match the identity that made the claim.")],
+    lease_s: Annotated[int, Field(
+        description=(
+            "New lease length in seconds from now. Refused above the "
+            "template's max_lease_seconds; inside that, clipped to the "
+            "tuple's remaining expiry."
+        ),
+    )],
+) -> dict:
+    """Extend a live claim's lease (`renew`, RDR-206) before it lapses.
 
-    Returns ``{"lease_until": "<ISO-8601>"}`` — the engine's own new
-    ``lease_until``, verbatim, never recomputed locally. Two ceilings
-    apply and they differ: a *lease_s* above the template's
-    ``max_lease_seconds`` is REFUSED (``LeaseTooLong``), while a duration
-    inside that cap is silently clipped to the tuple's own expiry — so
-    the returned instant can be earlier than ``now + lease_s``.
-
-    Renewing does not touch ``attempts``: a renew is the holder keeping
-    the message, not a delivery given back. Refused on a lapsed claim
-    (``ClaimNotFound``) rather than resurrecting it — a holder that
-    missed its window learns it lost the claim.
-
-    Args:
-        claim_id: The claim id returned by ``tuple_in``.
-        claimant: Must match the identity that made the claim.
-        lease_s: New lease length in seconds from now. Refused
-            (``LeaseTooLong``) above the template's ``max_lease_seconds``;
-            inside that, clipped to the tuple's remaining expiry.
+    Returns `{"lease_until": "<ISO-8601>"}`, the engine's own new value —
+    never recomputed locally, and can be earlier than `now + lease_s` when
+    clipped to the tuple's own expiry. Refused on a lapsed claim rather
+    than resurrecting it. Does not touch `attempts` — a renew is the
+    holder keeping the message, not a delivery given back.
     """
     try:
         lease_until = _t2_index_write(
@@ -6317,9 +6554,13 @@ def tuple_renew(claim_id: str, claimant: str, lease_s: int) -> dict:
     structured_output=False,
 )
 def tuple_registry() -> dict:
-    """The boot-loaded tuple-space template set: ``{digest, sources,
-    templates: [...]}`` (RDR-205). ``digest`` changes whenever a
-    template file changes; ``sources`` names the directories loaded."""
+    """The boot-loaded tuple-space template set (RDR-205).
+
+    Use `tuple_list` instead to see which concrete subspaces currently
+    hold rows. Returns `{digest, sources, templates: [...]}`; `digest`
+    changes whenever a template file changes, `sources` names the
+    directories loaded.
+    """
     try:
         with _t2_ctx() as db:
             return db.tuples.registry()
@@ -6332,9 +6573,14 @@ def tuple_registry() -> dict:
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
-def tuple_list(prefix: str = "") -> list[dict]:
-    """Concrete tuple subspaces that exist, optionally filtered by
-    *prefix* (e.g. ``"agents.mailbox."``)."""
+def tuple_list(
+    prefix: Annotated[str, Field(description="Optional subspace-name prefix filter (e.g. \"agents.mailbox.\").")] = "",
+) -> list[dict]:
+    """List concrete tuple subspaces that currently exist, each with its row census.
+
+    Use `tuple_registry` instead to see the template definitions rather
+    than live subspaces. Returns one census row per subspace.
+    """
     try:
         with _t2_ctx() as db:
             rows = db.tuples.subspace_list(prefix or None)
@@ -6351,10 +6597,15 @@ def tuple_list(prefix: str = "") -> list[dict]:
     # return needs no suppression today.
     structured_output=False,
 )
-def tuple_stats(subspace: str) -> dict:
-    """The exact-name census for one subspace: ``{subspace, total,
-    available, claimed, dead, consumed, expired_unpurged,
-    oldest_created_at, newest_created_at}``."""
+def tuple_stats(
+    subspace: Annotated[str, Field(description="The exact subspace name to census.")],
+) -> dict:
+    """Get the row census for one exact tuple subspace.
+
+    Use `tuple_list` instead to enumerate subspaces by prefix. Returns
+    `{subspace, total, available, claimed, dead, consumed,
+    expired_unpurged, oldest_created_at, newest_created_at}`.
+    """
     try:
         with _t2_ctx() as db:
             c = db.tuples.subspace_stats(subspace)
@@ -6538,25 +6789,40 @@ def _pin_default_model(model: "str | None") -> "str | None":
     return STRONG_DEFAULT_ALIAS
 
 
+#: Shared Field descriptions for the operator_* tools (all dispatch to a
+#: `claude -p` subprocess with the same timeout/model contract). Kept as
+#: constants so every operator states the same thing about them, rather
+#: than N independently-drifting copies. HISTORY: the 300s default
+#: replaced 120s, which was hitting false timeouts on real multi-step
+#: analytical input. The `model` override is RDR-196 .p2c (nexus-nyry9.16):
+#: a no-op unless `plan_run`'s NX_OPERATOR_MODEL_TIERING opt-in threads one
+#: in; not consulted on any default path.
+_OPERATOR_TIMEOUT_DESC = (
+    "Seconds before the subprocess is killed. Default 300s handles "
+    "multi-step analytical workloads reliably."
+)
+_OPERATOR_MODEL_DESC = (
+    "Opt-in --model override, pass-through to the dispatch subprocess. "
+    "None (default) is a no-op; only plan_run's tiering opt-in sets it."
+)
+
+
 @mcp.tool(
     title="Extract Structured Fields",
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
 async def operator_extract(
-    inputs: str, fields: str, timeout: float = 300.0, model: str | None = None,
+    inputs: Annotated[str, Field(description="Items to extract from (plain text or a JSON array string).")],
+    fields: Annotated[str, Field(description="Comma-separated field names to extract.")],
+    timeout: Annotated[float, Field(description=_OPERATOR_TIMEOUT_DESC)] = 300.0,
+    model: Annotated[str | None, Field(description=_OPERATOR_MODEL_DESC)] = None,
 ) -> dict:
-    """Extract structured fields from each input item using claude -p.
+    """Extract named structured fields from each input item, via an LLM subprocess.
 
-    Args:
-        inputs: Items to extract from (plain text or JSON array string).
-        fields: Comma-separated field names to extract.
-        timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
-        model: Opt-in ``--model`` override (RDR-196 .p2c, nexus-nyry9.16),
-            pass-through to ``claude_dispatch``. ``None`` (default) is a
-            no-op — argv unchanged. Threaded in by ``plan_run``'s
-            ``NX_OPERATOR_MODEL_TIERING`` opt-in only; not consulted by
-            any default path.
+    Use `operator_filter` instead when you need a keep/reject decision, or
+    `operator_rank`/`operator_compare` for ordering or comparison. Returns
+    one record per input item with the requested fields populated.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -6573,17 +6839,15 @@ async def operator_extract(
     structured_output=False,
 )
 async def operator_rank(
-    items: str, criterion: str, timeout: float = 300.0, model: str | None = None,
+    items: Annotated[str, Field(description="Items to rank (plain text or a JSON array string).")],
+    criterion: Annotated[str, Field(description="Natural-language ranking criterion.")],
+    timeout: Annotated[float, Field(description=_OPERATOR_TIMEOUT_DESC)] = 300.0,
+    model: Annotated[str | None, Field(description=_OPERATOR_MODEL_DESC)] = None,
 ) -> dict:
-    """Rank items by a criterion using claude -p.
+    """Rank items by a natural-language criterion, via an LLM subprocess.
 
-    Args:
-        items: Items to rank (plain text or JSON array string).
-        criterion: Natural-language ranking criterion.
-        timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
-        model: Opt-in ``--model`` override (RDR-196 .p2c, nexus-nyry9.16).
-            ``None`` (default) is a no-op. See ``operator_extract``'s
-            ``model`` docstring for the full contract.
+    Use `operator_filter` instead for a keep/reject decision rather than an
+    ordering. Returns items in ranked order with a rationale.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -6594,52 +6858,33 @@ async def operator_rank(
     )
 
 
+# HISTORY (nexus-km5i): two-sided mode. List/dict values in items/items_a/
+# items_b are JSON-serialized before prompt interpolation so the LLM sees
+# clean JSON instead of Python repr output.
 @mcp.tool(
     title="Compare Items",
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
 async def operator_compare(
-    items: str = "",
-    focus: str = "",
-    timeout: float = 300.0,
+    items: Annotated[str, Field(
+        description="Items to compare, one-sided mode (plain text or a JSON array string); ignored if items_a/items_b are set.",
+    )] = "",
+    focus: Annotated[str, Field(description="Optional aspect to focus the comparison on; scopes both modes.")] = "",
+    timeout: Annotated[float, Field(description=_OPERATOR_TIMEOUT_DESC)] = 300.0,
     *,
-    items_a: str = "",
-    items_b: str = "",
-    label_a: str = "A",
-    label_b: str = "B",
-    model: str | None = None,
+    items_a: Annotated[str, Field(description="Side A items for a two-sided compare.")] = "",
+    items_b: Annotated[str, Field(description="Side B items for a two-sided compare.")] = "",
+    label_a: Annotated[str, Field(description="Human-readable label for side A.")] = "A",
+    label_b: Annotated[str, Field(description="Human-readable label for side B.")] = "B",
+    model: Annotated[str | None, Field(description=_OPERATOR_MODEL_DESC)] = None,
 ) -> dict:
-    """Compare items and return a structured comparison using claude -p.
+    """Compare items within one set, or across two sets, via an LLM subprocess.
 
-    Two modes:
-
-    * **One-sided** (original): pass *items* only. The comparison runs
-      across entries within a single set. Keyword-only ``items_a`` /
-      ``items_b`` may be omitted or empty.
-    * **Two-sided** (nexus-km5i): pass *items_a* and *items_b* together
-      for a cross-set compare. The prompt becomes "Compare set {label_a}
-      vs set {label_b}" and asks for shared axes, divergent decisions,
-      and philosophy differences. Useful for cross-corpus DAGs where a
-      plan needs to align extractions from two different collections
-      under one synthesis. ``focus`` scopes both modes.
-
-    List / dict values in ``items`` / ``items_a`` / ``items_b`` are
-    JSON-serialized before prompt interpolation so the LLM sees clean
-    JSON instead of Python ``repr`` output.
-
-    Args:
-        items: Items to compare (plain text or JSON array string). Used
-            in one-sided mode; ignored when both ``items_a`` and
-            ``items_b`` are provided.
-        focus: Optional aspect to focus the comparison on.
-        timeout: Seconds before the subprocess is killed. Default 300s
-            (5 min). The claude -p substrate handles multi-step
-            analytical workloads; 120s hit false timeouts on real input.
-        items_a: Side A items for two-sided compare.
-        items_b: Side B items for two-sided compare.
-        label_a: Human-readable label for side A (default "A").
-        label_b: Human-readable label for side B (default "B").
+    Use `operator_rank` instead for a single ordered list rather than a
+    free-text comparison. One-sided mode (pass `items` only) compares
+    entries within a set; two-sided mode (pass `items_a` and `items_b`)
+    compares across sets and reports shared axes and divergences.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -6659,17 +6904,16 @@ async def operator_compare(
     structured_output=False,
 )
 async def operator_summarize(
-    content: str,
-    cited: bool = False,
-    timeout: float = 300.0,
-    model: str | None = None,
+    content: Annotated[str, Field(description="Text to summarize.")],
+    cited: Annotated[bool, Field(description="Include a citations list in the output.")] = False,
+    timeout: Annotated[float, Field(description=_OPERATOR_TIMEOUT_DESC)] = 300.0,
+    model: Annotated[str | None, Field(description=_OPERATOR_MODEL_DESC)] = None,
 ) -> dict:
-    """Summarize content using claude -p, optionally with citations.
+    """Summarize content, optionally with citations, via an LLM subprocess.
 
-    Args:
-        content: Text to summarize.
-        cited: If True, include a citations list in the output.
-        timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
+    Use `operator_generate` instead for a templated output form rather than
+    a summary. Returns a summary string, with a citations list when
+    `cited=True`.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -6686,19 +6930,17 @@ async def operator_summarize(
     structured_output=False,
 )
 async def operator_generate(
-    template: str,
-    context: str,
-    cited: bool = False,
-    timeout: float = 300.0,
-    model: str | None = None,
+    template: Annotated[str, Field(description="Named template or description of the desired output form.")],
+    context: Annotated[str, Field(description="Source material or context to generate from.")],
+    cited: Annotated[bool, Field(description="Include a citations list in the output.")] = False,
+    timeout: Annotated[float, Field(description=_OPERATOR_TIMEOUT_DESC)] = 300.0,
+    model: Annotated[str | None, Field(description=_OPERATOR_MODEL_DESC)] = None,
 ) -> dict:
-    """Generate output from a template and context using claude -p.
+    """Generate output in a named template's form from source context, via an LLM subprocess.
 
-    Args:
-        template: Named template or description of desired output form.
-        context: Source material or context to generate from.
-        cited: If True, include a citations list in the output.
-        timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
+    Use `operator_summarize` instead when you want a plain summary rather
+    than a specific output form. Returns the generated text, with a
+    citations list when `cited=True`.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -6709,68 +6951,63 @@ async def operator_generate(
     )
 
 
+# HISTORY (RDR-088 Phase 1, Paper §D.4 Filter operator; RDR-089 follow-up
+# added the SQL fast path). Composable with `operator_extract`,
+# `operator_rank`, and retrieval tools via `plan_run`.
 @mcp.tool(
     title="Filter Items by Criterion",
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
 async def operator_filter(
-    items: str,
-    criterion: str,
-    timeout: float = 300.0,
-    source: str = "auto",
-    aspect_field: str = "",
-    model: str | None = None,
+    items: Annotated[str, Field(
+        description=(
+            "Items to filter (plain text or a JSON array string). Include an "
+            "id field per item when rationale round-tripping matters. The "
+            "SQL fast path additionally needs collection and source_path "
+            "per item."
+        ),
+    )],
+    criterion: Annotated[str, Field(
+        description=(
+            "Natural-language keep condition (e.g. \"peer-reviewed only\", "
+            "\"published after 2023\"). Drives aspect-field inference on the "
+            "SQL path unless aspect_field overrides."
+        ),
+    )],
+    timeout: Annotated[float, Field(description=_OPERATOR_TIMEOUT_DESC + " Applies to the LLM path only.")] = 300.0,
+    source: Annotated[str, Field(
+        description=(
+            "Execution mode. \"auto\" (default) tries the SQL fast path "
+            "first, falls back to the LLM path on prerequisite failure. "
+            "\"aspects\" forces SQL (empty result with rationale on failed "
+            "prerequisites, never a silent LLM fallback). \"llm\" skips SQL."
+        ),
+    )] = "auto",
+    aspect_field: Annotated[str, Field(
+        description=(
+            "Explicit document_aspects column to filter on (e.g. "
+            "\"experimental_datasets\", \"extras.venue\"), disabling "
+            "heuristic inference for this call."
+        ),
+    )] = "",
+    model: Annotated[str | None, Field(description=_OPERATOR_MODEL_DESC + " LLM path only.")] = None,
 ) -> dict:
-    """Filter items by a criterion, returning a subset with rationale.
+    """Filter items by a natural-language criterion, keeping a subset with a per-item rationale.
 
-    RDR-088 Phase 1. Paper §D.4 Filter operator: given a prior-step's
-    output list and a natural-language criterion, return the items that
-    satisfy the criterion plus a per-item reason for the keep / reject
-    decision. Composable with ``operator_extract``, ``operator_rank``,
-    and retrieval tools via ``plan_run``. Distinct from ChromaDB's
-    metadata ``where=`` filter which operates at retrieval time over
-    structured fields; ``operator_filter`` operates over arbitrary
-    prior-step results with natural-language predicates.
+    Use `search_aspect_scoped` instead when the predicate is a selective
+    filter over an ALREADY-INDEXED aspect field at retrieval time; this
+    tool filters arbitrary prior-step results with a natural-language
+    predicate, not a retrieval-time metadata filter.
 
-    Two execution paths (RDR-089 follow-up):
+    Returns the kept items with a keep/reject reason each.
 
-    - **SQL fast path** (default ``source="auto"``): when items carry
-      ``collection`` + ``source_path`` identity AND an aspect column
-      can be resolved (either explicitly via ``aspect_field`` or by
-      heuristic inference from the criterion), filter via a SQL
-      query against ``document_aspects`` in PostgreSQL. Returns in
-      milliseconds.
-    - **LLM path** (``source="llm"`` or fallback): dispatches the
-      criterion to ``claude -p`` per call. The original behavior;
-      kicks in when SQL prerequisites do not hold.
-
-    Args:
-        items: Items to filter (plain text or JSON array string). Each
-            element should carry an ``id`` field when rationale round-
-            tripping matters; downstream plan steps key on ``id``. For
-            the SQL path each item additionally needs ``collection``
-            and ``source_path``.
-        criterion: Natural-language predicate describing the keep
-            condition (e.g. "peer-reviewed only", "published after 2023",
-            "uses TPC-C dataset"). For the SQL path the keyword cues
-            in this string drive aspect-field inference unless
-            ``aspect_field`` overrides.
-        timeout: Seconds before the subprocess is killed. Default 300s
-            (LLM path only; SQL path is bounded by the engine's query time).
-        source: Execution mode. ``"auto"`` (default) tries SQL first,
-            falls back to LLM on prerequisite failure. ``"aspects"``
-            forces SQL — failing prerequisites yield an empty result
-            with rationale rather than a silent LLM dispatch.
-            ``"llm"`` skips SQL entirely.
-        aspect_field: Explicit ``document_aspects`` column when the
-            caller knows which field to filter on (e.g.
-            ``"experimental_datasets"``, ``"extras.venue"``). Disables
-            heuristic inference for this call.
-        model: Opt-in ``--model`` override (RDR-196 .p2c, nexus-nyry9.16),
-            LLM path only — the SQL fast path never dispatches. ``None``
-            (default) is a no-op. See ``operator_extract``'s ``model``
-            docstring for the full contract.
+    Constraints:
+    - The SQL fast path (`source="auto"`/`"aspects"`) requires each item to
+      carry `collection` + `source_path` and a resolvable aspect column;
+      otherwise it falls back to (or, under `"aspects"`, refuses in favor
+      of) the LLM path.
+    - `model` only affects the LLM path — the SQL fast path never dispatches.
     """
     from nexus.operators.aspect_sql import try_filter  # noqa: PLC0415 — rare/branch-local path; SQL fast-path import deferred to call time
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
@@ -6802,37 +7039,30 @@ async def operator_filter(
     structured_output=False,
 )
 async def operator_check(
-    items: str,
-    check_instruction: str,
-    timeout: float = 300.0,
-    model: str | None = None,
+    items: Annotated[str, Field(
+        description=(
+            "Items to check for consistency (plain text or a JSON array "
+            "string). Each entry should carry an id field; evidence entries "
+            "key item_id against these ids."
+        ),
+    )],
+    check_instruction: Annotated[str, Field(
+        description=(
+            "Natural-language claim or consistency question to evaluate "
+            "across the items (e.g. \"do all papers agree on the baseline "
+            "numbers?\")."
+        ),
+    )],
+    timeout: Annotated[float, Field(description=_OPERATOR_TIMEOUT_DESC)] = 300.0,
+    model: Annotated[str | None, Field(description=_OPERATOR_MODEL_DESC)] = None,
 ) -> dict:
-    """Check a claim's consistency across peer items using claude -p.
+    """Check a claim's consistency across N peer items, via an LLM subprocess.
 
-    RDR-088 Phase 2. Paper §D.2 Check operator: validate a claim across
-    N peer items (papers, documents, extracted records) and return a
-    structured boolean plus grounding evidence. Unlike ``operator_compare``
-    which returns free-text, ``operator_check`` returns a composable
-    ``{ok: bool, evidence: list[{item_id, quote, role}]}`` payload so
-    plan steps can branch deterministically.
-
-    Evidence role is one of ``supports``, ``contradicts``, ``neutral``.
-    Populate at least one entry per item unless ``ok=True`` trivially
-    (every item agrees with no nuance to report).
-
-    Args:
-        items: Items to check for consistency (plain text or JSON array
-            string). Each entry should carry an ``id`` field; evidence
-            entries key ``item_id`` against these ids.
-        check_instruction: Natural-language claim or consistency
-            question to evaluate across the items (e.g. "do all papers
-            agree on the baseline numbers?").
-        timeout: Seconds before the subprocess is killed. Default 300s.
-        model: Opt-in ``--model`` override (nexus-3mea3, the 2026-08-21
-            check/verify default flip), pass-through to ``claude_dispatch``
-            exactly as on ``operator_filter``. ``None`` (default) is a
-            no-op — argv unchanged; the plan runner's tiering branch is
-            what supplies the cheap alias on the default path.
+    Use `operator_verify` instead for a single claim against a single
+    evidence source (1-to-1, not 1-to-N). Returns a composable
+    `{ok: bool, evidence: list[{item_id, quote, role}]}` payload, where
+    role is one of "supports", "contradicts", "neutral", so plan steps can
+    branch deterministically on `ok`.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -6849,31 +7079,24 @@ async def operator_check(
     structured_output=False,
 )
 async def operator_verify(
-    claim: str,
-    evidence: str,
-    timeout: float = 300.0,
-    model: str | None = None,
+    claim: Annotated[str, Field(
+        description="A single assertion to verify (e.g. \"the paper reports 2048 GPU-hours for training\").",
+    )],
+    evidence: Annotated[str, Field(
+        description=(
+            "The source material to verify the claim against — a section text, "
+            "extracted passage, or document body, not a collection of items."
+        ),
+    )],
+    timeout: Annotated[float, Field(description=_OPERATOR_TIMEOUT_DESC)] = 300.0,
+    model: Annotated[str | None, Field(description=_OPERATOR_MODEL_DESC)] = None,
 ) -> dict:
-    """Verify a single claim against a single evidence source using claude -p.
+    """Verify a single claim against a single evidence source, via an LLM subprocess.
 
-    RDR-088 Phase 2. Paper §D.2 Verify operator: targeted single-claim
-    variant of ``operator_check``. Returns ``{verified: bool, reason: str,
-    citations: list[str]}`` where citations are span anchors or locators
-    pulled from the evidence text that ground the verdict.
-
-    Distinct from ``operator_check`` by cardinality: verify is 1-claim to
-    1-evidence; check is 1-claim to N-items.
-
-    Args:
-        claim: A single assertion to verify (e.g. "the paper reports 2048
-            GPU-hours for training").
-        evidence: The source material to verify the claim against.
-            Typically a section text, extracted passage, or document
-            body. Not a collection of items.
-        timeout: Seconds before the subprocess is killed. Default 300s.
-        model: Opt-in ``--model`` override (nexus-3mea3, the 2026-08-21
-            check/verify default flip) — same pass-through contract as
-            ``operator_check``'s ``model``.
+    Use `operator_check` instead when the claim must hold across N peer
+    items rather than one evidence source. Returns
+    `{verified: bool, reason: str, citations: list[str]}`, where citations
+    are span anchors or locators from the evidence text.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -6884,77 +7107,65 @@ async def operator_verify(
     )
 
 
+# HISTORY (RDR-093 Phase 1, Paper §D.4 GroupBy operator). Group
+# cardinality on the SQL path: scalar columns produce one group per unique
+# value; JSON-array columns unroll across array values (a paper with two
+# datasets appears in two groups); `extras.<key>` maps via `json_extract`.
+# The inline-items contract is load-bearing for the bundled
+# groupby -> aggregate path (RDR-093 Gate finding C-1): a single
+# `claude -p` dispatch has no host-side retrieval, so aggregate must see
+# resolvable content inside the bundle prompt — reverting to id-references
+# would break it. Cardinality cap `_OPERATOR_MAX_INPUTS=100` (RDR-093 S-1,
+# generalised nexus-3j6b) is enforced by the plan runner's auto-hydration;
+# a fired cap attaches a `{truncated, original_count, kept_count}` block.
 @mcp.tool(
     title="Group Items by Key",
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
 async def operator_groupby(
-    items: str,
-    key: str,
-    timeout: float = 300.0,
-    source: str = "auto",
-    aspect_field: str = "",
-    model: str | None = None,
+    items: Annotated[str, Field(
+        description=(
+            "Items to partition (plain text or a JSON array string). Include "
+            "an id field per item for round-trip composability with "
+            "downstream operators (e.g. aggregate)."
+        ),
+    )],
+    key: Annotated[str, Field(
+        description=(
+            "Natural-language partition expression: a structured field name, "
+            "an inferred property, or a derived attribute. Need not surface "
+            "verbatim in the items."
+        ),
+    )],
+    timeout: Annotated[float, Field(description=_OPERATOR_TIMEOUT_DESC + " Applies to the LLM path only.")] = 300.0,
+    source: Annotated[str, Field(
+        description=(
+            "Execution mode. \"auto\" (default) tries the SQL fast path "
+            "first, falls back to the LLM path on prerequisite failure. "
+            "\"aspects\" forces SQL (a stub group on failed prerequisites, "
+            "never a silent LLM fallback). \"llm\" skips SQL."
+        ),
+    )] = "auto",
+    aspect_field: Annotated[str, Field(
+        description="Explicit document_aspects column override, disabling heuristic inference.",
+    )] = "",
+    model: Annotated[str | None, Field(description=_OPERATOR_MODEL_DESC + " LLM path only.")] = None,
 ) -> dict:
-    """Partition items by a natural-language key.
+    """Partition items into groups by a natural-language key.
 
-    Two execution paths (RDR-089 follow-up): ``source="auto"`` (default)
-    runs the SQL fast path against ``document_aspects`` when items
-    carry ``collection`` + ``source_path`` identity; falls back to
-    ``claude -p`` dispatch otherwise. ``source="aspects"`` forces SQL
-    and surfaces prerequisite failures as a stub group. ``source="llm"``
-    skips SQL. ``aspect_field`` overrides the heuristic inference.
+    Use with `operator_aggregate` to form the canonical
+    `filter -> groupby -> aggregate` analytic pipeline. Returns groups, each
+    carrying its label (`key_value`) and full item dicts inline (not
+    id-only references); items the operator cannot confidently assign land
+    in a `key_value="unassigned"` group.
 
-    Group cardinality on the SQL path: scalar columns produce one
-    group per unique value (high cardinality for free-text fields).
-    JSON-array columns unroll across array values — a paper with
-    two datasets appears in two groups. ``extras.<key>`` form maps
-    via ``json_extract``.
-
-    RDR-093 Phase 1. Paper §D.4 GroupBy operator: take a flat list of
-    items + a partition expression and return a structured grouping.
-    Each group carries its label (``key_value``) and the items that
-    belong to the group, with **items carried inline** (full dicts,
-    not id-only references). Pairs with ``operator_aggregate`` to form
-    the canonical ``filter → groupby → aggregate`` pipeline.
-
-    The inline-items contract is load-bearing for the bundled
-    ``groupby → aggregate`` path: a single ``claude -p`` dispatch has
-    no host-side retrieval, so aggregate must see resolvable content
-    inside the bundle prompt. Reverting to id-references would break
-    the bundle path. (RDR-093 Gate finding C-1.)
-
-    Items the operator cannot confidently assign land in a group
-    with ``key_value="unassigned"``. Plan authors can inspect the
-    unassigned group's size as a quality signal.
-
-    Cardinality cap: ``_OPERATOR_MAX_INPUTS=100`` enforced by the
-    plan runner's auto-hydration. When the cap fires the runner
-    attaches a ``{truncated, original_count, kept_count}`` block to
-    this operator's return envelope so callers see the truncation
-    rather than silently losing items. Originally scoped to
-    ``operator_groupby`` in RDR-093 S-1; generalised to every
-    operator that runs through the ids-branch auto-hydration in
-    nexus-3j6b.
-
-    Args:
-        items: Items to partition (plain text or JSON array string).
-            Each element should carry an ``id`` field for round-trip
-            composability; downstream operators (e.g. ``aggregate``)
-            key on ``id``.
-        key: Natural-language partition expression. May name a
-            structured field ("publication_year", "method family"),
-            an inferred property, or a derived attribute. The
-            operator does NOT require the key to surface verbatim
-            in the items; inference is fine.
-        timeout: Seconds before the subprocess is killed. Default 300s.
-        source: ``"auto"`` (default) | ``"aspects"`` | ``"llm"``.
-        aspect_field: explicit ``document_aspects`` column override.
-        model: Opt-in ``--model`` override (RDR-196 .p2c, nexus-nyry9.16),
-            LLM path only — the SQL fast path never dispatches. ``None``
-            (default) is a no-op. See ``operator_extract``'s ``model``
-            docstring for the full contract.
+    Constraints:
+    - The SQL fast path (`source="auto"`/`"aspects"`) requires each item to
+      carry `collection` + `source_path` and a resolvable aspect column;
+      otherwise it falls back to (or, under `"aspects"`, refuses in favor
+      of) the LLM path.
+    - `model` only affects the LLM path.
     """
     from nexus.operators.aspect_sql import try_groupby  # noqa: PLC0415 — rare/branch-local path; SQL fast-path import deferred to call time
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
@@ -6980,62 +7191,58 @@ async def operator_groupby(
     )
 
 
+# HISTORY (RDR-093 Phase 2, Paper §D.4 Aggregate operator; RDR-089
+# follow-up added the SQL fast path). Items arrive pre-hydrated inside
+# each group's `items` array per `operator_groupby`'s C-1 inline-items
+# contract — no runner-side nested-id hydration is required. Group
+# isolation (the prompt instructs the model to summarise USING ONLY the
+# items in each group) was verified 0% cross-group leakage on adversarial
+# fixtures with overlapping vocabulary (Spike B, bead nexus-rojs).
 @mcp.tool(
     title="Aggregate Grouped Items",
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
 async def operator_aggregate(
-    groups: str,
-    reducer: str,
-    timeout: float = 300.0,
-    source: str = "auto",
-    aspect_field: str = "",
-    model: str | None = None,
+    groups: Annotated[str, Field(
+        description=(
+            "A JSON-serialized list[{key_value, items: list[dict]}] from a "
+            "prior groupby step. Items are dicts (inline), not id references."
+        ),
+    )],
+    reducer: Annotated[str, Field(
+        description=(
+            "Natural-language reduction instruction (e.g. \"winning baseline "
+            "by reported metric\", \"most-cited method\", \"earliest "
+            "publication\")."
+        ),
+    )],
+    timeout: Annotated[float, Field(description=_OPERATOR_TIMEOUT_DESC + " Applies to the LLM path only.")] = 300.0,
+    source: Annotated[str, Field(
+        description=(
+            "Execution mode. \"auto\" (default) recognizes a small SQL "
+            "reducer vocabulary (count, count distinct, avg/min/max "
+            "confidence) and falls back to the LLM path otherwise. "
+            "\"aspects\" forces SQL and stubs unrecognized reducers. "
+            "\"llm\" skips SQL."
+        ),
+    )] = "auto",
+    aspect_field: Annotated[str, Field(
+        description="Explicit document_aspects column override; currently unused by the aggregate fast path.",
+    )] = "",
+    model: Annotated[str | None, Field(description=_OPERATOR_MODEL_DESC + " LLM path only.")] = None,
 ) -> dict:
-    """Reduce each group of items to a per-group summary.
+    """Reduce each group from `operator_groupby` to a per-group summary.
 
-    Two execution paths (RDR-089 follow-up). The SQL fast path
-    (default ``source="auto"``) recognises a small reducer
-    vocabulary backed by SQL aggregates: ``count``, ``count
-    distinct``, and ``avg`` / ``min`` / ``max confidence``. The
-    ``avg/min/max confidence`` reducers query
-    ``document_aspects.confidence`` per group. Anything outside the
-    recognised vocabulary falls back to ``claude -p`` dispatch
-    automatically. ``source="aspects"`` forces SQL and stubs
-    out unrecognised reducers; ``source="llm"`` skips SQL entirely.
+    Pairs with `operator_groupby` to form the canonical
+    `filter -> groupby -> aggregate` analytic pipeline. Returns one summary
+    per group with the group's `key_value` preserved verbatim.
 
-    RDR-093 Phase 2. Paper §D.4 Aggregate operator: take a keyed
-    grouping (typically from a prior ``operator_groupby`` step) plus a
-    natural-language reducer instruction, return one summary per
-    group with the group's ``key_value`` preserved verbatim. Pairs
-    with ``operator_groupby`` to form the canonical
-    ``filter -> groupby -> aggregate`` analytic pipeline.
-
-    Items arrive pre-hydrated inside each group's ``items`` array per
-    ``operator_groupby``'s C-1 inline-items contract. No runner-side
-    nested-id hydration is required; both bundled and isolated paths
-    see the same shape.
-
-    Group isolation: the prompt explicitly instructs the model to
-    summarise USING ONLY the items in each group. Spike B (bead
-    nexus-rojs) verified this framing produces 0% cross-group
-    leakage even on adversarial fixtures with vocabulary heavily
-    overlapping across groups.
-
-    Args:
-        groups: A JSON-serialised ``list[{key_value, items: list[dict]}]``
-            from a prior groupby step. Items are dicts (inline), not
-            id references.
-        reducer: Natural-language reduction instruction
-            (e.g. "winning baseline by reported metric",
-            "most-cited method", "earliest publication").
-        timeout: Seconds before the subprocess is killed. Default 300s.
-        source: ``"auto"`` (default) | ``"aspects"`` | ``"llm"``.
-        aspect_field: explicit ``document_aspects`` column override.
-            Currently unused by the aggregate fast path (the
-            recognised reducer vocabulary already disambiguates the
-            target column); reserved for forward extensions.
+    Constraints:
+    - The SQL fast path (`source="auto"`) recognizes only a small reducer
+      vocabulary (count, count distinct, avg/min/max confidence); anything
+      else falls back to the LLM path.
+    - `model` only affects the LLM path.
     """
     from nexus.operators.aspect_sql import try_aggregate  # noqa: PLC0415 — rare/branch-local path; SQL fast-path import deferred to call time
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
@@ -7073,34 +7280,35 @@ _TRAVERSE_MAX_DEPTH: int = 3
     structured_output=False,
 )
 def traverse(
-    seeds: list[str] | str,
-    link_types: list[str] | None = None,
-    purpose: str = "",
-    depth: int = 1,
-    direction: str = "both",
+    seeds: Annotated[list[str] | str, Field(
+        description="One or more tumbler strings (e.g. [\"1.1\", \"1.2\"]), or a single string.",
+    )],
+    link_types: Annotated[list[str] | None, Field(
+        description="Explicit catalog link types to follow (\"implements\", \"cites\", ...). Mutually exclusive with purpose.",
+    )] = None,
+    purpose: Annotated[str, Field(
+        description="Named alias for a link-type set (e.g. \"find-implementations\"). Mutually exclusive with link_types.",
+    )] = "",
+    depth: Annotated[int, Field(description="BFS depth, capped at 3.")] = 1,
+    direction: Annotated[str, Field(description="Traversal direction: \"out\", \"in\", or \"both\".")] = "both",
 ) -> dict:
-    """Walk the catalog link graph from seed tumblers. RDR-078 P3 (SC-4/SC-5).
+    """Walk the catalog link graph from seed tumblers, unranked (RDR-078 P3).
 
-    Accepts either explicit ``link_types`` **or** a ``purpose`` name — never
-    both (SC-16). Returns the standard retrieval step-output contract so
-    downstream plan steps can reference ``$stepN.tumblers``,
-    ``$stepN.collections``, or ``$stepN.ids``.
+    Use `search_graph_hop` instead when the reachable set should also be
+    vector-ranked in one call. Accepts either `link_types` or `purpose`,
+    never both.
 
-    Args:
-        seeds: One or more tumbler strings (e.g. ``["1.1", "1.2"]``).
-               Also accepts a single string for convenience.
-        link_types: Explicit catalog link types to follow
-                    (``"implements"``, ``"cites"``, …).
-                    Mutually exclusive with ``purpose``.
-        purpose: Named alias for a link-type set (e.g.
-                 ``"find-implementations"``).  Resolved via
-                 ``nexus.plans.purposes.resolve_purpose``.
-                 Mutually exclusive with ``link_types``.
-        depth: BFS depth. Capped at 3 (SC-4).
-        direction: ``"out"`` | ``"in"`` | ``"both"`` (default).
+    Returns `{"tumblers": [...], "ids": [], "collections": [...]}` for
+    `$stepN.tumblers`/`$stepN.collections` references, or the same shape
+    plus a `"warning"` key
+    (`{"tumblers": [...], "ids": [], "collections": [...], "warning": "..."}`)
+    when `purpose` does not resolve to a known name.
 
-    Returns:
-        ``{"tumblers": [...], "ids": [], "collections": [...]}``
+    Constraints:
+    - `ids` is ALWAYS an empty list — this tool returns document tumblers,
+      not chunk ids; do not feed `$stepN.ids` from this tool into
+      id-keyed hydration. Use `$stepN.tumblers` instead.
+    - `link_types` and `purpose` are mutually exclusive.
     """
     from nexus.plans.purposes import resolve_purpose  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
@@ -8765,6 +8973,57 @@ NX_ANSWER_CONTINUATION_MARKER_PREFIX: str = "[continuation handed off"
 NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX: str = "[continuation completed"
 
 
+# HISTORY (RDR-080 P1). Internal flow: (1) plan-match gate — on a hit,
+# execute the matched plan; on a miss, dispatch an inline LLM planner to
+# decompose the question and execute the resulting plan; (2) single-step
+# guard — a matched plan with exactly one `query` step reroutes to
+# `query()` directly; (3) execute via `plan_run`; (4) record run metrics
+# to T2 `nx_answer_runs`.
+#
+# Plan choice (RDR-196 Phase 3, nexus-nyry9.20): on every plan-match hit,
+# among the contiguous prefix of candidates within
+# PLAN_CHOICE_CONFIDENCE_BAND of the best raw confidence, the one with the
+# lowest PREDICTED cost from its step shape is chosen (ties break by
+# matcher position); outside that prefix, confidence wins regardless of
+# cost. Logged as an `nx_answer_plan_choice` structlog event and in the
+# structured envelope's `plan_choice` field.
+#
+# Latency (re-measured nexus-h33x8.6 DO 1-3 from the nx_answer_runs T2
+# table, executed plans only, n=142; corrects an earlier docstring that
+# overstated the fast end ~45x by counting zero-step error rows as
+# successes): p50 80.1s, p95 217.1s, p99 316.7s, mean 97.7s; 0.7% finish
+# under 5s, 88.7% take >= 30s, 33.8% take >= 2min. Each operator step spawns a `claude -p` subprocess with a
+# 300-second timeout and an ~11s substrate bootstrap floor; a plan-match
+# miss adds an inline-planner round trip (also up to 300s) on top. The
+# single-step `query()` fast path (mean ~2s) fires only for a matched plan
+# that is exactly one `tool: query` step. `plan_run` emits per-step
+# `nx_answer_step_start`/`nx_answer_step_complete` structlog events so a
+# caller tailing the MCP log sees progress in real time.
+#
+# budget_usd enforcement (RDR-196 .p3c, gated on
+# `budget_default.BUDGET_ENFORCEMENT_ENABLED`): a non-positive value is a
+# loud bounds error before any dispatch (0 does not mean unlimited). Once
+# Step 1 resolves a plan, its predicted cost is compared against the
+# REMAINING budget as a WARN-and-run pre-flight check, not a refusal (Sam's
+# round-2 decision, docs/rdr/rdr-196-cost-aware-nx-answer.md § Phase 3) —
+# the step-shape cost estimate has no real per-plan discriminating power in
+# the live population, so exceeding it warns rather than blocks. The REAL
+# enforcement is a mid-run stop-line: `plan_run` sums MEASURED per-step
+# costs and stops the segment AFTER the one that would exceed the cap, so
+# the run total can overshoot `budget_usd` by up to that final segment's
+# cost — documented contract, not a bug. A tripped budget (either axis)
+# returns the same `[budget exhausted ...]` marker, `(cost)` or `(time)`
+# naming which axis.
+#
+# budget_seconds (nexus-h33x8.6 a4) bounds ONLY the plan-execution phase
+# (Step 4), measured from this call's start. The plan-miss inline-planner
+# phase is checked immediately after Step 1 (nexus-nyry9.2 fix — it used to
+# dispatch before any deadline check and pay its cost regardless of
+# budget); an already-exhausted budget at that point returns the
+# exhaustion marker at step 0. There is no "retrieval-only" plan exemption
+# from the deadline (nexus-nyry9.5 deleted it — no shipped builtin plan
+# was ever found to route into that bucket): every non-single_query plan
+# is budget-bound at Step 4.
 @mcp.tool(
     title="Multi-Step Knowledge Answer",
     annotations={"readOnlyHint": False, "destructiveHint": False},
@@ -8772,269 +9031,93 @@ NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX: str = "[continuation completed"
 )
 @degrade_loud_when_migrating
 async def nx_answer(
-    question: str,
-    scope: str = "",
-    context: str = "",
-    max_steps: int = 6,
-    budget_usd: float | None = None,
-    budget_seconds: float | None = _NX_ANSWER_DEFAULT_BUDGET_SECONDS,
-    trace: bool = True,
-    dimensions: dict[str, Any] | None = None,
-    structured: bool = False,
-    min_confidence: float | None = None,
-    force_dynamic: bool = False,
-    bindings: dict[str, Any] | None = None,
-    continuation: bool | None = None,
+    question: Annotated[str, Field(description="Natural-language question to answer.")],
+    scope: Annotated[str, Field(
+        description=(
+            "Catalog subtree or corpus filter (e.g. \"1.2\" or \"knowledge\"). "
+            "Honoured on every path, including the single-step query() fast path."
+        ),
+    )] = "",
+    context: Annotated[str, Field(description="Supplementary caller-supplied context for the plan matcher.")] = "",
+    max_steps: Annotated[int, Field(description="Cap on plan DAG size, passed to the inline planner on a plan-match miss.")] = 6,
+    budget_usd: Annotated[float | None, Field(
+        description=(
+            "Soft per-call cost guidance in USD, not a hard limit — an "
+            "over-estimate warns rather than refuses. None (default) uses "
+            "the derived default budget. A non-positive value is refused "
+            "with an error before any dispatch."
+        ),
+    )] = None,
+    budget_seconds: Annotated[float | None, Field(
+        description=(
+            "Optional hard wall-clock budget for the plan-execution phase "
+            "only, measured from this call's start. None (default) enforces "
+            "no budget. When it trips, retrieved results plus any partial "
+            "operator text are returned instead of blocking further."
+        ),
+    )] = _NX_ANSWER_DEFAULT_BUDGET_SECONDS,
+    trace: Annotated[bool, Field(description="When False, redacts the question and final_text in the run log.")] = True,
+    dimensions: Annotated[dict[str, Any] | None, Field(
+        description=(
+            "Dimensional filter for the plan-match gate, e.g. "
+            "{\"verb\": \"research\"}. Unset considers every active plan."
+        ),
+    )] = None,
+    structured: Annotated[bool, Field(
+        description=(
+            "Return an envelope dict ({final_text, chunks, plan_id, "
+            "step_count, answer_shape, ...}) instead of a bare string."
+        ),
+    )] = False,
+    min_confidence: Annotated[float | None, Field(
+        description=(
+            "Per-call plan-match confidence floor override, in [0.0, 1.0]. "
+            "None (default) uses the global floor."
+        ),
+    )] = None,
+    force_dynamic: Annotated[bool, Field(
+        description="Skip the plan-match gate entirely and route directly to the inline LLM planner.",
+    )] = False,
+    bindings: Annotated[dict[str, Any] | None, Field(
+        description=(
+            "Caller-supplied plan bindings (e.g. {\"content_type\": \"rdr\"}) "
+            "that reach the plan runner and are advertised to the matcher as "
+            "available, making type-scoped builtin plans reachable."
+        ),
+    )] = None,
+    continuation: Annotated[bool | None, Field(
+        description=(
+            "None (default) uses the policy default (currently off). False "
+            "forces the full headless run. True requests continuation mode: "
+            "live for an eligible plan cut, in which case this call stops "
+            "before the terminal suffix and the caller must complete the "
+            "reduction and report it via nx_answer_report."
+        ),
+    )] = None,
 ) -> "str | dict":
-    """Answer a knowledge question using plan-match-first retrieval. RDR-080 P1.
+    """Answer a knowledge question via plan-match-first, multi-step retrieval.
 
-    Internal flow:
+    Use `search`/`query` directly instead for a single-step, already-known-
+    shape lookup — this tool reduces from many documents and is NOT
+    sub-second (p50 ~80s, p95 ~217s; see the module comment above this
+    tool for the measured distribution). Matches the question to a saved
+    retrieval plan (or grows one via an inline planner on a miss), executes
+    it, and returns the synthesized answer.
 
-    1. **Plan-match gate**: call ``plan_match(intent=question, dimensions=…)``.
-       On hit (confidence >= 0.40 or FTS5 sentinel), execute the matched
-       plan.  On miss, dispatch an inline LLM planner via ``claude -p``
-       to decompose the question and execute the resulting plan.
-    2. **Single-step guard**: if the matched plan has exactly 1 ``query``
-       step, reroute to ``query()`` directly.
-    3. **Execute plan**: run via ``plan_run``.
-    4. **Record**: write run metrics to T2 ``nx_answer_runs``.
+    Returns the final step's output as a string, or a structured envelope
+    (`{final_text, chunks, plan_id, step_count, answer_shape, ...}`) when
+    `structured=True`.
 
-    **Plan choice (RDR-196 Phase 3 Step 1, nexus-nyry9.20).** On EVERY
-    plan-match hit (not only when more than one candidate is returned —
-    ``candidate_count == 1`` is the common case today, per nexus-nyry9.3's
-    census), the top-confidence match is no longer picked unconditionally:
-    among the CONTIGUOUS PREFIX of ``matches`` (matcher order) within
-    ``PLAN_CHOICE_CONFIDENCE_BAND`` (``nexus.plans.cost_estimate``, a
-    named constant) of the best raw confidence — the prefix stops
-    permanently at the first out-of-band candidate, so cost can never
-    reach past a relevance demotion the matcher's own RDR-091 scope-fit
-    re-ranking already made — the one with the lowest PREDICTED cost from
-    its step shape (not a recorded per-plan median) is chosen; ties break
-    by earlier matcher position. Outside the prefix, confidence wins
-    regardless of cost. Logged on every hit as a ``nx_answer_plan_choice``
-    structlog event (candidate count, candidates, estimates, the choice)
-    and in the ``structured=True`` envelope's ``plan_choice`` field. See
-    docs/cli-reference.md's ``nx answer-runs`` § "Predicted vs actual
-    cost" for the read-time estimate-vs-actual column and what is and is
-    not yet persisted.
-
-    **Latency.** This is NOT a sub-second call in the general case, and
-    the figures below correct an earlier docstring version that
-    overstated the fast end by ~45x (it counted degenerate zero-step
-    error rows, p50 0.7s, as successes). Re-measured directly from the
-    ``nx_answer_runs`` T2 table (nexus-h33x8.6 DO 1-3, T2 memory
-    ``nexus/nx-answer-capability-analysis-2026-08-19``), executed plans
-    only (n=142, excludes the zero-step error rows): p50 80.1s, p95
-    217.1s, p99 316.7s, mean 97.7s; only 0.7% finish under 5s, 88.7%
-    take >= 30s, 33.8% take >= 2min. Each operator step (extract, rank,
-    summarize, generate, …) spawns a ``claude -p`` subprocess with a
-    300-second timeout (a single round trip has an ~11s floor
-    independent of workload — this is the substrate's own session
-    bootstrap cost, not reducible without leaving it). The plan-miss
-    path adds an inline-planner subprocess (also up to 300s) on top —
-    the miss tax is ~53s at p50 (plan-hit p50 64.1s vs plan-miss p50
-    117.2s). The documented single-step fast path (``query()`` alone,
-    mean ~2s) fires only when the matched plan is a single ``tool:
-    query`` step — see the seeded ``document-discovery`` /
-    ``corpus-coverage-check`` builtin templates (nexus-h33x8.6 a1) for
-    the question shapes that route onto it; a composed/operator plan
-    pays the durations above regardless of question phrasing.
-    ``plan_run`` emits per-step structured ``nx_answer_step_start`` /
-    ``nx_answer_step_complete`` events to ``structlog`` (nexus-0qi9) so
-    callers tailing ``~/.config/nexus/logs/mcp.log`` can see progress in
-    real time.
-
-    Args:
-        question: Natural-language question to answer.
-        scope: Catalog subtree or corpus filter (e.g. ``"1.2"`` or ``"knowledge"``).
-            Honoured on every path, the single-step ``query()`` fast path
-            included (it is passed as that call's ``subtree``, GH #1523).
-        context: Supplementary caller-supplied context for the plan matcher.
-        max_steps: Cap on plan DAG size (passed to inline planner on miss).
-        budget_usd: Soft per-invocation cost GUIDANCE in USD, not a hard
-            limit -- an over-estimate warns rather than refuses, and the
-            mid-run stop can overshoot by up to one segment's cost (see
-            below). ``None`` (the default)
-            means "use the derived default",
-            :data:`nexus.plans.budget_default.DERIVED_BUDGET_USD` --
-            1.0530 since 2026-08-21 (RDR-196 .p3a: p90 of n=30 config-conformant
-            runs, ``nx answer-runs --derive-budget``; provenance on the
-            constant). The former ``0.25`` literal predated any
-            measurement and is gone (RDR-196 § Risks). ENFORCED as of
-            RDR-196 .p3c (nexus-nyry9.21) whenever
-            :data:`nexus.plans.budget_default.BUDGET_ENFORCEMENT_ENABLED`
-            is True (the single gate for everything below -- setting it
-            back False is a true rollback):
-
-            - A non-positive ``budget_usd`` (``<= 0``) is a loud bounds
-              error, returned immediately, before any dispatch. ``0``
-              does NOT mean "unlimited".
-            - PRE-FLIGHT PRICE CHECK, a WARNING not a refusal (round-2
-              deviation from the accepted RDR text, Sam's decision —
-              see ``docs/rdr/rdr-196-cost-aware-nx-answer.md`` § Phase 3
-              for the dated note): once Step 1 resolves a plan (matched
-              or inline-planner-grown), its predicted cost
-              (:func:`nexus.plans.cost_estimate.estimate_plan_cost`,
-              the SAME step-shape estimate the .p3b plan-choice logic
-              already computes) is compared against the REMAINING
-              budget (the cap minus whatever the inline planner's own
-              dispatch already spent — the .r2 gap, closed on this
-              axis by nexus-nyry9.21 D5). This estimate has NO per-plan
-              discriminating power in the live population (a same-day
-              20-run measurement found every live plan predicting the
-              IDENTICAL bundle-dominant ceiling, median actual/predicted
-              ratio 0.805, worst overestimate 11.2x) — so exceeding the
-              remaining budget now WARNS and RUNS rather than refusing,
-              naming the estimate, the remaining budget, the full cap,
-              and any already-spent amount. A plan with NO estimate (an
-              operator this table has never priced) gets the same
-              treatment — it always ran, never refused on that basis
-              alone. Both cases surface via the SAME single warning
-              emitter: a leading warning line (text mode) / a
-              ``budget_warnings`` field (structured mode).
-              nexus-nyry9.21 round 2 also added an ``"unknown-cost"``
-              warning kind through the identical emitter: when one or
-              more executed steps report no ``cost_usd``, the mid-run
-              running sum could not include them and the check below
-              may have been blind for part of the run — surfaced once
-              per run, never silently.
-            - MID-RUN STOP-LINE, not a hard ceiling, and the REAL
-              enforcement (it sums MEASURED ``StepRecord`` costs, not a
-              step-shape guess): the remaining
-              budget is threaded into ``plan_run`` as
-              ``budget_usd_remaining``, checked BEFORE dispatching each
-              segment against the sum of already-completed steps'
-              known cost (see ``plan_run``'s own docstring for why a
-              dispatch's real cost can only ever be known AFTER it
-              returns). The segment that pushes the running sum over
-              the cap still finishes; only the segment AFTER it is
-              stopped. The run total can therefore end up above
-              ``budget_usd`` by up to that final segment's own cost —
-              this is the documented contract, not a bug. When it
-              trips, ``nx_answer`` returns the SAME
-              ``[budget exhausted ...]`` marker ``budget_seconds``
-              already produces (see below), with ``(cost)`` in place of
-              ``(time)`` — one emitter, parameterized by which budget
-              axis tripped, never a second marker shape.
-        budget_seconds: nexus-h33x8.6 a4 — an OPTIONAL hard wall-clock
-            budget for the plan-EXECUTION phase ONLY (Step 4 below,
-            the ``plan_run`` call), measured from this call's own
-            start. ``None`` (the default,
-            :data:`_NX_ANSWER_DEFAULT_BUDGET_SECONDS`) enforces no
-            budget — identical to pre-a4 behavior. When set and the
-            budget runs out (or an operator step's own dispatch raises
-            ``OperatorTimeoutError`` while the budget is active), the
-            retrieved results plus any reconstructed partial operator
-            text are returned instead of raising or blocking further —
-            "here are the retrieved chunks; synthesis skipped, budget
-            exceeded". Marked with a leading ``[budget exhausted (time)
-            after step N of M — partial answer]`` line (text mode) or a
-            top-level ``budget_exhausted_at_step`` field (structured
-            mode). RDR-196 .p3c (nexus-nyry9.21): the USD budget
-            (``budget_usd`` above) reuses this exact marker with
-            ``(cost)`` in place of ``(time)`` — one emitter, never a
-            second shape.
-
-            **CORRECTED (nexus-nyry9.2, RDR-196 .r2):** the plan-MISS
-            inline-planner phase (``_nx_answer_plan_miss``, its own
-            claude -p round trip, up to 300s) used to be dispatched
-            BEFORE ``deadline`` was ever consulted and paid its cost in
-            full regardless of budget. It is now checked immediately
-            after Step 1 (the plan-match gate, and on a miss, the
-            inline planner) — a budget already exhausted at that point
-            returns the exhaustion marker with
-            :data:`_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN` (step 0,
-            meaning zero plan steps ran) instead of proceeding to
-            Step 2 or Step 4. This also closes a second, previously
-            undocumented gap: the single-step fast path (Step 2) had no
-            deadline check of its own before this fix.
-
-            **DELETED (nexus-nyry9.5, RDR-196 .r5 review-fix, T2
-            review-nexus-nyry9.5):** a prior version of this docstring
-            named a second, INTENTIONAL boundary — a "retrieval-only"
-            matched plan (no operator steps) was exempt from the
-            deadline entirely. That bucket was never demonstrated to
-            route any real matched plan (a census of all 17 shipped
-            builtin plans found zero; see
-            ``_nx_answer_classify_plan``'s own docstring) and has been
-            deleted along with the exemption. There is no longer any
-            boundary where ``budget_seconds`` fails to apply to plan
-            execution once Step 1 has produced a match — every
-            non-``single_query`` plan is budget-bound at Step 4 like
-            any other.
-        trace: When False, redacts question and final_text in the run log.
-        dimensions: Dimensional filter for the plan-match gate.  Pass
-            ``{"verb": "research"}`` (etc.) so verb skills narrow the
-            match to templates of the appropriate verb.  Unset means
-            the matcher considers every active plan.
-        structured: RDR-086 Phase 3.3 opt-in. When True, returns an
-            envelope dict ``{final_text, chunks, plan_id, step_count}``
-            instead of a bare string. Each entry in ``chunks`` carries
-            ``id``, ``chash``, ``collection`` (and ``distance``, ``text``
-            when available) so callers can build ``chash:<hex>`` citations
-            without a second fetch. The single-step guard path produces
-            the same envelope shape — the guard logic itself is unchanged.
-            On pure-generate plans or retrieval misses, ``chunks`` is ``[]``.
-            ``truncated_chars`` (nexus-2xjge): ``None`` unless ``final_text``
-            was capped (a trailing ``[nx_answer: result capped at ...]``
-            marker is appended in text mode too), in which case it is the
-            count of characters dropped. ``answer_shape`` (nexus-90gyo):
-            ``"answered"`` when ``final_text`` is a synthesized answer,
-            else one of ``hydration_dump`` / ``extractions_only`` /
-            ``ranking_only`` / ``operator_payload`` / ``retrieval_only`` / ``listing`` / ``empty``
-            — a non-answer, in which case ``final_text`` is a one-line
-            ``[non-answer: <shape>]`` notice (the raw payload is never
-            echoed as prose), the run is recorded as a failure, and no
-            plan is grown from it (nexus-zy0kj). ``None`` on paths that
-            never classified (errors, misses, the single-step fast path,
-            a continuation handoff).
-        min_confidence: Per-call plan-match floor override (RDR-092 Phase
-            2 Option A). ``None`` (default) uses the global
-            :data:`_PLAN_MATCH_MIN_CONFIDENCE` (0.40, per RDR-079 P5).
-            Verb skills that have validated a stricter precision-first
-            floor (0.50 per R9 against a 5+5 probe corpus) pin the
-            tighter value per-call without moving the global knob; the
-            global default waits on Phase 5's larger-corpus
-            validation. Must be in ``[0.0, 1.0]`` when supplied.
-        bindings: Caller-supplied plan bindings, e.g.
-            ``{"content_type": "rdr"}``. A sibling of ``dimensions`` /
-            ``scope``, not a new verb. Two effects: the value reaches the
-            plan runner, AND the matcher is told the binding is available
-            so it will offer plans that require it. Without this,
-            type-scoped builtins (``type-scoped-search`` needs
-            ``content_type``, ``find-by-author`` needs ``author``) are
-            unreachable, because nx_answer will not infer a typed value
-            from the question text (nexus-0yrjr). Values are NOT
-            validated: the catalog's ``content_type`` has no closed
-            domain (``code``, ``prose``, ``rdr``, ``paper``,
-            ``knowledge``, ``blog_post``, ... and it grows), so
-            rejecting against a fixed set would refuse legitimate values.
-        force_dynamic: RDR-090 P1.1 (nexus-dslg). When True, skip the
-            plan-match gate entirely and route directly to the inline
-            LLM planner / dynamic-generation path. Default False
-            preserves the plan-match-first flow. Used by the
-            AgenticScholar bench harness path C to isolate dynamic
-            generation from the matched-plan path on collection-scoped
-            questions where ``scope`` would otherwise act as a forced-
-            miss proxy.
-        continuation: RDR-200 Phase 1a (nexus-4e75w.3). ``None`` (the
-            default) means the policy default — OFF for Phase 1, so
-            omitting this parameter is byte-identical to today.
-            ``False`` explicitly forces the headless ``claude -p``
-            reduction path (the reference implementation). ``True``
-            requests continuation mode; in Phase 1a this classifies the
-            plan's continuation cut (see
-            :mod:`nexus.plans.continuation`) and logs the decision via
-            structlog, but the continuation envelope itself is not yet
-            built — every call still falls through to the headless path
-            unchanged, so ``True`` is currently also byte-identical to
-            ``None``/``False`` in this call's return value. The envelope
-            (nexus-4e75w.4) and handoff telemetry (nexus-4e75w.5) are
-            what make ``True`` behave differently.
-
-    Returns:
-        The final step's output — a string by default, or the envelope
-        dict described above when ``structured=True``.
+    Constraints:
+    - `budget_usd` is a soft cost guide (warns, does not hard-block, and
+      can overshoot); `budget_seconds` is a hard wall-clock cap on plan
+      execution only.
+    - `continuation=True` is live for eligible plan cuts and requires a
+      matching `nx_answer_report` call from the caller afterward.
+    - A `structured=True` `answer_shape` other than "answered" means
+      `final_text` is a one-line notice, not the raw payload.
+    - In text mode a degraded answer starts with `[budget exhausted ...]`
+      (a cost or time budget stopped the plan) or `[non-answer: <shape>]`.
     """
     import time  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
     import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
@@ -11008,51 +11091,38 @@ async def nx_answer(
     )
 
 
+# HISTORY (RDR-200). The nx_answer_runs log is append-only by doctrine —
+# this writes a SECOND row carrying the same continuation_id in its own
+# marker line, never touches the original handoff row; the two are paired
+# at READ time by matching the id embedded in both markers' final_text and
+# excluded from the run split entirely (never double-counts a run). Writes
+# through the same telemetry route nx_answer itself uses — no schema change.
 @mcp.tool(
     title="Report Continuation Completion",
     annotations={"readOnlyHint": False, "destructiveHint": False},
     structured_output=False,
 )
 async def nx_answer_report(
-    continuation_id: str,
-    ok: bool,
-    final_text_excerpt: str = "",
+    continuation_id: Annotated[str, Field(
+        description=(
+            "The id from the continuation.continuation_id field of the "
+            "envelope nx_answer returned (or, in text mode, the id named in "
+            "the rendered instruction's final line). Required — a report "
+            "with no id cannot be paired."
+        ),
+    )],
+    ok: Annotated[bool, Field(description="Whether the reduction completed successfully.")],
+    final_text_excerpt: Annotated[str, Field(
+        description="Optional short excerpt of the caller's reduction output, for diagnostic visibility; capped to 500 chars.",
+    )] = "",
 ) -> dict:
-    """Report that an ``nx_answer`` continuation handoff (RDR-200) was
-    completed by the caller.
+    """Report that an `nx_answer` continuation handoff was completed by the caller.
 
-    The handoff row (written by ``nx_answer`` itself, BEFORE the
-    envelope ever returned — RDR-200 R2) already recorded that a
-    reduction was handed off. This tool records the OTHER half: that the
-    calling model actually executed the reduction, so ``nx answer-runs``
-    can report an honest **unreported rate** rather than treating every
-    un-paired handoff as silent failure by default.
-
-    **Completion reporting is a second append, not a mutation** (RDR-200
-    §Telemetry). The ``nx_answer_runs`` log is append-only by doctrine —
-    this writes a SECOND row carrying the SAME ``continuation_id`` in its
-    own marker line (``NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX``),
-    never touches the original handoff row. ``commands/answer_runs.py``
-    pairs the two at READ time by matching the id embedded in both
-    markers' ``final_text``. This report row is classified as a REPORT
-    EVENT, not a run — excluded from the four-way run split entirely, so
-    it can never double-count a run or land in ``degenerate`` on its own
-    ``step_count = 0``.
-
-    Best-effort, zero engine change: writes through the SAME
-    ``POST /v1/telemetry/nx_answer_runs/record`` route ``nx_answer``
-    itself uses — no new column, no new table, no schema migration.
-
-    Args:
-        continuation_id: The id from the ``continuation.continuation_id``
-            field of the envelope ``nx_answer`` returned (or, in text
-            mode, the id named in the rendered instruction's final
-            line). Required — a report with no id cannot be paired.
-        ok: Whether the reduction completed successfully.
-        final_text_excerpt: Optional short excerpt of the caller's
-            reduction output, for diagnostic visibility on the report
-            row. Capped to 500 chars — this tool is a completion signal,
-            not a second copy of the caller's full answer.
+    Call this after finishing the reduction `nx_answer` handed off with
+    `continuation=True`; it lets `nx answer-runs` report an honest
+    unreported rate instead of treating every un-paired handoff as a
+    silent failure. Best-effort: returns `{ok, recorded, continuation_id}`,
+    or `{ok: False, recorded: False, error}` if the write itself failed.
     """
     excerpt = (final_text_excerpt or "")[:500]
     marker = (
@@ -11078,44 +11148,41 @@ async def nx_answer_report(
     return {"ok": True, "recorded": True, "continuation_id": continuation_id}
 
 
+# HISTORY (RDR-080 P3, replaces the knowledge-tidier agent; nexus-mawqw
+# Fix A). Retrieves and hydrates matching entries server-side (one
+# semantic search pass), inlines them into the prompt, then dispatches a
+# TOOL-FREE claude -p to identify duplicates, contradictions, and outdated
+# entries — the child can never trip the MCP-server-approval gate since it
+# has no tools (the old prompt claimed store_put access the child never
+# had).
 @mcp.tool(
     title="Consolidate Knowledge Topic",
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
 async def nx_tidy(
-    topic: str,
-    collection: str = "knowledge",
-    timeout: float = 600.0,
+    topic: Annotated[str, Field(description="The knowledge topic to consolidate (e.g. \"chromadb quotas\").")],
+    collection: Annotated[str, Field(
+        description=(
+            "T3 collection to search. \"knowledge\" (default) means every live "
+            "knowledge__* collection, as in search/query; a bare subject name "
+            "resolves like store_put's."
+        ),
+    )] = "knowledge",
+    timeout: Annotated[float, Field(
+        description="Subprocess timeout in seconds. Default 600s handles heavy LLM-only reasoning over a large inlined corpus.",
+    )] = 600.0,
 ) -> str:
-    """Consolidate knowledge entries on *topic* via claude -p. RDR-080 P3.
+    """Find duplicate, contradictory, or outdated T3 knowledge entries on one topic.
 
-    Replaces the ``knowledge-tidier`` agent. nexus-mawqw / Fix A:
-    retrieves and hydrates matching entries **server-side** (in-process,
-    a single semantic ``search`` pass), inlines them into the prompt, then
-    dispatches a **tool-free** ``claude -p`` to identify duplicates,
-    contradictions, and outdated entries. Read-only: it reports a
-    consolidated summary plus suggested actions but performs no writes
-    (the old prompt claimed ``store_put`` access the child never had).
+    Read-only: reports a consolidated summary plus suggested actions, and
+    performs no writes itself.
 
-    Retrieval scope is one semantic-search pass capped at
-    ``_TIDY_MAX_ENTRIES`` chunks; it does not expand the query, chase
-    related terms, or deduplicate chunks to documents. Best suited to
-    note-shaped collections (≈one chunk per entry). When the cap is hit
-    the returned summary says so explicitly (no silent truncation).
-
-    Args:
-        topic: The knowledge topic to consolidate (e.g. "chromadb quotas").
-        collection: T3 collection to search (default: knowledge). A bare
-            subject name resolves like ``store_put``'s (docs/collections.md).
-        timeout: Subprocess timeout in seconds. Default 600s (10 min) —
-            consolidation on a large corpus does heavy LLM-only reasoning
-            over the inlined entries; 120s was hitting the timeout
-            routinely on real workloads. Caller can override lower for
-            small topics.
-
-    Returns:
-        Consolidated summary as a human-readable string.
+    Constraints:
+    - Retrieval is one semantic-search pass capped at a fixed entry count;
+      it does not expand the query or chase related terms. Best suited to
+      note-shaped collections (roughly one chunk per entry). A hit cap is
+      stated explicitly in the summary, never silently truncated.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -11203,36 +11270,27 @@ async def nx_tidy(
     return "\n".join(lines)
 
 
+# HISTORY (RDR-080 P3, replaces the plan-enricher agent). Requests below
+# the 300s floor are clamped upward (nexus-7sbf) to prevent agent overrides
+# from re-introducing false-positive timeouts; a structlog warning is
+# emitted when clamping occurs.
 @mcp.tool(
     title="Enrich Bead Context",
     annotations={"readOnlyHint": False, "destructiveHint": False},
     structured_output=False,
 )
 async def nx_enrich_beads(
-    bead_description: str,
-    context: str = "",
-    timeout: float = 300.0,
+    bead_description: Annotated[str, Field(description="The bead's title and description to enrich.")],
+    context: Annotated[str, Field(description="Optional additional context (e.g. audit findings).")] = "",
+    timeout: Annotated[float, Field(
+        description="Subprocess timeout in seconds. Default 300s; requests below a 300s floor are clamped up.",
+    )] = 300.0,
 ) -> str:
-    """Enrich a bead with execution context via claude -p. RDR-080 P3.
+    """Enrich a bead description with codebase execution context, via an LLM subprocess.
 
-    Replaces the ``plan-enricher`` agent. Spawns a ``claude -p``
-    subprocess that searches the codebase for relevant file paths,
-    code patterns, constraints, and test commands, then returns enriched
-    markdown.
-
-    Args:
-        bead_description: The bead's title and description to enrich.
-        context: Optional additional context (e.g. audit findings).
-        timeout: Subprocess timeout in seconds. Default 300s (5 min) —
-            codebase exploration with file:line verification is
-            multi-step; 120s was a frequent false-timeout on beads
-            with broad scope. Requests below the 300s floor are
-            clamped upward (see nexus-7sbf) to prevent agent
-            overrides from re-introducing false-positive timeouts;
-            a structlog warning is emitted when clamping occurs.
-
-    Returns:
-        Enriched bead markdown as a human-readable string.
+    Spawns a subprocess that searches the codebase for relevant file
+    paths, code patterns, constraints, and test commands, then returns
+    enriched markdown for the bead's description field.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -11271,66 +11329,53 @@ async def nx_enrich_beads(
     )
 
 
+# HISTORY (RDR-080 P3, replaces the plan-auditor agent). Findings are
+# classified and the loop terminates by construction (nexus-ll7zm): only a
+# BLOCKS-PLANNING finding (would build the wrong thing, or can't execute as
+# sequenced) can produce a NOT READY verdict; from round 3 onward NO
+# verdict blocks — everything found becomes a residual to carry into
+# implementation. The rules live in nexus.plans.audit_rounds and are
+# enforced in Python, not requested in the prompt, because the failure
+# this closes was a defect-finder being asked to judge when to stop
+# finding defects (origin: a five-round audit loop against a real plan
+# whose rounds 3-5 refined hypothetical CI semantics for a release cut
+# that had never been performed). Timeout floor clamping is nexus-7sbf,
+# same rationale as `nx_enrich_beads`.
 @mcp.tool(
     title="Audit Plan Correctness",
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
 async def nx_plan_audit(
-    plan_json: str,
-    context: str = "",
-    timeout: float = 600.0,
-    round_number: int = 1,
-    budget_rounds: int = 0,
+    plan_json: Annotated[str, Field(description="The plan to audit (JSON string or free-text description).")],
+    context: Annotated[str, Field(description="Optional additional context (e.g. an RDR reference).")] = "",
+    timeout: Annotated[float, Field(
+        description="Subprocess timeout in seconds. Default 600s; requests below a 300s floor are clamped up.",
+    )] = 600.0,
+    round_number: Annotated[int, Field(
+        description=(
+            "Which audit round this is for THIS plan, counted by the caller "
+            "(the tool is stateless). Leaving it at 1 forever reproduces the "
+            "unterminated loop."
+        ),
+    )] = 1,
+    budget_rounds: Annotated[int, Field(
+        description=(
+            "The effort budget the plan author declared up front. 0 means "
+            "unstated. May only TIGHTEN the round cap, never widen it."
+        ),
+    )] = 0,
 ) -> str:
-    """Audit a plan for correctness and codebase alignment via claude -p. RDR-080 P3.
+    """Audit a plan's file paths, dependencies, and assumptions against the codebase, via an LLM subprocess.
 
-    Replaces the ``plan-auditor`` agent. Spawns a ``claude -p``
-    subprocess that validates the plan's file paths, dependencies,
-    and assumptions against the current codebase state.
+    Returns a human-readable verdict with blocking findings and residuals
+    shown separately; residuals carry a recording instruction for the
+    caller.
 
-    **Findings are classified, and the loop terminates** (nexus-ll7zm).
-    Every finding is either ``BLOCKS-PLANNING`` (the plan would cause
-    someone to build the wrong thing, or cannot be executed as
-    sequenced) or ``DISCOVER-AT-IMPLEMENTATION`` (real, but the first
-    test run surfaces it). Only the first class can produce a NOT READY
-    verdict. From round 3 onward NO verdict blocks: everything found is
-    emitted as residuals to record and carry into implementation. The
-    rules live in :mod:`nexus.plans.audit_rounds` and are enforced in
-    Python, not requested in the prompt, because the failure this
-    closes was a defect-finder being asked to judge when to stop finding
-    defects. Origin: a five-round audit loop against the RDR-197 plan on
-    2026-08-23, where rounds 3-5 refined hypothetical CI semantics for a
-    release cut that had never been performed.
-
-    Args:
-        plan_json: The plan to audit (JSON string or free-text description).
-        context: Optional additional context (e.g. RDR reference).
-        timeout: Subprocess timeout in seconds. Default 600s (10 min) —
-            a real plan audit verifies file:line pointers, cross-
-            references research findings, walks dependency graphs;
-            120s was hitting the timeout on RDR-086's real plan
-            (11 beads, 5 phases). Requests below the 300s floor are
-            clamped upward (see nexus-7sbf) to prevent planning
-            agents from re-introducing false-positive timeouts via
-            low overrides; a structlog warning is emitted when
-            clamping occurs.
-        round_number: Which audit round this is for THIS plan, counted by
-            the caller. The tool is stateless — one ``claude -p``
-            dispatch with no memory between invocations — so the round
-            cannot be inferred here. Leaving it at 1 forever reproduces
-            the unterminated loop, which is why the planner guidance
-            requires passing it.
-        budget_rounds: The effort budget the plan author declared up
-            front from the feature's own stakes. 0 means unstated. A
-            budget may only TIGHTEN the cap, never widen it: a one-day
-            change can declare 1, but nothing can buy a third blocking
-            round.
-
-    Returns:
-        Audit verdict as a human-readable string, with blocking findings
-        and residuals shown separately and the recording instruction
-        attached to the residuals.
+    Constraints:
+    - Pass `round_number` (the tool has no memory between calls); from
+      round 3 onward no finding can block, only accumulate as a residual.
+    - `budget_rounds` can only lower the round cap below 3, never raise it.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
     from nexus.plans.audit_rounds import (  # noqa: PLC0415 — branch-local, keeps MCP import graph flat
@@ -11427,36 +11472,44 @@ async def nx_plan_audit(
     return str(payload)
 
 
+# HISTORY (RDR-126 §4). Removes BOTH OS autostart units — the storage-
+# service unit, and any legacy com.nexus.t2 unit left behind by an install
+# that predates the T2 daemon's retirement (nexus-i711w Stage 2 sub-stage
+# B) — even though the T2 daemon this tool was originally written for no
+# longer exists and nothing installs its unit any more; removing a stale
+# one is why the removal half survives. There is likewise no first-run
+# daemon auto-install left to undo.
 @mcp.tool(
     title="Uninstall Nexus Daemon",
     annotations={"destructiveHint": True, "idempotentHint": True},
     structured_output=False,
 )
-def daemon_uninstall(confirm: bool = False, remove_data: bool = False) -> str:
-    """Tear down the nexus storage stack's OS-level install (RDR-126 §4).
+def daemon_uninstall(
+    confirm: Annotated[bool, Field(
+        description="Must be true to actually remove anything. False (default) only describes what would be removed.",
+    )] = False,
+    remove_data: Annotated[bool, Field(
+        description=(
+            "When true (and confirm=true), ALSO deletes the nexus CONFIG "
+            "directory (~/.config/nexus/, or NEXUS_CONFIG_DIR) — notes, "
+            "plans, and the catalog. Irreversible."
+        ),
+    )] = False,
+) -> str:
+    """Stop the nexus storage stack and remove its OS-level autostart units.
 
-    Removes BOTH OS autostart units — the storage-service unit, and any
-    legacy ``com.nexus.t2`` unit left behind by an install that predates the
-    T2 daemon's retirement (nexus-i711w Stage 2 sub-stage B) — then stops the
-    engine-service + Postgres stack and clears the first-run marker.
+    Destructive and irreversible with `remove_data=True`; by default
+    (`confirm=False`) this only describes what would be removed and does
+    nothing.
 
-    The T2 daemon this tool was originally written for no longer exists, and
-    nothing installs its unit any more; removing a stale one is why the
-    removal half survives. There is likewise no first-run daemon auto-install
-    to undo.
+    Returns a status message naming what was removed, or the dry-run
+    description when `confirm=False`.
 
-    Destructive: by default this only DESCRIBES what would be removed and
-    asks you to re-call with ``confirm=true``. Nothing is removed until
-    ``confirm=true``.
-
-    Args:
-        confirm: Must be true to actually remove anything. When false
-            (default), returns a description of what would be removed.
-        remove_data: When true (and ``confirm=true``), ALSO deletes the nexus
-            CONFIG directory (``~/.config/nexus/``, or ``NEXUS_CONFIG_DIR``) —
-            your notes, plans, and the catalog. Irreversible. It does NOT
-            touch ``~/.local/share/nexus/``, which holds the Chroma store and
-            the embedding-model cache; remove that separately for a full wipe.
+    Constraints:
+    - Nothing is removed until `confirm=True`.
+    - `remove_data=True` does NOT touch `~/.local/share/nexus/` (the
+      embedding-model cache, and any relic Chroma directory from a
+      pre-PG install) — remove that separately for a full wipe.
     """
     from nexus.daemon import installer  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
 

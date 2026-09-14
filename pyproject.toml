@@ -12,7 +12,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "7.44.0"
+version = "7.45.0"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -60,8 +60,17 @@ dependencies = [
     # ordering mattered: had chromadb left first, the reranker would have lost
     # onnxruntime silently at runtime.
     "onnxruntime>=1.20,<2",
-    "tokenizers>=0.20,<1.0",
-    "llama-index-core>=0.12.7,<0.15",
+    # nexus-oqh4s (2026-09-14): floor was stale relative to the locked
+    # 0.22.2 (a >=0.20,<1.0 cap admitted every future 0.x minor, the exact
+    # fastembed-incident shape). Bumped to the locked minor, capped at the
+    # next: under semver a 0.x minor bump is licensed to break.
+    "tokenizers>=0.22,<0.23",
+    # nexus-oqh4s (2026-09-14): same fix, same reason -- AGENTS.md already
+    # names llama-index-core alongside tree-sitter-language-pack as having
+    # known breaking incompatibilities across releases. Floor bumped to the
+    # locked 0.14.21; the existing <0.15 cap already sat at that minor's
+    # next, so only the floor moved.
+    "llama-index-core>=0.14.21,<0.15",
     "markdown-it-py>=4.0.0,<5",
     "msgpack>=1.0,<2",
     "numpy>=1.24,<3",
@@ -78,8 +87,15 @@ dependencies = [
     # ``parser.parse(source)`` directly, so CI fails with
     # "Parser object has no attribute 'parse'". Migration is its own
     # arc — pinned to 0.x for now; tracked as nexus-8g79.35.
-    "tree-sitter-language-pack>=0.7.1,<1.0",
-    "voyageai>=0.2,<1.0",
+    # nexus-oqh4s (2026-09-14): the 1.x rewrite above is why this package was
+    # already flagged, but the <1.0 cap still admitted every 0.x minor in
+    # between -- the identical fastembed-incident shape. Floor bumped to the
+    # locked 0.13.0, capped at the next minor.
+    "tree-sitter-language-pack>=0.13.0,<0.14",
+    # nexus-oqh4s (2026-09-14): floor was stale relative to the locked
+    # 0.3.7 (a >=0.2,<1.0 cap admitted every future 0.x minor). Bumped to
+    # the locked minor, capped at the next.
+    "voyageai>=0.3,<0.4",
     # Same discipline as mineru: docling is the formula screen and the fallback
     # extractor for every PDF; its output shape is gated, so the cap sits at the
     # locked minor.
@@ -196,7 +212,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-local = ["fastembed>=0.7.0"]
+# nexus-oqh4s (7.45.0 pre-release audit, the nexus-l2ku5 class in the
+# extras table): was unbounded; a fresh resolve of conexus[local] landed on
+# fastembed 0.8.0 (2026-03-23), untested here, while uv.lock stayed on
+# 0.7.4. 0.x under semver licenses a minor bump to break, so the cap sits
+# at the next minor, not the next major -- see
+# tests/test_dependency_bounds_lint.py's extras gate.
+local = ["fastembed>=0.7.0,<0.8"]
 
 [project.urls]
 Homepage = "https://github.com/Hellblazer/nexus"

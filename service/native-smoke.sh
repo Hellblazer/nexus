@@ -68,6 +68,7 @@ cleanup() {
   # backstop, not just the happy path.
   [ -n "${T1_PY_TMPDIR:-}" ] && rm -rf "$T1_PY_TMPDIR"
   [ -n "${T2_PY_TMPDIR:-}" ] && rm -rf "$T2_PY_TMPDIR"
+  [ -n "${TUPLES_PY_TMPDIR:-}" ] && rm -rf "$TUPLES_PY_TMPDIR"
 }
 trap cleanup EXIT
 
@@ -197,7 +198,24 @@ if command -v uv >/dev/null 2>&1 && [ -f "$REPO_ROOT/pyproject.toml" ]; then
   # documented practice on this project) would pass through unisolated and
   # target that URL instead of this script's local native binary, bearing the
   # smoketoken bearer. Explicitly clearing it here closes that leg too.
+  #
+  # NX_SESSION_ID='' CLAUDE_CODE_SESSION_ID='' (nexus-xihsm, found while
+  # building the checkout-shape pre-tag check): get_t1_database() ->
+  # resolve_active_session_id() consults these two env vars (in that order,
+  # nexus-36q84) BEFORE any file-based fallback. This script's OWN throwaway
+  # T1 session ("native-smoke-t1", minted a few lines up) has nothing to do
+  # with whatever session identity happens to be exported in the invoking
+  # shell -- but when this script is run from an interactive Claude Code
+  # session (routine on this project: a human or agent driving the pre-tag
+  # battery by hand, not only GitHub Actions), CLAUDE_CODE_SESSION_ID is set
+  # in every subprocess Claude Code spawns and passes through here
+  # unisolated. The probe then resolves THAT session's lease -- which points
+  # at nothing this freshly-booted engine ever published -- and fails with
+  # T1ServerNotFoundError, misreading as a real regression. GitHub Actions
+  # runners never set either var, so this is invisible there; it bit the
+  # very first live run of this check, off this session's own worktree.
   PY_OUT=$(cd "$REPO_ROOT" && NEXUS_CONFIG_DIR="$T1_PY_TMPDIR" NX_SERVICE_URL='' \
+    NX_SESSION_ID='' CLAUDE_CODE_SESSION_ID='' \
     NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SVCPORT" NX_SERVICE_TOKEN=smoketoken \
     NX_STORAGE_BACKEND=service NATIVE_SMOKE_CLEANUP_ROWS="$NATIVE_SMOKE_CLEANUP_ROWS" \
     $TIMEOUT_CMD uv run python "$REPO_ROOT/service/smoke-probes/t1_real_client.py" 2>&1)
@@ -261,6 +279,45 @@ if command -v uv >/dev/null 2>&1 && [ -f "$REPO_ROOT/pyproject.toml" ]; then
   fi
 else
   echo "  WARN skipping (uv or pyproject.toml not found at $REPO_ROOT) -- this run does NOT cover routing+backend together for memory/plans/taxonomy/chash, only backend-via-curl above"
+fi
+
+# ── tuples (/v1/tuples) via the REAL Python client (nexus-6flt7) ────────────
+# RDR-205/RDR-206's Linda tuple space had NO probe here of either kind (curl or
+# real-client): every tuple route -- out, rd, rdp, in, inp, ack, ack-with-reply,
+# nack, renew -- ran on the JVM jar only (the Java suite,
+# tests/test_rdr206_mvv_*.py), so this script's native binary never exercised
+# TupleHandler/TupleRepository at all, RDR-206's renew and ack-with-reply
+# included. Same fix shape and same reasoning as the T1 (nexus-97oz3) and
+# memory/plans/taxonomy/chash (nexus-rxqqd) blocks above: the real Python
+# client (nexus.db.t2.http_tuple_store.HttpTupleStore), not curl, because its
+# typed-error classification (ClaimNotFound vs SchemaViolation, which share
+# HTTP status codes) and its parsed response shapes (renew's ISO-8601
+# lease_until, ack's 64-hex-or-null reply_id) are exactly what a status-code-
+# only curl assert() cannot tell apart. Covers out, inp (claim), renew
+# (asserts lease_until moves forward), ack with a reply object (asserts a
+# 64-hex reply_id), rdp of the reply address (asserts exactly that one row),
+# and a typed refusal (a stale ack on the now-consumed claim -> ClaimNotFound).
+# See service/smoke-probes/tuples_real_client.py's own header for the full
+# non-vacuity argument: against an engine predating /renew, the probe's
+# uncaught httpx.HTTPStatusError on the unmapped 404 fails this block exactly
+# the way a real regression would.
+echo "tuples (/v1/tuples) via the real Python client:"
+if command -v uv >/dev/null 2>&1 && [ -f "$REPO_ROOT/pyproject.toml" ]; then
+  TUPLES_PY_TMPDIR=$(mktemp -d)
+  # NEXUS_CONFIG_DIR isolation alone is NOT sufficient -- see the identical
+  # NX_SERVICE_URL='' comment on the T1 block above; the same ambient-env-var
+  # leak applies here and is closed the same way.
+  PY_OUT=$(cd "$REPO_ROOT" && NEXUS_CONFIG_DIR="$TUPLES_PY_TMPDIR" NX_SERVICE_URL='' \
+    NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SVCPORT" NX_SERVICE_TOKEN=smoketoken \
+    $TIMEOUT_CMD uv run python "$REPO_ROOT/service/smoke-probes/tuples_real_client.py" 2>&1)
+  rm -rf "$TUPLES_PY_TMPDIR"
+  if grep -q "^OK$" <<<"$PY_OUT"; then
+    echo "  ok   tuples real-client out/inp/renew/ack-with-reply/rdp/typed-refusal (routing + backend together)"
+  else
+    echo "  FAIL tuples real-client check:"; echo "$PY_OUT" | sed 's/^/    /'; fail=1
+  fi
+else
+  echo "  WARN skipping (uv or pyproject.toml not found at $REPO_ROOT) -- this run does NOT cover routing+backend together for tuples, and no curl fallback exists for this surface"
 fi
 
 # ── Local bge-768 EMBED (nexus-pqatt) ────────────────────────────────────────

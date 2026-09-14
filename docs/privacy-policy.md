@@ -56,7 +56,7 @@ You control which (if any) of the above are reachable by deciding whether to set
 ## 5. Data export and deletion
 
 - **Export** — `nx store export <collection>` produces a `.nxexp` archive of any T3 collection. `nx memory get` returns memory entries.
-- **Delete** — `nx store delete`, `nx memory delete`, `nx catalog gc`, and the `daemon_uninstall` MCP tool with `remove_data=true` all remove data permanently. `remove_data=true` wipes the nexus **config directory** (`~/.config/nexus/`, or `NEXUS_CONFIG_DIR`); it does **not** touch `~/.local/share/nexus/`, which holds the Chroma store and the embedding-model cache. Use the Uninstall step below to remove both.
+- **Delete** — `nx store delete`, `nx memory delete`, `nx catalog gc`, and the `daemon_uninstall` MCP tool with `remove_data=true` all remove data permanently. `remove_data=true` wipes the nexus **config directory** (`~/.config/nexus/`, or `NEXUS_CONFIG_DIR`); it does **not** touch `~/.local/share/nexus/`, which holds the embedding-model cache and, on a pre-PG install that has not been cleaned up, a relic Chroma directory nothing reads any more. Use the Uninstall step below to remove both.
 - **Uninstall** — removing Conexus and deleting `~/.config/nexus/` plus `~/.local/share/nexus/` removes everything Conexus persisted.
 
 ## 6. Children's privacy

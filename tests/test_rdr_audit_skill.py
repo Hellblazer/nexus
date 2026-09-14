@@ -16,7 +16,7 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).parent.parent
-SKILL_PATH = REPO_ROOT / "conexus" / "skills" / "rdr-audit" / "SKILL.md"
+SKILL_PATH = REPO_ROOT / "conexus" / "skills" / "rdr-audit-checklist" / "SKILL.md"
 COMMAND_PATH = REPO_ROOT / "conexus" / "commands" / "rdr-audit.md"
 REGISTRY_PATH = REPO_ROOT / "conexus" / "registry.yaml"
 USING_SKILLS_PATH = REPO_ROOT / "conexus" / "skills" / "using-nx-skills" / "SKILL.md"
@@ -37,7 +37,7 @@ class TestSkillFileExists:
 
     def test_skill_file_present(self) -> None:
         assert SKILL_PATH.exists(), (
-            f"conexus/skills/rdr-audit/SKILL.md does not exist. "
+            f"conexus/skills/rdr-audit-checklist/SKILL.md does not exist. "
             f"Phase 2a (nexus-dqp.3) creates this file."
         )
 
@@ -57,8 +57,12 @@ class TestFrontmatter:
         )
 
     def test_name_matches_directory(self) -> None:
+        """nexus-cnzei.6: the skill directory is rdr-audit-checklist, a
+        rename off rdr-audit to resolve its name collision with
+        commands/rdr-audit.md (both are a deliberately-kept dual surface;
+        see registry.yaml's rdr_skills comment)."""
         fm = _load_frontmatter(_load_skill_text())
-        assert fm["name"] == "rdr-audit"
+        assert fm["name"] == "rdr-audit-checklist"
 
     def test_description_starts_with_use_when(self) -> None:
         fm = _load_frontmatter(_load_skill_text())
@@ -371,13 +375,13 @@ class TestRegistryIntegration:
     def test_registered_in_yaml(self) -> None:
         registry = yaml.safe_load(REGISTRY_PATH.read_text())
         rdr_skills = registry.get("rdr_skills", {})
-        assert "rdr-audit" in rdr_skills, (
-            "rdr-audit must be registered under rdr_skills: in conexus/registry.yaml"
+        assert "rdr-audit-checklist" in rdr_skills, (
+            "rdr-audit-checklist must be registered under rdr_skills: in conexus/registry.yaml"
         )
 
     def test_registry_entry_has_required_fields(self) -> None:
         registry = yaml.safe_load(REGISTRY_PATH.read_text())
-        entry = registry.get("rdr_skills", {}).get("rdr-audit", {})
+        entry = registry.get("rdr_skills", {}).get("rdr-audit-checklist", {})
         for field in ("slash_command", "command_file", "description", "triggers"):
             assert field in entry, f"Registry entry missing field: {field}"
         assert entry["slash_command"] == "/rdr-audit"
