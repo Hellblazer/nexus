@@ -983,6 +983,7 @@ _ALL_TENANT_TABLES = [
     "nexus.index_failures",  # nexus-nukn3: telemetry-009-index-failures.xml (mirrors health._RLS_TENANT_TABLES)
     "nexus.ladder_completions",
     "nexus.memory",
+    "nexus.memory_summaries",  # RDR-207 Phase 1 (nexus-l3yuc.1, memory-004-3; mirrors health._RLS_TENANT_TABLES)
     # ("nexus.migration_jobs" removed — nexus-tk070.p5b, reworked
     # 2026-08-20: dead table dropped (migration-002-tenant-pk.xml),
     # mirrors health._RLS_TENANT_TABLES)

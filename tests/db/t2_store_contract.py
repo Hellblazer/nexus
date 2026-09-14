@@ -478,7 +478,10 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
 T2_STORE_RETURNS: dict[str, dict[str, str]] = {
     'memory': {
         'delete': 'bool',
-        'expire': 'list[int]',
+        # RDR-207 Phase 1 (nexus-l3yuc.9): expire quarantines, so the store
+        # returns both id lists (deleted_ids, always empty from that engine
+        # on, and quarantined_ids) instead of the deleted list alone.
+        'expire': 'MemoryExpireResult',
         'find_overlapping_memories': 'list[tuple[dict[str,Any],dict[str,Any]]]',
         'flag_stale_memories': 'list[dict[str,Any]]',
         'get': 'dict[str,Any]|None',
