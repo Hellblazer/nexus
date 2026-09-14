@@ -69,31 +69,56 @@
         function body — before the lock loop, before the batched recompute —
         collect every DISTINCT tenant_id present in the transition table
         (new_rows for the INSERT trigger, old_rows for the DELETE trigger)
-        that IS DISTINCT FROM current_setting('nexus.tenant', true). IS
-        DISTINCT FROM (not plain !=) is load-bearing: current_setting(...,
-        true) returns NULL when the GUC is entirely unset, and `tenant_id =
-        NULL` is never TRUE regardless of tenant_id's value — a plain != or =
-        comparison would silently miss the "GUC unset" case entirely (NULL
-        propagates through, satisfying neither branch), which is precisely
-        the shape case (f) reproduced. IS DISTINCT FROM correctly treats NULL
-        as a comparable value, so an unset GUC flags EVERY row's tenant_id as
-        a mismatch. If the resulting set is non-empty, RAISE EXCEPTION naming
-        the current GUC value (or "unset"), the offending tenant_id(s),
-        and the remedy: set nexus.tenant for the writing session before the
-        statement (once per tenant if the batch spans more than one), or call
+        that IS DISTINCT FROM current_setting('nexus.tenant', true) AND
+        whose CURRENT ROLE is actually subject to row-level security:
+        NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname =
+        current_user AND (rolsuper OR rolbypassrls)). IS DISTINCT FROM (not
+        plain !=) is load-bearing: current_setting(..., true) returns NULL
+        when the GUC is entirely unset, and `tenant_id = NULL` is never TRUE
+        regardless of tenant_id's value — a plain != or = comparison would
+        silently miss the "GUC unset" case entirely (NULL propagates
+        through, satisfying neither branch), which is precisely the shape
+        case (f) reproduced. IS DISTINCT FROM correctly treats NULL as a
+        comparable value, so an unset GUC flags EVERY row's tenant_id as a
+        mismatch — for a role the RLS-subject check does not exempt. If the
+        resulting set is non-empty, RAISE EXCEPTION naming the current GUC
+        value (or "unset"), the offending tenant_id(s), and the remedy: set
+        nexus.tenant for the writing session before the statement (once per
+        tenant if the batch spans more than one), or call
         nexus.topics_recount_doc_count(...) (taxonomy-016-doc-count-drift-
-        functions.xml) afterwards to correct it explicitly. A caller with
-        BYPASSRLS and NO GUC set is refused too, deliberately — BYPASSRLS
-        exempts a role from RLS filtering (so its own UPDATE would NOT have
-        silently under-matched), but the guard has no way to distinguish
-        "BYPASSRLS, would have been fine anyway" from "NOBYPASSRLS, about to
-        silently under-count" cheaply and correctly from inside the trigger,
-        and a caller relying on BYPASSRLS to skip setting nexus.tenant is
-        already violating the same operational discipline (every legitimate
-        write path — TenantScope.withTenant, every TaxonomyRepository method
-        — always sets the GUC regardless of role) that made the missing-GUC
-        case reachable in the first place. Set the GUC; it costs nothing on
-        the correct path and closes both failure classes at once.
+        functions.xml) afterwards to correct it explicitly.
+
+        WHY THE ROLE CHECK (2026-09-14 fix round, full engine suite on the
+        rebased tip: 24 errors, all this guard, all in test fixtures that
+        seed topic_assignments as the container superuser with no
+        nexus.tenant GUC — CatalogDeleteCollectionCascadeTest,
+        CatalogDocumentCascadeTest, CatalogRenameCollectionTest,
+        CollectionRegistryFkTest, CombinedQueryParityTest,
+        CombinedQueryRetentionTest, ForeignKeyConstraintTest,
+        PgVectorCombinedQueryContractTest, PgVectorRepositoryRawSqlPlanShapeTest,
+        Taxonomy010BackfillDirectIntegrationTest, Taxonomy014TenantFkRepointTest,
+        TaxonomyAssignFromChashesRepositoryTest, VectorsRepointFunctionsIntegrationTest,
+        GhostSweepDormantMarkingTest). The FIRST version of this guard fired
+        for EVERY role regardless of RLS posture, including a superuser or a
+        BYPASSRLS role — but FORCE ROW LEVEL SECURITY, by PostgreSQL's own
+        definition, never applies to either: a superuser bypasses RLS
+        unconditionally, and BYPASSRLS is precisely the role attribute that
+        exempts a role from RLS even under FORCE. This trigger's own UPDATE
+        against nexus.topics THEREFORE CANNOT be silently filtered for such a
+        role, regardless of whether nexus.tenant happens to be set — there is
+        nothing for this guard to protect against there, and refusing anyway
+        was over-reach: it broke every test fixture (and, by the identical
+        reasoning, any real superuser-driven maintenance path) that seeds
+        topic_assignments directly without bothering to set a GUC the RLS
+        layer was never going to consult for that role in the first place.
+        The role check narrows the guard to exactly the population it exists
+        for: a role that IS subject to RLS (NOSUPERUSER, NOBYPASSRLS —
+        nexus_admin, nexus_svc, and every ordinary application role) with an
+        absent or wrong nexus.tenant GUC. Case (f) (TopicsDocCountWritePathsTest)
+        still proves the guard fires for exactly that shape (its admin test
+        role is NOSUPERUSER NOBYPASSRLS); case (h) proves the SAME delete, run
+        as the container superuser with no GUC set, recounts correctly and
+        does not raise.
 
         A cascade-triggered DELETE (topic_assignments_chunk_fk's ON DELETE
         CASCADE from nexus.chunks, taxonomy-012-doc-id-chunk-fk.xml) under
@@ -159,10 +184,21 @@ BEGIN
     -- UNSET GUC makes current_setting(...,true) return NULL, and NULL =
     -- anything is never TRUE -- IS DISTINCT FROM correctly treats NULL as a
     -- comparable value, so an unset GUC flags every row as a mismatch too.
+    -- ROLE CHECK (2026-09-14 fix round): a superuser or BYPASSRLS role is
+    -- EXEMPT -- FORCE ROW LEVEL SECURITY never applies to either, so this
+    -- UPDATE cannot be silently filtered for such a role regardless of the
+    -- GUC, and the guard would protect nothing by firing there. Without
+    -- this exemption every test fixture (and any real superuser-driven
+    -- maintenance path) that seeds topic_assignments directly, with no GUC,
+    -- was refused for a hazard that structurally could not apply to it.
     SELECT array_agg(DISTINCT tenant_id ORDER BY tenant_id)
       INTO v_bad_tenants
       FROM new_rows
-     WHERE tenant_id IS DISTINCT FROM current_setting('nexus.tenant', true);
+     WHERE tenant_id IS DISTINCT FROM current_setting('nexus.tenant', true)
+       AND NOT EXISTS (
+             SELECT 1 FROM pg_catalog.pg_roles
+              WHERE rolname = current_user AND (rolsuper OR rolbypassrls)
+           );
     IF v_bad_tenants IS NOT NULL THEN
         RAISE EXCEPTION
             'topics_doc_count_recount_ins: nexus.tenant GUC (%) does not cover tenant_id(s) % '
@@ -171,8 +207,7 @@ BEGIN
             'for those tenants, leaving doc_count stale (nexus-4a8pn case (f)). Remedy: set '
             'nexus.tenant for the writing session before this statement -- once per tenant if '
             'the batch spans more than one -- or call nexus.topics_recount_doc_count(...) '
-            'afterwards to correct it explicitly. A caller with BYPASSRLS and no GUC set is '
-            'refused for the same reason: set nexus.tenant regardless of role privilege.',
+            'afterwards to correct it explicitly.',
             COALESCE(current_setting('nexus.tenant', true), '&lt;unset&gt;'), v_bad_tenants;
     END IF;
 
@@ -287,11 +322,17 @@ BEGIN
     -- posture (the GUC set to the tenant whose rows are actually being
     -- deleted) still passes this guard, and its UPDATE below legitimately
     -- matches zero rows for a topic whose last assignment was just removed
-    -- -- the guard is on POSTURE, never on the UPDATE's row count.
+    -- -- the guard is on POSTURE, never on the UPDATE's row count. ROLE
+    -- CHECK (2026-09-14 fix round): a superuser or BYPASSRLS role is EXEMPT
+    -- -- see the INSERT-path function's identical comment above.
     SELECT array_agg(DISTINCT tenant_id ORDER BY tenant_id)
       INTO v_bad_tenants
       FROM old_rows
-     WHERE tenant_id IS DISTINCT FROM current_setting('nexus.tenant', true);
+     WHERE tenant_id IS DISTINCT FROM current_setting('nexus.tenant', true)
+       AND NOT EXISTS (
+             SELECT 1 FROM pg_catalog.pg_roles
+              WHERE rolname = current_user AND (rolsuper OR rolbypassrls)
+           );
     IF v_bad_tenants IS NOT NULL THEN
         RAISE EXCEPTION
             'topics_doc_count_recount_del: nexus.tenant GUC (%) does not cover tenant_id(s) % '
@@ -300,8 +341,7 @@ BEGIN
             'for those tenants, leaving doc_count stale (nexus-4a8pn case (f)). Remedy: set '
             'nexus.tenant for the writing session before this statement -- once per tenant if '
             'the batch spans more than one -- or call nexus.topics_recount_doc_count(...) '
-            'afterwards to correct it explicitly. A caller with BYPASSRLS and no GUC set is '
-            'refused for the same reason: set nexus.tenant regardless of role privilege.',
+            'afterwards to correct it explicitly.',
             COALESCE(current_setting('nexus.tenant', true), '&lt;unset&gt;'), v_bad_tenants;
     END IF;
 

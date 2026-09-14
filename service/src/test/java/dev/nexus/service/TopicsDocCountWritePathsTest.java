@@ -81,7 +81,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * that RAISE and that nothing was left half-changed; case (g) is the
  * counterpart proving a correct-posture cascade (topic delete cascading its
  * assignments) does NOT raise, since the guard is on posture, never on the
- * UPDATE's own (possibly legitimately zero) row count.
+ * UPDATE's own (possibly legitimately zero) row count. Case (h), added in the
+ * SAME 2026-09-14 fix round (the guard's first version broke 14 existing test
+ * fixture classes that seed topic_assignments as the container superuser with
+ * no GUC), proves a superuser/BYPASSRLS role is EXEMPT from the guard — FORCE
+ * ROW LEVEL SECURITY never applies to either, so the guard would protect
+ * nothing by firing there, and it must recount correctly instead of raising.
  *
  * <p>Every fixture in this class goes through generated jOOQ DSL / {@link
  * PgContainerHelper} — no raw SQL strings (Sam's directive). {@link
@@ -509,5 +514,55 @@ class TopicsDocCountWritePathsTest {
         assertThat(actualAssignmentCount(topicToDelete)).isEqualTo(0);
         assertThat(actualAssignmentCount(topicToKeep)).isEqualTo(1);
         assertDocCountExact(topicToKeep);
+    }
+
+    // ── (h) superuser DELETE, no GUC: RLS-exempt role recounts correctly ───────
+
+    /**
+     * The 2026-09-14 fix-round regression pin: the SAME shape as case (f) — a
+     * DELETE on {@code topic_assignments} with no {@code nexus.tenant} GUC set
+     * — but run as the container SUPERUSER ({@link #pg}{@code .createConnection}),
+     * which is unconditionally exempt from RLS (FORCE ROW LEVEL SECURITY never
+     * applies to a superuser, regardless of the GUC — no {@code [NO] FORCE}
+     * toggle is needed or used here). The posture tripwire's role check
+     * ({@code NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user
+     * AND (rolsuper OR rolbypassrls))}) must recognize this and NOT raise: this
+     * trigger's own {@code UPDATE nexus.topics} cannot be silently filtered for
+     * a role RLS never applies to, so there is nothing for the guard to protect
+     * against here — it must recount correctly instead. This is exactly the
+     * shape the 14 existing test-fixture classes named in taxonomy-017's own
+     * header (which seed {@code topic_assignments} directly as the superuser,
+     * no GUC) depend on; the guard's first version broke all of them.
+     */
+    @Test
+    void superuserDelete_noGuc_recountsCorrectly_doesNotRaise() throws Exception {
+        String collection = "knowledge__wpath_sudel__voyage-code-3__v1";
+        seedCollection(collection);
+        String a = seedChunk(collection, "su-a");
+        String b = seedChunk(collection, "su-b");
+
+        long topicId = repo.insertTopic(TENANT, "su-del-topic", null, collection, 0,
+            "2026-01-01T00:00:00Z", null);
+        insertAssignmentDirect(a, topicId, collection);
+        insertAssignmentDirect(b, topicId, collection);
+        assertThat(actualAssignmentCount(topicId)).isEqualTo(2);
+        assertThat(docCountOf(topicId)).isEqualTo(2);
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext suCtx = DSL.using(su, SQLDialect.POSTGRES);
+            int deleted = suCtx.deleteFrom(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT),
+                       TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId))
+                .execute();
+            assertThat(deleted).as("both seeded assignment rows must be deleted").isEqualTo(2);
+        }
+
+        assertThat(actualAssignmentCount(topicId)).isEqualTo(0);
+        assertThat(docCountOf(topicId))
+            .as("a superuser (RLS-exempt) DELETE with no GUC set must still recount"
+                + " correctly -- the posture tripwire's role check must not fire for a"
+                + " role FORCE RLS never applies to")
+            .isEqualTo(0);
     }
 }
