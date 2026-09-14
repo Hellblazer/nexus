@@ -3348,7 +3348,7 @@ def _ps_all() -> list[tuple[int, str]]:
     import subprocess  # noqa: PLC0415 -- deferred; teardown-only path
 
     out = subprocess.run(
-        ["ps", "-eo", "pid=,command="], capture_output=True, text=True, timeout=10,
+        ["ps", "-ww", "-eo", "pid=,command="], capture_output=True, text=True, timeout=10,
     ).stdout
     rows: list[tuple[int, str]] = []
     for line in out.splitlines():

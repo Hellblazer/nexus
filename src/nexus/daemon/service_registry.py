@@ -965,7 +965,7 @@ def process_command(pid: int) -> str:
         return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
     try:
         probe = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
             capture_output=True, text=True, timeout=10,
         )
     except (FileNotFoundError, subprocess.SubprocessError):

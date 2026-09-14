@@ -714,8 +714,10 @@ def watcher_alive(state_dir: Path, address: str) -> bool:
     except OSError:
         return False
     try:
+        # -ww: procps truncates a piped command column to COLUMNS when that
+        # is set, which drops the mark from a long command line.
         proc = subprocess.run(  # noqa: S603 S607 — fixed argv; ps resolved on PATH
-            ["ps", "-p", str(pid), "-o", "command="],
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2.0,
         )
     except (OSError, subprocess.SubprocessError):

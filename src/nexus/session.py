@@ -368,7 +368,7 @@ def sweep_orphan_resource_trackers(
     """
     try:
         ps_output = subprocess.check_output(
-            ["ps", "-eo", "pid,ppid,etime,command"],
+            ["ps", "-ww", "-eo", "pid,ppid,etime,command"],
             text=True,
             stderr=subprocess.DEVNULL,
         )
@@ -389,7 +389,7 @@ def sweep_orphan_resource_trackers(
         for pid in candidates:
             try:
                 cmd = subprocess.check_output(
-                    ["ps", "-o", "command=", "-p", str(pid)],
+                    ["ps", "-ww", "-o", "command=", "-p", str(pid)],
                     text=True,
                     stderr=subprocess.DEVNULL,
                 ).strip()

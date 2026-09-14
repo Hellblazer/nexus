@@ -43,6 +43,18 @@ def test_a_live_watcher_process_is_alive(tmp_path: Path, fake_watcher: int) -> N
     assert watcher_alive(tmp_path, ADDRESS) is True
 
 
+def test_a_narrow_columns_setting_does_not_hide_the_mark(
+    tmp_path: Path, fake_watcher: int, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """procps truncates a piped ``ps -o command=`` to COLUMNS when it is set,
+    and a watcher's command line (a venv python path, then the mark) is
+    longer than 20 columns. Without ``-ww`` this reads as no watcher: the
+    Python 3.12 CI shard failed exactly so on every run from b013eddc6."""
+    monkeypatch.setenv("COLUMNS", "20")
+    _write_lock(tmp_path, fake_watcher)
+    assert watcher_alive(tmp_path, ADDRESS) is True
+
+
 def test_a_live_pid_that_is_not_a_watcher_is_not_alive(tmp_path: Path) -> None:
     """A dead watcher's pid reused by another process."""
     _write_lock(tmp_path, os.getpid())
