@@ -376,6 +376,39 @@ public final class SchemaMigrator {
      *                             obtained; caller should treat this as fatal
      */
     public static MigrationOutcome migrate(DataSource ds) {
+        return migrate(ds, () -> { });
+    }
+
+    /**
+     * Test seam (nexus-jl08t round 3, T2 [25617]/critic round-2 finding).
+     * {@code afterUpdateHook} runs immediately after {@code
+     * liquibase.update()} returns — the migration is already committed at
+     * that point — and strictly BEFORE the post-walk diagnostic count. The
+     * ordinary {@link #migrate(DataSource)} always passes a no-op, so this
+     * overload changes nothing for any existing caller.
+     *
+     * <p>Exists solely so {@code SchemaMigratorIntegrationTest} can inject a
+     * REAL Postgres error (revoking {@code SELECT} on {@code
+     * databasechangelog} from the migrating role via a second connection)
+     * strictly between the walk and the post-walk count that {@link
+     * #countThisWalkChangesets} performs — the two events happen inside one
+     * synchronous method with no other observable seam. Mocking the {@code
+     * DataSource}/{@code Connection} to fabricate the SQLException would
+     * test a fabrication rather than a genuine database failure; this hook
+     * lets the test cause a real one instead.
+     *
+     * <p><strong>Public, not package-private.</strong> {@code
+     * SchemaMigratorIntegrationTest} lives in {@code dev.nexus.service}, one
+     * package above this class's own {@code dev.nexus.service.db} — the same
+     * cross-package gap {@link #MASTER_CHANGELOG}'s own javadoc already notes
+     * (that constant's classpath string is duplicated test-side rather than
+     * widened). A bare constant tolerates duplication; this seam is behavior,
+     * not a value, so there is nothing to duplicate — widening visibility is
+     * the smaller change. The single-arg {@link #migrate(DataSource)} stays
+     * the only entry point any real caller (service boot, migration
+     * rehearsals) uses.
+     */
+    public static MigrationOutcome migrate(DataSource ds, Runnable afterUpdateHook) {
         log.info("event=schema_migration_start changelog={}", MASTER_CHANGELOG);
         try {
             pinJvmTimeZoneToUtc();
@@ -463,6 +496,7 @@ public final class SchemaMigrator {
                 }
 
                 liquibase.update(new Contexts(), new LabelExpression());
+                afterUpdateHook.run();
 
                 if (orderExecutedWatermark == null) {
                     return countsUnavailableOutcome(pending);

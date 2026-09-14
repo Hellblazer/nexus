@@ -2387,6 +2387,185 @@ class SchemaMigratorIntegrationTest {
         }
     }
 
+    // ── Test 19: nexus-jl08t round 3 — post-walk diagnostic count failure
+    // must not fail the boot ─────────────────────────────────────────────────
+    // Round-2 review (T2 nexus/jl08t-critic-round2-2026-09-14,
+    // nexus/jl08t-cre-round2-2026-09-14) found that commit 3d86ff13e's own
+    // message, the bead comment, and T2 all claimed "New test forces the
+    // post-walk count to fail after a successful walk and asserts the boot
+    // outcome is success" -- no such test existed anywhere in this file. This
+    // is that test, for real, against a genuinely successful walk on a real
+    // Testcontainers Postgres: a REAL SQL permission-denied error (REVOKE
+    // SELECT on databasechangelog from the migrating role, issued via a
+    // second superuser connection through the migrate(ds, afterUpdateHook)
+    // test seam) that fails ONLY the post-walk count, never the walk itself.
+    // Postgres explicitly documents that an object's owner can revoke their
+    // own ordinary privileges (GRANT reference, "Note"), so REVOKE SELECT
+    // against the migrating role -- which owns databasechangelog -- genuinely
+    // denies that role's next SELECT rather than being a silent no-op.
+    //
+    // Runs against the SHARED bootstrap()/adminDs fixture rather than a
+    // dedicated container: it is @Order(19), the highest declared order in
+    // this class, so it is guaranteed to run LAST and revoking ADMIN_ROLE's
+    // SELECT on databasechangelog here (restored immediately after, for
+    // hygiene) affects no later test. Reusing it also means this test adds
+    // NO new raw SQL: a dedicated container would need its own throwaway
+    // role/schema bootstrap (CREATE ROLE / GRANT ON DATABASE|SCHEMA / GRANT
+    // pg_monitor -- the same class tests 5/6/18 each already pay once, with
+    // no jOOQ typed-DSL form), which this design avoids entirely. `pg` is
+    // itself a real Testcontainers Postgres (PgContainerHelper.startDedicated(),
+    // same helper the dedicated-container tests use), so "against the real
+    // Testcontainers Postgres" still holds.
+
+    /**
+     * Pins {@code migrate()}'s counts-unavailable path ({@link
+     * SchemaMigrator.MigrationOutcome}'s javadoc, "Counts-unavailable
+     * sentinel"): a walk that commits successfully but whose post-walk
+     * diagnostic count genuinely fails must return {@code COUNTS_UNAVAILABLE}
+     * (-1) sentinel fields, a real {@code pendingAtStart}, log {@code
+     * event=schema_migration_count_unavailable}, never throw a {@link
+     * SchemaMigrator.MigrationException}, and never lose the schema changes
+     * the walk already committed.
+     *
+     * <p>The hook fires strictly between {@code liquibase.update()} (already
+     * returned normally) and the post-walk {@code countThisWalkChangesets()}
+     * call, so the pre-walk watermark read succeeds normally and only the
+     * post-walk count is made to fail.
+     */
+    @Test
+    @Order(19)
+    void diagnosticCountFailure_afterSuccessfulWalk_returnsCountsUnavailable_neverThrows()
+            throws Exception {
+        // Defensive: ensure the shared fixture is at HEAD (idempotent --
+        // matches tests 2/3/4/7's own "defensive re-migrate" pattern).
+        SchemaMigrator.migrate(adminDs);
+
+        // What THIS walk's pendingAtStart must equal -- computed
+        // independently via a separate Liquibase probe, exactly as test 18
+        // computes its own expectations dynamically rather than hardcoding.
+        // On an already-fully-migrated fixture this is the still-pending
+        // runAlways set (test 1's own "second.pendingAtStart()" assertion
+        // already establishes this is nonzero on a no-op walk).
+        int expectedPending;
+        try (Connection conn = adminDs.getConnection()) {
+            Database database = DatabaseFactory.getInstance()
+                .findCorrectDatabaseImplementation(new JdbcConnection(conn));
+            try (Liquibase liquibase = new Liquibase(
+                    "db/changelog/db.changelog-master.xml",
+                    new ClassLoaderResourceAccessor(),
+                    database)) {
+                expectedPending = liquibase.listUnrunChangeSets(
+                    new Contexts(), new LabelExpression()).size();
+            }
+        }
+
+        // The hook: a REAL Postgres permission-denied error, issued via a
+        // second connection on the shared fixture's own superuser, strictly
+        // after update() returns and before the post-walk count query runs.
+        // Typed jOOQ DSL -- the revoke(Privilege...).on(Table).from(Role)
+        // mirror of this test tree's own grant(...).on(...).to(...) calls
+        // (ScratchSchemaLiquibaseTest, StagingPromoteOpsIntegrationTest).
+        // databaseChangeLog() is this file's own established schema-agnostic
+        // Table reference for Liquibase's bookkeeping table, reused here
+        // exactly as every other query against it in this class.
+        Runnable revokeSelectOnChangelog = () -> {
+            try (Connection su = pg.createConnection("")) {
+                dsl(su).revoke(DSL.privilege("SELECT"))
+                    .on(databaseChangeLog())
+                    .from(DSL.role(ADMIN_ROLE))
+                    .execute();
+            } catch (Exception e) {
+                throw new RuntimeException("failed to revoke SELECT for test seam", e);
+            }
+        };
+
+        // The walk under test, with the hook wired in via the test seam,
+        // and SchemaMigrator's own log output captured so
+        // schema_migration_count_unavailable can be asserted directly.
+        SchemaMigrator.MigrationOutcome[] outcomeHolder =
+            new SchemaMigrator.MigrationOutcome[1];
+        List<String> logMessages = captureLogs(() ->
+            outcomeHolder[0] = SchemaMigrator.migrate(adminDs, revokeSelectOnChangelog));
+
+        assertThat(outcomeHolder[0])
+            .as("migrate() must return normally -- a post-walk diagnostic-"
+                + "count failure after a committed walk must never surface "
+                + "as a MigrationException")
+            .isNotNull();
+        SchemaMigrator.MigrationOutcome outcome = outcomeHolder[0];
+
+        // Restore SELECT immediately -- this is the last ordered test, but
+        // leaving the shared fixture's own role mid-revoke is needless
+        // surprise for anything added after this test in the future. A
+        // typed jOOQ grant(...), not raw SQL.
+        try (Connection su = pg.createConnection("")) {
+            dsl(su).grant(DSL.privilege("SELECT"))
+                .on(databaseChangeLog())
+                .to(DSL.role(ADMIN_ROLE))
+                .execute();
+        }
+
+        // ── Assert: the three diagnostic fields carry the
+        // COUNTS_UNAVAILABLE sentinel (-1). Not referenced by name --
+        // SchemaMigrator.COUNTS_UNAVAILABLE is private -- so pinned by
+        // the literal value the class's own javadoc documents.
+        assertThat(outcome.newChangesets())
+            .as("newChangesets must be the COUNTS_UNAVAILABLE sentinel "
+                + "when the post-walk count failed")
+            .isEqualTo(-1L);
+        assertThat(outcome.reexecutedChangesets())
+            .as("reexecutedChangesets must be the COUNTS_UNAVAILABLE sentinel")
+            .isEqualTo(-1L);
+        assertThat(outcome.markRanChangesets())
+            .as("markRanChangesets must be the COUNTS_UNAVAILABLE sentinel")
+            .isEqualTo(-1L);
+
+        // ── Assert: pendingAtStart is REAL -- it is computed before
+        // liquibase.update() ever runs, well before this test's hook fires,
+        // so it is unaffected by the post-walk failure.
+        assertThat(outcome.pendingAtStart())
+            .as("pendingAtStart is computed before the post-walk count this "
+                + "test's hook fails, and is real: independently confirmed "
+                + "via a separate listUnrunChangeSets() probe taken just "
+                + "before this walk")
+            .isEqualTo(expectedPending);
+
+        // ── Assert: the diagnostic event fired, naming the phase.
+        assertThat(logMessages)
+            .as("migrate() must log schema_migration_count_unavailable "
+                + "for the post-walk phase, never silently swallow the "
+                + "failure")
+            .anyMatch(m -> m.contains("event=schema_migration_count_unavailable")
+                && m.contains("phase=post_walk"));
+
+        // ── Assert: the accounted-for/pending_at_start identity check
+        // is explicitly skipped on the sentinel path (MigrationOutcome
+        // javadoc, "Counts-unavailable sentinel") -- it must not fire a
+        // spurious anomaly against sentinel values.
+        assertThat(logMessages)
+            .as("the accounted-for/pending_at_start identity check must "
+                + "be skipped on the counts-unavailable path")
+            .noneMatch(m -> m.contains("event=schema_migration_count_anomaly"));
+
+        // ── Assert: the schema changes this walk applied are actually
+        // present -- the migration committed before the diagnostic failure
+        // that came strictly afterward.
+        try (Connection conn = adminDs.getConnection()) {
+            assertThat(tablesInSchema(conn, "nexus"))
+                .as("nexus schema must contain every expected table -- "
+                    + "the walk committed before the diagnostic count "
+                    + "ever ran")
+                .containsAll(EXPECTED_NEXUS_TABLES);
+            assertThat(tablesInSchema(conn, "t1"))
+                .as("t1 schema must contain the scratch table")
+                .containsAll(EXPECTED_T1_TABLES);
+            assertThat(changelogRowCount(conn))
+                .as("DATABASECHANGELOG must be non-empty and unaffected "
+                    + "by the diagnostic-count failure")
+                .isGreaterThan(0);
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static DSLContext dsl(Connection c) {

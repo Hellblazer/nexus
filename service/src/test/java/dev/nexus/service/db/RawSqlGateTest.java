@@ -1023,6 +1023,15 @@ class RawSqlGateTest {
         // ON DATABASE|SCHEMA / GRANT pg_monitor WITH ADMIN OPTION) still has no
         // jOOQ form and stays raw, so the ceiling drops by exactly the one
         // converted site: 56 -> 55.
+        // nexus-jl08t round 3 (test 19, the real counts-unavailable test the
+        // round-2 review found missing): reuses the shared bootstrap()/adminDs
+        // fixture (it is @Order(19), guaranteed to run last) instead of a
+        // dedicated container, so it needs no throwaway role/schema bootstrap
+        // at all, and its REVOKE SELECT ON databasechangelog (the test's
+        // real-SQL-failure seam) is typed jOOQ (dsl(conn).revoke(...).on(...)
+        // .from(DSL.role(...))) -- the same revoke/grant shape
+        // ScratchSchemaLiquibaseTest and StagingPromoteOpsIntegrationTest
+        // already use. Net raw-SQL count for this file: unchanged, still 55.
         Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 55),
         // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 37 -> 39 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
@@ -1449,6 +1458,10 @@ class RawSqlGateTest {
     // nexus-jl08t fix round: 931 -> 930 (-1, matching
     // SchemaMigratorIntegrationTest.java's own 56 -> 55 above -- the
     // ALTER TABLE ... DROP CONSTRAINT site converted to typed jOOQ DSL).
+    // nexus-jl08t round 3: unchanged at 930 -- test 19 (the real
+    // counts-unavailable test the round-2 review found missing) reuses the
+    // shared fixture and its own REVOKE is typed jOOQ, so
+    // SchemaMigratorIntegrationTest.java's own count above stays 55.
     private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 930;
 
     /**
