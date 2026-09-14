@@ -217,6 +217,12 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
             "`nx index pdf`/progress-label lines through its 10-step journey, "
             "all inside the container.",
     ),
+    "tests/e2e/rdr208-mvv/send.py": (
+        1, "CONTAINER: copied into the RDR-208 local-mode MVV image and run "
+           "only inside it (own docstring), where `nx init` provisions the "
+           "container's own bundled PG/engine; its mailbox_send writes go to "
+           "that engine's tuple space and nowhere else.",
+    ),
     # ── NX_LOCAL+SANDBOX: no cloud "production tenant" concept applies
     # (the bundled engine is a private per-install Postgres under the
     # scratch HOME/SANDBOX/NEXUS_CONFIG_DIR) -- the specific hazard this
