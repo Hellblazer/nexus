@@ -300,10 +300,14 @@ happened.
   not per method, and the test derives the conflict-branch set from the
   repository source rather than from this sentence.
   **Status**: Verified (finding 7, correcting finding 6: the two import
-  paths carry the same conflict key and update branch as `upsert`; the
-  branch sets content, tags, session, agent, timestamp and TTL and no state
-  column; the scan filters on project and title only; merge updates by id).
-  **Method**: Source Search.
+  paths carry the same conflict key as `upsert`; `upsert`'s branch sets
+  content, tags, session, agent, timestamp and TTL, the import branches set
+  those plus the two access columns, and none sets a state column; the scan
+  filters on project and title only; merge updates by id). The repository's
+  two remaining write entry points, `delete` by key and `deleteById`, are
+  unconditional deletes that predate this RDR and stay outside the
+  two-label invariant on purpose: they are the explicit manual override
+  (finding 8). **Method**: Source Search.
 - [ ] A2: keeping `deleted_ids` with its current meaning (rows actually gone)
   and adding `quarantined_ids` beside it is `[additive]`: an old client reads
   `deleted_ids` only, through `resp.get("deleted_ids", [])`, and ignores the
@@ -561,11 +565,13 @@ It was decided against on 2026-09-14 with the analysis in hand.
 
 ### Consequences
 
-- Nothing in T2 is deleted without two labels on it, one from expiry and one
-  from a summary. That is the point, and it is also a standing population of
-  cold rows until someone rolls them up.
+- Nothing in T2 is deleted by the automatic path without two labels on it,
+  one from expiry and one from a summary; an explicit `nx memory delete`
+  remains the manual override. That is the point, and it is also a standing
+  population of cold rows until someone rolls them up.
 - Every read path carries one more predicate and every write path that can
-  reach an existing row carries a stated rule. Cheap per query, but a read
+  reach an existing row by key, scan or merge carries a stated rule, with
+  the two explicit deletes as the override. Cheap per query, but a read
   path added later that forgets the predicate silently resurrects cold rows,
   and a write path added later that forgets its rule silently writes into
   them; the reflection-driven test pins the read set, the source-grep test
@@ -677,7 +683,7 @@ run in one test module against the engine substrate, in the default suite.
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
 | quarantined memory rows | `nx memory list --quarantined` | `nx memory get` does not show them by design; the list shows title, project, quarantined_at | `nx memory reap` (marked only); `nx memory delete <id>` for an explicit single deletion | `nx doctor` row | PG backup, as `nexus.memory` |
-| `nexus.memory_summaries` | `nx memory summaries` | by id, same verb | `nx memory summaries delete <id>` (does not unmark sources) | count in `nx doctor` row | PG backup |
+| `nexus.memory_summaries` | `nx memory summaries` | by id, same verb | Deferred: a summary is provenance for rows the reaper deleted, so removing one is a data-hygiene decision an operator takes in SQL; no verb is promised | count in `nx doctor` row | PG backup |
 
 ### New Dependencies
 
