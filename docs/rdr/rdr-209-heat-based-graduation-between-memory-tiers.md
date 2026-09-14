@@ -65,6 +65,16 @@ one of record. Nexus has no rule. A promoted row keeps its T2 TTL, and its
 T3 copy inherits the remaining window. The fix delivers a stated rule for
 both copies.
 
+#### Gap 5: The heat counter measures search matches, not reads
+
+Found by the Phase 0 census (Research Findings). The engine's memory search
+increments `access_count` on every row that matches the query, not on the
+rows the caller sees, so the counter is dominated by how often a row's words
+appear in other people's searches. This also feeds the heat-weighted TTL
+that RDR-057 shipped: a row survives longer for matching common searches.
+The fix delivers a counter that means "a caller read this row", before any
+threshold is chosen on it.
+
 #### Gap 4: RDR-057's instrumentation never ran
 
 RDR-057 §Instrumentation gated its deferred items on three measurements and
@@ -110,8 +120,10 @@ promote`. Every T2 read that tracks access increments `access_count` and sets
 
 ### Investigation
 
-Read on 2026-09-14 at commit 05327a277, during RDR-207's research. Nothing
-below has been measured on the live store yet; Gap 4 is the first phase.
+Code read on 2026-09-14 at commit 05327a277, during RDR-207's research. The
+Phase 0 census was run the same day by conexus-e9 against the live hosted
+store (tenant `nexus`, read-only, 14:37Z), on request from this repo; its
+queries and full tables are in T2 `nexus_rdr/209-research-1`.
 
 #### Dependency Source Verification
 
@@ -139,12 +151,27 @@ below has been measured on the live store yet; Gap 4 is the first phase.
   entries are flushed to T2 as permanent rows; unflagged entries are still
   lost. Heat plays no part in which is which.
   *Source: `src/nexus/hooks.py:569-583`.*
-- **❓ Assumed** — The live T2 heat distribution is heavy-tailed enough that a
-  threshold separates a small hot set from the rest. If most rows have
-  `access_count` of zero or one and a few have hundreds, a threshold works;
-  if the distribution is flat, heat is not a useful signal and this RDR
-  should say so and stop. **This is the load-bearing assumption and it is
-  measured in Phase 0 before any design is locked.**
+- **✅ Verified, and it changes the premise** (spike, live census 2026-09-14)
+  — The distribution has a tail, but the counter does not measure reads.
+  Of the tenant's rows, most have been touched a few times and a few dozen
+  many times (median 3, ninetieth percentile 12, ninety-ninth 32; the top
+  one percent of rows hold under a tenth of all accesses). That much would
+  support a threshold. But the engine's memory search stamps access on
+  every row that matches the full-text query, with no limit in the SQL,
+  while the MCP tool and the CLI page the result client-side. So a search
+  that shows eight rows bumps two hundred. More than half of all accessed
+  rows share their `last_accessed` stamp with ten or more other rows, in
+  batches of up to eight hundred; one batch of two hundred and six was the
+  census-taker's own search minutes earlier. `access_count` therefore
+  counts "matched some search", not "was read". Graduating on it would
+  promote rows that contain common words.
+  *Source: `MemoryRepository.java:375-410` (search fetches every match, then
+  `batchTrackAccess` over all of them); `src/nexus/mcp/core.py:5707-5720`
+  (the tool slices the page after the call). T2 `nexus_rdr/209-research-1`.*
+- **✅ Verified** (same census) — Seven hundred and thirty-five rows have
+  never been accessed, and nearly nine in ten of those are older than
+  thirty days. Only thirty-nine rows carry a TTL after the 2026-09-12 sweep.
+  *Source: T2 `nexus_rdr/209-research-1`, queries q1 and q6.*
 - **⚠️ Documented** — The source paper's formula divides the lower tier's
   TTL by the heat term after graduation. Whether that rule fits a store
   whose T2 rows are mostly permanent (the 2026-09-12 sweep) is not obvious:
@@ -154,8 +181,16 @@ below has been measured on the live store yet; Gap 4 is the first phase.
 
 ### Critical Assumptions
 
-- [ ] A1: heat is a usable signal on the live store (heavy-tailed
-  distribution). **Status**: Unverified. **Method**: Spike, Phase 0 census.
+- [ ] A1: heat is a usable signal on the live store. **Status**: Refuted as
+  the counter stands (Phase 0 census): the shape is usable, the meaning is
+  not, because search tracking stamps every match. **Method**: Spike.
+  Consequence: Phase 1 cannot start on `access_count` as it is; a
+  read-only counter has to exist first (Gap 5 below, Phase 0b).
+- [ ] A5: the fix to the counter is to track only the rows actually returned
+  to the caller, which requires the engine to know the page (a `limit` and
+  `offset` on the search route), or a separate counter for direct gets.
+  **Status**: Unverified. **Method**: Source Search on `MemoryHandler`'s
+  search route and both clients, in Phase 0b.
 - [ ] A2: a promoted row can carry a mark on T2 (`promoted_at`,
   `promoted_to`) without changing any read path. **Status**: Unverified.
   **Method**: Source Search against `MemoryRepository` reads.
@@ -171,11 +206,20 @@ below has been measured on the live store yet; Gap 4 is the first phase.
 Measure first, then graduate on a threshold, with the graduation recorded on
 the source row and a stated TTL rule for both copies.
 
-**Phase 0, instrumentation.** `nx memory heat [--project P]` prints the
-distribution of `access_count` and of days since `last_accessed` for the
-tenant: counts per bucket, the top twenty rows by heat, and the share of rows
-never read. This answers Gap 4 and assumption A1, and its output is recorded
-in this RDR's Research Findings before Phase 1 is planned in detail.
+**Phase 0, instrumentation.** Done for the live tenant on 2026-09-14 by hand
+(Research Findings); `nx memory heat [--project P]` makes it repeatable:
+counts per bucket of `access_count` and of days since `last_accessed`, the
+top twenty rows, the share never read, and the share of `last_accessed`
+stamps shared by ten or more rows, which is the batch-touch signal that
+exposed Gap 5.
+
+**Phase 0b, a counter that means read.** Before any threshold: search
+tracking is restricted to the rows the caller actually receives, or direct
+gets get their own counter. The choice is A5 and is decided by source search
+on the search route and both clients. Whichever it is, the existing
+`access_count` is not reset; its history is what the heat-weighted TTL
+already used, and the census records what it meant. A wire-ledger entry
+records the change in what the counter means.
 
 **Phase 1, graduation criterion and mark.** A row graduates when its heat
 exceeds a threshold chosen from the Phase 0 measurement (a candidate shape:
@@ -366,3 +410,4 @@ Not run. Filed as draft; Phase 0 precedes the gate.
 | Date | Change |
 | --- | --- |
 | 2026-09-14 | Filed as draft, split out of RDR-207 candidate (c) at Sam's direction. Phase 0 census is the first work; no threshold is chosen in this text. |
+| 2026-09-14 | Phase 0 census run by conexus-e9 on the live tenant (T2 `209-research-1`). A1 refuted as the counter stands: search tracking stamps every match, so `access_count` measures search matches, not reads. Gap 5 and Phase 0b added; A5 added. |
