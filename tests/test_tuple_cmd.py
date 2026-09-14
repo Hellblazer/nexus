@@ -192,6 +192,141 @@ class TestTupleTemplatesListStats:
         assert census["available"] == 0
 
 
+class TestTupleDirectoryCmd:
+    """RDR-208 Phase 2 Step 4 (bead nexus-galkv.11): ``nx tuple directory
+    NAME`` -- shows who holds a name, reading ``directory/NAME`` exactly
+    once and classifying that one list through the SAME pure classifier
+    ``mailbox_send`` (nexus-galkv.10) uses, so the verb and the tool cannot
+    disagree about whether a name is safely addressable (gate audit round B
+    item 1, code review T2 ``nexus/rdr-208-phase2b-cre-2026-09-14``)."""
+
+    def _arm(self, name: str, session_id: str) -> None:
+        res = _invoke([
+            "out", f"directory/{name}", "--key", f"name={name}",
+            "--dim", f"session_id={session_id}", "--nonce", _uniq("nonce"),
+        ])
+        assert res.exit_code == 0, res.output
+
+    def test_no_entry_reports_nothing_live(self, t2_service_env) -> None:
+        name = _uniq("name")
+        res = _invoke(["directory", name])
+        assert res.exit_code == 0, res.output
+        assert "No live directory entry" in res.output
+
+    def test_one_holder_prints_the_entry_and_resolves(self, t2_service_env) -> None:
+        name = _uniq("name")
+        sid = str(uuid.uuid4())
+        self._arm(name, sid)
+
+        res = _invoke(["directory", name])
+        assert res.exit_code == 0, res.output
+        assert sid in res.output
+        assert "resolves to session" in res.output
+
+    def test_two_holders_are_flagged(self, t2_service_env) -> None:
+        name = _uniq("name")
+        sid1, sid2 = str(uuid.uuid4()), str(uuid.uuid4())
+        self._arm(name, sid1)
+        self._arm(name, sid2)
+
+        res = _invoke(["directory", name])
+        assert res.exit_code == 0, res.output
+        assert sid1 in res.output
+        assert sid2 in res.output
+        assert "held by" in res.output
+        assert "mailbox_send" in res.output
+
+    def test_json_shape_single_holder(self, t2_service_env) -> None:
+        name = _uniq("name")
+        sid = str(uuid.uuid4())
+        self._arm(name, sid)
+
+        res = _invoke(["directory", name, "--json"])
+        assert res.exit_code == 0, res.output
+        payload = _last_json_line(res.output)
+        assert payload["name"] == name
+        assert payload["holders"] == [sid]
+        assert payload["ambiguous"] is False
+        assert payload["resolved_session_id"] == sid
+        assert len(payload["entries"]) == 1
+        entry = payload["entries"][0]
+        assert entry["session_id"] == sid
+        assert "created_at" in entry
+        assert "expires_at" in entry
+
+    def test_json_shape_ambiguous(self, t2_service_env) -> None:
+        name = _uniq("name")
+        sid1, sid2 = str(uuid.uuid4()), str(uuid.uuid4())
+        self._arm(name, sid1)
+        self._arm(name, sid2)
+
+        res = _invoke(["directory", name, "--json"])
+        assert res.exit_code == 0, res.output
+        payload = _last_json_line(res.output)
+        assert sorted(payload["holders"]) == sorted([sid1, sid2])
+        assert payload["ambiguous"] is True
+        assert payload["resolved_session_id"] is None
+        assert len(payload["entries"]) == 2
+
+    def test_reads_directory_exactly_once_and_stays_self_consistent(
+        self, monkeypatch,
+    ) -> None:
+        """The bug this guards against: the verb used to read
+        ``directory/NAME`` once for the printed list and a SECOND time
+        inside the resolver's own classification -- a lapse or a re-nonce
+        landing between those two reads would make the printed entries and
+        the ambiguous/resolved verdict describe two different moments. A
+        fake store whose second call would see a SECOND holder that never
+        existed at the first read proves both that the verb reads exactly
+        once (the assert on ``fake.calls``) and that its output is the
+        SAME single read throughout (one entry, not ambiguous, resolved to
+        the one real holder -- never a spurious two-holder verdict)."""
+        import types
+
+        import nexus.commands.tuple_cmd as tuple_cmd_mod
+
+        name = _uniq("name")
+        sid1, sid2 = str(uuid.uuid4()), str(uuid.uuid4())
+
+        def _row(session_id: str, row_id: str) -> object:
+            return types.SimpleNamespace(
+                id=row_id, subspace=f"directory/{name}", template="directory/<name>",
+                keys={"name": name}, dims={"session_id": session_id}, body=None,
+                claim_state=None, claimant=None, lease_until=None, attempts=0,
+                consumed_at=None, consumed_by=None,
+                expires_at="2026-01-01T00:05:00Z", created_at="2026-01-01T00:00:00Z",
+            )
+
+        class _FakeStore:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def rd(self, subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0):
+                self.calls += 1
+                # A second call (the bug this test catches) would see a
+                # world with a SECOND holder that just armed -- if the verb
+                # ever reads twice, this makes the divergence visible.
+                rows = [_row(sid1, "a")]
+                if self.calls > 1:
+                    rows.append(_row(sid2, "b"))
+                return rows
+
+        fake = _FakeStore()
+        monkeypatch.setattr(tuple_cmd_mod, "_store", lambda: fake)
+
+        res = _invoke(["directory", name, "--json"])
+        assert res.exit_code == 0, res.output
+        payload = _last_json_line(res.output)
+
+        assert fake.calls == 1, (
+            f"directory/{name} was read {fake.calls} times, expected exactly 1"
+        )
+        assert len(payload["entries"]) == 1
+        assert payload["holders"] == [sid1]
+        assert payload["ambiguous"] is False
+        assert payload["resolved_session_id"] == sid1
+
+
 class TestKvParsing:
     def test_out_rejects_malformed_key(self, t2_service_env) -> None:
         out = _invoke(["out", "mailbox/x", "--key", "no-equals-sign"])
@@ -1453,6 +1588,85 @@ class TestStaleWatcherSelfStops:
         )
         assert stats.cycles == 1
         assert not [line for line in lines if "STOP" in line]
+
+
+# ── nx tuple watch: directory lease CLI wiring (RDR-208 P2.1, nexus-galkv.9) ─
+#
+# The lease logic itself lives in run_watch (see test_tuple_watch_directory_
+# lease.py); these tests only prove the CLI arm path threads directory_name/
+# directory_session_id through on exactly the condition write_instance_
+# registration already uses -- mirroring test_only_the_session_resolved_
+# watch_compares_against_the_marker's monkeypatch pattern just above.
+
+
+class TestDirectoryLeaseCliWiring:
+    def test_instance_given_threads_the_name_and_session_id(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        import nexus.session as session_mod
+        import nexus.tuple_watch as tuple_watch_mod
+
+        captured: dict = {}
+
+        def _fake_run_watch(*args, **kwargs):
+            captured.update(kwargs)
+            return None
+
+        monkeypatch.setattr(tuple_watch_mod, "run_watch", _fake_run_watch)
+        monkeypatch.setattr(session_mod, "resolve_active_session_id", lambda: "S1")
+        _store_obj, _cfg, sd = _watch_env(tmp_path)
+        name = _uniq("nexus")
+        res = _invoke([
+            "watch", "--instance", name, "--iterations", "1", "--interval", "0",
+            "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        assert captured.get("directory_name") == name
+        assert captured.get("directory_session_id") == "S1"
+
+    def test_positional_address_suppresses_the_directory_write(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        import nexus.session as session_mod
+        import nexus.tuple_watch as tuple_watch_mod
+
+        captured: dict = {}
+
+        def _fake_run_watch(*args, **kwargs):
+            captured.update(kwargs)
+            return None
+
+        monkeypatch.setattr(tuple_watch_mod, "run_watch", _fake_run_watch)
+        monkeypatch.setattr(session_mod, "resolve_active_session_id", lambda: "S1")
+        _store_obj, _cfg, sd = _watch_env(tmp_path)
+        name = _uniq("nexus")
+        res = _invoke([
+            "watch", _uniq("addr"), "--instance", name, "--iterations", "1",
+            "--interval", "0", "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        assert captured.get("directory_name") is None
+        assert captured.get("directory_session_id") is None
+
+    def test_no_instance_writes_no_directory_entry(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        import nexus.session as session_mod
+        import nexus.tuple_watch as tuple_watch_mod
+
+        captured: dict = {}
+
+        def _fake_run_watch(*args, **kwargs):
+            captured.update(kwargs)
+            return None
+
+        monkeypatch.setattr(tuple_watch_mod, "run_watch", _fake_run_watch)
+        monkeypatch.setattr(session_mod, "resolve_active_session_id", lambda: "S1")
+        _store_obj, _cfg, sd = _watch_env(tmp_path)
+        res = _invoke(["watch", "--iterations", "1", "--interval", "0", "--state-dir", str(sd)])
+        assert res.exit_code == 0, res.output
+        assert captured.get("directory_name") is None
+        assert captured.get("directory_session_id") is None
 
 
 # ── nx tuple watch: two addresses per session (MM-1.3, nexus-6konb.4) ──────

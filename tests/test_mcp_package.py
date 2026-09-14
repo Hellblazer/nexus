@@ -56,6 +56,9 @@ def test_core_registered_tools():
         # Phase 2 (bead nexus-h61dl.9) added the ninth, tuple_renew.
         "tuple_out", "tuple_rd", "tuple_in", "tuple_ack", "tuple_nack",
         "tuple_renew", "tuple_registry", "tuple_list", "tuple_stats",
+        # RDR-208 Phase 2 Step 2 (bead nexus-galkv.10): send-time name
+        # resolution over the RDR-208 session directory.
+        "mailbox_send",
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 
@@ -204,6 +207,8 @@ def test_init_reexports_all():
         # (bead nexus-h61dl.9) added tuple_renew.
         "tuple_out", "tuple_rd", "tuple_in", "tuple_ack", "tuple_nack",
         "tuple_renew", "tuple_registry", "tuple_list", "tuple_stats",
+        # RDR-208 Phase 2 Step 2 (bead nexus-galkv.10)
+        "mailbox_send",
         # demoted
         "store_delete", "collection_info", "collection_verify",
     ]:

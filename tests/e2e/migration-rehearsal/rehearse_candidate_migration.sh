@@ -104,8 +104,10 @@
 # rehearsal — vacuous coverage of exactly the risk those changesets exist
 # to retire. Stage 3h seeds mailbox rows in every claim state, an
 # over-4096-byte body (written past the working-tree client's OWN mirrored
-# 4096-byte pre-check, since the FLOOR predates it and enforces nothing at
-# all), an exactly-4096-byte body, and ledger rows, under one or two
+# 4096-byte pre-check, when the FLOOR predates the cap and enforces nothing;
+# a floor from engine-service-v0.1.118 on carries tuples-003 and refuses it
+# with TooLarge, which the leg asserts instead, skipping the over-cap asserts
+# by name), an exactly-4096-byte body, and ledger rows, under one or two
 # tenants (a second is minted for real via `nx tenant create` when the
 # floor supports it). Post-walk it asserts: the over-cap row is gone with
 # its claim-log history surviving at tuple_id=NULL (tuple_claim_log_tuple_
@@ -487,6 +489,10 @@ if [ "${#TUPLE_OVERCAP_BODY}" -eq 5000 ]; then
 else
   bad "over-cap body fixture is ${#TUPLE_OVERCAP_BODY} bytes, expected 5000"
 fi
+# Per tenant: 1 when the floor accepted the over-cap body, 0 when it refused
+# it with TooLarge because it already enforces the 4096-byte cap (every floor
+# from engine-service-v0.1.118, which shipped tuples-003).
+declare -A OVERCAP_SEEDED=()
 
 TUPLE_TENANT2_NAME="candmigtenant2"
 TUPLE_TENANT2_TOKEN=""
@@ -657,18 +663,27 @@ print(f"RESULT:ID={r['id']}")
 PYEOF
   ); then
     if [[ "$OVER_OUT" == *"RESULT:ID="* ]]; then
+      OVERCAP_SEEDED[$label]=1
       ok "seeded the over-cap (5000-byte body) mailbox row past the working-tree client's own pre-check, straight to the floor ($label)"
     else
       bad "seeding the over-cap mailbox row did not report an id ($label): $OVER_OUT"
     fi
+  elif [[ "$OVER_OUT" == *"TooLargeError"* && "$OVER_OUT" == *"limit of 4096 bytes"* ]]; then
+    # The floor already enforces the cap (it carries tuples-003), so no
+    # legacy over-cap row can exist for the candidate to clean up. The
+    # refusal is the check; the over-cap asserts below are skipped by name.
+    OVERCAP_SEEDED[$label]=0
+    ok "the floor refuses a 5000-byte body with TooLarge at the 4096-byte cap, so no legacy over-cap row can exist to seed ($label)"
   else
     bad "seeding the over-cap mailbox row failed ($label): $OVER_OUT"
   fi
-  if OUT=$("${NXTOK[@]}" nx tuple in "mailbox/candmig-oversize-$label" \
-      --pattern to="candmig-oversize-$label" --claimant "$claimant" --lease-s 900 2>&1); then
-    ok "claimed (and left claimed) the over-cap mailbox row, so it carries claim-log history ($label)"
-  else
-    bad "claiming the over-cap mailbox row failed ($label): $OUT"
+  if [ "${OVERCAP_SEEDED[$label]:-0}" = 1 ]; then
+    if OUT=$("${NXTOK[@]}" nx tuple in "mailbox/candmig-oversize-$label" \
+        --pattern to="candmig-oversize-$label" --claimant "$claimant" --lease-s 900 2>&1); then
+      ok "claimed (and left claimed) the over-cap mailbox row, so it carries claim-log history ($label)"
+    else
+      bad "claiming the over-cap mailbox row failed ($label): $OUT"
+    fi
   fi
 
   # ledger rows -- read-only template (take.enabled: false), no claim traffic.
@@ -699,10 +714,11 @@ done
 say "Stage 3h — non-vacuity: the planned tuple-space row counts actually exist, per tenant, before the walk"
 for TUPLE_LABEL in "${TUPLE_TENANT_IDS[@]}"; do
   MAILBOX_PRE="$(diag_sql "SELECT count(*) FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace LIKE 'mailbox/candmig-%'")"
-  if [ "${MAILBOX_PRE:-0}" = 8 ]; then
-    ok "tenant $TUPLE_LABEL: 8 mailbox rows planted (unclaimed, claimed-left, consumed x2 [+its reply target], dead, at-cap, over-cap)"
+  MAILBOX_WANT=$((7 + ${OVERCAP_SEEDED[$TUPLE_LABEL]:-0}))
+  if [ "${MAILBOX_PRE:-0}" = "$MAILBOX_WANT" ]; then
+    ok "tenant $TUPLE_LABEL: $MAILBOX_WANT mailbox rows planted (unclaimed, claimed-left, consumed x2 [+its reply target], dead, at-cap$([ "$MAILBOX_WANT" = 8 ] && echo ', over-cap'))"
   else
-    bad "tenant $TUPLE_LABEL: expected 8 mailbox rows, counted '$MAILBOX_PRE' -- population is incomplete; downstream tuple-space asserts would be vacuous"
+    bad "tenant $TUPLE_LABEL: expected $MAILBOX_WANT mailbox rows, counted '$MAILBOX_PRE' -- population is incomplete; downstream tuple-space asserts would be vacuous"
   fi
   LEDGER_PRE="$(diag_sql "SELECT count(*) FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace LIKE 'ledger/candmig-%'")"
   if [ "${LEDGER_PRE:-0}" = 2 ]; then
@@ -716,11 +732,17 @@ for TUPLE_LABEL in "${TUPLE_TENANT_IDS[@]}"; do
   else
     bad "tenant $TUPLE_LABEL: at-cap row body is '$ATCAP_LEN_PRE' bytes pre-walk, expected 4096"
   fi
-  OVERCAP_LEN_PRE="$(diag_sql "SELECT octet_length(body) FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-oversize-${TUPLE_LABEL}'")"
-  if [ "${OVERCAP_LEN_PRE:-0}" -gt 4096 ] 2>/dev/null; then
-    ok "tenant $TUPLE_LABEL: over-cap row body is $OVERCAP_LEN_PRE bytes pre-walk (over 4096 -- the floor enforced nothing)"
+  if [ "${OVERCAP_SEEDED[$TUPLE_LABEL]:-0}" = 1 ]; then
+    OVERCAP_LEN_PRE="$(diag_sql "SELECT octet_length(body) FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-oversize-${TUPLE_LABEL}'")"
+    if [ "${OVERCAP_LEN_PRE:-0}" -gt 4096 ] 2>/dev/null; then
+      ok "tenant $TUPLE_LABEL: over-cap row body is $OVERCAP_LEN_PRE bytes pre-walk (over 4096 -- the floor enforced nothing)"
+    else
+      bad "tenant $TUPLE_LABEL: over-cap row body is '$OVERCAP_LEN_PRE' bytes pre-walk, expected > 4096"
+    fi
   else
-    bad "tenant $TUPLE_LABEL: over-cap row body is '$OVERCAP_LEN_PRE' bytes pre-walk, expected > 4096"
+    OVERCAP_ROWS_PRE="$(diag_sql "SELECT count(*) FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-oversize-${TUPLE_LABEL}'")"
+    [ "$OVERCAP_ROWS_PRE" = 0 ] && ok "tenant $TUPLE_LABEL: no over-cap row pre-walk (the floor enforces the cap)" \
+      || bad "tenant $TUPLE_LABEL: $OVERCAP_ROWS_PRE over-cap row(s) pre-walk although the floor refused the over-cap body"
   fi
   DEAD_STATE_PRE="$(diag_sql "SELECT claim_state FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-dead-${TUPLE_LABEL}'")"
   if [ "$DEAD_STATE_PRE" = dead ]; then
@@ -877,13 +899,19 @@ for TUPLE_LABEL in "${TUPLE_TENANT_IDS[@]}"; do
   # tuple_claim_log_tuple_fk's ON DELETE SET NULL (tuples-001-2) -- the same
   # FK the sweep's own purge relies on for the identical shape of delete.
   OVERCAP_POST="$(diag_sql "SELECT count(*) FROM nexus.tuples WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-oversize-${TUPLE_LABEL}'")"
-  [ "$OVERCAP_POST" = 0 ] && ok "tenant $TUPLE_LABEL: the over-cap row is gone after the walk (tuples-003-2's cleanup DELETE)" \
-    || bad "tenant $TUPLE_LABEL: the over-cap row still exists after the walk (count=$OVERCAP_POST) -- tuples-003-2 did not remove it"
-  OVERCAP_LOG_POST="$(diag_sql "SELECT count(*) FROM nexus.tuple_claim_log WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-oversize-${TUPLE_LABEL}' AND tuple_id IS NULL")"
-  if [ "${OVERCAP_LOG_POST:-0}" -ge 1 ] 2>/dev/null; then
-    ok "tenant $TUPLE_LABEL: the over-cap row's claim-log row(s) survive with tuple_id NULLed ($OVERCAP_LOG_POST row(s))"
+  if [ "${OVERCAP_SEEDED[$TUPLE_LABEL]:-0}" = 1 ]; then
+    [ "$OVERCAP_POST" = 0 ] && ok "tenant $TUPLE_LABEL: the over-cap row is gone after the walk (tuples-003-2's cleanup DELETE)" \
+      || bad "tenant $TUPLE_LABEL: the over-cap row still exists after the walk (count=$OVERCAP_POST) -- tuples-003-2 did not remove it"
+    OVERCAP_LOG_POST="$(diag_sql "SELECT count(*) FROM nexus.tuple_claim_log WHERE tenant_id='${TUPLE_LABEL}' AND subspace='mailbox/candmig-oversize-${TUPLE_LABEL}' AND tuple_id IS NULL")"
+    if [ "${OVERCAP_LOG_POST:-0}" -ge 1 ] 2>/dev/null; then
+      ok "tenant $TUPLE_LABEL: the over-cap row's claim-log row(s) survive with tuple_id NULLed ($OVERCAP_LOG_POST row(s))"
+    else
+      bad "tenant $TUPLE_LABEL: expected >=1 surviving claim-log row with tuple_id NULL for the deleted over-cap row, counted '$OVERCAP_LOG_POST'"
+    fi
   else
-    bad "tenant $TUPLE_LABEL: expected >=1 surviving claim-log row with tuple_id NULL for the deleted over-cap row, counted '$OVERCAP_LOG_POST'"
+    [ "$OVERCAP_POST" = 0 ] && ok "tenant $TUPLE_LABEL: still no over-cap row after the walk" \
+      || bad "tenant $TUPLE_LABEL: $OVERCAP_POST over-cap row(s) after the walk, none was seeded"
+    echo "  n/a tenant $TUPLE_LABEL: tuples-003-2's DELETE and its claim-log SET NULL -- the floor enforces the cap, so there was no over-cap row to remove"
   fi
 
   # At-cap row: intact, unchanged.

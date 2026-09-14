@@ -42,6 +42,7 @@ from nexus.mcp.core import (  # noqa: F401
     tuple_registry,
     tuple_list,
     tuple_stats,
+    mailbox_send,
     # Demoted (plain functions)
     store_delete,
     collection_info,

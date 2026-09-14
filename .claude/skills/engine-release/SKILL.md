@@ -162,8 +162,10 @@ tuples-003 + nexus-8zoyp).** Stage 3h seeds `nexus.tuples` through the
 FLOOR engine before the swap: mailbox rows in every claim state
 (unclaimed, claimed-and-left, consumed with and without a reply,
 dead-lettered via 3 claim/nack cycles), an over-4096-byte body (written
-past the working-tree client's own mirrored 4096-byte pre-check, since
-the floor enforces no size limit at all), an exactly-4096-byte body, and
+past the working-tree client's own mirrored 4096-byte pre-check, when
+the floor enforces no size limit; a floor from v0.1.118 on refuses it with
+TooLarge, which the leg asserts in place of the over-cap checks), an
+exactly-4096-byte body, and
 ledger rows — under a second tenant too when the floor's `nx tenant
 create` supports minting one. Post-walk it asserts: the over-cap row is
 gone with its claim-log history surviving at `tuple_id=NULL`
