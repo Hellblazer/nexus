@@ -58,13 +58,17 @@ export NX_ALLOW_PROD_WRITE="local-service-gate: self-provisioned throwaway servi
 #     once a pinned release ships the fence routes (v0.1.62+); it stays as
 #     supplementary coverage of the fence contract itself, not identity.
 #
-# THIS GATE IS BGE-768 ONLY (nexus-w6h2m, 2026-07-28). A local service embeds
-# with bge-768 and nothing else — RDR-160 makes that the only valid value in
-# the service-stack topology, and `nx init --service` stamps it. The service
-# also serves ONE embedding mode at a time. So tests that need the SERVICE to
-# embed voyage-* collections are cloud-mode tests and are marked `cloud_mode`
-# and deselected here; the gate no longer needs a Voyage key for its own
-# corpus.
+# THIS GATE RUNS THE LOCAL SERVICE KEYLESS, BGE-768 ONLY (nexus-w6h2m,
+# 2026-07-28). `nx init --service` stamps bge-768 and no Voyage key reaches
+# the service, so it embeds with bge-768 and nothing else — that is a
+# deliberate posture for THIS gate, not the engine's ceiling: a keyed local
+# service embeds with Voyage instead (nexus-umm29 carve-out). Either way the
+# service serves ONE embedding mode at a time (RDR-210 tracks the dual-mode
+# engine that would end that). So tests that need the SERVICE to embed
+# voyage-* collections are cloud-mode tests and are marked `cloud_mode` and
+# deselected here; the gate no longer needs a Voyage key for its own corpus.
+# COVERAGE GAP: no gate in this repo boots the local service keyed — a keyed
+# local engine is untested end-to-end.
 #
 # It used to carry those tests and pass, because it was never actually running
 # local: the CHROMA_* secrets made is_local_mode() answer False, `nx init

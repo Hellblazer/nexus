@@ -3,9 +3,18 @@
 
 ``nx init`` is a single mode-detecting command (RDR-174 §1/§3). It resolves
 LOCAL vs MANAGED via :func:`_resolve_init_mode` and either provisions and
-starts the local service stack (Postgres + the bge-768 Java service) or runs
-the reused RDR-166 managed-onboarding wizard + service probe. It is distinct
-from the credentials-only wizard ``nx config init``.
+starts the local service stack (Postgres + the Java service, provisioned here
+for bge-768) or runs the reused RDR-166 managed-onboarding wizard + service
+probe. It is distinct from the credentials-only wizard ``nx config init``.
+
+Local mode's embedding posture is one model per boot, not a fixed bge-768
+ceiling: with ``NX_VOYAGE_API_KEY`` reaching the service, the Java service
+embeds and reranks with Voyage instead (nexus-umm29 carve-out; the outbound
+call is the only one the local service makes). This module always stamps
+``local.embed_model`` to bge-768 regardless of that opt-in — re-running
+``nx init`` or the upgrade ladder's provision leg reverts a Voyage posture at
+the next restart. RDR-210 tracks the dual-mode engine and the fix to stop
+clobbering the setting.
 
 This module DOES perform network and install work on the LOCAL path (PG
 provisioning, native-binary acquisition, bge-768 ONNX download) — the RDR-144
@@ -30,9 +39,12 @@ _log = structlog.get_logger(__name__)
 #: ``config.local_embed_model_choice()`` reads it and feeds the doctor advisory
 #: (health.py), the MCP first-run advisory, and ``local_ef`` model selection.
 #: ``_provision_service_embedder_step`` stamps it at provisioning time so those
-#: consumers agree with what the service actually runs — bge-768 is the only
-#: valid value in the service-stack topology (RDR-160); the RDR-144 multi-choice
-#: picker that once varied it was removed in RDR-174 P1.3.
+#: consumers agree with what the service actually runs — bge-768 is what this
+#: init/provision path always writes (RDR-160); the RDR-144 multi-choice picker
+#: that once varied it was removed in RDR-174 P1.3. A separate opt-in
+#: (``NX_VOYAGE_API_KEY``, nexus-umm29) switches the running service to Voyage
+#: without going through this key, which is why re-running init or the upgrade
+#: ladder's provision leg silently reverts that opt-in (RDR-210).
 _EMBED_MODEL_KEY = "local.embed_model"
 
 
@@ -40,10 +52,11 @@ _EMBED_MODEL_KEY = "local.embed_model"
 
 
 def _provision_service_embedder_step(embedder: str | None) -> None:
-    """Lock the service embedder to bge-768 and fetch the standard ONNX it reads.
+    """Provision bge-768 for the service and fetch the standard ONNX it reads.
 
-    RDR-160: a ``--service`` install routes EVERY collection through the Java
-    service's bge-768 embedder (768-dim). Two things follow:
+    RDR-160: this provisioning step routes the ``--service`` install through
+    the Java service's bge-768 embedder (768-dim) by default. Two things
+    follow:
 
     * **P3.2 (RDR-144 reverse-gap):** ``minilm-384`` is non-operative on the
       service T3 path, so an explicit ``--embedder minilm-384`` gets an ADVISORY
@@ -53,6 +66,12 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
       optimized cache, which onnxruntime-java cannot load) to the stable
       Java-read path; the service only reads the file. Offline failure is loud
       (no silent fallback).
+
+    This step always stamps ``local.embed_model`` to bge-768, even on a
+    machine with a Voyage opt-in already configured (``NX_VOYAGE_API_KEY``,
+    nexus-umm29) — that opt-in is a separate switch the supervisor reads at
+    service spawn, and running this step reverts it at the next restart.
+    RDR-210 tracks making the two agree.
     """
     from nexus.db.service_bge_model import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         SERVICE_BGE_DOWNLOAD_HINT,
@@ -61,8 +80,8 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
 
     if embedder == "minilm-384":
         click.echo(
-            "\nNote: a --service install embeds every collection with bge-768 "
-            "(768-dim) in the Java service. The minilm-384 choice is non-operative "
+            "\nNote: this --service install step provisions bge-768 (768-dim) "
+            "in the Java service. The minilm-384 choice is non-operative "
             "for the service T3 path; provisioning bge-768 instead. (minilm-384 "
             "remains valid for a non-service local install.)",
             err=True,
@@ -70,8 +89,12 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
 
     # Record bge-768 as the active local model so the rest of nx (catalog model
     # segment, doctor advisory) agrees with what the service actually runs.
+    # This is the default posture only — switching this key to a voyage model
+    # AND configuring voyage_api_key, then restarting, is a separate opt-in
+    # (docs/cli-reference.md "Local mode with Voyage"); a later `nx init`/
+    # upgrade-ladder provision run reverts that switch (RDR-210).
     set_config_value(_EMBED_MODEL_KEY, _TIER1_MODEL)
-    click.echo(f"\nSaved: {_EMBED_MODEL_KEY} = {_TIER1_MODEL} (service: bge-768 only)")
+    click.echo(f"\nSaved: {_EMBED_MODEL_KEY} = {_TIER1_MODEL} (service default; Voyage is a separate opt-in)")
 
     click.echo(
         f"\nProvisioning the standard bge-768 ONNX the service reads "
@@ -902,8 +925,9 @@ def _converge_ladder_best_effort() -> None:
     type=click.Choice(["bge-768", "minilm-384"]),
     default=None,
     help=(
-        "Local service embedder selector (minilm-384 gets an advisory — the "
-        "Java service embeds with bge-768 only)."
+        "Local service embedder selector (minilm-384 gets an advisory — this "
+        "init run provisions bge-768; Voyage is a separate opt-in, see "
+        "docs/cli-reference.md 'Local mode with Voyage' for the steps)."
     ),
 )
 @click.option(
@@ -956,15 +980,19 @@ def init_cmd(
     RDR-174 §1/§3 collapse: ``nx init`` is mode-detecting. ``_resolve_init_mode``
     decides LOCAL vs MANAGED (NX_LOCAL wins; otherwise on a configured
     ``service_url``). In LOCAL mode a plain ``nx init`` provisions and starts the
-    local service stack (Postgres + the bge-768 Java service, RDR-160) — the
-    same body the now-deprecated ``--service`` flag drives. In MANAGED mode a
-    remote nexus service serves every tier, so there is nothing to provision
-    locally (the credential wizard for that path lands in P1.2, nexus-r2auz).
+    local service stack (Postgres + the Java service, provisioned here for
+    bge-768, RDR-160) — the same body the now-deprecated ``--service`` flag
+    drives. In MANAGED mode a remote nexus service serves every tier, so there
+    is nothing to provision locally (the credential wizard for that path lands
+    in P1.2, nexus-r2auz).
 
     ``--embedder`` selects bge-768 vs minilm-384 for the local service-embedder
-    step (minilm-384 gets an advisory — the Java service is bge-768 only).
-    ``--service`` is still accepted (it forces local provisioning) and is slated
-    for a deprecation notice in P3.1.
+    step (minilm-384 gets an advisory — this step always provisions bge-768).
+    A separate opt-in (nexus-umm29) switches the running service to Voyage
+    instead — see docs/cli-reference.md "Local mode with Voyage" for the
+    ``local.embed_model`` + ``voyage_api_key`` + restart steps; a later
+    ``nx init`` reverts it (RDR-210). ``--service`` is still accepted (it
+    forces local provisioning) and is slated for a deprecation notice in P3.1.
     """
     # nexus-gynt2: stranded-install refusal, FIRST — before any provisioning.
     # Disarmed (constant-check no-op) on every migration-capable release; at

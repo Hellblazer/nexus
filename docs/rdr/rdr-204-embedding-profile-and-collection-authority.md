@@ -403,6 +403,18 @@ re-embedding under the new profile, the same re-index GH #1461 already
 requires after a switch; reads of such a collection continue to route by
 the row's own model and are never refused.
 
+*(Amended 2026-09-15, nexus-umm29.)* This "never refused" is the design
+intent; the shipped engine does not meet it yet. `resolveEmbedderStrict`
+(`EmbedderRouter.java`) dispatches on the collection's own
+`embedding_model`, and a model absent from the current boot's router
+(bge when keyed for Voyage, or Voyage when running keyless) raises
+`EmbeddingModelUnavailableException`, which `VectorHandler` maps to a 422 —
+a read of such a collection fails, it does not degrade. The gap is the
+single-router-per-boot design this document assumes throughout (`Main.java`
+"decides the mode once per process" above); RDR-210 tracks a dual-mode
+engine that would let both models resolve in the same boot and make this
+paragraph true as written.
+
 **2. Collections inherit at registration.** `catalog_collections.
 embedding_model` and a new `dimension` column stay as denormalised facts
 for joins. They are constrained: NOT NULL and non-empty on

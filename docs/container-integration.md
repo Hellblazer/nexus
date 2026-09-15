@@ -341,7 +341,7 @@ and point at the right host address and current port.
 | HTTP 401 | Wrong / revoked / rotated-out token | Reissue: `nx service token issue --tenant default` |
 | Connection refused | Service down — or the host supervisor restarted and allocated a **new port** | `nx daemon service status --json` on the host; refresh the container's `NX_SERVICE_URL`, or use the socat stable-port pattern |
 | Works from macOS container, refused from Linux bridge container | Service bound to loopback; bridge gateway can't reach it | Path C: `NX_SERVICE_BIND` or socat forward |
-| HTTP 422 on `voyage-*` collections | Host service started without a Voyage key (local ONNX embedding mode) | Provide `VOYAGE_API_KEY` on the host and restart the service, or use local-mode collections |
+| HTTP 422 on `voyage-*` collections | Host service booted keyless (bge-768 mode) | Set `local.embed_model` to a voyage model AND `voyage_api_key` (or export `NX_VOYAGE_API_KEY` directly) on the host, then restart the service — a bare `VOYAGE_API_KEY` alone is not plumbed to the service unless `local.embed_model` already names a voyage model (nexus-umm29). A keyed restart flips the whole service to Voyage and 422s bge-768 collections instead — the two modes don't coexist yet (RDR-210). |
 | Cowork agent's `mcp_*` tool returns error | Host service down or conexus plugin not enabled | `nx daemon service start`; `/plugin list` to confirm the plugin is active |
 
 ### Version skew

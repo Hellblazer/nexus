@@ -10,7 +10,7 @@ Nexus organizes data across three tiers with increasing durability. Data flows u
 |------|---------|------------|-----------|------------|-----|
 | T1 -- scratch | Service-backed (`HttpScratchStore` via `nexus-service`), PG-only — no in-process opt-out | nexus-service (`nx daemon service`) | nexus-service HTTP | Session only | Working notes, hypotheses |
 | T2 -- memory | Postgres 17 via `nexus-service` (the only backend since RDR-158; `=sqlite` hard-errors) | nexus-service (`nx daemon service`) | nexus-service HTTP | Survives restarts | Per-project notes, session context |
-| T3 -- knowledge | Postgres 17 + pgvector behind the native nexus-service (both modes); embedding server-side (bge-768 local / Voyage managed-cloud) | storage-service supervisor (`nx daemon service`) | nexus-service HTTP `/v1/vectors` (`NX_SERVICE_URL` + `NX_SERVICE_TOKEN`) | Permanent | Semantic search, indexed code/docs |
+| T3 -- knowledge | Postgres 17 + pgvector behind the native nexus-service (both modes); embedding server-side (managed-cloud: always Voyage. local: bge-768 by default, or Voyage when `NX_VOYAGE_API_KEY` reaches the service — nexus-umm29, one posture per boot, RDR-210 tracks dual-mode) | storage-service supervisor (`nx daemon service`) | nexus-service HTTP `/v1/vectors` (`NX_SERVICE_URL` + `NX_SERVICE_TOKEN`) | Permanent | Semantic search, indexed code/docs |
 | Catalog | Engine-owned Postgres tables (Liquibase-managed schema, RLS), reached via `HttpCatalogClient` through the `nexus-service` — no local JSONL event log, no `.catalog.db` (both deleted at RDR-158 P4, nexus-i711w) | nexus-service (`nx daemon service`) | nexus-service HTTP | Permanent | Document registry, typed link graph, provenance |
 
 The catalog sits alongside T3 as a metadata layer. While T3 stores document *content* as embeddings, the catalog stores document *metadata* and *relationships*. See [Document Catalog](catalog.md).
@@ -43,7 +43,7 @@ flowchart TD
   REG --> SVC
 
   SVC["native nexus-service<br/>(one binary · every tier)"]
-  SVC -->|"server-side embed<br/>bge-768 ONNX (local) / Voyage (cloud)<br/>+ ANN search"| PG[("Postgres 17 + pgvector<br/>T3 vectors")]
+  SVC -->|"server-side embed<br/>bge-768 ONNX (local default) or Voyage<br/>(cloud always; local when keyed)<br/>+ ANN search"| PG[("Postgres 17 + pgvector<br/>T3 vectors")]
   SVC --> PGT1[("Postgres<br/>T1 scratch")]
   SVC --> PGT2[("Postgres<br/>T2 domain stores")]
 
@@ -197,22 +197,30 @@ Since RDR-155, T3 serving routes through the **native nexus-service** (Postgres
 service over HTTP `/v1/vectors`, reading `NX_SERVICE_URL` + `NX_SERVICE_TOKEN`
 with supervisor-lease discovery (`~/.config/nexus/storage_service_addr.<uid>`).
 Embedding happens **server-side**, so the choice of model is a property of the
-service, not of the client. The two modes differ only in which embedder the
-service runs:
+service, not of the client. Managed-cloud mode always runs Voyage. Local mode
+runs bge-768 by default, or Voyage instead when `NX_VOYAGE_API_KEY` reaches the
+service (nexus-umm29 carve-out) — a local install can use either, but not both
+from the same boot (RDR-210 tracks a dual-mode engine that would end that
+limit):
 
-| | Local mode (default) | Managed-cloud mode |
-|---|---|---|
-| Embedder (server-side) | bge-768 (ONNX, RDR-160) | Voyage (`voyage-code-3` / `voyage-context-3`) |
-| Dimensions | 768 | 1024 |
-| Credentials | none required | Voyage API key on the service |
-| Reranking | available: server-side `ms-marco-MiniLM` cross-encoder (RDR-188) | available: `voyage-rerank-2.5` |
+| | Local mode, default | Local mode, keyed (`NX_VOYAGE_API_KEY`) | Managed-cloud mode |
+|---|---|---|---|
+| Embedder (server-side) | bge-768 (ONNX, RDR-160) | Voyage (`voyage-code-3` / `voyage-context-3`) | Voyage (`voyage-code-3` / `voyage-context-3`) |
+| Dimensions | 768 | 1024 | 1024 |
+| Credentials | none required | Voyage API key on the service | Voyage API key on the service |
+| Reranking | available: server-side `ms-marco-MiniLM` cross-encoder (RDR-188) | available: `voyage-rerank-2.5` | available: `voyage-rerank-2.5` |
+
+A collection embedded under the posture NOT running at the moment is refused
+with a 422 (RDR-204's "reads never refused" is the design intent, not today's
+behavior — see [RDR-204 § Technical Design](rdr/rdr-204-embedding-profile-and-collection-authority.md)'s 2026-09-15 amendment); switching postures needs a service restart, and re-running `nx init` or the upgrade ladder's provision leg reverts a Voyage opt-in back to bge-768 (see [nx init](cli-reference.md#nx-init) "Local mode with Voyage").
 
 Both modes rerank server-side in the Java engine on `rerank=true`; there is no client-side rerank path (the old `nexus.cross_encoder` rerank caller was deleted at RDR-188 P2.6; that module's ONNX cross-encoder survives only as a salience scorer, unrelated to search reranking). A missing local cross-encoder model degrades loud (`rerank_degraded=true`) rather than silently skipping the stage; `nx doctor` flags it.
 
-bge-768 is the standard local-mode service embedder (RDR-160 replaced the
-earlier MiniLM-384), not an opt-in extra. Run `nx daemon service start` to
-bring the stack up and `nx daemon service status` to verify health (lease, PG
-cluster, `/version` handshake with `embedding_mode`).
+bge-768 is the standard local-mode service embedder by default (RDR-160
+replaced the earlier MiniLM-384), not an opt-in extra; Voyage in local mode IS
+an explicit opt-in (`NX_VOYAGE_API_KEY`, nexus-umm29). Run `nx daemon service
+start` to bring the stack up and `nx daemon service status` to verify health
+(lease, PG cluster, `/version` handshake with `embedding_mode`).
 
 > **The legacy ChromaDB serving path is gone.** Pre-RDR-155, T3 was backed by
 > `chromadb.PersistentClient` (local) or `chromadb.CloudClient` + Voyage
@@ -235,12 +243,12 @@ Collections are namespaced by corpus type using `__` (double underscore) as sepa
 Conformant collection names (RDR-103) follow a 4-segment shape:
 `<content_type>__<owner_id>__<embedding_model>__v<n>`.
 
-| Pattern | Contents | Managed-cloud model | Local model |
-|---------|----------|---------------------|-------------|
-| `code__<owner_id>__voyage-code-3__v1` | Indexed source code | voyage-code-3 | bge-768 |
-| `docs__<owner_id>__voyage-context-3__v1` | Indexed prose files | voyage-context-3 (CCE) | bge-768 |
-| `rdr__<owner_id>__voyage-context-3__v1` | Indexed RDR documents | voyage-context-3 (CCE) | bge-768 |
-| `knowledge__<owner_id>__voyage-context-3__v1` | Stored agent outputs and notes | voyage-context-3 (CCE) | bge-768 |
+| Pattern | Contents | Managed-cloud model | Local model, default | Local model, keyed |
+|---------|----------|---------------------|-----------------------|---------------------|
+| `code__<owner_id>__voyage-code-3__v1` | Indexed source code | voyage-code-3 | bge-768 | voyage-code-3 |
+| `docs__<owner_id>__voyage-context-3__v1` | Indexed prose files | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
+| `rdr__<owner_id>__voyage-context-3__v1` | Indexed RDR documents | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
+| `knowledge__<owner_id>__voyage-context-3__v1` | Stored agent outputs and notes | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
 
 (`<owner_id>` is a stable slug like `nexus-1-1` — see [RDR-103](rdr/rdr-103-catalog-collection-name-authority.md).)
 

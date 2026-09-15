@@ -2359,6 +2359,13 @@ follow-up in nexus-ddmfg (the engine's voyage-only-mode-flip after
 restart) — that bead's scope now explicitly includes this stale/orphaned
 bge-data-after-a-keyed-write case, not just the engine-restart case.
 
+**Re-running `nx init` reverts this opt-in.** Both `nx init` and the upgrade
+ladder's provision leg unconditionally write `local.embed_model` back to
+bge-768; a later `nx daemon service` restart then boots keyless and the
+Voyage collections become unreadable until you redo the recipe above. RDR-210
+tracks the dual-mode engine (one boot serving both bge-768 and Voyage) that
+removes the need for this opt-in dance and the revert defect together.
+
 **Beads PRIME.md (user-level)** (nexus-cnzei.8). Runs unconditionally,
 independent of the local/managed/cloud dispatch above: when `bd` is on
 `PATH` or the beads Claude Code plugin is installed (either of its two real

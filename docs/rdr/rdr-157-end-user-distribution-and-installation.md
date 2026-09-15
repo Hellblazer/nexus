@@ -153,6 +153,17 @@ locked the architecture:
    > - **Local mode:** `nx` CLI + local MCP server → **HTTP** → `localhost:<port>`
    >   local Java native service → **JDBC** → **LOCAL** Postgres.
    >
+   > *(Amended 2026-09-15, nexus-umm29.)* The invariant governs the database
+   > connection: JDBC to a local Postgres is the local service's only one. Its one
+   > sanctioned outbound call is the third-party embedding and rerank API. With
+   > `NX_VOYAGE_API_KEY` set, the local service embeds `code__` with voyage-code-3
+   > and `docs__`/`rdr__`/`knowledge__` with voyage-context-3, and reranks with
+   > Voyage (`Main.java`); without it, it embeds with the bundled bge-768 (RDR-160)
+   > and refuses voyage collections. The carve-out was decided 2026-06-15 (Sam) and
+   > is bounded to the embedding and rerank API. Local mode must support both
+   > embedders at once (Sam, 2026-09-15); today it serves one per boot — RDR-210
+   > tracks the dual-mode engine that closes the gap.
+   >
    > Consequence for P3: the pgvector ≥ 0.8 (`iterative_scan`) floor is validated
    > wherever the JDBC connection actually lives — **locally** by the local service
    > against its local PG (`pg_provision.check_pgvector_available`, already shipped),

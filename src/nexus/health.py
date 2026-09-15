@@ -5945,10 +5945,13 @@ def _check_embedding_profile() -> list[HealthResult]:
     changed (the engine reads both only at spawn): the GH #1461 "did you
     restart?" blind spot, reported in those words with the restart
     command. Live collections under a model other than the profile's are
-    informational (reads route by the row's own model and are never
-    refused; RDR §Technical Design 1a); ``disputed`` and ``dormant`` rows
-    are red with their remedies; ``quarantine`` rows are reported with the
-    GC contract's remedy. ``nx collection shape`` stays the curation tool.
+    reported informationally (RDR §Technical Design 1a intends reads to
+    route by the row's own model and never be refused; today's
+    single-router-per-boot engine actually 422s a read whose model is not
+    the current boot's — RDR-204's 2026-09-15 amendment, RDR-210 tracks the
+    fix); ``disputed`` and ``dormant`` rows are red with their remedies;
+    ``quarantine`` rows are reported with the GC contract's remedy.
+    ``nx collection shape`` stays the curation tool.
 
     An engine below the Phase 2 route is red (no default is ever invented
     for a data-correctness fact); a reader that cannot be built or read

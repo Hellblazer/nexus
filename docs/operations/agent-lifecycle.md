@@ -27,7 +27,7 @@ since RDR-155 P4a, in both local and cloud mode.
 
 - **uninstalled** — no autostart unit, no service binary, no provisioned PG.
 - **installed** — the `nexus-service` binary is fetched + positioned; `nx` resolvable.
-- **provisioned** — Postgres 17 + pgvector provisioned, schema migrated (Liquibase), embedder wired (bge-768 local, or Voyage in cloud mode).
+- **provisioned** — Postgres 17 + pgvector provisioned, schema migrated (Liquibase), embedder wired (bge-768 local by default, or Voyage when the local service is keyed — nexus-umm29; always Voyage in cloud mode).
 - **running** — the supervisor publishes a `storage_service` lease; T2 + T3 serve.
 - **upgrading** — a transient state during `nx upgrade`, while the stateless
   preconditions (package, engine, process) converge and the ladder walks
@@ -71,9 +71,12 @@ Pick `engine-service-vX.Y.Z` from the
 local service backend by default (the deprecated `nx init --service` flag still
 works) and offers to register the OS autostart unit (RDR-174 decide-first;
 `--yes` accepts, `--no-autostart` declines). It is idempotent (safe to re-run).
-It embeds with bge-768 locally; in the managed-cloud deployment, embeddings run
-server-side via Voyage with `NX_VOYAGE_API_KEY` plumbed from the nexus credential
-chain. See
+It embeds with bge-768 locally by default; the local supervisor plumbs a
+configured Voyage credential into `NX_VOYAGE_API_KEY` for the local service to
+switch it to Voyage instead (nexus-umm29 opt-in, see
+[CLI reference § Local mode with Voyage](../cli-reference.md#nx-init)). In the
+managed-cloud deployment the managed service always embeds server-side via
+Voyage under its own operator-held key — nothing on the client plumbs it. See
 [getting-started.md](../getting-started.md#install) for the
 full walkthrough and [container-integration.md](../container-integration.md) for
 reaching the service from a container.

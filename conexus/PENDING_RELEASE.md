@@ -32,3 +32,5 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.46.2)
 
+- `conexus/skills/nexus/reference.md`: the T3 tier line says local mode embeds with bge-768 by default, or with Voyage when the local service is keyed, instead of implying Voyage is cloud-only (nexus-umm29).
+

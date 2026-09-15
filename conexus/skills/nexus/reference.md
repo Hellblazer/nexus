@@ -8,9 +8,11 @@ Nexus provides MCP tools for semantic search, persistent memory, and knowledge m
 - **T2 memory** — service-backed Postgres, survives restarts (`memory_put`,
   `memory_get`, `memory_delete`, `memory_search` tools)
 - **T3 knowledge** — pgvector via the nexus service, permanent (`search`,
-  `store_put`, `store_get`, `store_list` tools). Local mode embeds with the
-  bundled PG17+pgvector and bge-768; cloud mode uses the managed service and
-  Voyage.
+  `store_put`, `store_get`, `store_list` tools). Local mode uses the bundled
+  PG17+pgvector, embedding with bge-768 by default or Voyage when
+  `NX_VOYAGE_API_KEY` reaches the local service (nexus-umm29 carve-out — one
+  posture per boot; RDR-210 tracks a dual-mode engine); cloud mode uses the
+  managed service and always embeds with Voyage.
 
 All three tiers are Postgres behind the engine. SQLite is retired (RDR-158 P4)
 and ChromaDB is not a live substrate in any mode (RDR-155 P4b — the dependency

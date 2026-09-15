@@ -50,8 +50,11 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     │     Model names above (`voyage-code-3`, `voyage-context-3`) label the
     │     target model, not a client-side API call — the embed request is
     │     always issued through the nexus-service (`HttpVectorClient` →
-    │     `/v1/vectors`): cloud installs route to Voyage AI server-side,
-    │     local installs use the bundled bge-768 ONNX model. Direct
+    │     `/v1/vectors`): cloud installs always route to Voyage AI
+    │     server-side; local installs use the bundled bge-768 ONNX model by
+    │     default, or route to Voyage instead when `NX_VOYAGE_API_KEY`
+    │     reaches the service (nexus-umm29 carve-out) — one posture per
+    │     boot today, RDR-210 tracks serving both from one engine. Direct
     │     client-side Voyage calls (`_voyage_with_retry`) are retired code
     │     with no live caller.
     │
@@ -86,13 +89,16 @@ CLI (cli.py)            MCP Server (mcp_server.py)
                  the class remains a client-side shim)
           T3: Postgres 17 + pgvector behind the native nexus-service ── nx daemon service start
               Same service in BOTH modes; embedding is server-side
-              (bge-768 in local mode, Voyage in managed-cloud mode).
+              (managed-cloud mode: always Voyage. Local mode: bge-768 by
+              default, or Voyage instead when NX_VOYAGE_API_KEY reaches the
+              service — nexus-umm29 carve-out, one posture per boot, RDR-210
+              tracks a dual-mode engine).
               The client is HttpVectorClient over /v1/vectors; the legacy
               ChromaDB serving path is retired ([RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md)).
-                code__*       voyage-code-3 (managed) / bge-768 (local)
-                docs__*       voyage-context-3 CCE (managed) / bge-768 (local)
-                rdr__*        voyage-context-3 CCE (managed) / bge-768 (local)
-                knowledge__*  voyage-context-3 CCE (managed) / bge-768 (local)
+                code__*       voyage-code-3 (managed) / bge-768 or voyage-code-3 (local)
+                docs__*       voyage-context-3 CCE (managed) / bge-768 or voyage-context-3 (local)
+                rdr__*        voyage-context-3 CCE (managed) / bge-768 or voyage-context-3 (local)
+                knowledge__*  voyage-context-3 CCE (managed) / bge-768 or voyage-context-3 (local)
 ```
 
 **Service-mediated T3 storage ([RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md)).** T3 serving routes through the

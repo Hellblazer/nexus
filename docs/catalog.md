@@ -234,7 +234,8 @@ taxonomy:
 
 | Mode | Embedding model (server-side) | Code quality | Document quality |
 |------|----------------|-------------|-----------------|
-| Local | bge-768 (ONNX, via nexus-service) | Poor (excluded by default) | Good (8 topics from 120 docs) |
+| Local, keyless (default) | bge-768 (ONNX, via nexus-service) | Poor (excluded by default) | Good (8 topics from 120 docs) |
+| Local, keyed (`NX_VOYAGE_API_KEY`, nexus-umm29) | Voyage 1024d | Expected to match cloud (same model) — not separately measured | Expected to match cloud (same model) — not separately measured |
 | Cloud | Voyage 1024d | Excellent (124 topics from 5K chunks) | Excellent (88 topics, 78% assigned) |
 
 ### How it works
