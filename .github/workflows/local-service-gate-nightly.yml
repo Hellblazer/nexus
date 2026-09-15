@@ -52,7 +52,12 @@ jobs:
   gate:
     name: local-service gate (hermetic, throwaway PG + service)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 75, not 45 (nexus-ggonw): the steps before the slow leg take about 35
+    # minutes, and the slow leg's MinerU table test downloads ~2-3GB of
+    # weights on a cold HuggingFace cache. At 45 the job was cancelled inside
+    # that download (run 34975576187), and a cancelled job skips the cache's
+    # post-step save, so the cache never filled and every run timed out.
+    timeout-minutes: 75
     env:
       # Pinned for determinism — MUST match ci.yml's CA-3 job so the cache
       # key resolves the bundle pg-bundle-cache-seed.yml seeds on main.
