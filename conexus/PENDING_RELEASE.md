@@ -32,3 +32,5 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.46.1)
 
+- `conexus/skills/mailbox/SKILL.md`: the push-delivery rule passes `persistent: true` only when the Monitor tool has that parameter (current Claude Code builds removed it and reject unknown parameters), and re-arms on the 30-minute expiry notice (nexus-galkv.19).
+

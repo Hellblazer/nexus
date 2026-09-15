@@ -1050,7 +1050,7 @@ class TestMailboxArmIntegration:
         assert 'command: "nx tuple watch s-6konb9-instance-unknown"' not in output
         assert "omit --instance" in output
 
-    def test_emitted_text_includes_timeout_ms_and_persistent_true(
+    def test_emitted_text_includes_timeout_ms_and_persistent_only_where_offered(
         self, tmp_path: Path,
     ) -> None:
         from unittest.mock import patch as _patch
@@ -1062,7 +1062,9 @@ class TestMailboxArmIntegration:
         ):
             output = session_start(claude_session_id="s-6konb9-timeout-ms")
         assert "timeout_ms: 3600000" in output
-        assert "persistent: true" in output
+        call = output[output.index("Monitor({"):output.index("})")]
+        assert "persistent" not in call
+        assert "persistent: true only if Monitor has it" in output
 
     def test_absent_when_tuple_surface_unavailable_end_to_end(
         self, tmp_path: Path,
