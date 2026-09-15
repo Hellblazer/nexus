@@ -6581,16 +6581,25 @@ def tuple_registry() -> dict:
 )
 def tuple_list(
     prefix: Annotated[str, Field(description="Optional subspace-name prefix filter (e.g. \"agents.mailbox.\").")] = "",
+    limit: Annotated[int, Field(description="Max subspaces to return per page.")] = 100,
+    after: Annotated[str, Field(description="Subspace-name cursor from a prior truncated page's footer.")] = "",
 ) -> list[dict]:
     """List concrete tuple subspaces that currently exist, each with its row census.
 
     Use `tuple_registry` instead to see the template definitions rather
-    than live subspaces. Returns one census row per subspace.
+    than live subspaces. Returns one census row per subspace, paged
+    (RDR-211 scalability research, bead nexus-xapt8): a truncated page
+    appends a `_pagination` entry with `next_cursor` -- the catalog tools'
+    own convention for a `list[dict]`-shaped paged result -- pass that back
+    as `after` to continue.
     """
     try:
         with _t2_ctx() as db:
-            rows = db.tuples.subspace_list(prefix or None)
-        return [_tuple_census_to_dict(c) for c in rows]
+            rows, next_cursor = db.tuples.subspace_list(prefix or None, limit=limit, after=after or None)
+        out = [_tuple_census_to_dict(c) for c in rows]
+        if next_cursor:
+            out.append({"_pagination": {"next_cursor": next_cursor}})
+        return out
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return [{"error": _mcp_tool_error("tuple_list", e)}]
 

@@ -302,16 +302,31 @@ def tuple_templates_cmd(json_out: bool) -> None:
 
 @tuple_group.command(name="list")
 @click.option("--prefix", default=None, help="Filter to subspaces starting with this prefix.")
+@click.option("--limit", type=int, default=None, help="Page size; unset returns every matching subspace.")
+@click.option("--after", default=None, help="Subspace-name cursor from a prior truncated page's --json output.")
 @click.option("--json", "json_out", is_flag=True, default=False, help="Output as JSON array.")
-def tuple_list_cmd(prefix: str | None, json_out: bool) -> None:
-    """Concrete tuple subspaces that exist."""
+def tuple_list_cmd(prefix: str | None, limit: int | None, after: str | None, json_out: bool) -> None:
+    """Concrete tuple subspaces that exist.
+
+    Unpaged by default (every matching subspace). Pass --limit to page
+    (RDR-211 scalability research, bead nexus-xapt8): a truncated page
+    prints a "next: --after=<cursor>" hint line (or, under --json, the
+    array's last element is {"next_cursor": "..."}).
+    """
     try:
-        rows = _store().subspace_list(prefix)
+        if limit is None:
+            rows: list[Any] = _store().subspace_list(prefix)
+            next_cursor = None
+        else:
+            rows, next_cursor = _store().subspace_list(prefix, limit=limit, after=after)
     except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
         _print_tuple_error(e)
         raise SystemExit(1) from e
     if json_out:
-        click.echo(json.dumps([_census_dict(c) for c in rows]))
+        out: list[Any] = [_census_dict(c) for c in rows]
+        if next_cursor:
+            out.append({"next_cursor": next_cursor})
+        click.echo(json.dumps(out))
         return
     if not rows:
         click.echo("No subspaces.")
@@ -322,6 +337,8 @@ def tuple_list_cmd(prefix: str | None, json_out: bool) -> None:
             f"claimed={c.claimed} dead={c.dead} consumed={c.consumed} "
             f"expired_unpurged={c.expired_unpurged}"
         )
+    if next_cursor:
+        click.echo(f"next: --after={next_cursor}")
 
 
 @tuple_group.command(name="stats")

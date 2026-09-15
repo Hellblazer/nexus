@@ -317,6 +317,25 @@ class TestTupleRegistryListStats:
         assert stats["total"] == 0
         assert stats["available"] == 0
 
+    def test_list_truncated_page_carries_a_pagination_footer_entry(self, t2_service_env) -> None:
+        """nexus-xapt8: a truncated page appends a `_pagination` entry with
+        `next_cursor` -- the catalog tools' own convention for a
+        `list[dict]`-shaped paged result."""
+        prefix = f"mailbox/{_uniq('page')}-"
+        addrs = [f"{prefix}{i}" for i in range(3)]
+        for addr in addrs:
+            tuple_out(addr, {"to": addr}, {"from": "sender"}, "x", nonce=_uniq("nonce"))
+
+        page1 = tuple_list(prefix, limit=2)
+        assert len(page1) == 3  # 2 census rows + 1 pagination footer
+        assert "_pagination" in page1[-1]
+        cursor = page1[-1]["_pagination"]["next_cursor"]
+        assert cursor
+
+        page2 = tuple_list(prefix, limit=2, after=cursor)
+        assert len(page2) == 1  # the remaining subspace, no footer (not truncated)
+        assert "_pagination" not in page2[-1]
+
 
 class TestMailboxSend:
     """RDR-208 Phase 2 Step 2 (bead nexus-galkv.10): send-time `to`

@@ -18,8 +18,12 @@ out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> tuple_id
                                                             # ttl_seconds defaults to the template's retention
 rd (subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0) -> [Tuple]   # non-destructive; blocks up to timeout_s
 rdp(subspace, keys_pattern=None, *, n=1, since=None) -> [Tuple]                # probe
-in (subspace, keys_pattern, *, claimant, lease_s, timeout_s=0) -> (Tuple, claim_id) | None
-inp(subspace, keys_pattern, *, claimant, lease_s) -> (Tuple, claim_id) | None
+in (subspace, keys_pattern, *, claimant, lease_s=None, timeout_s=0) -> (Tuple, claim_id) | None
+                                                            # lease_s omitted (nexus-xapt8, additive) falls
+                                                            # through to the template's own
+                                                            # take.default_lease_seconds; refused as
+                                                            # SchemaViolation if the template has none
+inp(subspace, keys_pattern, *, claimant, lease_s=None) -> (Tuple, claim_id) | None
 ack(claim_id, claimant, *, reply=None) -> reply_id | None  # ownership checked; reply is {subspace, keys, dims,
                                                             # body, ttl_seconds}, written and the request
                                                             # consumed in one transaction (RDR-206)
@@ -27,12 +31,20 @@ nack(claim_id, claimant)                                   # ownership checked; 
 renew(claim_id, claimant, lease_s) -> lease_until          # ownership checked; extends a live claim, clamped
                                                             # to expires_at, refused above the template's
                                                             # max_lease_seconds; never counts an attempt (RDR-206)
-subspace_list(prefix) -> [{subspace, total, available, claimed, dead, consumed, expired_unpurged,
-                           oldest_created_at, newest_created_at}]    # concrete subspaces that exist;
-                                                                     # the two timestamps span all rows,
-                                                                     # expired included (the census needs
-                                                                     # the newest write, not the newest live row);
-                                                                     # total counts live rows only
+subspace_list(prefix, limit=None, after=None) -> {subspaces: [{subspace, total, available, claimed, dead,
+                           consumed, expired_unpurged, oldest_created_at, newest_created_at}], next_cursor?}
+                                                                     # concrete subspaces that exist, ordered
+                                                                     # by subspace name; the two timestamps
+                                                                     # span all rows, expired included (the
+                                                                     # census needs the newest write, not the
+                                                                     # newest live row); total counts live
+                                                                     # rows only. limit/after (nexus-xapt8,
+                                                                     # additive): omitted, every matching
+                                                                     # subspace, no next_cursor key at all --
+                                                                     # the pre-paging response shape,
+                                                                     # unchanged; with limit, next_cursor
+                                                                     # carries the cursor for the next page
+                                                                     # when the page was truncated
 registry() -> {digest, sources, templates: [TemplateSchema]}
 subspace_stats(subspace) -> {total, available, claimed, dead, consumed, expired_unpurged}
                                                             # the exact-name form of subspace_list, kept
@@ -54,6 +66,10 @@ subspace_stats(subspace) -> {total, available, claimed, dead, consumed, expired_
 | `subspace_stats` | no | yes | none |
 
 Matching differs by read. `in` and `inp` require every pinned key and match by equality, because exclusion needs an exact target. `rd` and `rdp` match by equality on every key the pattern supplies and place no condition on keys it omits; a pattern of `None` or `{}` reads the whole subspace, which is what a census does and what a claimant never may. `rd` and `rdp` return up to `n` live tuples, live meaning `expires_at > now()` and not acked, whatever the claim state: a row under a live claim and a dead-lettered row are both returned, with their state — but never their `claim_id`: that field is rendered only by `in`/`inp`'s own top-level response, the ack/nack credential, so reading a claimed row without having won the claim never leaks the means to ack or nack it. `n` is capped by the engine setting `NX_TUPLE_READ_MAX` (default 300, the client's paging convention); an `n` above the cap is clamped, not refused. Results are ordered by `(created_at, id)`, resuming strictly after `since`, a `(created_at, id)` cursor the caller keeps. Acked rows are never returned by any read.
+
+`subspace_list`'s `limit` is capped the same way, against `NX_TUPLE_READ_MAX`. It runs a request-path statement, bounded by its own `statement_timeout` (`NX_TUPLE_SUBSPACE_LIST_TIMEOUT_SECONDS`, default 10s, `SweepBounds`' `is_local=true` pattern — reverts at transaction end, never leaks onto the pooled connection) since, unlike the scheduled sweep's own bounded batch arms, it runs on demand against whatever cardinality a tenant has accumulated (nexus-xapt8, RDR-211 scalability research).
+
+`in`/`inp`'s `lease_s` is optional (nexus-xapt8, additive): omitted, it falls through to the matched template's own `take.default_lease_seconds`; a template with none configured refuses exactly as an explicit missing `lease_s` always has (`SchemaViolation`). The max-lease-seconds refusal and the expires-at clamp apply to a defaulted lease exactly as they do to an explicit one.
 
 ## Templates and subspaces
 

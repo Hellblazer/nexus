@@ -24,7 +24,8 @@ other name matches):
     inp(subspace, keys_pattern, *, claimant, lease_s) -> (TupleRow, claim_id) | None
     ack(claim_id, claimant) ; nack(claim_id, claimant)
     registry() -> {digest, sources, templates: [...]}
-    subspace_list(prefix=None) -> [SubspaceCensus]
+    subspace_list(prefix=None, *, limit=None, after=None) -> [SubspaceCensus]
+        (with limit: -> ([SubspaceCensus], next_cursor | None) instead)
     subspace_stats(subspace) -> SubspaceCensus
 
 Two things no other T2 domain store needs, both new code (RDR-205
@@ -738,13 +739,41 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """The boot-loaded template set: ``{digest, sources, templates: [...]}``."""
         return self._get("/registry")
 
-    def subspace_list(self, prefix: str | None = None) -> list[SubspaceCensus]:
-        """Concrete subspaces that exist, optionally filtered by *prefix*."""
+    def subspace_list(
+        self,
+        prefix: str | None = None,
+        *,
+        limit: int | None = None,
+        after: str | None = None,
+    ) -> list[SubspaceCensus] | tuple[list[SubspaceCensus], str | None]:
+        """Concrete subspaces that exist, optionally filtered by *prefix*.
+
+        With *limit* omitted (the default), this is the pre-paging call:
+        every matching subspace, returned as a plain list -- byte-identical
+        to the wire request and the Python return type this method has
+        always had. Existing callers that never pass *limit* (``nx doctor``'s
+        ``tuples.oldest_unclaimed`` row, which needs every claimable
+        subspace) see no change at all.
+
+        With *limit* given (RDR-211 scalability research addition 2, bead
+        nexus-xapt8, additive), the response is instead a ``(rows,
+        next_cursor)`` pair: *next_cursor* is ``None`` when every matching
+        subspace fit in the page, else the subspace-name cursor for the next
+        call's *after*. *limit* is capped server-side at the engine's own
+        ``rd``/``rdp`` read ceiling (300 by default).
+        """
         params: dict[str, Any] = {}
         if prefix:
             params["prefix"] = prefix
+        if limit is not None:
+            params["limit"] = limit
+        if after:
+            params["after"] = after
         r = self._get("/subspace_list", params)
-        return [_body_to_census(c) for c in (r or {}).get("subspaces", [])]
+        rows = [_body_to_census(c) for c in (r or {}).get("subspaces", [])]
+        if limit is None:
+            return rows
+        return rows, (r or {}).get("next_cursor")
 
     def subspace_stats(self, subspace: str) -> SubspaceCensus:
         """The exact-name form of :meth:`subspace_list` for one subspace."""

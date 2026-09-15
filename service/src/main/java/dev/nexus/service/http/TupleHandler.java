@@ -42,16 +42,29 @@ import java.util.Optional;
  *   POST /v1/tuples/out             {subspace, keys, dims?, body?, nonce?, ttl_seconds?} -&gt; {"id": "&lt;hex&gt;"}
  *   POST /v1/tuples/rd              {subspace, keys_pattern?, n?, since?, timeout_s?} -&gt; {"tuples": [...]}
  *   POST /v1/tuples/rdp             {subspace, keys_pattern?, n?, since?} -&gt; {"tuples": [...]}
- *   POST /v1/tuples/in              {subspace, keys_pattern, claimant, lease_s, timeout_s?} -&gt; {"tuple": ..|null, "claim_id": ..|null}
- *   POST /v1/tuples/inp             {subspace, keys_pattern, claimant, lease_s} -&gt; same shape as /in
+ *   POST /v1/tuples/in              {subspace, keys_pattern, claimant, lease_s?, timeout_s?} -&gt; {"tuple": ..|null, "claim_id": ..|null}
+ *   POST /v1/tuples/inp             {subspace, keys_pattern, claimant, lease_s?} -&gt; same shape as /in
  *   POST /v1/tuples/ack             {claim_id, claimant, reply?{subspace, keys, dims?, body?, ttl_seconds?}}
  *                                   -&gt; {"acked": true, "reply_id": "&lt;hex&gt;"|null}
  *   POST /v1/tuples/nack            {claim_id, claimant} -&gt; {"nacked": true}
  *   POST /v1/tuples/renew           {claim_id, claimant, lease_s} -&gt; {"lease_until": "&lt;ISO-8601&gt;"}
  *   GET  /v1/tuples/registry        -&gt; {"digest", "sources", "templates": [...]}
- *   GET  /v1/tuples/subspace_list   ?prefix= -&gt; {"subspaces": [...]}
+ *   GET  /v1/tuples/subspace_list   ?prefix=&amp;limit=&amp;after= -&gt; {"subspaces": [...], "next_cursor"?: "&lt;subspace&gt;"}
  *   GET  /v1/tuples/subspace_stats  ?subspace= -&gt; {subspace, total, available, claimed, dead, consumed, expired_unpurged, oldest_created_at, newest_created_at}
  * </pre>
+ *
+ * <p>{@code lease_s} on {@code /in}/{@code /inp} is OPTIONAL (nexus-xapt8,
+ * additive): omitted, it falls through to the matched template's own {@code
+ * take.default_lease_seconds}; a template with no default configured refuses
+ * exactly as an explicit missing {@code lease_s} always has (a {@code
+ * SchemaViolation}, not a bare 400). The max-lease and expiry clamps apply
+ * unchanged either way.
+ *
+ * <p>{@code subspace_list}'s {@code limit}/{@code after} are OPTIONAL and
+ * ADDITIVE (nexus-xapt8): omitted, the response is every matching subspace
+ * with no {@code next_cursor} -- byte-identical to the pre-paging response
+ * shape. {@code after} is a subspace-name cursor (the last subspace name
+ * from a prior truncated page); results are ordered by subspace name.
  *
  * <p>A tuple's {@code id} and a {@code since} cursor's id half are lowercase
  * hex on the wire (the RDR-086 chunk-identity convention this repo already
@@ -200,7 +213,7 @@ public final class TupleHandler implements HttpHandler {
         String subspace = requireString(body, "subspace");
         Map<String, String> pattern = stringMap((Map<String, Object>) body.get("keys_pattern"));
         String claimant = requireString(body, "claimant");
-        long leaseS = requireLong(body, "lease_s");
+        Long leaseS = numberOrNull(body.get("lease_s"));
         long timeoutS = longOrDefault(body.get("timeout_s"), 0);
 
         Optional<TupleRepository.ClaimedTuple> result = repo.in(tenant, subspace, pattern, claimant, leaseS, timeoutS);
@@ -217,7 +230,12 @@ public final class TupleHandler implements HttpHandler {
         String subspace = requireString(body, "subspace");
         Map<String, String> pattern = stringMap((Map<String, Object>) body.get("keys_pattern"));
         String claimant = requireString(body, "claimant");
-        long leaseS = requireLong(body, "lease_s");
+        // nexus-xapt8: optional, same as /in (below the handler layer both
+        // route through TupleRepository.claimOnce, which resolves an absent
+        // lease_s against the template's take.default_lease_seconds) --
+        // kept symmetric with /in rather than leaving the probe form as the
+        // one endpoint that still hard-requires it.
+        Long leaseS = numberOrNull(body.get("lease_s"));
 
         Optional<TupleRepository.ClaimedTuple> result = repo.inp(tenant, subspace, pattern, claimant, leaseS);
         HttpUtil.send(ex, 200, renderClaim(result));
@@ -368,11 +386,30 @@ public final class TupleHandler implements HttpHandler {
             HttpUtil.send(ex, 405, "{\"error\":\"GET required\"}");
             return;
         }
-        String prefix = parseQuery(ex.getRequestURI()).get("prefix");
-        List<TupleRepository.SubspaceCensus> list = repo.subspaceList(tenant, prefix);
+        Map<String, String> q = parseQuery(ex.getRequestURI());
+        String prefix = q.get("prefix");
+        // nexus-xapt8: limit/after are OPTIONAL and additive -- absent, this
+        // is exactly the pre-paging call (repo.subspaceListPage(tenant,
+        // prefix, null, null) is what repo.subspaceList itself delegates to),
+        // so an old client sending neither param sees the old response
+        // shape verbatim (no "next_cursor" key at all).
+        Integer limit = q.containsKey("limit") ? parseIntQueryParam(q.get("limit")) : null;
+        String after = q.get("after");
+        TupleRepository.SubspacePage page = repo.subspaceListPage(tenant, prefix, limit, after);
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("subspaces", list.stream().map(this::renderCensus).toList());
+        out.put("subspaces", page.items().stream().map(this::renderCensus).toList());
+        if (page.nextCursor() != null) {
+            out.put("next_cursor", page.nextCursor());
+        }
         HttpUtil.send(ex, 200, MAPPER.writeValueAsString(out));
+    }
+
+    private static int parseIntQueryParam(String v) {
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
+            throw new SchemaViolationException("limit", "must be an integer");
+        }
     }
 
     private void handleSubspaceStats(HttpExchange ex, String tenant, String method) throws IOException {
