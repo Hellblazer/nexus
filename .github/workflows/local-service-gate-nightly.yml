@@ -53,10 +53,14 @@ jobs:
     name: local-service gate (hermetic, throwaway PG + service)
     runs-on: ubuntu-latest
     # 75, not 45 (nexus-ggonw): the steps before the slow leg take about 35
-    # minutes, and the slow leg's MinerU table test downloads ~2-3GB of
-    # weights on a cold HuggingFace cache. At 45 the job was cancelled inside
-    # that download (run 34975576187), and a cancelled job skips the cache's
-    # post-step save, so the cache never filled and every run timed out.
+    # minutes, and the slow leg's MinerU table test itself takes several
+    # more. 45 was sized against a cold HuggingFace hub download (~2-3GB of
+    # weights) that cancelled the job inside the download (run 34975576187) —
+    # a cancelled job skips the cache's post-step save, so the cache never
+    # filled and every run timed out. The hub fetch is gone (prime-mineru
+    # below restores our own self-hosted, actions/cache-fronted mirror
+    # instead), but 75 stays as margin for the pre-slow steps plus the slow
+    # leg's own model-load + per-page inference time.
     timeout-minutes: 75
     env:
       # Pinned for determinism — MUST match ci.yml's CA-3 job so the cache
@@ -309,18 +313,18 @@ jobs:
               sys.exit(1)
           PY
 
-      - name: Cache HuggingFace models (MinerU, for the slow leg)
+      - name: Prime MinerU pipeline models (self-hosted mirror, for the slow leg)
         # nexus-ggonw: test_mineru_path_indexes_table_values_as_text runs in
         # the slow leg below and drives the same MinerU pipeline as the
-        # deselected formula test, so its first run downloads the ~2-3GB of
-        # MinerU weights. Same cache and key as ci.yml's HuggingFace step, so
-        # a warm cache from either workflow serves both.
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
-        with:
-          path: ~/.cache/huggingface
-          key: huggingface-models-${{ runner.os }}-${{ hashFiles('uv.lock') }}
-          restore-keys: |
-            huggingface-models-${{ runner.os }}-
+        # deselected formula test. This used to cache ~/.cache/huggingface
+        # and let MinerU's default MINERU_MODEL_SOURCE=huggingface pull the
+        # weights from the hub on a cold cache — a ~1-3GB fetch that
+        # cancelled the job inside the download at the old 45-minute budget
+        # (run 34975576187). The composite action below mirrors
+        # prime-docling: restore our own self-hosted release asset from
+        # actions/cache, write MinerU's local-models config, and export
+        # MINERU_MODEL_SOURCE=local so the client never reaches HuggingFace.
+        uses: ./.github/actions/prime-mineru
 
       - name: Slow-marked tests (nexus-s6dei)
         # `-m slow` was selected by ZERO commands repo-wide before this leg —
@@ -338,8 +342,8 @@ jobs:
         # coverage is owned by the release shakedown's step 3b, which now
         # indexes with an EXPLICIT --extractor mineru, doctor-precheck
         # parsed, and a post-hoc extraction_method identity assert — a
-        # route-away or substitution reddens every release. The HF cache
-        # step above was added for test_mineru_path_indexes_table_values_as_text,
+        # route-away or substitution reddens every release. The prime-mineru
+        # mirror step above was added for test_mineru_path_indexes_table_values_as_text,
         # which does run here (nexus-ggonw); re-selecting the formula twin
         # is still nexus-jy4hd's decision to revisit, not a side effect.
         #

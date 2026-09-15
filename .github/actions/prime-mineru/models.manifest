@@ -1,0 +1,19 @@
+# Pipeline model paths this mirror carries, one mineru.utils.enum_class.ModelPath
+# value per line (blank lines and #-comments ignored). This is the SINGLE
+# SOURCE both the action's own description and
+# tests/test_prime_mineru_action.py read — do not duplicate this list in
+# prose anywhere else.
+#
+# Must equal { v for v in vars(ModelPath).values() if isinstance(v, str) and
+# v.startswith("models/") } minus ModelPath.pp_formulanet_plus_m — see
+# test_prime_mineru_action.py::test_manifest_matches_mineru_modelpath_pipeline_entries.
+# pp_formulanet_plus_m is omitted deliberately: it loads only when
+# MINERU_FORMULA_CH_SUPPORT=true, which nothing in src/, .github/, or
+# tests/e2e/ sets (test_manifest_omission_stays_a_decision pins that).
+models/Layout/PP-DocLayoutV2
+models/MFR/unimernet_hf_small_2503
+models/OCR/paddleocr_torch
+models/TabRec/SlanetPlus/slanet-plus.onnx
+models/TabRec/UnetStructure/unet.onnx
+models/TabCls/paddle_table_cls/PP-LCNet_x1_0_table_cls.onnx
+models/OriCls/paddle_orientation_classification/PP-LCNet_x1_0_doc_ori.onnx

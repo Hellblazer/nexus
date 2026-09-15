@@ -1,0 +1,140 @@
+name: Prime MinerU pipeline models
+description: >-
+  Provision the extracted MinerU pipeline model weights (layout, formula
+  recognition, OCR, table recognition/classification, orientation
+  classification) into ~/.cache/nexus/mineru-models for CI, then point
+  MinerU at them locally via MINERU_MODEL_SOURCE=local. Restores from the
+  Actions cache; on a miss, downloads and extracts OUR self-hosted GitHub
+  release asset (no HuggingFace dependency), sha256-verifies it before
+  extraction — same pattern as prime-bge-onnx / prime-crossencoder-onnx —
+  then extracts. Same shape as prime-docling.
+
+  History (nexus-ggonw): tests/test_pdf_subsystem.py's
+  TestFormulaPreservationOnRealPdf::test_mineru_path_indexes_table_values_as_text
+  (the nightly slow leg's MinerU coverage) left MINERU_MODEL_SOURCE at its
+  "huggingface" default, so a cold job downloaded ~1-3GB of pipeline weights
+  straight from the HuggingFace hub on every cache miss — run 34975576187
+  timed out at 45 minutes inside that download. This action mirrors the
+  docling fix: fetch our own release asset once behind actions/cache, write
+  MinerU's local-models config, and export MINERU_MODEL_SOURCE=local so the
+  MinerU client (mineru/utils/models_download_utils.py) never resolves
+  through the hub at all.
+
+  Model set: the SUBSET of mineru.utils.enum_class.ModelPath's pipeline
+  entries that mineru/backend/pipeline/model_init.py actually loads at this
+  repo's default config — every ModelPath value except pp_formulanet_plus_m
+  (loaded only when MINERU_FORMULA_CH_SUPPORT=true, which nothing in
+  src/, .github/, or tests/e2e/ sets). The exact list lives in
+  models.manifest (this directory) — the single source both this
+  description and tests/test_prime_mineru_action.py read; do not duplicate
+  it in prose. This is 7 of the 8 model paths the official
+  `mineru-models-download -m pipeline` downloader fetches.
+
+inputs:
+  cache-key:
+    description: >-
+      actions/cache key. Use an arch-qualified key for multi-arch matrix
+      jobs so each runner architecture caches independently.
+    required: false
+    default: ""
+  asset-tag:
+    description: >-
+      GitHub release tag that hosts mineru-pipeline-models-v1.tar.gz.
+
+      Provenance of the current v1 tarball: the models/ tree of
+      opendatalab/PDF-Extract-Kit-1.0 revision
+      d1336ee3c2975a8b26c4b09ff39dc6b593d34141 (18 files under models/, per
+      models.manifest's 7 leaf paths). Verified 2026-09-15: those 18 files
+      are blob-identical in the newer revision
+      ed6b654c018d742e65a17671e379c5e6ecc87ec9 — that revision only ADDS
+      models/OCR/paddleocr_torch/ch_PP-OCRv6_small_{det,rec}_infer.safetensors,
+      which mineru 3.1.11 (this repo's pin) does not load — so either
+      revision produces an identical tarball for our purposes; d1336ee3 is
+      the one actually packaged.
+
+      Regenerate from a warm local HuggingFace cache (populated by running
+      the MinerU tests once with the default MINERU_MODEL_SOURCE) or the
+      official downloader (`mineru-models-download -s huggingface -m
+      pipeline`), then repackage just the subset this action needs:
+        STAGE=$(mktemp -d)
+        SNAP=~/.cache/huggingface/hub/models--opendatalab--PDF-Extract-Kit-1.0/snapshots/<rev>/models
+        mkdir -p "$STAGE/models"/{Layout,MFR,OCR,TabRec,TabCls,OriCls}
+        cp -RL "$SNAP/Layout/PP-DocLayoutV2" "$STAGE/models/Layout/PP-DocLayoutV2"
+        cp -RL "$SNAP/MFR/unimernet_hf_small_2503" "$STAGE/models/MFR/unimernet_hf_small_2503"
+        cp -RL "$SNAP/OCR/paddleocr_torch" "$STAGE/models/OCR/paddleocr_torch"
+        cp -RL "$SNAP/TabRec/SlanetPlus" "$STAGE/models/TabRec/SlanetPlus"
+        cp -RL "$SNAP/TabRec/UnetStructure" "$STAGE/models/TabRec/UnetStructure"
+        cp -RL "$SNAP/TabCls/paddle_table_cls" "$STAGE/models/TabCls/paddle_table_cls"
+        cp -RL "$SNAP/OriCls/paddle_orientation_classification" "$STAGE/models/OriCls/paddle_orientation_classification"
+        tar -czf mineru-pipeline-models-v1.tar.gz -C "$STAGE" .
+        shasum -a 256 mineru-pipeline-models-v1.tar.gz
+
+      A REGENERATED tarball is a DIFFERENT artifact even under the same
+      file name — its sha256 will differ from the pin below (gzip is not
+      byte-reproducible run to run). Treat a content change (a MinerU bump
+      that changes the model set, a corrected/re-exported source revision)
+      as requiring BOTH together, never one alone: cut a new -v2 asset tag
+      AND update MODEL_SHA256 below to the new tarball's digest in the same
+      change — a tag bump with a stale pin fails the step's shasum -c on
+      every run; a pin bump with no tag bump silently verifies against
+      whatever the old tag still serves.
+    required: false
+    default: ci-assets-mineru-v1
+
+runs:
+  using: composite
+  steps:
+    - name: Restore MinerU pipeline models cache
+      id: cache
+      # Keyed on the ASSET TAG (mirrors prime-docling): the extracted models
+      # are an immutable export of that tag, so they download once per tag
+      # and restore thereafter; cutting a new asset tag invalidates the
+      # cache by construction, with no separate key bump to forget.
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+      with:
+        path: ~/.cache/nexus/mineru-models
+        key: ${{ inputs.cache-key != '' && inputs.cache-key || format('mineru-{0}-{1}', inputs.asset-tag, runner.os) }}
+
+    - name: Fetch MinerU pipeline models from our own mirror on cache miss
+      # WE HOST THESE. Nothing here may reach HuggingFace.
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        ASSET_TAG: ${{ inputs.asset-tag }}
+        # Pinned to the current mineru-pipeline-models-v1.tar.gz. MUST move
+        # in lockstep with a -v2 asset-tag bump — see the asset-tag input's
+        # own description above.
+        MODEL_SHA256: dc8c072b691ad38d5ab6b6474e9f009f5b673f248c1ff5f5d885016fc504305c
+      run: |
+        set -euo pipefail
+        mkdir -p "$HOME/.cache/nexus/mineru-models"
+        echo "MinerU pipeline models cache miss; fetching from self-hosted release ${ASSET_TAG}."
+        curl --fail --silent --show-error --location --retry 3 --retry-delay 5 \
+          -o /tmp/mineru-pipeline-models.tar.gz \
+          "https://github.com/${GITHUB_REPOSITORY}/releases/download/${ASSET_TAG}/mineru-pipeline-models-v1.tar.gz"
+        echo "${MODEL_SHA256}  /tmp/mineru-pipeline-models.tar.gz" | shasum -a 256 -c -
+        tar -xzf /tmp/mineru-pipeline-models.tar.gz -C "$HOME/.cache/nexus/mineru-models"
+        rm -f /tmp/mineru-pipeline-models.tar.gz
+
+    - name: Write MinerU local-models config and export MINERU_MODEL_SOURCE
+      # UNCONDITIONAL — no `if:` guard. Must run on a cache HIT too, or a
+      # restored-from-cache job never gets MINERU_MODEL_SOURCE/
+      # MINERU_TOOLS_CONFIG_JSON exported and silently falls back to
+      # MinerU's "huggingface" default (test_config_step_runs_unconditionally
+      # pins this).
+      #
+      # mineru/utils/config_reader.py reads models-dir from a JSON config
+      # file (default $HOME/mineru.json; relocatable via
+      # MINERU_TOOLS_CONFIG_JSON to an absolute path, which we use here so
+      # this action never touches a developer's own ~/mineru.json). The
+      # extracted root must directly contain "models/..." — see
+      # mineru/utils/models_download_utils.py's auto_download_and_get_model_root_path,
+      # which joins this root with the relative ModelPath entries.
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$HOME/.cache/nexus/mineru-config"
+        config_file="$HOME/.cache/nexus/mineru-config/mineru.json"
+        printf '%s\n' '{"models-dir": {"pipeline": "'"$HOME/.cache/nexus/mineru-models"'"}}' > "$config_file"
+        echo "MINERU_MODEL_SOURCE=local" >> "$GITHUB_ENV"
+        echo "MINERU_TOOLS_CONFIG_JSON=$config_file" >> "$GITHUB_ENV"
