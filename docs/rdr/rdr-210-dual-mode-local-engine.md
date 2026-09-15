@@ -78,7 +78,10 @@ The engine seeds the embedding profile from its posture on every boot
 (`Main.java:247-254`, `EmbedderRouter.contentTypeModelTokens` at 227-238): a
 keyed boot names the Voyage models, a keyless boot names bge-768. Once one engine
 holds both, "which model do new collections get" becomes a choice the posture no
-longer answers, and nothing carries the user's choice to the engine.
+longer answers, and nothing carries the user's choice to the engine. The same
+holds for rerank: today the posture also picks the reranker (Voyage when keyed,
+the ms-marco cross-encoder when keyless, `Main.java:172-226`), and a dual engine
+needs a rule for which one a mixed-result search uses (Open question 2).
 
 #### Gap 4: Client reads resolve one physical collection per corpus
 
