@@ -507,8 +507,12 @@ def tuple_watch_cmd(
     locks = None
     try:
         store = _store()
-        if not preflight(store, watched, config=cfg, emit=click.echo).ok:
+        checked = preflight(store, watched, config=cfg, emit=click.echo)
+        if not checked.ok:
             return
+        # Partial, like the locks below: an address the engine cannot read was
+        # named and dropped, and the rest are still watched.
+        watched = list(checked.readable)
         locks = acquire_watch_locks(watched, state_dir=sd, emit=click.echo)
         if not locks.ok:
             return
@@ -520,8 +524,9 @@ def tuple_watch_cmd(
         # only by the session id this process resolved from its own environment,
         # which is what `mailbox_drain.py` reads back per its own payload session id.
         #
-        # Deliberately keyed on `watched` (what was RESOLVED), not `locks.acquired`
-        # (what was actually LOCKED): nexus-6konb.10 (MM-3.2) decision 3 -- this
+        # Deliberately keyed on `watched` (what was RESOLVED and the engine could
+        # read, per the partial preflight above), not `locks.acquired` (what was
+        # actually LOCKED): nexus-6konb.10 (MM-3.2) decision 3 -- this
         # registration is written whether or not the instance-name lock was
         # acquired. The name belongs to the new session regardless of whether a
         # stale watcher from a prior /clear still holds that address's lock, and
