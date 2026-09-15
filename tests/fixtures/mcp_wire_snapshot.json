@@ -1567,6 +1567,14 @@
       "module": "nexus.mcp.core",
       "parameters": {
         "properties": {
+          "after": {
+            "default": "",
+            "type": "string"
+          },
+          "limit": {
+            "default": 100,
+            "type": "integer"
+          },
           "prefix": {
             "default": "",
             "type": "string"
