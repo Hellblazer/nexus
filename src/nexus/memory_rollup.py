@@ -21,7 +21,6 @@ separate reap step and ``nx memory restore``.
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
@@ -79,7 +78,7 @@ class RollupGroup:
 #: A summarizer returns one summary text for a group, or raises.
 Summarizer = Callable[[RollupGroup], str]
 
-Status = Literal["marked", "dry_run", "check_failed", "dispatch_failed", "refused"]
+Status = Literal["marked", "dry_run", "check_failed", "dispatch_failed", "source_changed", "refused"]
 
 
 @dataclass(frozen=True)
@@ -132,15 +131,12 @@ def group_prompt_content(group: RollupGroup) -> str:
 
 
 def rollup_model() -> str | None:
-    """The model a rollup dispatches at: the strong operator pin, or ``None``
-    (CLI default) when ``NX_OPERATOR_MODEL_TIERING=0``. The same rule as
-    ``nexus.mcp.core._pin_default_model`` for a call with no model, without
-    importing the MCP server module into the CLI."""
-    if os.environ.get("NX_OPERATOR_MODEL_TIERING") == "0":
-        return None
-    from nexus.operators.model_tiers import STRONG_DEFAULT_ALIAS  # noqa: PLC0415 — deferred: operator deps stay off CLI startup
+    """The model a rollup dispatches at: exactly what ``operator_summarize``
+    pins for a call with no model (``nexus.mcp.core._pin_default_model``);
+    ``None`` means the CLI default."""
+    from nexus.mcp.core import _pin_default_model  # noqa: PLC0415 — deferred: heavy import, keep CLI startup fast; the one pin rule, not a copy (only two modules may import operators.model_tiers)
 
-    return STRONG_DEFAULT_ALIAS
+    return _pin_default_model(None)
 
 
 def dispatch_summarizer(*, model: str | None = None, timeout: float = 300.0) -> Summarizer:
@@ -202,6 +198,34 @@ def run_groups(
 
         if dry_run:
             outcomes.append(GroupOutcome(group, "dry_run", summary=summary))
+            continue
+
+        # The summarizer call can take minutes. A source restored or re-put
+        # meanwhile is live again, and insertSummary would still mark it (plan
+        # residual 1, admitted in the engine), leaving a mark no summary of
+        # its current content backs. Re-read the listing right before marking
+        # so this command does not widen that window.
+        try:
+            still = {int(r["id"]) for r in store.list_quarantined(project=project)}
+        except httpx.HTTPError as exc:
+            _log.warning(
+                "memory_rollup_recheck_failed", project=project, month=group.month,
+                source_ids=group.source_ids, error=str(exc),
+            )
+            outcomes.append(GroupOutcome(
+                group, "refused", summary=summary, error=f"{type(exc).__name__}: {exc}",
+            ))
+            continue
+        changed = [i for i in group.source_ids if i not in still]
+        if changed:
+            _log.warning(
+                "memory_rollup_source_changed", project=project, month=group.month,
+                source_ids=group.source_ids, changed_ids=changed,
+            )
+            outcomes.append(GroupOutcome(
+                group, "source_changed", summary=summary,
+                error=f"no longer quarantined: {', '.join(str(i) for i in changed)}",
+            ))
             continue
 
         try:

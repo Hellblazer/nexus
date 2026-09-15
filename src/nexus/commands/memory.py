@@ -459,6 +459,9 @@ def rollup_cmd(project: str, dry_run: bool) -> None:
                            + ", ".join(o.missing_titles))
             case "dispatch_failed":
                 click.echo(f"  {o.group.month}: NOT marked, the summarizer failed: {o.error}")
+            case "source_changed":
+                click.echo(f"  {o.group.month}: NOT marked, entries changed while it was "
+                           f"being summarized ({o.error})")
             case "refused":
                 click.echo(f"  {o.group.month}: NOT marked, the engine refused the summary: {o.error}")
     failed = sum(1 for o in outcomes if not o.ok)

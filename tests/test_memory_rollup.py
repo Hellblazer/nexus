@@ -99,6 +99,31 @@ def test_a_dispatch_failure_on_group_2_of_3_leaves_groups_1_and_3_marked(db: T2D
     assert middle in {r["id"] for r in db.memory.list_quarantined(project=PROJECT)}
 
 
+def test_a_source_restored_during_the_summarizer_call_leaves_its_group_unmarked(
+    db: T2Database,
+) -> None:
+    """substantive-critic, nexus-l3yuc.17: the summarizer call takes minutes,
+    and insertSummary would still mark a row restored meanwhile (plan
+    residual 1). The rollup re-reads the listing before marking."""
+    kept = _quarantine(db, "kept.md", days=2)
+    restored = _quarantine(db, "restored.md", days=2)
+    calls: list[RollupGroup] = []
+
+    def _restoring(group: RollupGroup) -> str:
+        calls.append(group)
+        assert db.memory.restore(restored) is True
+        return "Summary naming " + ", ".join(group.titles)
+
+    [outcome] = rollup(db.memory, PROJECT, _restoring, model="stub-model")
+
+    assert len(calls) == 1 and db.get(id=restored) is not None, "non-vacuity: the restore happened"
+    assert outcome.status == "source_changed"
+    assert str(restored) in (outcome.error or "")
+    assert db.memory.list_summaries(project=PROJECT) == [], "nothing marked, live or quarantined"
+    assert {r["id"] for r in db.memory.list_quarantined(project=PROJECT)} == {kept}
+    assert _marked(db) == set()
+
+
 # ── dry run, grouping, and the check itself ─────────────────────────────────
 
 
