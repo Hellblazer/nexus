@@ -583,6 +583,11 @@ class T2Database:
         # access_count increment is immaterial on a row about to be deleted.)
         if id is not None and (project is None or title is None):
             entry = self.memory.get(id=id)
+            if entry is None:
+                # RDR-207: get hides a quarantined row, and a delete by id is
+                # the explicit way to remove one (§Day 2 Operations). Resolve
+                # it from the quarantined listing so the cascade still runs.
+                entry = self.memory.find_quarantined(id=id)
             if entry is not None:
                 project, title = entry["project"], entry["title"]
         deleted = self.memory.delete(project=project, title=title, id=id)

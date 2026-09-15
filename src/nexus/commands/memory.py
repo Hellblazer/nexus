@@ -1,15 +1,40 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import contextlib
 import sys
+from collections.abc import Generator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import click
+import httpx
+import structlog
 
 from nexus.commands._helpers import default_db_path as _default_db_path
 from nexus.commands._helpers import t2_handle
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 from nexus.ttl import parse_ttl
+
+_log = structlog.get_logger(__name__)
+
+
+@contextlib.contextmanager
+def _needs_quarantine_routes(verb: str) -> Generator[None, None, None]:
+    """Turn a 404 from an engine older than RDR-207 into a clean CLI error.
+
+    The quarantine routes (reap, restore, the quarantined list, summaries) are
+    new in the engine carrying RDR-207 Phase 1, and an older engine answers
+    each with 404. Any other HTTP error propagates unchanged.
+    """
+    try:
+        yield
+    except httpx.HTTPStatusError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            raise click.ClickException(
+                f"nx memory {verb}: the engine predates RDR-207 quarantine "
+                "(no such route); this verb needs a newer engine."
+            ) from exc
+        raise
 
 
 @click.group()
@@ -156,8 +181,35 @@ def search_cmd(query: str, project: str | None) -> None:
 @memory.command("list")
 @click.option("--project", "-p", default=None, help="Filter by project")
 @click.option("--agent", "-a", default=None, help="Filter by agent name")
-def list_cmd(project: str | None, agent: str | None) -> None:
-    """List memory entries."""
+@click.option(
+    "--quarantined",
+    is_flag=True,
+    default=False,
+    help="List quarantined entries (expired, hidden from every other read) instead.",
+)
+def list_cmd(project: str | None, agent: str | None, quarantined: bool) -> None:
+    """List memory entries.
+
+    With ``--quarantined``, list the entries expiry has quarantined: past their
+    TTL, hidden from get, search and list, and kept until ``nx memory reap``
+    deletes them (only once a rollup marks them) or ``nx memory restore``
+    brings one back. A "rolled up" stamp means reap will delete that entry.
+    """
+    if quarantined:
+        with t2_handle() as db, _needs_quarantine_routes("list --quarantined"):
+            entries = db.memory.list_quarantined(project=project)
+        if agent:
+            entries = [e for e in entries if e.get("agent") == agent]
+        if not entries:
+            click.echo("No quarantined entries found.")
+            return
+        for e in entries:
+            mark = f", rolled up {e['rolled_up_at']}" if e.get("rolled_up_at") else ""
+            click.echo(
+                f"[{e['id']}] {e['project']}/{e['title']}  "
+                f"(quarantined {e['quarantined_at']}{mark})"
+            )
+        return
     with t2_handle() as db:
         entries = db.memory.list_entries(project=project, agent=agent)
     if not entries:
@@ -213,11 +265,19 @@ def delete_cmd(
                 if entry_id is not None
                 else db.memory.get(project=project, title=title)
             )
+            quarantined = False
+            if entry is None:
+                # RDR-207: get hides a quarantined entry, and this verb is the
+                # explicit single-row deletion the design names for one
+                # (§Day 2 Operations), so look in the quarantined listing.
+                entry = db.memory.find_quarantined(project=project, title=title, id=entry_id)
+                quarantined = entry is not None
             if entry is None:
                 raise click.ClickException("entry not found — use: nx memory list to see available entries")
+            name = f"{entry['project']}/{entry['title']}" + (" (quarantined)" if quarantined else "")
             if not yes:
                 preview = entry["content"][:120].replace("\n", " ")
-                click.echo(f"{entry['project']}/{entry['title']}")
+                click.echo(name)
                 click.echo(f"  {preview}")
                 click.confirm("Delete?", abort=True)
             _delete_with_taxonomy_cascade(
@@ -226,7 +286,7 @@ def delete_cmd(
                 title=entry["title"],
                 id=entry_id,
             )
-            click.echo(f"Deleted: {entry['project']}/{entry['title']}")
+            click.echo(f"Deleted: {name}")
 
 
 def _delete_with_taxonomy_cascade(
@@ -251,9 +311,104 @@ def _delete_with_taxonomy_cascade(
     return deleted
 
 
+@memory.command("reap")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation prompt")
+def reap_cmd(yes: bool) -> None:
+    """Delete quarantined entries that carry a rollup mark.
+
+    Only an entry a rollup summary already covers is deleted. An unmarked
+    quarantined entry is never touched, however long it has been quarantined.
+    Each reaped entry's topic assignments are removed too, as ``nx memory
+    delete`` does; the engine's reap runs no taxonomy cascade of its own.
+    """
+    with t2_handle() as db, _needs_quarantine_routes("reap"):
+        marked = [e for e in db.memory.list_quarantined() if e.get("rolled_up_at")]
+        if not marked:
+            click.echo("Nothing to reap: no quarantined entry carries a rollup mark.")
+            return
+        if not yes:
+            for e in marked:
+                click.echo(f"[{e['id']}] {e['project']}/{e['title']}")
+            n = len(marked)
+            click.confirm(f"Reap {n} {'entry' if n == 1 else 'entries'}?", abort=True)
+        deleted = db.memory.reap()
+        listed = {e["id"]: e for e in marked}
+        for row_id in deleted:
+            entry = listed.get(row_id)
+            if entry is None:
+                # Marked after the listing above: never previewed, and there is
+                # no (project, title) left to key the cascade on.
+                _log.warning("memory_reap_cascade_skipped", id=row_id)
+                click.echo(
+                    f"  id={row_id} was marked after the listing; its topic "
+                    "assignments were not removed",
+                    err=True,
+                )
+                continue
+            db.taxonomy.purge_assignments_for_doc(project=entry["project"], title=entry["title"])
+    n = len(deleted)
+    click.echo(f"Reaped {n} {'entry' if n == 1 else 'entries'}.")
+
+
+@memory.command("restore")
+@click.argument("entry_id", metavar="ID", type=int)
+def restore_cmd(entry_id: int) -> None:
+    """Bring a quarantined entry back as a permanent entry.
+
+    Restoring is a decision to keep the entry, so it does not re-enter its old
+    TTL, and any rollup mark is cleared.
+    """
+    with t2_handle() as db, _needs_quarantine_routes("restore"):
+        entry = db.memory.find_quarantined(id=entry_id)
+        restored = db.memory.restore(entry_id)
+    if not restored:
+        raise click.ClickException(
+            f"no quarantined entry with id={entry_id}. "
+            "Use: nx memory list --quarantined to see them"
+        )
+    name = f"{entry['project']}/{entry['title']}" if entry else f"id={entry_id}"
+    click.echo(f"Restored: {name} (permanent)")
+
+
+@memory.command("summaries")
+@click.argument("summary_id", metavar="ID", required=False, type=int)
+@click.option("--project", "-p", default=None, help="Filter by project")
+def summaries_cmd(summary_id: int | None, project: str | None) -> None:
+    """List rollup summaries, or show one by ID.
+
+    A summary is provenance for the quarantined entries it covers and is kept
+    after ``nx memory reap`` deletes them. No verb deletes a summary.
+    """
+    with t2_handle() as db, _needs_quarantine_routes("summaries"):
+        rows = db.memory.list_summaries(project=project)
+    if summary_id is not None:
+        row = next((r for r in rows if r["id"] == summary_id), None)
+        if row is None:
+            raise click.ClickException(
+                f"summary not found — id={summary_id}. Use: nx memory summaries to see them"
+            )
+        click.echo(f"[{row['id']}] {row['project']}  ({row['model']}, {row['produced_at']})")
+        click.echo(f"  sources: {', '.join(str(i) for i in row['source_ids'])}")
+        click.echo(row["content"])
+        return
+    if not rows:
+        click.echo("No summaries found.")
+        return
+    for r in rows:
+        n = len(r["source_ids"])
+        click.echo(
+            f"[{r['id']}] {r['project']}  "
+            f"({r['model']}, {r['produced_at']}, {n} source{'' if n == 1 else 's'})"
+        )
+
+
 @memory.command("expire")
 def expire_cmd() -> None:
-    """Remove TTL-expired memory entries.
+    """Quarantine TTL-expired memory entries.
+
+    RDR-207: an entry past its TTL is hidden from every read but kept. See
+    ``nx memory list --quarantined``, ``nx memory restore`` and
+    ``nx memory reap``.
 
     Cross-domain operation: also purges the relevance_log table
     older than 90 days. RDR-120 P6 follow-up (nexus-w6txl): the

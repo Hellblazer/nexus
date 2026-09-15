@@ -311,6 +311,23 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
     'document_highlights': {
         'rename_collection': ['old', 'new'],
     },
+    'memory': {
+        # RDR-207 Phase 2 (nexus-l3yuc.10): the quarantine and rollup routes.
+        # Service-only by construction: quarantine is an engine-side state
+        # (memory-004) that no SQLite store ever had. Production callers: the
+        # nx memory reap/restore/list --quarantined/summaries verbs, the delete
+        # fallback in nx memory delete and T2Database.delete, and the
+        # memory.quarantine doctor row. insert_summary has no src caller until
+        # nx memory rollup (nexus-l3yuc.15); like count_assignments above it is
+        # the only typed accessor for a live route, and the tests mark rows
+        # through it.
+        'find_quarantined': ['project', 'title', 'id'],
+        'insert_summary': ['project', 'content', 'source_ids', 'model', 'produced_by'],
+        'list_quarantined': ['project'],
+        'list_summaries': ['project'],
+        'reap': [],
+        'restore': ['id'],
+    },
     'scratch': {
         'close_session': [],
     },

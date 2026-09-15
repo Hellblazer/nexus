@@ -7609,6 +7609,69 @@ def _highest_child_seqs(cat: Any) -> dict[str, int]:
     return best
 
 
+def _check_memory_quarantine() -> list[HealthResult]:
+    """Informational row for RDR-207's quarantine (bead nexus-l3yuc.10):
+    quarantined memory rows without a rollup mark, rows marked and waiting for
+    ``nx memory reap``, and rollup summaries, across the whole tenant.
+
+    Always ``ok=True``. Unmarked rows accumulating is the design, not a fault:
+    expiry quarantines instead of deleting, and only a rollup mark lets
+    ``nx memory reap`` remove a row, so this row makes the backlog visible.
+
+    The reads run first. The row is not applicable only when this box has no
+    engine-backed T2 to read (the store cannot be constructed), the virgin-box
+    case; a reachable engine with nothing quarantined reports ``none``. An
+    engine older than RDR-207 answers 404, which reads as unread, never clean.
+    """
+    import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    label = "memory.quarantine"
+    try:
+        from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — deferred: CLI startup cost
+
+        store = HttpMemoryStore()  # self-resolves the endpoint, as t2/__init__ does
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_memory_quarantine_check_failed", stage="connect", error=str(exc))
+        return [HealthResult(
+            label=label, ok=True,
+            detail="not applicable (no engine-backed T2 on this box)",
+        )]
+
+    try:
+        try:
+            quarantined = store.list_quarantined()
+            summaries = store.list_summaries()
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                return [HealthResult(
+                    label=label, ok=True,
+                    detail="skipped (engine predates the RDR-207 quarantine routes — "
+                           "needs a newer engine)",
+                )]
+            _log.debug("doctor_memory_quarantine_check_failed", stage="read", error=str(exc))
+            return [HealthResult(label=label, ok=True, detail="skipped (memory store unavailable)")]
+        except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+            _log.debug("doctor_memory_quarantine_check_failed", stage="read", error=str(exc))
+            return [HealthResult(label=label, ok=True, detail="skipped (memory store unavailable)")]
+    finally:
+        try:
+            store.close()
+        except Exception:  # noqa: BLE001 — best-effort handle cleanup
+            pass
+
+    if not quarantined and not summaries:
+        return [HealthResult(label=label, ok=True, detail="none")]
+    unmarked = sum(1 for row in quarantined if not row.get("rolled_up_at"))
+    marked = len(quarantined) - unmarked
+    return [HealthResult(
+        label=label, ok=True,
+        detail=(
+            f"{unmarked} quarantined without a rollup mark, {marked} marked and "
+            f"awaiting `nx memory reap`, {len(summaries)} summaries"
+        ),
+    )]
+
+
 def _check_topics_doc_count_drift() -> list[HealthResult]:
     """Name topics whose cached ``doc_count`` disagrees with the real
     ``topic_assignments`` row count (bead nexus-c0g6e, GH #1529).
@@ -7807,6 +7870,9 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     results.extend(_check_mineru_server())
     results.extend(_check_t2_schema_applied())
     results.extend(_check_t2_dropped_writes())
+    # RDR-207 (bead nexus-l3yuc.10): informational; not applicable where no
+    # engine-backed T2 exists, unread on an engine older than RDR-207.
+    results.extend(_check_memory_quarantine())
 
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
     from nexus.config import catalog_path  # noqa: PLC0415 — deferred to avoid circular import
