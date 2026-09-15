@@ -158,14 +158,15 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
   <div class="eyebrow">Coordination</div>
   <ol id="toc">
     <li><a href="#l1">What it gives you</a></li>
-    <li><a href="#l2">A session gets its address</a></li>
-    <li><a href="#l3">A message arrives</a></li>
-    <li><a href="#l4">An agent starts, works, and reports</a></li>
-    <li><a href="#l5">A request to a peer session</a></li>
-    <li><a href="#l6">The session changes</a></li>
-    <li><a href="#l7">Watch it and steer it</a></li>
-    <li><a href="#l8">When to use it</a></li>
-    <li><a href="#l9">Appendix: limits and rules</a></li>
+    <li><a href="#l2">Coordination and SendMessage</a></li>
+    <li><a href="#l3">A session gets its address</a></li>
+    <li><a href="#l4">A message arrives</a></li>
+    <li><a href="#l5">An agent starts, works, and reports</a></li>
+    <li><a href="#l6">A request to a peer session</a></li>
+    <li><a href="#l7">The session changes</a></li>
+    <li><a href="#l8">Watch it and steer it</a></li>
+    <li><a href="#l9">When to use it</a></li>
+    <li><a href="#l10">Appendix: limits and rules</a></li>
   </ol>
   <div class="meta"><a href="tuple-space.html">← The tuple space</a><br><a href="getting-started.html">← Getting started</a><br><a href="rdr.html">← Working with RDRs</a><br><a href="research.html">← Research with Nexus</a><br><a href="./">← Install guide</a></div>
 </nav>
@@ -189,6 +190,7 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 <tr><td>ledger</td><td>The part of the tuple space where hooks record that an agent started and that it reported. Any session can read it.</td></tr>
 <tr><td>dispatch file</td><td>A local file for each session, outside the tuple space. Hooks add a row when an agent is expected, when it starts, and when it reports.</td></tr>
 <tr><td>hook</td><td>A script that Claude Code runs at a fixed point: session start, each prompt, and agent start and stop.</td></tr>
+<tr><td>SendMessage</td><td>The Claude Code tool that sends a message to an agent by name or to a live session.</td></tr>
 <tr><td>watcher</td><td>The command <code>nx tuple watch</code>. It runs in the background and prints one line for each new message.</td></tr>
 <tr><td>take operation</td><td>A <code>tuple_in</code> call. It gives a message to one reader only, for a limited time called the lease.</td></tr>
 <tr><td>ack, nack</td><td><code>tuple_ack</code> removes a message that the reader took. <code>tuple_nack</code> returns the message to the mailbox.</td></tr>
@@ -200,7 +202,7 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 <section class="lesson" id="l1">
 <div class="lhead"><span class="lnum">1</span><h2>What it gives you</h2><span class="ltime">2 min</span></div>
 <p class="why">Sessions and agents hand work to each other without you in the middle. None of them stops to wait. The message tuple waits in the engine instead.</p>
-<p>Claude Code already returns agent reports and delivers messages to running sessions. Nexus memory already holds long content. Coordination adds a tuple that waits for its reader. Every exchange has three steps: send, continue, react. The two sides never need to run at the same time, or know where the other runs.</p>
+<p>Claude Code's SendMessage already delivers messages to agents by name and to live sessions, and Nexus memory already holds long content. Coordination adds a tuple that waits for its reader. Lesson 2 compares the two. Every exchange has three steps: send, continue, react. The two sides never need to run at the same time, or know where the other runs.</p>
 
 <figure class="fig">
 <svg viewBox="0 0 760 256" role="img" aria-label="A timeline. Your session writes a request and keeps working. The request tuple waits in the engine while the peer session is busy with its own work. The peer takes the request and acks it with a reply. The reply tuple waits until your session's watcher pings, and your session takes the reply. Neither session stops to wait for the other.">
@@ -246,7 +248,29 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 
 <!-- ============ 2 ============ -->
 <section class="lesson" id="l2">
-<div class="lhead"><span class="lnum">2</span><h2>A session gets its address</h2><span class="ltime">3 min</span></div>
+<div class="lhead"><span class="lnum">2</span><h2>Coordination and SendMessage</h2><span class="ltime">2 min</span></div>
+<p class="why">SendMessage talks to an agent or a live session. The tuple space holds work until a reader takes it and confirms it. Most sessions use both.</p>
+<div class="tbl"><table>
+<tr><th>Aspect</th><th>SendMessage</th><th>Tuple space</th></tr>
+<tr><td>Who takes part</td><td>Agents by name and live sessions that <code>ListAgents</code> shows, on this machine, on other machines, and in the cloud.</td><td>Any process that uses the engine: sessions, agents, hooks, and scripts with <code>nx tuple</code>.</td></tr>
+<tr><td>Reader not running</td><td>A finished subagent resumes from its transcript. A session must be live.</td><td>A message to a session id or agent id waits in the engine for up to seven days. A send by name needs a live holder, as with SendMessage.</td></tr>
+<tr><td>Delivery</td><td>The harness puts the message into the conversation at the reader's next tool round.</td><td>The reader takes the message when ready: after a ping, or at the next prompt.</td></tr>
+<tr><td>Confirmation</td><td>The send result says that the message arrived, not that Claude read it. A session can hold the message for approval or refuse it. A remote or cloud session reports nothing back.</td><td>The reader acks. If it stops first, the message returns. Three failures make a dead letter.</td></tr>
+<tr><td>Reply</td><td>The reader sends a new message to the sender. A cloud session cannot reply yet.</td><td>The reply goes in the ack, with the same correlation id.</td></tr>
+<tr><td>A subagent's address</td><td>Its sends go out under its parent session's address, and replies go to the parent.</td><td>It has its own mailbox at its agent id.</td></tr>
+<tr><td>Idle notice</td><td>A send can ask for one notice when a session on this machine next goes idle or exits.</td><td>No such signal. The watcher pings only when a message arrives.</td></tr>
+<tr><td>Record</td><td>The transcripts.</td><td>Rows that any session can query: waiting and dead messages, and agent starts and reports.</td></tr>
+</table></div>
+<ul class="plain">
+<li>Use SendMessage to steer a running agent or to ask a live session a quick question.</li>
+<li>Use the tuple space for work that must not be lost, or for a reply that must pair with its request. Use it also for a reader that may restart, and for hooks and scripts.</li>
+<li>The two work together. The harness delivers each agent's report, and hooks record the same report in the ledger.</li>
+</ul>
+</section>
+
+<!-- ============ 3 ============ -->
+<section class="lesson" id="l3">
+<div class="lhead"><span class="lnum">3</span><h2>A session gets its address</h2><span class="ltime">3 min</span></div>
 <p class="why">The session id is the session's address. The watcher publishes the session's name, so peers can find it.</p>
 
 <div class="tbl"><table class="steps">
@@ -274,12 +298,12 @@ This session is <b>nexus-4a</b> [102a61] — the name other sessions use to mess
   "dims": {"session_id": "<b>5b354c36-d317-4a00-aa15-f567e65a7209</b>"},
   "expires_at": "2026-09-15T15:12:13Z"
 }</pre></details>
-<p class="note">The Monitor tool ends a watch after 30 minutes. Claude restarts it at the expiry notice. If Claude does not, the drain hook repeats the instruction (lesson 3).</p>
+<p class="note">The Monitor tool ends a watch after 30 minutes. Claude restarts it at the expiry notice. If Claude does not, the drain hook repeats the instruction (lesson 4).</p>
 </section>
 
-<!-- ============ 3 ============ -->
-<section class="lesson" id="l3">
-<div class="lhead"><span class="lnum">3</span><h2>A message arrives</h2><span class="ltime">4 min</span></div>
+<!-- ============ 4 ============ -->
+<section class="lesson" id="l4">
+<div class="lhead"><span class="lnum">4</span><h2>A message arrives</h2><span class="ltime">4 min</span></div>
 <p class="why">A message arrives while Claude works on something else. The watcher pings, and Claude takes the message at its next step. If Claude does not react, the drain hook delivers the message at the next prompt.</p>
 
 <figure class="fig">
@@ -330,9 +354,9 @@ MAILBOX WATCH: arm once, now.
 …</pre></details>
 </section>
 
-<!-- ============ 4 ============ -->
-<section class="lesson" id="l4">
-<div class="lhead"><span class="lnum">4</span><h2>An agent starts, works, and reports</h2><span class="ltime">5 min</span></div>
+<!-- ============ 5 ============ -->
+<section class="lesson" id="l5">
+<div class="lhead"><span class="lnum">5</span><h2>An agent starts, works, and reports</h2><span class="ltime">5 min</span></div>
 <p class="why">A background agent works while the session continues. Every agent has a mailbox at its agent id. Hooks record each agent in a local dispatch file and in the tuple-space ledger.</p>
 
 <div class="tbl"><table class="steps">
@@ -365,9 +389,9 @@ CLASSIFIED  reported=0 blocked_resolved=28 (immediate=28 later=0) blocked_unreso
 <p class="note">All 28 agents in this session reported. The hook stopped each one once first.</p>
 </section>
 
-<!-- ============ 5 ============ -->
-<section class="lesson" id="l5">
-<div class="lhead"><span class="lnum">5</span><h2>A request to a peer session</h2><span class="ltime">4 min</span></div>
+<!-- ============ 6 ============ -->
+<section class="lesson" id="l6">
+<div class="lhead"><span class="lnum">6</span><h2>A request to a peer session</h2><span class="ltime">4 min</span></div>
 <p class="why">Claude sends a request to a peer by name and continues. The reply arrives later as a ping. The call is the same for a peer on another machine that uses the same engine.</p>
 
 <div class="tbl"><table class="steps">
@@ -376,7 +400,7 @@ CLASSIFIED  reported=0 blocked_resolved=28 (immediate=28 later=0) blocked_unreso
 <tr><td><span class="who cl">Claude</span></td><td>Calls <code>mailbox_send</code> with the peer's name, kind <code>request</code>, and a new correlation id, then continues. The tool finds the peer in the directory, or refuses and names the holders.</td></tr>
 <tr><td><span class="who">watcher</span></td><td>Pings the peer. The request waits in the peer's mailbox until the peer is ready.</td></tr>
 <tr><td><span class="who cl">peer</span></td><td>Takes the request, does the work, and acks with a reply to the sender. The reply keeps the correlation id.</td></tr>
-<tr><td><span class="who">watcher</span></td><td>Pings the sender when the reply arrives, minutes or days later. Claude takes it as in lesson 3.</td></tr>
+<tr><td><span class="who">watcher</span></td><td>Pings the sender when the reply arrives, minutes or days later. Claude takes it as in lesson 4.</td></tr>
 </table></div>
 
 <details class="gloss out"><summary>A send to a peer on the same machine</summary><pre class="out">mailbox_send  to: <b>nexus-8c</b>   kind: request   correlation_id: r-41
@@ -391,9 +415,9 @@ CLASSIFIED  reported=0 blocked_resolved=28 (immediate=28 later=0) blocked_unreso
 nx-tuple-watch: new mail at mailbox/5b354c36-d317-4a00-aa15-f567e65a7209 from=5cab61d9-3c73-435c-b2f8-c75546df8db7 kind=notice correlation_id=<b>s7-real-remote-to-b7</b> tuple_id=8ce10d62…. Drain it now …</pre></details>
 </section>
 
-<!-- ============ 6 ============ -->
-<section class="lesson" id="l6">
-<div class="lhead"><span class="lnum">6</span><h2>The session changes</h2><span class="ltime">3 min</span></div>
+<!-- ============ 7 ============ -->
+<section class="lesson" id="l7">
+<div class="lhead"><span class="lnum">7</span><h2>The session changes</h2><span class="ltime">3 min</span></div>
 <p class="why"><code>/clear</code> and <code>/resume</code> give the conversation a new session id. The old watcher stops itself, and mail for the old id still arrives.</p>
 
 <div class="tbl"><table class="steps">
@@ -408,9 +432,9 @@ nx-tuple-watch: new mail at mailbox/5b354c36-d317-4a00-aa15-f567e65a7209 from=5c
 <details class="gloss out"><summary>The STOP line</summary><pre class="out">nx-tuple-watch: STOP: this conversation is now session <b>427e57b4-d9c4-474b-8626-215eb6aa80cf</b>, not <b>643e36a6-b061-4ae4-ae5a-e2a29491fcf8</b> -- the watch for the old session is stopping. Re-arm per the SessionStart instruction, with the name from a fresh ListAgents call.</pre></details>
 </section>
 
-<!-- ============ 7 ============ -->
-<section class="lesson" id="l7">
-<div class="lhead"><span class="lnum">7</span><h2>Watch it and steer it</h2><span class="ltime">4 min</span></div>
+<!-- ============ 8 ============ -->
+<section class="lesson" id="l8">
+<div class="lhead"><span class="lnum">8</span><h2>Watch it and steer it</h2><span class="ltime">4 min</span></div>
 <p class="why">Ask Claude, or read the engine from a terminal. A read never takes a message.</p>
 
 <div class="see">You might say</div>
@@ -451,9 +475,9 @@ nx doctor  <span class="c"># includes four tuple rows</span></pre><button class=
 <p><code>nx doctor</code> adds four tuple rows: the oldest untaken message, tuple-table cleanup, time since the last sweep, and the watcher permission. If the permission row warns, add <code>Bash(nx tuple watch:*)</code> to <code>permissions.allow</code> in the settings file that the row names.</p>
 </section>
 
-<!-- ============ 8 ============ -->
-<section class="lesson" id="l8">
-<div class="lhead"><span class="lnum">8</span><h2>When to use it</h2><span class="ltime">4 min</span></div>
+<!-- ============ 9 ============ -->
+<section class="lesson" id="l9">
+<div class="lhead"><span class="lnum">9</span><h2>When to use it</h2><span class="ltime">4 min</span></div>
 <p class="why">Use coordination when work spans sessions, when a job runs longer than you want to watch, or when many agents must all report.</p>
 <div class="tbl"><table>
 <tr><th>Situation</th><th>You might say</th><th>What you get</th></tr>
@@ -473,9 +497,9 @@ nx doctor  <span class="c"># includes four tuple rows</span></pre><button class=
 </ul>
 </section>
 
-<!-- ============ 9 ============ -->
-<section class="lesson" id="l9">
-<div class="lhead"><span class="lnum">9</span><h2>Appendix: limits and rules</h2><span class="ltime">reference</span></div>
+<!-- ============ 10 ============ -->
+<section class="lesson" id="l10">
+<div class="lhead"><span class="lnum">10</span><h2>Appendix: limits and rules</h2><span class="ltime">reference</span></div>
 <p class="why">You need none of this to use the system. This appendix gives the numbers behind the steps above.</p>
 <details class="gloss"><summary>Limits and rules</summary><div style="padding:0 14px 12px">
 <ul class="plain">
@@ -488,7 +512,7 @@ nx doctor  <span class="c"># includes four tuple rows</span></pre><button class=
 <li><strong>Watcher.</strong> The watcher reads every three seconds. It prints a ping for a message again after ten minutes, at most three times.</li>
 <li><strong>Drain hook.</strong> The drain hook takes at most ten messages at one prompt and uses at most six seconds.</li>
 <li><strong>Sweep.</strong> Every six hours, the engine returns claims whose lease ended and removes expired rows.</li>
-<li><strong>Health.</strong> <code>nx doctor</code> shows four tuple rows. Lesson 7 lists them.</li>
+<li><strong>Health.</strong> <code>nx doctor</code> shows four tuple rows. Lesson 8 lists them.</li>
 </ul>
 </div></details>
 </section>
