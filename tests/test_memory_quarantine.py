@@ -10,6 +10,7 @@ backdated timestamp, then ``expire``. A row is marked through the real
 """
 from __future__ import annotations
 
+from functools import partial
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -19,6 +20,7 @@ from click.testing import CliRunner
 import nexus.health as h
 from nexus.cli import main
 from nexus.db.t2 import T2Database
+from nexus.db.t2.http_memory_store import HttpMemoryStore
 from tests._t2_fixture_ops import backdate_memory, canonical_chunk_id
 from tests.test_taxonomy import _seed_assignment, _seed_topic
 
@@ -246,6 +248,21 @@ def test_an_engine_without_the_routes_is_a_clean_error(runner: CliRunner, args: 
     assert out.exit_code == 1, out.output
     assert "predates RDR-207 quarantine" in out.output
     assert "Traceback" not in out.output
+
+
+def test_delete_against_an_engine_without_the_routes_is_still_not_found(runner: CliRunner) -> None:
+    """The delete fallback calls the REAL find_quarantined, whose listing 404s
+    on an engine older than RDR-207; that must read as the old "entry not
+    found", never a crash."""
+    store = MagicMock()
+    store.get.return_value = None
+    store.list_quarantined.side_effect = _route_missing()
+    store.find_quarantined = partial(HttpMemoryStore.find_quarantined, store)
+    out = _nx(runner, MagicMock(memory=store), "delete", "--id", "5", "--yes")
+    assert out.exit_code == 1, out.output
+    assert "entry not found" in out.output and "Traceback" not in out.output
+    store.list_quarantined.assert_called_once()
+    store.delete.assert_not_called()
 
 
 # ── the memory.quarantine doctor row ────────────────────────────────────────
