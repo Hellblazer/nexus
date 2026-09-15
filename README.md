@@ -115,6 +115,7 @@ Once a day the MCP server sends one anonymous message with six values: a random 
 - [Research with Nexus](https://hellblazer.github.io/nexus/research.html): what you say to Claude at each step of research work, and what you see.
 - [Research in Nexus](https://hellblazer.github.io/nexus/research-in-nexus.html): the thinking behind the method, what was borrowed from experimental science and what was left out.
 - [The Nexus Tuple Space](https://hellblazer.github.io/nexus/tuple-space.html): how sessions, agents, and hooks coordinate.
+- [Coordination](https://hellblazer.github.io/nexus/coordination.html): how sessions and agents coordinate through the tuple space, and which steps the hooks, the watcher, and Claude each do.
 - [CLI reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md), [architecture](https://github.com/Hellblazer/nexus/blob/main/docs/architecture.md), [storage tiers](https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md), and the [docs tree](https://github.com/Hellblazer/nexus/blob/main/docs/README.md).
 - [Managed service](https://github.com/Hellblazer/nexus/blob/main/docs/managed-onboarding.md), for a hosted deployment with server-side embeddings.
 

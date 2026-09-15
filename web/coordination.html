@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="How Claude Code sessions and their agents cooperate through the Nexus tuple space: which steps the hooks, the watcher and the engine do by themselves, and which steps Claude does with a tool call.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
+<title>Coordination Between Sessions and Agents</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#EEF1F4; --paper:#FFFFFF; --ink:#1B2430; --ink-2:#4A5666; --ink-3:#7A8697;
+  --line:#D5DBE3; --brass:#A87A22; --brass-soft:#F3EAD3; --blue:#24466B; --blue-soft:#E1E9F3;
+  --ok:#2E7D4F; --ok-soft:#E3F1E8; --warn:#9A6A12; --code-bg:#1B2430; --code-fg:#E9EDF2; --code-cmt:#8A97A8;
+  --t1:#B96E2B; --t2:#24466B; --t3:#2E7D4F;
+  --radius:6px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+    --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+    --ok:#6CC58F; --ok-soft:#1B2E22; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+    --t1:#E0955A; --t2:#8FB4DD; --t3:#6CC58F;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+  --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+  --ok:#6CC58F; --ok-soft:#1B2E22; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+  --t1:#E0955A; --t2:#8FB4DD; --t3:#6CC58F;
+}
+*{box-sizing:border-box}
+/* Code blocks scroll sideways inside their column. A grid or flex child defaults to min-width:auto, which lets a long <pre> line widen the track and the page; min-width:0 on every wrapper between the track and the <pre> stops that. */
+.wrap,.wrap>*,main,.step,.cmd,.tbl,.further,.callout,.lesson{min-width:0}
+pre{max-width:100%}
+
+html{margin:0}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;font-size:16px;line-height:1.55;padding-inline:clamp(16px,4vw,40px);padding-block:40px 80px;}
+.wrap{max-width:1040px;margin:0 auto;display:grid;grid-template-columns:220px minmax(0,1fr);gap:48px;align-items:start}
+@media (max-width:820px){.wrap{grid-template-columns:1fr;gap:24px}.rail{position:static!important}}
+h1,h2,h3{font-family:"Source Serif 4",Georgia,"Times New Roman",serif;font-weight:600;line-height:1.15;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,5vw,46px);letter-spacing:-.01em}
+h2{font-size:27px}
+h3{font-size:18px;margin-top:26px}
+p{margin:12px 0;max-width:68ch}
+.lede{font-size:18px;color:var(--ink-2);max-width:62ch}
+.topnav{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:12px}
+.topnav a{font-size:14px;font-weight:500;text-decoration:none}
+.topnav a:hover{text-decoration:underline}
+.eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--brass);font-weight:600;margin-bottom:12px}
+a{color:var(--blue)}
+code{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em;background:var(--blue-soft);padding:1px 5px;border-radius:4px}
+.hidden{display:none!important}
+
+/* rail */
+.rail{position:sticky;top:24px}
+.rail .eyebrow{margin-bottom:8px}
+.rail ol{list-style:none;padding:0;margin:0;display:grid;gap:2px}
+.rail a{display:block;padding:7px 8px;border-radius:4px;color:var(--ink-2);text-decoration:none;font-size:14px;line-height:1.35}
+.rail a:hover{background:var(--paper)}
+.rail .meta{font-size:12px;color:var(--ink-3);margin-top:14px;line-height:1.5}
+
+/* lessons */
+.lesson{padding:36px 0 8px;border-top:1px solid var(--line);scroll-margin-top:16px}
+.lesson:first-of-type{border-top:0;padding-top:8px}
+.lhead{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.lnum{font-family:"Source Serif 4",Georgia,serif;font-size:30px;font-weight:600;color:var(--brass);line-height:1}
+.ltime{font-size:13px;color:var(--ink-3);margin-left:auto}
+.why{border-left:3px solid var(--brass);padding:2px 0 2px 14px;color:var(--ink-2);margin:16px 0 10px;max-width:66ch}
+pre{margin:0;background:var(--code-bg);color:var(--code-fg);border-radius:var(--radius);padding:14px 16px;font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:14px;line-height:1.6;overflow-x:auto}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;padding-right:76px}
+pre .c{color:var(--code-cmt)}
+.cmd{position:relative;margin:12px 0}
+.copy{position:absolute;top:8px;right:8px;font:inherit;font-size:12px;font-weight:500;padding:4px 9px;border-radius:4px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:var(--code-fg);cursor:pointer}
+.copy:hover{background:rgba(255,255,255,.14)}
+.copy:focus-visible{outline:2px solid var(--brass)}
+.see{margin:10px 0 4px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+pre.out{background:var(--paper);color:var(--ink-2);border:1px dashed var(--line);font-size:13px}
+pre.out b{color:var(--ink);font-weight:500}
+.note{font-size:14px;color:var(--ink-2);margin:8px 0;max-width:68ch}
+.callout{border-left:3px solid var(--brass);background:var(--brass-soft);padding:12px 16px;border-radius:0 var(--radius) var(--radius) 0;margin:18px 0;font-size:15px;max-width:68ch}
+.callout p{margin:4px 0}
+.callout.rule{border-color:var(--blue);background:var(--blue-soft)}
+
+.ph{color:var(--brass);font-style:italic}
+pre .ph{color:#E0B24C}
+
+
+/* figures */
+figure.fig{margin:18px 0;max-width:68ch}
+figure.fig svg{width:100%;height:auto;display:block;color:var(--ink)}
+figure.fig figcaption{font-size:13px;color:var(--ink-3);margin-top:6px}
+figure.fig text{font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:12.5px;fill:currentColor}
+figure.fig .sm{font-size:10.5px;fill:var(--ink-3);letter-spacing:.05em;text-transform:uppercase}
+figure.fig .lbl{font-size:11px;fill:var(--ink-2)}
+figure.fig rect.box{fill:var(--paper);stroke:currentColor;stroke-width:1}
+figure.fig rect.you{fill:var(--brass-soft);stroke:var(--brass);stroke-width:1.2}
+figure.fig line,figure.fig path{stroke:currentColor;stroke-width:1.2;fill:none}
+figure.fig .you-edge{stroke:var(--brass)}
+figure.fig .dash{stroke-dasharray:4 3}
+
+/* investigate further */
+.further{margin:22px 0 6px;border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:0 var(--radius) var(--radius) 0;background:var(--paper);padding:12px 16px;max-width:68ch}
+.further h4{margin:0 0 6px;font-family:"Source Serif 4",Georgia,serif;font-size:16px;font-weight:600;color:var(--blue)}
+.further ul{margin:0;padding-left:20px;font-size:15px;color:var(--ink-2)}
+.further li{margin:4px 0}
+
+/* tier diagram */
+.tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px 0;max-width:68ch}
+@media (max-width:560px){.tiers{grid-template-columns:1fr}}
+.tier{background:var(--paper);border:1px solid var(--line);border-top:4px solid var(--tc);border-radius:var(--radius);padding:12px 14px}
+.tier b{font-family:"Source Serif 4",Georgia,serif;font-size:20px;font-weight:600;color:var(--tc);display:block}
+.tier small{display:block;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:6px}
+.tier p{font-size:14px;margin:4px 0;color:var(--ink-2)}
+.tier code{font-size:.85em}
+.arrowrow{font-size:13px;color:var(--ink-3);margin:-6px 0 14px;max-width:68ch}
+
+/* entry table */
+table{border-collapse:collapse;width:100%;font-size:15px;margin:14px 0;max-width:68ch}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+.tbl{overflow-x:auto}
+.gloss-wrap{margin:22px 0 8px;max-width:68ch}
+details.gloss{border:1px solid var(--line);border-radius:var(--radius);background:var(--paper);margin:6px 0}
+details.gloss summary{cursor:pointer;padding:10px 14px;font-weight:500;list-style:none;display:flex;justify-content:space-between}
+details.gloss summary::after{content:"+";color:var(--brass);font-family:"IBM Plex Mono",monospace}
+details.gloss[open] summary::after{content:"–"}
+details.gloss table{margin:0;font-size:14px}
+details.gloss td:first-child{font-weight:500;white-space:nowrap;width:9em}
+details.gloss tr:last-child td{border-bottom:0}
+ol.plain,ul.plain{margin:6px 0 10px;padding-left:22px;max-width:66ch}
+ol.plain li,ul.plain li{margin:3px 0}
+.finish{border:1px solid var(--line);background:var(--paper);border-radius:var(--radius);padding:18px 20px;margin-top:40px;max-width:68ch}
+.finish h2{font-size:24px}
+.footer{margin-top:60px;font-size:13px;color:var(--ink-3)}
+@media (prefers-reduced-motion:reduce){.copy{transition:none}}
+</style>
+<style>
+details.gloss td:first-child{width:11em;white-space:normal}
+details.gloss.out{max-width:68ch;margin:10px 0}
+details.gloss.out pre.out{margin:0;border:0;border-top:1px solid var(--line);border-radius:0 0 var(--radius) var(--radius)}
+.terms td:first-child{font-weight:500;white-space:nowrap}
+figure.fig rect.bag{fill:var(--blue-soft);stroke:var(--blue);stroke-width:1.2}
+.who{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;padding:1px 6px;border-radius:3px;border:1px solid var(--line);background:var(--paper);color:var(--ink-2);white-space:nowrap}
+.who.cl{border-color:var(--brass);background:var(--brass-soft);color:var(--brass)}
+table.steps td:first-child{width:6.5em;white-space:nowrap}
+</style>
+<script data-goatcounter="https://hellblazer-nexus.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+<div class="wrap">
+
+<nav class="rail" aria-label="Lessons">
+  <div class="eyebrow">Coordination</div>
+  <ol id="toc">
+    <li><a href="#l1">A session gets its address</a></li>
+    <li><a href="#l2">A message arrives</a></li>
+    <li><a href="#l3">An agent starts, works, and reports</a></li>
+    <li><a href="#l4">A request to a peer session</a></li>
+    <li><a href="#l5">The session changes</a></li>
+    <li><a href="#l6">Appendix: limits and rules</a></li>
+  </ol>
+  <div class="meta"><a href="tuple-space.html">← The tuple space</a><br><a href="getting-started.html">← Getting started</a><br><a href="rdr.html">← Working with RDRs</a><br><a href="research.html">← Research with Nexus</a><br><a href="./">← Install guide</a></div>
+</nav>
+
+<main>
+<div class="topnav"><span class="eyebrow" style="margin:0">Nexus · coordination</span><a href="tuple-space.html">← The tuple space</a></div>
+<h1>Coordination Between Sessions and Agents</h1>
+<p class="lede">This page follows one Claude Code session through its work with agents and with other sessions. For each step, it shows which part does the work. Hooks, the watcher, and the engine do their steps without a request. Claude does its steps with tool calls. Every example comes from a real session.</p>
+<p class="note">In the tables, <span class="who">hook</span>, <span class="who">watcher</span>, and <span class="who">engine</span> steps are automatic. <span class="who cl">Claude</span> and <span class="who cl">agent</span> steps are tool calls that the model makes. <a href="tuple-space.html">The Nexus Tuple Space</a> explains the operations themselves.</p>
+
+<div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><table class="terms">
+<tr><th>Term</th><th>Meaning</th></tr>
+<tr><td>engine</td><td>The Nexus service that owns the database and handles every tuple call.</td></tr>
+<tr><td>session id</td><td>The id of one Claude Code conversation, a UUID. It is the session's mailbox address.</td></tr>
+<tr><td>name</td><td>The short label the harness shows for a session, such as <code>nexus-4a</code>. It can change when a session resumes.</td></tr>
+<tr><td>agent id</td><td>The id the harness gives an agent: the letter <code>a</code> and 16 hexadecimal digits. It is the agent's mailbox address.</td></tr>
+<tr><td>mailbox</td><td>The part of the tuple space that holds messages for one address.</td></tr>
+<tr><td>directory</td><td>The part of the tuple space that maps each name to the session id that holds it.</td></tr>
+<tr><td>ledger</td><td>The part of the tuple space where hooks record that an agent started and that it reported. Any session can read it.</td></tr>
+<tr><td>dispatch file</td><td>A local file for each session, outside the tuple space. Hooks add a row when an agent is expected, when it starts, and when it reports.</td></tr>
+<tr><td>hook</td><td>A script that Claude Code runs at a fixed point: session start, each prompt, and agent start and stop.</td></tr>
+<tr><td>watcher</td><td>The command <code>nx tuple watch</code>. It runs in the background and prints one line for each new message.</td></tr>
+<tr><td>take operation</td><td>A <code>tuple_in</code> call. It gives a message to one reader only, for a limited time called the lease.</td></tr>
+<tr><td>ack, nack</td><td><code>tuple_ack</code> removes a message that the reader took. <code>tuple_nack</code> returns it to the mailbox.</td></tr>
+<tr><td>dead letter</td><td>A message that failed three times. Anybody can read it, and nobody can take it.</td></tr>
+<tr><td>correlation id</td><td>An id that a request carries and its reply repeats, so that the two can be paired.</td></tr>
+</table></details></div>
+
+<!-- ============ 1 ============ -->
+<section class="lesson" id="l1">
+<div class="lhead"><span class="lnum">1</span><h2>A session gets its address</h2><span class="ltime">3 min</span></div>
+<p class="why">The session id is the session's address. The session-start hook gives Claude that id and an instruction to start a watcher. The watcher then puts the session's name in the directory, so other sessions can find it.</p>
+
+<div class="tbl"><table class="steps">
+<tr><th>By</th><th>What happens</th></tr>
+<tr><td><span class="who">hook</span></td><td>When the session starts, resumes, clears, or compacts, <code>nx hook session-start</code> reads the session id. It writes a marker file for the watcher and adds two things to Claude's context: <code>Nexus ready (session: &lt;id&gt;)</code> and a <code>MAILBOX WATCH</code> instruction.</td></tr>
+<tr><td><span class="who cl">Claude</span></td><td>Calls <code>ListAgents</code> to learn the session's name. The harness gives the name. Nexus does not choose it.</td></tr>
+<tr><td><span class="who cl">Claude</span></td><td>Starts the watcher with the Monitor tool, as the instruction says: <code>nx tuple watch --instance &lt;name&gt;</code>.</td></tr>
+<tr><td><span class="who">watcher</span></td><td>Watches two mailboxes: <code>mailbox/&lt;session id&gt;</code> and <code>mailbox/&lt;name&gt;</code>. It writes <code>directory/&lt;name&gt;</code> with the session id. The entry lasts five minutes, and the watcher writes it again every minute.</td></tr>
+</table></div>
+
+<details class="gloss out"><summary>What Claude sees at session start</summary><pre class="out">Nexus ready (session: <b>5b354c36-d317-4a00-aa15-f567e65a7209</b>).
+…
+<b>MAILBOX WATCH: arm once, now.</b>
+Monitor({
+  command: "nx tuple watch --instance &lt;name&gt;",
+  description: "mailbox watch 5b354c36-d317-4a00-aa15-f567e65a7209",
+  timeout_ms: 3600000
+})
+
+ListAgents
+This session is <b>nexus-4a</b> [102a61] — the name other sessions use to message it</pre></details>
+<details class="gloss out"><summary>The directory entry the watcher writes</summary><pre class="out">tuple_rd  subspace: directory/nexus-4a
+{
+  "keys": {"name": "<b>nexus-4a</b>"},
+  "dims": {"session_id": "<b>5b354c36-d317-4a00-aa15-f567e65a7209</b>"},
+  "expires_at": "2026-09-15T15:12:13Z"
+}</pre></details>
+<p class="note">The Monitor tool ends a watch after 30 minutes. Claude starts the watcher again when the expiry notice arrives. If Claude does not, the drain hook in lesson 2 shows the instruction again.</p>
+</section>
+
+<!-- ============ 2 ============ -->
+<section class="lesson" id="l2">
+<div class="lhead"><span class="lnum">2</span><h2>A message arrives</h2><span class="ltime">4 min</span></div>
+<p class="why">A message waits in the mailbox until one reader takes it. The watcher tells Claude at once. If Claude does not take the message, the drain hook takes it at the next prompt and shows it to Claude.</p>
+
+<figure class="fig">
+<svg viewBox="0 0 760 262" role="img" aria-label="The watcher reads the mailbox and tells Claude with a ping. Claude takes the message from the mailbox and acks it. At the next prompt, the drain hook takes any message that is still waiting and shows its body to Claude.">
+  <rect class="bag" x="290" y="18" width="180" height="46" rx="4"/><text x="380" y="38" text-anchor="middle">mailbox</text><text x="380" y="55" text-anchor="middle" class="lbl">in the engine</text>
+  <rect class="box" x="40" y="116" width="200" height="48" rx="4"/><text x="140" y="136" text-anchor="middle">watcher</text><text x="140" y="153" text-anchor="middle" class="lbl">reads every 3 s, never takes</text>
+  <rect class="box" x="520" y="116" width="200" height="48" rx="4"/><text x="620" y="136" text-anchor="middle">drain hook</text><text x="620" y="153" text-anchor="middle" class="lbl">takes and acks at the next prompt</text>
+  <rect class="you" x="280" y="200" width="200" height="48" rx="4"/><text x="380" y="220" text-anchor="middle">Claude</text><text x="380" y="237" text-anchor="middle" class="lbl">tuple_in, then tuple_ack</text>
+  <line x1="330" y1="64" x2="170" y2="116" class="dash"/>
+  <line x1="430" y1="64" x2="590" y2="116"/>
+  <line x1="380" y1="64" x2="380" y2="200" class="you-edge"/>
+  <line x1="200" y1="164" x2="280" y2="218"/>
+  <line x1="580" y1="164" x2="480" y2="218"/>
+  <text x="388" y="140" class="lbl">take and ack</text>
+  <text x="226" y="212" text-anchor="end" class="lbl">ping</text>
+  <text x="540" y="214" class="lbl">shows the body</text>
+</svg>
+<figcaption>The watcher only reads the mailbox. Claude, or the drain hook at the next prompt, takes the message. Only one of them gets it.</figcaption>
+</figure>
+
+<div class="tbl"><table class="steps">
+<tr><th>By</th><th>What happens</th></tr>
+<tr><td><span class="who">engine</span></td><td>Stores the message in the mailbox. It waits there for at most seven days.</td></tr>
+<tr><td><span class="who">watcher</span></td><td>Reads the mailbox every three seconds and prints one ping line for each new message. The line names the sender, the kind, and the correlation id. It does not contain the message body.</td></tr>
+<tr><td><span class="who cl">Claude</span></td><td>Calls <code>tuple_in</code> on the mailbox. This take operation gives the message to Claude with a lease of at most fifteen minutes.</td></tr>
+<tr><td><span class="who cl">Claude</span></td><td>Does the work, then calls <code>tuple_ack</code>. For a request, the reply is part of the same call. The engine removes the request and writes the reply in one transaction, so a crash cannot send the reply twice. If Claude cannot do the work, <code>tuple_nack</code> gives the message back.</td></tr>
+<tr><td><span class="who">hook</span></td><td>At each prompt, the drain hook takes up to ten waiting messages, acks them, and shows each body in Claude's context. This path also works when no watcher runs.</td></tr>
+<tr><td><span class="who">hook</span></td><td>If no watcher holds the session's mailbox, the drain hook shows the <code>MAILBOX WATCH</code> instruction again, at most once every ten minutes. If that attempt fails, the hook tries again after one minute.</td></tr>
+</table></div>
+
+<details class="gloss out"><summary>The ping line</summary><pre class="out">nx-tuple-watch: new mail at mailbox/5b354c36-d317-4a00-aa15-f567e65a7209 from=<b>cdeb12b5-f397-478f-83cd-37b77a4f3160</b> kind=<b>ack</b> correlation_id=<b>nexus-4a-paired-release-scope-2026-09-15</b> tuple_id=7bdd22ba…. Drain it now …</pre></details>
+<details class="gloss out"><summary>The take and the ack</summary><pre class="out">tuple_in   subspace: mailbox/5b354c36-…   keys: {to: 5b354c36-…}   timeout_s: 25
+{
+  "tuple": {
+    "dims": {"from": "cdeb12b5-…", "kind": "<b>reply</b>", "correlation_id": "<b>r-41</b>", "address_kind": "session"},
+    "body": "Armed. The watcher is Monitor task b3g9s5nia running nx tuple watch --instance nexus-8c …"
+  },
+  "claim_id": "784e820d-…"
+}
+tuple_ack  … → Acked</pre></details>
+<details class="gloss out"><summary>What the drain hook shows at a prompt</summary><pre class="out">## Mailbox (RDR-205): delivered at this prompt
+
+- from=5b354c36-d317-4a00-aa15-f567e65a7209 kind=<b>notice</b> correlation_id=s7b-b7-to-remote address=mailbox/0f49b34d-ea73-4c3c-8e29-c3aa344a66aa tuple_id=481f00b1…
+  <b>rdr-208 mvv step 7b: nexus-b7 (this host) to the container session by name</b></pre></details>
+<details class="gloss out"><summary>What the drain hook shows when no watcher runs</summary><pre class="out">No mailbox watch is running for this session; its SessionStart arm instruction may not have arrived.
+MAILBOX WATCH: arm once, now.
+…</pre></details>
+</section>
+
+<!-- ============ 3 ============ -->
+<section class="lesson" id="l3">
+<div class="lhead"><span class="lnum">3</span><h2>An agent starts, works, and reports</h2><span class="ltime">5 min</span></div>
+<p class="why">An agent has its own mailbox, addressed by its agent id. Hooks record each agent in two places. The dispatch file lets the session check that every agent it started reported. The ledger in the tuple space lets any session see the same starts and reports.</p>
+
+<div class="tbl"><table class="steps">
+<tr><th>By</th><th>What happens</th></tr>
+<tr><td><span class="who">hook</span></td><td>Before the Agent tool runs, a hook writes an EXPECT row for the agent type to the session's dispatch file.</td></tr>
+<tr><td><span class="who">hook</span></td><td>When the agent starts, a hook adds the agent's id and mailbox address to its context. A second hook writes a START row to the dispatch file.</td></tr>
+<tr><td><span class="who cl">Claude</span></td><td>To correct the agent while it works, calls <code>mailbox_send</code> with the agent id. An agent id needs no directory lookup.</td></tr>
+<tr><td><span class="who cl">agent</span></td><td>Calls <code>tuple_in</code> on its own mailbox before it writes its report. The mailbox skill tells the agent to do this. No hook does it for the agent, so the agent reads a message only when it calls <code>tuple_in</code>.</td></tr>
+<tr><td><span class="who">hook</span></td><td>When a background agent stops without a report, the stop hook stops it one time and writes a BLOCKED row. The agent then sends its report, and the hook writes a REPORTED row. The harness gives the report to the session.</td></tr>
+<tr><td><span class="who">hook</span></td><td>At start and at stop, other hooks also write a start record and a report record to <code>ledger/&lt;session id&gt;</code> in the tuple space. The report record copies any <code>VERIFY:</code> line from the report. These writes are best effort: a failure is logged and does not stop the agent.</td></tr>
+<tr><td><span class="who cl">Claude</span></td><td>Runs <code>expectations_census</code>. It reads the dispatch file and compares the agents that the session expected, the agents that started, and the agents that reported.</td></tr>
+</table></div>
+
+<details class="gloss out"><summary>What the agent sees when it starts</summary><pre class="out">Claimant id: <b>a4873be6337bcac8c</b> — mailbox: <b>mailbox/a4873be6337bcac8c</b></pre></details>
+<details class="gloss out"><summary>The tuple-space ledger records for one agent</summary><pre class="out">tuple_rd  subspace: ledger/5b354c36-…   keys_pattern: {agent_id: a52466bfafa7e0d74}
+  keys: {kind: <b>start</b>,  agent_id: a52466bfafa7e0d74}   dims: {agent_type: Explore}                   created_at: 15:07:32Z
+  keys: {kind: <b>report</b>, agent_id: a52466bfafa7e0d74}   dims: {agent_type: Explore, verify: absent}   created_at: 15:12:09Z</pre></details>
+<details class="gloss out"><summary>The message an agent sends after the hook stops it</summary><pre class="out">Explore finished: the tuple-space agent map (sessions and subagents) is done. The full numbered fact list with file:line citations went to you in my SubagentHandback report; <b>this message only satisfies the stop hook.</b></pre></details>
+
+<div class="see">To check the agents of a session</div>
+<div class="cmd"><pre>source <span class="ph">&lt;CONEXUS PLUGIN DIR&gt;</span>/hooks/scripts/expectations.sh
+expectations_census <span class="ph">&lt;SESSION-ID&gt;</span></pre><button class="copy" type="button">Copy</button></div>
+<details class="gloss out"><summary>What you see</summary><pre class="out">AGENT  a4873be6337bcac8c  conexus:substantive-critic  BLOCKED_RESOLVED  declared
+AGENT  a52466bfafa7e0d74  Explore                     BLOCKED_RESOLVED  declared
+…
+ROWS        expect=<b>28</b> start=<b>28</b> reported=<b>28</b> blocked=28 wouldblock=0
+CLASSIFIED  reported=0 blocked_resolved=28 (immediate=28 later=0) blocked_unresolved=<b>0</b> wouldblock=0 no_terminal=0 undeclared=<b>0</b> no_start=0 expected_no_start=0
+…</pre></details>
+<p class="note">In this session, all 28 expected agents started and reported. Each one reported only after the hook stopped it once.</p>
+</section>
+
+<!-- ============ 4 ============ -->
+<section class="lesson" id="l4">
+<div class="lhead"><span class="lnum">4</span><h2>A request to a peer session</h2><span class="ltime">4 min</span></div>
+<p class="why">Claude sends to a peer session by name. <code>mailbox_send</code> finds the name in the directory and writes to the mailbox of the session that holds it. The call is the same for a session on another machine that uses the same engine.</p>
+
+<div class="tbl"><table class="steps">
+<tr><th>By</th><th>What happens</th></tr>
+<tr><td><span class="who cl">Claude</span></td><td>Writes long content to project memory with <code>memory_put</code>. A message body is at most 4096 bytes, so the message carries only the memory title.</td></tr>
+<tr><td><span class="who cl">Claude</span></td><td>Calls <code>mailbox_send</code> with the peer's name, the kind <code>request</code>, and a new correlation id. The tool looks up <code>directory/&lt;name&gt;</code>. When exactly one live session holds the name, it writes to that session's mailbox. When no session or two sessions hold the name, it writes nothing and names the holders.</td></tr>
+<tr><td><span class="who">watcher</span></td><td>The peer's watcher prints a ping line in the peer session.</td></tr>
+<tr><td><span class="who cl">Claude</span></td><td>The peer takes the request, does the work, and calls <code>tuple_ack</code> with a reply to the sender's mailbox. The reply has the same correlation id.</td></tr>
+<tr><td><span class="who">watcher</span></td><td>The sender's watcher prints a ping line for the reply, and Claude takes it as in lesson 2.</td></tr>
+</table></div>
+
+<details class="gloss out"><summary>A send to a peer on the same machine</summary><pre class="out">mailbox_send  to: <b>nexus-8c</b>   kind: request   correlation_id: r-41
+→ {"to": "<b>cdeb12b5-…</b>", "address_kind": "<b>session</b>", "from": "5b354c36-…"}</pre></details>
+
+<h3>Other machines</h3>
+<p>Two machines share one tuple space when both use the same engine. In cloud mode, every machine connects to one managed engine, so the directory and the mailboxes are the same on every machine. In local mode, each machine runs its own engine, so a session on another machine cannot receive the message. Every call carries the tenant's credentials, so only sessions of one tenant share a space.</p>
+<details class="gloss out"><summary>A message from a session on a second host, arriving here</summary><pre class="out"><span class="c"># the send, on the second host</span>
+→ {"tuple_id": "8ce10d62…", "to": "<b>5b354c36-d317-4a00-aa15-f567e65a7209</b>", "address_kind": "session", "from": "<b>5cab61d9-3c73-435c-b2f8-c75546df8db7</b>"}
+
+<span class="c"># the ping, in this session</span>
+nx-tuple-watch: new mail at mailbox/5b354c36-d317-4a00-aa15-f567e65a7209 from=5cab61d9-3c73-435c-b2f8-c75546df8db7 kind=notice correlation_id=<b>s7-real-remote-to-b7</b> tuple_id=8ce10d62…. Drain it now …</pre></details>
+</section>
+
+<!-- ============ 5 ============ -->
+<section class="lesson" id="l5">
+<div class="lhead"><span class="lnum">5</span><h2>The session changes</h2><span class="ltime">3 min</span></div>
+<p class="why">A <code>/clear</code> or a <code>/resume</code> gives the conversation a new session id. The old watcher stops by itself, and a message sent to the old id still reaches the conversation.</p>
+
+<div class="tbl"><table class="steps">
+<tr><th>By</th><th>What happens</th></tr>
+<tr><td><span class="who">hook</span></td><td>On <code>/clear</code>, the session-start hook writes a record that names the old session id. Then it writes the watcher marker for the new id.</td></tr>
+<tr><td><span class="who">watcher</span></td><td>The old watcher compares the marker with its own session id on each cycle. When they differ, it removes its directory entry, prints a STOP line, and exits.</td></tr>
+<tr><td><span class="who cl">Claude</span></td><td>Starts a new watcher with the same Monitor call. It calls <code>ListAgents</code> again first, because the name can change.</td></tr>
+<tr><td><span class="who">hook</span></td><td>At each prompt, the drain hook also reads the old session's mailbox. So a message sent to the old id reaches the new session.</td></tr>
+<tr><td><span class="who">hook</span></td><td><code>/branch</code> runs no session-start hook. At the branch's first prompt, the drain hook moves the marker to the new session id. The watcher for the old id then stops.</td></tr>
+</table></div>
+
+<details class="gloss out"><summary>The STOP line</summary><pre class="out">nx-tuple-watch: STOP: this conversation is now session <b>427e57b4-d9c4-474b-8626-215eb6aa80cf</b>, not <b>643e36a6-b061-4ae4-ae5a-e2a29491fcf8</b> -- the watch for the old session is stopping. Re-arm per the SessionStart instruction, with the name from a fresh ListAgents call.</pre></details>
+</section>
+
+<!-- ============ 6 ============ -->
+<section class="lesson" id="l6">
+<div class="lhead"><span class="lnum">6</span><h2>Appendix: limits and rules</h2><span class="ltime">reference</span></div>
+<p class="why">You need none of this to use the system. It gives the numbers behind the steps above.</p>
+<details class="gloss"><summary>Limits and rules</summary><div style="padding:0 14px 12px">
+<ul class="plain">
+<li><strong>Lease.</strong> A take operation gives a message to one reader for at most fifteen minutes. A reader that needs more time calls <code>tuple_renew</code>.</li>
+<li><strong>Dead letter.</strong> A nack counts as one failed attempt. A lease that ends without an ack also counts as one. After three attempts, the message becomes a dead letter. The drain hook shows a dead letter once, as UNDELIVERABLE.</li>
+<li><strong>Retention.</strong> A message lasts at most seven days. Ledger records last 90 days, and nobody can take them.</li>
+<li><strong>Size.</strong> A message body is at most 4096 bytes. Each key or dimension value is at most 256 bytes.</li>
+<li><strong>Wait.</strong> One <code>tuple_in</code> call waits at most 25 seconds. For a longer wait, call it again.</li>
+<li><strong>Directory.</strong> An entry lasts five minutes, and the watcher writes it again every minute. <code>mailbox_send</code> refuses a name with no live holder or with two holders. <code>nx tuple directory &lt;name&gt;</code> shows the holders.</li>
+<li><strong>Watcher.</strong> It reads every three seconds. It prints a ping for a message again after ten minutes, at most three times.</li>
+<li><strong>Drain hook.</strong> It takes at most ten messages at one prompt and uses at most six seconds.</li>
+<li><strong>Sweep.</strong> Every six hours, the engine returns claims whose lease ended and removes expired rows.</li>
+<li><strong>Health.</strong> <code>nx doctor</code> shows four tuple rows. They report the oldest message that nobody took, the database cleanup state of the tuple tables, the time since the last sweep, and whether the watcher can run.</li>
+</ul>
+</div></details>
+</section>
+
+<p class="footer">Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a>, the <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-208-session-id-mail-addressing.md">RDR-208</a> design record for session addressing, and <a href="tuple-space.html">The Nexus Tuple Space</a> for the operations.</p>
+</main>
+</div>
+
+<script>
+(function(){
+  document.querySelectorAll(".copy").forEach(function(btn){
+    btn.addEventListener("click",function(){
+      var pre=btn.parentElement.querySelector("pre");
+      var text=pre.textContent.split("\n").map(function(l){return l.replace(/\s+#.*$/,"");}).filter(function(l){return l.trim();}).join("\n");
+      function ok(){btn.textContent="Copied";setTimeout(function(){btn.textContent="Copy";},1400);}
+      function fail(){btn.textContent="Select and copy";setTimeout(function(){btn.textContent="Copy";},2200);}
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(ok,fail);}else{fail();}
+    });
+  });
+})();
+</script>
+</body>
+</html>
