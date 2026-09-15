@@ -4,7 +4,11 @@ package dev.nexus.service.db;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -141,5 +145,110 @@ class TupleWaitRegistryTest {
                 .isEqualTo(2); // still-parked-subspace + trigger-subspace; idle-subspace is gone
 
         stillWaiting.release(); // avoid leaking state past the test, though nothing reads it after
+    }
+
+    // ── per-claimant park counters (RDR-211 scalability research, nexus-xapt8) ──
+
+    /**
+     * Before the fix, {@code perClaimantParked} grew one entry per DISTINCT
+     * claimant string ever parked and nothing ever removed one — a many-
+     * distinct-claimants workload (the common shape: a claimant identity is
+     * typically a one-shot agent/session id, not a small closed set) leaked
+     * the map without bound. {@link TupleWaitRegistry#releaseParkSlot} now
+     * removes a claimant's entry the moment its count reaches zero, in the
+     * same atomic {@code compute} step as the decrement.
+     */
+    @Test
+    void tryAcquireParkSlot_manyDistinctClaimants_thenReleaseAll_mapReturnsToEmpty() {
+        TupleWaitRegistry registry = new TupleWaitRegistry(4, 1_000);
+
+        int claimantCount = 200;
+        for (int i = 0; i < claimantCount; i++) {
+            String claimant = "claimant-" + i;
+            registry.tryAcquireParkSlot(claimant);
+        }
+        assertThat(registry.perClaimantTrackedCount())
+            .as("one tracked entry per distinct claimant while parked")
+            .isEqualTo(claimantCount);
+
+        for (int i = 0; i < claimantCount; i++) {
+            registry.releaseParkSlot("claimant-" + i);
+        }
+        assertThat(registry.perClaimantTrackedCount())
+            .as("every entry must be removed once its count reaches zero -- not merely decremented to zero")
+            .isZero();
+    }
+
+    /**
+     * The race the un-atomic {@code computeIfAbsent} + {@code incrementAndGet}
+     * pair exposed: many threads hammering acquire/release for the SAME
+     * claimant, concurrently, must never let more than {@code maxPerClaimant}
+     * acquisitions be live at once. Asserts the invariant DIRECTLY (a
+     * shared counter of currently-held slots, checked against the cap at
+     * every acquisition) rather than inferring it from exception counts,
+     * which a lost update could satisfy by accident. A brief hold between
+     * acquire and release widens the race window (same reasoning as {@code
+     * TupleClaimContentionTest}'s injected delay), and a vacuity guard fails
+     * loud if concurrent holding was never actually observed -- a run that
+     * happened to fully serialize would prove nothing about the fix.
+     */
+    @Test
+    void tryAcquireParkSlot_concurrentSameClaimant_neverExceedsThePerClaimantCap() throws Exception {
+        int cap = 4;
+        TupleWaitRegistry registry = new TupleWaitRegistry(cap, 1_000);
+        String claimant = "shared-claimant";
+        int threads = 32;
+        int roundsPerThread = 50;
+
+        AtomicInteger currentlyHeld = new AtomicInteger();
+        AtomicInteger maxObservedHeld = new AtomicInteger();
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        try {
+            for (int t = 0; t < threads; t++) {
+                pool.submit(() -> {
+                    try {
+                        start.await();
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                    for (int r = 0; r < roundsPerThread; r++) {
+                        try {
+                            registry.tryAcquireParkSlot(claimant);
+                        } catch (ParkCapExceededException e) {
+                            continue; // refused -- correct under contention, not a failure
+                        }
+                        int held = currentlyHeld.incrementAndGet();
+                        maxObservedHeld.updateAndGet(prev -> Math.max(prev, held));
+                        try {
+                            Thread.sleep(1); // widen the race window
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                        }
+                        currentlyHeld.decrementAndGet();
+                        registry.releaseParkSlot(claimant);
+                    }
+                });
+            }
+            start.countDown();
+            pool.shutdown();
+            assertThat(pool.awaitTermination(60, TimeUnit.SECONDS))
+                .as("all threads must finish within the test's own budget")
+                .isTrue();
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(maxObservedHeld.get())
+            .as("vacuity guard: this run must have observed genuine concurrent holding "
+                + "(peak > 1), otherwise it never exercised the race at all")
+            .isGreaterThan(1);
+        assertThat(maxObservedHeld.get())
+            .as("the per-claimant cap must never be exceeded, even under concurrent contention")
+            .isLessThanOrEqualTo(cap);
+        assertThat(registry.perClaimantTrackedCount())
+            .as("every acquisition was paired with a release -- the tracked entry must be gone")
+            .isZero();
     }
 }

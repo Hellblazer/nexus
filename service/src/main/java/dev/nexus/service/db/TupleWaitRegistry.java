@@ -301,6 +301,19 @@ final class TupleWaitRegistry {
      * action on refusal is to give up and return the (already-computed, empty) probe
      * result, which is what the exception carries by construction (see its javadoc).
      *
+     * <p>The per-claimant branch (nexus-xapt8, RDR-211 scalability research addition
+     * 15) goes through {@link ConcurrentHashMap#compute}, whose remapping function
+     * runs atomically for the given key — the increment-then-check the previous
+     * {@code computeIfAbsent} + {@code incrementAndGet} pair performed as TWO separate
+     * operations is now one. That pairing had a second defect beyond the race: nothing
+     * ever removed a claimant's entry once its count reached zero, so {@link
+     * #perClaimantParked} grew one entry per DISTINCT claimant string EVER parked,
+     * forever — for a claimant identity that is typically a one-shot agent/session id
+     * rather than a small closed set, that is an unbounded map keyed on cardinality
+     * this registry has no way to bound. The {@code compute} call below folds the
+     * removal in: a claimant whose count reaches zero (in {@link #releaseParkSlot})
+     * has its entry removed in the SAME atomic step that decrements it.
+     *
      * @param claimantOrNull null for a claimant-less caller ({@code rd}); non-null names
      *                       the claimant whose own cap is also checked ({@code in}/{@code inp})
      */
@@ -311,25 +324,49 @@ final class TupleWaitRegistry {
             throw new ParkCapExceededException("global");
         }
         if (claimantOrNull != null) {
-            AtomicInteger perClaimant = perClaimantParked.computeIfAbsent(claimantOrNull, k -> new AtomicInteger());
-            int newPerClaimant = perClaimant.incrementAndGet();
-            if (newPerClaimant > maxPerClaimant) {
-                perClaimant.decrementAndGet();
+            boolean[] exceeded = {false};
+            perClaimantParked.compute(claimantOrNull, (k, v) -> {
+                int current = (v == null) ? 0 : v.get();
+                if (current + 1 > maxPerClaimant) {
+                    exceeded[0] = true;
+                    return v; // unchanged -- the cap refuses, nothing to acquire
+                }
+                if (v == null) {
+                    return new AtomicInteger(1);
+                }
+                v.incrementAndGet();
+                return v;
+            });
+            if (exceeded[0]) {
                 globalParked.decrementAndGet();
                 throw new ParkCapExceededException("claimant");
             }
         }
     }
 
-    /** Releases a park slot acquired via {@link #tryAcquireParkSlot}. Always call in a {@code finally}. */
+    /** Releases a park slot acquired via {@link #tryAcquireParkSlot}. Always call in a
+     *  {@code finally}. Removes {@code claimantOrNull}'s {@link #perClaimantParked}
+     *  entry the moment its count reaches zero (nexus-xapt8), atomically with the
+     *  decrement via {@link ConcurrentHashMap#compute} -- the counterpart to {@link
+     *  #tryAcquireParkSlot}'s own {@code compute} call, so the map never accumulates
+     *  an entry for a claimant with no currently-parked call. */
     void releaseParkSlot(String claimantOrNull) {
         globalParked.decrementAndGet();
         if (claimantOrNull != null) {
-            AtomicInteger perClaimant = perClaimantParked.get(claimantOrNull);
-            if (perClaimant != null) {
-                perClaimant.decrementAndGet();
-            }
+            perClaimantParked.compute(claimantOrNull, (k, v) -> {
+                if (v == null) {
+                    return null; // never acquired (or already reaped) -- nothing to release
+                }
+                return (v.decrementAndGet() <= 0) ? null : v;
+            });
         }
+    }
+
+    /** Number of claimants currently tracked with a non-zero parked count
+     *  (nexus-xapt8) -- test-only visibility so a test can assert the map
+     *  returns to empty once every parked call releases. */
+    int perClaimantTrackedCount() {
+        return perClaimantParked.size();
     }
 
     boolean isShuttingDown() {
