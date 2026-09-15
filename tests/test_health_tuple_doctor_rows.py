@@ -470,7 +470,7 @@ class TestCheckTupleSweepFreshness:
             calls["n"] += 1
             if calls["n"] == 1:
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="t\n", stderr="")
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0||\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0|||\n", stderr="")
 
         r = h._check_tuple_sweep_freshness(
             creds_path=creds, psql_bin=Path("/fake/psql"), psql_runner=_psql_runner(responder),
@@ -488,7 +488,7 @@ class TestCheckTupleSweepFreshness:
             calls["n"] += 1
             if calls["n"] == 1:
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="t\n", stderr="")
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=f"3|0|{recent}\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=f"3|0|{recent}|0\n", stderr="")
 
         r = h._check_tuple_sweep_freshness(
             creds_path=creds, psql_bin=Path("/fake/psql"), psql_runner=_psql_runner(responder),
@@ -504,7 +504,7 @@ class TestCheckTupleSweepFreshness:
             calls["n"] += 1
             if calls["n"] == 1:
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="t\n", stderr="")
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="2|2|\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="2|2||0\n", stderr="")
 
         r = h._check_tuple_sweep_freshness(
             creds_path=creds, psql_bin=Path("/fake/psql"), psql_runner=_psql_runner(responder),
@@ -523,13 +523,41 @@ class TestCheckTupleSweepFreshness:
             calls["n"] += 1
             if calls["n"] == 1:
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="t\n", stderr="")
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=f"1|0|{stale}\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=f"1|0|{stale}|1\n", stderr="")
 
         r = h._check_tuple_sweep_freshness(
             creds_path=creds, psql_bin=Path("/fake/psql"), psql_runner=_psql_runner(responder),
         )[0]
         assert r.ok is False and r.warn is not True
         assert "over the" in r.detail
+
+    def test_one_fresh_and_one_stale_tenant_warns_on_the_laggard(self, tmp_path) -> None:
+        """nexus-xapt8: the defect this row existed to catch. Before the
+        MIN-vs-MAX fix, a query aggregating on MAX(last_swept_at) would
+        report the FRESH tenant's recent sweep and the row would pass --
+        masking the stale tenant entirely. The SQL under test is faked here
+        (the responder does the MIN/stale-count arithmetic the real
+        query would do server-side), so this pins the ROW's interpretation
+        of that output, not Postgres's own aggregate behaviour."""
+        import datetime as _dt
+        creds = _make_creds_file(tmp_path)
+        laggard = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(hours=24)).isoformat(sep=" ")
+        calls = {"n": 0}
+
+        def responder(sql, cmd):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="t\n", stderr="")
+            # total=2, never=0, MIN(last_swept_at)=the 24h-stale laggard
+            # (not the fresh tenant's timestamp), stale_count=1.
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=f"2|0|{laggard}|1\n", stderr="")
+
+        r = h._check_tuple_sweep_freshness(
+            creds_path=creds, psql_bin=Path("/fake/psql"), psql_runner=_psql_runner(responder),
+        )[0]
+        assert r.ok is False and r.warn is not True
+        assert "over the" in r.detail
+        assert "1 stale" in r.detail
 
     def test_engine_unreachable(self, tmp_path) -> None:
         creds = _make_creds_file(tmp_path)

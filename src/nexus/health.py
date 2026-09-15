@@ -5438,10 +5438,22 @@ def _check_tuple_sweep_freshness(
             ),
         )]
 
+    # nexus-xapt8: judged by MIN(last_swept_at) -- the LAGGARD tenant, not
+    # MAX (the freshest). A per-tenant sweep age check that reports only the
+    # most-recently-swept tenant's age can never surface a genuinely stale
+    # tenant sitting behind a fresh one: in a multi-tenant deployment, MAX
+    # reports OK for the whole row as long as ANY tenant was swept recently,
+    # even if every other tenant has been stuck for days. MIN is the tenant
+    # the sweep is failing FOR. The stale-tenant count is computed
+    # server-side in the same query, against the same threshold this row
+    # already applies to the laggard's own age, so "how many tenants are
+    # stale" and "is the row itself a warning" can never disagree.
     sweep_sql = (
         "SELECT COUNT(*), "
         "COUNT(*) FILTER (WHERE last_swept_at IS NULL), "
-        "MAX(last_swept_at) "
+        "MIN(last_swept_at), "
+        "COUNT(*) FILTER (WHERE last_swept_at IS NOT NULL AND last_swept_at < "
+        f"now() - interval '{_TUPLE_SWEEP_STALE_AGE_S} seconds') "
         "FROM nexus.tuple_tenants;"
     )
     proc = _run_psql(psql_bin, host, port, dbname, user, password, sweep_sql, psql_runner=psql_runner)
@@ -5452,15 +5464,16 @@ def _check_tuple_sweep_freshness(
             detail=f"engine unreachable (psql exit {proc.returncode}): {stderr_snip}",
         )]
     parts = proc.stdout.strip().split("|")
-    if len(parts) != 3:
+    if len(parts) != 4:
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=f"unexpected sweep-freshness query output: {proc.stdout!r}",
         )]
-    total_s, never_s, most_recent_s = parts
+    total_s, never_s, oldest_s, stale_s = parts
     try:
         total = int(total_s) if total_s else 0
         never_swept = int(never_s) if never_s else 0
+        stale_count = int(stale_s) if stale_s else 0
     except ValueError:
         return [HealthResult(
             label=label, ok=False, warn=True,
@@ -5470,8 +5483,8 @@ def _check_tuple_sweep_freshness(
     if total == 0:
         return [HealthResult(label=label, ok=True, detail="no tuple tenants recorded yet")]
 
-    most_recent = _parse_tuple_timestamp(most_recent_s or None)
-    if most_recent is None:
+    oldest = _parse_tuple_timestamp(oldest_s or None)
+    if oldest is None:
         return [HealthResult(
             label=label, ok=True,
             detail=(
@@ -5483,17 +5496,18 @@ def _check_tuple_sweep_freshness(
             ),
         )]
 
-    age_s = (datetime.now(UTC) - most_recent).total_seconds()
+    age_s = (datetime.now(UTC) - oldest).total_seconds()
     detail = (
-        f"{total} tenant(s), {never_swept} never swept, most recent sweep "
-        f"{_fmt_age(age_s)} ago. Budget-exhaustion state is not persisted "
-        "by the engine (only logged); this row measures sweep recency only."
+        f"{total} tenant(s), {never_swept} never swept, {stale_count} stale, "
+        f"laggard sweep {_fmt_age(age_s)} ago. Budget-exhaustion state is "
+        "not persisted by the engine (only logged); this row measures "
+        "sweep recency only."
     )
     if age_s > _TUPLE_SWEEP_STALE_AGE_S:
         return [HealthResult(
             label=label, ok=False,
             detail=(
-                f"last tuple sweep was {_fmt_age(age_s)} ago, over the "
+                f"the laggard tuple sweep was {_fmt_age(age_s)} ago, over the "
                 f"{_fmt_age(_TUPLE_SWEEP_STALE_AGE_S)} slack budget: {detail}"
             ),
             fix_suggestions=["Check the engine process is up and its sweep scheduler is running."],
