@@ -75,65 +75,10 @@ Templates ship as YAML in engine resources, loaded and validated at boot; a brea
 
 Every state a row in `nexus.tuples` can be in, and what moves it. The claim log records each transition as its own append-only row.
 
-<svg viewBox="0 0 820 400" role="img" aria-label="A tuple row moves from available to claimed on in, back on nack or a lapsed lease, to consumed on ack, to dead at max_attempts, to expired when expires_at passes, and the sweep purges consumed and expired rows.">
-  <defs>
-    <marker id="tuple-life-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
-  </defs>
-  <g font-family="monospace" font-size="12" fill="currentColor" stroke="currentColor" stroke-width="1.2">
-    <rect x="40" y="120" width="140" height="52" rx="6" fill="none"/>
-    <text x="110" y="141" text-anchor="middle" stroke="none" font-weight="600">available</text>
-    <text x="110" y="160" text-anchor="middle" stroke="none" font-size="10.5">claim_state NULL</text>
-
-    <rect x="340" y="120" width="140" height="52" rx="6" fill="none"/>
-    <text x="410" y="141" text-anchor="middle" stroke="none" font-weight="600">claimed</text>
-    <text x="410" y="160" text-anchor="middle" stroke="none" font-size="10.5">lease_until set</text>
-
-    <rect x="640" y="120" width="140" height="52" rx="6" fill="none"/>
-    <text x="710" y="141" text-anchor="middle" stroke="none" font-weight="600">consumed</text>
-    <text x="710" y="160" text-anchor="middle" stroke="none" font-size="10.5">consumed_at set</text>
-
-    <rect x="340" y="270" width="140" height="52" rx="6" fill="none" stroke-dasharray="2 2"/>
-    <text x="410" y="291" text-anchor="middle" stroke="none" font-weight="600">dead</text>
-    <text x="410" y="310" text-anchor="middle" stroke="none" font-size="10.5">readable, never claimable</text>
-
-    <rect x="40" y="270" width="140" height="52" rx="6" fill="none" stroke-dasharray="5 3"/>
-    <text x="110" y="291" text-anchor="middle" stroke="none" font-weight="600">expired</text>
-    <text x="110" y="310" text-anchor="middle" stroke="none" font-size="10.5">expires_at passed</text>
-
-    <line x1="110" y1="60" x2="110" y2="118" marker-end="url(#tuple-life-arrow)"/>
-    <text x="118" y="92" stroke="none">out</text>
-    <path d="M40 132 C 8 132, 8 160, 40 160" fill="none" marker-end="url(#tuple-life-arrow)"/>
-    <text x="4" y="112" stroke="none" font-size="10.5">out again:</text>
-    <text x="4" y="125" stroke="none" font-size="10.5">refresh expires_at</text>
-
-    <line x1="182" y1="134" x2="338" y2="134" marker-end="url(#tuple-life-arrow)"/>
-    <text x="260" y="126" text-anchor="middle" stroke="none">in / inp</text>
-    <line x1="338" y1="160" x2="182" y2="160" marker-end="url(#tuple-life-arrow)"/>
-    <text x="260" y="182" text-anchor="middle" stroke="none">nack, or lease lapses</text>
-    <text x="260" y="196" text-anchor="middle" stroke="none" font-size="10.5">attempts + 1</text>
-
-    <line x1="482" y1="146" x2="638" y2="146" marker-end="url(#tuple-life-arrow)"/>
-    <text x="560" y="138" text-anchor="middle" stroke="none">ack</text>
-
-    <line x1="410" y1="174" x2="410" y2="268" marker-end="url(#tuple-life-arrow)"/>
-    <text x="420" y="214" stroke="none">nack or lapse</text>
-    <text x="420" y="228" stroke="none">at max_attempts</text>
-
-    <line x1="110" y1="174" x2="110" y2="268" marker-end="url(#tuple-life-arrow)"/>
-    <text x="118" y="224" stroke="none">expires_at passes</text>
-
-    <line x1="338" y1="296" x2="182" y2="296" marker-end="url(#tuple-life-arrow)"/>
-    <text x="260" y="288" text-anchor="middle" stroke="none">expires_at passes</text>
-
-    <line x1="110" y1="324" x2="110" y2="372" marker-end="url(#tuple-life-arrow)"/>
-    <text x="118" y="352" stroke="none">sweep purges</text>
-    <line x1="710" y1="174" x2="710" y2="372" marker-end="url(#tuple-life-arrow)" stroke-dasharray="4 3"/>
-    <text x="718" y="280" stroke="none">sweep purges</text>
-    <text x="718" y="294" stroke="none" font-size="10.5">past retention</text>
-
-    <text x="560" y="392" text-anchor="middle" stroke="none" font-size="10.5">every arrow out of claimed writes a claim_log row: claim, ack, nack, expire, dead</text>
-  </g>
-</svg>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="tuple-row-life-dark.png">
+  <img src="tuple-row-life-light.png" width="820" alt="A tuple row moves from available to claimed on in, back on nack or a lapsed lease, to consumed on ack, to dead at max_attempts, to expired when expires_at passes, and the sweep purges consumed and expired rows.">
+</picture>
 
 The availability predicate is the row's whole story:
 
