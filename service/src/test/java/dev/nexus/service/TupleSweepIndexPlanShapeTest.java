@@ -12,8 +12,6 @@ import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
 import java.sql.Statement;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 
 import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
 import static dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG;
@@ -112,14 +110,17 @@ class TupleSweepIndexPlanShapeTest {
                 "       now() + interval '30 days', now() - (i || ' seconds')::interval " +
                 "FROM generate_series(1, " + CLAIMED_ROWS + ") i");
 
-            // Claim-log rows -- the bulk within the log's own retention, a small
-            // PAST_THRESHOLD subset past it (arm 3's target).
+            // Claim-log rows -- the bulk within the log's own retention (expires_at
+            // in the future), a small PAST_THRESHOLD subset past it (arm 3's
+            // target: purgeOldClaimLogBatch filters on expires_at, the log row's
+            // OWN retention deadline stamped at write time by insertClaimLog --
+            // NOT on `at`, the write timestamp; nexus-xapt8 / tuples-005).
             st.execute(
                 "INSERT INTO nexus.tuple_claim_log (tenant_id, subspace, template, transition, at, expires_at) " +
                 "SELECT '" + TENANT + "', 'mailbox/planshape-log', 'mailbox/<agent_id>', 'claim', " +
-                "       CASE WHEN i <= " + PAST_THRESHOLD + " THEN now() - interval '200 days' " +
-                "            ELSE now() - interval '1 day' END, " +
-                "       now() + interval '180 days' " +
+                "       now() - (i || ' seconds')::interval, " +
+                "       CASE WHEN i <= " + PAST_THRESHOLD + " THEN now() - interval '1 hour' " +
+                "            ELSE now() + interval '180 days' END " +
                 "FROM generate_series(1, " + LOG_ROWS + ") i");
 
             PgContainerHelper.analyzeTable(su, TUPLES);
@@ -193,22 +194,63 @@ class TupleSweepIndexPlanShapeTest {
         assertThat(plan).as("must not degrade to a sequential scan").doesNotContain("Seq Scan");
     }
 
-    // ── Arm 3: purge old claim-log rows — idx_tuple_claim_log_tenant_at ──────
+    // ── Arm 3: purge old claim-log rows — idx_tuple_claim_log_tenant_expires_at ──
 
+    /**
+     * nexus-xapt8 (RDR-211 scalability research): rewritten to match
+     * {@code TupleRepository.purgeOldClaimLogBatch}'s ACTUAL filter column,
+     * {@code expires_at} (the log row's own retention deadline, stamped at
+     * write time by {@code insertClaimLog} — see that method's javadoc), not
+     * {@code at} (the write timestamp) this test previously EXPLAINed. The
+     * old shape pinned a query the repository has not issued since the
+     * nexus-em75s.37 follow-on that moved the purge arm onto {@code
+     * expires_at}; {@code idx_tuple_claim_log_tenant_at}, the index that old
+     * shape used, is dropped by {@code tuples-005-subspace-and-claim-log-
+     * indexes.xml} changeset 3 as dead weight for exactly that reason.
+     */
     @Test
-    void purgeOldClaimLogQuery_usesTenantAtIndex_noSeqScan() {
-        OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(180);
+    void purgeOldClaimLogQuery_usesTenantExpiresAtIndex_noSeqScan() {
         String plan = explain(ctx -> ctx.select(TUPLE_CLAIM_LOG.LOG_ID)
                 .from(TUPLE_CLAIM_LOG)
-                .where(TUPLE_CLAIM_LOG.TENANT_ID.eq(TENANT).and(TUPLE_CLAIM_LOG.AT.lt(cutoff)))
+                .where(TUPLE_CLAIM_LOG.TENANT_ID.eq(TENANT)
+                        .and(TUPLE_CLAIM_LOG.EXPIRES_AT.lt(DSL.currentOffsetDateTime())))
                 .orderBy(TUPLE_CLAIM_LOG.LOG_ID.asc())
                 .limit(300)
                 .forUpdate()
                 .skipLocked());
 
         assertThat(plan)
-            .as("the sweep's purge-log arm must use idx_tuple_claim_log_tenant_at at seeded cardinality")
-            .contains("idx_tuple_claim_log_tenant_at");
+            .as("the sweep's purge-log arm must use idx_tuple_claim_log_tenant_expires_at at seeded cardinality")
+            .contains("idx_tuple_claim_log_tenant_expires_at");
+        assertThat(plan).as("must not degrade to a sequential scan").doesNotContain("Seq Scan");
+    }
+
+    // ── rd/rdp read scan — idx_tuples_subspace_scan (nexus-xapt8) ────────────
+
+    /**
+     * nexus-xapt8 (RDR-211 scalability research): {@code
+     * TupleRepository.queryOnce} (rd/rdp's read path) needs every row for a
+     * (tenant, subspace) with {@code consumed_at IS NULL AND expires_at >
+     * now()}, ordered by {@code (created_at, id)} — a shape neither existing
+     * partial index on {@code nexus.tuples} can serve (both exclude a
+     * claim_state/consumed_at subset this query needs in full). The
+     * "available" pool seeded above already mixes live and
+     * already-expired rows (the {@code PAST_THRESHOLD} subset) in the SAME
+     * subspace, so this EXPLAIN is genuinely selective.
+     */
+    @Test
+    void rdQuery_usesSubspaceScanIndex_noSeqScan() {
+        String plan = explain(ctx -> ctx.selectFrom(TUPLES)
+                .where(TUPLES.TENANT_ID.eq(TENANT)
+                        .and(TUPLES.SUBSPACE.eq("mailbox/planshape-avail"))
+                        .and(TUPLES.CONSUMED_AT.isNull())
+                        .and(TUPLES.EXPIRES_AT.gt(DSL.currentOffsetDateTime())))
+                .orderBy(TUPLES.CREATED_AT.asc(), TUPLES.ID.asc())
+                .limit(300));
+
+        assertThat(plan)
+            .as("rd/rdp's read scan must use idx_tuples_subspace_scan at seeded cardinality")
+            .contains("idx_tuples_subspace_scan");
         assertThat(plan).as("must not degrade to a sequential scan").doesNotContain("Seq Scan");
     }
 

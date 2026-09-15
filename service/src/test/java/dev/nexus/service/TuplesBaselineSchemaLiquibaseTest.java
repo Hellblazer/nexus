@@ -474,12 +474,15 @@ class TuplesBaselineSchemaLiquibaseTest {
                 .as("idx_tuples_expires_at must NOT be partial -- the purge predicate covers every claim_state")
                 .doesNotContain("WHERE");
 
-            assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuple_claim_log_tenant_at")).isTrue();
-            String logDef = PgCatalogProbes.indexDef(ctx, "nexus", "idx_tuple_claim_log_tenant_at");
-            assertThat(logDef).contains("tenant_id").contains("at");
-            assertThat(logDef.toUpperCase(Locale.ROOT))
-                .as("idx_tuple_claim_log_tenant_at must NOT be partial -- the TTL cutoff is a bind parameter")
-                .doesNotContain("WHERE");
+            // idx_tuple_claim_log_tenant_at itself is NOT asserted present here any
+            // more (bead nexus-xapt8): tuples-005-subspace-and-claim-log-indexes.xml
+            // changeset 3 drops it later in this SAME fully-migrated walk, once the
+            // purge arm's own filter column moved to expires_at -- see that
+            // changeset's header for the grep that confirmed nothing still filters
+            // or orders on (tenant_id, at). Its absence at tip, and the replacement
+            // index's shape, are pinned by tuplesXapt8Indexes_exist_withExpectedShapes
+            // below rather than here, so this test stays a pure record of what
+            // tuples-002-sweep-indexes.xml itself adds.
         }
     }
 
@@ -542,8 +545,110 @@ class TuplesBaselineSchemaLiquibaseTest {
                     .as("idx_tuples_claim_id must be recreated by the re-apply").isTrue();
                 assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuples_expires_at"))
                     .as("idx_tuples_expires_at must be recreated by the re-apply").isTrue();
+                // idx_tuple_claim_log_tenant_at is recreated by this changeset's own
+                // walk (tuples-002-4) but then DROPPED again by
+                // tuples-005-subspace-and-claim-log-indexes.xml changeset 3, later in
+                // the SAME full-changelog re-apply (bead nexus-xapt8) -- so the FINAL
+                // state after applyFullChangelog is gone, not present. This is the
+                // walk's genuine end state, not a regression of this test: see
+                // tuplesXapt8Indexes_rollBackAndReapply_restoreTheNewShape below for
+                // the changeset that removes it and the index that replaces it.
                 assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuple_claim_log_tenant_at"))
-                    .as("idx_tuple_claim_log_tenant_at must be recreated by the re-apply").isTrue();
+                    .as("idx_tuple_claim_log_tenant_at is recreated here by tuples-002-4 but dropped again "
+                        + "by tuples-005-3 later in the same full-changelog walk (nexus-xapt8)").isFalse();
+            }
+        } finally {
+            dedicated.stop();
+        }
+    }
+
+    // ── Test 15b: tuples-005 — subspace scan index + claim-log purge index fix ──
+
+    /**
+     * Bead nexus-xapt8 (RDR-211 scalability research): the SAME idiom as Test
+     * 13 (shape pins against the shared, already-fully-migrated cluster) for
+     * {@code tuples-005-subspace-and-claim-log-indexes.xml}'s three
+     * changesets. See that file's own header for which query each index
+     * serves and why {@code idx_tuple_claim_log_tenant_at} is dropped.
+     */
+    @Test
+    void tuplesXapt8Indexes_exist_withExpectedShapes() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+
+            assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuples_subspace_scan")).isTrue();
+            String subspaceScanDef = PgCatalogProbes.indexDef(ctx, "nexus", "idx_tuples_subspace_scan");
+            assertThat(subspaceScanDef)
+                .contains("tenant_id").contains("subspace").contains("created_at").contains("id");
+            assertThat(subspaceScanDef.toUpperCase(Locale.ROOT))
+                .as("idx_tuples_subspace_scan must NOT be partial -- rd/rdp and subspace_list "
+                    + "need every row for a (tenant, subspace) regardless of claim_state/consumed_at")
+                .doesNotContain("WHERE");
+
+            assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuple_claim_log_tenant_expires_at"))
+                .isTrue();
+            String logExpiresDef =
+                PgCatalogProbes.indexDef(ctx, "nexus", "idx_tuple_claim_log_tenant_expires_at");
+            assertThat(logExpiresDef).contains("tenant_id").contains("expires_at");
+            assertThat(logExpiresDef.toUpperCase(Locale.ROOT))
+                .as("idx_tuple_claim_log_tenant_expires_at must NOT be partial -- the TTL cutoff is a bind parameter")
+                .doesNotContain("WHERE");
+
+            assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuple_claim_log_tenant_at"))
+                .as("the dead (tenant_id, at) index must be gone at tip -- nothing filters or orders on it")
+                .isFalse();
+        }
+    }
+
+    // ── Test 15c: tuples-005's own rollback round trip ───────────────────────
+
+    /**
+     * Rolls back exactly {@code tuples-005}'s 3 changesets (same idiom as
+     * Test 14), asserting the interesting asymmetry: rolling back changeset 3
+     * RESTORES {@code idx_tuple_claim_log_tenant_at} (its rollback recreates
+     * the dropped index verbatim), while rolling back 2 and 1 removes the two
+     * new indexes. Re-applying restores the tip shape: the two new indexes
+     * back, the old one dropped again.
+     */
+    @Test
+    void tuplesXapt8Indexes_rollBackAndReapply_restoreTheNewShape() throws Exception {
+        PostgreSQLContainer<?> dedicated = PgContainerHelper.startDedicated();
+        try {
+            try (Connection su = dedicated.createConnection("")) {
+                migrateUpTo(su, "tuples-005-3", true);
+            }
+
+            try (Connection su = dedicated.createConnection("")) {
+                Database database = DatabaseFactory.getInstance()
+                    .findCorrectDatabaseImplementation(new JdbcConnection(su));
+                try (Liquibase liquibase = new Liquibase(
+                        MASTER_CHANGELOG, new ClassLoaderResourceAccessor(), database)) {
+                    liquibase.rollback(3, new Contexts(), new LabelExpression());
+                }
+            }
+
+            try (Connection su = dedicated.createConnection("")) {
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuples_subspace_scan"))
+                    .as("idx_tuples_subspace_scan must be gone after rollback").isFalse();
+                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuple_claim_log_tenant_expires_at"))
+                    .as("idx_tuple_claim_log_tenant_expires_at must be gone after rollback").isFalse();
+                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuple_claim_log_tenant_at"))
+                    .as("rolling back changeset 3 must RESTORE the dropped index").isTrue();
+            }
+
+            try (Connection su = dedicated.createConnection("")) {
+                applyFullChangelog(su);
+            }
+
+            try (Connection su = dedicated.createConnection("")) {
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuples_subspace_scan"))
+                    .as("idx_tuples_subspace_scan must be recreated by the re-apply").isTrue();
+                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuple_claim_log_tenant_expires_at"))
+                    .as("idx_tuple_claim_log_tenant_expires_at must be recreated by the re-apply").isTrue();
+                assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuple_claim_log_tenant_at"))
+                    .as("idx_tuple_claim_log_tenant_at must be dropped again by the re-apply").isFalse();
             }
         } finally {
             dedicated.stop();
