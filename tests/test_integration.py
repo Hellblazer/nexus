@@ -172,7 +172,8 @@ def test_t2_memory_expire_runs(runner, isolated_home):
     runner.invoke(main, ["memory", "put", f"Should expire {unique}",
                          "--project", "expire-test", "--title", "expire-me.md", "--ttl", "1d"])
     result = runner.invoke(main, ["memory", "expire"])
-    assert result.exit_code == 0 and "Expired" in result.output
+    # RDR-207: expiry quarantines, so the verb reports "Quarantined N entries."
+    assert result.exit_code == 0 and "Quarantined" in result.output, result.output
 
 
 @pytest.mark.integration
