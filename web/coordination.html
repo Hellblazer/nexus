@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="How Claude Code sessions and their agents coordinate through the Nexus engine: what it gives you, how to watch and steer it, when to use it, and which steps the hooks, the watcher, and Claude each do.">
+<meta name="description" content="How Claude Code sessions and their agents coordinate through the Nexus tuple space: what it gives you, how to watch and steer it, when to use it, and which steps the hooks, the watcher, and Claude each do.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
 <title>Coordination Between Sessions and Agents</title>
@@ -174,7 +174,7 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 <main>
 <div class="topnav"><span class="eyebrow" style="margin:0">Nexus · coordination</span><a href="tuple-space.html">← The tuple space</a></div>
 <h1>Coordination Between Sessions and Agents</h1>
-<p class="lede">Your Claude Code sessions and agents send each other work, replies, and reports through the Nexus engine. A sender writes a message and continues. The reader takes it when ready. This page shows what that gives you, how each step works, and how to watch it.</p>
+<p class="lede">Your Claude Code sessions and agents coordinate through the Nexus tuple space, a shared and persistent space of records in the engine. A writer adds a record and continues. A reader acts on it when ready. This page shows what that gives you, how each step works, and how to watch it.</p>
 <p class="note">In the tables, <span class="who">hook</span>, <span class="who">watcher</span>, <span class="who">engine</span>, and <span class="who">harness</span> steps run by themselves. <span class="who cl">Claude</span>, <span class="who cl">agent</span>, and <span class="who cl">peer</span> steps are tool calls that a model makes. <a href="tuple-space.html">The Nexus Tuple Space</a> explains the operations.</p>
 
 <div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><table class="terms">
@@ -192,6 +192,7 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 <tr><td>hook</td><td>A script that Claude Code runs at a fixed point: session start, each prompt, and agent start and stop.</td></tr>
 <tr><td>SendMessage</td><td>The Claude Code tool that sends a message to an agent by name or to a live session.</td></tr>
 <tr><td>watcher</td><td>The command <code>nx tuple watch</code>. It runs in the background and prints one line for each new message.</td></tr>
+<tr><td>rendezvous</td><td>A meeting point in time: one party waits for a tuple that another party writes later.</td></tr>
 <tr><td>take operation</td><td>A <code>tuple_in</code> call. It gives a message to one reader only, for a limited time called the lease.</td></tr>
 <tr><td>ack, nack</td><td><code>tuple_ack</code> removes a message that the reader took. <code>tuple_nack</code> returns the message to the mailbox.</td></tr>
 <tr><td>dead letter</td><td>A message that failed three times. Anybody can read it, and nobody can take it.</td></tr>
@@ -201,8 +202,8 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 <!-- ============ 1 ============ -->
 <section class="lesson" id="l1">
 <div class="lhead"><span class="lnum">1</span><h2>What it gives you</h2><span class="ltime">2 min</span></div>
-<p class="why">Sessions and agents hand work to each other without you in the middle. None of them stops to wait. The message tuple waits in the engine instead.</p>
-<p>Claude Code's SendMessage already delivers messages to agents by name and to live sessions, and Nexus memory already holds long content. Coordination adds a tuple that waits for its reader. Lesson 2 compares the two. Every exchange has three steps: send, continue, react. The two sides never need to run at the same time, or know where the other runs.</p>
+<p class="why">The tuple space lets sessions and agents coordinate asynchronously and survive failures. It is part of Nexus persistent memory, so the records of that coordination outlive every conversation.</p>
+<p>SendMessage delivers a message into a conversation, and the exchange lives there. Compaction summarizes it, <code>/clear</code> drops it from the context, and each side keeps only its own transcript. Files and memory notes can carry content, but they have no take operation, so two readers can both act on one note. The tuple space is built for coordination. Every exchange has three steps: send, continue, react. Lesson 2 compares it with SendMessage in detail.</p>
 
 <figure class="fig">
 <svg viewBox="0 0 760 256" role="img" aria-label="A timeline. Your session writes a request and keeps working. The request tuple waits in the engine while the peer session is busy with its own work. The peer takes the request and acks it with a reply. The reply tuple waits until your session's watcher pings, and your session takes the reply. Neither session stops to wait for the other.">
@@ -238,11 +239,12 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 </figure>
 <div class="tbl"><table>
 <tr><th>What you get</th><th>How it works</th></tr>
-<tr><td>Sessions ask each other for work</td><td>Say "Ask <span class="ph">&lt;PEER NAME&gt;</span> to …". Your session continues, and the reply arrives later. Nobody copies text between terminals.</td></tr>
-<tr><td>No lost messages</td><td>The engine keeps each message until a reader acks it. If a reader stops, its lease ends, and the next take operation or the six-hourly sweep frees the message. Three failures make it a dead letter.</td></tr>
-<tr><td>Agents you can correct</td><td>Send a correction while the agent works. Its instructions require a mailbox read before it reports, so it sees the correction then.</td></tr>
-<tr><td>A view of the work</td><td>Every live message, name, and agent record is a row that every session on the same engine can read. A local file shows which agents did not report.</td></tr>
-<tr><td>Other machines</td><td>In cloud mode every machine uses one engine, so the same request reaches them.</td></tr>
+<tr><td>Asynchronous coordination</td><td>Neither side needs the other to be running. A writer adds a tuple and continues. A reader that arrives minutes or days later still finds it.</td></tr>
+<tr><td>Records that survive</td><td>Tuples live in the engine, outside every conversation. They survive compaction, <code>/clear</code>, a restart, and the end of a session: messages for seven days, ledger records for 90.</td></tr>
+<tr><td>Fault tolerance</td><td>A reader that stops before its ack does not lose the message: its lease ends, and the message becomes available again. A reply and its ack commit together. Each lapse or nack counts as one failure, and three failures make a dead letter that every session can read.</td></tr>
+<tr><td>Rendezvous</td><td>A reader can wait for a tuple that nobody has written yet, such as an agent's report, and act when it appears.</td></tr>
+<tr><td>Visibility</td><td>Every live message, name, and agent record is a row that every session on the same engine can read. You see what waits, what is in progress, and which agents reported.</td></tr>
+<tr><td>Richer patterns</td><td>One space serves request and reply with a paired correlation id, rendezvous, a name directory, and an audit ledger. Hooks and scripts use it too. A work queue and a lock fit the same operations but are not built yet.</td></tr>
 </table></div>
 </section>
 
