@@ -197,7 +197,7 @@ class TupleSweepIndexPlanShapeTest {
     // ── Arm 3: purge old claim-log rows — idx_tuple_claim_log_tenant_expires_at ──
 
     /**
-     * nexus-xapt8 (RDR-211 scalability research): rewritten to match
+     * nexus-xapt8 (a scalability research pass over this design): rewritten to match
      * {@code TupleRepository.purgeOldClaimLogBatch}'s ACTUAL filter column,
      * {@code expires_at} (the log row's own retention deadline, stamped at
      * write time by {@code insertClaimLog} — see that method's javadoc), not
@@ -228,7 +228,7 @@ class TupleSweepIndexPlanShapeTest {
     // ── rd/rdp read scan — idx_tuples_subspace_scan (nexus-xapt8) ────────────
 
     /**
-     * nexus-xapt8 (RDR-211 scalability research): {@code
+     * nexus-xapt8 (a scalability research pass over this design): {@code
      * TupleRepository.queryOnce} (rd/rdp's read path) needs every row for a
      * (tenant, subspace) with {@code consumed_at IS NULL AND expires_at >
      * now()}, ordered by {@code (created_at, id)} — a shape neither existing
@@ -252,6 +252,65 @@ class TupleSweepIndexPlanShapeTest {
             .as("rd/rdp's read scan must use idx_tuples_subspace_scan at seeded cardinality")
             .contains("idx_tuples_subspace_scan");
         assertThat(plan).as("must not degrade to a sequential scan").doesNotContain("Seq Scan");
+    }
+
+    // ── GROUP BY census — idx_tuples_subspace_scan does NOT cover this shape ──
+
+    /**
+     * Critique finding (nexus-xapt8 fix round): the changelog comment and
+     * {@code subspaceListPage}'s own javadoc both asserted this index serves
+     * the census query too, but the only EXPLAIN this file carried was the
+     * NARROWER {@code rd}/{@code rdp} shape above (subspace EQUALITY plus a
+     * {@code LIMIT 300}). {@code subspaceListPage}'s UNFILTERED form -- no
+     * subspace predicate at all, exactly the shape {@code health.py}'s
+     * {@code tuples.oldest_unclaimed} doctor row issues via {@code
+     * subspace_list(prefix=None)} -- is a materially different query: it
+     * must aggregate EVERY row for the tenant, and none of the {@code GROUP
+     * BY}'s aggregated columns ({@code claim_state}, {@code consumed_at},
+     * {@code expires_at}) are covered by the index, so an index scan would
+     * still need a heap fetch per row.
+     *
+     * <p>MEASURED (this arm, this seeded fixture -- 10,000 rows across 2
+     * subspaces for this tenant): Postgres chooses {@code Seq Scan on
+     * tuples} -> {@code HashAggregate} -> {@code Sort}, NOT {@code
+     * idx_tuples_subspace_scan}. This confirms the critique's prediction
+     * exactly: the index does not help this query shape, because there is
+     * no subspace equality/prefix predicate for it to seek on, and the
+     * planner reasonably prefers a full scan + hash aggregate over an
+     * index scan that still pays a heap fetch per row. The changelog
+     * header and {@code subspaceListPage}'s javadoc are corrected in the
+     * same fix round to say so, rather than implying coverage this arm
+     * disproves. This is asserted as a POSITIVE fact (Seq Scan IS chosen),
+     * not left open-ended, so a future planner-version or cardinality
+     * change that flips the choice is visible here as a FAILURE demanding
+     * the prose be re-checked, rather than silently drifting from what the
+     * docs claim.
+     */
+    @Test
+    void unfilteredGroupByCensusQuery_doesNotUseTheSubspaceScanIndex_seqScanInstead() {
+        var now = DSL.currentOffsetDateTime();
+        var live = TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.gt(now));
+        String plan = explain(ctx -> ctx.select(
+                        TUPLES.SUBSPACE,
+                        DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.isNull())).cast(Long.class),
+                        DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.eq("claimed"))).cast(Long.class),
+                        DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.eq("dead"))).cast(Long.class),
+                        DSL.count().filterWhere(TUPLES.CONSUMED_AT.isNotNull()).cast(Long.class),
+                        DSL.count().filterWhere(TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.le(now)))
+                                .cast(Long.class),
+                        DSL.min(TUPLES.CREATED_AT),
+                        DSL.max(TUPLES.CREATED_AT))
+                .from(TUPLES)
+                .where(TUPLES.TENANT_ID.eq(TENANT))
+                .groupBy(TUPLES.SUBSPACE)
+                .orderBy(TUPLES.SUBSPACE.asc()));
+
+        assertThat(plan)
+                .as("measured fact, not an assumption: the unfiltered census query does NOT use "
+                        + "idx_tuples_subspace_scan at this cardinality -- no subspace predicate for it to "
+                        + "seek on, so a heap-fetch-per-row index scan loses to a full scan + hash aggregate")
+                .contains("Seq Scan on tuples")
+                .doesNotContain("idx_tuples_subspace_scan");
     }
 
     @Test

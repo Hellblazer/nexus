@@ -3801,7 +3801,7 @@ The boot-loaded template registry: digest, source directories, and the registere
 nx tuple list [--prefix PREFIX] [--limit N] [--after CURSOR] [--json]
 ```
 
-Concrete tuple subspaces that exist, optionally filtered to those starting with `--prefix`. Each row reports `total`/`available`/`claimed`/`dead`/`consumed`/`expired_unpurged`. Unpaged by default — every matching subspace, exactly as before RDR-211's paging addition. With `--limit`, a truncated page prints a `next: --after=<cursor>` hint line (under `--json`, the array's last element is `{"next_cursor": "..."}` instead); pass that cursor back as `--after` to continue. Results are always ordered by subspace name.
+Concrete tuple subspaces that exist, optionally filtered to those starting with `--prefix`. Each row reports `total`/`available`/`claimed`/`dead`/`consumed`/`expired_unpurged`. Unpaged by default — every matching subspace, exactly as before this paging addition (bead nexus-xapt8). With `--limit`, a truncated page prints a `next: --after=<cursor>` hint line (under `--json`, the array's last element is `{"next_cursor": "..."}` instead); pass that cursor back as `--after` to continue. Results are always ordered by subspace name.
 
 | Flag | Description |
 |------|-------------|

@@ -565,7 +565,7 @@ class TuplesBaselineSchemaLiquibaseTest {
     // ── Test 15b: tuples-005 — subspace scan index + claim-log purge index fix ──
 
     /**
-     * Bead nexus-xapt8 (RDR-211 scalability research): the SAME idiom as Test
+     * Bead nexus-xapt8 (a scalability research pass over this design): the SAME idiom as Test
      * 13 (shape pins against the shared, already-fully-migrated cluster) for
      * {@code tuples-005-subspace-and-claim-log-indexes.xml}'s three
      * changesets. See that file's own header for which query each index

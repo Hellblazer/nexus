@@ -1400,7 +1400,7 @@
     <include file="db/changelog/memory-004-quarantine-and-rollup.xml"/>
 
     <!--
-        Bead nexus-xapt8 (RDR-211 scalability research): idx_tuples_subspace_scan
+        Bead nexus-xapt8 (a scalability research pass over this design): idx_tuples_subspace_scan
         (serves rd/rdp and the new subspaceList GROUP BY query, neither of which
         the existing partial tuples indexes can serve) plus a claim-log purge
         index correction (adds (tenant_id, expires_at), the column the purge arm

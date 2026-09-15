@@ -147,7 +147,7 @@ class TupleWaitRegistryTest {
         stillWaiting.release(); // avoid leaking state past the test, though nothing reads it after
     }
 
-    // ── per-claimant park counters (RDR-211 scalability research, nexus-xapt8) ──
+    // ── per-claimant park counters (a scalability research pass over this design, nexus-xapt8) ──
 
     /**
      * Before the fix, {@code perClaimantParked} grew one entry per DISTINCT

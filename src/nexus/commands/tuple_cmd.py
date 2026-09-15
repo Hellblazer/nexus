@@ -309,7 +309,7 @@ def tuple_list_cmd(prefix: str | None, limit: int | None, after: str | None, jso
     """Concrete tuple subspaces that exist.
 
     Unpaged by default (every matching subspace). Pass --limit to page
-    (RDR-211 scalability research, bead nexus-xapt8): a truncated page
+    (a scalability research pass over this design, bead nexus-xapt8): a truncated page
     prints a "next: --after=<cursor>" hint line (or, under --json, the
     array's last element is {"next_cursor": "..."}).
     """

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-    Bead nexus-xapt8 (RDR-211 scalability research, additions 5/6/13/15/17):
+    Bead nexus-xapt8 (a scalability research pass over this design, additions 5/6/13/15/17):
     two index fixes surfaced by that research, both additive (CREATE/DROP
     INDEX only — no row ever changes, so neither changeset needs a DATA
     EFFECT line per scripts/data_effect_lint.py's own scope).
@@ -15,23 +15,32 @@
       - idx_tuples_claim_lease / idx_tuples_claim_id (tuples-002-sweep-
         indexes.xml): WHERE claim_state = 'claimed' AND consumed_at IS
         NULL — the opposite subset.
-    Two request-path queries need EVERY row for a (tenant, subspace),
-    regardless of claim_state or consumed_at:
-      - TupleRepository.queryOnce (rd/rdp's read path, ~line 590-606):
-        tenant_id = ? AND subspace = ? AND consumed_at IS NULL AND
-        expires_at > now() [+ since cursor], ORDER BY created_at, id.
-      - TupleRepository.subspaceList's new GROUP BY query (changeset 2 of
-        this bead's Java diff, this file's sibling change): tenant_id = ?
-        [AND subspace > ? for the paging cursor], GROUP BY subspace, ORDER
-        BY subspace.
-    A single NON-partial index on (tenant_id, subspace, created_at, id)
-    serves both: the leading two columns give Postgres an index-range scan
-    for either query's equality/prefix predicate, and the trailing
+    TupleRepository.queryOnce (rd/rdp's read path, ~line 590-606) needs
+    EVERY row for a (tenant, subspace) equality match, regardless of
+    claim_state or consumed_at: tenant_id = ? AND subspace = ? AND
+    consumed_at IS NULL AND expires_at > now() [+ since cursor], ORDER BY
+    created_at, id. A single NON-partial index on (tenant_id, subspace,
+    created_at, id) serves it: the leading two columns give Postgres an
+    index-range scan for the equality predicate, and the trailing
     (created_at, id) pair matches rd's own ORDER BY exactly, so a large,
     long-lived subspace with many already-consumed or already-expired rows
     no longer forces a sequential scan (or a scan of one of the ABOVE
     partial indexes, which cannot serve this query at all since neither
-    covers a consumed/expired row).
+    covers a consumed/expired row). Proven by EXPLAIN against seeded
+    cardinality: TupleSweepIndexPlanShapeTest#rdQuery_usesSubspaceScanIndex_noSeqScan.
+
+    This index does NOT serve TupleRepository.subspaceListPage's UNFILTERED
+    GROUP BY census query (the shape health.py's doctor row issues via
+    subspace_list(prefix=None) — no subspace predicate at all, so there is
+    nothing for a (tenant_id, subspace, ...) index to seek on, and none of
+    the aggregated columns — claim_state, consumed_at, expires_at — are
+    covered). MEASURED, not assumed (fix-round correction: an earlier draft
+    of this comment claimed coverage this test disproves):
+    TupleSweepIndexPlanShapeTest#unfilteredGroupByCensusQuery_doesNotUseTheSubspaceScanIndex_seqScanInstead
+    shows Postgres chooses Seq Scan + HashAggregate at 10,000 seeded rows.
+    The doctor's unpaged call is bounded instead by subspaceListPage's own
+    request-path statement_timeout (NX_TUPLE_SUBSPACE_LIST_TIMEOUT_SECONDS),
+    not by this index — see that method's own javadoc.
 
     ── Changeset 2 / 3: nexus.tuple_claim_log purge index ─────────────────
     TupleRepository.purgeOldClaimLogBatch (~line 1312-1322) filters

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CensusTimeoutException;
 import dev.nexus.service.db.ClaimNotFoundException;
 import dev.nexus.service.db.ClaimOwnershipException;
 import dev.nexus.service.db.LeaseTooLongException;
@@ -126,7 +127,7 @@ class TupleRepositoryTest {
                   max_lease_seconds: 300
                 retention_seconds: 3600
                 """, java.nio.charset.StandardCharsets.UTF_8);
-        // nexus-xapt8 (RDR-211 scalability research, addition 6): a take-enabled
+        // nexus-xapt8 (a scalability research pass over this design, addition 6): a take-enabled
         // template WITH take.default_lease_seconds configured -- none of the
         // three bundled v1 templates (mailbox/ledger/directory) set this field
         // (mailbox has only max_lease_seconds; ledger/directory have
@@ -994,7 +995,7 @@ class TupleRepositoryTest {
         assertThat(row.get(0).claimState()).isNull(); // still available -- no claim written
     }
 
-    // ── lease_s optional, default from the template (RDR-211 scalability research, nexus-xapt8) ──
+    // ── lease_s optional, default from the template (a scalability research pass over this design, nexus-xapt8) ──
 
     @Test
     void inp_leaseSecondsOmitted_templateHasDefault_usesTemplateDefault() {
@@ -1010,13 +1011,20 @@ class TupleRepositoryTest {
     }
 
     @Test
-    void in_leaseSecondsOmitted_templateHasNoDefault_schemaViolation_noClaim() {
+    void in_leaseSecondsOmitted_templateHasNoDefault_illegalArgument_matchesPreCommitShape_noClaim() {
+        // Review fix (nexus-xapt8 fix round, code review finding 2): this
+        // must throw the EXACT pre-commit exception -- IllegalArgumentException,
+        // message "lease_s required" -- not SchemaViolationException, so
+        // TupleHandler's catch ladder renders the byte-identical HTTP 400
+        // {"error":"lease_s required"} an omitted lease_s against any
+        // production template always produced before this bead.
         String to = "agent-lease-omitted-nodefault-" + UUID.randomUUID();
         repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "sender"), null, "n1", null);
         // mailbox.yaml declares no take.default_lease_seconds.
         assertThatThrownBy(() -> repo.in(TENANT_A, "mailbox/" + to, Map.of("to", to), "c", (Long) null, 0))
-                .isInstanceOf(SchemaViolationException.class)
-                .hasMessageContaining("lease_s");
+                .isInstanceOf(IllegalArgumentException.class)
+                .isNotInstanceOf(SchemaViolationException.class)
+                .hasMessage("lease_s required");
         assertThat(repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null)).hasSize(1);
     }
 
@@ -1582,7 +1590,7 @@ class TupleRepositoryTest {
         }
     }
 
-    // ── subspace_list: GROUP BY rewrite + paging (RDR-211 scalability research, nexus-xapt8) ──
+    // ── subspace_list: GROUP BY rewrite + paging (a scalability research pass over this design, nexus-xapt8) ──
 
     /**
      * The "old vs new" proof the bead calls for: {@code subspaceList}'s new ONE-
@@ -1680,6 +1688,101 @@ class TupleRepositoryTest {
         assertThat(pageCount).as("5 subspaces at limit=2 must take 3 pages (2, 2, 1)").isEqualTo(3);
         assertThat(collected).as("every subspace exactly once, in order, no gaps or duplicates")
                 .isEqualTo(repo.subspaceList(TENANT_A, listPrefix));
+    }
+
+    // ── limit<=0 clamps to 1, matching rd/rdp (code review finding 1) ───────
+
+    /**
+     * Review finding 1: an explicit {@code limit=0} previously fell into the
+     * SAME "unbounded" bucket as {@code limit=null} (the param genuinely
+     * omitted) -- inconsistent with {@code rd}/{@code rdp}'s own {@code n
+     * <= 0 -> 1} convention in this same file, and untested. Now clamps to
+     * 1: a page of exactly one subspace, with {@code nextCursor} set
+     * whenever more than one subspace exists.
+     */
+    @Test
+    void subspaceListPage_limitZero_clampsToOne_notUnbounded() {
+        String addrPrefix = "xapt8-limit-zero-" + UUID.randomUUID() + "-";
+        String listPrefix = "probe/" + addrPrefix;
+        for (int i = 0; i < 3; i++) {
+            String subspace = listPrefix + i;
+            String owner = addrPrefix + i;
+            repo.out(TENANT_A, subspace, Map.of("owner", owner, "kind", "open"), Map.of(), null, null, null);
+        }
+
+        var page = repo.subspaceListPage(TENANT_A, listPrefix, 0, null);
+        assertThat(page.items()).as("limit=0 must clamp to 1, not return everything unbounded").hasSize(1);
+        assertThat(page.nextCursor()).as("more subspaces remain -- the page was truncated").isNotNull();
+    }
+
+    @Test
+    void subspaceListPage_limitNegative_clampsToOne_sameAsZero() {
+        String addrPrefix = "xapt8-limit-negative-" + UUID.randomUUID() + "-";
+        String listPrefix = "probe/" + addrPrefix;
+        for (int i = 0; i < 3; i++) {
+            String subspace = listPrefix + i;
+            String owner = addrPrefix + i;
+            repo.out(TENANT_A, subspace, Map.of("owner", owner, "kind", "open"), Map.of(), null, null, null);
+        }
+
+        var page = repo.subspaceListPage(TENANT_A, listPrefix, -5, null);
+        assertThat(page.items()).as("a negative limit must clamp to 1, same as 0").hasSize(1);
+        assertThat(page.nextCursor()).isNotNull();
+    }
+
+    @Test
+    void subspaceListPage_limitZero_singleMatchingSubspace_noNextCursor() {
+        // The clamp-to-1 path must still report "no truncation" correctly
+        // when there is only ever one row to return -- nextCursor is about
+        // whether more remain, not about whether the clamp fired.
+        String addrPrefix = "xapt8-limit-zero-single-" + UUID.randomUUID() + "-";
+        String subspace = "probe/" + addrPrefix;
+        repo.out(TENANT_A, subspace, Map.of("owner", addrPrefix, "kind", "open"), Map.of(), null, null, null);
+
+        var page = repo.subspaceListPage(TENANT_A, subspace, 0, null);
+        assertThat(page.items()).hasSize(1);
+        assertThat(page.nextCursor()).as("nothing left to page to").isNull();
+    }
+
+    // ── statement-timeout mapping (critique finding 10, nexus-xapt8 fix round) ──
+
+    /**
+     * A GENUINE Postgres-side {@code 57014} cancellation (via {@link
+     * TupleRepository#setTestOnlySubspaceListPreQueryHook}, a {@code
+     * pg_sleep} that exceeds a repo constructed with {@code
+     * subspaceListTimeoutSeconds=1}) must surface as {@link
+     * CensusTimeoutException}, not an opaque database exception that would
+     * fall through {@code TupleHandler} to its generic 500 ladder (or, at
+     * the doctor, be misread as "engine unreachable" -- see {@code
+     * health.py}'s own new {@code CensusTimeoutError} branch). Not a
+     * hand-crafted exception; this really does cancel the statement in
+     * Postgres.
+     */
+    @Test
+    void subspaceListPage_realStatementTimeout_raisesCensusTimeoutException() throws Exception {
+        TupleRepository shortTimeoutRepo = new TupleRepository(tenantScope, registry,
+                TupleRepository.DEFAULT_READ_MAX, TupleRepository.DEFAULT_CLAIM_PASSES,
+                /* timeoutCapSeconds */ 10, /* parkCapPerClaimant */ 4, /* parkCapGlobal */ 16,
+                /* subspaceListTimeoutSeconds */ 1);
+        String subspace = "probe/xapt8-timeout-" + UUID.randomUUID();
+        repo.out(TENANT_A, subspace, Map.of("owner", "o", "kind", "open"), Map.of(), null, null, null);
+
+        TupleRepository.setTestOnlySubspaceListPreQueryHook(
+                ctx -> ctx.resultQuery("SELECT pg_sleep(2)").fetch());
+        try {
+            assertThatThrownBy(() -> shortTimeoutRepo.subspaceListPage(TENANT_A, subspace, null, null))
+                    .isInstanceOf(CensusTimeoutException.class)
+                    .extracting(e -> ((CensusTimeoutException) e).timeoutSeconds())
+                    .isEqualTo(1L);
+        } finally {
+            TupleRepository.setTestOnlySubspaceListPreQueryHook(null); // never leak into other tests
+        }
+
+        // The SAME call against the class-level repo (10s timeout, hook now
+        // uninstalled) must succeed normally -- the fixture, not the
+        // mechanism, is what makes the row slow.
+        var page = repo.subspaceListPage(TENANT_A, subspace, null, null);
+        assertThat(page.items()).hasSize(1);
     }
 
     @Test

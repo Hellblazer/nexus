@@ -228,21 +228,29 @@ class TupleHandlerWiringTest {
         assertThat(tuple).doesNotContainKey("claim_id");
     }
 
-    // ── lease_s optional on /in and /inp (RDR-211 scalability research, nexus-xapt8) ──
+    // ── lease_s optional on /in and /inp (nexus-xapt8, scalability research) ──
 
     /**
      * mailbox.yaml declares {@code take.max_lease_seconds} but no {@code
-     * take.default_lease_seconds} -- an omitted {@code lease_s} against it must
-     * still refuse (a {@code SchemaViolation}, per {@code TupleRepository
-     * #claimOnce}'s own javadoc), not silently succeed with some fallback the
-     * template never configured. The happy-path "omitted lease_s uses the
-     * template's own default" case needs a template WITH a default, which none
-     * of the three production templates declare -- proved instead at the
-     * repository layer against a test-only template (
+     * take.default_lease_seconds} -- an omitted {@code lease_s} against it
+     * must still refuse, not silently succeed with some fallback the
+     * template never configured. Review fix (nexus-xapt8 fix round, code
+     * review finding 2): this refusal must be BYTE-IDENTICAL to what an
+     * omitted {@code lease_s} against ANY of today's three production
+     * templates already produced before this bead -- HTTP 400 {@code
+     * {"error":"lease_s required"}} ({@code TupleHandler}'s plain {@code
+     * IllegalArgumentException} catch, not the typed {@code SchemaViolation}
+     * shape an earlier draft of this fix used -- see {@code TupleRepository
+     * #claimOnce}'s own comment on why). This branch is reachable by every
+     * shipped template today, so it is a presently-observable contract, not
+     * a hypothetical one. The happy-path "omitted lease_s uses the
+     * template's own default" case needs a template WITH a default, which
+     * none of the three production templates declare -- proved instead at
+     * the repository layer against a test-only template (
      * {@code TupleRepositoryTest#inp_leaseSecondsOmitted_templateHasDefault_usesTemplateDefault}).
      */
     @Test
-    void in_leaseSOmitted_mailboxHasNoDefault_schemaViolation400() throws Exception {
+    void in_leaseSOmitted_mailboxHasNoDefault_illegalArgument400_matchesPreCommitShape() throws Exception {
         String to = "wire-lease-omitted-addr";
         assertThat(post(withRegistry, "/v1/tuples/out", Map.of(
                 "subspace", "mailbox/" + to,
@@ -255,10 +263,14 @@ class TupleHandlerWiringTest {
                 "keys_pattern", Map.of("to", to),
                 "claimant", "wire-lease-omitted-claimant"));
         assertThat(inResp.statusCode()).isEqualTo(400);
-        assertThat(inResp.body()).contains("SchemaViolation").contains("lease_s");
+        assertThat(inResp.body())
+                .as("byte-identical to the pre-commit shape: flat {\"error\":\"lease_s required\"}, "
+                        + "never the typed SchemaViolation envelope")
+                .isEqualTo("{\"error\":\"lease_s required\"}")
+                .doesNotContain("SchemaViolation");
     }
 
-    // ── subspace_list paging (RDR-211 scalability research, nexus-xapt8) ────
+    // ── subspace_list paging (a scalability research pass over this design, nexus-xapt8) ────
 
     /**
      * The additive-paging contract's own wire-shape proof: no {@code limit}

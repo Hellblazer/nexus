@@ -86,7 +86,7 @@ public final class TupleRepository {
     public static final String PARK_CAP_GLOBAL_ENV = "NX_TUPLE_PARK_CAP_GLOBAL";
     public static final int DEFAULT_PARK_CAP_GLOBAL = 16;
 
-    /** nexus-xapt8 (RDR-211 scalability research): request-path ceiling for
+    /** nexus-xapt8 (a scalability research pass over this design): request-path ceiling for
      *  {@link #subspaceListPage}'s own statement, mirroring {@link SweepBounds}'
      *  is_local=true pattern (reverts at transaction end, never leaks onto the
      *  pooled connection). Deliberately generous like {@link SweepBounds
@@ -154,6 +154,20 @@ public final class TupleRepository {
      */
     public static void setTestOnlySignalHook(java.util.function.BiConsumer<String, String> hookOrNull) {
         TupleWaitRegistry.TEST_ONLY_SIGNAL_HOOK = hookOrNull == null ? (tenant, subspace) -> { } : hookOrNull;
+    }
+
+    /**
+     * Cross-package installer for {@link #TEST_ONLY_SUBSPACE_LIST_PRE_QUERY_HOOK}
+     * (nexus-xapt8, critique finding 10) -- same reasoning as {@link
+     * #setTestOnlySignalHook}: the field itself stays package-private, this
+     * installer is public so a test outside {@code dev.nexus.service.db}
+     * (e.g. {@code TupleRepositoryTest}, package {@code dev.nexus.service})
+     * can still install it. Pass {@code null} to restore the no-op default.
+     * Never call this outside test code.
+     */
+    public static void setTestOnlySubspaceListPreQueryHook(
+            java.util.function.Consumer<org.jooq.DSLContext> hookOrNull) {
+        TEST_ONLY_SUBSPACE_LIST_PRE_QUERY_HOOK = hookOrNull == null ? ctx -> { } : hookOrNull;
     }
 
     private final TenantScope tenantScope;
@@ -721,21 +735,26 @@ public final class TupleRepository {
         if (!t.take().enabled()) {
             throw new TakeDisabledException(subspace, t.name());
         }
-        // nexus-xapt8 (RDR-211 scalability research, addition 6): lease_s is
-        // optional on the wire -- an omitted value falls through to the
-        // template's own take.default_lease_seconds; a template with no
-        // default configured refuses with the SAME field/exception shape a
-        // non-positive explicit lease_s already gets just below (never a
-        // bare HTTP-layer "required" -- the template lookup this decision
-        // needs lives here, not in TupleHandler).
+        // nexus-xapt8 (a scalability research pass over this design,
+        // addition 6): lease_s is optional on the wire -- an omitted value
+        // falls through to the template's own take.default_lease_seconds.
+        // Review fix (nexus-xapt8 fix round, code review finding 2): a
+        // template with no default configured throws the EXACT
+        // pre-commit shape (IllegalArgumentException("lease_s required"),
+        // rendered by TupleHandler's catch ladder as HTTP 400
+        // {"error":"lease_s required"}), not the new SchemaViolation shape
+        // an earlier draft used -- this branch is reachable by every
+        // shipped template today (none declares a default), so the old
+        // flat error body is a presently-observable contract, not merely
+        // a historical one, and it must not move out from under an
+        // existing caller. See TupleHandlerWiringTest's pinned-shape test.
         long leaseSeconds;
         if (leaseSecondsOrNull != null) {
             leaseSeconds = leaseSecondsOrNull;
         } else if (t.take().defaultLeaseSeconds() != null) {
             leaseSeconds = t.take().defaultLeaseSeconds();
         } else {
-            throw new SchemaViolationException("lease_s",
-                    "required: omitted and template '" + t.name() + "' has no take.default_lease_seconds");
+            throw new IllegalArgumentException("lease_s required");
         }
         if (leaseSeconds <= 0) {
             throw new SchemaViolationException("lease_s", "must be positive");
@@ -1479,34 +1498,99 @@ public final class TupleRepository {
 
     /**
      * {@code subspace_list(prefix, limit?, after?) -> {items, next_cursor?}}
-     * (nexus-xapt8, RDR-211 scalability research addition 2): ONE {@code
-     * GROUP BY subspace} query computing every {@link SubspaceCensus} field
-     * for every matching subspace in a single round trip -- replaces the
-     * prior {@code SELECT DISTINCT subspace} plus one {@link #computeCensus}
-     * call PER subspace, an N+1 shape whose cost scaled with subspace count
-     * rather than row count. Semantics match {@link #computeCensus} exactly:
-     * {@code total} is live rows only (available+claimed+dead); the two
-     * timestamps span every row, live or not.
+     * (nexus-xapt8, a scalability research pass over this design, addition
+     * 2): ONE {@code GROUP BY subspace} query computing every {@link
+     * SubspaceCensus} field for every matching subspace in a single round
+     * trip -- replaces the prior {@code SELECT DISTINCT subspace} plus one
+     * {@link #computeCensus} call PER subspace, an N+1 shape whose cost
+     * scaled with subspace count rather than row count. Semantics match
+     * {@link #computeCensus} exactly: {@code total} is live rows only
+     * (available+claimed+dead); the two timestamps span every row, live or
+     * not.
      *
      * <p>{@code limit} is optional and capped at {@link #readMax} (the same
-     * ceiling {@code rd}/{@code rdp}'s own {@code n} uses) -- {@code null} or
-     * non-positive means unbounded, matching {@link #subspaceList}'s
-     * pre-existing contract exactly. {@code after} is a subspace-name
-     * cursor (the last subspace name from a prior truncated page); results
-     * are always ordered by subspace name, and {@link SubspacePage
-     * #nextCursor} is non-null exactly when the page was truncated by
-     * {@code limit}.
+     * ceiling {@code rd}/{@code rdp}'s own {@code n} uses). Review fix
+     * (nexus-xapt8 fix round): {@code null} -- the param genuinely
+     * omitted -- means UNBOUNDED, matching {@link #subspaceList}'s
+     * pre-existing contract exactly (the caller opted out of paging
+     * entirely). A non-null but non-positive {@code limit} (an explicit
+     * {@code 0} or negative value) instead clamps to 1, matching {@code
+     * rd}/{@code rdp}'s OWN {@code n <= 0 -> 1} convention at {@link
+     * #readMax}'s sibling call site (~line 617) -- the two "unbounded"
+     * and "clamp to the minimum" cases are no longer folded into one
+     * bucket the way an earlier draft of this method did. {@code after} is
+     * a subspace-name cursor (the last subspace name from a prior
+     * truncated page); results are always ordered by subspace name, and
+     * {@link SubspacePage#nextCursor} is non-null exactly when the page
+     * was truncated by {@code limit}.
      *
      * <p>A request-path {@code statement_timeout} applies ({@link
      * SweepBounds#applyStatementTimeout}'s {@code is_local=true} pattern, at
      * {@link #subspaceListTimeoutSeconds}) -- unlike the scheduled sweep's
      * own bounded batch arms, this query runs ON DEMAND against whatever
-     * cardinality a tenant has accumulated, so nothing else bounds it.
+     * cardinality a tenant has accumulated, so nothing else bounds it. This
+     * matters most for the UNFILTERED call ({@code prefix=null}, exactly
+     * what {@link #subspaceList}'s unpaged form and the {@code
+     * tuples.oldest_unclaimed} doctor row issue): {@code
+     * idx_tuples_subspace_scan} (the sibling index this changeset also
+     * adds) does NOT serve this shape -- there is no subspace predicate for
+     * it to seek on, and none of the aggregated columns are covered, so
+     * Postgres chooses a full scan + hash aggregate (MEASURED, fix-round
+     * correction: {@code TupleSweepIndexPlanShapeTest
+     * #unfilteredGroupByCensusQuery_doesNotUseTheSubspaceScanIndex_seqScanInstead}).
+     * The statement_timeout, not the index, is what bounds this call.
      */
     public SubspacePage subspaceListPage(String tenant, String prefix, Integer limit, String after) {
-        Integer effectiveLimit = (limit != null && limit > 0) ? Math.min(limit, readMax) : null;
+        Integer effectiveLimit = (limit == null) ? null : Math.min(limit <= 0 ? 1 : limit, readMax);
+        try {
+            return subspaceListPageUnguarded(tenant, prefix, after, effectiveLimit);
+        } catch (RuntimeException e) {
+            if (isStatementTimeout(e)) {
+                throw new CensusTimeoutException(subspaceListTimeoutSeconds);
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Critique finding 10 (nexus-xapt8 fix round): walks {@code e}'s cause
+     * chain for a {@link java.sql.SQLException} whose SQLState is {@code
+     * 57014} ({@code query_canceled}) -- the exact signal {@code
+     * SweepBounds#applyStatementTimeout}'s {@code statement_timeout}
+     * produces on cancellation. Same walk-the-chain idiom {@code
+     * CatalogRepository#classifySweepFailureReason} already uses for the
+     * identical SQLState.
+     */
+    private static boolean isStatementTimeout(Throwable e) {
+        for (Throwable c = e; c != null; c = c.getCause()) {
+            if (c instanceof java.sql.SQLException se && "57014".equals(se.getSQLState())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * TEST-ONLY (nexus-xapt8, critique finding 10): runs BEFORE {@link
+     * #subspaceListPageUnguarded}'s own {@code SELECT}, inside the SAME
+     * transaction where {@link SweepBounds#applyStatementTimeout} has
+     * already run {@code SET LOCAL statement_timeout} -- a test installs a
+     * {@code ctx -> ctx.resultQuery("SELECT pg_sleep(...)").fetch()} hook to
+     * force a GENUINE Postgres-side {@code 57014} cancellation (the
+     * statement_timeout applies to every statement in that transaction, not
+     * only the census query), proving {@link #isStatementTimeout} and the
+     * {@link CensusTimeoutException} rethrow against a real cancellation
+     * rather than an unrealistically large seeded fixture. A no-op by
+     * default (costs nothing in production); package-private, never
+     * assigned outside test code -- same shape as {@link
+     * #TEST_ONLY_CLAIM_SELECT_TO_UPDATE_DELAY}.
+     */
+    static volatile java.util.function.Consumer<DSLContext> TEST_ONLY_SUBSPACE_LIST_PRE_QUERY_HOOK = ctx -> { };
+
+    private SubspacePage subspaceListPageUnguarded(String tenant, String prefix, String after, Integer effectiveLimit) {
         return tenantScope.withTenant(tenant, ctx -> {
             SweepBounds.applyStatementTimeout(ctx, Duration.ofSeconds(subspaceListTimeoutSeconds));
+            TEST_ONLY_SUBSPACE_LIST_PRE_QUERY_HOOK.accept(ctx);
 
             Condition cond = TUPLES.TENANT_ID.eq(tenant);
             if (prefix != null && !prefix.isBlank()) {

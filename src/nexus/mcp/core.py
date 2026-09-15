@@ -6579,6 +6579,14 @@ def tuple_registry() -> dict:
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
+# a scalability research pass over this design, bead nexus-xapt8: paged, default limit=100
+# rather than unbounded. Deliberately bounded (not merely capped for the
+# engine's own protection) -- an agent calling this tool with no arguments
+# gets the result inlined into its own context, and the live tenant's
+# subspace count is already double digits and growing roughly 10/day, so
+# an unbounded default would put an ever-larger, unbounded blob into
+# context on every unqualified call. The footer entry names the next
+# cursor so a caller that genuinely needs everything can still walk it.
 def tuple_list(
     prefix: Annotated[str, Field(description="Optional subspace-name prefix filter (e.g. \"agents.mailbox.\").")] = "",
     limit: Annotated[int, Field(description="Max subspaces to return per page.")] = 100,
@@ -6587,11 +6595,13 @@ def tuple_list(
     """List concrete tuple subspaces that currently exist, each with its row census.
 
     Use `tuple_registry` instead to see the template definitions rather
-    than live subspaces. Returns one census row per subspace, paged
-    (RDR-211 scalability research, bead nexus-xapt8): a truncated page
-    appends a `_pagination` entry with `next_cursor` -- the catalog tools'
-    own convention for a `list[dict]`-shaped paged result -- pass that back
-    as `after` to continue.
+    than live subspaces. Returns one census row per subspace, paged: a
+    truncated page appends a `_pagination` entry with `next_cursor` -- the
+    catalog tools' own convention for a `list[dict]`-shaped paged result --
+    pass that back as `after` to continue. Bounded to 100 by default
+    (rather than unbounded) so an unqualified call cannot dump an
+    ever-growing subspace list into the caller's own context; a caller
+    that genuinely wants everything pages through with `after`.
     """
     try:
         with _t2_ctx() as db:

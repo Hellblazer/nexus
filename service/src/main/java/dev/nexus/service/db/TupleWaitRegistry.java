@@ -301,7 +301,7 @@ final class TupleWaitRegistry {
      * action on refusal is to give up and return the (already-computed, empty) probe
      * result, which is what the exception carries by construction (see its javadoc).
      *
-     * <p>The per-claimant branch (nexus-xapt8, RDR-211 scalability research addition
+     * <p>The per-claimant branch (nexus-xapt8, a scalability research pass over this design addition
      * 15) goes through {@link ConcurrentHashMap#compute}, whose remapping function
      * runs atomically for the given key — the increment-then-check the previous
      * {@code computeIfAbsent} + {@code incrementAndGet} pair performed as TWO separate

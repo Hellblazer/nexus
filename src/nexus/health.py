@@ -5070,7 +5070,7 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
     import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
 
     try:
-        from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred: CLI startup cost
+        from nexus.db.t2.http_tuple_store import CensusTimeoutError, HttpTupleStore  # noqa: PLC0415 — deferred: CLI startup cost
         store = HttpTupleStore()
     except Exception as exc:  # noqa: BLE001 — best-effort: engine/config unreachable, must not crash `nx doctor`
         _log.debug("doctor_tuple_unclaimed_age_connect_failed", error=str(exc))
@@ -5081,6 +5081,28 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
 
     try:
         subspaces = store.subspace_list()
+    except CensusTimeoutError as exc:
+        # Critique finding 10 (nexus-xapt8 fix round): this row's own
+        # unpaged subspace_list() call is exactly the one caller that
+        # cannot opt into paging (it needs every claimable subspace), so
+        # it is the most exposed to subspaceListPage's own request-path
+        # statement_timeout as a tenant's row count grows. Deliberately a
+        # SEPARATE branch from the generic except-Exception fallthrough
+        # below: the engine is fully reachable and healthy here -- ONE
+        # statement ran past its own budget -- so "engine unreachable"
+        # would misdirect whoever reads this row toward the wrong fix.
+        _log.debug("doctor_tuple_unclaimed_age_census_timeout", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"census query exceeded its statement_timeout budget "
+                f"(NX_TUPLE_SUBSPACE_LIST_TIMEOUT_SECONDS): {exc}. The engine "
+                "is reachable and healthy -- this tenant's subspace count has "
+                "grown past what an unpaged scan can complete within budget. "
+                "Raise NX_TUPLE_SUBSPACE_LIST_TIMEOUT_SECONDS, or investigate "
+                "why this tenant carries so many subspaces."
+            ),
+        )]
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             if route_predates_floor:

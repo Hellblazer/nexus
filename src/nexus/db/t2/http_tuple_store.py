@@ -40,7 +40,7 @@ Two things no other T2 domain store needs, both new code (RDR-205
   :func:`_check_request_size` — before any network call, and refuses
   before sending.
 - **Typed-error mapping** (:func:`_raise_typed`): the engine renders
-  each of its ten RDR-205 typed errors (``TupleException`` and its
+  each of its eleven RDR-205-family typed errors (``TupleException`` and its
   subtypes) as ``{"error": "<code>", "detail": "<message>"}`` at the
   error's own HTTP status. Some codes SHARE a status (``UnknownSubspace``
   and ``ClaimNotFound`` are both 404), so classification reads the
@@ -136,7 +136,7 @@ _ROUTE_PREFIX: str = "/v1/tuples"
 
 
 class TupleError(RuntimeError):
-    """Base of the ten RDR-205 typed tuple-space client errors.
+    """Base of the eleven RDR-205-family typed tuple-space client errors.
 
     ``code`` matches the engine's ``TupleException#code()`` verbatim
     (e.g. ``"UnknownSubspace"``); the exception's message is the
@@ -203,6 +203,17 @@ class LeaseTooLongError(TupleError):
     code = "LeaseTooLong"
 
 
+class CensusTimeoutError(TupleError):
+    """``subspace_list``'s own request-path ``statement_timeout``
+    (``NX_TUPLE_SUBSPACE_LIST_TIMEOUT_SECONDS``) fired -- the census query
+    genuinely ran too long against the tenant's current row count, not a
+    connectivity or server-availability problem (nexus-xapt8, critique
+    finding 10). 503: the engine is fully up; retry with a narrower
+    ``prefix``/``limit``, or later once load subsides."""
+
+    code = "CensusTimeout"
+
+
 _ERROR_CLASSES_BY_CODE: dict[str, type[TupleError]] = {
     cls.code: cls
     for cls in (
@@ -215,6 +226,7 @@ _ERROR_CLASSES_BY_CODE: dict[str, type[TupleError]] = {
         ParkCapExceededError,
         TtlTooLongError,
         LeaseTooLongError,
+        CensusTimeoutError,
     )
 }
 
@@ -328,7 +340,7 @@ def _check_request_size(payload: dict[str, Any]) -> None:
 
 
 def _raise_typed(exc: httpx.HTTPStatusError) -> NoReturn:
-    """Re-raise *exc* as one of the ten typed :class:`TupleError`
+    """Re-raise *exc* as one of the eleven typed :class:`TupleError`
     subclasses when the engine's response body names one; otherwise
     re-raise *exc* unchanged.
 
@@ -701,7 +713,7 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         404 with ``{"error": "unknown tuples op: /renew"}`` (the route
         switch's default branch, verified at ``engine-service-v0.1.116``).
         The body DOES carry an ``error`` field; its value is simply not one
-        of the ten recognised codes, so ``_raise_typed`` finds no class for
+        of the eleven recognised codes, so ``_raise_typed`` finds no class for
         it and re-raises the bare ``httpx.HTTPStatusError`` -- loud by
         design. A silent no-op here would let a caller believe its lease was
         extended while the claim lapses underneath it. (An earlier version
@@ -755,7 +767,7 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         ``tuples.oldest_unclaimed`` row, which needs every claimable
         subspace) see no change at all.
 
-        With *limit* given (RDR-211 scalability research addition 2, bead
+        With *limit* given (a scalability research pass over this design addition 2, bead
         nexus-xapt8, additive), the response is instead a ``(rows,
         next_cursor)`` pair: *next_cursor* is ``None`` when every matching
         subspace fit in the page, else the subspace-name cursor for the next
