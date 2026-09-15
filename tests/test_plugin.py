@@ -9,6 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.db.t2.http_memory_store import MemoryExpireResult
 
 
 @pytest.fixture
@@ -111,7 +112,9 @@ def test_session_end_runs_expire(runner: CliRunner, fake_home: Path) -> None:
     (mcp_infra.t2_index_write) and still runs the TTL expire sweep
     (RDR-128 P3 — the flush no longer opens memory.db directly)."""
     mock_t2 = MagicMock()
-    mock_t2.expire.return_value = 3
+    # RDR-207 (nexus-l3yuc.14): the hook reads both id lists through
+    # expire_detail so its message can say what the engine did.
+    mock_t2.expire_detail.return_value = MemoryExpireResult(quarantined_ids=[1, 2, 3])
     mock_t2.memory.put.return_value = 1
 
     def _run(write_fn):
@@ -122,7 +125,8 @@ def test_session_end_runs_expire(runner: CliRunner, fake_home: Path) -> None:
         with patch("nexus.mcp_infra.t2_index_write", _run):
             result = runner.invoke(main, ["hook", "session-end"])
 
-    mock_t2.expire.assert_called_once()
+    mock_t2.expire_detail.assert_called_once()
+    assert "Quarantined 3 memory entries." in result.output, result.output
 
 
 # ── AC6: nx doctor ────────────────────────────────────────────────────────────
