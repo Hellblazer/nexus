@@ -137,6 +137,8 @@ Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, 
 
 **Heat-weighted expiry (RDR-057 Phase 2a)**: T2 `access_count` and `last_accessed` columns track usage. Effective TTL becomes `base_ttl * (1 + log(access_count + 1))` — frequently-accessed entries survive longer. See [Configuration — Heat-Weighted T2 Expiry](configuration.md#heat-weighted-t2-expiry).
 
+**Expiry quarantines, it does not delete (RDR-207)**: an entry past its effective TTL disappears from every read (`get`, `search`, `list`, the MCP memory tools) but stays in the table. `nx memory list --quarantined` shows these entries. `nx memory reap` deletes one only after a rollup summary covers it, `nx memory restore ID` brings one back as permanent, and `nx memory delete --id ID` removes one outright. See [nx memory](cli-reference.md#nx-memory).
+
 The access-count increment rides the same server-side transaction as the row fetch, arbitrated by Postgres. `search()` exposes an explicit opt-out (`access="silent"`, used by internal consolidation scans) that skips the increment as a deliberate policy choice, not a fallback.
 
 **Consolidation (RDR-061 E6)**: `memory_consolidate` MCP tool provides three hygiene operations to manage T2 growth over time:
@@ -162,7 +164,7 @@ memory_consolidate(action="merge", project="myrepo",
     confirm_destructive=True)
 ```
 
-Merges run as a single transaction against the engine so UPDATE and DELETE are atomic. If `keep_id` was deleted by a concurrent `expire()` call, the merge raises `KeyError` and `delete_ids` survive, preventing silent data loss when the consolidation scan races with TTL expiry. `nx_tidy` and `nx_answer` both invoke these operations during periodic hygiene.
+Merges run as a single transaction against the engine so UPDATE and DELETE are atomic. If `keep_id` no longer exists, the merge raises `KeyError` and `delete_ids` survive. A merge that names a quarantined entry, as `keep_id` or in `delete_ids`, is refused too (RDR-207), so a consolidation scan that races with TTL expiry never merges into or out of a hidden row; restore the entry first. `nx_tidy` and `nx_answer` both invoke these operations during periodic hygiene.
 
 **Taxonomy cascade on delete**: When a memory entry is deleted, the T2 facade also calls `db.taxonomy.purge_assignments_for_doc(project, title)` (the `HttpTaxonomyStore` instance), removing any topic assignments that reference the deleted entry and dropping any topics left empty by the deletion.
 

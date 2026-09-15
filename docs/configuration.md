@@ -328,7 +328,7 @@ Highly-accessed entries survive longer than their nominal TTL. Unaccessed entrie
 
 **Note**: This differs from the paper (Memory in the LLM Era) which uses division for relevance-decay. Nexus uses multiplication for heat-based survival — entries agents keep touching stick around longer. If you need strict time-bounded expiry regardless of access, use `ttl=None` (permanent) and explicit `memory_delete` instead.
 
-Periodic purge runs via `T2Database.expire(relevance_log_days=90)`, which also purges the `relevance_log` telemetry table (RDR-061 E2) of entries older than 90 days.
+Expiry quarantines; it does not delete (RDR-207). `T2Database.expire(relevance_log_days=90)`, which the session-end hook and `nx memory expire` run, hides every entry past its effective TTL from get, search and list, and keeps the row. `nx memory reap` deletes a quarantined entry only once a rollup summary covers it, and `nx memory restore ID` brings one back as permanent; see [nx memory](cli-reference.md#nx-memory). The same call also purges the `relevance_log` telemetry table (RDR-061 E2) of entries older than 90 days, and those rows are deleted.
 
 ## Verification
 
