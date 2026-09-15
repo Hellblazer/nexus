@@ -304,6 +304,19 @@ jobs:
               sys.exit(1)
           PY
 
+      - name: Cache HuggingFace models (MinerU, for the slow leg)
+        # nexus-ggonw: test_mineru_path_indexes_table_values_as_text runs in
+        # the slow leg below and drives the same MinerU pipeline as the
+        # deselected formula test, so its first run downloads the ~2-3GB of
+        # MinerU weights. Same cache and key as ci.yml's HuggingFace step, so
+        # a warm cache from either workflow serves both.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: ~/.cache/huggingface
+          key: huggingface-models-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            huggingface-models-${{ runner.os }}-
+
       - name: Slow-marked tests (nexus-s6dei)
         # `-m slow` was selected by ZERO commands repo-wide before this leg —
         # a slow-marked test was operationally deleted (no output, no skip
@@ -316,13 +329,14 @@ jobs:
         #
         # test_mineru_path_preserves_formulas is DESELECTED here — DECIDED
         # state, not pending (nexus-jy4hd, 2026-08-18): MinerU's first
-        # invocation downloads ~2-3GB of model weights with no HF cache in
-        # this job, and MinerU-end-to-end coverage is owned by the release
-        # shakedown's step 3b, which now indexes with an EXPLICIT
-        # --extractor mineru, doctor-precheck parsed, and a post-hoc
-        # extraction_method identity assert — a route-away or substitution
-        # reddens every release. Do not fold the pytest twin in here
-        # without also adding the HF cache step ci.yml already carries.
+        # invocation downloads ~2-3GB of model weights, and MinerU-end-to-end
+        # coverage is owned by the release shakedown's step 3b, which now
+        # indexes with an EXPLICIT --extractor mineru, doctor-precheck
+        # parsed, and a post-hoc extraction_method identity assert — a
+        # route-away or substitution reddens every release. The HF cache
+        # step above was added for test_mineru_path_indexes_table_values_as_text,
+        # which does run here (nexus-ggonw); re-selecting the formula twin
+        # is still nexus-jy4hd's decision to revisit, not a side effect.
         #
         # FIRST-NIGHTLY-RUN VERIFICATION (manual, once, after this merges): confirm this step exits 0; the non-vacuity step below prints exactly 7 (floor=7); slow-s6dei.xml contains no test_mineru_path_preserves_formulas testcase; and -rs prints no unexpected skip lines beyond legitimately-conditional ones.
         run: |
