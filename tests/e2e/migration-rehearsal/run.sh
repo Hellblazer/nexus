@@ -54,6 +54,11 @@ unset FORCE_COLOR CLICOLOR_FORCE
 # P0.2, nexus-ccs9v.2): BASH_SOURCE is relative to wherever this script was
 # invoked FROM, not the repo root the next line cd's into.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Shared Claude Code OAuth credential picker (nexus-galkv.19) — see its own
+# header for the incident this closes. Used below by --fullstack and
+# --shakeout-e2e, which used to fetch with a bare, unscoped `security
+# find-generic-password` and could silently select a token-less husk item.
+CRED_TOOL="$SCRIPT_DIR/../lib/claude_credentials.py"
 
 # nexus-f2g8u: silent-exit guard. Armed as early as possible — before any
 # other trap this script installs — so no exit path anywhere below can
@@ -1150,12 +1155,18 @@ if [ "$FULLSTACK" = 1 ]; then
   # rotates); the live token lives in the macOS keychain. Pull it at run time
   # (same approach as tests/cc-validation), stage it (ephemeral, cleaned on exit),
   # mount read-only. Real, billed calls; data/PG stay container-isolated.
-  FRESHCREDS="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null || true)"
-  if [ -z "$FRESHCREDS" ] && [ -f "$HOME/.claude/.credentials.json" ]; then
+  # nexus-galkv.19: `pick` chooses by CONTENT across every keychain item
+  # under the service, never a bare unscoped `security find-generic-password`
+  # (which can silently select a token-less husk — see CRED_TOOL's note
+  # above). The ~/.claude/.credentials.json fallback is used only if it
+  # itself passes `check`, so a stale/husk file on disk never gets mounted
+  # either.
+  FRESHCREDS="$(python3 "$CRED_TOOL" pick || true)"
+  if [ -z "$FRESHCREDS" ] && [ -f "$HOME/.claude/.credentials.json" ] && python3 "$CRED_TOOL" check "$HOME/.claude/.credentials.json" >/dev/null 2>&1; then
     echo "      (keychain miss — falling back to ~/.claude/.credentials.json, may be stale)" >&2
     FRESHCREDS="$(cat "$HOME/.claude/.credentials.json")"
   fi
-  [ -n "$FRESHCREDS" ] || { echo "--fullstack needs claude oauth (keychain 'Claude Code-credentials' or ~/.claude/.credentials.json)" >&2; exit 1; }
+  [ -n "$FRESHCREDS" ] || { echo "--fullstack needs claude oauth (keychain 'Claude Code-credentials' or a usable ~/.claude/.credentials.json)" >&2; exit 1; }
   printf '%s' "$FRESHCREDS" > "$STAGE/.claude-credentials.json"; chmod 600 "$STAGE/.claude-credentials.json"
   docker run --rm "${run_env[@]}" \
     -v "$STAGE/.claude-credentials.json":/home/nexus/.claude/.credentials.json:ro \
@@ -1166,12 +1177,14 @@ elif [ "$SHAKEOUT_E2E" = 1 ]; then
   # too), but override the image's default entrypoint (rehearse_fullstack.sh)
   # to run this journey's own driver instead — mirrors how --acquire/
   # --shakeout override the entrypoint on a shared/reused image.
-  FRESHCREDS="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null || true)"
-  if [ -z "$FRESHCREDS" ] && [ -f "$HOME/.claude/.credentials.json" ]; then
+  # nexus-galkv.19: same shared picker as --fullstack above — see that
+  # branch's comment.
+  FRESHCREDS="$(python3 "$CRED_TOOL" pick || true)"
+  if [ -z "$FRESHCREDS" ] && [ -f "$HOME/.claude/.credentials.json" ] && python3 "$CRED_TOOL" check "$HOME/.claude/.credentials.json" >/dev/null 2>&1; then
     echo "      (keychain miss — falling back to ~/.claude/.credentials.json, may be stale)" >&2
     FRESHCREDS="$(cat "$HOME/.claude/.credentials.json")"
   fi
-  [ -n "$FRESHCREDS" ] || { echo "--shakeout-e2e needs claude oauth (keychain 'Claude Code-credentials' or ~/.claude/.credentials.json)" >&2; exit 1; }
+  [ -n "$FRESHCREDS" ] || { echo "--shakeout-e2e needs claude oauth (keychain 'Claude Code-credentials' or a usable ~/.claude/.credentials.json)" >&2; exit 1; }
   printf '%s' "$FRESHCREDS" > "$STAGE/.claude-credentials.json"; chmod 600 "$STAGE/.claude-credentials.json"
   docker run --rm "${run_env[@]}" \
     -v "$STAGE/.claude-credentials.json":/home/nexus/.claude/.credentials.json:ro \
