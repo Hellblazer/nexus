@@ -171,7 +171,7 @@ figure.fig .take-edge{stroke:var(--brass)}
     <li><a href="#l6">Tools and commands</a></li>
     <li><a href="#l7">Appendix: how it is built</a></li>
   </ol>
-  <div class="meta"><a href="research.html">← Research with Nexus</a><br><a href="research-in-nexus.html">Research in Nexus →</a><br><a href="getting-started.html">← Getting started</a><br><a href="working-together.html">Working together →</a><br><a href="./">← Install guide</a></div>
+  <div class="meta"><a href="research.html">← Research with Nexus</a><br><a href="research-in-nexus.html">Research in Nexus →</a><br><a href="getting-started.html">← Getting started</a><br><a href="coordination.html">Coordination →</a><br><a href="./">← Install guide</a></div>
 </nav>
 
 <main>
@@ -190,7 +190,7 @@ figure.fig .take-edge{stroke:var(--brass)}
 <tr><td>claim</td><td>The state of a tuple between a take operation and its ack. The taker holds the claim.</td></tr>
 <tr><td>lease</td><td>The time limit on a claim. When the lease ends, the tuple becomes available again.</td></tr>
 <tr><td>ack, nack</td><td>Ack ends a claim and marks the tuple consumed. Nack ends a claim and returns the tuple to the space.</td></tr>
-<tr><td>dead letter</td><td>A tuple that failed too many take operations. Nobody can take it, but anybody can read it.</td></tr>
+<tr><td>dead letter</td><td>A tuple that failed three delivery attempts. Nobody can take it, but anybody can read it.</td></tr>
 <tr><td>agent</td><td>A process that a Claude Code session starts to do one task.</td></tr>
 <tr><td>instance</td><td>One Claude Code session, under the name the harness gives it.</td></tr>
 <tr><td>engine</td><td>The Nexus service that owns the database and answers every tuple call.</td></tr>
@@ -218,7 +218,7 @@ figure.fig .take-edge{stroke:var(--brass)}
 <div class="see">You might say</div>
 <div class="cmd"><pre>Tell the agent that works on <span class="ph">&lt;THE TASK&gt;</span> that the schema changed. Put the message in its mailbox.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What happens</div>
-<p>Claude writes a message tuple to the agent's mailbox. The agent reads its mailbox before every reply, so it acts on the message before it hands back its next result. The message reaches exactly one reader.</p>
+<p>Claude writes a message tuple to the agent's mailbox. The agent's instructions tell it to read its mailbox before it returns its result, so it can act on the message first. The message reaches exactly one reader.</p>
 
 <h3>Ask another session for something</h3>
 <div class="see">You might say</div>
@@ -260,7 +260,7 @@ figure.fig .take-edge{stroke:var(--brass)}
 <!-- ============ 2 ============ -->
 <section class="lesson" id="l2">
 <div class="lhead"><span class="lnum">2</span><h2>Send a message to an agent</h2><span class="ltime">10 min</span></div>
-<p class="why">Every agent has a mailbox, and a message to the agent is a tuple in it. The agent reads its mailbox before every reply, so a correction you send while it works is read before that reply is written.</p>
+<p class="why">Every agent has a mailbox, and a message to the agent is a tuple in it. The agent's instructions tell it to read its mailbox before it writes its report, so a correction you send while it works can change that report. No hook reads the mailbox for the agent.</p>
 
 <h3>The address</h3>
 <p>When Claude starts an agent, a hook gives the agent an id and tells it its mailbox address. You never need the id yourself: describe the agent by its task, as in lesson 1, and Claude resolves it. To see the addresses that exist, ask <em>"List the mailboxes in the tuple space"</em>, and Claude runs a list by prefix.</p>
@@ -290,7 +290,7 @@ tuple_ack  claim_id: ede42f56-…   claimant: a3f7c2e1d09b4c551
 → Acked claim ede42f56-…</pre></details>
 
 <h3>Delivery</h3>
-<p>Each message reaches exactly one reader. When two readers take from the same mailbox, the engine hands each message to one of them, and the other does not receive it. A reader that takes a message and then crashes never acks it, so its lease ends, the message becomes available again, and the next reader gets it. A reader whose work is still running renews its lease with <code>tuple_renew</code> before the lease ends, so the message stays with that reader. After three failed take operations the engine marks the message as a dead letter: nobody can take it, but anybody can read it, so a message that makes every reader crash stays visible. An unclaimed or dead-lettered message survives at most seven days.</p>
+<p>Each message reaches exactly one reader. When two readers take from the same mailbox, the engine hands each message to one of them, and the other does not receive it. A reader that takes a message and then crashes never acks it, so its lease ends, the message becomes available again, and the next reader gets it. A reader whose work is still running renews its lease with <code>tuple_renew</code> before the lease ends, so the message stays with that reader. A nack counts as one failed attempt, and so does a lease that ends without an ack. After three failed attempts, the engine marks the message as a dead letter. Nobody can take it, but anybody can read it, so a message that makes every reader crash stays visible. An unclaimed or dead-lettered message survives at most seven days.</p>
 <p class="note">Neither side has to know when the other is running. The agent reads the space, the sender writes the space, and that is why a shared space works better than a direct message between two processes on different schedules.</p>
 </section>
 
@@ -318,7 +318,7 @@ tuple_ack  claim_id: ede42f56-…   claimant: a3f7c2e1d09b4c551
 <!-- ============ 4 ============ -->
 <section class="lesson" id="l4">
 <div class="lhead"><span class="lnum">4</span><h2>Ask another session for something</h2><span class="ltime">10 min</span></div>
-<p class="why">Every session has a mailbox addressed by its session id, and that mailbox is a channel between any two sessions on one machine. The sessions share the same engine and the same tenant. You name a peer by the name that the harness shows. The send resolves that name to the session that holds it and delivers there.</p>
+<p class="why">Every session has a mailbox addressed by its session id, and that mailbox is a channel between any two sessions that share the same engine and the same tenant. That is every session on one machine, and in cloud mode every session on every machine. You name a peer by the name that the harness shows. The send resolves that name to the session that holds it and delivers there.</p>
 
 <h3>The exchange</h3>
 <p>Behind the instruction in lesson 1, Claude sends a request to the peer's name with kind "request" and a new correlation id, then waits on its own mailbox. The peer receives the request, opens what it names, does the work, and answers with a reply that carries the same correlation id. The request names its subject with a pointer, whether a bead id, a memory title, or a document address, and if the work produced something, the reply names where it was written.</p>
@@ -443,7 +443,7 @@ nx tuple rd ledger/<span class="ph">&lt;SESSION-ID&gt;</span> -n 300</pre><butto
 <li><strong>Waiting happens inside the engine.</strong> A waiting read waits on a signal for its subspace, which the engine sends after commit. The client does not poll, the wait holds no connection, and each wait is bounded so the client's own timeouts never fire first.</li>
 <li><strong>Templates are delivered with the engine.</strong> They are files the engine loads and checks at start. A client can ask the engine for the templates and their digest and detect a mismatch instead of guessing.</li>
 </ul>
-<p>A claim can be extended. A holder that is still working calls <code>tuple_renew</code> before its lease ends. The engine moves the lease forward, but never past the tuple's own expiry. A renew that asks for more than the template's longest lease is refused. Renewing does not count as one of the three failed take operations a message can survive.</p>
+<p>A claim can be extended. A holder that is still working calls <code>tuple_renew</code> before its lease ends. The engine moves the lease forward, but never past the tuple's own expiry. A renew that asks for more than the template's longest lease is refused. A renew does not count as a failed attempt.</p>
 <p>A reply can travel with the ack that closes a take operation, instead of as a separate call. <code>tuple_ack</code> takes an optional reply. The engine writes the reply and consumes the request in one transaction. Both take effect or neither does, so a crash cannot fall between them.</p>
 </div></details>
 </section>
