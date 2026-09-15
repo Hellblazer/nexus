@@ -36,9 +36,19 @@ class TestMailboxArmInstructionText:
     def test_contains_the_monitor_call_shape(self) -> None:
         text = mailbox_arm_instruction("sess-abc")
         assert "Monitor({" in text
-        assert "persistent: true" in text
         assert "timeout_ms: 3600000" in text
         assert '"nx tuple watch --instance' in text
+
+    def test_persistent_is_conditional_never_in_the_literal_call(self) -> None:
+        """Current Claude Code builds removed Monitor's ``persistent`` parameter
+        and reject unknown ones, so a literal copy of the call must not carry
+        it. The text still says to add it where the tool has it, and to re-arm
+        on the expiry notice where it does not (nexus-galkv.19)."""
+        text = mailbox_arm_instruction("sess-abc")
+        call = text[text.index("Monitor({"):text.index("})")]
+        assert "persistent" not in call
+        assert "persistent: true only if Monitor has it" in text
+        assert "re-arm on its 30-minute expiry notice" in text
 
     def test_never_uses_a_bare_positional_address(self) -> None:
         """The old design embedded the session id (and instance, when

@@ -192,20 +192,26 @@ def mailbox_arm_instruction(session_id: str) -> str:
     (nexus-6konb.20): ListAgents renames a session on resume (measured
     nexus-58 to nexus-03, 2026-09-14), and a re-arm that reused the old
     name from memory watched the wrong instance mailbox.
+
+    Keeps ``persistent`` out of the literal call (nexus-galkv.19, 2026-09-15):
+    Claude Code builds since the 2026-09-12 MM-0.1 measurement removed that
+    Monitor parameter and reject unknown ones, capping a watch at 30 minutes.
+    The text says to add it only where the tool has it, and to re-arm on the
+    expiry notice where it does not. ``timeout_ms: 3600000`` is valid on both.
     """
     return (
         f"{ARM_MARKER}: arm once, now.\n"
-        "    Monitor({\n"
-        '      command: "nx tuple watch --instance <name>",\n'
-        f'      description: "mailbox watch {session_id}",\n'
-        "      persistent: true,\n"
-        "      timeout_ms: 3600000\n"
-        "    })\n"
-        "Take <name> from ListAgents now, not memory: it changes on resume. "
-        "Without one, omit --instance. Arming twice is harmless (a lock "
-        "refuses it); a watcher from before a /clear, /resume or /branch stops "
-        "itself, and this instruction re-arms. Each line is a ping, never "
-        "the message; the watcher never claims: call "
+        "Monitor({\n"
+        '  command: "nx tuple watch --instance <name>",\n'
+        f'  description: "mailbox watch {session_id}",\n'
+        "  timeout_ms: 3600000\n"
+        "})\n"
+        "Add persistent: true only if Monitor has it; else re-arm on its "
+        "30-minute expiry notice. "
+        "Take <name> from ListAgents now, not memory: it changes on resume; "
+        "without one, omit --instance. Arming twice is harmless; a watcher "
+        "from before a /clear, /resume or /branch stops itself. Each line is "
+        "a ping, never the message; the watcher never claims: call "
         "mcp__plugin_conexus_nexus__tuple_in on the named mailbox, handle "
         "it, then mcp__plugin_conexus_nexus__tuple_ack (with reply for a "
         "request) or mcp__plugin_conexus_nexus__tuple_nack. An unacked "
