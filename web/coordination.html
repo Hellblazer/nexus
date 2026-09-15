@@ -241,29 +241,45 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 <tr><td>Sessions ask each other for work</td><td>Say "Ask <span class="ph">&lt;PEER NAME&gt;</span> to …". Your session continues, and the reply arrives later. Nobody copies text between terminals.</td></tr>
 <tr><td>No lost messages</td><td>The engine keeps each message until a reader acks it. If a reader stops, its lease ends, and the next take operation or the six-hourly sweep frees the message. Three failures make it a dead letter.</td></tr>
 <tr><td>Agents you can correct</td><td>Send a correction while the agent works. Its instructions require a mailbox read before it reports, so it sees the correction then.</td></tr>
-<tr><td>A view of the work</td><td>List the waiting messages and names in the engine. A local file shows which agents did not report.</td></tr>
+<tr><td>A view of the work</td><td>Every live message, name, and agent record is a row that every session on the same engine can read. A local file shows which agents did not report.</td></tr>
 <tr><td>Other machines</td><td>In cloud mode every machine uses one engine, so the same request reaches them.</td></tr>
 </table></div>
 </section>
 
 <!-- ============ 2 ============ -->
 <section class="lesson" id="l2">
-<div class="lhead"><span class="lnum">2</span><h2>Coordination Using Tuples and SendMessage</h2><span class="ltime">2 min</span></div>
-<p class="why">SendMessage talks to an agent or a live session. The tuple space holds work until a reader takes it and confirms it. Most sessions use both.</p>
+<div class="lhead"><span class="lnum">2</span><h2>Coordination Using Tuples and SendMessage</h2><span class="ltime">3 min</span></div>
+<p class="why">SendMessage connects one sender to one receiver. The tuple space is one shared space for every session, agent, hook, and script. Its records can wait for a reader that does not exist yet, and every session on the same engine can see them.</p>
+
+<h3>Three operations</h3>
+<div class="tbl"><table>
+<tr><th>Operation</th><th>Tool</th><th>What it does</th></tr>
+<tr><td>out</td><td><code>tuple_out</code>, <code>mailbox_send</code></td><td>Adds a tuple. The writer continues at once.</td></tr>
+<tr><td>rd</td><td><code>tuple_rd</code></td><td>Reads matching tuples and leaves them in place, for any number of readers. With a timeout, it waits for a new tuple.</td></tr>
+<tr><td>in</td><td><code>tuple_in</code></td><td>Takes one matching tuple. Exactly one reader gets it, then acks it or returns it.</td></tr>
+</table></div>
+<p>A reader asks for tuples by their keys, not by their sender. The engine defines three kinds of tuple today:</p>
+<ul class="plain">
+<li><strong>Mailbox:</strong> messages. One reader takes each message. Kept for seven days.</li>
+<li><strong>Directory:</strong> the session that holds each name. Anybody reads it, and nobody takes it. An entry lives while its session renews it.</li>
+<li><strong>Ledger:</strong> agent starts and reports. Anybody reads and counts them, and nobody takes them. Kept for 90 days.</li>
+</ul>
+<p class="note">A work queue and a lock use the same three operations. Neither is built yet.</p>
+
+<h3>Compared with SendMessage</h3>
 <div class="tbl"><table>
 <tr><th>Aspect</th><th>SendMessage</th><th>Tuple space</th></tr>
-<tr><td>Who takes part</td><td>Agents by name and live sessions that <code>ListAgents</code> shows, on this machine, on other machines, and in the cloud.</td><td>Any process that uses the engine: sessions, agents, hooks, and scripts with <code>nx tuple</code>.</td></tr>
-<tr><td>Reader not running</td><td>A finished subagent resumes from its transcript. A session must be live.</td><td>A message to a session id or agent id waits in the engine for up to seven days. A send by name needs a live holder, as with SendMessage.</td></tr>
-<tr><td>Delivery</td><td>The harness puts the message into the conversation at the reader's next tool round.</td><td>The reader takes the message when ready: after a ping, or at the next prompt.</td></tr>
-<tr><td>Confirmation</td><td>The send result says that the message arrived, not that Claude read it. A session can hold the message for approval or refuse it. A remote or cloud session reports nothing back.</td><td>The reader acks. If it stops first, the message returns. Three failures make a dead letter.</td></tr>
-<tr><td>Reply</td><td>The reader sends a new message to the sender. A cloud session cannot reply yet.</td><td>The reply goes in the ack, with the same correlation id.</td></tr>
-<tr><td>A subagent's address</td><td>Its sends go out under its parent session's address, and replies go to the parent.</td><td>It has its own mailbox at its agent id.</td></tr>
-<tr><td>Idle notice</td><td>A send can ask for one notice when a session on this machine next goes idle or exits.</td><td>No such signal. The watcher pings only when a message arrives.</td></tr>
-<tr><td>Record</td><td>The transcripts.</td><td>Rows that any session can query: waiting and dead messages, and agent starts and reports.</td></tr>
+<tr><td>Shape</td><td>One sender to one receiver.</td><td>One shared space. Many writers and many readers, and a reader matches tuples by their keys.</td></tr>
+<tr><td>Visibility</td><td>Each side's transcript holds its half. Nothing links the two halves or queries them.</td><td>Every live tuple is a row in the engine that every session on it can read. Each message shows its sender, kind, correlation id, and claim state.</td></tr>
+<tr><td>The other side</td><td>Must exist now: a live session, or an agent that can resume from its transcript.</td><td>Need not exist yet. A message to a session id or agent id waits up to seven days. A reader can also wait for a tuple that nobody has written.</td></tr>
+<tr><td>Who takes part</td><td>Agents and sessions that <code>ListAgents</code> shows, on this machine, on other machines, and in the cloud.</td><td>Sessions, agents, hooks, and scripts that use the engine.</td></tr>
+<tr><td>Confirmation</td><td>Arrival only. A session can hold or refuse a message, and a remote session reports nothing back.</td><td>The reader acks. An unacked message returns, and three failures make a dead letter that anybody can read.</td></tr>
+<tr><td>Reply</td><td>A new message to the sender. A cloud session cannot reply yet.</td><td>The reply goes in the ack, with the same correlation id.</td></tr>
 </table></div>
+<p class="note">A send by name needs a live holder, as with SendMessage. A delivered message leaves the space. The engine clears its body at the ack and keeps only the count.</p>
 <ul class="plain">
-<li>Use SendMessage to steer a running agent or to ask a live session a quick question.</li>
-<li>Use the tuple space for work that must not be lost, or for a reply that must pair with its request. Use it also for a reader that may restart, and for hooks and scripts.</li>
+<li>Use SendMessage to steer a running agent or to ask a live session a quick question. It can also ask for one notice when a session on this machine goes idle.</li>
+<li>Use the tuple space when others must see the work, or when the other side may not exist yet. Use it also for hooks and scripts.</li>
 <li>The two work together. The harness delivers each agent's report, and hooks record the same report in the ledger.</li>
 </ul>
 </section>
@@ -464,7 +480,7 @@ nx doctor  <span class="c"># includes four tuple rows</span></pre><button class=
 <tr><td>available</td><td>Waiting. Nobody took it.</td></tr>
 <tr><td>claimed</td><td>Taken, not yet acked. Also counts a message whose lease ended, until the next take operation or the sweep.</td></tr>
 <tr><td>dead</td><td>Failed three times.</td></tr>
-<tr><td>consumed</td><td>Delivered and acked.</td></tr>
+<tr><td>consumed</td><td>Delivered and acked. The body is gone, and only the count remains.</td></tr>
 <tr><td>expired_unpurged</td><td>Past its time limit. The next sweep removes it.</td></tr>
 </table></div>
 <details class="gloss out"><summary>What Claude sees: three mailboxes from one tuple_list call</summary><pre class="out">tuple_list
@@ -478,13 +494,14 @@ nx doctor  <span class="c"># includes four tuple rows</span></pre><button class=
 <!-- ============ 9 ============ -->
 <section class="lesson" id="l9">
 <div class="lhead"><span class="lnum">9</span><h2>When to use it</h2><span class="ltime">4 min</span></div>
-<p class="why">Use coordination when work spans sessions, when a job runs longer than you want to watch, or when many agents must all report.</p>
+<p class="why">Use coordination when work spans sessions or must stay visible. Use it also when the other side may not be there yet, or when many agents must all report.</p>
 <div class="tbl"><table>
 <tr><th>Situation</th><th>You might say</th><th>What you get</th></tr>
 <tr><td>One session in each of two repositories</td><td>"Ask <span class="ph">&lt;PEER NAME&gt;</span> to <span class="ph">&lt;DEPLOY THE SERVICE&gt;</span>. The details are in memory <span class="ph">&lt;PROJECT&gt;/&lt;TITLE&gt;</span>. Tell me when the reply arrives."</td><td>The peer works in its own repository while yours continues. Its reply names where it wrote the result.</td></tr>
 <tr><td>A long job on another machine, in cloud mode</td><td>"Ask <span class="ph">&lt;REMOTE NAME&gt;</span> to run <span class="ph">&lt;THE FULL TEST SUITE&gt;</span> and send me the result."</td><td>Your session keeps working. A ping announces the reply.</td></tr>
 <tr><td>Many background agents</td><td>"Start one agent for each <span class="ph">&lt;MODULE&gt;</span>, and check that every one reported."</td><td>The census shows any agent that did not report.</td></tr>
-<tr><td>A change of plan during agent work</td><td>"Tell the agent that works on <span class="ph">&lt;THE TASK&gt;</span> to <span class="ph">&lt;SKIP THE PARSER&gt;</span>."</td><td>The agent reads the change at its next mailbox read.</td></tr>
+<tr><td>See what every agent did</td><td>"Which agents did this session start, and which reported?"</td><td>Claude reads the ledger: one start and one report record per agent, kept for 90 days.</td></tr>
+<tr><td>Find a peer</td><td>"Which session holds the name <span class="ph">&lt;NAME&gt;</span>?"</td><td>Claude reads the directory. Every session on the same engine gets the same answer.</td></tr>
 <tr><td>A note for a busy session</td><td>"Send <span class="ph">&lt;PEER NAME&gt;</span> a note that <span class="ph">&lt;THE RELEASE IS PUBLISHED&gt;</span>."</td><td>The note waits in the peer's mailbox, for up to seven days.</td></tr>
 </table></div>
 <h3>Good practice</h3>
