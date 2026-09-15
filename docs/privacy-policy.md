@@ -11,6 +11,13 @@ _Effective: 2026-08-18_
 > data Conexus actually collects or where it is willing to send it — this is
 > a correction to where already-described data physically lives.
 
+> **Change note (2026-09-15, nexus-umm29):** local mode is not always
+> outbound-silent. Configuring `local.embed_model` as a Voyage model plus a
+> Voyage key so both reach the local nexus-service at restart switches that
+> service to embed and rerank with Voyage AI instead of the bundled bge-768
+> ONNX — the same outbound call managed-cloud mode always makes. §2 below now
+> states this opt-in, and how to revert it, explicitly.
+
 Conexus is a self-hosted MCP server and Claude Code / Claude Desktop extension that indexes content on your machine and provides semantic search and persistent memory across Claude conversations. This policy describes what data Conexus handles, where it goes, and what is never collected.
 
 ## 1. What Conexus stores
@@ -18,7 +25,7 @@ Conexus is a self-hosted MCP server and Claude Code / Claude Desktop extension t
 All persistent data lives on the Postgres server backing your `nexus-service` — the host machine's own disk in local mode, or the operator's server in managed-cloud mode:
 
 - **Indexed content** — text from files you ask Conexus to index (`nx index repo`, `nx index pdf`), plus structured metadata (file paths, chunk identifiers, taxonomy assignments). The T3 vector store is the native nexus-service (Postgres 17 + pgvector). Stored in:
-  - the local nexus-service's Postgres cluster on disk (local mode — embeddings + chunk text, embedded server-side with bge-768)
+  - the local nexus-service's Postgres cluster on disk (local mode — embeddings + chunk text, embedded server-side with the bundled bge-768 ONNX by default, or with Voyage AI's API once the service is switched into keyed mode — see §2 for what that requires and how to revert)
   - a managed nexus-service's Postgres (managed-cloud mode — only if you point Conexus at a hosted service)
   - **frozen legacy artifact only, on installs that predate the 6.0 substrate move:** `~/.local/share/nexus/chroma/` may still hold a pre-PG ChromaDB store left over from before you migrated. On this release it is inert history, not a live migration source — the Chroma read path was deleted outright (RDR-155 P4b), and an install that still carries unmigrated Chroma/SQLite data is detected and redirected to a two-hop upgrade (install the last migration-capable release, migrate there, then upgrade forward) rather than being read directly by the version you are running.
 - **Memory entries (T2)** — anything you (or an agent) writes via `nx memory put` or the `memory_put` MCP tool. Served by the same `nexus-service` Postgres as everything else (local mode: on the host disk; managed-cloud mode: the operator's server) — the SQLite T2 substrate is deleted (RDR-158). `~/.config/nexus/memory.db`, where still present from a pre-migration install, is an inert frozen snapshot, not a live store.
@@ -29,8 +36,11 @@ All persistent data lives on the Postgres server backing your `nexus-service` �
 
 ## 2. What Conexus sends to third parties
 
-**Local mode** (default — no credentials configured):
+**Local mode, default** (no Voyage credentials configured):
 Nothing leaves the machine. Embeddings are computed locally by the on-machine nexus-service (bge-768 ONNX), and search runs against the local on-disk Postgres + pgvector store.
+
+**Local mode, keyed** (`local.embed_model` set to a Voyage model plus a configured `voyage_api_key`, or `NX_VOYAGE_API_KEY` exported directly, reaching the local nexus-service at restart — an explicit opt-in, not the default):
+The local service sends your chunk text and query strings to Voyage AI's API for embedding and reranking. This is the one outbound call a local install makes; everything else in this mode stays on the host machine. See https://www.voyageai.com/privacy. A keyed local service runs one embedding posture at a time — it embeds and reranks everything with Voyage, and existing bge-768 collections become unreadable. **A bare restart does not undo this**: the stored key is replumbed at every boot as long as `local.embed_model` still names a Voyage model, so the service comes back up keyed again. To actually stop sending data to Voyage AI and return to "nothing leaves the machine," set `local.embed_model` back to `bge-768` (or remove the stored `voyage_api_key`/unset `NX_VOYAGE_API_KEY`) and then restart the service.
 
 **Managed-cloud mode** (you opt in by pointing Conexus at a hosted nexus-service):
 - **The managed nexus-service** — chunk text + embeddings are stored in the managed service's Postgres for retrieval, under that service operator's policy. Your data leaves your machine for whoever hosts the service.

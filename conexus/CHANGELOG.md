@@ -4,6 +4,16 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.47.0] - 2026-09-15
+
+Paired engine: engine-service-v0.1.120 (`REQUIRED_ENGINE_VERSION` (0, 1, 120)),
+RDR-207 Phase 1. Plugin version aligned with conexus 7.47.0. This pin advance
+makes live the plugin change `PENDING_RELEASE.md` held:
+
+- `skills/nexus/reference.md` (nexus-umm29): the T3 tier line says local mode
+  embeds with bge-768 by default, or with Voyage when the local service is
+  keyed, instead of implying Voyage is cloud-only.
+
 ## [7.46.2] - 2026-09-15
 
 Paired engine: engine-service-v0.1.119 (`REQUIRED_ENGINE_VERSION` (0, 1, 119)),

@@ -303,18 +303,19 @@ def other_store(service):
 def pg_conn(pg_instance):
     """Direct psql subprocess helper for backdating timestamps in expire/stale tests.
 
-    Returns a callable: pg_conn(sql) -> None.
-    Uses psql to run SQL as the superuser (bypasses RLS).
+    Returns a callable: pg_conn(sql) -> str, the tuples-only, unaligned
+    stdout (``psql -tA``) so a SELECT's rows can be read back; DML callers
+    ignore it. Uses psql to run SQL as the superuser (bypasses RLS).
     """
     pg_port = pg_instance["port"]
     pg_user = pg_instance["user"]
     dbname  = pg_instance["dbname"]
 
-    def run_sql(sql: str) -> None:
-        """Execute SQL as superuser (bypasses RLS for test setup)."""
+    def run_sql(sql: str) -> str:
+        """Execute SQL as superuser (bypasses RLS for test setup); returns stdout."""
         proc = subprocess.run(
             [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_port),
-             "-U", pg_user, "-d", dbname,
+             "-U", pg_user, "-d", dbname, "-tA",
              "-v", "ON_ERROR_STOP=1", "-c", sql],
             capture_output=True, text=True,
         )
@@ -322,6 +323,7 @@ def pg_conn(pg_instance):
             raise RuntimeError(
                 f"psql backdate failed:\nstdout={proc.stdout}\nstderr={proc.stderr}"
             )
+        return proc.stdout.strip()
 
     return run_sql
 
@@ -585,11 +587,15 @@ class TestMVVExpire:
     """
 
     def test_expire_ttl(self, store, pg_conn, ns) -> None:
-        """Entry with ttl=1 that is 2 days old must be deleted by expire().
+        """Entry with ttl=1 that is 2 days old is QUARANTINED by expire().
 
-        Mirrors test_memory.py:126: assert db.expire() == 1
-        The HTTP backend returns a list of deleted IDs; we assert the specific
-        row_id appears in deleted_ids (exact membership, no fallback arm).
+        RDR-207 Phase 1 (memory-004, nexus-l3yuc.2): expiry no longer deletes.
+        The engine stamps ``quarantined_at`` and every read path hides the row,
+        so through this client the row is gone from ``get`` exactly as before,
+        while ``deleted_ids`` is empty from this engine on (kept in the response
+        so this client's ``resp.get("deleted_ids", [])`` keeps parsing). The
+        row still exists in the table, and the client reports it in
+        ``quarantined_ids`` (nexus-l3yuc.9's store slice).
         """
         p = f"ep-{ns}"
         row_id = store.put(p, "old.md", "stale", ttl=1)
@@ -598,11 +604,26 @@ class TestMVVExpire:
             f"UPDATE nexus.memory SET timestamp = '{past}' "
             f"WHERE id = {row_id}"
         )
-        deleted_ids = store.expire()
-        assert row_id in deleted_ids, (
-            f"expire() must have deleted row {row_id}; got deleted_ids={deleted_ids}"
+        swept = store.expire()
+        assert swept.deleted_ids == [], (
+            "expire() quarantines instead of deleting from RDR-207 Phase 1 on; "
+            f"deleted_ids must be empty, got {swept.deleted_ids}"
         )
-        assert store.get(project=p, title="old.md") is None
+        assert row_id in swept.quarantined_ids, (
+            f"expire() must report row {row_id} in quarantined_ids; got {swept}"
+        )
+        assert store.get(project=p, title="old.md") is None, (
+            "a quarantined row must be hidden from get exactly as a deleted one was"
+        )
+        # Non-vacuity: the row was quarantined, not deleted, and not merely never
+        # a candidate. Read the stamp with the superuser connection the fixture
+        # already provides for backdating.
+        stamped = pg_conn(
+            f"SELECT quarantined_at IS NOT NULL FROM nexus.memory WHERE id = {row_id}"
+        )
+        assert stamped == "t", (
+            f"row {row_id} must still exist with quarantined_at set; got {stamped!r}"
+        )
 
     def test_expire_permanent_not_deleted(self, store, pg_conn, ns) -> None:
         """Permanent (ttl=None) entry is NOT deleted even if very old."""
@@ -643,12 +664,12 @@ class TestMVVExpire:
             f"WHERE id = {row_id}"
         )
         # effective_ttl = 1 * (1 + ln(6)) ≈ 2.79 days; age 1.5 days < 2.79 → survives
-        deleted_ids = store.expire()
-        assert row_id not in deleted_ids, (
+        swept = store.expire()
+        assert row_id not in swept.deleted_ids and row_id not in swept.quarantined_ids, (
             f"Heat-weighted expire failed: row {row_id} (access_count=5, ttl=1, age=1.5d) "
-            f"was deleted despite effective_ttl≈2.79 days. "
+            f"was swept despite effective_ttl≈2.79 days. "
             f"Java expire() likely ignores access_count (naive age>ttl check). "
-            f"deleted_ids={deleted_ids}"
+            f"result={swept}"
         )
         assert store.get(project=p, title="hot.md") is not None, (
             "hot.md was deleted by expire() — heat-weighting formula not applied"

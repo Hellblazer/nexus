@@ -119,6 +119,7 @@ def _collection() -> str:
 
 def _pre_tp8yk_upsert_skip_reembed(
     db, collection_name, ids, documents, embeddings, metadatas, *, force=False,
+    force_re_embed=False,
 ):
     """Exact pre-nexus-tp8yk shape of ``_upsert_skip_reembed`` (the D1 kill
     control): ``missing=None`` degrades to "no reroute" and the function

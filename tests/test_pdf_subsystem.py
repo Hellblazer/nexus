@@ -277,6 +277,51 @@ def pdf_git_repo(tmp_path_factory: pytest.TempPathFactory, simple_pdf: Path) -> 
     return repo
 
 
+class TestIndexPdfFileForceReEmbedDecoupled:
+    """nexus-4jj40 sibling (shakedown 2026-09-15): the PDF per-file fallback
+    passed ``force`` as ``force_re_embed``, so a plain --force paid for a full
+    re-embed on this path. Only the explicit opt-in may force one."""
+
+    def _captured_flags(
+        self, repo: Path, *, force: bool, force_re_embed: bool = False,
+    ) -> list[bool]:
+        collection_name = "docs__pdf-subsystem-force"
+        model = index_model_for_collection(collection_name)
+        mock_col = MagicMock()
+        mock_col.get.return_value = {"ids": [], "metadatas": []}
+        mock_db = MagicMock()
+        flags: list[bool] = []
+
+        def capture(collection_name, ids, documents, embeddings, metadatas, *, force_re_embed=False):
+            flags.append(force_re_embed)
+
+        mock_db.upsert_chunks_with_embeddings.side_effect = capture
+        _index_pdf_file(
+            file=repo / "docs" / "simple.pdf",
+            repo=repo,
+            collection_name=collection_name,
+            target_model=model,
+            col=mock_col,
+            db=mock_db,
+            voyage_key="vk_test",
+            git_meta=_git_metadata(repo),
+            now_iso=datetime.now(UTC).isoformat(),
+            score=0.5,
+            embed_fn=lambda texts: _fake_embed(texts, model, "vk_test")[0],
+            force=force,
+            force_re_embed=force_re_embed,
+        )
+        return flags
+
+    def test_force_alone_does_not_force_re_embed(self, pdf_git_repo: Path) -> None:
+        flags = self._captured_flags(pdf_git_repo, force=True)
+        assert flags and set(flags) == {False}
+
+    def test_explicit_opt_in_forces_re_embed(self, pdf_git_repo: Path) -> None:
+        flags = self._captured_flags(pdf_git_repo, force=True, force_re_embed=True)
+        assert flags and set(flags) == {True}
+
+
 class TestIndexPdfFileGitMetadata:
     """AC-S5 / AC-S6: _index_pdf_file augments chunks with git metadata."""
 

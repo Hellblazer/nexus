@@ -806,7 +806,7 @@ class TestServiceLocalEmbedder:
         assert result.exit_code == 0, result.output
         assert calls == ["fetch"], "standard bge ONNX must be fetched for --service"
         assert _read_config(cfg_dir)["local"]["embed_model"] == _TIER1_MODEL
-        assert "bge-768 only" in result.output
+        assert "Voyage is a separate opt-in" in result.output
         # the interactive non-service prompt must NOT run
         assert "choose your on-device" not in result.output.lower()
 

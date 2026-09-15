@@ -476,7 +476,7 @@ class TestSessionEndFlush:
         output = session_end_flush()
 
         assert "Flushed 0" in output
-        assert "Expired 0" in output
+        assert "Quarantined 0" in output
 
 
 
@@ -504,7 +504,7 @@ def test_session_end_flush_cli_subcommand(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert "Flushed 0" in result.output
-    assert "Expired 0" in result.output
+    assert "Quarantined 0" in result.output
 
 
 # ── session lock stale cleanup ───────────────────────────────────────────────

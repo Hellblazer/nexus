@@ -4,8 +4,11 @@
 
 `nx index repo` walks a git repository and classifies each file by extension, routing code
 and prose to separate T3 collections served by the native `nexus-service` (Postgres 17 +
-pgvector) — embedding happens server-side: bge-768 (ONNX) in local mode, purpose-built Voyage
-AI models (`voyage-code-3` for code, `voyage-context-3` for prose) in managed-cloud mode.
+pgvector) — embedding happens server-side: bge-768 (ONNX) in local mode by default, or
+purpose-built Voyage AI models (`voyage-code-3` for code, `voyage-context-3` for prose) in
+managed-cloud mode always, and in local mode too when `NX_VOYAGE_API_KEY` reaches the
+service (nexus-umm29 opt-in — one embedding posture per boot, RDR-210 tracks serving both
+from one engine).
 Code files receive AST-aware chunking via tree-sitter with an embed-only context prefix;
 prose files receive semantic markdown chunking. Git frecency scores are computed in a single
 subprocess and attached to every chunk.
@@ -48,12 +51,12 @@ Classification is overridable via `.nexus.yml` (see [Per-Repo Configuration](#ne
 
 ## Dual-Collection Architecture
 
-Each indexed repository produces two T3 collections. Embedding happens server-side in the nexus-service (local mode: bge-768; managed-cloud: Voyage AI):
+Each indexed repository produces two T3 collections. Embedding happens server-side in the nexus-service (local mode: bge-768 by default, Voyage when keyed; managed-cloud: always Voyage AI):
 
-| Collection | Managed-cloud model | Local model | Contents |
-|---|---|---|---|
-| `code__<owner_id>__voyage-code-3__v1` | `voyage-code-3` | `bge-768` | Code files |
-| `docs__<owner_id>__voyage-context-3__v1` | `voyage-context-3` (CCE) | `bge-768` | Prose + PDF files |
+| Collection | Managed-cloud model | Local model, default | Local model, keyed | Contents |
+|---|---|---|---|---|
+| `code__<owner_id>__voyage-code-3__v1` | `voyage-code-3` | `bge-768` | `voyage-code-3` | Code files |
+| `docs__<owner_id>__voyage-context-3__v1` | `voyage-context-3` (CCE) | `bge-768` | `voyage-context-3` | Prose + PDF files |
 
 Conformant collection names (RDR-103) follow the 4-segment shape
 `<content_type>__<owner_id>__<embedding_model>__v<n>`, where `<owner_id>` is a stable slug
@@ -281,7 +284,7 @@ After indexing completes, `nx index repo` automatically runs topic discovery on 
 
 To skip this step, pass `--no-taxonomy`. This is useful for fast incremental updates or in CI pipelines where the additional API calls are not wanted.
 
-In **local mode** (bge-768 ONNX embeddings, embedded server-side by the nexus-service), code collections are excluded from taxonomy discovery by default — general-purpose embeddings produce poorly separated clusters on code. Prose, RDR, and knowledge collections are still discovered. In **managed-cloud mode** (Voyage AI), all collection types including code are included, since `voyage-code-3` embeddings produce well-separated clusters.
+In **local mode running keyless** (bge-768 ONNX embeddings, embedded server-side by the nexus-service — today's default), code collections are excluded from taxonomy discovery by default — general-purpose embeddings produce poorly separated clusters on code. Prose, RDR, and knowledge collections are still discovered. In **managed-cloud mode**, and in **local mode running keyed** (`NX_VOYAGE_API_KEY`, nexus-umm29), all collection types including code are included, since `voyage-code-3` embeddings produce well-separated clusters.
 
 ## Searching Indexed Repos
 

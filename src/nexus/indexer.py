@@ -2677,6 +2677,7 @@ def _index_prose_file(
     staleness_cache: "StalenessCache | None" = None,
     hooks: "HookRegistry | None" = None,
     batcher: object | None = None,
+    force_re_embed: bool = False,
 ) -> int:
     """Index a single prose file.  Delegates to nexus.prose_indexer.index_prose_file.
 
@@ -2707,6 +2708,7 @@ def _index_prose_file(
         now_iso=now_iso,
         score=score,
         force=force,
+        force_re_embed=force_re_embed,
         timeout=timeout,
         embed_fn=embed_fn,
         stage_timers=stage_timers,
@@ -2739,6 +2741,7 @@ def _index_pdf_file(
     staleness_cache: "StalenessCache | None" = None,
     hooks: "HookRegistry | None" = None,
     batcher: object | None = None,
+    force_re_embed: bool = False,
 ) -> int:
     """Index a single PDF file into the docs__ collection.
 
@@ -2905,7 +2908,9 @@ def _index_pdf_file(
                 documents=documents,
                 embeddings=embeddings,
                 metadatas=metadatas,
-                force_re_embed=force,
+                # nexus-4jj40: --force alone re-sends without re-embedding;
+                # only the explicit --re-embed opt-in forces a re-embed.
+                force_re_embed=force_re_embed,
             )
         except Exception as upload_exc:
             # nexus-bhlfy: mirrors commands/store.py's cotmr fix — stamp
@@ -5624,6 +5629,7 @@ def _run_index(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
+            force_re_embed=force_re_embed,
             timeout=read_timeout_seconds,
             embed_fn=_embed_fn,
             stage_timers=timers,
@@ -5661,6 +5667,7 @@ def _run_index(
             file, repo, docs_collection, docs_model, docs_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
+            force_re_embed=force_re_embed,
             timeout=read_timeout_seconds,
             chunk_chars=tuning.pdf_chunk_chars,
             embed_fn=_embed_fn,
@@ -5736,6 +5743,7 @@ def _run_index(
             file, repo, rdr_col_name, docs_model, rdr_col, db,
             voyage_key, git_meta, now_iso, score,
             force=force,
+            force_re_embed=force_re_embed,
             timeout=read_timeout_seconds,
             embed_fn=_embed_fn,
             stage_timers=timers,

@@ -192,7 +192,11 @@ class JooqRecordReflectionFeatureTest {
     // 92 -> 95: RDR-205 Phase 1 (nexus-em75s.2), tuples-001-baseline.xml
     // added three tables — nexus.tuples, nexus.tuple_claim_log,
     // nexus.tuple_tenants — each a generated Record type, +3.
-    private static final int EXPECTED_RECORD_TYPES = 95;
+    // 95 -> 96: RDR-207 Phase 1 (nexus-l3yuc.1), memory-004-quarantine-and-
+    // rollup.xml added nexus.memory_summaries, one generated Record type
+    // (MemorySummariesRecord). The two stamp columns on the pre-existing
+    // nexus.memory table are a column-count change only, no new Record type.
+    private static final int EXPECTED_RECORD_TYPES = 96;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

@@ -895,6 +895,7 @@ def reindex_cmd(name: str, force: bool) -> None:
                 missing.append(sp)
                 continue
             try:
+                # nexus-8143o: force_re_embed left at its default False -- the collection was just DELETED above, so every chash here is new and there is nothing to skip.
                 if p.suffix.lower() == ".pdf":
                     index_pdf(p, corpus=corpus, collection_name=name, force=True)
                 else:

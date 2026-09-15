@@ -581,8 +581,10 @@ def session_end_flush() -> str:
     function cannot verify. A future drift there could reopen an
     equivalent hole. Tracked as a follow-up.
     """
+    from nexus.db.t2.http_memory_store import MemoryExpireResult  # noqa: PLC0415 — deferred import; keeps the hook's startup cost off the T2 client
+
     flushed = 0
-    expired = 0
+    expired = MemoryExpireResult()
 
     try:
         try:
@@ -612,7 +614,7 @@ def session_end_flush() -> str:
             # Flushed entries are permanent (ttl=None); the expire sweep
             # below only reaps already-expired rows, so flush-then-expire
             # ordering is safe.
-            return n, db.expire()
+            return n, db.expire_detail()
 
         # RDR-128 P3 (nexus-sbxbe.3): route the flush + TTL sweep through the
         # T2 daemon so the detached SessionEnd grandchild does not open
@@ -653,7 +655,7 @@ def session_end_flush() -> str:
     except Exception as exc:  # noqa: BLE001 — session-end boundary: a storage error of ANY class must not crash the host (the SQLite-specific catch went with the substrate, 2026-08-29)
         _log.warning("session_end: storage error during flush/expire", error=str(exc))
 
-    return f"Session ended. Flushed {flushed} scratch entries. Expired {expired} memory entries."
+    return f"Session ended. Flushed {flushed} scratch entries. {expired.describe(prefix='memory ')}"
 
 
 def session_end() -> str:

@@ -12,6 +12,13 @@ kind: companion
 **Consumer:** conexus RDR-001 (upgrade-orchestration / multitenant cloud service), tracked engine-side by epic `nexus-w5v8j`
 **Release gate:** this epic is one of the four conditions on release-blocker `nexus-luxe6` (see the Release-blocker readiness section)
 
+*(Amended 2026-09-15, nexus-umm29.)* conexus RDR-001 is the historical
+addressee: it covers the hosted service and never restated the local-service
+invariant. The live consumer of this handoff is conexus RDR-002 (`nx upgrade`
+orchestration), which cites nexus RDR-157 and §7 below as its contract of
+record (conexus-97, 2026-09-15). conexus recorded the nexus-umm29 carve-out in
+its RDR-001 revision history.
+
 RDR-157 builds the per-OS/arch distribution for the RDR-152/155 storage stack:
 a GraalVM native-image `nexus-service` binary plus, for the local distribution,
 a ship-alongside relocatable PostgreSQL 17 + pgvector bundle, brought to a
@@ -77,6 +84,13 @@ the consumer.**
   (never a remote PG). The pgvector >= 0.8 (`iterative_scan`) floor is validated
   locally by `pg_provision.check_pgvector_available`.
 
+  *(Amended 2026-09-15, nexus-umm29.)* This invariant has one sanctioned
+  exception: the third-party embedding and rerank API (Voyage). The carve-out
+  was decided 2026-06-15 (Sam) and is bounded to that API. Local mode must
+  support both bge-768 and Voyage at once (Sam, 2026-09-15); today it serves
+  one per boot, picked by whether `NX_VOYAGE_API_KEY` reaches the service —
+  RDR-210 tracks the dual-mode engine that closes the gap.
+
 ### 4. `nx init --service` one-command collapse + native-binary launch (P4.1)
 
 - **Entry point:** `nx init --service` (LOCAL mode). Lifecycle commands:
@@ -113,6 +127,13 @@ the consumer.**
   service's bge-768 (768-dim) embedder; `minilm-384` is non-operative on the
   service T3 path and gets an advisory. (`nexus-jrrve` is closed as subsumed by
   RDR-160.)
+
+  *(Amended 2026-09-15, nexus-umm29.)* "Every collection" held only for the
+  keyless posture this primitive describes. With `NX_VOYAGE_API_KEY` reaching
+  the service, the engine instead embeds every collection with Voyage and
+  refuses bge collections — one posture per boot, not both at once. See the
+  primitive 3 Contract note above for the carve-out and RDR-210, which tracks
+  the dual-mode engine that would let both models be served from one boot.
 
 ### 6. Cloud remote-validation: owned by conexus RDR-001
 

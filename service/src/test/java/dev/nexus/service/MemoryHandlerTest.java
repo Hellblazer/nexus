@@ -872,6 +872,174 @@ class MemoryHandlerTest {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /** Phase E: each tenant authenticates with its own bound token (no wildcard). */
+    // ── RDR-207 (bead nexus-l3yuc.5): quarantine, reap, restore, summaries ────
+
+    /** Import a row past its TTL through the real /import route; returns its id. */
+    private long importExpiredRow(String tenant, String project, String title) throws Exception {
+        String ts = java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).minusDays(30)
+            .format(java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME);
+        var resp = post("/v1/memory/import", tenant, mapper.writeValueAsString(Map.of(
+            "project", project, "title", title, "content", "content of " + title,
+            "tags", "t", "ttl", 1, "timestamp", ts, "access_count", 0)));
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+        return ((Number) mapper.readValue(resp.body(), MAP_T).get("id")).longValue();
+    }
+
+    @Test
+    void expire_emitsBothKeys_oldClientShapeSurvives() throws Exception {
+        // THE old-client-against-new-engine proof: deleted_ids is still a list
+        // (empty from this engine on) and quarantined_ids names the row.
+        String project = "rdr207-expire-" + System.nanoTime();
+        long id = importExpiredRow(TENANT, project, "stale");
+
+        var resp = post("/v1/memory/expire", TENANT, "{}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat(body.get("deleted_ids"))
+            .as("an old client reads deleted_ids as a list, always empty now")
+            .isInstanceOf(List.class);
+        assertThat((List<?>) body.get("deleted_ids")).isEmpty();
+        assertThat((List<?>) body.get("quarantined_ids")).extracting(o -> ((Number) o).longValue())
+            .contains(id);
+
+        // Hidden from /get, visible on /quarantined with the full shape plus both stamps.
+        assertThat(get("/v1/memory/get?id=" + id, TENANT).statusCode()).isEqualTo(404);
+        var q = get("/v1/memory/quarantined?project=" + project, TENANT);
+        assertThat(q.statusCode()).isEqualTo(200);
+        var rows = mapper.readValue(q.body(), LIST_T);
+        assertThat(rows).hasSize(1);
+        Map<String, Object> row = rows.get(0);
+        assertThat(((Number) row.get("id")).longValue()).isEqualTo(id);
+        assertThat(row).containsKeys("project", "title", "content", "timestamp", "ttl",
+            "access_count", "last_accessed", "tags", "session", "agent");
+        assertThat(row.get("content")).as("Phase 3 reads content from here").isEqualTo("content of stale");
+        assertThat(row.get("quarantined_at")).isNotNull();
+        assertThat(row).containsEntry("rolled_up_at", null);
+    }
+
+    @Test
+    void quarantined_projectOptional_absentMeansWholeTenant() throws Exception {
+        String p1 = "rdr207-q1-" + System.nanoTime();
+        String p2 = "rdr207-q2-" + System.nanoTime();
+        long a = importExpiredRow(TENANT, p1, "a");
+        long b = importExpiredRow(TENANT, p2, "b");
+        post("/v1/memory/expire", TENANT, "{}");
+
+        var all = mapper.readValue(get("/v1/memory/quarantined", TENANT).body(), LIST_T);
+        assertThat(all).extracting(r -> ((Number) r.get("id")).longValue()).contains(a, b);
+        var only = mapper.readValue(get("/v1/memory/quarantined?project=" + p2, TENANT).body(), LIST_T);
+        assertThat(only).extracting(r -> ((Number) r.get("id")).longValue()).containsExactly(b);
+        var other = mapper.readValue(get("/v1/memory/quarantined", OTHER_TENANT).body(), LIST_T);
+        assertThat(other).extracting(r -> ((Number) r.get("id")).longValue())
+            .as("tenant isolation").doesNotContain(a, b);
+    }
+
+    @Test
+    void summaries_postMarksSources_getLists_reapDeletesMarkedOnly() throws Exception {
+        String project = "rdr207-rollup-" + System.nanoTime();
+        long marked = importExpiredRow(TENANT, project, "marked");
+        long unmarked = importExpiredRow(TENANT, project, "unmarked");
+        post("/v1/memory/expire", TENANT, "{}");
+
+        var ins = post("/v1/memory/summaries", TENANT, mapper.writeValueAsString(Map.of(
+            "project", project, "content", "summary of marked", "source_ids", List.of(marked),
+            "model", "test-model", "produced_by", "handler-test")));
+        assertThat(ins.statusCode()).as(ins.body()).isEqualTo(200);
+        long summaryId = ((Number) mapper.readValue(ins.body(), MAP_T).get("id")).longValue();
+        assertThat(summaryId).isPositive();
+
+        var list = mapper.readValue(get("/v1/memory/summaries?project=" + project, TENANT).body(), LIST_T);
+        assertThat(list).hasSize(1);
+        Map<String, Object> summary = list.get(0);
+        assertThat(((Number) summary.get("id")).longValue()).isEqualTo(summaryId);
+        assertThat(summary.get("content")).isEqualTo("summary of marked");
+        assertThat((List<?>) summary.get("source_ids")).extracting(o -> ((Number) o).longValue())
+            .containsExactly(marked);
+        assertThat(summary.get("model")).isEqualTo("test-model");
+        assertThat(summary.get("produced_by")).isEqualTo("handler-test");
+        assertThat(summary.get("produced_at")).isNotNull();
+        assertThat(mapper.readValue(get("/v1/memory/summaries", TENANT).body(), LIST_T))
+            .as("project optional").isNotEmpty();
+        assertThat(mapper.readValue(get("/v1/memory/summaries?project=" + project, OTHER_TENANT).body(), LIST_T))
+            .as("tenant isolation").isEmpty();
+
+        var q = mapper.readValue(get("/v1/memory/quarantined?project=" + project, TENANT).body(), LIST_T);
+        assertThat(q).filteredOn(r -> ((Number) r.get("id")).longValue() == marked)
+            .singleElement().satisfies(r -> assertThat(r.get("rolled_up_at")).isNotNull());
+        assertThat(q).filteredOn(r -> ((Number) r.get("id")).longValue() == unmarked)
+            .singleElement().satisfies(r -> assertThat(r.get("rolled_up_at")).isNull());
+
+        var reap = post("/v1/memory/reap", TENANT, "{}");
+        assertThat(reap.statusCode()).isEqualTo(200);
+        assertThat((List<?>) mapper.readValue(reap.body(), MAP_T).get("deleted_ids"))
+            .extracting(o -> ((Number) o).longValue())
+            .as("reap deletes the marked row and not the unmarked one")
+            .contains(marked).doesNotContain(unmarked);
+        var after = mapper.readValue(get("/v1/memory/quarantined?project=" + project, TENANT).body(), LIST_T);
+        assertThat(after).extracting(r -> ((Number) r.get("id")).longValue()).containsExactly(unmarked);
+    }
+
+    @Test
+    void summaries_unknownSourceId_409WithCode_nothingWritten() throws Exception {
+        String project = "rdr207-refuse-" + System.nanoTime();
+        long known = importExpiredRow(TENANT, project, "known");
+        post("/v1/memory/expire", TENANT, "{}");
+
+        var resp = post("/v1/memory/summaries", TENANT, mapper.writeValueAsString(Map.of(
+            "project", project, "content", "summary", "source_ids", List.of(known, 987654321L),
+            "model", "m")));
+        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat(mapper.readValue(resp.body(), MAP_T)).containsEntry("code", "unknown_source_id");
+        assertThat(mapper.readValue(get("/v1/memory/summaries?project=" + project, TENANT).body(), LIST_T))
+            .isEmpty();
+        var q = mapper.readValue(get("/v1/memory/quarantined?project=" + project, TENANT).body(), LIST_T);
+        assertThat(q).singleElement().satisfies(r -> assertThat(r.get("rolled_up_at")).isNull());
+
+        var empty = post("/v1/memory/summaries", TENANT, mapper.writeValueAsString(Map.of(
+            "project", project, "content", "summary", "source_ids", List.of(), "model", "m")));
+        assertThat(empty.statusCode()).as("empty source list is a 400").isEqualTo(400);
+        var noModel = post("/v1/memory/summaries", TENANT, mapper.writeValueAsString(Map.of(
+            "project", project, "content", "summary", "source_ids", List.of(known))));
+        assertThat(noModel.statusCode()).as("model is required").isEqualTo(400);
+    }
+
+    @Test
+    void restore_pathParameter_clearsStampsAndMakesPermanent() throws Exception {
+        String project = "rdr207-restore-" + System.nanoTime();
+        long id = importExpiredRow(TENANT, project, "back");
+        post("/v1/memory/expire", TENANT, "{}");
+        post("/v1/memory/summaries", TENANT, mapper.writeValueAsString(Map.of(
+            "project", project, "content", "summary", "source_ids", List.of(id), "model", "m")));
+
+        var resp = post("/v1/memory/" + id + "/restore", TENANT, "");
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+        assertThat(mapper.readValue(resp.body(), MAP_T)).containsEntry("restored", true);
+
+        var got = get("/v1/memory/get?id=" + id, TENANT);
+        assertThat(got.statusCode()).as("readable again").isEqualTo(200);
+        assertThat(mapper.readValue(got.body(), MAP_T)).containsEntry("ttl", null);
+        assertThat(mapper.readValue(get("/v1/memory/quarantined?project=" + project, TENANT).body(), LIST_T))
+            .isEmpty();
+
+        var again = post("/v1/memory/" + id + "/restore", TENANT, "");
+        assertThat(mapper.readValue(again.body(), MAP_T)).as("a live row is not a restore target")
+            .containsEntry("restored", false);
+        assertThat(post("/v1/memory/abc/restore", TENANT, "").statusCode())
+            .as("non-numeric id").isEqualTo(400);
+        assertThat(get("/v1/memory/" + id + "/restore", TENANT).statusCode())
+            .as("GET is not allowed").isEqualTo(405);
+        assertThat(post("/v1/memory/" + id + "/restore", OTHER_TENANT, "").statusCode()).isEqualTo(200);
+        assertThat(mapper.readValue(post("/v1/memory/" + id + "/restore", OTHER_TENANT, "").body(), MAP_T))
+            .as("tenant isolation").containsEntry("restored", false);
+    }
+
+    @Test
+    void rdr207Routes_methodGuards() throws Exception {
+        assertThat(get("/v1/memory/reap", TENANT).statusCode()).isEqualTo(405);
+        assertThat(post("/v1/memory/quarantined", TENANT, "{}").statusCode()).isEqualTo(405);
+        assertThat(delete("/v1/memory/summaries", TENANT).statusCode()).isEqualTo(405);
+    }
+
     private static String tokenFor(String tenant) {
         return OTHER_TENANT.equals(tenant) ? OTHER_TOKEN : TOKEN;
     }

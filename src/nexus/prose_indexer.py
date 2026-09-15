@@ -341,7 +341,9 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                 documents=documents,
                 embeddings=embeddings,
                 metadatas=metadatas,
-                force_re_embed=ctx.force,
+                # nexus-4jj40: --force alone re-sends without re-embedding;
+                # only the explicit --re-embed opt-in forces a re-embed.
+                force_re_embed=ctx.force_re_embed,
             )
         except Exception as upload_exc:
             # nexus-bhlfy: mirrors commands/store.py's cotmr fix — stamp

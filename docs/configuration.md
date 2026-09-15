@@ -13,7 +13,7 @@ Each level is deep-merged, with higher-priority values winning.
 
 ## Local Mode
 
-Nexus auto-detects local mode when cloud credentials are absent. The recommended setup is `uv tool install conexus && nx init`: `nx init` provisions the local service stack and locks its embedder to bge-768, fetching the ONNX the Java service reads (see [nx init](cli-reference.md#nx-init)). It does **not** add the `[local]` extra — the RDR-144 embedder picker that did was removed at RDR-174 P1.3. Request the extra at install time instead, with `uv tool install "conexus[local]"`; `[local]` adds the Python-side bge-768 embedder used by the non-service local paths, while plain `conexus` uses the built-in 384-dim MiniLM. Upgrade with [`nx self install`](cli-reference.md#nx-self-install), which carries the extras recorded in the install receipt into the new generation; `uv tool upgrade conexus` and `uv tool install --reinstall conexus` do not touch a generation install.
+Nexus auto-detects local mode when cloud credentials are absent. The recommended setup is `uv tool install conexus && nx init`: `nx init` provisions the local service stack and sets its embedder to bge-768 by default, fetching the ONNX the Java service reads (see [nx init](cli-reference.md#nx-init)). The service can be switched to embed with Voyage instead — see [CLI reference § Local mode with Voyage](cli-reference.md#nx-init). It does **not** add the `[local]` extra — the RDR-144 embedder picker that did was removed at RDR-174 P1.3. Request the extra at install time instead, with `uv tool install "conexus[local]"`; `[local]` adds the Python-side bge-768 embedder used by the non-service local paths, while plain `conexus` uses the built-in 384-dim MiniLM. Upgrade with [`nx self install`](cli-reference.md#nx-self-install), which carries the extras recorded in the install receipt into the new generation; `uv tool upgrade conexus` and `uv tool install --reinstall conexus` do not touch a generation install.
 
 | Env var | Default | Description |
 |---|---|---|
@@ -26,7 +26,7 @@ Nexus auto-detects local mode when cloud credentials are absent. The recommended
 
 | Key | Default | Description |
 |---|---|---|
-| `local.embed_model` | (auto-select) | The embedder `nx init` recorded (`BAAI/bge-base-en-v1.5` or `all-MiniLM-L6-v2`). Absent = legacy auto-select (bge if the `[local]` extra is importable, else MiniLM). |
+| `local.embed_model` | (auto-select) | The embedder `nx init` recorded (`BAAI/bge-base-en-v1.5` or `all-MiniLM-L6-v2`). Absent = legacy auto-select (bge if the `[local]` extra is importable, else MiniLM). A `voyage-code-3` / `voyage-context-3` value is also legal (nexus-umm29 opt-in) — it also needs `voyage_api_key` configured and the service restarted before the engine actually switches models; see [CLI reference § Local mode with Voyage](cli-reference.md#nx-init). |
 | `local.fastembed_cache_path` | `~/.local/share/nexus/fastembed_cache` (XDG-aware) | Stable cache dir for the bge-768 model so it is not re-downloaded to a volatile `$TMPDIR` on every reboot. |
 
 **Mode selection**: As of 6.0, managed-cloud mode activates when `NX_SERVICE_URL` (+ `NX_SERVICE_TOKEN`) is set — the client routes T3 through the hosted service (see [Managed-Cloud Credentials](#managed-cloud-credentials) below). Otherwise local mode is used. Set `NX_LOCAL=1` to force local mode even with service credentials present. (The legacy `CHROMA_API_KEY`/`VOYAGE_API_KEY` auto-detect predates the service substrate and applies only to pre-6.0 installs that have not migrated.)
@@ -155,7 +155,7 @@ T2 and T3 both route through the single native `nexus-service` (`nx daemon servi
 | `NX_SERVICE_TOKEN` | Bearer token for the nexus-service. | local: from `pg_credentials`; managed: user-supplied |
 | `NX_STORAGE_BACKEND` | Storage-backend env guard (RDR-152/158). `service` (the default and only backend) routes T2 stores + T3 vectors through the Java/Postgres nexus-service. `sqlite` is RETIRED (RDR-158 P3): setting it is a hard error carrying the stranded-install redirect — the SQLite stores were deleted; to migrate old local data, install the last migration-capable 6.x release, run `nx upgrade` there, then upgrade back. | `service` |
 | `NX_STORAGE_BACKEND_<STORE>` | Per-store override of `NX_STORAGE_BACKEND`, taking precedence over the global value. Known `<STORE>` suffixes: `T1`, `CATALOG`, `VECTORS`, `TAXONOMY`, `ASPECT_QUEUE` (e.g. `NX_STORAGE_BACKEND_VECTORS=service`). `service` is the only accepted value; `=sqlite` hard-errors (RDR-158 P3). | inherits `NX_STORAGE_BACKEND` |
-| `NX_LOCAL` | Force local mode (local nexus-service, bge-768) even when cloud credentials exist. | unset (cloud mode if credentials present) |
+| `NX_LOCAL` | Force local mode (local nexus-service, bge-768 by default, or Voyage when `NX_VOYAGE_API_KEY` reaches the service — nexus-umm29) even when cloud credentials exist. | unset (cloud mode if credentials present) |
 
 > Note: the retired `nx daemon t3` ChromaDB path and its `NX_T3_ADDR` override no longer route T3 serving; T3 traffic goes to the nexus-service via `NX_SERVICE_URL`.
 
@@ -328,7 +328,7 @@ Highly-accessed entries survive longer than their nominal TTL. Unaccessed entrie
 
 **Note**: This differs from the paper (Memory in the LLM Era) which uses division for relevance-decay. Nexus uses multiplication for heat-based survival — entries agents keep touching stick around longer. If you need strict time-bounded expiry regardless of access, use `ttl=None` (permanent) and explicit `memory_delete` instead.
 
-Periodic purge runs via `T2Database.expire(relevance_log_days=90)`, which also purges the `relevance_log` telemetry table (RDR-061 E2) of entries older than 90 days.
+Expiry quarantines; it does not delete (RDR-207). `T2Database.expire(relevance_log_days=90)`, which the session-end hook and `nx memory expire` run, hides every entry past its effective TTL from get, search and list, and keeps the row. `nx memory reap` deletes a quarantined entry only once a rollup summary covers it, and `nx memory restore ID` brings one back as permanent; see [nx memory](cli-reference.md#nx-memory). The same call also purges the `relevance_log` telemetry table (RDR-061 E2) of entries older than 90 days, and those rows are deleted.
 
 ## Verification
 

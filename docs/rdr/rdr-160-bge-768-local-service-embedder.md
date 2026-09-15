@@ -65,6 +65,17 @@ forced re-embed for every future local user.
    MiniLM-384 is **dropped from the service**.
 2. **`EmbedderRouter` local mode routes all collections to the bge-768 embedder**
    (model token `bge-base-en-v15-768`, dim 768, table `chunks_768`).
+
+   *(Amended 2026-09-15, nexus-umm29.)* This was the whole of local mode at the
+   time this RDR closed; it no longer is. With `NX_VOYAGE_API_KEY` reaching the
+   service, local mode instead routes every collection to Voyage
+   (voyage-code-3 for `code__`, voyage-context-3 for `docs__`/`rdr__`/
+   `knowledge__`) and refuses bge collections; keyless boots this RDR's
+   bge-768-only behavior unchanged. The carve-out was decided 2026-06-15 (Sam),
+   the same day as this RDR, and is bounded to the embedding and rerank API.
+   Sam requires local mode to support both embedders at once (2026-09-15);
+   today's engine serves one per boot, and RDR-210 tracks the dual-mode engine
+   that would let this item and the next both hold simultaneously.
 3. **Parity gate (the load-bearing correctness check).** The Java bge embedder's
    output must match the Python **fastembed** bge reference within tolerance,
    modeled on the existing `EmbedParityTest` / parity gate (`nexus-gmiaf.21`). bge
@@ -77,7 +88,9 @@ forced re-embed for every future local user.
    **standard (un-fused) bge ONNX** + tokenizer into a stable, Java-loadable path
    (the CLI is the network-facing side; the service only reads the file —
    consistent with the topology invariant that the local Java service makes no
-   outbound HTTP). NOTE (CA-1/RF-160-1): this is NOT fastembed's cached
+   outbound HTTP, **except the third-party embedding and rerank API when a
+   Voyage key is configured — see the nexus-umm29 carve-out amendment below**).
+   NOTE (CA-1/RF-160-1): this is NOT fastembed's cached
    `model_optimized.onnx` (that fails to load on onnxruntime-java); the service
    needs its own standard export. The CLI-fetches/service-reads *mechanism* from
    `nexus-jrrve` is reused; the model artifact differs.

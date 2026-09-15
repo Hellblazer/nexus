@@ -78,15 +78,17 @@ nx index repo ./my-project
 
 | Flag | Description |
 |------|-------------|
-| `--force` | Force re-indexing, bypassing staleness check (re-chunks and re-embeds in-place). For `pdf`/`md`/`rdr` this always re-embeds every chunk. For `repo` (nexus-4jj40 round 5), it re-chunks and re-sends every file but does NOT by itself force a Voyage re-embed; see the `repo`-only `--re-embed` flag below |
+| `--force` | Force re-indexing, bypassing staleness check (re-chunks and re-sends every chunk in place). Does NOT by itself force a Voyage re-embed — `repo` (nexus-4jj40 round 5) and `pdf`/`md`/`rdr` (nexus-8143o, same split) all share this: the server's own existence-partition still skips the billed embed call for a chunk whose text is byte-identical to what is already stored, refreshing only its metadata. See `--re-embed` below |
+| `--re-embed` | Requires `--force`. Also forces a Voyage re-embed of every chunk, even one whose text is unchanged (the pre-decoupling `--force` behaviour). Without it, `--force` alone re-chunks and re-sends every file/document; the server's own existence-partition still skips the billed embed call for a chunk whose text is byte-identical to what is already stored, refreshing only its metadata (e.g. a chunker classification change). Reserve `--re-embed` for a genuine embedding-model change. Applies to `repo`, `pdf`, `md`, `rdr`, and `nx dt index` |
 | `--monitor` | Print per-file progress lines. For `pdf` and `md`, also shows a per-chunk tqdm progress bar during embedding. Auto-enabled when stdout is not a TTY (piped, backgrounded, CI) |
+
+**On a plain re-index, `--force` alone keeps the skip — this is the common case, not an edge case.** Re-running `--force` on an already-indexed file re-chunks and re-sends every chunk, but for a chunk whose text has not changed the server's existence-partition still recognizes the same chash and skips the billed embed, refreshing only metadata; nothing about `--force` clears that chunk out first. For `pdf` specifically, `--force`'s own pre-flight cleanup (breaking a partial-ingest deadlock, unrelated to `--re-embed`) does NOT change this: it only deletes T3 chunks no live catalog manifest still references, so an already-indexed PDF's CURRENT chunks — the ones a re-run would otherwise skip re-embedding — survive that cleanup untouched. `--re-embed` is the only lever that forces the embed regardless.
 
 **`repo`-only flags:**
 
 | Flag | Description |
 |------|-------------|
 | `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh). Mutually exclusive with `--force` |
-| `--re-embed` | Requires `--force`. Also forces a Voyage re-embed of every chunk, even one whose text is unchanged (the pre-nexus-4jj40 `--force` behaviour). Without it, `--force` alone re-chunks and re-sends every file; the server's own existence-partition still skips the billed embed call for a chunk whose text is byte-identical to what is already stored, refreshing only its metadata (e.g. a chunker classification change). Reserve `--re-embed` for a genuine embedding-model change |
 | `--since-head` | Index only the git delta since the last indexed commit (`owners.head_hash`): changed files re-index, deleted files' docs prune, full-tree passes (staleness pulls, housekeeping, misclassified/orphan prunes, rg cache rebuild) are skipped. Worktree-inclusive. Falls back to a full index when no usable base exists; ignored with `--force`. The per-commit hook's fast path |
 | `--corpus [docs\|knowledge]` | Corpus routing for auto-classified prose/PDF files (default: `docs`). `docs` routes to `docs__` collections; `knowledge` routes to `knowledge__` collections instead |
 | `--on-locked {skip,wait}` | Behavior under contention (default: `wait`). Per-repo advisory lock (two `nx index repo` on the same repo): `skip` exits immediately, `wait` blocks. Catalog-write fairness (RDR-146): when a foreground interactive catalog write is pending, `skip` defers this run's catalog writes to the next idempotent pass, `wait` proceeds after a bounded yield. `NX_WRITE_PRIORITY=interactive|batch` overrides the tty-based priority of a run's catalog writes. |
@@ -403,8 +405,11 @@ nx dt index --uuid UUID-A --uuid UUID-B --uuid UUID-C
 # See what would be indexed without writing.
 nx dt index --selection --dry-run
 
-# Force re-indexing even if the record's content is unchanged.
+# Force re-indexing even if the record's content is unchanged (metadata-
+# only refresh for a byte-identical chunk -- add --re-embed to also pay
+# for a fresh Voyage embed).
 nx dt index --uuid 8EDC855D-213F-40AD-A9CF-9543CC76476B --force
+nx dt index --uuid 8EDC855D-213F-40AD-A9CF-9543CC76476B --force --re-embed
 ```
 
 | Flag | Description |
@@ -419,7 +424,8 @@ nx dt index --uuid 8EDC855D-213F-40AD-A9CF-9543CC76476B --force
 | `--corpus <name>` | Corpus name used to derive the default collection (default: `dt`). PDFs route to `knowledge__<corpus>-papers` (paper-shaped, aspect-eligible); markdown notes route to `docs__<corpus>` |
 | `--dry-run` | Print records that would be indexed; make no T3 writes |
 | `--extractor [auto\|docling\|mineru]` | PDF extraction backend for file-backed records (default `auto`). `mineru` is formula-aware but can OOM-fail on formula-dense pages; the recovery is `--extractor docling` (formula-stripped, always completes) |
-| `--force` | Force re-indexing every record, bypassing the staleness check (re-chunks and re-embeds in place) — same semantics as `nx index pdf --force`. Forwarded to `index_pdf`/`index_markdown`'s own `force` kwarg for both file-backed records and, with `--dt-content`, non-file-backed ones; catalog identity and tumbler are preserved (nexus-gup3b). Without it, an unchanged record prints `skipped: index fresh (use --force)` |
+| `--force` | Force re-indexing every record, bypassing the staleness check (re-chunks and re-sends every chunk in place) — same decoupled semantics as `nx index pdf --force` (nexus-8143o): does NOT by itself force a Voyage re-embed. Forwarded to `index_pdf`/`index_markdown`'s own `force` kwarg for both file-backed records and, with `--dt-content`, non-file-backed ones; catalog identity and tumbler are preserved (nexus-gup3b). Without it, an unchanged record prints `skipped: index fresh (use --force)` |
+| `--re-embed` | Requires `--force`. Also forces a Voyage re-embed of every chunk, even one whose text is unchanged (the pre-nexus-8143o `--force` behaviour). Forwarded to `index_pdf`/`index_markdown`'s own `force_re_embed` kwarg, same split as `nx index pdf`/`md`/`rdr`/`repo` |
 | `--allow-page-gap` | Accept a PDF whose extracted pages do not cover DEVONthink's `pageCount` (nexus-i0cwh). By default a gap is a per-record failure listed under `Failures:` with the missing page numbers, and the run exits non-zero; either way the gap is recorded on the catalog row as `meta.page_gap` (cleared on the next full-coverage run) |
 | `--link-semantic` | After a record indexes, create `relates` edges to its DT similarity + explicit-link neighbours already indexed in nexus (RDR-139 Layer B). DT unavailable → zero edges. Opt-in |
 | `--writeback` | After a record indexes, stamp the nexus identity back onto the DT record (RDR-139 Layer F): `nx-indexed` / `nx-tumbler:<t>` tags + a tumbler backlink annotation. nexus-owned namespace only; never edits user content. Opt-in |
@@ -1932,14 +1938,37 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 | `get [ID]` | Read entry by numeric ID |
 | `get --project NAME --title NAME` | Read entry by project + title |
 | `search QUERY` | Keyword search (served by the engine's Postgres full-text index) |
-| `list` | List entries |
-| `delete` | Delete one or more entries |
-| `expire` | Remove expired entries |
+| `list` | List entries (`--quarantined`: the quarantined entries instead) |
+| `delete` | Delete one or more entries, a quarantined one included |
+| `expire` | Quarantine expired entries (hidden, not deleted) |
+| `reap` | Delete the quarantined entries that carry a rollup mark |
+| `restore ID` | Bring a quarantined entry back as a permanent entry |
+| `summaries [ID]` | List rollup summaries, or show one by ID |
+| `rollup --project NAME` | Summarize a project's quarantined entries by month and mark them for `reap` |
 | `promote ID --collection NAME` | Promote entry to T3 by ID |
+
+**Quarantine (RDR-207).** Expiry does not delete. An entry past its TTL is quarantined: `get`, `search` and `list` stop showing it, but the row stays in the table. That is why an entry you expected to be gone can still exist while nothing finds it.
+
+- `nx memory list --quarantined [--project NAME]` shows the quarantined entries with the time each was quarantined. An entry that also shows "rolled up" is covered by a rollup summary.
+- `nx memory reap` deletes only quarantined entries that carry a rollup mark, and removes their topic assignments. It has no age horizon: an unmarked entry stays quarantined however old it is. It lists what it will delete and asks first; `-y` / `--yes` skips the prompt.
+- `nx memory restore ID` brings an entry back as permanent. It does not re-enter its old TTL, and any rollup mark is cleared.
+- `nx memory delete --id ID` (or `--project` + `--title`) deletes one quarantined entry outright. You do not restore it first. `--all` covers only live entries.
+- `nx memory promote` reads the entry the way `get` does, so it reports a quarantined entry as not found. Restore the entry first, then promote it. Delete and promote differ because the design names delete as the way to remove a quarantined entry and names no promote for one.
+- `nx memory summaries [ID] [--project NAME]` lists rollup summaries, or shows one with its source entry ids. A summary is kept after `reap` deletes the entries it covers. No verb deletes a summary; that is an operator's decision, taken in SQL.
+- `nx doctor` reports a `memory.quarantine` row: quarantined entries without a mark, entries marked and waiting for `reap`, and the summary count. It is informational: it warns only when it cannot read the memory store at all, and shows "not applicable" on a box with no engine-backed T2.
+- Against an engine older than RDR-207 these verbs exit with "the engine predates RDR-207 quarantine".
 
 **`put` flags:** `--tags`, `--ttl` (default: `permanent`, reversed 2026-09-12 by nexus-473mx: a caller now asks for a clock explicitly; `--ttl 0` is rejected, not coerced), `--merge` (canonical-fact merge: fold into an existing high-overlap entry instead of creating a duplicate, non-destructive), `--merge-threshold FLOAT` (word-set Jaccard threshold for `--merge`, default: `0.5`)
 
-**`list` flags:** `--project NAME` (filter by project), `-a` / `--agent NAME` (filter by agent name)
+**`list` flags:** `--project NAME` (filter by project), `-a` / `--agent NAME` (filter by agent name), `--quarantined` (list quarantined entries instead)
+
+**`reap` flags:** `-y` / `--yes` (skip the confirmation prompt)
+
+**`summaries` flags:** `-p` / `--project NAME` (filter by project)
+
+**`rollup` flags:** `-p` / `--project NAME` (required), `--dry-run` (print the groups and their summaries; write nothing)
+
+`nx memory rollup` is the attended step that makes quarantined entries reapable. It groups one project's unmarked quarantined entries by month and prints the groups before doing anything; the cost is one summarizer call (`claude -p`, the same path `operator_summarize` uses) per group. The month is that of each entry's timestamp, which is its last write, since a put or a merge refreshes it and no creation date is kept. A summary must contain every source entry's title, or that group is reported and left unmarked; this is a floor, not a check that the summary is faithful. A group that passes is stored as a summary and its entries are marked, one group at a time. A group that fails (the summarizer errors, the title check fails, one of its entries was restored or re-put while its summary was being written, or the engine refuses the summary) is reported, the other groups still run, and the command exits nonzero. Marking deletes nothing: `nx memory reap` does that later, and `nx memory restore` still brings an entry back until then.
 
 **`promote` flags:** `--collection` (required), `--tags`, `--remove`
 
@@ -2335,6 +2364,13 @@ the voyage collection. This is the same underlying gap tracked as a
 follow-up in nexus-ddmfg (the engine's voyage-only-mode-flip after
 restart) — that bead's scope now explicitly includes this stale/orphaned
 bge-data-after-a-keyed-write case, not just the engine-restart case.
+
+**Re-running `nx init` reverts this opt-in.** Both `nx init` and the upgrade
+ladder's provision leg unconditionally write `local.embed_model` back to
+bge-768; a later `nx daemon service` restart then boots keyless and the
+Voyage collections become unreadable until you redo the recipe above. RDR-210
+tracks the dual-mode engine (one boot serving both bge-768 and Voyage) that
+removes the need for this opt-in dance and the revert defect together.
 
 **Beads PRIME.md (user-level)** (nexus-cnzei.8). Runs unconditionally,
 independent of the local/managed/cloud dispatch above: when `bd` is on

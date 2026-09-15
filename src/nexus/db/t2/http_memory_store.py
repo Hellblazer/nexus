@@ -19,7 +19,8 @@ Server-side vs client-composed methods:
 Server-side (all storage/SQL logic runs on the Java service):
     put, put_or_merge, get, resolve_title, search, list_entries,
     get_projects_with_prefix, search_glob, search_by_tag, get_all,
-    delete, expire, merge_memories, flag_stale_memories
+    delete, expire, merge_memories, flag_stale_memories,
+    reap, restore, list_quarantined, insert_summary, list_summaries (RDR-207)
 
     put_or_merge is server-side (POST /v1/memory/put_or_merge):
     the Jaccard scan + conditional merge-or-upsert runs atomically
@@ -37,6 +38,7 @@ Client-composed (pure-Python logic over server-side data):
 from __future__ import annotations
 
 import contextlib
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import httpx
@@ -72,6 +74,44 @@ from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
 
 # ── HttpMemoryStore ────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class MemoryExpireResult:
+    """What one ``expire()`` sweep did (RDR-207 Phase 1, bead nexus-l3yuc.9).
+
+    ``deleted_ids`` is empty from engine-service RDR-207 Phase 1 on and is
+    kept for the response shape; ``quarantined_ids`` names the rows the sweep
+    hid. ``swept`` is the count callers that only ever wanted "how many rows
+    left view" read.
+    """
+
+    deleted_ids: list[int] = field(default_factory=list)
+    quarantined_ids: list[int] = field(default_factory=list)
+
+    @property
+    def swept(self) -> int:
+        return len(self.deleted_ids) + len(self.quarantined_ids)
+
+    def describe(self, prefix: str = "") -> str:
+        """One sentence for the user, worded off which list is non-empty.
+
+        An engine older than RDR-207 still deletes on expiry and reports it
+        in ``deleted_ids``. Calling that a quarantine would tell the user the
+        rows are recoverable when they are gone, which is RDR-207's Gap 2.
+        """
+        def _n(count: int) -> str:
+            return f"{count} {prefix}{'entry' if count == 1 else 'entries'}"
+
+        if not self.deleted_ids:
+            return f"Quarantined {_n(len(self.quarantined_ids))}."
+        deleted = (
+            f"Deleted {_n(len(self.deleted_ids))} (this engine predates RDR-207 "
+            "quarantine, so expiry deleted them)"
+        )
+        if self.quarantined_ids:
+            return f"{deleted}; quarantined {len(self.quarantined_ids)}."
+        return f"{deleted}."
 
 
 class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
@@ -478,10 +518,130 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
     # ── Housekeeping ───────────────────────────────────────────────────────────
 
-    def expire(self) -> list[int]:
-        """Delete TTL-expired memory entries. Returns list of deleted row IDs."""
+    def expire(self) -> MemoryExpireResult:
+        """Sweep TTL-expired memory entries (RDR-207: quarantine, not deletion).
+
+        From engine-service RDR-207 Phase 1 on, ``POST /v1/memory/expire``
+        stamps ``quarantined_at`` on every row past its heat-weighted TTL and
+        reports them in ``quarantined_ids``; ``deleted_ids`` stays in the
+        response and is always empty. Against an older engine the response
+        carries ``deleted_ids`` only, so ``quarantined_ids`` reads as empty
+        here: both directions parse (docs/wire-contract-pending.md,
+        ``[additive]``). A quarantined row is hidden from every read exactly
+        as a deleted one was; ``nx memory restore <id>`` (Phase 2) brings it
+        back.
+        """
         resp = self._post("/v1/memory/expire", {})
+        return MemoryExpireResult(
+            deleted_ids=[int(i) for i in resp.get("deleted_ids", [])],
+            quarantined_ids=[int(i) for i in resp.get("quarantined_ids", [])],
+        )
+
+    # ── Quarantine and rollup (RDR-207) ────────────────────────────────────────
+    #
+    # Every route below is new in the engine carrying RDR-207 Phase 1. An older
+    # engine answers each with 404, which propagates as httpx.HTTPStatusError;
+    # find_quarantined is the one exception (see its docstring).
+
+    def reap(self) -> list[int]:
+        """Delete every quarantined row that carries a rollup mark; return the ids.
+
+        ``POST /v1/memory/reap``. An unmarked quarantined row is never touched,
+        and there is no age horizon. The engine runs no taxonomy cascade; a
+        caller that wants one runs it from the rows it listed before reaping.
+        """
+        resp = self._post("/v1/memory/reap", {})
         return [int(i) for i in resp.get("deleted_ids", [])]
+
+    def restore(self, id: int) -> bool:
+        """Bring a quarantined row back as a permanent entry.
+
+        ``POST /v1/memory/{id}/restore`` clears ``quarantined_at`` and
+        ``rolled_up_at`` and makes the row permanent (``ttl`` None). ``False``
+        when the tenant has no quarantined row with that id.
+        """
+        resp = self._post(f"/v1/memory/{int(id)}/restore", {})
+        return bool(resp.get("restored", False))
+
+    def list_quarantined(self, project: str | None = None) -> list[dict[str, Any]]:
+        """Every quarantined row: the full ``get`` record plus both stamps.
+
+        ``GET /v1/memory/quarantined``, the one read that sees quarantined rows.
+        No *project* lists the whole tenant. ``quarantined_at`` and
+        ``rolled_up_at`` are UTC second strings, ``None`` when unset.
+        """
+        params = {"project": project} if project else {}
+        resp = self._get("/v1/memory/quarantined", params=params)
+        return [_normalize(r) for r in resp]
+
+    def find_quarantined(
+        self,
+        project: str | None = None,
+        title: str | None = None,
+        id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """One quarantined row by numeric id or by (project, title), or ``None``.
+
+        For the explicit single-row delete of a quarantined entry (RDR-207
+        §Day 2 Operations): ``get`` hides quarantined rows, so a caller that
+        resolves a row before deleting it looks here when ``get`` finds
+        nothing. Filters :meth:`list_quarantined` client-side. An engine older
+        than RDR-207 has no quarantine and answers the listing with 404, which
+        reads as ``None`` here, the same answer ``get`` gave.
+        """
+        if id is None and (project is None or title is None):
+            raise ValueError("Provide either id or both project and title.")
+        try:
+            rows = self.list_quarantined(project=project if id is None else None)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        for row in rows:
+            if id is not None:
+                if row["id"] == id:
+                    return row
+            elif row["project"] == project and row["title"] == title:
+                return row
+        return None
+
+    def insert_summary(
+        self,
+        project: str,
+        content: str,
+        source_ids: list[int],
+        model: str,
+        produced_by: str | None = None,
+    ) -> int:
+        """Store a rollup summary and mark its source rows; return the summary id.
+
+        ``POST /v1/memory/summaries``, one engine transaction. The engine
+        refuses with 409 (``"code": "unknown_source_id"``), writing nothing,
+        when a source id is not a row of *project*.
+        """
+        payload: dict[str, Any] = {
+            "project": project,
+            "content": content,
+            "source_ids": [int(i) for i in source_ids],
+            "model": model,
+        }
+        if produced_by is not None:
+            payload["produced_by"] = produced_by
+        resp = self._post("/v1/memory/summaries", payload)
+        return int(resp["id"])
+
+    def list_summaries(self, project: str | None = None) -> list[dict[str, Any]]:
+        """Every rollup summary, newest shape ``{id, project, content,
+        source_ids, produced_at, model, produced_by}``.
+
+        ``GET /v1/memory/summaries``; no *project* lists the whole tenant.
+        """
+        params = {"project": project} if project else {}
+        resp = self._get("/v1/memory/summaries", params=params)
+        return [
+            {**r, "id": int(r["id"]), "source_ids": [int(i) for i in r.get("source_ids") or []]}
+            for r in resp
+        ]
 
     # ── Consolidation (RDR-061 E6) ─────────────────────────────────────────────
 

@@ -126,17 +126,40 @@ def test_empty_ids_noop(monkeypatch):
     db.upsert_chunks_with_embeddings.assert_not_called()
 
 
-# ── RDR-181 §Approach step 3: force bypasses this function's OWN client-side
-# probe entirely (a distinct, earlier client-side skip predating RDR-181's
-# server-side existence-partition) and forwards force_re_embed=True so the
-# server also re-embeds unconditionally. Without this, --force reindex would
-# still take the metadata-only-update branch below for known chashes,
-# silently defeating the caller's intent. ──────────────────────────────────
+# ── RDR-181 §Approach step 3 / nexus-8143o: force bypasses this function's
+# OWN client-side probe entirely (a distinct, earlier client-side skip
+# predating RDR-181's server-side existence-partition). Without this,
+# --force reindex would still take the metadata-only-update branch below
+# for known chashes, silently defeating the caller's intent to bypass
+# staleness. ``force_re_embed`` is a SEPARATE, decoupled knob (nexus-8143o,
+# extending nexus-4jj40 round 5's `repo`-only split to `pdf`/`md`/`rdr`):
+# it controls whether the SERVER also re-embeds unconditionally, and is
+# forwarded verbatim regardless of its value -- ``force=True`` alone no
+# longer implies ``force_re_embed=True``. ───────────────────────────────────
 
 
-def test_force_true_bypasses_probe_and_sets_force_re_embed(monkeypatch):
+def test_force_true_without_re_embed_bypasses_probe_and_sets_force_re_embed_false(monkeypatch):
+    """--force alone (force_re_embed defaults False) still bypasses the
+    client-side probe (every chunk re-sent), but must NOT set
+    force_re_embed=True on the server call -- the whole point of this
+    bead's decoupling."""
     db = _service_db(monkeypatch, existing={_IDS[0], _IDS[2]})
     sent = _upsert_skip_reembed(db, _COLL, _IDS, _DOCS, _EMB, _METAS, force=True)
+    assert sent == 3  # every chunk goes down the embed path, not just the new one
+    db.existing_ids.assert_not_called()  # the client-side probe is skipped entirely
+    db.upsert_chunks_with_embeddings.assert_called_once_with(
+        _COLL, _IDS, _DOCS, _EMB, _METAS, force_re_embed=False,
+    )
+    db.update_chunks.assert_not_called()  # no metadata-only branch under force
+
+
+def test_force_true_and_force_re_embed_true_sets_force_re_embed(monkeypatch):
+    """--force --re-embed reaches the server as force_re_embed=True (the
+    pre-decoupling --force-alone behaviour, now opt-in)."""
+    db = _service_db(monkeypatch, existing={_IDS[0], _IDS[2]})
+    sent = _upsert_skip_reembed(
+        db, _COLL, _IDS, _DOCS, _EMB, _METAS, force=True, force_re_embed=True,
+    )
     assert sent == 3  # every chunk goes down the embed path, not just the new one
     db.existing_ids.assert_not_called()  # the client-side probe is skipped entirely
     db.upsert_chunks_with_embeddings.assert_called_once_with(

@@ -206,14 +206,18 @@ at self-provisioned substrates the suite manages itself; `NX_SERVICE_HOST`/
   RUNFENCE index-run fence, one vector round trip — exact-count non-vacuity
   (`SMOKE_EXPECTED`), fail-loud on any mismatch or unreachable service.
 
-The gate is **bge-768-only** since nexus-w6h2m (2026-07-28): a local service
-embeds with bge-768 and nothing else, so `cloud_mode` tests are deselected and
-the gate no longer needs a `VOYAGE_API_KEY` for its own corpus. Two markers
-carve tests out, each with an exact-count guard: `lived_in` (excludes tests
-that dispatch real `claude -p` or need seeded lived-in corpora) and
-`cloud_mode`. A guard trip or any new hard failure is real signal — compensate
-with live validation of the release's changed paths (the v6.3.5/v6.3.6
-pattern: exercise the advertised claims against the real deployment).
+The gate runs the local service **keyless** since nexus-w6h2m (2026-07-28): no
+`NX_VOYAGE_API_KEY` reaches it, so it embeds every collection with bge-768 and
+`cloud_mode` tests are deselected — the gate needs no `VOYAGE_API_KEY` for its
+own corpus. This is a posture choice, not the engine's ceiling: a keyed local
+service embeds with Voyage instead (nexus-umm29 carve-out), but nothing in this
+gate, or anywhere else in the release battery, boots the local service keyed —
+that combination is untested by any gate. Two markers carve tests out, each
+with an exact-count guard: `lived_in` (excludes tests that dispatch real
+`claude -p` or need seeded lived-in corpora) and `cloud_mode`. A guard trip or
+any new hard failure is real signal — compensate with live validation of the
+release's changed paths (the v6.3.5/v6.3.6 pattern: exercise the advertised
+claims against the real deployment).
 
 If unit-suite Py3.13 surfaces a known nexus-9eaz-family flake (`test_migration_guard_*`, `test_concurrent_apply_pending_*`, `test_concurrent_bootstrap`, `test_concurrent_t2database_construction`, `test_stop_claiming_on_running_worker_causes_exit`): these are marked with `@_skip_on_gha_flake` on main, so they shouldn't fire here. If they DO fire locally, that's signal: investigate before proceeding.
 

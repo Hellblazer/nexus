@@ -125,6 +125,46 @@ def test_index_rdr_force_flag(runner: CliRunner, repo_with_rdrs: Path) -> None:
     assert kwargs.get("force") is True
 
 
+# ── --re-embed flag (nexus-8143o, extending nexus-4jj40 round 5's split
+# from `repo` to `pdf`/`md`/`rdr`) ───────────────────────────────────────────
+
+def test_index_rdr_re_embed_requires_force(runner: CliRunner, repo_with_rdrs: Path) -> None:
+    """--re-embed alone (no --force) is a UsageError, mirroring pdf/md."""
+    result = runner.invoke(main, ["index", "rdr", str(repo_with_rdrs), "--re-embed"])
+    assert result.exit_code != 0
+    assert "--re-embed requires --force" in result.output
+
+
+def test_index_rdr_force_without_re_embed_defaults_false(
+    runner: CliRunner, repo_with_rdrs: Path
+) -> None:
+    """--force alone must NOT set force_re_embed=True on the
+    batch_index_markdowns call (the whole point of this bead)."""
+    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+        result = runner.invoke(main, ["index", "rdr", str(repo_with_rdrs), "--force"])
+
+    assert result.exit_code == 0, result.output
+    _, kwargs = mock_batch.call_args
+    assert kwargs.get("force") is True
+    assert kwargs.get("force_re_embed") is False
+
+
+def test_index_rdr_force_and_re_embed_together(
+    runner: CliRunner, repo_with_rdrs: Path
+) -> None:
+    """--force --re-embed reaches batch_index_markdowns as
+    force_re_embed=True."""
+    with patch("nexus.doc_indexer.batch_index_markdowns", return_value={}) as mock_batch:
+        result = runner.invoke(
+            main, ["index", "rdr", str(repo_with_rdrs), "--force", "--re-embed"]
+        )
+
+    assert result.exit_code == 0, result.output
+    _, kwargs = mock_batch.call_args
+    assert kwargs.get("force") is True
+    assert kwargs.get("force_re_embed") is True
+
+
 def test_index_rdr_monitor_flag_and_on_file(
     runner: CliRunner, repo_with_rdrs: Path
 ) -> None:

@@ -2370,7 +2370,26 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
     "--force",
     is_flag=True,
     default=False,
-    help="Force re-indexing, bypassing staleness check (re-chunks and re-embeds in-place).",
+    help="Force re-indexing, bypassing staleness check (re-chunks and "
+         "re-sends every chunk in place). Does NOT force a Voyage "
+         "re-embed on its own (nexus-8143o, extending nexus-4jj40 round "
+         "5's --force/--re-embed split from `repo` to `pdf`/`md`/`rdr`): "
+         "the server's own existence-partition still skips the embed call "
+         "for a chunk whose text is byte-identical to what is already "
+         "stored, refreshing only its metadata. Add --re-embed for the "
+         "old force-re-embeds-everything behaviour.",
+)
+@click.option(
+    "--re-embed",
+    "re_embed",
+    is_flag=True,
+    default=False,
+    help="With --force: also force a Voyage re-embed of every chunk, even "
+         "ones whose text is unchanged (the pre-nexus-8143o --force "
+         "behaviour). Has no effect without --force -- there is nothing to "
+         "re-embed for a file the staleness check already skips. Reserve "
+         "for a genuine embedding-model change; a plain reclassification-"
+         "only pass does not need it.",
 )
 @click.option("--monitor", is_flag=True, default=False,
               help="Print chunking metadata after indexing. Auto-enabled when stdout is not a TTY.")
@@ -2435,7 +2454,7 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
         "run is marked loudly in the summary when this override is used."
     ),
 )
-def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str, streaming: str, source_uri: str | None, allow_degraded_extraction: bool) -> None:
+def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collection: str | None, dry_run: bool, force: bool, re_embed: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str, streaming: str, source_uri: str | None, allow_degraded_extraction: bool) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     import time as _time  # noqa: PLC0415 — deliberate function-local import (stdlib, command-local alias)
 
@@ -2510,6 +2529,12 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         raise click.UsageError("--force and --dry-run are mutually exclusive.")
     if dry_run and dir_path is not None:
         raise click.UsageError("--dry-run is not supported with --dir.")
+    if re_embed and not force:
+        raise click.UsageError(
+            "--re-embed requires --force -- a file the staleness check "
+            "skips never reaches the server, so there is nothing to "
+            "re-embed."
+        )
 
     # ── Batch mode (--dir) ──────────────────────────────────────────────
     if dir_path is not None:
@@ -2642,7 +2667,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                 try:
                     n = index_pdf(
                         pdf, corpus=corpus, collection_name=collection,
-                        force=force, enrich=enrich, extractor=extractor,
+                        force=force, force_re_embed=re_embed, enrich=enrich, extractor=extractor,
                         on_formula_oom=on_formula_oom, streaming=streaming,
                         allow_degraded_extraction=allow_degraded_extraction,
                     )
@@ -2873,6 +2898,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
         try:
             meta = index_pdf(path, corpus=corpus, collection_name=collection, force=force,
+                             force_re_embed=re_embed,
                              return_metadata=True, on_progress=on_chunk_progress, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming,
                              source_uri=source_uri or "", on_fork_detected=fork_holder.extend,
                              allow_degraded_extraction=allow_degraded_extraction)
@@ -2904,7 +2930,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         click.echo(f"\n  {'  '.join(parts)}")
     else:
         try:
-            n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming,
+            n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, force_re_embed=re_embed, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming,
                           source_uri=source_uri or "", on_fork_detected=fork_holder.extend,
                           allow_degraded_extraction=allow_degraded_extraction)
         except IndexRunVerifyRefused as e:
@@ -2974,7 +3000,26 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     "--force",
     is_flag=True,
     default=False,
-    help="Force re-indexing, bypassing staleness check.",
+    help="Force re-indexing, bypassing staleness check (re-chunks and "
+         "re-sends every chunk in place). Does NOT force a Voyage "
+         "re-embed on its own (nexus-8143o, extending nexus-4jj40 round "
+         "5's --force/--re-embed split from `repo` to `pdf`/`md`/`rdr`): "
+         "the server's own existence-partition still skips the embed call "
+         "for a chunk whose text is byte-identical to what is already "
+         "stored, refreshing only its metadata. Add --re-embed for the "
+         "old force-re-embeds-everything behaviour.",
+)
+@click.option(
+    "--re-embed",
+    "re_embed",
+    is_flag=True,
+    default=False,
+    help="With --force: also force a Voyage re-embed of every chunk, even "
+         "ones whose text is unchanged (the pre-nexus-8143o --force "
+         "behaviour). Has no effect without --force -- there is nothing to "
+         "re-embed for a file the staleness check already skips. Reserve "
+         "for a genuine embedding-model change; a plain reclassification-"
+         "only pass does not need it.",
 )
 @click.option("--monitor", is_flag=True, default=False,
               help="Print chunking metadata after indexing. Auto-enabled when stdout is not a TTY.")
@@ -2993,7 +3038,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         "document in a different --collection than this run targets."
     ),
 )
-def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, monitor: bool, source_uri: str | None) -> None:
+def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, re_embed: bool, monitor: bool, source_uri: str | None) -> None:
     """Extract and index a Markdown file into T3 docs__CORPUS (or --collection)."""
     from nexus.corpus import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         EmbeddingProfileMismatchError,
@@ -3011,6 +3056,13 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
         SourceUriNotFoundError,
         UnchunkableContentError,
     )
+
+    if re_embed and not force:
+        raise click.UsageError(
+            "--re-embed requires --force -- a file the staleness check "
+            "skips never reaches the server, so there is nothing to "
+            "re-embed."
+        )
 
     # Normalize --collection through t3_collection_name() so bare names like
     # "mynotes" become "knowledge__mynotes__voyage-context-3__v1", matching
@@ -3065,6 +3117,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
                 chunk_bar.refresh()
 
             meta = index_markdown(path, corpus=corpus, collection_name=collection, force=force,
+                                  force_re_embed=re_embed,
                                   return_metadata=True, on_progress=on_chunk_progress,
                                   source_uri=source_uri or "", on_fork_detected=fork_holder.extend)
             chunk_bar.close()
@@ -3073,6 +3126,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
             click.echo(f"\n  Chunks: {n}  Sections: {sections}")
         else:
             n = index_markdown(path, corpus=corpus, collection_name=collection, force=force,
+                               force_re_embed=re_embed,
                                source_uri=source_uri or "", on_fork_detected=fork_holder.extend)
     except CredentialsMissingError as exc:
         # GH #336: surface the silent failure visibly. Click maps
@@ -3139,11 +3193,30 @@ _RDR_EXCLUDES = {"README.md", "TEMPLATE.md"}
     "--force",
     is_flag=True,
     default=False,
-    help="Force re-indexing, bypassing staleness check.",
+    help="Force re-indexing, bypassing staleness check (re-chunks and "
+         "re-sends every chunk in place). Does NOT force a Voyage "
+         "re-embed on its own (nexus-8143o, extending nexus-4jj40 round "
+         "5's --force/--re-embed split from `repo` to `pdf`/`md`/`rdr`): "
+         "the server's own existence-partition still skips the embed call "
+         "for a chunk whose text is byte-identical to what is already "
+         "stored, refreshing only its metadata. Add --re-embed for the "
+         "old force-re-embeds-everything behaviour.",
+)
+@click.option(
+    "--re-embed",
+    "re_embed",
+    is_flag=True,
+    default=False,
+    help="With --force: also force a Voyage re-embed of every chunk, even "
+         "ones whose text is unchanged (the pre-nexus-8143o --force "
+         "behaviour). Has no effect without --force -- there is nothing to "
+         "re-embed for a file the staleness check already skips. Reserve "
+         "for a genuine embedding-model change; a plain reclassification-"
+         "only pass does not need it.",
 )
 @click.option("--monitor", is_flag=True, default=False,
               help="Print per-file progress lines. Auto-enabled when stdout is not a TTY.")
-def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
+def index_rdr_cmd(path: Path, force: bool, re_embed: bool, monitor: bool) -> None:
     """Index RDR documents into T3 rdr__REPO-HASH8.
 
     PATH is either a repo root (glob all docs/rdr/*.md, excluding README/TEMPLATE)
@@ -3153,6 +3226,13 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
     from nexus.doc_indexer import batch_index_markdowns  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.indexer import _repo_collection_or_legacy  # noqa: PLC0415 — deliberate function-local import (heavy indexer dep deferred; startup-cost)
     from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+
+    if re_embed and not force:
+        raise click.UsageError(
+            "--re-embed requires --force -- a file the staleness check "
+            "skips never reaches the server, so there is nothing to "
+            "re-embed."
+        )
 
     path = path.resolve()
 
@@ -3265,7 +3345,8 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
     file_heartbeat.arm(f"0/{len(rdr_files)} RDR document(s)")
     try:
         results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection,
-                                        content_type="rdr", force=force, on_file=on_file,
+                                        content_type="rdr", force=force, force_re_embed=re_embed,
+                                        on_file=on_file,
                                         base_path=repo_root, embed_fn=_embed_fn)
     finally:
         file_heartbeat.disarm()

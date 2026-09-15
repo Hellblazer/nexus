@@ -1707,8 +1707,11 @@ def test_pdf_metadata_schema_complete(simple_pdf: Path, monkeypatch):
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_t3.get_or_create_collection.return_value = mock_col
+    # nexus-8143o: simple_pdf is a REAL PDF pymupdf can open, so this
+    # routes through the streaming pipeline (_STREAMING_THRESHOLD=0) ->
+    # uploader_loop, which now always passes force_re_embed as a kwarg.
     mock_t3.upsert_chunks_with_embeddings.side_effect = (
-        lambda collection, ids, documents, embeddings, metadatas: captured.extend(metadatas)
+        lambda collection, ids, documents, embeddings, metadatas, **_kwargs: captured.extend(metadatas)
     )
     # nexus-5xn3k.4: mock_t3 never actually writes chunks to the real
     # (test-scoped) engine's T3, so the fence's fail-closed verify-then-stamp
@@ -1980,6 +1983,136 @@ def test_force_default_false_still_skips(sample_pdf, monkeypatch, cloud_mode):
     ext_cls.assert_not_called()
 
 
+# ── force_re_embed decoupling (nexus-8143o, extending nexus-4jj40 round 5's
+# --force/--re-embed split from `repo` to `pdf`/`md`/`rdr`) ─────────────────
+
+def _pdf_force_setup(sample_pdf, monkeypatch, cloud_mode):
+    """Shared MagicMock T3 handle for index_pdf's small-document path."""
+    set_credentials(monkeypatch)
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+    return mock_t3
+
+
+def test_index_pdf_small_doc_force_re_embed_true_forwards_true(sample_pdf, monkeypatch, cloud_mode):
+    """--force --re-embed reaches upsert_chunks_with_embeddings as
+    force_re_embed=True (index_pdf's small-document all-at-once path,
+    the third of the bead's three _upsert_skip_reembed call sites)."""
+    mock_t3 = _pdf_force_setup(sample_pdf, monkeypatch, cloud_mode)
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as ext_cls:
+            with patch("nexus.doc_indexer.PDFChunker") as chk_cls:
+                chunk = MagicMock()
+                chunk.text = "text"
+                chunk.chunk_index = 0
+                chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 4, "page_number": 1}
+                ext_cls.return_value.extract.return_value = MagicMock(
+                    text="text", metadata={"extraction_method": "docling", "page_count": 1,
+                                           "format": "markdown", "page_boundaries": []})
+                chk_cls.return_value.chunk.return_value = [chunk]
+                result = index_pdf(sample_pdf, corpus="mybook", t3=mock_t3, force=True,
+                                   force_re_embed=True, embed_fn=_fake_embed)
+    assert result > 0
+    _, kwargs = mock_t3.upsert_chunks_with_embeddings.call_args
+    assert kwargs.get("force_re_embed") is True
+
+
+def test_index_pdf_small_doc_force_without_re_embed_forwards_false(sample_pdf, monkeypatch, cloud_mode):
+    """--force alone (force_re_embed defaults False) must NOT set
+    force_re_embed=True on the server call — the whole point of this bead."""
+    mock_t3 = _pdf_force_setup(sample_pdf, monkeypatch, cloud_mode)
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.PDFExtractor") as ext_cls:
+            with patch("nexus.doc_indexer.PDFChunker") as chk_cls:
+                chunk = MagicMock()
+                chunk.text = "text"
+                chunk.chunk_index = 0
+                chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 4, "page_number": 1}
+                ext_cls.return_value.extract.return_value = MagicMock(
+                    text="text", metadata={"extraction_method": "docling", "page_count": 1,
+                                           "format": "markdown", "page_boundaries": []})
+                chk_cls.return_value.chunk.return_value = [chunk]
+                result = index_pdf(sample_pdf, corpus="mybook", t3=mock_t3, force=True,
+                                   embed_fn=_fake_embed)
+    assert result > 0
+    _, kwargs = mock_t3.upsert_chunks_with_embeddings.call_args
+    assert kwargs.get("force_re_embed") is False
+
+
+def test_index_markdown_force_re_embed_true_forwards_true(sample_md, monkeypatch, cloud_mode):
+    """--force --re-embed reaches upsert_chunks_with_embeddings as
+    force_re_embed=True via _index_document (index_markdown's only
+    upsert path, the first of the bead's three _upsert_skip_reembed
+    call sites)."""
+    set_credentials(monkeypatch)
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+    chunk = MagicMock()
+    chunk.text = "text"
+    chunk.chunk_index = 0
+    chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 4, "page_number": 0, "header_path": "H"}
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.SemanticMarkdownChunker") as chk_cls:
+            chk_cls.return_value.chunk.return_value = [chunk]
+            result = index_markdown(sample_md, corpus="docs", t3=mock_t3, force=True,
+                                    force_re_embed=True, embed_fn=_fake_embed)
+    assert result > 0
+    _, kwargs = mock_t3.upsert_chunks_with_embeddings.call_args
+    assert kwargs.get("force_re_embed") is True
+
+
+def test_index_markdown_force_without_re_embed_forwards_false(sample_md, monkeypatch, cloud_mode):
+    """--force alone (force_re_embed defaults False) must NOT set
+    force_re_embed=True on the server call."""
+    set_credentials(monkeypatch)
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+    chunk = MagicMock()
+    chunk.text = "text"
+    chunk.chunk_index = 0
+    chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 4, "page_number": 0, "header_path": "H"}
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
+        with patch("nexus.doc_indexer.SemanticMarkdownChunker") as chk_cls:
+            chk_cls.return_value.chunk.return_value = [chunk]
+            result = index_markdown(sample_md, corpus="docs", t3=mock_t3, force=True,
+                                    embed_fn=_fake_embed)
+    assert result > 0
+    _, kwargs = mock_t3.upsert_chunks_with_embeddings.call_args
+    assert kwargs.get("force_re_embed") is False
+
+
+def test_batch_index_markdowns_forwards_force_re_embed(tmp_path):
+    """batch_index_markdowns (the RDR batch path) forwards force_re_embed
+    verbatim to index_markdown for every file."""
+    f1 = tmp_path / "a.md"
+    f1.write_text("# A\n\nbody\n")
+    with patch("nexus.doc_indexer.index_markdown", return_value=1) as mock_idx:
+        batch_index_markdowns([f1], corpus="test", force=True, force_re_embed=True)
+    assert mock_idx.call_count == 1
+    _, kwargs = mock_idx.call_args
+    assert kwargs.get("force") is True
+    assert kwargs.get("force_re_embed") is True
+
+
+def test_batch_index_markdowns_force_re_embed_defaults_false(tmp_path):
+    """batch_index_markdowns without --re-embed forwards force_re_embed=False
+    (the whole point of this bead)."""
+    f1 = tmp_path / "a.md"
+    f1.write_text("# A\n\nbody\n")
+    with patch("nexus.doc_indexer.index_markdown", return_value=1) as mock_idx:
+        batch_index_markdowns([f1], corpus="test", force=True)
+    assert mock_idx.call_count == 1
+    _, kwargs = mock_idx.call_args
+    assert kwargs.get("force") is True
+    assert kwargs.get("force_re_embed") is False
+
+
 @pytest.mark.parametrize("kind", ["pdf", "markdown"])
 def test_batch_index_passes_force(kind, tmp_path):
     batch_fn, idx_name, ext, is_bytes = _BATCH_FNS[kind]
@@ -2226,7 +2359,7 @@ def incr_setup(sample_pdf, monkeypatch, cloud_mode):
         dir = ckpt_dir
         content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
 
-        def run(self, n_chunks, embed_fn=_fake_embed, on_progress=None):
+        def run(self, n_chunks, embed_fn=_fake_embed, on_progress=None, force=False, force_re_embed=False):
             mock_chunks = _make_n_chunks(n_chunks)
             mock_col = MagicMock()
             mock_col.get.return_value = {"ids": [], "metadatas": []}
@@ -2248,7 +2381,8 @@ def incr_setup(sample_pdf, monkeypatch, cloud_mode):
                         # NX_STORAGE_BACKEND_VECTORS=chroma legacy opt-out,
                         # which used to keep the make_t3 patch load-bearing.
                         result = index_pdf(self.path, corpus="test", t3=t3,
-                                           embed_fn=embed_fn, on_progress=on_progress)
+                                           embed_fn=embed_fn, on_progress=on_progress,
+                                           force=force, force_re_embed=force_re_embed)
             return result, t3
     return _Setup()
 
@@ -2259,6 +2393,29 @@ def test_index_pdf_incremental_indexes_all_chunks(incr_setup):
     assert result == n
     total = sum(len(c.args[1]) for c in t3.upsert_chunks_with_embeddings.call_args_list)
     assert total == n
+
+
+def test_index_pdf_incremental_force_re_embed_true_forwards_true(incr_setup):
+    """--force --re-embed reaches every batch's upsert_chunks_with_embeddings
+    call as force_re_embed=True (_index_pdf_incremental, the second of the
+    bead's three _upsert_skip_reembed call sites)."""
+    n = incr_setup.threshold + 10
+    result, t3 = incr_setup.run(n, force=True, force_re_embed=True)
+    assert result == n
+    assert t3.upsert_chunks_with_embeddings.call_args_list
+    for c in t3.upsert_chunks_with_embeddings.call_args_list:
+        assert c.kwargs.get("force_re_embed") is True
+
+
+def test_index_pdf_incremental_force_without_re_embed_forwards_false(incr_setup):
+    """--force alone (force_re_embed defaults False) must NOT set
+    force_re_embed=True on any batch's server call."""
+    n = incr_setup.threshold + 10
+    result, t3 = incr_setup.run(n, force=True)
+    assert result == n
+    assert t3.upsert_chunks_with_embeddings.call_args_list
+    for c in t3.upsert_chunks_with_embeddings.call_args_list:
+        assert c.kwargs.get("force_re_embed") is False
 
 
 def test_index_pdf_incremental_resumes_from_checkpoint(incr_setup):
@@ -2459,6 +2616,52 @@ class TestStreamingRouting:
             result = index_pdf(pdf, "test", streaming=streaming)
         assert result == expected
         mock_pipeline.assert_called_once()
+
+    def test_streaming_forwards_force_re_embed_true(self, tmp_path):
+        """nexus-8143o ship-blocker fix: index_pdf's streaming dispatch
+        (the path nearly every real PDF takes, _STREAMING_THRESHOLD=0)
+        must forward force_re_embed to pipeline_index_pdf -- without this
+        --force --re-embed was a silent no-op for streaming PDFs."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(b"dummy")
+        with (
+            patch("nexus.doc_indexer._sha256", return_value="abc123"),
+            patch("nexus.doc_indexer.make_t3"),
+            patch("nexus.doc_indexer._vector_with_retry", return_value={"metadatas": []}),
+            patch("pymupdf.open") as mock_pymupdf_open,
+            patch("nexus.pipeline_stages.pipeline_index_pdf", return_value=5) as mock_pipeline,
+        ):
+            mock_doc = MagicMock()
+            mock_doc.__enter__ = MagicMock(return_value=mock_doc)
+            mock_doc.__exit__ = MagicMock(return_value=False)
+            mock_doc.__len__ = MagicMock(return_value=3)
+            mock_pymupdf_open.return_value = mock_doc
+            index_pdf(pdf, "test", streaming="always", force=True, force_re_embed=True)
+        mock_pipeline.assert_called_once()
+        _, kwargs = mock_pipeline.call_args
+        assert kwargs.get("force_re_embed") is True
+
+    def test_streaming_force_without_re_embed_forwards_false(self, tmp_path):
+        """--force alone (force_re_embed defaults False) must NOT set
+        force_re_embed=True on the streaming dispatch."""
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(b"dummy")
+        with (
+            patch("nexus.doc_indexer._sha256", return_value="abc123"),
+            patch("nexus.doc_indexer.make_t3"),
+            patch("nexus.doc_indexer._vector_with_retry", return_value={"metadatas": []}),
+            patch("pymupdf.open") as mock_pymupdf_open,
+            patch("nexus.pipeline_stages.pipeline_index_pdf", return_value=5) as mock_pipeline,
+        ):
+            mock_doc = MagicMock()
+            mock_doc.__enter__ = MagicMock(return_value=mock_doc)
+            mock_doc.__exit__ = MagicMock(return_value=False)
+            mock_doc.__len__ = MagicMock(return_value=3)
+            mock_pymupdf_open.return_value = mock_doc
+            index_pdf(pdf, "test", streaming="always", force=True)
+        mock_pipeline.assert_called_once()
+        _, kwargs = mock_pipeline.call_args
+        assert kwargs.get("force_re_embed") is False
 
 
 class TestStreamingReturnMetadata:

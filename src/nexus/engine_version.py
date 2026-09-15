@@ -509,7 +509,19 @@ from __future__ import annotations
 #: schema_changeset_count fix and the collection-scoped tombstone filter
 #: ONLY through this pin. Ship record: T2
 #: nexus/engine-service-v0.1.119-ship-2026-09-14.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 119)
+#: ->(0,1,120) 2026-09-15: RDR-207 Phase 1 engine half (nexus-l3yuc.1 to .5),
+#: paired with conexus 7.47.0, which carries RDR-207 Phases 2 and 3. memory-004
+#: adds quarantined_at and rolled_up_at to nexus.memory and the
+#: nexus.memory_summaries table; POST /v1/memory/expire quarantines instead of
+#: deleting (deleted_ids stays, always empty; quarantined_ids added), and the
+#: reap, restore, quarantined and summaries routes are new. Both wire-ledger
+#: entries lead with [additive], so the deploy fired BEFORE this client tag
+#: (nexus-1emxn choreography (a)): tagged a9551ee21292, deployed 2026-09-15
+#: with the tracker recorded by conexus (gate report 20260915T115535Z). Three
+#: new changesets (memory-004-1..3); no data-effecting changesets in this delta
+#: (scripts/list_data_effects.py). Local-mode installs get
+#: quarantine-instead-of-delete ONLY through this pin.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 120)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

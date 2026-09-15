@@ -5,7 +5,9 @@
 The Java nexus-service local-mode embedder ({@code Bge768Embedder}) loads a
 STANDARD (un-fused) bge-base-en-v1.5 ONNX export. The CLI is the network-facing
 side: it fetches the model and writes it to a stable, Java-loadable path; the
-service only READS the file (topology invariant — the local Java service makes
+service only READS the file for this model (topology invariant — outside its
+one sanctioned outbound call, the third-party embedding and rerank API used
+when `NX_VOYAGE_API_KEY` reaches it, nexus-umm29, the local Java service makes
 no outbound HTTP).
 
 CRITICAL (CA-1 / RF-160-1): this is NOT fastembed's cached

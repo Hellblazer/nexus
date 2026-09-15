@@ -26,6 +26,10 @@ import uuid
 import pytest
 
 from nexus.db.t1 import publish_t1_session_lease
+from nexus.db.t2.http_memory_store import MemoryExpireResult
+
+#: What the stubbed flush-and-expire leg returns: nothing flushed, nothing swept.
+_NO_EXPIRY = MemoryExpireResult()
 
 
 PARENT_SESSION = "parent-session-" + uuid.uuid4().hex[:8]
@@ -129,7 +133,7 @@ def test_child_session_end_does_not_clear_the_parents_t1_scope(parent_lease, mon
     monkeypatch.setenv("NX_SESSION_ID", child_env["NX_SESSION_ID"])
 
     monkeypatch.setattr(hss, "HttpScratchStore", FakeScratchStore)
-    monkeypatch.setattr(mcp_infra, "t2_index_write", lambda fn: (0, 0))
+    monkeypatch.setattr(mcp_infra, "t2_index_write", lambda fn: (0, _NO_EXPIRY))
 
     hooks.session_end_flush()
 
@@ -184,7 +188,7 @@ def test_control_tool_granting_dispatch_binds_and_clears_the_childs_own_session(
     monkeypatch.setenv("NX_T1_SESSION_ID", child_env["NX_T1_SESSION_ID"])
     monkeypatch.setenv("NX_SESSION_ID", child_env["NX_SESSION_ID"])
     monkeypatch.setattr(hss, "HttpScratchStore", FakeScratchStore)
-    monkeypatch.setattr(mcp_infra, "t2_index_write", lambda fn: (0, 0))
+    monkeypatch.setattr(mcp_infra, "t2_index_write", lambda fn: (0, _NO_EXPIRY))
 
     hooks.session_end_flush()
 

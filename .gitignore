@@ -27,6 +27,7 @@ tests/fixtures/*.pdf
 !tests/fixtures/distributed-bloom-filter.pdf
 !tests/fixtures/bft-to-smr.pdf
 !tests/fixtures/tc-sql.pdf
+!tests/fixtures/virgo.pdf
 .beads/ephemeral.sqlite3
 .beads/*.pid
 .beads/*.pid.lock

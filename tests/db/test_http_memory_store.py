@@ -73,6 +73,16 @@ def _next_id() -> int:
     _ID_SEQ[0] += 1
     return _ID_SEQ[0]
 
+# RDR-207 state. A quarantined row leaves _STORE (every read hides it) and sits
+# here with the full record shape plus both stamps, as GET /quarantined sends
+# it. /expire keeps the old engine's canned {"deleted_ids": []} reply unless a
+# test sets _EXPIRE_NEW_SHAPE, which makes it quarantine every ttl=1 row and
+# reply with both lists, as the RDR-207 engine does.
+_QUARANTINED: dict[int, dict[str, Any]] = {}
+_SUMMARIES: list[dict[str, Any]] = []
+_EXPIRE_NEW_SHAPE = [False]
+_QUARANTINED_AT = "2026-06-07T00:00:00Z"
+
 def _make_entry(project: str, title: str, content: str, **kwargs: Any) -> dict[str, Any]:
     """
     Create a faithful replica of Java MemoryHandler's recordToMap output:
@@ -305,8 +315,69 @@ class _FakeMemoryHandler(FakeT2HandlerBase):
             self._send(200, results)
 
         elif op == "/expire":
-            # Stub: nothing expires in tests
-            self._send(200, {"deleted_ids": []})
+            # Stub: nothing expires in tests (the old engine's reply shape),
+            # unless _EXPIRE_NEW_SHAPE asks for the RDR-207 engine's.
+            if not _EXPIRE_NEW_SHAPE[0]:
+                self._send(200, {"deleted_ids": []})
+                return
+            quarantined = []
+            with _STORE_LOCK:
+                for entries in _STORE.values():
+                    for title, entry in list(entries.items()):
+                        if entry.get("ttl") == 1:
+                            del entries[title]
+                            _QUARANTINED[entry["id"]] = {
+                                **entry, "quarantined_at": _QUARANTINED_AT, "rolled_up_at": None,
+                            }
+                            quarantined.append(entry["id"])
+            self._send(200, {"deleted_ids": [], "quarantined_ids": quarantined})
+
+        elif op == "/reap":
+            with _STORE_LOCK:
+                reaped = [i for i, row in _QUARANTINED.items() if row["rolled_up_at"]]
+                for i in reaped:
+                    del _QUARANTINED[i]
+            self._send(200, {"deleted_ids": reaped})
+
+        elif (restore := re.fullmatch(r"/(\d+)/restore", op)) is not None:
+            with _STORE_LOCK:
+                row = _QUARANTINED.pop(int(restore.group(1)), None)
+                if row is not None:
+                    row = {k: v for k, v in row.items() if k not in ("quarantined_at", "rolled_up_at")}
+                    row["ttl"] = None
+                    _STORE.setdefault(row["project"], {})[row["title"]] = row
+            self._send(200, {"restored": row is not None})
+
+        elif op == "/summaries":
+            source_ids = body.get("source_ids") or []
+            # MemoryHandler's requireString / requireLongList: each missing
+            # or blank field is a 400 before the repository is called.
+            if not source_ids or any(
+                not str(body.get(f, "")).strip() for f in ("project", "content", "model")
+            ):
+                self._send(400, {"error": "project, source_ids, content and model are required"})
+                return
+            project = body["project"]
+            with _STORE_LOCK:
+                known = {i for i, row in _QUARANTINED.items() if row["project"] == project}
+                known |= {e["id"] for e in _STORE.get(project, {}).values()}
+                unknown = [i for i in source_ids if i not in known]
+                if unknown:
+                    self._send(409, {
+                        "error": f"source ids {unknown} are not rows of {project}",
+                        "code": "unknown_source_id",
+                    })
+                    return
+                for i in source_ids:
+                    if i in _QUARANTINED:
+                        _QUARANTINED[i]["rolled_up_at"] = "2026-06-08T00:00:00Z"
+                summary_id = _next_id()
+                _SUMMARIES.append({
+                    "id": summary_id, "project": project, "content": body["content"],
+                    "source_ids": list(source_ids), "produced_at": "2026-06-08T00:00:00Z",
+                    "model": body["model"], "produced_by": body.get("produced_by"),
+                })
+            self._send(200, {"id": summary_id})
 
         elif op == "/merge":
             keep_id = body.get("keep_id")
@@ -419,6 +490,18 @@ class _FakeMemoryHandler(FakeT2HandlerBase):
                 entries = [dict(e) for e in _STORE.get(project, {}).values()]
             self._send(200, entries)
 
+        elif op == "/quarantined":
+            project = params.get("project")
+            with _STORE_LOCK:
+                rows = [dict(r) for r in _QUARANTINED.values() if not project or r["project"] == project]
+            self._send(200, rows)
+
+        elif op == "/summaries":
+            project = params.get("project")
+            with _STORE_LOCK:
+                rows = [dict(s) for s in _SUMMARIES if not project or s["project"] == project]
+            self._send(200, rows)
+
         elif op == "/flag_stale":
             project = params.get("project", "")
             with _STORE_LOCK:
@@ -470,6 +553,9 @@ def clear_store():
     """Reset the fake store before each test to ensure isolation."""
     with _STORE_LOCK:
         _STORE.clear()
+        _QUARANTINED.clear()
+        _SUMMARIES.clear()
+        _EXPIRE_NEW_SHAPE[0] = False
         _ID_SEQ[0] = 1
     yield
 
@@ -665,9 +751,113 @@ class TestDelete:
 
 
 class TestExpire:
-    def test_expire_returns_list(self, store: HttpMemoryStore) -> None:
+    def test_expire_against_old_engine_shape_parses(self, store: HttpMemoryStore) -> None:
+        # The stub replies {"deleted_ids": []} with no quarantined_ids, the
+        # shape of every engine before RDR-207 Phase 1: the new client reads
+        # both lists as empty (docs/wire-contract-pending.md, [additive]).
         result = store.expire()
-        assert isinstance(result, list)
+        assert result.deleted_ids == []
+        assert result.quarantined_ids == []
+        assert result.swept == 0
+
+
+class TestQuarantine:
+    """RDR-207 Phase 2 (nexus-l3yuc.12): the two-list expire response and the
+    five quarantine routes, against the fake's copy of the RDR-207 engine
+    (MemoryHandler's /expire, /reap, /{id}/restore, /quarantined, /summaries).
+    """
+
+    def _quarantine_one(self, store: HttpMemoryStore) -> int:
+        _EXPIRE_NEW_SHAPE[0] = True
+        row_id = store.put("p", "old.md", "stale", ttl=1)
+        store.put("p", "keep.md", "live", ttl=None)
+        result = store.expire()
+        assert result.deleted_ids == [], "the RDR-207 engine's deleted_ids is always empty"
+        assert result.quarantined_ids == [row_id] and result.swept == 1
+        return row_id
+
+    def test_expire_new_engine_shape_reports_quarantined_ids(self, store: HttpMemoryStore) -> None:
+        row_id = self._quarantine_one(store)
+        assert store.get(id=row_id) is None, "a quarantined row is hidden from get"
+
+    def test_list_quarantined_carries_the_full_record_and_both_stamps(
+        self, store: HttpMemoryStore,
+    ) -> None:
+        row_id = self._quarantine_one(store)
+        [row] = store.list_quarantined()
+        assert (row["id"], row["project"], row["title"], row["content"]) == (row_id, "p", "old.md", "stale")
+        assert (row["quarantined_at"], row["rolled_up_at"]) == (_QUARANTINED_AT, None)
+        assert isinstance(row["id"], int) and row["tags"] == "" and row["last_accessed"] == ""
+        assert store.list_quarantined(project="p") == [row]
+        assert store.list_quarantined(project="other") == []
+
+    def test_find_quarantined_by_id_and_by_title(self, store: HttpMemoryStore) -> None:
+        row_id = self._quarantine_one(store)
+        assert store.find_quarantined(id=row_id)["title"] == "old.md"
+        assert store.find_quarantined(project="p", title="old.md")["id"] == row_id
+        assert store.find_quarantined(id=row_id + 99) is None
+        assert store.find_quarantined(project="p", title="keep.md") is None, "a live row is not quarantined"
+        with pytest.raises(ValueError):
+            store.find_quarantined(project="p")
+
+    def test_find_quarantined_against_an_engine_older_than_rdr_207_is_none(
+        self, store: HttpMemoryStore, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        request = httpx.Request("GET", "http://engine.test/v1/memory/quarantined")
+
+        def _route_missing(project=None):
+            raise httpx.HTTPStatusError(
+                "404", request=request, response=httpx.Response(404, request=request),
+            )
+
+        monkeypatch.setattr(store, "list_quarantined", _route_missing)
+        assert store.find_quarantined(id=1) is None
+
+    def test_restore_returns_the_row_as_permanent(self, store: HttpMemoryStore) -> None:
+        row_id = self._quarantine_one(store)
+        assert store.restore(row_id) is True
+        back = store.get(id=row_id)
+        assert back is not None and back["ttl"] is None
+        assert store.list_quarantined() == []
+        assert store.restore(row_id) is False, "no quarantined row with that id any more"
+
+    def test_summary_marks_its_sources_and_reap_deletes_only_marked(
+        self, store: HttpMemoryStore,
+    ) -> None:
+        row_id = self._quarantine_one(store)
+        assert store.reap() == [], "an unmarked quarantined row is never reaped"
+
+        summary_id = store.insert_summary("p", "covers old.md", [row_id], "stub", produced_by="test")
+        [marked] = store.list_quarantined()
+        assert marked["rolled_up_at"] is not None
+        assert store.list_summaries() == [{
+            "id": summary_id, "project": "p", "content": "covers old.md",
+            "source_ids": [row_id], "produced_at": "2026-06-08T00:00:00Z",
+            "model": "stub", "produced_by": "test",
+        }]
+        assert store.list_summaries(project="other") == []
+
+        assert store.reap() == [row_id]
+        assert store.list_quarantined() == []
+        assert store.list_summaries()[0]["source_ids"] == [row_id], "the summary outlives its sources"
+
+    def test_summaries_post_without_a_project_is_a_400(self, store: HttpMemoryStore) -> None:
+        """The fake mirrors MemoryHandler.requireString: a missing field is a
+        400 before anything is written (code review, nexus-l3yuc.14)."""
+        with pytest.raises(httpx.HTTPStatusError) as exc:
+            store._post(
+                "/v1/memory/summaries",
+                {"content": "covers nothing", "source_ids": [1], "model": "stub"},
+            )
+        assert exc.value.response.status_code == 400
+        assert store.list_summaries() == []
+
+    def test_insert_summary_with_an_unknown_source_is_a_409(self, store: HttpMemoryStore) -> None:
+        with pytest.raises(httpx.HTTPStatusError) as exc:
+            store.insert_summary("p", "covers nothing", [424242], "stub")
+        assert exc.value.response.status_code == 409
+        assert exc.value.response.json()["code"] == "unknown_source_id"
+        assert store.list_summaries() == []
 
 
 class TestMerge:

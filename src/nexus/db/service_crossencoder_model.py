@@ -4,10 +4,11 @@
 
 The Java engine's local-mode reranker (``CrossEncoderReranker``) scores
 ``(query, document)`` pairs with ``cross-encoder/ms-marco-MiniLM-L-6-v2``
-(~91 MB fp32 ONNX). Same topology invariant as the bge-768 flow
-(:mod:`nexus.db.service_bge_model`): the CLI is the network-facing side and
-writes the artifacts to a stable Java-read path; the local service only READS
-the files and makes no outbound HTTP.
+(~91 MB fp32 ONNX) when the service is running keyless — a keyed service
+reranks with Voyage instead (see :mod:`nexus.db.service_bge_model` for the
+carve-out, nexus-umm29). Same topology invariant as the bge-768 flow: the CLI
+is the network-facing side and writes the artifacts to a stable Java-read
+path; the local service only READS these files.
 
 Source: HuggingFace ``resolve`` URLs at a PINNED revision, sha256-verified —
 the exact artifact the retiring client-side ``LocalCrossEncoder``

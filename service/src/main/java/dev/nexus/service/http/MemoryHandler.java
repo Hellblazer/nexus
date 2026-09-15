@@ -10,6 +10,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.jooq.nexus.tables.records.MemoryRecord;
+import dev.nexus.service.jooq.nexus.tables.records.MemorySummariesRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,10 +38,22 @@ import java.util.*;
  *   POST   /v1/memory/search_by_tag     FTS scoped to tag
  *   GET    /v1/memory/all               all entries for project
  *   DELETE /v1/memory/delete            delete by (project+title) or id=
- *   POST   /v1/memory/expire            delete TTL-expired entries (returns deleted ids)
+ *   POST   /v1/memory/expire            quarantine TTL-expired entries (RDR-207; returns
+ *                                       deleted_ids, always empty, and quarantined_ids)
  *   POST   /v1/memory/merge             atomic merge: update keep_id + delete delete_ids
  *   GET    /v1/memory/flag_stale        entries not accessed within idle_days
+ *   POST   /v1/memory/reap              delete quarantined AND rolled-up rows (RDR-207)
+ *   POST   /v1/memory/{id}/restore      clear both stamps, make the row permanent (RDR-207)
+ *   GET    /v1/memory/quarantined       quarantined rows, full shape plus both stamps
+ *                                       (?project= optional; absent = whole tenant)
+ *   POST   /v1/memory/summaries         insert a rollup summary and mark its sources
+ *   GET    /v1/memory/summaries         list summaries (?project= optional)
  * </pre>
+ *
+ * <p>The RDR-207 routes are all additive: an old client that reads only
+ * {@code deleted_ids} from {@code /expire} keeps parsing a valid shape, and the
+ * five new routes did not exist before. The engine therefore deploys before the
+ * client tag (docs/wire-contract-pending.md, {@code [additive]}).
  *
  * <p>All endpoints require {@code Authorization: Bearer <token>} (enforced by
  * {@link AuthFilter}, which resolves the tenant server-side from the token and
@@ -61,6 +74,10 @@ public final class MemoryHandler implements HttpHandler {
             .setSerializationInclusion(JsonInclude.Include.ALWAYS);
 
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
+
+    /** RDR-207: {@code /{id}/restore}; a non-numeric id is a 400 from {@link #parseLong}. */
+    private static final java.util.regex.Pattern RESTORE_ROUTE =
+        java.util.regex.Pattern.compile("^/([^/]+)/restore$");
 
     private final MemoryRepository repo;
 
@@ -83,6 +100,14 @@ public final class MemoryHandler implements HttpHandler {
         String method = exchange.getRequestMethod().toUpperCase(Locale.ROOT);
 
         try {
+            // RDR-207: /v1/memory/{id}/restore is the one path-parameter route
+            // (StagingHandler's /load/{name} is the precedent); every other route is
+            // an exact-match case below.
+            java.util.regex.Matcher restore = RESTORE_ROUTE.matcher(op);
+            if (restore.matches()) {
+                handleRestore(exchange, tenant, method, restore.group(1));
+                return;
+            }
             switch (op) {
                 case "/put"            -> handlePut(exchange, tenant, method);
                 case "/put_or_merge"   -> handlePutOrMerge(exchange, tenant, method);
@@ -100,6 +125,9 @@ public final class MemoryHandler implements HttpHandler {
                 case "/flag_stale"     -> handleFlagStale(exchange, tenant, method);
                 case "/import"         -> handleImport(exchange, tenant, method);
                 case "/import_batch"   -> handleImportBatch(exchange, tenant, method);
+                case "/reap"           -> handleReap(exchange, tenant, method);
+                case "/quarantined"    -> handleQuarantined(exchange, tenant, method);
+                case "/summaries"      -> handleSummaries(exchange, tenant, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (IllegalArgumentException e) {
@@ -377,12 +405,107 @@ public final class MemoryHandler implements HttpHandler {
 
     /**
      * POST /v1/memory/expire  (body can be empty {})
-     * Response 200: {"deleted_ids": [<long>, ...]}
+     * Response 200: {"deleted_ids": [], "quarantined_ids": [<long>, ...]}
+     *
+     * <p>RDR-207: expiry quarantines instead of deleting. {@code deleted_ids} is
+     * always empty from this engine on and is KEPT so an old client, which reads
+     * only that key, keeps parsing a valid shape; {@code quarantined_ids} is the
+     * additive addition.
      */
     private void handleExpire(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
-        var deletedIds = repo.expire(tenant);
-        HttpUtil.send(ex, 200, json(Map.of("deleted_ids", deletedIds)));
+        var result = repo.expire(tenant);
+        HttpUtil.send(ex, 200, json(Map.of(
+            "deleted_ids", result.deletedIds(),
+            "quarantined_ids", result.quarantinedIds())));
+    }
+
+    /**
+     * POST /v1/memory/reap  (body can be empty {})
+     * Response 200: {"deleted_ids": [<long>, ...]} — the rows that were BOTH
+     * quarantined and rolled up (RDR-207). Here {@code deleted_ids} carries its
+     * natural meaning; it is the EXPIRE response's {@code deleted_ids} that is
+     * permanently empty (plan record A2).
+     */
+    private void handleReap(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        HttpUtil.send(ex, 200, json(Map.of("deleted_ids", repo.reap(tenant))));
+    }
+
+    /**
+     * POST /v1/memory/{id}/restore  (body ignored)
+     * Response 200: {"restored": true|false} — false when no quarantined row with
+     * that id is visible to the tenant (same shape as /delete's {"deleted": bool}).
+     */
+    private void handleRestore(HttpExchange ex, String tenant, String method, String rawId)
+            throws IOException {
+        requireMethod(ex, method, "POST");
+        long id = parseLong(rawId, "id");
+        HttpUtil.send(ex, 200, json(Map.of("restored", repo.restore(tenant, id))));
+    }
+
+    /**
+     * GET /v1/memory/quarantined?project=  (project OPTIONAL; absent = whole tenant)
+     * Response 200: [full record shape (as /get) + "quarantined_at" + "rolled_up_at"]
+     *
+     * <p>The FULL record shape, not /list's summary view: Phase 3's rollup reads
+     * content, title and timestamp from here because every other read path hides
+     * quarantined rows, and the client filters on {@code rolled_up_at} (plan
+     * record A3). The two stamps are added beside {@link #recordToMap} rather than
+     * inside it, so no other read route's key set changes.
+     */
+    private void handleQuarantined(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        Map<String, String> params = queryParams(ex.getRequestURI());
+        var rows = repo.listQuarantined(tenant, params.get("project"));
+        HttpUtil.send(ex, 200, json(rows.stream().map(r -> {
+            Map<String, Object> m = recordToMap(r);
+            m.put("quarantined_at", utcSecond(r.getQuarantinedAt()));
+            m.put("rolled_up_at", utcSecond(r.getRolledUpAt()));
+            return m;
+        }).toList()));
+    }
+
+    /**
+     * GET  /v1/memory/summaries?project=  (project OPTIONAL; absent = whole tenant)
+     *      Response 200: [{"id","project","content","source_ids","produced_at","model","produced_by"}]
+     * POST /v1/memory/summaries
+     *      Request: {"project": "...", "content": "...", "source_ids": [<long>,...],
+     *                "model": "...", "produced_by": "..." (optional)}
+     *      Response 200: {"id": <long>}; 400 on an empty source list or blank
+     *      content/model; 409 when a source id is not a row of that project
+     *      (nothing written — MemoryRepository.UnknownSourceIdException, with
+     *      "code":"unknown_source_id" so a client can tell it from other 409s).
+     */
+    private void handleSummaries(HttpExchange ex, String tenant, String method) throws IOException {
+        switch (method) {
+            case "GET" -> {
+                Map<String, String> params = queryParams(ex.getRequestURI());
+                var rows = repo.listSummaries(tenant, params.get("project"));
+                HttpUtil.send(ex, 200, json(rows.stream().map(this::summaryToMap).toList()));
+            }
+            case "POST" -> {
+                Map<String, Object> body = readBody(ex);
+                String project = requireString(body, "project");
+                String content = requireString(body, "content");
+                List<Long> sourceIds = requireLongList(body, "source_ids");
+                String model = requireString(body, "model");
+                String producedBy = optStringOrNull(body, "produced_by");
+                try {
+                    long id = repo.insertSummary(tenant, project, content, sourceIds, model, producedBy);
+                    HttpUtil.send(ex, 200, json(Map.of("id", id)));
+                } catch (MemoryRepository.UnknownSourceIdException e) {
+                    log.debug("event=memory_summary_refused tenant={} project={} error={}",
+                              tenant, project, e.getMessage());
+                    HttpUtil.send(ex, 409, json(Map.of(
+                        "error", e.getMessage(), "code", "unknown_source_id")));
+                }
+            }
+            default -> {
+                HttpUtil.send(ex, 405, "{\"error\":\"method not allowed\"}");
+                throw new SkipHandlerException();
+            }
+        }
     }
 
     /**
@@ -673,6 +796,26 @@ public final class MemoryHandler implements HttpHandler {
             ? MemoryRepository.UTC_SECOND.format(r.getLastAccessed().withOffsetSameInstant(ZoneOffset.UTC))
             : "");
         return m;
+    }
+
+    /** RDR-207: one summary row on the wire. source_ids is provenance, never a live reference. */
+    private Map<String, Object> summaryToMap(MemorySummariesRecord r) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", r.getId());
+        m.put("project", r.getProject());
+        m.put("content", r.getContent());
+        m.put("source_ids", r.getSourceIds() != null ? Arrays.asList(r.getSourceIds()) : List.of());
+        m.put("produced_at", utcSecond(r.getProducedAt()));
+        m.put("model", r.getModel());
+        m.put("produced_by", r.getProducedBy());
+        return m;
+    }
+
+    /** The same UTC second-precision rendering recordToMap uses for timestamp; null stays null. */
+    private static String utcSecond(OffsetDateTime t) {
+        return t != null
+            ? MemoryRepository.UTC_SECOND.format(t.withOffsetSameInstant(ZoneOffset.UTC))
+            : null;
     }
 
     private String json(Object obj) {

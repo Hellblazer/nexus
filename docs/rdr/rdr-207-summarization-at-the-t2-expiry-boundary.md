@@ -2,7 +2,8 @@
 title: "Summarization at the T2 Expiry Boundary — the Manage Phase RDR-057 Cut"
 id: RDR-207
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-09-15
 priority: high
 author: conexus (relayed and filed by nexus)
 reviewed-by: self
@@ -286,13 +287,13 @@ happened.
 
 ### Critical Assumptions
 
-- [ ] A1: every read path in `MemoryRepository` (get, search, list, prefix
+- [x] A1: every read path in `MemoryRepository` (get, search, list, prefix
   resolution, stale-flagging) can carry a `quarantined_at IS NULL` predicate,
   and the set of read paths is derived by the implementation and pinned by a
   test that inserts a quarantined row and asserts no read returns it.
   **Status**: Verified (finding 4: twelve read entry points, all jOOQ on one
   table). **Method**: Source Search.
-- [ ] A5: `MemoryRepository` has seven write entry points; five reach an
+- [x] A5: `MemoryRepository` has seven write entry points; five reach an
   existing row in one of three shapes, and the two explicit deletes are
   named at the end of this item. The shapes: an `ON CONFLICT (tenant_id,
   project, title) DO UPDATE` branch (`upsert`, `importRow`, `importBatch`),
@@ -309,19 +310,19 @@ happened.
   unconditional deletes that predate this RDR and stay outside the
   two-label invariant on purpose: they are the explicit manual override
   (finding 8). **Method**: Source Search.
-- [ ] A2: keeping `deleted_ids` with its current meaning (rows actually gone)
+- [x] A2: keeping `deleted_ids` with its current meaning (rows actually gone)
   and adding `quarantined_ids` beside it is `[additive]`: an old client reads
   `deleted_ids` only, through `resp.get("deleted_ids", [])`, and ignores the
   new key. **Status**: Verified. **Method**: Source Search
   (`http_memory_store.py:484`, finding 2).
-- [ ] A3: the new `nexus.memory_summaries` table takes the same tenant
+- [x] A3: the new `nexus.memory_summaries` table takes the same tenant
   row-level-security policy and service grants as `nexus.memory`.
   **Status**: Verified with one correction (finding 4): service grants arrive
   through schema default privileges, the RLS policy must be copied per table,
   and the diagnostic role needs an explicit line if it is to read summaries.
   **Method**: Source Search. The PITR-fork walk before deploy remains the gate
   that catches a grants defect in practice (v0.1.78).
-- [ ] A4: a summary can be checked against its sources without an LLM. The
+- [waived: held as an assumed floor by design; the forced-failure tests show it refusing a summary that omits a title] A4: a summary can be checked against its sources without an LLM. The
   check is that the summary text contains every source row's title.
   **Status**: Assumed. It is a floor, not a fidelity proof; the test plan
   shows it refusing a summary that omits a title.
@@ -441,7 +442,8 @@ Liquibase, every reference schema-qualified):
   in one transaction, inserts the summary row and sets `rolled_up_at = now()`
   on every source row. Refuses, writing nothing, if any source id does not
   exist in that tenant and project. A row already marked may be covered
-  again; its mark timestamp moves.
+  again; its mark timestamp moves. The check is existence only, so a live
+  row can be marked too (see Risks and Mitigations, residual 1).
 - Every read path (`get`, `search`, `list`, prefix resolution, the stale
   sweep) adds `quarantined_at IS NULL` (assumption A1). A quarantined row is
   therefore invisible exactly as a deleted row was, which keeps the meaning
@@ -483,6 +485,19 @@ Liquibase, every reference schema-qualified):
   are hidden by the engine, and summaries are not injected into reads here;
   retrieval-time use of summaries is RDR-209's rollup-time question, or a
   later RDR.
+- Added during implementation, all client-side, recorded at close.
+  `nx memory delete` (by id, or by project and title) and
+  `T2Database.delete` fall back to the quarantined listing when `get` finds
+  nothing, so the explicit single delete this design names still reaches a
+  quarantined row (plan ambiguity A7). `nx memory reap` removes each reaped
+  row's topic assignments, using the listing it takes before reaping, as
+  delete does (plan residual 2). The expiry message is worded from which id
+  list is non-empty, so a client running against an engine older than this
+  RDR says "Deleted" when that engine deleted. The `nx doctor` row warns,
+  softly, when it cannot read the memory store at all. The rollup re-reads
+  the quarantined listing right before each mark and leaves a group unmarked
+  if any of its rows left quarantine during the summarizer call (see Risks
+  and Mitigations, residual 1).
 
 **Rollup producer, `nx memory rollup`:**
 
@@ -601,6 +616,19 @@ It was decided against on 2026-09-14 with the analysis in hand.
 - **Risk**: the new table's grants or policy are wrong on production.
   **Mitigation**: the PITR-fork rehearsal before deploy, the gate that caught
   v0.1.78.
+- **Risk** (plan residual 1): `insertSummary` marks any existing row of the
+  project, live or quarantined; it checks only that each source id exists.
+  A live row marked this way, if it is later given a TTL and expires, is
+  already marked, so reap could delete it with no summary of its current
+  content. **Mitigation**: accepted as is for engine-service-v0.1.120 (Sam,
+  2026-09-15, T2 `nexus_rdr/207-decision-v0120-phase1-alone-2026-09-15`) and
+  pinned by
+  `MemoryRepositoryQuarantineTest.residual1_insertSummaryAdmitsALiveRow_laterExpireThenReapDeletesItUnsummarized`.
+  The rollup, the one attended caller, re-checks its sources right before
+  marking, so its own summarizer wait does not trigger this; a direct
+  `POST /v1/memory/summaries` still can. Reap never deletes a row that is
+  not quarantined. Refusing unquarantined sources is a one-predicate engine
+  change for a later cut.
 
 ### Surfaces touched
 
@@ -627,8 +655,8 @@ results, and any automatic promotion of hot rows (RDR-209).
 
 ### Prerequisites
 
-- [ ] A1 and A3 verified by source search at the start of Phase 1.
-- [ ] Sam's acceptance of this RDR (lifecycle transitions are Sam's).
+- [x] A1 and A3 verified by source search at the start of Phase 1.
+- [x] Sam's acceptance of this RDR (lifecycle transitions are Sam's).
 
 ### Minimum Viable Validation
 
@@ -831,3 +859,6 @@ rather than edited away for the reason stated in its revision note.
 | 2026-09-14 | Gate round 2 — BLOCKED (1 Critical, 0 Significant, 1 ship-blocker(s)); commit `ab910b7e7`; critique `nexus_rdr/207-gate-critique-2026-09-14b`. |
 | 2026-09-14 | Gate round 3 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `01afc7e65`; critique `nexus_rdr/207-gate-critique-2026-09-14d`. |
 | 2026-09-14 | Accept: the three round 3 residuals dispositioned by file change, commits `9124a2be7` (delete override named, summaries-delete verb struck, A5 import-branch wording) and `007aac28d` (A5 count); fix checks `nexus_rdr/207-fix-check-9124a2be7` and `nexus_rdr/207-fix-check-007aac28d`, both PASS. |
+| 2026-09-14 | Phase 1 (engine) landed on develop at `208006736`: memory-004, the quarantine boundary in `MemoryRepository`, the six routes, and the wire-ledger entries (beads nexus-l3yuc.1 to .8). |
+| 2026-09-15 | Sam: engine-service-v0.1.120 carries Phase 1 alone, and residual 1 (`insertSummary` admits a live row) stays in the engine; it is now named under Risks and Mitigations. Phase 2 (client) landed on develop, `36cc02c57` through `db1c78236` (beads .9, .10, .12, .13, .14). Phase 3 and the MVV landed, `6a93e6dc6` and `ba928f72f` (beads .11, .15, .16, .17). engine-service-v0.1.120 tagged on `a9551ee21` and live from 11:42Z; STEP-6 green on its re-run; cloud client-path gate 7/7. Behaviors added during implementation recorded under Technical Design. |
+| 2026-09-15 | Closed as implemented (Sam). Close critique, first pass `nexus_rdr/207-critique-scope-check-2026-09-15`: partial, because residual 1 and the phase records were missing from this text; both added in this revision, with the assumption and prerequisite checkboxes resolved. Second pass `nexus_rdr/207-critique-closetime-edits-2026-09-15`: justified. Problem Statement Replay pointers: Gap 1 `service/src/main/java/dev/nexus/service/db/MemoryRepository.java:603`, Gap 2 `src/nexus/commands/memory.py:355`, Gap 3 `src/nexus/memory_rollup.py:160`. Post-mortem `docs/rdr/post-mortem/rdr-207-summarization-at-the-t2-expiry-boundary.md`. |

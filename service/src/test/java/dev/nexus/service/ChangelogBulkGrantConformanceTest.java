@@ -99,9 +99,10 @@ class ChangelogBulkGrantConformanceTest {
      * container superuser that just ran the product changelog (same as
      * db.changelog-test-role.xml's case) — the GH #1402/nexus-46yy3
      * foreign-ownership hazard this allowlist otherwise guards against cannot
-     * occur here either. The LATER, single-relation ownership transfer is a
-     * targeted {@code ALTER TABLE ... OWNER TO}, not a bulk grant, and is
-     * outside this scanner's {@code ON ALL} pattern entirely.
+     * occur here either. The LATER ownership transfers (topic_assignments, and
+     * since RDR-207 / nexus-l3yuc.1 memory and memory_summaries too) are
+     * targeted {@code ALTER TABLE ... OWNER TO} statements, not bulk grants,
+     * and are outside this scanner's {@code ON ALL} pattern entirely.
      */
     private static final Set<String> ALLOWLISTED_FILES =
         Set.of("grants-nexus-diag.xml", "db.changelog-test-role.xml",
