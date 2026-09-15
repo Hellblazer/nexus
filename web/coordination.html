@@ -202,7 +202,7 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 <!-- ============ 1 ============ -->
 <section class="lesson" id="l1">
 <div class="lhead"><span class="lnum">1</span><h2>What it gives you</h2><span class="ltime">2 min</span></div>
-<p class="why">The tuple space lets sessions and agents coordinate asynchronously and survive failures. It is part of Nexus persistent memory, so the records of that coordination outlive every conversation.</p>
+<p class="why">The tuple space is part of Nexus persistent memory: one central, asynchronous hub where sessions and agents communicate and coordinate. It works across conversations, processes, and machines that share an engine, and its records survive failures.</p>
 <p>SendMessage works well for talking to a live agent or session, but the exchange exists only inside the two conversations. Compaction summarizes it, <code>/clear</code> removes it from the context, and no record outside the two transcripts shows what happened. Files and memory notes can hold content, but nothing tells a reader that a note arrived, and two readers can act on the same note. The tuple space keeps coordination in the engine, outside the conversations, where every session on the engine can see it. Every exchange has the same three steps: send, continue, and react to the answer. Lesson 2 compares the two in detail.</p>
 
 <figure class="fig">
