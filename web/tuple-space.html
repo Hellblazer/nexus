@@ -222,9 +222,9 @@ figure.fig .take-edge{stroke:var(--brass)}
 
 <h3>Ask another session for something</h3>
 <div class="see">You might say</div>
-<div class="cmd"><pre>Ask the <span class="ph">&lt;PEER SESSION&gt;</span> session to rebuild its gate jar. Wait for its ack.</pre><button class="copy" type="button">Copy</button></div>
+<div class="cmd"><pre>Ask the <span class="ph">&lt;PEER SESSION&gt;</span> session to rebuild its gate jar. Wait for its answer.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What happens</div>
-<p>Claude writes a request tuple to the other session's mailbox and waits on its own mailbox for the ack. The other session takes the request, does the work, and writes the ack. Nobody relays anything by hand, and an unanswered request stays visible with its age.</p>
+<p>Claude writes a request tuple to the other session's mailbox and waits on its own mailbox for the answer. The other session receives the request, does the work, and writes the answer. Nobody relays anything by hand, and an unanswered request stays visible with its age.</p>
 
 <figure class="fig">
 <svg viewBox="0 0 760 360" role="img" aria-label="Four kinds of process around one shared tuple space: a session, its agents, the hooks, and a peer session. Arrows labelled out, rd and in connect each to the space.">
@@ -236,7 +236,7 @@ figure.fig .take-edge{stroke:var(--brass)}
   <rect class="tuple" x="380" y="127" width="100" height="26" rx="3"/><text x="430" y="144" text-anchor="middle" class="lbl">report · agent a</text>
   <rect class="tuple" x="282" y="163" width="120" height="26" rx="3"/><text x="342" y="180" text-anchor="middle" class="lbl">message → agent b</text>
   <rect class="tuple" x="412" y="163" width="66" height="26" rx="3"/><text x="445" y="180" text-anchor="middle" class="lbl">request</text>
-  <rect class="tuple" x="340" y="199" width="80" height="26" rx="3"/><text x="380" y="216" text-anchor="middle" class="lbl">ack · r-41</text>
+  <rect class="tuple" x="330" y="199" width="100" height="26" rx="3"/><text x="380" y="216" text-anchor="middle" class="lbl">answer · r-41</text>
 
   <rect class="you" x="20" y="40" width="130" height="44" rx="4"/><text x="85" y="58" text-anchor="middle">your session</text><text x="85" y="74" text-anchor="middle" class="lbl">starts the agents</text>
   <rect class="box" x="20" y="286" width="130" height="44" rx="4"/><text x="85" y="304" text-anchor="middle">agents</text><text x="85" y="320" text-anchor="middle" class="lbl">started by it</text>
@@ -248,10 +248,10 @@ figure.fig .take-edge{stroke:var(--brass)}
   <line x1="150" y1="298" x2="262" y2="232" class="take-edge" marker-end="url(#arb)"/><text x="162" y="322" class="op take">in, read mailbox</text>
   <line x1="610" y1="62" x2="470" y2="118" marker-end="url(#ar)"/><text x="600" y="46" text-anchor="end" class="op">out start, report</text>
   <line x1="610" y1="298" x2="520" y2="236" class="dash take-edge" marker-end="url(#arb)"/><text x="600" y="234" text-anchor="end" class="op take">in request</text>
-  <line x1="610" y1="322" x2="496" y2="262" marker-end="url(#ar)"/><text x="600" y="344" text-anchor="end" class="op">out ack</text>
+  <line x1="610" y1="322" x2="496" y2="262" marker-end="url(#ar)"/><text x="600" y="344" text-anchor="end" class="op">out answer</text>
   <text x="380" y="352" text-anchor="middle" class="sm">brass: a take, exactly one winner</text>
 </svg>
-<figcaption>Every process talks to the tuple space and to no other process. Hooks write for the agents. Your session waits for a report. An agent takes messages from its mailbox. A peer session takes a request and adds an ack.</figcaption>
+<figcaption>Every process talks to the tuple space and to no other process. Hooks write for the agents. Your session waits for a report. An agent takes messages from its mailbox. A peer session takes a request and answers it.</figcaption>
 </figure>
 
 <p>The harness, hooks, memory, and scratch keep doing what they do. The tuple space is built from them: hooks write its records, the ids the harness assigns are its addresses, and Claude reads it with the same kind of tools it already calls. Lessons 2 to 4 show each situation in more detail, lesson 5 shows how to look at the space, and the <a href="#l7">appendix</a> explains the operations underneath.</p>
@@ -264,29 +264,29 @@ figure.fig .take-edge{stroke:var(--brass)}
 
 <h3>The address</h3>
 <p>When Claude starts an agent, a hook gives the agent an id and tells it its mailbox address. You never need the id yourself: describe the agent by its task, as in lesson 1, and Claude resolves it. To see the addresses that exist, ask <em>"List the mailboxes in the tuple space"</em>, and Claude runs a list by prefix.</p>
-<details class="gloss out"><summary>What the agent receives at start</summary><pre class="out">Claimant id: <b>a3f7c2e1</b> — mailbox: <b>mailbox/a3f7c2e1</b></pre></details>
+<details class="gloss out"><summary>What the agent receives at start</summary><pre class="out">Claimant id: <b>a3f7c2e1d09b4c551</b> — mailbox: <b>mailbox/a3f7c2e1d09b4c551</b></pre></details>
 
 <h3>Send</h3>
 <div class="see">What Claude does</div>
 <p>One <code>tuple_out</code> call to the agent's mailbox with the message body and a message id that Claude creates. The id becomes the identity of the tuple, so if the connection fails and Claude sends again, the second send lands on the same tuple and the agent never sees the message twice. The tool returns the tuple's id.</p>
-<details class="gloss out"><summary>What you see</summary><pre class="out">tuple_out  subspace: mailbox/a3f7c2e1   keys: {to: a3f7c2e1}
+<details class="gloss out"><summary>What you see</summary><pre class="out">tuple_out  subspace: mailbox/a3f7c2e1d09b4c551   keys: {to: a3f7c2e1d09b4c551}
            dims: {from: <span class="ph">&lt;YOUR SESSION&gt;</span>, kind: directive}   nonce: msg-17
 → <b>e4175991d6ad…</b></pre></details>
 <p>The body is a pointer, not the content. It names the memory entry, the document, or the scratch note that holds what the agent needs, and the agent opens that item. The <a href="#l7">appendix</a> says why.</p>
 
 <h3>What the agent sees</h3>
 <p>On its next mailbox read, the agent takes the message with <code>tuple_in</code>, which returns the tuple and a claim id. It acts on the message, then acks the claim.</p>
-<details class="gloss out"><summary>What you see</summary><pre class="out">tuple_in  subspace: mailbox/a3f7c2e1   keys: {to: a3f7c2e1}   claimant: a3f7c2e1
+<details class="gloss out"><summary>What you see</summary><pre class="out">tuple_in  subspace: mailbox/a3f7c2e1d09b4c551   keys: {to: a3f7c2e1d09b4c551}   claimant: a3f7c2e1d09b4c551
 {
   "tuple": {
-    "keys": {"to": "a3f7c2e1"},
+    "keys": {"to": "a3f7c2e1d09b4c551"},
     "dims": {"from": "<span class="ph">&lt;YOUR SESSION&gt;</span>", "kind": "directive"},
     "body": "The schema changed. Read memory <span class="ph">&lt;PROJECT&gt;</span>/<span class="ph">&lt;TITLE&gt;</span> before you write the migration.",
     "claim_state": "claimed",  "lease_until": "…T16:17:51Z",  "attempts": 0
   },
   "claim_id": "<b>ede42f56-3a09-4897-86ee-856b9209ec9c</b>"
 }
-tuple_ack  claim_id: ede42f56-…   claimant: a3f7c2e1
+tuple_ack  claim_id: ede42f56-…   claimant: a3f7c2e1d09b4c551
 → Acked claim ede42f56-…</pre></details>
 
 <h3>Delivery</h3>
@@ -301,9 +301,9 @@ tuple_ack  claim_id: ede42f56-…   claimant: a3f7c2e1
 
 <h3>A report</h3>
 <p>When an agent stops, a hook adds a report tuple to the session's ledger with the agent's id as the key. Behind the instruction in lesson 1, Claude calls <code>tuple_rd</code> on the ledger with that id and a timeout. If the tuple is already there, the read returns immediately. If not, the read waits inside the engine and wakes when the tuple is written or the timeout ends.</p>
-<details class="gloss out"><summary>What you see</summary><pre class="out">tuple_rd  subspace: ledger/<span class="ph">&lt;SESSION-ID&gt;</span>   keys: {agent_id: a3f7c2e1, kind: report}   timeout_s: 25
+<details class="gloss out"><summary>What you see</summary><pre class="out">tuple_rd  subspace: ledger/<span class="ph">&lt;SESSION-ID&gt;</span>   keys: {agent_id: a3f7c2e1d09b4c551, kind: report}   timeout_s: 25
 {
-  "keys": {"agent_id": "a3f7c2e1", "kind": "report"},
+  "keys": {"agent_id": "a3f7c2e1d09b4c551", "kind": "report"},
   "dims": {"agent_type": "conexus:developer"},
   "created_at": "…T16:15:49Z"
 }</pre></details>
@@ -318,26 +318,24 @@ tuple_ack  claim_id: ede42f56-…   claimant: a3f7c2e1
 <!-- ============ 4 ============ -->
 <section class="lesson" id="l4">
 <div class="lhead"><span class="lnum">4</span><h2>Ask another session for something</h2><span class="ltime">10 min</span></div>
-<p class="why">A mailbox addressed to a session's name is a channel between any two sessions on one machine. The sessions share the same engine and the same tenant, and each has a name that the harness shows, so no new addressing is needed.</p>
+<p class="why">Every session has a mailbox addressed by its session id, and that mailbox is a channel between any two sessions on one machine. The sessions share the same engine and the same tenant. You name a peer by the name that the harness shows. The send resolves that name to the session that holds it and delivers there.</p>
 
 <h3>The exchange</h3>
-<p>Behind the instruction in lesson 1, Claude writes a request tuple to the peer's mailbox with kind "request" and a new correlation id, then waits on its own mailbox. The peer takes the request, opens what it names, does the work, and acks the request with a reply that carries the same correlation id. The engine writes that reply to your mailbox in the same step that consumes the request. The request names its subject with a pointer, whether a bead id, a memory title, or a document address, and if the work produced something, the ack names where it was written.</p>
-<details class="gloss out"><summary>What you see, on your side</summary><pre class="out">tuple_out  subspace: mailbox/<b>conexus-98</b>   keys: {to: conexus-98}
-           dims: {from: nexus-19, kind: request, correlation_id: r-41, address_kind: instance}
-           body: Rebuild the gate jar. Ack when done.
-tuple_in   subspace: mailbox/<b>nexus-19</b>   keys: {to: nexus-19}   claimant: nexus-19   timeout_s: 25
-→ (no tuple yet, waiting)
-tuple_in   … timeout_s: 25
+<p>Behind the instruction in lesson 1, Claude sends a request to the peer's name with kind "request" and a new correlation id, then waits on its own mailbox. The peer receives the request, opens what it names, does the work, and answers with a reply that carries the same correlation id. The request names its subject with a pointer, whether a bead id, a memory title, or a document address, and if the work produced something, the reply names where it was written.</p>
+<details class="gloss out"><summary>What you see, on your side</summary><pre class="out">mailbox_send  to: <b>nexus-8c</b>   kind: request   correlation_id: r-41
+              body: Confirm your mailbox watcher is armed. Ack when done.
+→ {"to": "<b>cdeb12b5-…</b>", "address_kind": "<b>session</b>", "from": "5b354c36-…"}
+tuple_in   subspace: mailbox/<b>5b354c36-…</b>   keys: {to: 5b354c36-…}   timeout_s: 25
 {
   "tuple": {
-    "dims": {"from": "conexus-98", "kind": "<b>ack</b>", "correlation_id": "<b>r-41</b>", "address_kind": "instance"},
-    "body": "Rebuilt. Jar stamped at 16:16Z, gate green."
+    "dims": {"from": "cdeb12b5-…", "kind": "<b>reply</b>", "correlation_id": "<b>r-41</b>", "address_kind": "session"},
+    "body": "Armed. The watcher is Monitor task b3g9s5nia running nx tuple watch --instance nexus-8c …"
   },
-  "claim_id": "…"
+  "claim_id": "784e820d-…"
 }
 tuple_ack  … → Acked</pre></details>
-<p>The peer session went through the mirror of this: a <code>tuple_in</code> on its own mailbox that returned your request, the work, and one <code>tuple_ack</code> on your request with the ack as its reply. Because the reply and the ack are one call, a crash cannot deliver the reply and leave the request to run again. An unanswered request is a tuple with an age that the census in lesson 5 shows, not a line in a chat window that nobody reads.</p>
-<p class="note">To find a peer's name, ask Claude to list the sessions on the machine. The name it shows, such as <code>conexus-98</code>, is the mailbox address.</p>
+<p>The peer receives the request in one of two ways. Its mailbox watcher, a background command, prints a line when a message arrives. The peer then takes the request with <code>tuple_in</code>, does the work, and calls <code>tuple_ack</code> with the reply. The reply and the ack are then one call, so a crash cannot deliver the reply and leave the request to run again. When a hook shows the request at the peer's next prompt, the hook has already consumed it. The peer then sends the reply as a new message with the same correlation id, as in the output above. An unanswered request is a tuple with an age that the census in lesson 5 shows, not a line in a chat window that nobody reads.</p>
+<p class="note">To find a peer's name, ask Claude to list the sessions on the machine. Send to the name it shows, such as <code>nexus-8c</code>. The send resolves the name in the session directory and delivers to that session's mailbox.</p>
 </section>
 
 <!-- ============ 5 ============ -->
@@ -350,10 +348,10 @@ tuple_ack  … → Acked</pre></details>
 <div class="see">What Claude does</div>
 <p>Claude reads the session's ledger with an empty pattern, which returns every live tuple in it, and compares the start tuples with the report tuples by agent id. This read is the census. Only <code>tuple_rd</code> can do it, because a take operation must give every key exactly and can never claim by accident with a wide pattern.</p>
 <details class="gloss out"><summary>What you see</summary><pre class="out">tuple_rd  subspace: ledger/<span class="ph">&lt;SESSION-ID&gt;</span>   keys: {}   n: 300
-  {agent_id: a3f7c2e1, kind: <b>start</b>,  agent_type: conexus:developer}
-  {agent_id: a3f7c2e1, kind: <b>report</b>, agent_type: conexus:developer}
-  {agent_id: 9b04d8aa, kind: <b>start</b>,  agent_type: conexus:test-validator}
-→ 9b04d8aa started and has not reported</pre></details>
+  {agent_id: a3f7c2e1d09b4c551, kind: <b>start</b>,  agent_type: conexus:developer}
+  {agent_id: a3f7c2e1d09b4c551, kind: <b>report</b>, agent_type: conexus:developer}
+  {agent_id: a9b04d8aa1f3e6c27, kind: <b>start</b>,  agent_type: conexus:test-validator}
+→ a9b04d8aa1f3e6c27 started and has not reported</pre></details>
 
 <h3>Three kinds of question</h3>
 <ul class="plain">
@@ -365,7 +363,7 @@ tuple_ack  … → Acked</pre></details>
 {"total": 0, "available": 0, "claimed": 0, "dead": 0, "consumed": 1,
  "expired_unpurged": 0, "oldest_created_at": "…T15:54:21Z", "newest_created_at": "…T15:54:21Z"}</pre></details>
 
-<p>Three rows in <code>nx doctor</code> watch the space as a whole: the age of the oldest unclaimed tuple in each subspace, the health of the database table, and the age of the last sweep, which is the job that ends leases nobody renewed, removes expired tuples, and removes old claim-log rows. A healthy space shows small numbers in all three, and what these rows catch is a sweep that has stopped.</p>
+<p>Four rows in <code>nx doctor</code> watch the space: the age of the oldest unclaimed tuple in each subspace, the health of the database table, the age of the last sweep, and whether your Claude Code permissions let the mailbox watcher run. The sweep is the job that ends leases nobody renewed, removes expired tuples, and removes old claim-log rows. A healthy space shows small numbers in the first three, and what those rows catch is a sweep that has stopped.</p>
 </section>
 
 <!-- ============ 6 ============ -->
@@ -375,11 +373,11 @@ tuple_ack  … → Acked</pre></details>
 
 <div class="tbl"><table>
 <tr><th>Surface</th><th>What it is</th></tr>
-<tr><td>Nine MCP tools</td><td><code>tuple_out</code>, <code>tuple_rd</code>, <code>tuple_in</code>, <code>tuple_ack</code>, <code>tuple_nack</code>, <code>tuple_renew</code>, <code>tuple_registry</code>, <code>tuple_list</code>, <code>tuple_stats</code>. Claude calls these inside a session.</td></tr>
-<tr><td><code>nx tuple</code></td><td>The same operations from the terminal: <code>out</code>, <code>rd</code>, <code>in</code>, <code>ack</code>, <code>nack</code>, <code>renew</code>, <code>templates</code>, <code>list</code>, <code>stats</code>. Hooks and scripts call these.</td></tr>
+<tr><td>Ten MCP tools</td><td><code>mailbox_send</code>, <code>tuple_out</code>, <code>tuple_rd</code>, <code>tuple_in</code>, <code>tuple_ack</code>, <code>tuple_nack</code>, <code>tuple_renew</code>, <code>tuple_registry</code>, <code>tuple_list</code>, <code>tuple_stats</code>. Claude calls these inside a session.</td></tr>
+<tr><td><code>nx tuple</code></td><td>The same operations from the terminal: <code>out</code>, <code>rd</code>, <code>in</code>, <code>ack</code>, <code>nack</code>, <code>renew</code>, <code>templates</code>, <code>list</code>, <code>stats</code>. Hooks and scripts call these. Two more: <code>directory</code>, which shows the session that holds a name, and <code>watch</code>, the mailbox watcher.</td></tr>
 <tr><td>Hooks</td><td>The agent-start hook gives each agent its id and mailbox address. The start and stop hooks write the ledger's start and report tuples without blocking the agent.</td></tr>
 <tr><td>Skills</td><td><code>/conexus:mailbox</code> holds the rules for sending and reading messages. <code>/conexus:orchestration</code> holds the rule for waiting on a report.</td></tr>
-<tr><td><code>nx doctor</code></td><td>The three rows described in <a href="#l5">lesson 5</a>.</td></tr>
+<tr><td><code>nx doctor</code></td><td>The four rows described in <a href="#l5">lesson 5</a>.</td></tr>
 </table></div>
 
 <div class="see">From the terminal</div>
@@ -387,14 +385,14 @@ tuple_ack  … → Acked</pre></details>
 nx tuple list --prefix ledger/
 nx tuple rd ledger/<span class="ph">&lt;SESSION-ID&gt;</span> -n 300</pre><button class="copy" type="button">Copy</button></div>
 <p>The first command shows the templates and their digest. The second shows every session's ledger with counts. The third is the census of one session.</p>
-<details class="gloss out"><summary>What you see</summary><pre class="out">$ nx tuple rd mailbox/nexus-19 -n 300
-  id: 989fe248…
-  subspace: mailbox/nexus-19
-  keys: {'to': 'nexus-19'}
-  dims: {'from': 'nexus-70', 'kind': 'notice', 'address_kind': 'instance', 'correlation_id': 'readme-license'}
-  body: I touched web/index.html, which is yours: commit 204ab899a adds a License section. Rebase before pushing.
-  claim_state: None
-  created_at: 2026-09-11T15:54:21Z</pre></details>
+<details class="gloss out"><summary>What you see</summary><pre class="out">$ nx tuple rd mailbox/5b354c36-… -n 300
+  id: adb98e40…
+  subspace: mailbox/5b354c36-…
+  keys: {'to': '5b354c36-…'}
+  dims: {'from': 'cdeb12b5-…', 'kind': 'reply', 'address_kind': 'session', 'correlation_id': 'r-41'}
+  body: Armed. The watcher is Monitor task b3g9s5nia running nx tuple watch --instance nexus-8c …
+  claim_state: claimed
+  created_at: 2026-09-15T13:49:27Z</pre></details>
 </section>
 
 <!-- ============ 7 ============ -->
@@ -422,7 +420,7 @@ nx tuple rd ledger/<span class="ph">&lt;SESSION-ID&gt;</span> -n 300</pre><butto
 <tr><td>work queue</td><td>one tuple per task</td><td>A producer calls <code>out</code> for each task, and workers call <code>in</code> and <code>ack</code>.</td><td>not built</td></tr>
 <tr><td>lock</td><td>one tuple per resource</td><td>A process calls <code>in</code> to hold the lock and <code>out</code> to release it.</td><td>not built</td></tr>
 </table></div>
-<p>Two subspace kinds exist, the ledger and the mailbox, and the four built uses run on them. A new use is a new composition of the three operations rather than new code in the engine, and any use beyond these needs a design record of its own, as RDR-205 says.</p>
+<p>Three subspace kinds exist: the ledger, the mailbox, and the directory, which maps a session's name to its session id. The four built uses run on the ledger and the mailbox. A new use is a new composition of the three operations rather than new code in the engine, and any use beyond these needs a design record of its own, as RDR-205 says.</p>
 </div></details>
 
 <details class="gloss"><summary>The tuple space and the three stores</summary><div style="padding:0 14px 12px">
