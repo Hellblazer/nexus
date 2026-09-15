@@ -110,7 +110,12 @@ def test_prose_indexer_service_mode_skips_client_embed(tmp_path, monkeypatch):
     f = tmp_path / "note.md"
     f.write_text("# Title\n\nSome prose content long enough to chunk.\n")
     db = _RecordingDb()
-    ctx = _make_ctx(tmp_path, db, "rdr__t__minilm-l6-v2-384__v1", "minilm-l6-v2-384")
+    # nexus-4jj40: force_re_embed is decoupled from force, so pass it
+    # explicitly to exercise the ctx.force_re_embed -> upsert forwarding.
+    ctx = _make_ctx(
+        tmp_path, db, "rdr__t__minilm-l6-v2-384__v1", "minilm-l6-v2-384",
+        force_re_embed=True,
+    )
 
     count = index_prose_file(ctx, f)
 
@@ -125,11 +130,53 @@ def test_prose_indexer_service_mode_skips_client_embed(tmp_path, monkeypatch):
     assert all(
         m.get("embedding_model") == "minilm-l6-v2-384" for m in up["metadatas"]
     )
-    # RDR-181 §Approach step 3: ctx.force=True must reach force_re_embed on
-    # the upsert call — the plumbing gap this test file's --force ctx was
-    # already exercising for the embed-stub, now also proven for the
-    # forceReEmbed escape.
+    # RDR-181 §Approach step 3 / nexus-4jj40: --force --re-embed
+    # (ctx.force_re_embed=True) must reach force_re_embed=True on the upsert.
     assert up["force_re_embed"] is True
+
+
+def test_prose_indexer_force_alone_does_not_force_re_embed(tmp_path, monkeypatch):
+    """nexus-4jj40 sibling (shakedown 2026-09-15): the prose per-file fallback
+    passed ctx.force as force_re_embed, so a plain --force paid for a full
+    re-embed on this path."""
+    from nexus.prose_indexer import index_prose_file
+
+    f = tmp_path / "note3.md"
+    f.write_text("# Title\n\nProse content that a plain --force re-sends.\n")
+    db = _RecordingDb()
+    ctx = _make_ctx(
+        tmp_path, db, "rdr__t__minilm-l6-v2-384__v1", "minilm-l6-v2-384",
+        force=True, force_re_embed=False,
+    )
+
+    count = index_prose_file(ctx, f)
+
+    assert count >= 1
+    assert len(db.upserts) == 1
+    assert db.upserts[0]["force_re_embed"] is False
+
+
+def test_index_prose_file_wrapper_threads_force_re_embed(tmp_path, monkeypatch):
+    """Review finding on the shakedown fix (T2 nexus/nexus-4jj40-prose-rdr-
+    force-re-embed-wrapper-gap): indexer._index_prose_file builds the prose
+    IndexContext for nx index repo's docs and rdr loops. Without a
+    force_re_embed parameter there, --re-embed never reached the per-file
+    fallback, whatever prose_indexer did with the context."""
+    from nexus.indexer import _index_prose_file
+
+    flags = []
+    for force_re_embed in (False, True):
+        f = tmp_path / f"wrap-{force_re_embed}.md"
+        f.write_text("# Title\n\nWrapper-level prose content for the fallback path.\n")
+        db = _RecordingDb()
+        _index_prose_file(
+            f, tmp_path, "rdr__t__minilm-l6-v2-384__v1", "minilm-l6-v2-384",
+            _make_col(), db, "key-present-but-must-not-be-used", {},
+            "2026-06-11T00:00:00+00:00", 0.0,
+            force=True, force_re_embed=force_re_embed,
+        )
+        flags.append([u["force_re_embed"] for u in db.upserts])
+    assert flags == [[False], [True]]
 
 
 def test_prose_indexer_force_false_does_not_set_force_re_embed(tmp_path, monkeypatch):

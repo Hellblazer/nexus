@@ -102,6 +102,41 @@ def _service_mode_patches(db, *, extra=None):
             p.stop()
 
 
+@pytest.mark.parametrize("force_re_embed", [False, True])
+def test_run_index_prose_and_rdr_loops_forward_force_re_embed(
+    tmp_path, monkeypatch, force_re_embed,
+):
+    """Fix-check residual on nexus-4jj40 (T2 nexus/nexus-4jj40-fix-check-
+    round2-2026-09-15): _run_index's docs loop (_index_one_prose) and rdr
+    loop (_index_one_rdr) both call _index_prose_file, whose IndexContext
+    drives the per-file fallback. Each must forward _run_index's own
+    force_re_embed, independent of force. A plain mock db means no
+    ChunkBatcher, so both loops take the per-file path."""
+    from nexus.indexer import _run_index
+
+    repo = tmp_path / "repo"
+    (repo / "docs" / "rdr").mkdir(parents=True)
+    (repo / "README.md").write_text("# Readme\n\nSome prose for the docs loop.\n")
+    (repo / "docs" / "rdr" / "rdr-001-probe.md").write_text(
+        "# RDR-001 Probe\n\nSome RDR text for the rdr loop.\n",
+    )
+
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
+    monkeypatch.setenv("NX_LOCAL", "0")
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
+    monkeypatch.setenv("CHROMA_API_KEY", "fake")
+
+    db, _col = _mock_db()
+    with _service_mode_patches(db) as mocks:
+        _run_index(repo, _reg(), force=True, force_re_embed=force_re_embed)
+
+    seen = {
+        call.args[0].name: call.kwargs.get("force_re_embed")
+        for call in mocks["_index_prose_file"].call_args_list
+    }
+    assert seen == {"README.md": force_re_embed, "rdr-001-probe.md": force_re_embed}
+
+
 # ── RDR-152 P3.3: _run_index service-mode routing ─────────────────────────────
 
 

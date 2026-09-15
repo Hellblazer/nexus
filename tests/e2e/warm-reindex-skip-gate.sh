@@ -7,9 +7,10 @@
 # same chash -> vector present -> metadata-only UPDATE, RDR-181). The skip
 # breaking silently turns minutes into hours (the stevengharris report class),
 # and nothing in the unit suite exercises the client-walk-gate + server-skip
-# pair against a real engine. Probe history on the bead: a --force probe is
-# WRONG for this (--force threads forceReEmbed by design and measures the
-# escape hatch, not the skip).
+# pair against a real engine. Probe history on the bead: a --force --re-embed
+# probe is WRONG for this (it threads forceReEmbed by design and measures the
+# escape hatch, not the skip). Since nexus-4jj40 (be444581c) --force ALONE
+# re-sends without re-embedding; --re-embed is the explicit opt-in.
 #
 # Three legs against one warm sandbox:
 #   A  pure warm reindex (zero changes)  -> minutes wall, ZERO server embeds
@@ -330,19 +331,21 @@ echo "  staged=$STAGED_B partition_lines=$PARTITION_LINES_B skipped=$SKIP_B embe
 [ "$SKIP_B" -ge 1 ] || _fail "leg B: partition lines ARE present ($PARTITION_LINES_B) but skipped=0 summed across them — server-side skip not firing on uploaded unchanged chunks"
 [ "$EMB_B" -le 2 ] || _fail "leg B embedded $EMB_B chunks — only the appended section (~1) should embed; siblings must skip"
 
-echo "── 8/8 Leg C: FALSIFICATION — --force (skip off by design) must show the broken-skip signature ──"
+echo "── 8/8 Leg C: FALSIFICATION — --force --re-embed (skip off by design) must show the broken-skip signature ──"
 # No perturbation needed: --force defeats the client walk gate (everything
-# re-uploads) AND threads force_re_embed=True into every flush (indexer.py
-# RDR-181 step 3), so the server existence-partition never runs. The env
+# re-uploads) and --re-embed threads force_re_embed=True into every flush
+# (indexer.py RDR-181 step 3), so the server existence-partition never runs.
+# --force alone no longer does that (nexus-4jj40, be444581c): it re-sends and
+# the server still skips unchanged text, refreshing only metadata. The env
 # lever NX_UPSERT_SKIP_EXISTING=0 is NOT usable here: it only applies when
 # the kwarg is unset, and the batch flush always passes it explicitly.
 M3=$(_marker)
-_nx index repo "$CORPUS" --force >"$LOGS/warm-c.log" 2>&1 || { tail -20 "$LOGS/warm-c.log" >&2; _fail "leg C reindex failed"; }
+_nx index repo "$CORPUS" --force --re-embed >"$LOGS/warm-c.log" 2>&1 || { tail -20 "$LOGS/warm-c.log" >&2; _fail "leg C reindex failed"; }
 SKIP_C=$(_skipped_since "$M3"); STAGED_C=$(_staged_in_log "$LOGS/warm-c.log")
 echo "  staged=$STAGED_C skipped=$SKIP_C"
 [ "$STAGED_C" -ge 10 ] || _fail "leg C staged only $STAGED_C chunks — --force did not re-upload the corpus, falsification vacuous"
-[ "$SKIP_C" -eq 0 ] || _fail "leg C (--force, skip off by design) still reported skipped chunks — the skip signal is not trustworthy, leg B is vacuous"
-_all_forced_since "$M3" || _fail "leg C event=combined_write_embed_partition lines did not all carry force_re_embed=true — either no partition events fired (vacuous) or --force did not thread through to the combined write"
+[ "$SKIP_C" -eq 0 ] || _fail "leg C (--force --re-embed, skip off by design) still reported skipped chunks — the skip signal is not trustworthy, leg B is vacuous"
+_all_forced_since "$M3" || _fail "leg C event=combined_write_embed_partition lines did not all carry force_re_embed=true — either no partition events fired (vacuous) or --re-embed did not thread through to the combined write"
 
 GATE_OK=1
 echo "WARM-REINDEX SKIP GATE PASSED — cold=$COLD_STAGED legA=${WALL_A}s/${STAGED_A}up legB=${STAGED_B}up/${SKIP_B}skip/${EMB_B}emb legC=${STAGED_C}forced"
