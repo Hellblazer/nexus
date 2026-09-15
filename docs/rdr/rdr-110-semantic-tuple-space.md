@@ -1871,7 +1871,7 @@ match RDRs 094 / 105 / 108._
   implementation (refactor target in Phase 3).
 - Linda / tuple-space prior art:
   https://en.wikipedia.org/wiki/Tuple_space ;
-  Gelernter & Carriero, "Generative Communication in Linda", 1985.
+  Gelernter, "Generative Communication in Linda", ACM TOPLAS 7(1), 1985.
 - JavaSpaces specification — lease + atomic-take + leased-write
   semantics that inform the at-least-once delivery model.
 - Klaim — multiple named tuple spaces with locality, the
