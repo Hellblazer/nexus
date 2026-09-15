@@ -201,7 +201,7 @@ class TestNxAnswerStructuredEnvelope:
         with mod._t2_ctx() as db:
             db.save_plan(
                 query="orange foxes", plan_json=plan_json,
-                tags="test", project="", ttl=30,
+                tags="test", project="", ttl=30, verb="query",
             )
 
         result = asyncio.run(nx_answer(

@@ -575,6 +575,16 @@ try:
         else:
             print(f"  ok [H2]: ack with reply returned {reply_id[:12]}..., exactly that row "
                   "at the reply address, request consumed")
+        # Consume the reply, so the live tenant keeps no unclaimed gate mail.
+        # Left in place, it turned the doctor's tuples.oldest_unclaimed red an
+        # hour after every run (shakedown 2026-09-15).
+        drained = store.inp(reply_sub, {"to": asker}, claimant=asker, lease_s=60)
+        if drained is None:
+            print("  VIOLATION [H2]: the reply could not be claimed for cleanup",
+                  file=sys.stderr)
+            bad = True
+        else:
+            store.ack(drained[1], asker)
 
     # [H3] a reply into a keys-only template (the ledger) is refused before
     # anything is consumed, so the same claimant can still ack plainly.
