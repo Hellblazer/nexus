@@ -290,6 +290,7 @@ def _default_reindex(
             # files so a now-empty source cannot inflate the verification
             # (nexus-s5m44): an inflated count would let delete-after-verify
             # drop the old collection while the new one is short content.
+            # nexus-8143o: force_re_embed left at its default False -- target_name is a brand-new collection (a migration target), so every chash is new and there is nothing to skip.
             results = batch_index_markdowns(
                 rdr_files, corpus=corpus, collection_name=target_name, force=True
             )
@@ -299,6 +300,7 @@ def _default_reindex(
             p = Path(sp)
             if not p.exists():
                 continue
+            # nexus-8143o: same invariant as the rdr branch above -- target_name is brand new.
             if p.suffix.lower() == ".pdf":
                 count = index_pdf(p, corpus=corpus, collection_name=target_name, force=True)
             else:

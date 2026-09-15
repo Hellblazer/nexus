@@ -439,6 +439,28 @@ class TestUploaderLoop:
         assert len(t3.upsert_chunks_with_embeddings.call_args[0][1]) == 3
         assert db.read_uploadable_chunks("h1") == []
 
+    def test_force_re_embed_true_forwards_true(self, db) -> None:
+        """nexus-8143o: uploader_loop's own force_re_embed kwarg (default
+        False) is forwarded verbatim to every batch's
+        upsert_chunks_with_embeddings call -- the streaming pipeline's
+        one and only RDR-181 server-side re-embed control point."""
+        _pop_chunks(db, "h1", 3)
+        t3 = MagicMock()
+        uploader_loop("h1", db, t3, "docs__test", threading.Event(), force_re_embed=True)
+        t3.upsert_chunks_with_embeddings.assert_called_once()
+        _, kwargs = t3.upsert_chunks_with_embeddings.call_args
+        assert kwargs.get("force_re_embed") is True
+
+    def test_force_re_embed_default_forwards_false(self, db) -> None:
+        """Omitting force_re_embed (the default) must NOT set True on the
+        server call -- the whole point of this bead's decoupling."""
+        _pop_chunks(db, "h1", 3)
+        t3 = MagicMock()
+        uploader_loop("h1", db, t3, "docs__test", threading.Event())
+        t3.upsert_chunks_with_embeddings.assert_called_once()
+        _, kwargs = t3.upsert_chunks_with_embeddings.call_args
+        assert kwargs.get("force_re_embed") is False
+
     def test_batch_sizing(self, db) -> None:
         _pop_chunks(db, "h1", 200)
         t3 = MagicMock()
@@ -498,7 +520,7 @@ class TestUploaderLoop:
         seen_in_hook: list[list[dict]] = []
         seen_in_t3: list[list[dict]] = []
         t3.upsert_chunks_with_embeddings.side_effect = (
-            lambda collection, ids, documents, embeddings, metadatas:
+            lambda collection, ids, documents, embeddings, metadatas, **_kwargs:
             seen_in_t3.append([dict(m) for m in metadatas])
         )
 
@@ -573,6 +595,40 @@ class TestPipelineIndexPdf:
         assert total == 2
         mock_t3.upsert_chunks_with_embeddings.assert_called_once()
         assert db.get_pipeline_state("abc123") is None
+
+    def test_force_re_embed_true_forwards_true(self, db, mock_t3) -> None:
+        """nexus-8143o: pipeline_index_pdf's own force_re_embed kwarg
+        reaches uploader_loop's upsert_chunks_with_embeddings call as
+        force_re_embed=True -- the fix for the ship-blocker where --force
+        --re-embed was a no-op on the streaming path (_STREAMING_THRESHOLD=0,
+        nearly every real PDF)."""
+        fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}))
+        fr = _er(3)
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(3, fr)
+            MC.return_value.chunk.return_value = fc
+            pipeline_index_pdf(Path("/test/doc2.pdf"), "abc124", "docs__test",
+                               mock_t3, db=db, embed_fn=_embed, corpus="test",
+                               force_re_embed=True)
+        mock_t3.upsert_chunks_with_embeddings.assert_called_once()
+        _, kwargs = mock_t3.upsert_chunks_with_embeddings.call_args
+        assert kwargs.get("force_re_embed") is True
+
+    def test_force_re_embed_default_forwards_false(self, db, mock_t3) -> None:
+        """force_re_embed defaulting to False must NOT set True on the
+        server call -- the whole point of this bead's decoupling (the
+        deadlock-break *force* flag, tested separately, is orthogonal --
+        see pipeline_index_pdf's docstring)."""
+        fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}))
+        fr = _er(3)
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(3, fr)
+            MC.return_value.chunk.return_value = fc
+            pipeline_index_pdf(Path("/test/doc3.pdf"), "abc125", "docs__test",
+                               mock_t3, db=db, embed_fn=_embed, corpus="test")
+        mock_t3.upsert_chunks_with_embeddings.assert_called_once()
+        _, kwargs = mock_t3.upsert_chunks_with_embeddings.call_args
+        assert kwargs.get("force_re_embed") is False
 
     def test_streaming_register_failure_feeds_identity_drop_collector(self, db, mock_t3) -> None:
         """nexus-2xu6t follow-up (critic round, 2026-08-05): a preflight

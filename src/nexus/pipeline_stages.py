@@ -475,6 +475,7 @@ def uploader_loop(
     catalog_doc_id: str = "",
     hooks: "HookRegistry | None" = None,
     dry_run: bool = False,
+    force_re_embed: bool = False,
 ) -> None:
     """Poll chunk buffer for embedded chunks and upsert to T3 ChromaDB.
 
@@ -493,6 +494,13 @@ def uploader_loop(
     *t3* itself is unaffected — ``pipeline_index_pdf``'s caller already
     controls whether *t3* is the real or an ephemeral client; this flag
     only stops the CATALOG-adjacent hook fan-out.
+
+    *force_re_embed* (nexus-8143o): forwarded verbatim to every batch's
+    ``t3.upsert_chunks_with_embeddings`` call — the RDR-181 server-side
+    existence-partition control. This is the ONLY place in the streaming
+    pipeline that talks to that control: ``embed_fn`` (the chunker
+    stage's client-side embedder, local/dry-run mode only) has nothing to
+    do with it, see ``pipeline_index_pdf``'s docstring.
     """
     total_uploaded = 0
 
@@ -516,7 +524,7 @@ def uploader_loop(
                     for row in batch
                 ]
 
-                t3.upsert_chunks_with_embeddings(collection, ids, documents, embeddings, metadatas)
+                t3.upsert_chunks_with_embeddings(collection, ids, documents, embeddings, metadatas, force_re_embed=force_re_embed)
 
                 # RDR-108 Phase 3: inject the per-row global chunk_index
                 # from T2 into the metadata blob BEFORE firing the batch
@@ -855,6 +863,7 @@ def pipeline_index_pdf(
     target_model: str = "voyage-context-3",
     git_meta: dict | None = None,
     force: bool = False,
+    force_re_embed: bool = False,
     doc_id: str = "",
     hooks: "HookRegistry | None" = None,
     source_uri: str = "",
@@ -891,6 +900,31 @@ def pipeline_index_pdf(
             whose ``content_hash`` matches — so neither the pipeline
             state nor half-written prior chunks can silently skip the
             re-ingest or race the upsert. No-op when False.
+
+            The T3 orphan delete in (b) is NOT a general-purpose clear:
+            ``_force_t3_orphan_cleanup``'s server-side delete goes through
+            ``PgVectorRepository``'s anti-join (nexus-o8dil.5), which
+            REFUSES to delete a chunk a live catalog manifest row still
+            references. For an already-indexed PDF being re-run with
+            ``--force`` (the common case — a fresh PDF has no prior
+            manifest row to protect anything), that means the CURRENT
+            chunks survive this cleanup untouched: re-upload hits the
+            SAME chashes, and without *force_re_embed* the server's
+            existence-partition (RDR-181) skips the billed re-embed for
+            them, refreshing only metadata. ``force`` alone does NOT
+            imply a fresh embed on a re-index.
+        force_re_embed: DECOUPLED from *force* (nexus-8143o, mirroring
+            nexus-4jj40 round 5's ``repo`` split and doc_indexer.py's
+            ``_upsert_skip_reembed``). Forwarded to ``uploader_loop``,
+            which forwards it verbatim to every batch's
+            ``t3.upsert_chunks_with_embeddings`` call — the actual RDR-181
+            server-side re-embed control. This is the streaming pipeline's
+            OWN skip point; it has nothing to do with ``embed_fn`` (the
+            chunker stage's optional client-side embedder, used only in
+            local/dry-run mode to populate the pipeline staging buffer —
+            it always computes whatever it is asked to compute and never
+            consults *force_re_embed*, which only governs the SERVER's
+            final upsert decision).
 
     Pass *dry_run=True* (nexus-uxg4u) to skip every catalog/T2 write this
     function would otherwise make — the fallback pre-flight registration
@@ -1046,6 +1080,7 @@ def pipeline_index_pdf(
             catalog_doc_id=doc_id,
             hooks=hooks,
             dry_run=dry_run,
+            force_re_embed=force_re_embed,
         )
 
         all_futures: set[Future] = {extract_future, chunk_future, upload_future}

@@ -78,15 +78,17 @@ nx index repo ./my-project
 
 | Flag | Description |
 |------|-------------|
-| `--force` | Force re-indexing, bypassing staleness check (re-chunks and re-embeds in-place). For `pdf`/`md`/`rdr` this always re-embeds every chunk. For `repo` (nexus-4jj40 round 5), it re-chunks and re-sends every file but does NOT by itself force a Voyage re-embed; see the `repo`-only `--re-embed` flag below |
+| `--force` | Force re-indexing, bypassing staleness check (re-chunks and re-sends every chunk in place). Does NOT by itself force a Voyage re-embed — `repo` (nexus-4jj40 round 5) and `pdf`/`md`/`rdr` (nexus-8143o, same split) all share this: the server's own existence-partition still skips the billed embed call for a chunk whose text is byte-identical to what is already stored, refreshing only its metadata. See `--re-embed` below |
+| `--re-embed` | Requires `--force`. Also forces a Voyage re-embed of every chunk, even one whose text is unchanged (the pre-decoupling `--force` behaviour). Without it, `--force` alone re-chunks and re-sends every file/document; the server's own existence-partition still skips the billed embed call for a chunk whose text is byte-identical to what is already stored, refreshing only its metadata (e.g. a chunker classification change). Reserve `--re-embed` for a genuine embedding-model change. Applies to `repo`, `pdf`, `md`, `rdr`, and `nx dt index` |
 | `--monitor` | Print per-file progress lines. For `pdf` and `md`, also shows a per-chunk tqdm progress bar during embedding. Auto-enabled when stdout is not a TTY (piped, backgrounded, CI) |
+
+**On a plain re-index, `--force` alone keeps the skip — this is the common case, not an edge case.** Re-running `--force` on an already-indexed file re-chunks and re-sends every chunk, but for a chunk whose text has not changed the server's existence-partition still recognizes the same chash and skips the billed embed, refreshing only metadata; nothing about `--force` clears that chunk out first. For `pdf` specifically, `--force`'s own pre-flight cleanup (breaking a partial-ingest deadlock, unrelated to `--re-embed`) does NOT change this: it only deletes T3 chunks no live catalog manifest still references, so an already-indexed PDF's CURRENT chunks — the ones a re-run would otherwise skip re-embedding — survive that cleanup untouched. `--re-embed` is the only lever that forces the embed regardless.
 
 **`repo`-only flags:**
 
 | Flag | Description |
 |------|-------------|
 | `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh). Mutually exclusive with `--force` |
-| `--re-embed` | Requires `--force`. Also forces a Voyage re-embed of every chunk, even one whose text is unchanged (the pre-nexus-4jj40 `--force` behaviour). Without it, `--force` alone re-chunks and re-sends every file; the server's own existence-partition still skips the billed embed call for a chunk whose text is byte-identical to what is already stored, refreshing only its metadata (e.g. a chunker classification change). Reserve `--re-embed` for a genuine embedding-model change |
 | `--since-head` | Index only the git delta since the last indexed commit (`owners.head_hash`): changed files re-index, deleted files' docs prune, full-tree passes (staleness pulls, housekeeping, misclassified/orphan prunes, rg cache rebuild) are skipped. Worktree-inclusive. Falls back to a full index when no usable base exists; ignored with `--force`. The per-commit hook's fast path |
 | `--corpus [docs\|knowledge]` | Corpus routing for auto-classified prose/PDF files (default: `docs`). `docs` routes to `docs__` collections; `knowledge` routes to `knowledge__` collections instead |
 | `--on-locked {skip,wait}` | Behavior under contention (default: `wait`). Per-repo advisory lock (two `nx index repo` on the same repo): `skip` exits immediately, `wait` blocks. Catalog-write fairness (RDR-146): when a foreground interactive catalog write is pending, `skip` defers this run's catalog writes to the next idempotent pass, `wait` proceeds after a bounded yield. `NX_WRITE_PRIORITY=interactive|batch` overrides the tty-based priority of a run's catalog writes. |
@@ -403,8 +405,11 @@ nx dt index --uuid UUID-A --uuid UUID-B --uuid UUID-C
 # See what would be indexed without writing.
 nx dt index --selection --dry-run
 
-# Force re-indexing even if the record's content is unchanged.
+# Force re-indexing even if the record's content is unchanged (metadata-
+# only refresh for a byte-identical chunk -- add --re-embed to also pay
+# for a fresh Voyage embed).
 nx dt index --uuid 8EDC855D-213F-40AD-A9CF-9543CC76476B --force
+nx dt index --uuid 8EDC855D-213F-40AD-A9CF-9543CC76476B --force --re-embed
 ```
 
 | Flag | Description |
@@ -419,7 +424,8 @@ nx dt index --uuid 8EDC855D-213F-40AD-A9CF-9543CC76476B --force
 | `--corpus <name>` | Corpus name used to derive the default collection (default: `dt`). PDFs route to `knowledge__<corpus>-papers` (paper-shaped, aspect-eligible); markdown notes route to `docs__<corpus>` |
 | `--dry-run` | Print records that would be indexed; make no T3 writes |
 | `--extractor [auto\|docling\|mineru]` | PDF extraction backend for file-backed records (default `auto`). `mineru` is formula-aware but can OOM-fail on formula-dense pages; the recovery is `--extractor docling` (formula-stripped, always completes) |
-| `--force` | Force re-indexing every record, bypassing the staleness check (re-chunks and re-embeds in place) — same semantics as `nx index pdf --force`. Forwarded to `index_pdf`/`index_markdown`'s own `force` kwarg for both file-backed records and, with `--dt-content`, non-file-backed ones; catalog identity and tumbler are preserved (nexus-gup3b). Without it, an unchanged record prints `skipped: index fresh (use --force)` |
+| `--force` | Force re-indexing every record, bypassing the staleness check (re-chunks and re-sends every chunk in place) — same decoupled semantics as `nx index pdf --force` (nexus-8143o): does NOT by itself force a Voyage re-embed. Forwarded to `index_pdf`/`index_markdown`'s own `force` kwarg for both file-backed records and, with `--dt-content`, non-file-backed ones; catalog identity and tumbler are preserved (nexus-gup3b). Without it, an unchanged record prints `skipped: index fresh (use --force)` |
+| `--re-embed` | Requires `--force`. Also forces a Voyage re-embed of every chunk, even one whose text is unchanged (the pre-nexus-8143o `--force` behaviour). Forwarded to `index_pdf`/`index_markdown`'s own `force_re_embed` kwarg, same split as `nx index pdf`/`md`/`rdr`/`repo` |
 | `--allow-page-gap` | Accept a PDF whose extracted pages do not cover DEVONthink's `pageCount` (nexus-i0cwh). By default a gap is a per-record failure listed under `Failures:` with the missing page numbers, and the run exits non-zero; either way the gap is recorded on the catalog row as `meta.page_gap` (cleared on the next full-coverage run) |
 | `--link-semantic` | After a record indexes, create `relates` edges to its DT similarity + explicit-link neighbours already indexed in nexus (RDR-139 Layer B). DT unavailable → zero edges. Opt-in |
 | `--writeback` | After a record indexes, stamp the nexus identity back onto the DT record (RDR-139 Layer F): `nx-indexed` / `nx-tumbler:<t>` tags + a tumbler backlink annotation. nexus-owned namespace only; never edits user content. Opt-in |

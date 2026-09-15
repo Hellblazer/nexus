@@ -530,8 +530,8 @@ def test_scanner_finds_the_known_per_record_loop_sites() -> None:
     assert len(sites) == 5, sites
     uncovered = {(s.rel_path, s.function, s.lineno) for s in sites if not s.covered}
     assert uncovered == {
-        ("db/embed_migrate.py", "_default_reindex", 303),
         ("db/embed_migrate.py", "_default_reindex", 305),
+        ("db/embed_migrate.py", "_default_reindex", 307),
     }, (
         "the set of genuinely-uncovered sites changed -- either a real "
         "coverage regression (fix it) or embed_migrate.py's line numbers "

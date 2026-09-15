@@ -701,6 +701,39 @@ def test_index_pdf_force_flag(runner, fake_pdf):
     assert kw.get("force") is True
 
 
+# ── --re-embed flag (nexus-8143o, extending nexus-4jj40 round 5's split
+# from `repo` to `pdf`/`md`/`rdr`) ───────────────────────────────────────────
+
+def test_index_pdf_re_embed_requires_force(runner, fake_pdf):
+    """--re-embed alone (no --force) is a UsageError -- a file the
+    staleness check skips never reaches the server, so there is nothing
+    to re-embed."""
+    result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--re-embed"])
+    assert result.exit_code != 0
+    assert "--re-embed requires --force" in result.output
+
+
+def test_index_pdf_force_without_re_embed_defaults_false(runner, fake_pdf):
+    """--force alone must NOT set force_re_embed=True on the indexer call
+    (the whole point of this bead)."""
+    with patch("nexus.doc_indexer.index_pdf", return_value=PDF_RESULT) as m:
+        result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--force"])
+    assert result.exit_code == 0, result.output
+    _, kw = m.call_args
+    assert kw.get("force") is True
+    assert kw.get("force_re_embed") is False
+
+
+def test_index_pdf_force_and_re_embed_together(runner, fake_pdf):
+    """--force --re-embed reaches index_pdf as force_re_embed=True."""
+    with patch("nexus.doc_indexer.index_pdf", return_value=PDF_RESULT) as m:
+        result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--force", "--re-embed"])
+    assert result.exit_code == 0, result.output
+    _, kw = m.call_args
+    assert kw.get("force") is True
+    assert kw.get("force_re_embed") is True
+
+
 def test_index_pdf_force_dry_run_mutual_exclusion(runner, fake_pdf):
     result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--force", "--dry-run"])
     assert result.exit_code != 0
@@ -784,6 +817,33 @@ def test_index_md_force_flag(runner, fake_md):
     assert result.exit_code == 0, result.output
     _, kw = m.call_args
     assert kw.get("force") is True
+
+
+def test_index_md_re_embed_requires_force(runner, fake_md):
+    """--re-embed alone (no --force) is a UsageError, mirroring pdf/rdr."""
+    result = runner.invoke(main, ["index", "md", str(fake_md), "--re-embed"])
+    assert result.exit_code != 0
+    assert "--re-embed requires --force" in result.output
+
+
+def test_index_md_force_without_re_embed_defaults_false(runner, fake_md):
+    """--force alone must NOT set force_re_embed=True on the indexer call."""
+    with patch("nexus.doc_indexer.index_markdown", return_value=MD_RESULT) as m:
+        result = runner.invoke(main, ["index", "md", str(fake_md), "--force"])
+    assert result.exit_code == 0, result.output
+    _, kw = m.call_args
+    assert kw.get("force") is True
+    assert kw.get("force_re_embed") is False
+
+
+def test_index_md_force_and_re_embed_together(runner, fake_md):
+    """--force --re-embed reaches index_markdown as force_re_embed=True."""
+    with patch("nexus.doc_indexer.index_markdown", return_value=MD_RESULT) as m:
+        result = runner.invoke(main, ["index", "md", str(fake_md), "--force", "--re-embed"])
+    assert result.exit_code == 0, result.output
+    _, kw = m.call_args
+    assert kw.get("force") is True
+    assert kw.get("force_re_embed") is True
 
 
 # ── --monitor flag ───────────────────────────────────────────────────────────

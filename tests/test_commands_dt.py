@@ -87,6 +87,10 @@ def fake_dispatcher(monkeypatch) -> list[dict]:
         dry_run: bool,
         extractor: str = "auto",
         force: bool = False,
+        # nexus-8143o: intentionally NO default -- a caller (index_cmd)
+        # that forgets to forward force_re_embed must raise here, not
+        # silently pass this fixture's own default.
+        force_re_embed: bool,
     ) -> tuple[bool, int]:
         calls.append({
             "uuid": uuid,
@@ -96,6 +100,7 @@ def fake_dispatcher(monkeypatch) -> list[dict]:
             "dry_run": dry_run,
             "extractor": extractor,
             "force": force,
+            "force_re_embed": force_re_embed,
         })
         # Default success (stamped, chunks=1) — tests that want to exercise
         # the stamp-failed / unchanged summary paths replace the dispatcher
@@ -432,6 +437,46 @@ class TestPassthroughFlags:
         assert result.exit_code == 0, result.output
         assert fake_dispatcher[0]["force"] is False
 
+    # ── --re-embed flag (nexus-8143o, giving `nx dt index` the same
+    # --force/--re-embed split as the other four `nx index` subcommands) ────
+
+    def test_re_embed_requires_force(self, runner, fake_selectors):
+        """--re-embed alone (no --force) is a UsageError, mirroring
+        pdf/md/rdr/repo."""
+        from nexus.cli import main
+
+        result = runner.invoke(main, ["dt", "index", "--selection", "--re-embed"])
+        assert result.exit_code != 0
+        assert "--re-embed requires --force" in result.output
+
+    def test_force_without_re_embed_forwards_false(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        """--force alone must NOT set force_re_embed=True on the
+        per-record dispatcher (the whole point of this bead)."""
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [("U", "/a.pdf")]
+        result = runner.invoke(main, ["dt", "index", "--selection", "--force"])
+        assert result.exit_code == 0, result.output
+        assert fake_dispatcher[0]["force"] is True
+        assert fake_dispatcher[0]["force_re_embed"] is False
+
+    def test_force_and_re_embed_together(
+        self, runner, fake_selectors, fake_dispatcher,
+    ):
+        """--force --re-embed reaches the per-record dispatcher as
+        force_re_embed=True."""
+        from nexus.cli import main
+
+        fake_selectors["selection"].return_value = [("U", "/a.pdf")]
+        result = runner.invoke(
+            main, ["dt", "index", "--selection", "--force", "--re-embed"],
+        )
+        assert result.exit_code == 0, result.output
+        assert fake_dispatcher[0]["force"] is True
+        assert fake_dispatcher[0]["force_re_embed"] is True
+
 
 # ── nexus-gup3b: --force bypasses the staleness gate end-to-end ─────────────
 #
@@ -648,7 +693,7 @@ class TestStampFailedSummary:
         ]
 
         # Dispatcher returns False for the two that should fail to stamp.
-        def maybe_fail(uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False):
+        def maybe_fail(uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False, force_re_embed=False):
             return uuid == "U-OK", 1
 
         monkeypatch.setattr("nexus.commands.dt._index_record", maybe_fail)
@@ -710,7 +755,7 @@ class TestDtContentExceptionHandling:
             ("U-OK", "x-devonthink-item://ok"),
         ]
 
-        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False):
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False, force_re_embed=False):
             if uuid == "U-BAD":
                 raise ChunkLandingUnverifiedError(collection=collection, count=3)
             return True
@@ -753,7 +798,7 @@ class TestDtContentExceptionHandling:
             ("U-OK", "x-devonthink-item://ok"),
         ]
 
-        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False):
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False, force_re_embed=False):
             if uuid == "U-BAD":
                 raise IndexRunVerifyRefused(
                     doc_id="1.99.1", referenced=5, present=3, missing=2,
@@ -810,7 +855,7 @@ class TestDtContentExceptionHandling:
             ("U-BAD", "x-devonthink-item://bad"),
         ]
 
-        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False):
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False, force_re_embed=False):
             raise IndexRunVerifyRefused(
                 doc_id="1.99.1", referenced=5, present=3, missing=2,
                 chunk_count=5,
@@ -842,7 +887,7 @@ class TestDtContentExceptionHandling:
 
         monkeypatch.setattr(
             "nexus.commands.dt._index_dt_content_record",
-            lambda uuid, *, collection, corpus, extraction_source="dt_content", force=False: True,
+            lambda uuid, *, collection, corpus, extraction_source="dt_content", force=False, force_re_embed=False: True,
         )
 
         result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
@@ -864,7 +909,7 @@ class TestDtContentExceptionHandling:
         ]
         seen: list[dict] = []
 
-        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False):
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False, force_re_embed=False):
             seen.append({"uuid": uuid, "force": force})
             return True
 
@@ -894,7 +939,7 @@ class TestDtContentExceptionHandling:
 
         monkeypatch.setattr(
             "nexus.commands.dt._index_dt_content_record",
-            lambda uuid, *, collection, corpus, extraction_source="dt_content", force=False: False,
+            lambda uuid, *, collection, corpus, extraction_source="dt_content", force=False, force_re_embed=False: False,
         )
 
         result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
@@ -1046,7 +1091,7 @@ class TestAllTupleMembersSurviveTheRealPerRecordPath:
             ("U-OK", "x-devonthink-item://ok"),
         ]
 
-        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False):
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False, force_re_embed=False):
             if uuid == "U-BAD":
                 raise member_cls(**kwargs)
             return True
@@ -1140,7 +1185,7 @@ class TestGenericFallbackHandlesUnknownTupleMember:
             ("U-OK", "x-devonthink-item://ok"),
         ]
 
-        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False):
+        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False, force_re_embed=False):
             if uuid == "U-BAD":
                 raise _SyntheticThirdMember(detail="unknown-shape")
             return True
@@ -1931,6 +1976,94 @@ class TestStampDtUriOnEntry:
         assert pdf_kwargs[0].get("force") is False
         assert md_kwargs[0].get("force") is False
 
+    def test_index_record_forwards_force_re_embed_to_index_pdf(
+        self, monkeypatch, tmp_path,
+    ):
+        """nexus-8143o: force_re_embed must reach index_pdf's own kwarg,
+        same contract as force (nexus-gup3b) above."""
+        from nexus.commands import dt as dt_module
+
+        pdf_kwargs: list[dict] = []
+
+        def fake_index_pdf(*args, **kwargs):
+            pdf_kwargs.append(kwargs)
+            return 3
+
+        monkeypatch.setattr(
+            dt_module, "_stamp_dt_uri_on_entry", lambda *a, **kw: True,
+        )
+        monkeypatch.setattr("nexus.doc_indexer.index_pdf", fake_index_pdf)
+
+        dt_module._index_record(
+            uuid="UUID-REEMBED-PDF",
+            path=str(tmp_path / "a.pdf"),
+            collection="knowledge__test",
+            corpus="default",
+            dry_run=False,
+            force=True,
+            force_re_embed=True,
+        )
+        assert pdf_kwargs[0].get("force_re_embed") is True
+
+    def test_index_record_forwards_force_re_embed_to_index_markdown(
+        self, monkeypatch, tmp_path,
+    ):
+        """Same contract on the .md branch."""
+        from nexus.commands import dt as dt_module
+
+        md_kwargs: list[dict] = []
+
+        def fake_index_markdown(*args, **kwargs):
+            md_kwargs.append(kwargs)
+            return 2
+
+        monkeypatch.setattr(
+            dt_module, "_stamp_dt_uri_on_entry", lambda *a, **kw: True,
+        )
+        monkeypatch.setattr("nexus.doc_indexer.index_markdown", fake_index_markdown)
+
+        dt_module._index_record(
+            uuid="UUID-REEMBED-MD",
+            path=str(tmp_path / "note.md"),
+            collection="knowledge__test",
+            corpus="default",
+            dry_run=False,
+            force=True,
+            force_re_embed=True,
+        )
+        assert md_kwargs[0].get("force_re_embed") is True
+
+    def test_index_record_force_re_embed_defaults_to_false_for_both_branches(
+        self, monkeypatch, tmp_path,
+    ):
+        from nexus.commands import dt as dt_module
+
+        pdf_kwargs: list[dict] = []
+        md_kwargs: list[dict] = []
+
+        monkeypatch.setattr(
+            dt_module, "_stamp_dt_uri_on_entry", lambda *a, **kw: True,
+        )
+        monkeypatch.setattr(
+            "nexus.doc_indexer.index_pdf",
+            lambda *a, **kw: pdf_kwargs.append(kw) or 1,
+        )
+        monkeypatch.setattr(
+            "nexus.doc_indexer.index_markdown",
+            lambda *a, **kw: md_kwargs.append(kw) or 1,
+        )
+
+        dt_module._index_record(
+            uuid="U-PDF2", path=str(tmp_path / "a.pdf"),
+            collection=None, corpus="default", dry_run=False, force=True,
+        )
+        dt_module._index_record(
+            uuid="U-MD2", path=str(tmp_path / "a.md"),
+            collection=None, corpus="default", dry_run=False, force=True,
+        )
+        assert pdf_kwargs[0].get("force_re_embed") is False
+        assert md_kwargs[0].get("force_re_embed") is False
+
     def test_index_record_dry_run_skips_stamp(
         self, monkeypatch, tmp_path,
     ):
@@ -2077,7 +2210,7 @@ class TestLinkSemantic:
         wb_calls: list[str] = []
         monkeypatch.setattr(
             "nexus.commands.dt._index_record",
-            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False: (uuid == "U-OK", 1),
+            lambda uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False, force_re_embed=False: (uuid == "U-OK", 1),
         )
         monkeypatch.setattr(
             "nexus.commands.dt._link_semantic_record",
@@ -2291,7 +2424,7 @@ class TestPageCoverage:
         assert dt_mod._dt_record_facts("U1") is None
 
     def _dispatch(self, monkeypatch, pages: list[int]):
-        def record(uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False):
+        def record(uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False, force_re_embed=False):
             return True, 5, pages
         monkeypatch.setattr("nexus.commands.dt._index_record", record)
         monkeypatch.setattr("nexus.commands.dt._stamp_page_gap", lambda uuid, missing: True)
@@ -2340,7 +2473,7 @@ class TestPageCoverage:
 
         fake_selectors["selection"].return_value = [("U", "/a.pdf")]
 
-        def record(uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False):
+        def record(uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False, force_re_embed=False):
             return True, 3, None
         monkeypatch.setattr("nexus.commands.dt._index_record", record)
         monkeypatch.setattr(dt_mod, "_dt_record_facts", lambda uuid: {"name": "a", "url": "", "year": 0, "page_count": 5})
@@ -2380,7 +2513,7 @@ class TestPageCoverage:
 
         fake_selectors["selection"].return_value = [("U-MD", "/n.md"), ("U-SAME", "/b.pdf")]
 
-        def record(uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False):
+        def record(uuid, path, *, collection, corpus, dry_run, extractor="auto", force=False, force_re_embed=False):
             return (True, 2, []) if path.endswith(".md") else (True, 0, [])
         monkeypatch.setattr("nexus.commands.dt._index_record", record)
         calls: list[str] = []

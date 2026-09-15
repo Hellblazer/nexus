@@ -1210,6 +1210,7 @@ def _upsert_skip_reembed(
     metadatas: list[dict],
     *,
     force: bool = False,
+    force_re_embed: bool = False,
 ) -> int:
     """Upsert chunks, short-circuiting server-side re-embedding of known chashes.
 
@@ -1234,11 +1235,20 @@ def _upsert_skip_reembed(
     client-side existence probe (the ``nexus-h8rf6.4`` optimization above,
     independent of and predating the RDR-181 server-side embed-skip) is
     bypassed entirely — every chunk is sent through
-    ``upsert_chunks_with_embeddings`` with ``force_re_embed=True`` so the
-    server also skips its existence-partition and re-embeds unconditionally.
-    Without this, a ``--force`` reindex would still take the client-side
-    metadata-only-update branch for unchanged chashes below, silently
-    defeating the caller's intent to force a full re-embed.
+    ``upsert_chunks_with_embeddings`` rather than split into the metadata-
+    only-update branch below for unchanged chashes.
+
+    ``force_re_embed`` (nexus-8143o, extending nexus-4jj40 round 5's
+    ``repo``-only decoupling to ``pdf``/``md``/``rdr``): DECOUPLED from
+    ``force``. ``force`` alone re-sends every chunk but leaves the
+    server's OWN existence-partition (RDR-181) free to skip the billed
+    Voyage re-embed for a chash whose text is byte-identical to what is
+    already stored, refreshing only that chunk's metadata. Pass
+    ``force_re_embed=True`` (``force`` must also be True — this function
+    never re-derives ``force`` from ``force_re_embed``) to additionally
+    force the server to re-embed unconditionally, the pre-decoupling
+    ``force``-alone behaviour. Forwarded verbatim as
+    ``upsert_chunks_with_embeddings(..., force_re_embed=force_re_embed)``.
 
     Returns the number of chunks actually sent down the embed path.
     """
@@ -1277,10 +1287,11 @@ def _upsert_skip_reembed(
             collection=collection_name,
             branch="force_full_upsert",
             count=len(ids),
+            force_re_embed=force_re_embed,
         )
         db.upsert_chunks_with_embeddings(
             collection_name, ids, documents, embeddings, metadatas,
-            force_re_embed=True,
+            force_re_embed=force_re_embed,
         )
         return len(ids)
     present: set[str] = set()
@@ -1550,6 +1561,7 @@ def _index_document(
     collection_name: str | None = None,
     embed_fn: EmbedFn | None = None,
     force: bool = False,
+    force_re_embed: bool = False,
     return_metadata: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
     source_key: str | None = None,
@@ -1580,6 +1592,10 @@ def _index_document(
     ``source_path`` value used in the staleness check and stale-chunk pruning.
     Callers pass a relative path here so that T3 metadata lookups match the
     relative ``source_path`` stored in chunk metadata (RDR-060).
+
+    *force_re_embed* (nexus-8143o) is forwarded verbatim to
+    :func:`_upsert_skip_reembed` -- see that function's docstring for the
+    full ``force``/``force_re_embed`` decoupling.
 
     When *doc_id* is provided (the caller — ``index_markdown`` — already
     resolved catalog identity, possibly via *source_uri*), it is used
@@ -1798,7 +1814,7 @@ def _index_document(
         if actual_model != target_model:
             for m in metadatas:
                 m["embedding_model"] = actual_model
-        _upsert_skip_reembed(db, collection_name, ids, documents, embeddings, metadatas, force=force)
+        _upsert_skip_reembed(db, collection_name, ids, documents, embeddings, metadatas, force=force, force_re_embed=force_re_embed)
 
         # Post-store hook chains (RDR-095). Both single-doc and batch chains
         # fire from every storage event; the per-doc loop covers single-shape
@@ -1890,6 +1906,7 @@ def _index_pdf_incremental(
     on_progress: Callable[[int, int], None] | None = None,
     hooks: "HookRegistry | None" = None,
     force: bool = False,
+    force_re_embed: bool = False,
     doc_id: str = "",
     source_uri: str = "",
     dry_run: bool = False,
@@ -1907,7 +1924,9 @@ def _index_pdf_incremental(
     ``force`` (RDR-181 §Approach step 3) is forwarded to
     :func:`_upsert_skip_reembed` per batch so a ``--force`` reindex reaches
     the server's ``forceReEmbed`` escape here too, not just the small-document
-    all-at-once path.
+    all-at-once path. ``force_re_embed`` (nexus-8143o) is forwarded
+    alongside it, per batch -- see :func:`_upsert_skip_reembed`'s docstring
+    for the full decoupling.
 
     When *doc_id* is provided (the caller — ``index_pdf`` — already resolved
     catalog identity, possibly via *source_uri*), it is reused directly
@@ -2050,7 +2069,7 @@ def _index_pdf_incremental(
                     m["embedding_model"] = actual_model
 
             # Upsert (nexus-h8rf6.4: known chashes skip the server-side embed)
-            _upsert_skip_reembed(t3, collection_name, batch_ids, batch_docs, embeddings, batch_metas, force=force)
+            _upsert_skip_reembed(t3, collection_name, batch_ids, batch_docs, embeddings, batch_metas, force=force, force_re_embed=force_re_embed)
 
             # RDR-108 Phase 3: inject the global chunk_index per row before
             # firing the batch chain. ``batch_metas`` came from
@@ -2367,6 +2386,7 @@ def index_pdf(
     collection_name: str | None = None,
     embed_fn: EmbedFn | None = None,
     force: bool = False,
+    force_re_embed: bool = False,
     return_metadata: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
     enrich: bool = False,
@@ -2391,6 +2411,26 @@ def index_pdf(
     local ONNX function for dry-run mode).
 
     Pass *force=True* to bypass the staleness check and always re-index.
+
+    *force_re_embed* (nexus-8143o, extending nexus-4jj40 round 5's ``repo``-
+    only decoupling to ``pdf``/``md``/``rdr``): DECOUPLED from *force* --
+    see :func:`_upsert_skip_reembed`'s docstring for the full rationale.
+    *force* alone re-chunks and re-sends every chunk in place; the server's
+    own existence-partition still skips the billed Voyage re-embed for a
+    chunk whose text is byte-identical to what is already stored,
+    refreshing only its metadata. Pass *force_re_embed=True* only for a
+    genuine embedding-model recompute -- the default keeps a plain
+    reclassification-only ``--force`` pass near-zero cost. Reaches every
+    write path this function can take -- the incremental
+    (``_index_pdf_incremental``) and small-document all-at-once paths
+    directly, and the streaming pipeline (``pipeline_stages.
+    pipeline_index_pdf``, the default path for most real PDFs, since
+    ``_STREAMING_THRESHOLD=0``) via its own ``force_re_embed`` parameter,
+    forwarded straight through to ``uploader_loop``'s
+    ``upsert_chunks_with_embeddings`` call -- see that function's
+    docstring for why its *force* alone (nexus-9ji's partial-ingest
+    deadlock break) does NOT imply a fresh re-embed on an already-indexed
+    PDF's re-run.
 
     When *return_metadata* is True, returns a dict instead of an int::
 
@@ -2713,6 +2753,7 @@ def index_pdf(
                     embed_fn=embed_fn, extractor=extractor, on_formula_oom=on_formula_oom,
                     corpus=corpus, target_model=target_model,
                     force=force,
+                    force_re_embed=force_re_embed,
                     doc_id=doc_id,
                     hooks=hooks,
                     source_uri=source_uri,
@@ -2936,6 +2977,7 @@ def index_pdf(
                 pdf_path, corpus, prepared, content_hash, col_name, db,
                 embed_fn=embed_fn, on_progress=on_progress, hooks=hooks,
                 force=force,
+                force_re_embed=force_re_embed,
                 doc_id=doc_id,
                 source_uri=source_uri,
                 dry_run=dry_run,
@@ -3056,7 +3098,7 @@ def index_pdf(
             for m in metadatas_list:
                 m["embedding_model"] = actual_model
         # nexus-h8rf6.4: known chashes skip the server-side embed.
-        _upsert_skip_reembed(db, col_name, ids, documents, embeddings, metadatas_list, force=force)
+        _upsert_skip_reembed(db, col_name, ids, documents, embeddings, metadatas_list, force=force, force_re_embed=force_re_embed)
 
         # Post-store hook chains (RDR-095). Both single-doc and batch chains
         # fire from every storage event; the per-doc loop covers single-shape
@@ -3379,6 +3421,7 @@ def index_markdown(
     collection_name: str | None = None,
     embed_fn: EmbedFn | None = None,
     force: bool = False,
+    force_re_embed: bool = False,
     return_metadata: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
     content_type: str = "prose",
@@ -3400,6 +3443,11 @@ def index_markdown(
     local ONNX function for dry-run mode).
 
     Pass *force=True* to bypass the staleness check and always re-index.
+
+    *force_re_embed* (nexus-8143o): DECOUPLED from *force* -- forwarded
+    verbatim to :func:`_index_document`/:func:`_upsert_skip_reembed`. See
+    :func:`_upsert_skip_reembed`'s docstring for the full rationale; the
+    same split ``nx index repo --force --re-embed`` already has.
 
     When *return_metadata* is True, returns a dict instead of an int::
 
@@ -3510,7 +3558,7 @@ def index_markdown(
     raw = _index_document(
         md_path, corpus, chunk_fn, t3=t3,
         collection_name=collection_name, embed_fn=embed_fn,
-        force=force, return_metadata=return_metadata, on_progress=on_progress,
+        force=force, force_re_embed=force_re_embed, return_metadata=return_metadata, on_progress=on_progress,
         source_key=source_key,
         hooks=hooks,
         doc_id=doc_id,
@@ -3584,6 +3632,7 @@ def batch_index_markdowns(
     collection_name: str | None = None,
     content_type: str = "prose",
     force: bool = False,
+    force_re_embed: bool = False,
     on_file: Callable[[Path, int, float], None] | None = None,
     base_path: Path | None = None,
     embed_fn: EmbedFn | None = None,
@@ -3602,6 +3651,10 @@ def batch_index_markdowns(
 
     Pass *force=True* to bypass the staleness check on every file.
 
+    *force_re_embed* (nexus-8143o): DECOUPLED from *force* -- forwarded
+    verbatim to :func:`index_markdown` for every file. See
+    :func:`_upsert_skip_reembed`'s docstring for the full rationale.
+
     *on_file*, if provided, is called after each file as
     ``on_file(path, chunks, elapsed_s)`` where *chunks* is the number of
     chunks upserted (0 for skipped/failed) and *elapsed_s* is wall time.
@@ -3616,6 +3669,7 @@ def batch_index_markdowns(
         try:
             raw = index_markdown(path, corpus, t3=t3, collection_name=collection_name,
                                  content_type=content_type, force=force,
+                                 force_re_embed=force_re_embed,
                                  base_path=base_path, embed_fn=embed_fn, hooks=hooks)
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"

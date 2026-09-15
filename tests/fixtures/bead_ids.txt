@@ -1459,6 +1459,7 @@ nexus-7zvp
 nexus-7zy
 nexus-80tk
 nexus-81183
+nexus-8143o
 nexus-81b9f
 nexus-82ihm
 nexus-830c
@@ -3035,6 +3036,8 @@ nexus-galkv.27
 nexus-galkv.28
 nexus-galkv.29
 nexus-galkv.3
+nexus-galkv.30
+nexus-galkv.31
 nexus-galkv.4
 nexus-galkv.5
 nexus-galkv.6
@@ -3066,6 +3069,7 @@ nexus-gf82u
 nexus-gff3g
 nexus-gfl3y
 nexus-gggzn
+nexus-ggonw
 nexus-ggvi0
 nexus-ggvi0.1
 nexus-ggzwl

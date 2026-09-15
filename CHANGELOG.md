@@ -6,6 +6,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **`nx index pdf`/`nx index md`/`nx index rdr`/`nx dt index --force` no
+  longer force a Voyage re-embed by themselves (nexus-8143o), matching the
+  split `nx index repo --force`/`--re-embed` already had (nexus-4jj40
+  round 5). `--force` alone bypasses the staleness check and re-sends
+  every chunk; the server's own existence-partition still skips the
+  billed embed call for a chunk whose text is byte-identical to what is
+  already stored, refreshing only its metadata — true on a normal
+  re-index of an already-indexed PDF too, since `--force`'s own
+  pre-flight cleanup only deletes T3 chunks no live catalog manifest row
+  still references, so an already-indexed document's current chunks
+  survive it untouched. Add the new `--re-embed` flag (requires
+  `--force`) on all five commands for the old force-re-embeds-everything
+  behaviour, including on the streaming PDF pipeline (`_STREAMING_
+  THRESHOLD=0`, the path nearly every real PDF takes), where the flag
+  previously had no effect at all.
+
 ## [7.46.2] - 2026-09-15
 
 Paired with engine-service-v0.1.119, unchanged from 7.46.1. A patch cut from
