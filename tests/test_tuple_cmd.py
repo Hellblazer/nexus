@@ -984,7 +984,7 @@ class TestTupleWatchPreflight:
         assert "connection refused" in lines[0]
 
     def test_unreadable_mailbox_is_a_skip_naming_the_address(self, tmp_path) -> None:
-        """The PER-ADDRESS branch: the registry answers, the mailbox does not."""
+        """The PER-ADDRESS branch: the registry answers, no mailbox does."""
 
         class _HalfUp:
             def registry(self):
@@ -998,9 +998,36 @@ class TestTupleWatchPreflight:
                            emit=lines.append)
         assert result.ok is False
         assert "404" in result.detail
-        assert len(lines) == 1  # the FIRST address stops it; no line per address
-        assert "SKIP" in lines[0]
-        assert "mailbox/addr-a" in lines[0]
+        assert result.readable == ()
+        assert len(lines) == 2  # one SKIP per address, each named
+        assert all("SKIP" in line for line in lines)
+        assert "mailbox/addr-a" in lines[0] and "mailbox/addr-b" in lines[1]
+
+    def test_one_unreadable_mailbox_is_skipped_and_the_readable_one_kept(self, tmp_path) -> None:
+        """PARTIAL, like acquire_watch_locks: an address the engine cannot read is
+        named and skipped, never a reason to drop one it can. A forked session armed
+        with its ListAgents name "<title> (Branch)" lost its session-id mailbox this
+        way (nexus-galkv.19, MVV step 6 re-run)."""
+
+        class _Census:
+            dead, total, available, claimed = 0, 0, 0, 0
+
+        class _OneBad:
+            def registry(self):
+                return {"digest": "d", "templates": []}
+
+            def subspace_stats(self, subspace):
+                if subspace == "mailbox/bad (Branch)":
+                    raise _Boom(f"no template registered for subspace '{subspace}'")
+                return _Census()
+
+        lines = []
+        result = preflight(_OneBad(), ["session-xyz", "bad (Branch)"], config=WatchConfig(),
+                           emit=lines.append)
+        assert result.ok is True
+        assert result.readable == ("session-xyz",)
+        assert len(lines) == 1
+        assert "SKIP" in lines[0] and "mailbox/bad (Branch)" in lines[0]
 
     def test_dead_backlog_near_the_probe_cap_warns_with_the_count(self, tmp_path) -> None:
         class _Census:
@@ -1720,6 +1747,27 @@ class TestWatchAddressResolution:
         assert r.addresses == ["same"]
         assert r.notices == []  # neither mailbox is unwatched, so there is nothing to warn about
 
+    @pytest.mark.parametrize(
+        "name", ["listagents (Branch)", "/clear (Branch)", "a" * 129, "nexus-19\n"],
+    )
+    def test_an_instance_outside_the_address_charset_is_not_watched_and_says_so(
+        self, name: str,
+    ) -> None:
+        """After /branch, ListAgents names the fork "<title> (Branch)". Armed with
+        that name, the watcher used to hand it to the engine, whose SKIP ended the
+        whole watch, the session-id mailbox included (nexus-galkv.19)."""
+        r = resolve_watch_addresses((), instance=name, session_id="session-xyz")
+        assert r.addresses == ["session-xyz"]
+        assert r.error == ""
+        assert len(r.notices) == 1
+        assert "WARNING" in r.notices[0] and repr(name) in r.notices[0]
+        assert "--instance was not given" not in r.notices[0]
+
+    def test_an_unusable_instance_and_no_session_is_a_skip_naming_the_name(self) -> None:
+        r = resolve_watch_addresses((), instance="listagents (Branch)", session_id=None)
+        assert r.addresses == []
+        assert "SKIP" in r.error and "'listagents (Branch)'" in r.error
+
     def test_explicit_addresses_suppress_the_instance_too(self) -> None:
         """The precedence MM-3.1's arming relies on: what it names is what is watched.
 
@@ -2026,6 +2074,45 @@ class TestWatchTwoAddressesCli:
         assert len(pings) == 1, res.output
         assert tid in pings[0]
         assert not [line for line in res.stdout.splitlines() if "WARNING" in line]
+
+    def test_cli_instance_outside_the_charset_still_watches_the_session(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        """MVV step 6 re-run (nexus-galkv.19): a fork armed with its ListAgents
+        name "<title> (Branch)" watched nothing at all, its own session-id
+        mailbox included."""
+        store, _cfg, sd = _watch_env(tmp_path)
+        sess = _uniq("sess")
+        monkeypatch.setenv("NX_SESSION_ID", sess)
+        tid = _out(store, sess, sender="alice")
+        res = _invoke([
+            "watch", "--instance", "listagents (Branch)", "--iterations", "1",
+            "--interval", "0", "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        pings = [line for line in res.stdout.splitlines() if "new mail" in line]
+        assert len(pings) == 1 and tid in pings[0], res.output
+        warnings = [line for line in res.stdout.splitlines() if "WARNING" in line]
+        assert len(warnings) == 1 and "'listagents (Branch)'" in warnings[0], res.output
+        assert not [line for line in res.stdout.splitlines() if "SKIP" in line]
+        assert not registration_path(sd, sess).exists()
+
+    def test_cli_an_unreadable_address_is_skipped_and_the_other_still_watched(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        store, _cfg, sd = _watch_env(tmp_path)
+        good = _uniq("good")
+        monkeypatch.setenv("NX_SESSION_ID", good)
+        tid = _out(store, good, sender="alice")
+        res = _invoke([
+            "watch", good, "bad (Branch)", "--iterations", "1", "--interval", "0",
+            "--state-dir", str(sd),
+        ])
+        assert res.exit_code == 0, res.output
+        skips = [line for line in res.stdout.splitlines() if "SKIP" in line]
+        assert len(skips) == 1 and "mailbox/bad (Branch)" in skips[0], res.output
+        pings = [line for line in res.stdout.splitlines() if "new mail" in line]
+        assert len(pings) == 1 and tid in pings[0], res.output
 
 
 # ── Phase 1 review fixes (MM-1.4, nexus-6konb.5) ──────────────────────────

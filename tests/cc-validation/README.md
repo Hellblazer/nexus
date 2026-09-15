@@ -78,6 +78,17 @@ one with no refresh token), takes the freshest survivor, and **fails loud**
 naming `claude /login` when nothing is usable. The snapshot is refreshed only
 from a credential that passed that check.
 
+**The picker itself lives in `tests/e2e/lib/claude_credentials.py`**
+(nexus-galkv.19), not in this file — `_cred_tool` here is a thin wrapper
+around it. Two more callers fetched the same keychain service with the
+identical bare, unscoped `security find-generic-password` this section warns
+against, and hit the identical husk-selection failure on 2026-09-15:
+`tests/e2e/auth-login.sh` (which then wrote the husk over its own fallback
+snapshot) and the `--fullstack`/`--shakeout-e2e` legs of
+`tests/e2e/migration-rehearsal/run.sh` (which mount it into a container). All
+three now share one picker (`pick` / `check FILE`) instead of three copies of
+this same fix drifting apart again.
+
 **Lesson (same class as the 2026-05-31 trio below): a successful FETCH is not
 a valid CREDENTIAL.** `[auth] provisioned …` is a provenance line, not an auth
 verification — never read it as "auth is fine".

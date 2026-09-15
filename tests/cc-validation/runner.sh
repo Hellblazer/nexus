@@ -224,102 +224,18 @@ mkdir -p "$TEST_HOME/.claude/plugins" "$TEST_HOME/.claude/agents" "$TEST_HOME/.c
 #
 # _cred_tool pick  → freshest usable keychain credential on stdout, rc 1 if none
 # _cred_tool check <file> → rc 0 iff that file holds a usable credential
+#
+# Thin wrapper around the shared picker (nexus-galkv.19) — the verdict logic
+# above (husk rejection, expiry-without-refresh rejection, freshest-survivor
+# selection by attribute-only `dump-keychain` enumeration) used to be
+# duplicated inline here; it now lives in one place so
+# tests/e2e/auth-login.sh and tests/e2e/migration-rehearsal/run.sh's
+# --fullstack/--shakeout-e2e legs (which used to fetch with a bare,
+# unscoped `security find-generic-password`, silently able to select the
+# same kind of husk this tool exists to reject) share it instead of
+# re-deriving it.
 _cred_tool() {
-    python3 - "$@" <<'PY'
-import json
-import re
-import subprocess
-import sys
-import time
-
-SERVICE = "Claude Code-credentials"
-
-
-def verdict(data):
-    """(ok, reason). Usable == carries a token we can authenticate or refresh with."""
-    oauth = (data or {}).get("claudeAiOauth") or {}
-    access = oauth.get("accessToken") or ""
-    refresh = oauth.get("refreshToken") or ""
-    if not access and not refresh:
-        return False, "empty husk — accessToken and refreshToken are both blank"
-    expires = oauth.get("expiresAt") or 0
-    if expires and expires <= int(time.time() * 1000) and not refresh:
-        return False, "accessToken expired and no refreshToken to renew it"
-    return True, ""
-
-
-def expiry(data):
-    return ((data or {}).get("claudeAiOauth") or {}).get("expiresAt") or 0
-
-
-mode = sys.argv[1]
-
-if mode == "check":
-    try:
-        with open(sys.argv[2]) as fh:
-            payload = json.load(fh)
-    except Exception as exc:
-        print(f"unreadable: {exc}", file=sys.stderr)
-        sys.exit(1)
-    ok, why = verdict(payload)
-    if not ok:
-        print(why, file=sys.stderr)
-        sys.exit(1)
-    sys.exit(0)
-
-# mode == "pick"
-
-
-def fetch(acct):
-    cmd = ["security", "find-generic-password", "-s", SERVICE]
-    if acct is not None:
-        cmd += ["-a", acct]
-    proc = subprocess.run(cmd + ["-w"], capture_output=True, text=True)
-    if proc.returncode != 0:
-        return None
-    try:
-        return json.loads(proc.stdout)
-    except Exception:
-        return None
-
-
-# `security` has no list-by-service, so enumerate accounts from an
-# ATTRIBUTE-ONLY dump (no `-d`, so no secrets are read and no unlock prompt).
-accounts, block = [], []
-dump = subprocess.run(["security", "dump-keychain"], capture_output=True, text=True).stdout
-for line in dump.splitlines() + ["keychain: <eof>"]:
-    if line.startswith("keychain: "):
-        text = "\n".join(block)
-        svce = re.search(r'"svce"<blob>="([^"]*)"', text)
-        acct = re.search(r'"acct"<blob>="([^"]*)"', text)
-        if svce and acct and svce.group(1) == SERVICE:
-            accounts.append(acct.group(1))
-        block = [line]
-    else:
-        block.append(line)
-
-usable, seen = [], set()
-for acct in accounts + [None]:  # None == the old first-match form, tried last
-    if acct in seen:
-        continue
-    seen.add(acct)
-    payload = fetch(acct)
-    if payload is None:
-        continue
-    label = acct if acct is not None else "<first-match>"
-    ok, why = verdict(payload)
-    if ok:
-        usable.append((expiry(payload), label, payload))
-    else:
-        print(f"  [auth] skipping keychain item acct={label!r}: {why}", file=sys.stderr)
-
-if not usable:
-    sys.exit(1)
-usable.sort(key=lambda row: row[0], reverse=True)
-expires, label, payload = usable[0]
-print(f"  [auth] keychain item acct={label!r} selected (expiresAt={expires})", file=sys.stderr)
-sys.stdout.write(json.dumps(payload))
-PY
+    python3 "$REPO_ROOT/tests/e2e/lib/claude_credentials.py" "$@"
 }
 
 provision_credentials() {

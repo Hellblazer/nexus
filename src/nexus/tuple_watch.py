@@ -53,7 +53,9 @@ much as what is.
   plus one census per address. A below-floor or unreachable engine 404s or
   refuses every call forever and is otherwise indistinguishable from an empty
   mailbox, so a failure here prints ONE named SKIP line and the loop is never
-  entered. A dead backlog approaching ``probe_n`` warns: past the cap dead
+  entered. Per address it is PARTIAL, like the locks below: an unreadable
+  mailbox prints its own SKIP line and is dropped, and the loop is skipped
+  only when no address is readable. A dead backlog approaching ``probe_n`` warns: past the cap dead
   rows no longer hide fresh mail permanently (the cursor above pages past
   them), but they force the address into permanent cursor mode, add
   catch-up latency before new mail is seen, and drop the forever re-emit
@@ -537,22 +539,38 @@ def resolve_watch_addresses(
 
     addresses: list[str] = []
     notices: list[str] = []
+    # An instance name becomes a subspace segment and a directory entry, so one
+    # outside the address charset is refused rather than sanitised, and said out
+    # loud. /branch hands a fork the ListAgents name "<title> (Branch)", which is
+    # outside it (nexus-galkv.19).
+    unusable = bool(instance) and not _SAFE_SESSION_ID.fullmatch(instance)
     if session_id:
         addresses.append(session_id)
-    if instance:
+    if instance and not unusable:
         addresses.append(instance)
     addresses = _unique_addresses(addresses)
 
     if not addresses:
+        why = (
+            f"the instance name {instance!r} is not a valid mailbox address" if unusable
+            else "--instance was not set"
+        )
         return ResolvedAddresses(
             addresses=[],
             error=(
                 f"{PING_PREFIX} SKIP: no mailbox to watch -- no address was given, no"
-                f" session id resolved, and --instance was not set, so nothing is being"
+                f" session id resolved, and {why}, so nothing is being"
                 f" watched. Pass an address, or --instance <name>."
             ),
         )
-    if not instance:
+    if unusable:
+        notices.append(
+            f"{PING_PREFIX} WARNING: watching only the session-id mailbox. The instance"
+            f" name {instance!r} is not a valid mailbox address (letters, digits, '.', '_'"
+            f" and '-' only, at most 128), so mail sent to this instance by name will not"
+            f" be pinged.",
+        )
+    elif not instance:
         notices.append(
             f"{PING_PREFIX} WARNING: watching only the session-id mailbox. The"
             f" instance-name mailbox is NOT watched, and mail sent to this instance by"
@@ -593,6 +611,8 @@ def _error_note(e: BaseException) -> str:
 class PreflightResult:
     ok: bool
     detail: str = ""
+    #: The addresses whose mailbox answered, in order. The caller watches these.
+    readable: tuple[str, ...] = ()
 
 
 def preflight(
@@ -607,9 +627,16 @@ def preflight(
     An engine below the floor that first served ``/v1/tuples`` 404s every call
     forever, and an unreachable one refuses every call forever; either way the
     loop would print nothing, which reads exactly like an empty mailbox. So this
-    runs first and, on failure, prints ONE line beginning ``SKIP`` on STDOUT --
-    the stream the Monitor watches, because a skip the session cannot see is the
-    silent no-op this guard exists to prevent -- and the caller exits.
+    runs first and, when the engine does not answer, prints ONE line beginning
+    ``SKIP`` on STDOUT -- the stream the Monitor watches, because a skip the
+    session cannot see is the silent no-op this guard exists to prevent -- and
+    the caller exits.
+
+    Per address it is PARTIAL, like :func:`acquire_watch_locks`: a mailbox the
+    engine cannot read prints its own ``SKIP`` line and is dropped, never a
+    reason to drop one it can read (nexus-galkv.19: a forked session armed with
+    an unreadable instance name lost its session-id mailbox too). The result is
+    not ``ok`` only when no address is readable.
     """
     try:
         store.registry()
@@ -622,7 +649,10 @@ def preflight(
         )
         return PreflightResult(ok=False, detail=detail)
 
-    for address in _unique_addresses(addresses):
+    readable: list[str] = []
+    failures: list[str] = []
+    unique = _unique_addresses(addresses)
+    for address in unique:
         subspace = f"mailbox/{address}"
         try:
             census = store.subspace_stats(subspace)
@@ -633,7 +663,9 @@ def preflight(
                 f"{PING_PREFIX} SKIP: {subspace} is not readable, so it is not being watched"
                 f" ({detail}){_error_note(e)}.",
             )
-            return PreflightResult(ok=False, detail=detail)
+            failures.append(detail)
+            continue
+        readable.append(address)
         dead = getattr(census, "dead", 0) or 0
         if dead >= config.probe_n * config.dead_backlog_warn_ratio:
             # Past probe_n the read cap truncates and dead rows hide fresh mail again
@@ -642,7 +674,10 @@ def preflight(
                 f"{PING_PREFIX} WARNING: {subspace} holds {dead} dead-lettered rows against a"
                 f" probe cap of {config.probe_n}; at the cap they hide fresh mail. Purge them.",
             )
-    return PreflightResult(ok=True)
+    detail = "; ".join(failures)
+    if unique and not readable:
+        return PreflightResult(ok=False, detail=detail)
+    return PreflightResult(ok=True, detail=detail, readable=tuple(readable))
 
 
 @dataclass
@@ -840,7 +875,7 @@ def write_instance_registration(state_dir: Path, session_id: str, instance: str)
     filename and a stray path-hostile value must never be trusted with
     directory writes.
     """
-    if not instance or not _SAFE_SESSION_ID.match(session_id):
+    if not instance or not _SAFE_SESSION_ID.fullmatch(session_id):
         return
     path = registration_path(state_dir, session_id)
     try:

@@ -6,6 +6,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.46.2] - 2026-09-15
+
+Paired with engine-service-v0.1.119, unchanged from 7.46.1. A patch cut from
+v7.46.1 carrying three fixes found while finishing the RDR-208 MVV; develop's
+RDR-207 Phase 1 engine work still waits for the next engine tag.
+
+### Fixed
+- **A forked session's name no longer drops its whole mailbox watch
+  (nexus-galkv.19).** After `/branch`, `ListAgents` names the fork
+  `<title> (Branch)`, which is outside the mailbox address charset. Armed with
+  that name, `nx tuple watch` handed the engine a subspace it refused and
+  exited, so the fork's session-id mailbox went unwatched too. An `--instance`
+  outside the charset is now not watched and prints one warning naming it, and
+  the preflight is partial per address: a mailbox the engine cannot read gets
+  its own `SKIP` line and the others are still watched.
+- **The mailbox arm instruction no longer passes `persistent: true` to
+  Monitor.** Current Claude Code builds removed that parameter and reject
+  unknown ones, and cap a watch at 30 minutes. The instruction now adds it only
+  where Monitor has it and says to re-arm on the 30-minute expiry notice.
+- **Test harnesses share one Claude Code credential picker.** Two macOS
+  Keychain items can carry the service `Claude Code-credentials`, and a bare
+  lookup can return the empty one. `tests/e2e/auth-login.sh` and the
+  `--fullstack` and `--shakeout-e2e` legs of `migration-rehearsal/run.sh` used
+  that lookup and could provision a logged-out session. They now use
+  `tests/e2e/lib/claude_credentials.py`, the picker cc-validation already used,
+  and a lint fails on any other bare lookup. Test tooling only.
+
 ## [7.46.1] - 2026-09-14
 
 Paired with engine-service-v0.1.119, unchanged from 7.46.0. A patch cut from
