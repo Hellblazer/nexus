@@ -402,6 +402,73 @@ def summaries_cmd(summary_id: int | None, project: str | None) -> None:
         )
 
 
+@memory.command("rollup")
+@click.option("--project", "-p", required=True, help="Project whose quarantined entries to roll up")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Print the groups and their summaries; write nothing")
+def rollup_cmd(project: str, dry_run: bool) -> None:
+    """Summarize a project's quarantined entries by month and mark them for reap.
+
+    Attended: it runs when you run it and costs one summarizer call per group,
+    and it prints the groups before making any call. Groups are by the month
+    of each entry's timestamp, which is its last write (a put or a merge
+    refreshes it); no creation date is kept. A summary must name every source
+    entry by title, or that group is left unmarked. Marked entries are deleted
+    only by a later ``nx memory reap``; ``nx memory restore`` still works
+    until then. A group that fails is reported, the other groups still run,
+    and the command exits nonzero.
+    """
+    from nexus.memory_rollup import (  # noqa: PLC0415 — deferred: operator deps stay off CLI startup
+        DEFAULT_MODEL_LABEL,
+        dispatch_summarizer,
+        plan_groups,
+        rollup_model,
+        run_groups,
+    )
+
+    with t2_handle() as db, _needs_quarantine_routes("rollup"):
+        groups = plan_groups(db.memory.list_quarantined(project=project))
+        if not groups:
+            click.echo(f"Nothing to roll up: no unmarked quarantined entries in {project!r}.")
+            return
+        entries = sum(len(g.rows) for g in groups)
+        click.echo(
+            f"{len(groups)} group{'' if len(groups) == 1 else 's'} ({entries} "
+            f"{'entry' if entries == 1 else 'entries'}) in {project!r}, "
+            "one summarizer call each:"
+        )
+        for g in groups:
+            click.echo(f"  {g.month}: {len(g.rows)} {'entry' if len(g.rows) == 1 else 'entries'}")
+        model = rollup_model()
+        outcomes = run_groups(
+            db.memory, project, groups, dispatch_summarizer(model=model),
+            model=model or DEFAULT_MODEL_LABEL, dry_run=dry_run,
+        )
+
+    for o in outcomes:
+        n = len(o.group.rows)
+        noun = "entry" if n == 1 else "entries"
+        match o.status:
+            case "marked":
+                click.echo(f"  {o.group.month}: marked {n} {noun} (summary id={o.summary_id})")
+            case "dry_run":
+                click.echo(f"  {o.group.month}: would mark {n} {noun}; summary:")
+                click.echo("    " + (o.summary or "").replace("\n", "\n    "))
+            case "check_failed":
+                click.echo(f"  {o.group.month}: NOT marked, the summary omits "
+                           + ", ".join(o.missing_titles))
+            case "dispatch_failed":
+                click.echo(f"  {o.group.month}: NOT marked, the summarizer failed: {o.error}")
+            case "refused":
+                click.echo(f"  {o.group.month}: NOT marked, the engine refused the summary: {o.error}")
+    failed = sum(1 for o in outcomes if not o.ok)
+    if failed:
+        raise click.ClickException(
+            f"{failed} of {len(outcomes)} group{'' if len(outcomes) == 1 else 's'} not marked; "
+            "see above. Those entries stay quarantined."
+        )
+
+
 @memory.command("expire")
 def expire_cmd() -> None:
     """Quarantine TTL-expired memory entries.

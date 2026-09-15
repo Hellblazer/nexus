@@ -1938,6 +1938,7 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 | `reap` | Delete the quarantined entries that carry a rollup mark |
 | `restore ID` | Bring a quarantined entry back as a permanent entry |
 | `summaries [ID]` | List rollup summaries, or show one by ID |
+| `rollup --project NAME` | Summarize a project's quarantined entries by month and mark them for `reap` |
 | `promote ID --collection NAME` | Promote entry to T3 by ID |
 
 **Quarantine (RDR-207).** Expiry does not delete. An entry past its TTL is quarantined: `get`, `search` and `list` stop showing it, but the row stays in the table. That is why an entry you expected to be gone can still exist while nothing finds it.
@@ -1948,7 +1949,7 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 - `nx memory delete --id ID` (or `--project` + `--title`) deletes one quarantined entry outright. You do not restore it first. `--all` covers only live entries.
 - `nx memory promote` reads the entry the way `get` does, so it reports a quarantined entry as not found. Restore the entry first, then promote it. Delete and promote differ because the design names delete as the way to remove a quarantined entry and names no promote for one.
 - `nx memory summaries [ID] [--project NAME]` lists rollup summaries, or shows one with its source entry ids. A summary is kept after `reap` deletes the entries it covers. No verb deletes a summary; that is an operator's decision, taken in SQL.
-- `nx doctor` reports a `memory.quarantine` row: quarantined entries without a mark, entries marked and waiting for `reap`, and the summary count. It is informational and never warns.
+- `nx doctor` reports a `memory.quarantine` row: quarantined entries without a mark, entries marked and waiting for `reap`, and the summary count. It is informational: it warns only when it cannot read the memory store at all, and shows "not applicable" on a box with no engine-backed T2.
 - Against an engine older than RDR-207 these verbs exit with "the engine predates RDR-207 quarantine".
 
 **`put` flags:** `--tags`, `--ttl` (default: `permanent`, reversed 2026-09-12 by nexus-473mx: a caller now asks for a clock explicitly; `--ttl 0` is rejected, not coerced), `--merge` (canonical-fact merge: fold into an existing high-overlap entry instead of creating a duplicate, non-destructive), `--merge-threshold FLOAT` (word-set Jaccard threshold for `--merge`, default: `0.5`)
@@ -1958,6 +1959,10 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 **`reap` flags:** `-y` / `--yes` (skip the confirmation prompt)
 
 **`summaries` flags:** `-p` / `--project NAME` (filter by project)
+
+**`rollup` flags:** `-p` / `--project NAME` (required), `--dry-run` (print the groups and their summaries; write nothing)
+
+`nx memory rollup` is the attended step that makes quarantined entries reapable. It groups one project's unmarked quarantined entries by month and prints the groups before doing anything; the cost is one summarizer call (`claude -p`, the same path `operator_summarize` uses) per group. The month is that of each entry's timestamp, which is its last write, since a put or a merge refreshes it and no creation date is kept. A summary must contain every source entry's title, or that group is reported and left unmarked; this is a floor, not a check that the summary is faithful. A group that passes is stored as a summary and its entries are marked, one group at a time. A group that fails (the summarizer errors, the title check fails, or the engine refuses the summary) is reported, the other groups still run, and the command exits nonzero. Marking deletes nothing: `nx memory reap` does that later, and `nx memory restore` still brings an entry back until then.
 
 **`promote` flags:** `--collection` (required), `--tags`, `--remove`
 
