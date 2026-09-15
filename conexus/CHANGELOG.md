@@ -4,6 +4,16 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.46.2] - 2026-09-15
+
+Paired engine: engine-service-v0.1.119 (`REQUIRED_ENGINE_VERSION` (0, 1, 119)),
+unchanged. Plugin version aligned with conexus 7.46.2. This pin advance makes
+live the plugin change `PENDING_RELEASE.md` held:
+
+- `skills/mailbox/SKILL.md` (nexus-galkv.19): the push-delivery rule passes
+  `persistent: true` only when the Monitor tool has that parameter, and
+  re-arms on the 30-minute expiry notice.
+
 ## [7.46.1] - 2026-09-14
 
 Paired engine: engine-service-v0.1.119 (`REQUIRED_ENGINE_VERSION` (0, 1, 119)),
