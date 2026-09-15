@@ -6,7 +6,43 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.47.0] - 2026-09-15
+
+Paired with engine-service-v0.1.120 (RDR-207 Phase 1), deployed before this
+client tag because every wire change in the pairing is additive.
+`REQUIRED_ENGINE_VERSION` moves from v0.1.119 to v0.1.120, so local-mode
+installs converge to it on upgrade.
+
+### Added
+- **T2 memory expiry quarantines instead of deleting (RDR-207).** An entry past
+  its TTL is hidden from every read and kept. New verbs: `nx memory list
+  --quarantined`, `nx memory restore ID`, `nx memory reap` (deletes only
+  quarantined entries that a stored summary covers), and `nx memory summaries
+  [ID]`. `nx memory expire` and the session-end message report quarantined
+  entries, and say deleted when the engine really deleted (an engine older than
+  v0.1.120). A merge naming a quarantined entry is refused; `nx memory delete`
+  still reaches a quarantined entry. `nx doctor` gains a `memory.quarantine`
+  row.
+- **`nx memory rollup --project P [--dry-run]` (RDR-207 Phase 3).** Groups a
+  project's quarantined entries by month, asks a summarizer for one summary per
+  group, checks that every source title appears in the summary, then stores it
+  and marks its sources in one engine transaction, which makes them eligible
+  for `nx memory reap`. Each group stands alone and reports its own outcome; a
+  group whose source was restored while the summarizer ran is left unmarked.
+  Attended only: nothing runs it automatically.
+
 ### Changed
+- **`nx index repo --force` no longer pays a full re-embed on its per-file
+  fallbacks (nexus-4jj40).** Prose, RDR and PDF files that fall back from the
+  batched path forwarded `--force` as a re-embed; they now honour `--re-embed`
+  like the code and batched paths.
+- **Docs: local mode embeds with bge-768 by default, or with Voyage when the
+  local service is keyed (nexus-umm29).** One local engine runs one of the two
+  per boot. The privacy policy now states that a keyed local install sends
+  chunk text and query strings to Voyage AI. RDR-157's no-outbound-HTTP rule
+  for the local service carries a dated amendment: the Voyage embedding and
+  rerank API is its one sanctioned exception. RDR-210 (draft) designs one
+  local engine that serves both.
 - **`nx index pdf`/`nx index md`/`nx index rdr`/`nx dt index --force` no
   longer force a Voyage re-embed by themselves (nexus-8143o), matching the
   split `nx index repo --force`/`--re-embed` already had (nexus-4jj40
