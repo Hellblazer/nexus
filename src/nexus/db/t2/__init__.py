@@ -72,6 +72,7 @@ from nexus.db.t2.records import _sanitize_fts5
 if TYPE_CHECKING:
     import httpx
 
+    from nexus.db.t2.http_memory_store import MemoryExpireResult
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 
 _log = structlog.get_logger()
@@ -740,13 +741,19 @@ class T2Database:
     # ── Housekeeping ──────────────────────────────────────────────────────────
 
     def expire(self, relevance_log_days: int | None = None) -> int:
+        """:meth:`expire_detail`, returning only the count of rows swept from
+        view (quarantined plus, against an older engine, deleted)."""
+        return self.expire_detail(relevance_log_days).swept
+
+    def expire_detail(self, relevance_log_days: int | None = None) -> MemoryExpireResult:
         """Sweep TTL-expired entries using heat-weighted effective TTL.
 
         RDR-207 (nexus-l3yuc.9): from engine-service RDR-207 Phase 1 on the
         engine QUARANTINES a row past its TTL instead of deleting it; the
         row is hidden from every read and ``nx memory restore`` brings it
-        back. The return value counts rows swept from view (quarantined plus,
-        against an older engine, deleted).
+        back. Returns both id lists, so a caller that tells the user what
+        happened can say "deleted" when an older engine really deleted
+        (``MemoryExpireResult.describe``).
 
         effective_ttl = base_ttl * (1 + log(access_count + 1))
         Highly accessed entries survive longer. Unaccessed entries (access_count=0)
@@ -792,7 +799,7 @@ class T2Database:
             relevance_log_deleted=log_deleted,
             **extra,
         )
-        return swept.swept
+        return swept
 
     def complete_aspect(self, record_fields: dict[str, Any]) -> bool:
         """Persist an extracted aspect and clear its queue row in one call.

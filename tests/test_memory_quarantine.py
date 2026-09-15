@@ -18,9 +18,10 @@ import pytest
 from click.testing import CliRunner
 
 import nexus.health as h
+from nexus import hooks, mcp_infra
 from nexus.cli import main
 from nexus.db.t2 import T2Database
-from nexus.db.t2.http_memory_store import HttpMemoryStore
+from nexus.db.t2.http_memory_store import HttpMemoryStore, MemoryExpireResult
 from tests._t2_fixture_ops import backdate_memory, canonical_chunk_id
 from tests.test_taxonomy import _seed_assignment, _seed_topic
 
@@ -288,11 +289,11 @@ class _FakeStore:
         self.closed = True
 
 
-def _row(monkeypatch: pytest.MonkeyPatch, factory) -> h.HealthResult:
+def _row(monkeypatch: pytest.MonkeyPatch, factory, *, warn: bool = False) -> h.HealthResult:
     monkeypatch.setattr("nexus.db.t2.http_memory_store.HttpMemoryStore", factory)
     [result] = h._check_memory_quarantine()
     assert result.label == "memory.quarantine"
-    assert result.ok is True and result.warn is False, "informational: never warns"
+    assert (result.ok, result.warn) == (not warn, warn), result.detail
     return result
 
 
@@ -321,17 +322,60 @@ def test_doctor_row_counts_unmarked_marked_and_summaries(monkeypatch) -> None:
     assert store.closed is True
 
 
+def test_doctor_row_on_an_engine_older_than_rdr_207_reads_unread_not_clean(monkeypatch) -> None:
+    result = _row(monkeypatch, lambda *a, **k: _FakeStore(exc=_route_missing()))
+    assert result.detail.startswith("skipped (engine predates the RDR-207 quarantine routes")
+
+
+def test_doctor_row_soft_warns_when_the_store_cannot_be_read(monkeypatch) -> None:
+    """substantive-critic, nexus-l3yuc.14: an unreachable engine is a soft
+    WARN, never a silent ok, as _check_t2_schema_applied does."""
+    store = _FakeStore(exc=RuntimeError("connection refused"))
+    result = _row(monkeypatch, lambda *a, **k: store, warn=True)
+    assert result.detail.startswith("memory store unreachable (RuntimeError: connection refused)")
+    assert store.closed is True
+
+
+# ── expire wording against an engine that still deletes ─────────────────────
+#
+# substantive-critic, nexus-l3yuc.14: REQUIRED_ENGINE_VERSION still names an
+# engine older than RDR-207, where expire deletes for real. Reporting that as
+# "Quarantined" tells the user a gone row is recoverable.
+
+
 @pytest.mark.parametrize(
-    "exc,expected",
+    "deleted,quarantined,prefix,expected",
     [
-        (_route_missing(), "skipped (engine predates the RDR-207 quarantine routes"),
-        (RuntimeError("transport failure"), "skipped (memory store unavailable)"),
+        ([], [], "", "Quarantined 0 entries."),
+        ([], [7], "", "Quarantined 1 entry."),
+        ([1, 2], [], "memory ",
+         "Deleted 2 memory entries (this engine predates RDR-207 quarantine, so expiry deleted them)."),
+        ([1], [2, 3], "",
+         "Deleted 1 entry (this engine predates RDR-207 quarantine, so expiry deleted them); quarantined 2."),
     ],
-    ids=["pre-rdr-207-engine", "read-failure"],
+    ids=["nothing", "quarantined-one", "deleted-only", "both"],
 )
-def test_doctor_row_reads_unread_never_clean(monkeypatch, exc, expected) -> None:
-    result = _row(monkeypatch, lambda *a, **k: _FakeStore(exc=exc))
-    assert result.detail.startswith(expected) and result.detail != "none"
+def test_expire_result_describes_what_the_engine_did(deleted, quarantined, prefix, expected) -> None:
+    result = MemoryExpireResult(deleted_ids=deleted, quarantined_ids=quarantined)
+    assert result.describe(prefix=prefix) == expected
+
+
+def test_expire_cmd_against_a_deleting_engine_says_deleted(runner: CliRunner) -> None:
+    db = MagicMock()
+    db.memory.expire.return_value = MemoryExpireResult(deleted_ids=[4, 5])
+    out = _nx(runner, db, "expire")
+    assert out.exit_code == 0, out.output
+    assert "Deleted 2 entries (this engine predates RDR-207 quarantine" in out.output
+    assert "Quarantined" not in out.output
+
+
+def test_session_end_against_a_deleting_engine_says_deleted(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("NX_SESSION_ID", raising=False)
+    result = MemoryExpireResult(deleted_ids=[1, 2, 3])
+    monkeypatch.setattr(mcp_infra, "t2_index_write", lambda fn: (0, result))
+    message = hooks.session_end_flush()
+    assert "Deleted 3 memory entries (this engine predates RDR-207 quarantine" in message, message
+    assert "Quarantined" not in message
 
 
 def test_doctor_row_against_the_engine(db: T2Database) -> None:

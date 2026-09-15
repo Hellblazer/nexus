@@ -350,9 +350,12 @@ class _FakeMemoryHandler(FakeT2HandlerBase):
 
         elif op == "/summaries":
             source_ids = body.get("source_ids") or []
-            if not source_ids or not str(body.get("content", "")).strip() \
-                    or not str(body.get("model", "")).strip():
-                self._send(400, {"error": "source_ids, content and model are required"})
+            # MemoryHandler's requireString / requireLongList: each missing
+            # or blank field is a 400 before the repository is called.
+            if not source_ids or any(
+                not str(body.get(f, "")).strip() for f in ("project", "content", "model")
+            ):
+                self._send(400, {"error": "project, source_ids, content and model are required"})
                 return
             project = body["project"]
             with _STORE_LOCK:
@@ -837,6 +840,17 @@ class TestQuarantine:
         assert store.reap() == [row_id]
         assert store.list_quarantined() == []
         assert store.list_summaries()[0]["source_ids"] == [row_id], "the summary outlives its sources"
+
+    def test_summaries_post_without_a_project_is_a_400(self, store: HttpMemoryStore) -> None:
+        """The fake mirrors MemoryHandler.requireString: a missing field is a
+        400 before anything is written (code review, nexus-l3yuc.14)."""
+        with pytest.raises(httpx.HTTPStatusError) as exc:
+            store._post(
+                "/v1/memory/summaries",
+                {"content": "covers nothing", "source_ids": [1], "model": "stub"},
+            )
+        assert exc.value.response.status_code == 400
+        assert store.list_summaries() == []
 
     def test_insert_summary_with_an_unknown_source_is_a_409(self, store: HttpMemoryStore) -> None:
         with pytest.raises(httpx.HTTPStatusError) as exc:

@@ -93,6 +93,26 @@ class MemoryExpireResult:
     def swept(self) -> int:
         return len(self.deleted_ids) + len(self.quarantined_ids)
 
+    def describe(self, prefix: str = "") -> str:
+        """One sentence for the user, worded off which list is non-empty.
+
+        An engine older than RDR-207 still deletes on expiry and reports it
+        in ``deleted_ids``. Calling that a quarantine would tell the user the
+        rows are recoverable when they are gone, which is RDR-207's Gap 2.
+        """
+        def _n(count: int) -> str:
+            return f"{count} {prefix}{'entry' if count == 1 else 'entries'}"
+
+        if not self.deleted_ids:
+            return f"Quarantined {_n(len(self.quarantined_ids))}."
+        deleted = (
+            f"Deleted {_n(len(self.deleted_ids))} (this engine predates RDR-207 "
+            "quarantine, so expiry deleted them)"
+        )
+        if self.quarantined_ids:
+            return f"{deleted}; quarantined {len(self.quarantined_ids)}."
+        return f"{deleted}."
+
 
 class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     """MemoryStore drop-in that delegates to the RDR-152 Java HTTP service.

@@ -7622,6 +7622,9 @@ def _check_memory_quarantine() -> list[HealthResult]:
     engine-backed T2 to read (the store cannot be constructed), the virgin-box
     case; a reachable engine with nothing quarantined reports ``none``. An
     engine older than RDR-207 answers 404, which reads as unread, never clean.
+    A read that fails any other way is a soft WARN, never a silent ok, the
+    same degrade :func:`_check_t2_schema_applied` uses for an unreachable
+    engine.
     """
     import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
 
@@ -7641,18 +7644,20 @@ def _check_memory_quarantine() -> list[HealthResult]:
         try:
             quarantined = store.list_quarantined()
             summaries = store.list_summaries()
-        except httpx.HTTPStatusError as exc:
-            if exc.response is not None and exc.response.status_code == 404:
+        except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`; degrades to a named skip or a soft WARN
+            if (isinstance(exc, httpx.HTTPStatusError) and exc.response is not None
+                    and exc.response.status_code == 404):
                 return [HealthResult(
                     label=label, ok=True,
                     detail="skipped (engine predates the RDR-207 quarantine routes — "
                            "needs a newer engine)",
                 )]
-            _log.debug("doctor_memory_quarantine_check_failed", stage="read", error=str(exc))
-            return [HealthResult(label=label, ok=True, detail="skipped (memory store unavailable)")]
-        except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-            _log.debug("doctor_memory_quarantine_check_failed", stage="read", error=str(exc))
-            return [HealthResult(label=label, ok=True, detail="skipped (memory store unavailable)")]
+            _log.warning("doctor_memory_quarantine_check_failed", stage="read", error=str(exc))
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail=f"memory store unreachable ({type(exc).__name__}: {str(exc)[:160]}); "
+                       "could not count quarantined rows",
+            )]
     finally:
         try:
             store.close()

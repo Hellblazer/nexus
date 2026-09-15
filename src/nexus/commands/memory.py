@@ -427,10 +427,7 @@ def expire_cmd() -> None:
             # this. Without the daemon-side facade we lose that
             # signal, but the memory-side expiry still landed.
             pass
-    q = len(swept.quarantined_ids)
-    d = len(swept.deleted_ids)
-    click.echo(f"Quarantined {q} {'entry' if q == 1 else 'entries'}"
-               + (f", deleted {d}" if d else "") + ".")
+    click.echo(swept.describe())
 
 
 @memory.command("promote")
