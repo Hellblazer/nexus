@@ -2,58 +2,72 @@
 # Authenticate Claude Code for e2e tests.
 #
 # Strategy (tries in order):
-#   1. Keychain extract (macOS): reads "Claude Code-credentials" from macOS
-#      Keychain and writes it to tests/e2e/.claude-auth/.credentials.json.
-#      Fast, no browser needed — may prompt for Keychain password/Touch ID.
+#   1. Keychain extract (macOS): picks the freshest USABLE
+#      "Claude Code-credentials" item from macOS Keychain — via the shared
+#      tests/e2e/lib/claude_credentials.py picker, not a bare, unscoped
+#      `security find-generic-password` (see below) — and writes it to
+#      tests/e2e/.claude-auth/.credentials.json. Fast, no browser needed —
+#      may prompt for Keychain password/Touch ID.
 #   2. Interactive fallback: runs Claude Code interactively in Docker so you
 #      can complete the OAuth flow yourself, then /exit.
 #
 # Credentials are saved to tests/e2e/.claude-auth/ and reused by run.sh.
+#
+# CRED_TOOL (nexus-galkv.19): more than one macOS Keychain item can carry
+# the service name "Claude Code-credentials" — on this box an
+# acct="unknown" item is an empty husk (accessToken "", refreshToken "",
+# expiresAt 0) alongside the live acct=<login user> item the CLI actually
+# refreshes. A bare `security find-generic-password -s ... -w` (no `-a`)
+# returns an ARBITRARY match; on 2026-09-15 it returned the husk, this
+# script wrote it over the only fallback snapshot, and interactive Claude
+# Code showed "Not logged in" while `claude -p` failed "OAuth session
+# expired and could not be refreshed". `claude_credentials.py pick`
+# enumerates every account under the service and picks the freshest one
+# that actually carries a token; `check FILE` asks the same "does this
+# carry a usable token" question of an on-disk file. See
+# tests/cc-validation/README.md § Auth for the fuller incident writeup
+# (the original fix, for a sibling harness that never shared it here).
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 AUTH_DIR="$REPO_ROOT/tests/e2e/.claude-auth"
+CRED_TOOL="$REPO_ROOT/tests/e2e/lib/claude_credentials.py"
 
 mkdir -p "$AUTH_DIR"
 
-# If already authenticated, check token expiry before short-circuiting.
-# Stale cached creds (expiresAt in the past) silently break the harness
-# with "Failed to authenticate. API Error: 401" inside tmux — the fixed
-# cache never refreshes so every subsequent run is broken until someone
-# manually deletes .credentials.json. The keychain holds the fresh token;
-# we just need to notice when the cache is stale and re-extract.
+# If already authenticated, check USABILITY, not just an expiresAt vs. wall
+# clock comparison — the old check here compared expiresAt > now, which
+# misreads a token-less husk's expiresAt=0 as "already past" (0 <= now is
+# always true) and so happened to re-extract on a husk, but for the wrong
+# reason: a husk with a FUTURE (bogus) expiresAt would have short-circuited
+# as "valid" instead of being rejected for carrying no token at all.
+# `check` asks the real question via the same verdict `pick` uses.
+if [[ -f "$AUTH_DIR/.credentials.json" ]] && python3 "$CRED_TOOL" check "$AUTH_DIR/.credentials.json" 2>/dev/null; then
+    echo "Already authenticated (cached credential is usable)"
+    echo "Delete tests/e2e/.claude-auth/.credentials.json and re-run to force refresh."
+    exit 0
+fi
 if [[ -f "$AUTH_DIR/.credentials.json" ]]; then
-    _now_ms=$(( $(date +%s) * 1000 ))
-    _exp_ms=$(python3 -c "
-import json, sys
-try:
-    with open(sys.argv[1]) as f:
-        d = json.load(f)
-    print(int(d.get('claudeAiOauth', {}).get('expiresAt', 0)))
-except Exception:
-    print(0)
-" "$AUTH_DIR/.credentials.json" 2>/dev/null || echo 0)
-    if [[ "$_exp_ms" -gt "$_now_ms" ]]; then
-        _remaining_s=$(( (_exp_ms - _now_ms) / 1000 ))
-        echo "Already authenticated (cached creds valid for ~$(( _remaining_s / 3600 ))h)"
-        echo "Delete tests/e2e/.claude-auth/.credentials.json and re-run to force refresh."
-        exit 0
-    fi
-    echo "Cached credentials are stale (expiresAt already past) — refreshing from Keychain…"
+    echo "Cached credentials are not usable — refreshing from Keychain…"
     rm -f "$AUTH_DIR/.credentials.json"
 fi
 
 # ─── Strategy 1: macOS Keychain ───────────────────────────────────────────────
 # Claude Code stores OAuth credentials in the macOS Keychain under the service
-# name "Claude Code-credentials".  Extract them directly — no browser needed.
+# name "Claude Code-credentials". Extract the freshest USABLE one via the
+# shared picker — never a bare `security find-generic-password` (see
+# CRED_TOOL note above for why that silently selects an arbitrary, possibly
+# token-less, item).
 
 if [[ "$(uname)" == "Darwin" ]] && command -v security &>/dev/null; then
     echo "Trying macOS Keychain extraction..."
-    creds=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
-    if [[ -n "$creds" ]]; then
-        echo "$creds" > "$AUTH_DIR/.credentials.json"
+    if creds="$(python3 "$CRED_TOOL" pick)"; then
+        # `pick` only ever returns a payload that already passed the same
+        # verdict `check` applies — the write below is therefore always
+        # from a credential that passed the usability check.
+        printf '%s' "$creds" > "$AUTH_DIR/.credentials.json"
 
         # Also extract the oauthAccount from ~/.claude.json.
         # Claude Code uses oauthAccount to recognize the user as logged in —
@@ -78,7 +92,7 @@ print('  oauthAccount saved to tests/e2e/.claude-auth/claude.json')
         echo "  Run: ./tests/e2e/run.sh"
         exit 0
     else
-        echo "  Keychain entry not found or access denied — falling back to interactive."
+        echo "  No usable Keychain item found — falling back to interactive."
     fi
 fi
 
@@ -122,5 +136,6 @@ else
     echo ""
     echo "AUTH-LOGIN FAILED — no credentials found. Did you complete login and /exit?"
     echo "  Tip: credentials are saved to ~/.claude/.credentials.json inside the container"
+    echo "  Faster alternative: run 'claude /login' in a normal session on this host, then re-run this script."
     exit 1
 fi
