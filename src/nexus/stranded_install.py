@@ -233,7 +233,8 @@ def legacy_chroma_dir() -> Path:
 
     RDR-155 P4b: this stopped being a configurable serving path when the
     chroma substrate retired; it survives only as the on-disk location the
-    stranded-install detector (and the P3-dying legacy index leg) probes.
+    stranded-install detector reads to redirect (nothing creates it: the
+    indexer's writability probe was deleted at nexus-7a8rn).
 
     Precedence (matching the retired ``config._default_local_path``):
       1. ``NX_LOCAL_CHROMA_PATH`` env var (explicit override)

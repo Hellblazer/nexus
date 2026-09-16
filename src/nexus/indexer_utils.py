@@ -18,7 +18,6 @@ from pathlib import Path
 
 import structlog
 
-from nexus.errors import CredentialsMissingError
 from nexus.retry import _vector_with_retry
 
 _log = structlog.get_logger(__name__)
