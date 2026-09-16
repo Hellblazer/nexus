@@ -4,6 +4,19 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.49.0] - 2026-09-16
+
+Paired engine: engine-service-v0.1.125 (`REQUIRED_ENGINE_VERSION` (0, 1, 125)),
+beads nexus-r0vkh and nexus-a6mon. Plugin version aligned with conexus 7.49.0.
+This pin advance makes live the plugin change `PENDING_RELEASE.md` held:
+
+- `hooks/scripts/rdr_hook.py` (nexus-n9xjy): the SessionStart hook's
+  path-derived fallback calls `nexus.indexer._conformant_name_for_repo`
+  directly. The indexer's resolver wrapper no longer absorbs an unreachable
+  catalog, so the previously-installed hook, paired with a 7.49.0 client,
+  would have reported the repo as not indexed whenever the engine was down
+  at session start.
+
 ## [7.48.0] - 2026-09-15
 
 Paired engine: engine-service-v0.1.121 (`REQUIRED_ENGINE_VERSION` (0, 1, 121)),

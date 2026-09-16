@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.49.0] - 2026-09-16
+
+Paired engine: engine-service-v0.1.125 (`REQUIRED_ENGINE_VERSION` (0, 1, 125);
+was engine-service-v0.1.121), deployed before this client tag on the additive
+branch of the paired-release choreography. The four engine tags since 7.48.0
+carry: the bounded collection re-home used for the owner-1.1 repair
+(nexus-wsx4l, v0.1.122); the resolver predicate that stops a quarantine
+sibling winning a tuple (nexus-bc7ps, v0.1.123); the bounded quarantine sweep
+(nexus-a6mon, v0.1.124, changeset catalog-037); and the taxonomy assign bounds
+plus the a6mon review fixes below (nexus-r0vkh, v0.1.125). Local-mode installs
+get all of it only through this pin.
+
+### Added
+- **Code chunks have a minimum-size floor: a chunk under 64 characters is
+  merged into its neighbour instead of indexed alone (bead nexus-x50jb).**
+  Prose is deliberately not floored: two attempts were backed out on
+  evidence (a length floor destroys short sections' `header_path`; a
+  bare-heading predicate merges a parent heading into its child with the
+  wrong path and breaks cross-file paragraph dedup); the reasoning is in
+  `plan_merges`'s docstring.
+
 ### Fixed
 - **Taxonomy assign convoy no longer wedges the engine pool (bead nexus-r0vkh).**
   On 2026-09-16 one `assign_from_chashes_1024` call ran 782 s and eight
