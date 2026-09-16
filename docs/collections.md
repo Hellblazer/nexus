@@ -145,6 +145,21 @@ that skips them leaves rows that fail loud on a foreign key later
 (RDR-164). Never write to or delete a `quarantine-*` collection; the orphan
 GC owns those and restores from them.
 
+A `quarantine-*` collection is a registered row like any other, under a name
+no parser accepts, so the two list routes (`/v1/catalog/collections/list`
+and `/v1/vectors/stats`) take a `lifecycle_state` filter (`live`,
+`quarantine`, `dormant`, `disputed`; anything else is a 400). The default is
+the full inventory, which is what doctor, gc, backfill and export read.
+Code that picks a search target, parses a name, or discovers topics reads
+the live view only: `HttpVectorClient.list_live_collections()`,
+`live_collection_rows()`, `HttpCatalogClient.list_collections("live")`, or
+`nexus.mcp_infra.get_live_collection_names()` for the MCP fan-out
+(nexus-bc7ps). An explicit `corpus=<name>` naming a registered non-live
+collection is excluded the same way, since an explicit name in an MCP call
+is the model's navigation, not a person's choice. A routing module that
+calls the bare listing fails the lint in
+`tests/test_bc7ps_routing_uses_live_listing.py`.
+
 Do not create a second collection to change embedding model. The model is
 an install-level fact, and switching it mints the sibling for you at the
 next write (see "Local mode with Voyage" in the CLI reference).

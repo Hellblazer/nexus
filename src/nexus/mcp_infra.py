@@ -538,6 +538,21 @@ def get_collection_names() -> list[str]:
     return _collections_cache[0]
 
 
+def get_live_collection_names() -> list[str]:
+    """The ROUTING view of :func:`get_collection_names` (nexus-bc7ps): names
+    whose cached row is live, plus names with no catalog row (unregistered is
+    not non-live). The cache itself stays complete, because
+    :func:`get_collection_row` is the identity read gc and quarantine tooling
+    depend on; only the fan-out reads this filtered projection."""
+    from nexus.db.http_vector_client import is_live_collection_row  # noqa: PLC0415 — circular-dep avoidance (http_vector_client imports this module)
+    # Derived from get_collection_names(), not from the cache tuple directly:
+    # that function is the seam tests monkeypatch to inject a corpus, and a
+    # name it returns with no cached row is unregistered, hence live.
+    names = get_collection_names()
+    rows = _collections_cache[2]
+    return [n for n in names if is_live_collection_row(rows.get(n, {}))]
+
+
 def get_collection_counts() -> dict[str, int]:
     """Return cached per-collection row counts, keyed by collection name.
 
@@ -568,9 +583,14 @@ def get_collection_counts() -> dict[str, int]:
     return _collections_cache[1]
 
 
-def get_collection_row(name: str) -> dict | None:
+def get_collection_row(name: str, *, refresh: bool = True) -> dict | None:
     """Return the cached catalog attributes for T3 collection *name*, or
     ``None`` when no catalog row backs it.
+
+    ``refresh=False`` reads whatever the cache holds without the staleness
+    check, for a caller that has just warmed the cache through
+    :func:`get_collection_names` in the same call and must not pay (or, in a
+    test with that read monkeypatched away, must not attempt) a second fetch.
 
     RDR-204 Phase 3 (nexus-ft04v.26): the row is ``{"content_type",
     "owner_id", "embedding_model", "lifecycle_state"}``, sourced from the
@@ -593,7 +613,8 @@ def get_collection_row(name: str) -> dict | None:
     fall back to parsing the name -- the engine 422s a direct read of an
     unregistered collection anyway.
     """
-    _refresh_collections_cache_if_stale()
+    if refresh:
+        _refresh_collections_cache_if_stale()
     row = _collections_cache[2].get(name)
     if not row or "content_type" not in row:
         return None

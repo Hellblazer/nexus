@@ -2138,6 +2138,39 @@ _SOURCE_PATH_RETIRED = (
 )
 
 
+#: The closed ``catalog_collections.lifecycle_state`` vocabulary (hygiene-002's
+#: CHECK), mirrored from the engine's ``CatalogRepository.LIFECYCLE_STATES``.
+LIFECYCLE_STATES: frozenset[str] = frozenset({"live", "quarantine", "dormant", "disputed"})
+
+
+def is_live_collection_row(row: Any) -> bool:
+    """Whether a ``list_collections()`` row is one a ROUTING consumer may use
+    (nexus-bc7ps). A row with no ``lifecycle_state`` key is a collection the
+    engine could not join to a catalog row (absent means absent, never null);
+    that is unregistered, not non-live, so it counts as live here. A non-dict
+    entry (a bare name from a name-only substrate) carries no state and is
+    treated the same way."""
+    if not isinstance(row, dict):
+        return True
+    return row.get("lifecycle_state", "live") == "live"
+
+
+def live_collection_rows(t3: Any) -> list[dict]:
+    """Routing-side listing over any T3 handle (nexus-bc7ps).
+
+    A real :class:`HttpVectorClient` asks the engine for ``lifecycle_state=live``
+    (:meth:`HttpVectorClient.list_live_collections`); any other object with a
+    ``list_collections()`` (a test double, or the retired in-process substrate)
+    gets the client-side equivalent filter through :func:`is_live_collection_row`.
+    Routing modules call this, never the bare ``list_collections()``, so a
+    ``quarantine-<name>`` row cannot reach a name parser through them; the lint in
+    ``tests/test_bc7ps_routing_uses_live_listing.py`` pins that.
+    """
+    if isinstance(t3, HttpVectorClient):
+        return t3.list_live_collections()
+    return [row for row in t3.list_collections() if is_live_collection_row(row)]
+
+
 class HttpVectorClient:
     """Drop-in subset of ``T3Database`` that routes to the Java service.
 
@@ -3359,8 +3392,16 @@ class HttpVectorClient:
             )
         return _post("/v1/vectors/resolve", body, tenant=self._tenant)
 
-    def collection_stats(self) -> list[dict]:
+    def collection_stats(self, lifecycle_state: str | None = None) -> list[dict]:
         """Per-collection live statistics via ``GET /v1/vectors/stats``.
+
+        ``lifecycle_state`` (nexus-bc7ps) is passed through as the route's
+        exact-match filter on the joined ``catalog_collections`` row: ``None``
+        is the full inventory (the engine default), ``"live"`` is what a
+        ROUTING consumer asks for so a ``quarantine-<name>`` row never reaches
+        a name parser. The engine refuses an unknown value with a 400, which
+        surfaces here as :class:`VectorServiceError`; see
+        :data:`LIFECYCLE_STATES`.
 
         RDR-156 P3 (nexus-70r3c.12): served from the
         ``nexus.collection_vector_stats`` SECURITY INVOKER view — one
@@ -3377,7 +3418,11 @@ class HttpVectorClient:
         must work across the skew use :meth:`list_collections`, which falls
         back automatically.
         """
-        result = _get("/v1/vectors/stats", tenant=self._tenant)
+        path = "/v1/vectors/stats"
+        if lifecycle_state:
+            from urllib.parse import urlencode  # noqa: PLC0415 — one call site
+            path = f"{path}?{urlencode({'lifecycle_state': lifecycle_state})}"
+        result = _get(path, tenant=self._tenant)
         return result if isinstance(result, list) else []
 
     # ── RDR-191 Phase 1: server-side GC prune (catalog-023) ─────────────────
@@ -3456,8 +3501,18 @@ class HttpVectorClient:
     #: (not present as a key) when no catalog row backs that collection.
     _STATS_CATALOG_ATTR_KEYS = ("content_type", "owner_id", "embedding_model", "lifecycle_state")
 
-    def list_collections(self) -> list[dict]:
+    def list_collections(self, lifecycle_state: str | None = None) -> list[dict]:
         """List the tenant's vector collections with live chunk counts.
+
+        ``lifecycle_state`` (nexus-bc7ps): ``None`` is the full inventory, the
+        right view for doctor, gc, backfill and export; a state name is an
+        exact match on the catalog row. Routing code calls
+        :meth:`list_live_collections` (or :func:`live_collection_rows` when the
+        client may be a test double) rather than passing ``"live"`` here, so the
+        lint in ``tests/test_bc7ps_routing_uses_live_listing.py`` has one
+        surface to check. A filtered listing never primes the process's
+        collection-row cache below: that cache is the identity read every
+        gc and quarantine tool depends on and must stay complete.
 
         T3Database parity: returns ``[{"name": ..., "count": N, ...}, ...]``
         — ``nx collection list`` and friends index both keys (the missing
@@ -3483,12 +3538,15 @@ class HttpVectorClient:
         cross-dim residue case, which predates catalog attribution anyway).
         """
         try:
-            stats = self.collection_stats()
+            stats = self.collection_stats(lifecycle_state)
         except VectorServiceError as e:
             if e.code != 404:
                 _log.warning("http_vector_list_collections_failed", error=str(e))
                 return []
             _log.info("http_vector_stats_unavailable_fallback", error=str(e))
+            # A pre-catalog-005 JAR has no catalog join to filter on: every
+            # row it can name is treated as live (absent state = live, the
+            # same reading is_live_collection_row applies to the joined route).
             return self._list_collections_via_count()
         merged: dict[str, dict] = {}
         for row in stats:
@@ -3516,11 +3574,28 @@ class HttpVectorClient:
         # _resolve_collection_row) write a DIFFERENT tenant's rows into the
         # cache the process-default client reads. Only the process's own
         # tenant's listing may prime it.
-        if self._tenant == _process_default_tenant():
+        if lifecycle_state is None and self._tenant == _process_default_tenant():
             # Deferred import: mcp_infra imports this module.
             from nexus.mcp_infra import prime_collections_cache  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
             prime_collections_cache(rows)
         return rows
+
+    def list_live_collections(self) -> list[dict]:
+        """The ROUTING view of :meth:`list_collections` (nexus-bc7ps): rows
+        whose ``lifecycle_state`` is live, so a ``quarantine-<name>`` sibling
+        (or a dormant / disputed row) is never handed to a name parser, corpus
+        resolver or taxonomy discovery. Inventory and gc callers keep the bare
+        listing.
+
+        The engine filters server-side; the rows are ALSO filtered here through
+        :func:`is_live_collection_row`, because an engine older than the filter
+        ignores the query param and returns the full inventory, and the whole
+        point of this view is that the caller never has to check. That is what
+        makes the pairing additive in the new-client / old-engine direction
+        rather than a silent regression to pre-fix behaviour.
+        """
+        rows = self.list_collections(lifecycle_state="live")
+        return [row for row in rows if is_live_collection_row(row)]
 
     def _list_collections_via_count(self) -> list[dict]:
         """Deployment-skew fallback: ``/collections`` names + N ``/count`` calls.

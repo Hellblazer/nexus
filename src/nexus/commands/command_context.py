@@ -1242,9 +1242,13 @@ def _knowledge_collections() -> list[str]:
         from nexus.db import make_t3  # noqa: PLC0415 — command-local import (db)
         from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — command-local import (mcp_infra)
 
+        from nexus.db.http_vector_client import live_collection_rows  # noqa: PLC0415 — command-local import (http_vector_client)
+
         return sorted(
-            c for c in make_t3().list_collections()
-            if (row := get_collection_row(str(c))) is not None
+            name
+            for c in live_collection_rows(make_t3())
+            if (name := c["name"] if isinstance(c, dict) else str(c))
+            and (row := get_collection_row(name)) is not None
             and row.get("content_type") == "knowledge"
         )
     except Exception:  # noqa: BLE001 — a preamble probe never aborts the command

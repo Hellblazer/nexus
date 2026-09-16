@@ -68,11 +68,14 @@ def _enumerate_discoverable_collections(t3: Any, exclude: list[str]) -> list[str
     """
     from fnmatch import fnmatch  # noqa: PLC0415 - branch-local; deferred to call time
 
-    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.db.http_vector_client import is_service_backed, live_collection_rows  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     names: list[tuple[str, int]] = []
     if is_service_backed(t3):
-        for c in t3.list_collections():
+        # nexus-bc7ps: discovery is a ROUTING consumer. A quarantine-<name>
+        # collection listed here reached canonical_embedding_model and died on
+        # an unknown content type (2026-09-16T01:14:11Z); live rows only.
+        for c in live_collection_rows(t3):
             names.append((c.get("name", ""), int(c.get("count", 0) or 0)))
     else:
         for c in t3._client.list_collections():

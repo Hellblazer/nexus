@@ -1630,6 +1630,47 @@ class CatalogRepositoryTest {
         assertThat(colls).isNotEmpty();
     }
 
+    @Test @Order(61)
+    void collection_list_defaultIsEveryState_andLiveIsAnExactMatch() {
+        // nexus-bc7ps: the registry serves every state by default (doctor, gc and
+        // backfill must not go blind); a routing consumer passes 'live' and never sees
+        // a quarantine-<name> row. Seed a quarantine row the way gc_quarantine_orphans
+        // does, then read it back through every filter shape.
+        String quarantined = "quarantine-code__listq__voyage-code-3__v1";
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(
+                org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), TENANT_A, quarantined);
+        } catch (Exception e) {
+            throw new IllegalStateException("seeding the quarantine row failed", e);
+        }
+        java.util.function.Function<List<Map<String, Object>>, List<Object>> names =
+            rows -> rows.stream().map(r -> r.get("name")).toList();
+
+        var byDefault = repo.listCollections(TENANT_A);
+        assertThat(names.apply(byDefault)).as("guard: the row is in the default inventory").contains(quarantined);
+        assertThat(byDefault.stream().filter(r -> quarantined.equals(r.get("name"))).findFirst().orElseThrow()
+            .get("lifecycle_state")).as("guard: seeded non-live").isEqualTo("quarantine");
+        assertThat(names.apply(repo.listCollections(TENANT_A, null, null)))
+            .as("a null filter is the default").isEqualTo(names.apply(byDefault));
+
+        var live = repo.listCollections(TENANT_A, null, "live");
+        assertThat(names.apply(live)).doesNotContain(quarantined);
+        assertThat(live).isNotEmpty().allSatisfy(r ->
+            assertThat(r.get("lifecycle_state")).as("'live' is an exact match").isEqualTo("live"));
+        assertThat(names.apply(repo.listCollections(TENANT_A, null, "quarantine")))
+            .as("an explicit state is an exact match").containsExactly(quarantined);
+
+        // The normaliser is what the handlers gate on: blank and 'all' -> null (no
+        // filter), the set passes through, anything else is refused by name.
+        assertThat(CatalogRepository.normalizeLifecycleFilter(null)).isNull();
+        assertThat(CatalogRepository.normalizeLifecycleFilter("  ")).isNull();
+        assertThat(CatalogRepository.normalizeLifecycleFilter("all")).isNull();
+        assertThat(CatalogRepository.normalizeLifecycleFilter("dormant")).isEqualTo("dormant");
+        assertThatThrownBy(() -> CatalogRepository.normalizeLifecycleFilter("Quarantine"))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("quarantine").hasMessageContaining("all").hasMessageContaining("Quarantine");
+    }
+
     @Test @Order(62)
     void collection_supersede() {
         repo.upsertCollection(TENANT_A, Map.of(

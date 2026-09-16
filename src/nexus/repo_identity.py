@@ -449,8 +449,12 @@ def list_sibling_collections(
         hash8 = parts[1]
         matcher = lambda n: n.endswith(f"-{hash8}")  # noqa: E731
 
+    from nexus.db.http_vector_client import live_collection_rows  # noqa: PLC0415 — circular-dep avoidance (http_vector_client)
+
     try:
-        all_colls = t3_client.list_collections()
+        # nexus-bc7ps: sibling projection is routing; a quarantine sibling
+        # shares the owner segment and must not be a search target.
+        all_colls = live_collection_rows(t3_client)
     except Exception:  # noqa: BLE001 — boundary catch of T3 client errors; degrade to empty sibling list
         return []
 
