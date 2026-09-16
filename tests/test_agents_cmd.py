@@ -13,7 +13,7 @@ from click.testing import CliRunner
 
 from nexus import health
 from nexus.commands import agents_cmd
-from nexus.commands.agents_cmd import agents_group, compose_worktree_developer, installed_plugin_dir, worktree_developer_drift
+from nexus.commands.agents_cmd import agents_group, compose_worktree_developer, installed_plugin_dir, worktree_developer_drift, refresh_worktree_developer
 
 REPO_ROOT = Path(__file__).parent.parent
 SN_DIR = REPO_ROOT / "sn"
@@ -107,6 +107,25 @@ class TestInstall:
         code, out = _run("--dest", str(dest))
         assert code == 0 and "updated" in out
         assert dest.read_text() == compose_worktree_developer(sn_dir=SN_DIR, conexus_dir=CONEXUS_DIR)
+
+    def test_upgrade_refresh_regenerates_a_lagging_agent_and_leaves_absent_or_current_alone(self, tmp_path: Path) -> None:
+        """nexus-4a, 2026-09-16: `nx upgrade` regenerates the opt-in agent after
+        plugin lockstep instead of leaving it for the doctor to flag."""
+        dest = tmp_path / "agents" / "worktree-developer.md"
+        kw = dict(dest=dest, sn_dir=SN_DIR, conexus_dir=CONEXUS_DIR)
+        assert refresh_worktree_developer(**kw) is None, "absent agent: opt-in, nothing to do"
+        assert not dest.exists()
+        current = compose_worktree_developer(sn_dir=SN_DIR, conexus_dir=CONEXUS_DIR)
+        dest.parent.mkdir(parents=True)
+        dest.write_text(current)
+        assert refresh_worktree_developer(**kw) is None, "current agent: nothing to say"
+        dest.write_text(current + "\nstale from an older plugin\n")
+        line = refresh_worktree_developer(**kw, dry_run=True)
+        assert line and "would regenerate" in line
+        assert dest.read_text() != current, "dry run writes nothing"
+        line = refresh_worktree_developer(**kw)
+        assert line and "regenerated" in line
+        assert dest.read_text() == current
 
     def test_check_on_missing_file_exits_one_and_writes_nothing(self, tmp_path: Path) -> None:
         dest = tmp_path / "worktree-developer.md"
