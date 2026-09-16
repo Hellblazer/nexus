@@ -215,22 +215,39 @@ above.
 - [x] `in` gives a tuple to exactly one claimant at a time.
   **Status**: Verified. **Method**: Source Search (`SKIP LOCKED` plus the claim
   state compare-and-swap).
-- [ ] A `release` operation can reuse the claim-release core
+- [x] A `release` operation can reuse the claim-release core
   (`releaseOrDeadLetter`) without counting an attempt, log a new `release`
   transition in the claim log without a schema change, and signal waiters after
-  commit. **Status**: Unverified. **Method**: Spike.
+  commit. **Status**: Verified 2026-09-16. **Method**: Spike.
+  `TupleReleaseSpikeTest` 6/6: attempts unchanged, never dead-letters, lapsed
+  and consumed claims raise `ClaimNotFound`, wrong claimant raises
+  `ClaimOwnership`, a parked `in` wakes. `tuple_claim_log.transition` is plain
+  `TEXT NOT NULL` with no check constraint (`tuples-001-baseline.xml`), so the
+  new value needs no changeset. T2 `nexus_rdr/211-spike-1-2026-09-16`.
 - [x] A lock template can tolerate holder crashes without dead-lettering
   itself. **Status**: Verified. **Method**: Source Search. A template that omits
   `max_attempts` is treated as unbounded (TupleRepository.java:682, 935), so a
   lock never dead-letters, and every lapse is still logged.
-- [ ] The lock flag (claim and renew move expiry forward; `out` resets an
+- [x] The lock flag (claim and renew move expiry forward; `out` resets an
   expired lock row) can be scoped to lock templates without changing `out`'s
-  idempotency for any other template. **Status**: Unverified. **Method**: Spike.
-- [ ] The wait registry can register one waiter in several subspace groups and
+  idempotency for any other template. **Status**: Verified 2026-09-16, with one
+  design consequence. **Method**: Spike. `TupleLockFlagSpikeTest` 3/3: a lock
+  renewed across its retention boundary stays held and renewable, `out` on an
+  expired lock row makes it available, and a non-flagged template's second
+  `out` leaves the row byte-identical. The flag is read at three sites, not
+  one: `writeOut`, `claimOnce` and `renew` (Technical Design). The existing
+  tuple suites re-ran green with the prototype in place. T2
+  `nexus_rdr/211-spike-2-2026-09-16`.
+- [x] The wait registry can register one waiter in several subspace groups and
   wake it from any of them, without losing a write that lands between the first
   query and the park. `rd` gets that guarantee by registering before it queries
   (TupleRepository.java:547-549), and `wait` must keep it for every subspace.
-  **Status**: Unverified. **Method**: Spike.
+  **Status**: Verified 2026-09-16. **Method**: Spike.
+  `TupleWaitRegistryMultiSpikeTest` 5/5: a signal landing between register and
+  the first await is not lost, a signal on any of three registered subspaces
+  wakes the waiter, an unregistered subspace never does, and three
+  registrations plus one park-slot call track one claimant. T2
+  `nexus_rdr/211-spike-3-2026-09-16`.
 
 ## Proposed Solution
 
@@ -302,6 +319,14 @@ lock/<resource>:   keys [resource]; dims from; id_from keys; take enabled,
 - Wire contract: an engine-plus-client change, recorded in
   `docs/wire-contract-pending.md` and shipped as a paired release.
 
+**The lock flag.** A template-level `lock: true`. It is read at three sites,
+and each is a branch in Java, so a template without the flag produces the same
+SQL as today: `writeOut`, where an `out` that meets an expired lock row resets
+it to available instead of leaving it dead; `claimOnce`, where a claim moves the
+tuple's expiry to now plus retention before the lease is clamped against it;
+and `renew`, where a renew does the same. Claim and renew both carry the flag
+because the lease clamp otherwise still caps against the stale ceiling.
+
 **Waiting.** A parked call takes one of 16 slots shared by every tenant on one
 engine (TupleRepository.java:86-87). So the design spends one slot per waiting
 process, not one per thing it waits for. A new engine operation, `wait`, is a
@@ -371,7 +396,8 @@ them for 180 days (TemplateRegistry.java:66-67).
    `in` never sees an expired row (line 712), and a lease is clamped to the tuple's
    expiry. Without a change, a lock held across the boundary loses its lease there
    and cannot be renewed, and an idle expired lock stays unobtainable until the
-   sweep deletes it, up to six hours. Guard: the lock flag (Approach item 5).
+   sweep deletes it, up to six hours. Guard: the lock flag (Approach item 5),
+   read at `writeOut`, `claimOnce` and `renew` (Technical Design).
 6. **Claim-log volume.** Guard: a template may set a shorter claim-log TTL than
    the engine's 180 days (new). The value for queues and locks is set at
    implementation.
@@ -536,8 +562,8 @@ idempotency, and it loses history.
 
 ### Prerequisites
 
-- [ ] All Critical Assumptions verified (the `release` spike and the lock
-  attempts question).
+- [x] All Critical Assumptions verified (the three spikes ran 2026-09-16;
+  the lock attempts question is answered by the engine as built).
 - [ ] Sam decides the Open Questions below.
 
 ### Minimum Viable Validation
@@ -667,7 +693,7 @@ research findings and the proposed design.
 
 ### Assumption Verification
 
-Two assumptions are unverified: the `release` spike, and the lock-attempts rule.
+Every assumption is verified: three by spike on 2026-09-16, the rest by source search.
 Both must be verified before implementation begins.
 
 #### API Verification
@@ -728,3 +754,9 @@ sized to the one real engine change (`release`) and the three template decisions
   multiplex instead). Added the multiplexed `wait`, one parked call per process
   over several subspaces, which the watcher uses in place of per-address probes.
   The six defects outside this RDR are bead nexus-xapt8.
+- 2026-09-16: The three spikes ran as JUnit tests against the engine (worktree
+  branch `rdr-211-spikes`, T2 `nexus_rdr/211-spike-1..3-2026-09-16`). All three
+  assumptions hold. Spike 2 adds a design fact: the lock flag is read at three
+  sites (`writeOut`, `claimOnce`, `renew`), recorded in Technical Design. The
+  claim-log transition column has no check constraint, so `release` needs no
+  changeset. Prerequisite 1 ticked; Open Question 2 still waits on Sam.
