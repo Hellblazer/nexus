@@ -557,9 +557,10 @@ the floor tag (the floor is only a lower bound on what is running).
 
 **The direct form is REQUIRED, not a fallback, whenever the floor legitimately
 trails the newest published tag** — which is every engine cut after the first
-since the last client release, because `REQUIRED_ENGINE_VERSION` moves only with
-a client release (its pin derives from CHANGELOG's newest released section) while
-engine tags keep shipping. `check_engine_release_floor.py`'s wrapper runs the
+since the last client release, because the pinned engine version moves only with
+a client release (its pin derives from CHANGELOG's newest released section; the
+bump itself is unconditional, one engine identity per release) while engine tags
+keep shipping. `check_engine_release_floor.py`'s wrapper runs the
 ENGINE PIN CHECK before the tracker write and fails closed on that state, so it
 cannot record the deploy at all. Measured 2026-09-16: the v0.1.122 write went
 through only because the floor had been bumped and not yet reverted; the v0.1.123
