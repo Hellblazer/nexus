@@ -143,7 +143,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-122](rdr-122-llm-json-repair-pass.md) | LLM-JSON Repair Pass: Port a2ui PayloadFixer Pattern to nx Structured-Output Parsers | Technical | Closed | 2026-05-19 |
 | [RDR-125](rdr-125-routing-hook-plugin-ownership.md) | Routing-Hook Plugin Ownership: Each Plugin Ships Its Own Rules | Architecture | Closed 2026-05-21 (shipped in 4.33.1) | 2026-05-20 |
 | [RDR-126](rdr-126-claude-desktop-deployment-unified-chat-cowork.md) | Claude Desktop Deployment: Unified Chat and Cowork Surface | Architecture | Closed | 2026-05-23 |
-| [RDR-127](rdr-127-substrate-decoupled-surface-rendering.md) | Substrate-Decoupled Surface Rendering | Architecture | Accepted | 2026-05-24 |
+| [RDR-127](rdr-127-substrate-decoupled-surface-rendering.md) | Substrate-Decoupled Surface Rendering | Architecture | Closed | 2026-05-22 |
 | [RDR-128](rdr-128-t2-single-writer-enforcement.md) | T2 Single-Writer Enforcement: One Owner for memory.db, or an Enforced Lock Discipline | Architecture | Closed 2026-05-25 (implemented, shipped 5.1.0) | 2026-05-25 |
 | [RDR-129](rdr-129-t2-daemon-serving-path-cross-store-contention.md) | T2 Daemon Write-Path Hardening: Guaranteed-Single-Daemon Enforcement and Contention-Free Internal Serialization | Architecture | Closed | 2026-05-25 |
 | [RDR-130](rdr-130-command-preambles-via-nx-cli.md) | Command Preambles via the nx CLI: Thin Commands, Tested Logic, No Inlined Bash | Architecture | Accepted 2026-05-26 | 2026-05-26 |
@@ -185,7 +185,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-166](rdr-166-managed-service-consumer-journeys.md) | Managed-Service Consumer Journeys: Greenfield Onboarding and Local→Managed Migration to conexus-nexus.com | Architecture | Closed | 2026-06-22 |
 | [RDR-167](rdr-167-cross-tier-observability-correlation.md) | Cross-Tier Observability and Request Correlation for the Service Stack: X-Request-ID Propagation, SLF4J MDC, Readiness, and Structured Logs | Architecture | Draft | 2026-06-25 |
 | [RDR-168](rdr-168-service-mode-catalog-interface-conformance.md) | Service-Mode Catalog Interface Conformance: Make HttpCatalogClient a Faithful Drop-In for the Local Catalog, Enforced by a Signature-Conformance Test | Bug Fix | Closed | 2026-06-25 |
-| [RDR-169](rdr-169-docuverse-storage-reference-only-chunks.md) | Docuverse Storage: Reference-Only Chunks — Retention Enum, Nullable Content, Reference-Only Search DTO, and the URI-Resolver / Embed-Without-Store Surface | Architecture | Accepted | 2026-06-25 |
+| [RDR-169](rdr-169-docuverse-storage-reference-only-chunks.md) | Docuverse Storage: Reference-Only Chunks — Retention Enum, Nullable Content, Reference-Only Search DTO, and the URI-Resolver / Embed-Without-Store Surface | Architecture | Closed | 2026-06-25 |
 | [RDR-170](rdr-170-migration-application-not-gated-on-package-version.md) | T2 Migration Application Must Not Gate on Package Version: Drop the apply_pending Upper Bound | Architecture | Closed | 2026-06-25 |
 | [RDR-171](rdr-171-finegrain-content-stable-spans.md) | Fine-Grain Content-Stable Catalog Spans: A dchash Document-Offset Span Form That Survives Re-Chunking | Architecture | Draft | 2026-06-26 |
 | [RDR-172](rdr-172-service-mode-aspect-enqueue-silent-failure.md) | Service-Mode Aspect-Enqueue Silent Failure: store_put's Enqueue 500s on the RDR-156 doc_id FK and the Hook Swallows It | Architecture | Closed | 2026-06-27 |
@@ -222,7 +222,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-203](rdr-203-composite-nx-answer-run-record.md) | One Composite Run Record: Collapse nx_answer's Three Telemetry Writes into a Single Engine Operation | Architecture | Closed | 2026-09-05 |
 | [RDR-204](rdr-204-embedding-profile-and-collection-authority.md) | Collections Stop Encoding Metadata in Their Names: An Install-Scoped Embedding Profile and catalog_collections as the Authority | Architecture | Closed | 2026-09-06 |
 | [RDR-205](rdr-205-linda-tuple-space-over-postgres.md) | Linda Tuple Space over Postgres: A Coordination Primitive for Agents and Instances | Architecture | Closed | 2026-09-09 |
-| [RDR-206](rdr-206-tuple-claim-renew-and-reply-in-ack.md) | Tuple Space Claim Renewal and Reply-in-Ack: Close the Two Limits RDR-205 Accepted for v1 | Feature | Accepted | 2026-09-11 |
+| [RDR-206](rdr-206-tuple-claim-renew-and-reply-in-ack.md) | Tuple Space Claim Renewal and Reply-in-Ack: Close the Two Limits RDR-205 Accepted for v1 | Feature | Closed | 2026-09-11 |
 | [RDR-207](rdr-207-summarization-at-the-t2-expiry-boundary.md) | Summarization at the T2 Expiry Boundary — the Manage Phase RDR-057 Cut | Feature | Closed | 2026-09-12 |
 | [RDR-208](rdr-208-session-id-mail-addressing.md) | Session-Id Mail Addressing: One Mailbox per Session, Names Resolved at Send Time | Architecture | Accepted | 2026-09-14 |
 | [RDR-209](rdr-209-heat-based-graduation-between-memory-tiers.md) | Heat-Based Graduation Between Memory Tiers | Feature | Draft | 2026-09-14 |

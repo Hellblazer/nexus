@@ -1194,10 +1194,10 @@ def read_source(
 #     nx-scratch://       — scratch.get() existence check (no mtime on scratch)
 #     chroma://           — content-addressed; chash IS identity → staleness N/A
 #                          (always returns StatOk(current_mtime=None))
-#     https://            — HEAD + Last-Modified; DEFERRED to Phase B (nexus-dtnpu)
+#     https://            — HEAD + Last-Modified; DEFERRED, owned by nexus-oqenh
 #                          (returns StatFail so staleness_signal returns 'dangling'
 #                          and callers know to defer the check)
-#   Java-side: deferred to Phase B (nexus-dtnpu).  The UriSchemeHandler interface
+#   Java-side: deferred, owned by nexus-oqenh.  The UriSchemeHandler interface
 #     has a comment-only seam; no stat/head capability is implemented yet.
 
 
@@ -1440,7 +1440,7 @@ def _stat_https_uri(uri: str, **_kw: Any) -> StatResult:
     """Stat an ``https://`` URI.
 
     A full implementation would issue a HEAD request and parse the
-    ``Last-Modified`` header.  This is DEFERRED to Phase B (nexus-dtnpu):
+    ``Last-Modified`` header.  This is DEFERRED, owned by nexus-oqenh (RDR-169 closed 2026-09-16 with this residual disclosed):
     HEAD + Last-Modified adds a network round-trip to the serving hot-path
     and requires timeout / retry plumbing that belongs in the Phase B
     reference-only serving milestone, not Phase A.
@@ -1493,7 +1493,7 @@ def stat_source(
     - Python-side handlers: ``file``, ``obsidian``, ``x-devonthink-item``,
       ``nx-scratch``, ``chroma`` (content-addressed → always fresh),
       ``https`` (deferred Phase A → StatOk(None) → fresh; Phase B adds HEAD).
-    - Java-side stat: deferred to Phase B (nexus-dtnpu).
+    - Java-side stat: deferred, owned by nexus-oqenh.
     """
     if not uri:
         return StatFail(reason="error", detail="empty uri")
