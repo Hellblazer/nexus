@@ -820,3 +820,4 @@ Phase 1 Step 1 enumerates every one with its test.
   refusal gets its own verified assumption and API row, `wait` gets an API row,
   Approach item 5 counts three effects, the guards are two per-template plus the
   engine-wide park report, and Risks names the ack-on-lock case.
+- 2026-09-16: Gate round 2 — PASSED (0 Critical, 7 Significant, 0 ship-blocker(s)); commit `f94817adf`; critique `nexus_rdr/211-gate-critique-2026-09-16b`.
