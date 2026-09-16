@@ -100,11 +100,11 @@ lists the lock as "not built".
 A lock holder that finishes, and a worker that decides a task belongs to someone
 else, both need to return a claim without consuming the tuple and without
 counting a failure. The engine has no such operation. `nack` always counts an
-attempt (TupleRepository.java:923-950), so a lock that is released three times
+attempt (TupleRepository.java:1014-1032), so a lock that is released three times
 by healthy holders dead-letters itself, and a queue that hands tasks back
 dead-letters tasks that never failed. `ack` is no substitute for a lock release:
 it consumes the lock tuple, and a later `out` with the same identity only
-refreshes the consumed row's expiry (TupleRepository.java:380-383), so the lock
+refreshes the consumed row's expiry (TupleRepository.java:420-426), so the lock
 cannot be recreated until the sweep purges that row.
 
 ## Relationship to Prior RDRs
@@ -181,22 +181,22 @@ above.
 - **Documented**: `out` is idempotent by identity. A second `out` of the same
   identity refreshes `expires_at`, clamped to the row's original retention
   ceiling, and never changes the body, claim, or consumed state
-  (TupleRepository.java:359-387). So a template with `id_from: keys` lets any
+  (TupleRepository.java:399-433, the refire update at 420-426). So a template with `id_from: keys` lets any
   process "make sure the lock exists" safely: a second writer cannot create a
   second lock tuple.
 - **Documented**: `rd` is non-destructive, supports subset key matching and a
   `(created_at, id)` cursor for paging, and waits at most 25 seconds per call
-  (TupleRepository.java:541-613, :81).
+  (TupleRepository.java:584-637, :81).
 - **Documented**: a waiting `rd` registers before its first query, so a write
-  that lands between the query and the wait is not lost (lines 547-549).
+  that lands between the query and the wait is not lost (lines 592-593).
 - **Documented**: `in` requires every pinned key, returns a caller's own live
   claim again if it asks twice, reclaims a lapsed claim at the next take
   (counting an attempt), and clamps the lease to the tuple's expiry (lines
-  659-784).
+  685-810).
 - **Documented**: `ack` marks the tuple consumed and sets the body to NULL
-  (lines 817-847, the update at 836-838). A consumed tuple
+  (`consumeClaim` at 907, the update at 925-929, called from `ack` at 942). A consumed tuple
   stays as a row until the sweep purges it, and `rd` and `in` never return it.
-- **Documented**: `nack` always counts an attempt (line 923). There is no way to
+- **Documented**: `nack` always counts an attempt (line 1026). There is no way to
   end a claim that neither consumes the tuple nor counts a failure.
 - **Documented**: nothing in the schema or the security policy restricts which
   session may write to a subspace. A "single writer" is a convention, not an
@@ -226,7 +226,7 @@ above.
   new value needs no changeset. T2 `nexus_rdr/211-spike-1-2026-09-16`.
 - [x] A lock template can tolerate holder crashes without dead-lettering
   itself. **Status**: Verified. **Method**: Source Search. A template that omits
-  `max_attempts` is treated as unbounded (TupleRepository.java:682, 935), so a
+  `max_attempts` is treated as unbounded (TupleRepository.java:772, 1025), so a
   lock never dead-letters, and every lapse is still logged.
 - [x] The lock flag (claim and renew move expiry forward; `out` resets an
   expired lock row) can be scoped to lock templates without changing `out`'s
@@ -241,7 +241,7 @@ above.
 - [x] The wait registry can register one waiter in several subspace groups and
   wake it from any of them, without losing a write that lands between the first
   query and the park. `rd` gets that guarantee by registering before it queries
-  (TupleRepository.java:547-549), and `wait` must keep it for every subspace.
+  (TupleRepository.java:592-593), and `wait` must keep it for every subspace.
   **Status**: Verified 2026-09-16. **Method**: Spike.
   `TupleWaitRegistryMultiSpikeTest` 5/5: a signal landing between register and
   the first await is not lost, a signal on any of three registered subspaces
@@ -253,9 +253,11 @@ above.
 
 ### Approach
 
-Add three templates and one engine operation. The templates reuse the claim
-machinery the engine already has. The operation closes Gap 4, which the queue and
-the lock share.
+Add three templates and two engine operations, `release` and `wait`, plus the
+lock flag and three template-level guards (`max_live_rows`, a per-template
+claim-log TTL, a park-slot report). The templates reuse the claim machinery
+the engine already has. `release` closes Gap 4, which the queue and the lock
+share.
 
 1. **`board/<topic>`**: announcements. Take disabled. Each post is a new tuple
    (`id_from: keys+nonce`), so the board is an append-only log. Readers use `rd`
@@ -272,7 +274,11 @@ the lock share.
    resource (`id_from: keys`), so `out` is a safe "make sure the lock exists"
    for anyone. To hold the lock, a process takes the tuple with `in`. It renews
    the lease while it works and ends with `release`, which returns the tuple
-   for the next holder. The lock is never acked, so it is never consumed.
+   for the next holder. The lock is never acked, so it is never consumed, and
+   the engine enforces that: `ack` on a lock claim is refused (Technical
+   Design, the lock flag), because a consumed lock row is unobtainable until
+   the sweep purges it. `nack` on a lock stays allowed; it returns the lock
+   and counts an attempt, which a lock template never dead-letters on.
 4. **`release(claim_id, claimant)`**: a new engine operation. It ends a live
    claim, returns the tuple to available without counting an attempt, logs a
    `release` transition, and signals the subspace's waiters after commit. A
@@ -326,6 +332,17 @@ it to available instead of leaving it dead; `claimOnce`, where a claim moves the
 tuple's expiry to now plus retention before the lease is clamped against it;
 and `renew`, where a renew does the same. Claim and renew both carry the flag
 because the lease clamp otherwise still caps against the stale ceiling.
+
+A fourth site refuses: `consumeClaim`, the body `ack` and `ackWithReply` share
+(TupleRepository.java:907, called at 942 and 1001), raises `SchemaViolation`
+when the claim's template carries the flag, before the transaction opens, with
+a message that names `release`. The reset in `writeOut` clears the claim
+columns but never `consumed_at`, and `claimOnce` requires `consumed_at IS
+NULL` (lines 788 and 801), so an acked lock would stay dead until the sweep
+purged it: the failure Alternative 1 is rejected for, reached by an ordinary
+call. The check uses the existing `SchemaViolation` rather than a new typed
+error, the precedent being RDR-206's reply-target shape check, so the pinned
+error set is unchanged.
 
 **Waiting.** A parked call takes one of 16 slots shared by every tenant on one
 engine (TupleRepository.java:86-87). So the design spends one slot per waiting
@@ -389,11 +406,11 @@ them for 180 days (TemplateRegistry.java:66-67).
    `dead` counts for queue subspaces, warning above 1,000 available or at any
    dead task (a new row over existing fields).
 4. **Acked tasks.** An acked task keeps its row, with a NULL body, until its
-   retention ends (TupleRepository.java:835-839). Guard: queue retention of two
+   retention ends (TupleRepository.java:925-929). Guard: queue retention of two
    days, not seven.
 5. **The lock expiry cliff.** A lock tuple expires at its creation time plus
-   retention, a refire cannot move that ceiling (TupleRepository.java:366, 383),
-   `in` never sees an expired row (line 712), and a lease is clamped to the tuple's
+   retention, a refire cannot move that ceiling (TupleRepository.java:420-426),
+   `in` never sees an expired row (lines 789 and 802), and a lease is clamped to the tuple's
    expiry. Without a change, a lock held across the boundary loses its lease there
    and cannot be renewed, and an idle expired lock stays unobtainable until the
    sweep deletes it, up to six hours. Guard: the lock flag (Approach item 5),
@@ -402,20 +419,16 @@ them for 180 days (TemplateRegistry.java:66-67).
    the engine's 180 days (new). The value for queues and locks is set at
    implementation.
 
-**Known limits outside this RDR.** The research found these, and they affect the
-ledger today, so they are fixed on their own, not here:
-
-- No index serves `rd` or the census by subspace. The only candidate,
-  `idx_tuples_claim_scan`, is partial on `claim_state IS NULL`, and `rd` does not
-  state that predicate.
-- `tuple_list` runs one query per subspace in a single transaction, with no
-  statement timeout and no paging.
-- The doctor's sweep-freshness row reads `MAX(last_swept_at)`, so a tenant stuck at
-  its batch cap is hidden (health.py:5441-5446).
-- The claim-log purge filters on `expires_at`, but its index is on
-  `(tenant_id, at)`.
-- The per-claimant park counters are never removed (TupleWaitRegistry.java:325-332).
-- `default_lease_seconds` is parsed and reported but never applied.
+**Known limits outside this RDR, since fixed.** The research found six defects
+that affected the ledger on 2026-09-15. They were fixed on their own under bead
+nexus-xapt8 and are on develop before this RDR's gate (commits 0242bc100,
+c5d872faa, 42cb39693, 42982cc2f, bc4622c2f): a subspace-scan index and a
+claim-log purge-by-expiry index; `tuple_list` rewritten as one `GROUP BY` query
+with paging; the doctor's sweep-freshness row judging by the laggard tenant;
+the per-claimant park counters released; and `default_lease_seconds` applied in
+`claimOnce` (TupleRepository.java:754-755). The failure order above was framed
+against the pre-fix engine; with the index and paging in place the census cost
+no longer competes with the park cap, which stays first.
 
 ### Existing Infrastructure Audit
 
@@ -461,6 +474,8 @@ process, writes a fresh one.
   processes create two lock tuples at once, which breaks exclusion.
 
 **Reason for rejection**: it either leaves the lock dead or lets two holders in.
+Because the same dead lock is one ordinary `ack` away under the chosen design,
+the lock flag also makes `ack` refuse on a lock claim (Technical Design).
 
 ### Alternative 2: Release a lock or hand back a task with `nack`
 
@@ -570,8 +585,9 @@ idempotency, and it loses history.
 
 One end-to-end run against a real engine, with two sessions and one script:
 
-1. The script posts to a board. Both sessions, waiting with `rd`, wake and read
-   the same post.
+1. The script posts to a board. Both sessions, each running `nx tuple watch`
+   in board mode over its mailboxes and the topic with one `wait`, ping once,
+   and both read the same post with `rd`.
 2. The script puts two tasks on a queue. Each session takes a different one. One
    session releases its task, and the task's attempt count stays at zero. The
    other session takes and acks it.
@@ -593,8 +609,10 @@ and a report of park slots in use and refused calls. Tests: one `wait` on three
 subspaces wakes on a write to any of them, takes one park slot, and loses no
 write that lands between its query and its park; a lock held and renewed across
 its retention boundary stays held; an `out` on an expired lock makes it
-available; `out` past `max_live_rows` is refused with the typed error; the park
-report counts a 429.
+available; `ack` and `ack` with a reply on a lock claim are refused with
+`SchemaViolation` and the claim stays live; `nack` on a lock returns it; `out`
+past `max_live_rows` is refused with the typed error; the park report counts a
+429.
 
 #### Step 2: The three templates
 
@@ -643,6 +661,12 @@ None.
   lock tuple exists.
 - **Scenario**: a lock holder releases. **Verify**: the tuple is not consumed and
   the next `in` gets it.
+- **Scenario**: a lock holder calls `ack`. **Verify**: `SchemaViolationException`,
+  the claim is still live, the holder can still `release`.
+- **Scenario**: the watcher waits on two mailboxes and two board topics with one
+  `wait`. **Verify**: a post on either topic pings once with that topic's
+  cursor advanced, a mailbox write wakes the same call, and the engine's park
+  report shows one slot for the watcher.
 - **Scenario**: a lock holder's lease lapses. **Verify**: the next `in` reclaims
   the lock, and the lock is not dead-lettered under the chosen attempts rule.
 - **Scenario**: `release` on a lapsed claim. **Verify**: `ClaimNotFoundException`.
@@ -724,8 +748,10 @@ The Minimum Viable Validation is in scope and runs before the RDR closes.
 
 ### Proportionality
 
-Three templates and one operation, reusing existing machinery. The document is
-sized to the one real engine change (`release`) and the three template decisions.
+Three templates, two operations (`release`, `wait`), the lock flag at its four
+sites, and three template-level guards, all reusing existing machinery. The
+document is sized to those engine changes and the three template decisions;
+Phase 1 Step 1 enumerates every one with its test.
 
 ## References
 
@@ -766,3 +792,5 @@ sized to the one real engine change (`release`) and the three template decisions
   from the template, a post may set a shorter `ttl_seconds`, nothing per topic
   (T2 `nexus_rdr/211-decision-oq2-board-retention-2026-09-16`). Both
   prerequisites ticked; the RDR goes to gate.
+- 2026-09-16: Gate round 1 — BLOCKED (1 Critical, 4 Significant, 1 ship-blocker(s)); commit `83d053f90`; critique `nexus_rdr/211-gate-critique-2026-09-16`.
+- 2026-09-16: Gate round 1 fix (research `nexus_rdr/211-research-1`): `ack` on a lock claim is refused by the lock flag at `consumeClaim`, so the dead-lock failure Alternative 1 is rejected for cannot be reached by an ordinary call; the Known-limits list marked fixed under nexus-xapt8; engine line citations re-read from the working tree; Approach and Proportionality count both operations; the MVV and Test Plan exercise `wait` and the watcher's board mode.
