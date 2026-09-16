@@ -521,7 +521,7 @@ from __future__ import annotations
 #: new changesets (memory-004-1..3); no data-effecting changesets in this delta
 #: (scripts/list_data_effects.py). Local-mode installs get
 #: quarantine-instead-of-delete ONLY through this pin.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 120)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 121)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

@@ -74,7 +74,7 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 | `tuple_nack` | Release a claim back to available (`nack`); counts an attempt toward the template's `max_attempts` |
 | `tuple_renew` | Extend a live claim's lease before it lapses (`renew`, RDR-206). Returns `{lease_until}`, the engine's own value, never recomputed locally. A `lease_s` above the template cap is refused (`LeaseTooLong`); inside the cap it is clipped to the tuple's expiry. Does not count as an attempt; refused on a lapsed claim rather than resurrecting it |
 | `tuple_registry` | The boot-loaded template set: `{digest, sources, templates}` |
-| `tuple_list` | Concrete subspaces that exist, optionally filtered by prefix |
+| `tuple_list` | Concrete subspaces that exist, optionally filtered by prefix. Pages 100 subspaces by default (bead nexus-xapt8); a truncated page appends `{"_pagination": {"next_cursor": "..."}}`, which you pass back as `after`. `limit=0` or a negative limit clamps to 1 |
 | `tuple_stats` | The census for one subspace |
 | `mailbox_send` | Send to a session, an agent, or a NAME, resolved at send time (RDR-208). A session or agent id writes directly; a name reads every live `directory/<name>` row and refuses (writing nothing) on zero or more than one distinct holding session. Returns `{tuple_id, to, address_kind, from}` |
 

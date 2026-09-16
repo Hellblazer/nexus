@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.48.0] - 2026-09-15
+
+Paired engine: engine-service-v0.1.121 (`REQUIRED_ENGINE_VERSION` (0, 1, 121)),
+carrying bead nexus-xapt8's tuple-space scale fixes: a subspace-scan index and a
+claim-log purge-by-expiry index (changeset tuples-005), a single-query subspace
+census with a request-path statement timeout and a typed CensusTimeout error, an
+optional `lease_s` that falls back to the template's own default, and an atomic
+per-claimant park counter.
+
 ### Changed
 - **`tuple_list` MCP tool now pages, 100 subspaces by default (bead nexus-xapt8).**
   Previously unbounded (every matching subspace, always). A truncated page
