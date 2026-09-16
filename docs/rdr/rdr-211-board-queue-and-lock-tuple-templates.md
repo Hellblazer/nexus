@@ -238,6 +238,13 @@ above.
   one: `writeOut`, `claimOnce` and `renew` (Technical Design). The existing
   tuple suites re-ran green with the prototype in place. T2
   `nexus_rdr/211-spike-2-2026-09-16`.
+- [x] `ack` on a lock claim can be refused inside `consumeClaim`, after the
+  claim's row is read and before any column is written, from the template name
+  that row carries. **Status**: Verified 2026-09-16. **Method**: Source Search.
+  `consumeClaim` reads the row first (TupleRepository.java:908) and refuses a
+  stale claim or a wrong claimant there (909-912) before its update; the row's
+  template name is already used at 1031. The placement is the one those two
+  refusals use, so no spike (T2 `nexus_rdr/211-research-2`).
 - [x] The wait registry can register one waiter in several subspace groups and
   wake it from any of them, without losing a write that lands between the first
   query and the park. `rd` gets that guarantee by registering before it queries
@@ -254,8 +261,8 @@ above.
 ### Approach
 
 Add three templates and two engine operations, `release` and `wait`, plus the
-lock flag and three template-level guards (`max_live_rows`, a per-template
-claim-log TTL, a park-slot report). The templates reuse the claim machinery
+lock flag, two per-template guards (`max_live_rows`, a claim-log TTL) and an
+engine-wide park-slot report. The templates reuse the claim machinery
 the engine already has. `release` closes Gap 4, which the queue and the lock
 share.
 
@@ -286,7 +293,7 @@ share.
    `renew` do.
 5. **A lock lives as long as it is used.** Today a tuple expires at its creation
    time plus the template's retention, and nothing can move that ceiling. A lock
-   template gets a flag with two effects. A claim or renew moves the lock tuple's
+   template gets a flag with three effects. A claim or renew moves the lock tuple's
    expiry to now plus retention. An `out` that meets an expired lock row resets
    it to available instead of leaving it dead. Retention then bounds only an idle
    lock (Scale and Limits).
@@ -335,14 +342,19 @@ because the lease clamp otherwise still caps against the stale ceiling.
 
 A fourth site refuses: `consumeClaim`, the body `ack` and `ackWithReply` share
 (TupleRepository.java:907, called at 942 and 1001), raises `SchemaViolation`
-when the claim's template carries the flag, before the transaction opens, with
-a message that names `release`. The reset in `writeOut` clears the claim
+when the claim's template carries the flag, with a message that names
+`release`. The check sits inside the transaction, after `liveClaimRow` reads
+the claim's row (line 908) and before any column is written, beside the
+stale-claim and wrong-claimant refusals that already live there (lines
+909-912); the template name is on that row, and nothing about a bare
+`claim_id` encodes it, so the check cannot precede `withTenant`. The claim
+stays live because the ack never wrote anything. The reset in `writeOut` clears the claim
 columns but never `consumed_at`, and `claimOnce` requires `consumed_at IS
 NULL` (lines 788 and 801), so an acked lock would stay dead until the sweep
 purged it: the failure Alternative 1 is rejected for, reached by an ordinary
 call. The check uses the existing `SchemaViolation` rather than a new typed
-error, the precedent being RDR-206's reply-target shape check, so the pinned
-error set is unchanged.
+error, as RDR-206's reply-target shape check does, so the pinned error set is
+unchanged.
 
 **Waiting.** A parked call takes one of 16 slots shared by every tenant on one
 engine (TupleRepository.java:86-87). So the design spends one slot per waiting
@@ -547,6 +559,11 @@ idempotency, and it loses history.
   deletes it (Scale and Limits, item 5).
   **Mitigation**: the lock flag (Approach item 5), with a test that holds a lock
   across the retention boundary.
+- **Risk**: a holder, or a tool acting for one, calls `ack` on a lock claim out
+  of habit, and a consumed lock row is unobtainable until the sweep purges it.
+  **Mitigation**: the lock flag refuses `ack` on a lock claim with
+  `SchemaViolation` naming `release` (Technical Design), with a test that the
+  claim stays live and can still be released.
 - **Risk**: parked calls reach the engine-wide cap of 16.
   **Mitigation**: one `wait` per watcher instead of one parked call per topic,
   and the park report and doctor row
@@ -727,7 +744,9 @@ Both must be verified before implementation begins.
 | API Call | Library | Verification |
 | --- | --- | --- |
 | `TupleRepository.in`, `ack`, `nack`, `renew`, `out` | engine | Source Search |
-| `TupleRepository.release` | engine | To be built; Spike |
+| `TupleRepository.release` | engine | To be built; Spike (`nexus_rdr/211-spike-1-2026-09-16`) |
+| `TupleRepository.wait`, `TupleWaitRegistry.registerMulti` | engine | To be built; Spike (`nexus_rdr/211-spike-3-2026-09-16`) |
+| `consumeClaim` refusal on a lock claim | engine | To be built; Source Search (`nexus_rdr/211-research-2`) |
 
 ### Scope Verification
 
@@ -749,7 +768,8 @@ The Minimum Viable Validation is in scope and runs before the RDR closes.
 ### Proportionality
 
 Three templates, two operations (`release`, `wait`), the lock flag at its four
-sites, and three template-level guards, all reusing existing machinery. The
+sites, two per-template guards and the park-slot report, all reusing existing
+machinery. The
 document is sized to those engine changes and the three template decisions;
 Phase 1 Step 1 enumerates every one with its test.
 
@@ -794,3 +814,9 @@ Phase 1 Step 1 enumerates every one with its test.
   prerequisites ticked; the RDR goes to gate.
 - 2026-09-16: Gate round 1 — BLOCKED (1 Critical, 4 Significant, 1 ship-blocker(s)); commit `83d053f90`; critique `nexus_rdr/211-gate-critique-2026-09-16`.
 - 2026-09-16: Gate round 1 fix (research `nexus_rdr/211-research-1`): `ack` on a lock claim is refused by the lock flag at `consumeClaim`, so the dead-lock failure Alternative 1 is rejected for cannot be reached by an ordinary call; the Known-limits list marked fixed under nexus-xapt8; engine line citations re-read from the working tree; Approach and Proportionality count both operations; the MVV and Test Plan exercise `wait` and the watcher's board mode.
+- 2026-09-16: Fix-check follow-up (`nexus_rdr/211-fix-check-6c34f1913`, research
+  `nexus_rdr/211-research-2`): the `consumeClaim` refusal sits inside the
+  transaction after the row is read, not before the transaction opens; the
+  refusal gets its own verified assumption and API row, `wait` gets an API row,
+  Approach item 5 counts three effects, the guards are two per-template plus the
+  engine-wide park report, and Risks names the ack-on-lock case.
