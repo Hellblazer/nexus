@@ -6924,7 +6924,27 @@ public final class CatalogRepository {
                               .and(CATALOG_COLLECTIONS.OWNER_ID.eq(ownerId))
                               .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(embeddingModel))
                               .and(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED.eq(false))
-                              .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
+                              .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
+                              // nexus-bc7ps: a QUARANTINE sibling is not a candidate.
+                              // Without this the tie below falls to NAME DESC and 'q'
+                              // sorts above 'c'/'d'/'k', so every contested tuple
+                              // resolved to its quarantine- sibling from the moment
+                              // hygiene-002-1 populated their attributes (2026-09-08
+                              // 20:25:14Z, 18 seconds after the last good write). The
+                              // client then cannot parse 'quarantine-code' as a
+                              // content_type, swallows the ValueError, and synthesises
+                              // a path-derived name -- which is how 41,032 chunks were
+                              // stranded (nexus-n9xjy).
+                              //
+                              // ne('quarantine'), NOT eq('live'), deliberately: dormant
+                              // and disputed rows keep whatever resolution behaviour
+                              // they have today. This fixes the defect and widens
+                              // nothing. THE TEST MATTERS MORE THAN THIS LINE -- NAME
+                              // DESC will re-create the same class for any future
+                              // prefix that sorts high, so the guard is
+                              // CatalogRepositoryTest's "a quarantine sibling never
+                              // wins a tuple", not this predicate.
+                              .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne("quarantine")))
                        .orderBy(COL_VERSION_NUM.desc(), CATALOG_COLLECTIONS.NAME.desc())
                        .limit(1).fetchOne();
             return r != null ? collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
@@ -7568,10 +7588,25 @@ public final class CatalogRepository {
      *                          which table is not done
      */
     public record RehomeStatus(int remainingChunks, int remainingDocuments, int remainingRows,
+                               int remainingMovableRows,
                                Map<String, Integer> remainingByTable) {
 
-        /** True when nothing this operation moves still names the source. */
-        public boolean done() { return remainingRows == 0; }
+        /**
+         * True when nothing this operation CAN STILL MOVE names the source.
+         *
+         * <p>Keyed on {@code remainingMovableRows}, not {@code remainingRows},
+         * and the difference is a defect this shipped with (found in production
+         * by conexus-2e on the owner-1.1 repair, 2026-09-16). Merge-and-report
+         * leaves colliding rows at the source BY DESIGN, so on any estate where
+         * anything collides {@code remainingRows} never reaches zero and a
+         * caller looping on {@code done()} — which this contract names as its
+         * terminator — spins forever against a finished move. The real repair
+         * parked 31 {@code search_telemetry} rows and {@code done()} stayed
+         * false indefinitely; the operator had to invent "remaining_rows
+         * stopped decreasing" to stop cleanly. A terminator the operation
+         * guarantees will never be reached is not a contract.
+         */
+        public boolean done() { return remainingMovableRows == 0; }
     }
 
     /**
@@ -7654,6 +7689,20 @@ public final class CatalogRepository {
      * the estate (durable {@code rdr204_ghost_sweep_v1} marker in {@code
      * nexus.catalog_meta}), and production has already spent it — see nexus-29drn.
      *
+     * <p><b>A CALLER LOOPING THIS MUST WAIT ON THE DATABASE, NEVER ON A CLOCK.</b>
+     * The obvious loop — submit, sleep a few seconds, submit again — builds a
+     * LOCK CONVOY, and the first operator to run this built one (conexus-2e, the
+     * owner-1.1 repair, 2026-09-16): after a call was cut by the edge they waited
+     * a fixed 5 s and submitted the next batch, but the cut call was still
+     * COMMITTING server-side, so three {@code UPDATE nexus.chunks SET collection}
+     * statements stacked — one working at 81 s and two blocked on
+     * {@code Lock/transactionid} and {@code Lock/tuple}. Postgres serialized them
+     * and they completed correctly, so it cost throughput rather than
+     * correctness, but it would have piled up across sixty calls. Poll
+     * {@code pg_stat_activity} for active re-home UPDATEs and submit only at
+     * zero. The cut response says nothing about whether the work finished; that
+     * is what {@link #rehomeStatus} is for.
+     *
      * @throws RehomeRefused if source and target are the same, or either is not a
      *                       registered live collection
      */
@@ -7684,7 +7733,7 @@ public final class CatalogRepository {
             return new RehomeResult(
                 moved.getOrDefault("chunks", 0),
                 moved.getOrDefault("catalog_documents", 0),
-                moved, leftBehind, rehomeStatus(ctx, source));
+                moved, leftBehind, rehomeStatus(ctx, source, target));
         });
     }
 
@@ -7694,18 +7743,39 @@ public final class CatalogRepository {
      * String)}; see {@link RehomeStatus} for why this is a separate call at all.
      */
     public RehomeStatus rehomeStatus(String tenant, String source) {
-        return tenantScope.withTenant(tenant, ctx -> rehomeStatus(ctx, source));
+        return rehomeStatus(tenant, source, null);
+    }
+
+    /** {@link #rehomeStatus(String, String)} that can also say what is STUCK, given the target. */
+    public RehomeStatus rehomeStatus(String tenant, String source, String target) {
+        return tenantScope.withTenant(tenant, ctx -> rehomeStatus(ctx, source, target));
     }
 
     private RehomeStatus rehomeStatus(DSLContext ctx, String source) {
+        return rehomeStatus(ctx, source, null);
+    }
+
+    /**
+     * @param target the collection a re-home would move {@code source} onto, or
+     *        null when the caller has not named one. The movable count needs it:
+     *        whether a row can move is a question about what is ALREADY AT THE
+     *        TARGET, so "what is left" and "what is stuck" are different
+     *        questions and only the second needs a target. With null, movable
+     *        equals remaining — nothing is known to be stuck.
+     */
+    private RehomeStatus rehomeStatus(DSLContext ctx, String source, String target) {
         Map<String, Integer> byTable = new LinkedHashMap<>();
         int total = 0;
+        int movable = 0;
         for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
             int n = ctx.fetchCount(t.table(), t.collection().eq(source));
             if (n > 0) {
                 byTable.put(t.countKey(), n);
             }
             total += n;
+            movable += target == null
+                ? n
+                : ctx.fetchCount(t.table(), movableAtSource(ctx, t, source, target));
         }
         // Spelled as selectCount().from(...) rather than fetchCount(TABLE, cond) so the
         // TombstoneFilterGateTest scan can SEE these two reads: it recognizes a literal
@@ -7717,7 +7787,7 @@ public final class CatalogRepository {
                .where(CHUNKS.COLLECTION.eq(source)).fetchOne(0, Integer.class),
             ctx.selectCount().from(CATALOG_DOCUMENTS)
                .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(source)).fetchOne(0, Integer.class),
-            total, byTable);
+            total, movable, byTable);
     }
 
     /** Refuse unless {@code name} is a registered, live (non-superseded) collection. */
@@ -7761,9 +7831,19 @@ public final class CatalogRepository {
      * {@code deleted_at} to filter on in any case, so filtering the document side alone
      * would move a tombstoned document's chunks while its own row stayed behind.
      */
+    /**
+     * The WHERE that selects rows at {@code source} this operation CAN move —
+     * everything at the source except rows whose move would collide with a row
+     * already at {@code target}.
+     *
+     * <p>Shared by {@link #moveScopedTable} and {@link #rehomeStatus} on
+     * purpose: if the mover and the progress report disagreed about what is
+     * movable, {@code done()} would either never fire or fire early, and both
+     * failures look like a correct 200 to a caller. One definition, used twice.
+     */
     @SuppressWarnings({"unchecked", "rawtypes"})
-    private int moveScopedTable(DSLContext ctx, CollectionScopedTable t, String source,
-                                String target, Map<String, Integer> leftBehind) {
+    private Condition movableAtSource(DSLContext ctx, CollectionScopedTable t,
+                                      String source, String target) {
         Condition where = t.collection().eq(source);
         int aliasSeq = 0;
         for (org.jooq.UniqueKey<?> key : t.table().getKeys()) {
@@ -7783,6 +7863,12 @@ public final class CatalogRepository {
             }
             where = where.and(DSL.notExists(ctx.selectOne().from(peer).where(match)));
         }
+        return where;
+    }
+
+    private int moveScopedTable(DSLContext ctx, CollectionScopedTable t, String source,
+                                String target, Map<String, Integer> leftBehind) {
+        Condition where = movableAtSource(ctx, t, source, target);
         int movedRows = ctx.update(t.table()).set(t.collection(), target).where(where).execute();
         // Whatever still names the source in a table we just moved is, by construction,
         // a row the collision predicate excluded. Count it so "done" can never be read

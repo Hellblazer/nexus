@@ -1872,8 +1872,14 @@ public final class CatalogHandler implements HttpHandler {
         if (source == null) {
             HttpUtil.send(exchange, 400, "{\"error\":\"source required\"}"); return;
         }
+        // `target` is OPTIONAL but wanted: whether a row is STUCK is a question
+        // about what is already at the target, so without it this can only
+        // report what is left, not what is movable, and `done` degrades to
+        // remaining_rows == 0 -- the unreachable terminator this pair of fields
+        // exists to fix. A poller that knows its target should always pass it.
+        String target = body.get("target") instanceof String s ? s : null;
         Map<String, Object> out = new java.util.LinkedHashMap<>();
-        putStatus(out, repo.rehomeStatus(tenant, source));
+        putStatus(out, repo.rehomeStatus(tenant, source, target));
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(out));
     }
 
@@ -1882,6 +1888,10 @@ public final class CatalogHandler implements HttpHandler {
         out.put("remaining_chunks", s.remainingChunks());
         out.put("remaining_documents", s.remainingDocuments());
         out.put("remaining_rows", s.remainingRows());
+        // What is still MOVABLE, which is what `done` keys on. It differs from
+        // remaining_rows exactly when merge-and-report has parked colliding
+        // rows at the source; those are finished business, not pending work.
+        out.put("remaining_movable_rows", s.remainingMovableRows());
         out.put("remaining_by_table", s.remainingByTable());
         out.put("done", s.done());
     }

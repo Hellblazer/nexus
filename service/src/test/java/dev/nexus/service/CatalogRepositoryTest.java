@@ -1790,6 +1790,84 @@ class CatalogRepositoryTest {
         assertThat(forTuple.get("name")).isEqualTo(name);
     }
 
+    @Test @Order(62)
+    void collectionForTuple_neverResolvesToAQuarantineSibling() {
+        // nexus-bc7ps, and THIS TEST IS THE POINT rather than the predicate it
+        // guards. collectionForTuple breaks ties with NAME DESC, so ANY future
+        // prefix that sorts above the real content types re-creates this class;
+        // the predicate fixes today's instance, this pins the property.
+        //
+        // The live incident: hygiene-002-1 (2026-09-08 20:25:14Z) populated
+        // content_type/owner_id/embedding_model on 8 quarantine rows, making them
+        // eligible here. 'q' sorts above 'c'/'d'/'k', so seven contested tuples
+        // began resolving to their quarantine sibling 18 seconds after the last
+        // good write. The client cannot parse 'quarantine-code' as a
+        // content_type, swallowed the ValueError, and synthesised a path-derived
+        // name -- stranding 41,032 chunks (nexus-n9xjy). rdr__ survived only
+        // because 'r' sorts above 'q'.
+        String real = "code__qsib__voyage-code-3__v1";
+        String quarantined = "quarantine-code__qsib__voyage-code-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", real, "content_type", "code",
+            "owner_id", "qsib", "embedding_model", "voyage-code-3"));
+        // Seeded through PgContainerHelper.insertCollection, which derives
+        // lifecycle_state='quarantine' from the name prefix exactly as
+        // gc_quarantine_orphans does in production. upsertCollection does NOT
+        // carry lifecycle_state in from its map -- the first draft of this test
+        // tried that and the non-vacuity guard below caught it, which is the
+        // guard earning its place before the test had even run once.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(
+                org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES),
+                TENANT_A, quarantined);
+        } catch (Exception e) {
+            throw new IllegalStateException("seeding the quarantine sibling failed", e);
+        }
+        // Give it the SAME discriminators as the real row, which is what made the
+        // live rows contend: hygiene-002-1 populated exactly these three columns.
+        repo.importCollection(TENANT_A, Map.of(
+            "name", quarantined, "content_type", "code",
+            "owner_id", "qsib", "embedding_model", "voyage-code-3"));
+
+        // NON-VACUITY, and this test is worthless without it: the sibling must
+        // actually be a candidate that WOULD WIN. It shares every discriminator
+        // column, is not superseded, is not legacy-grandfathered, ties on
+        // model_version, and sorts ABOVE the real row by name. If any of that
+        // stops being true the test passes for the wrong reason.
+        var sibling = repo.getCollection(TENANT_A, quarantined);
+        assertThat(sibling).as("guard: the quarantine sibling must exist").isNotNull();
+        // Read lifecycle_state from the COLUMN, not from getCollection: collRow
+        // does not project it (only collRowWithLifecycle does), so asserting on
+        // the map here would compare against null and pass or fail for reasons
+        // unrelated to the row's actual state.
+        String state;
+        try (Connection su = pg.createConnection("")) {
+            state = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                .select(org.jooq.impl.DSL.field("lifecycle_state", String.class))
+                .from(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "catalog_collections")))
+                .where(org.jooq.impl.DSL.field("name", String.class).eq(quarantined))
+                .fetchOne(0, String.class);
+        } catch (Exception e) {
+            throw new IllegalStateException("reading lifecycle_state failed", e);
+        }
+        assertThat(state)
+            .as("guard: it must really be quarantined, or the predicate is untested")
+            .isEqualTo("quarantine");
+        assertThat(sibling.get("superseded_by"))
+            .as("guard: it must pass the superseded_by filter, as the live rows did")
+            .isEqualTo("");
+        assertThat(quarantined.compareTo(real))
+            .as("guard: it must SORT ABOVE the real name, or NAME DESC would not "
+                + "have picked it and this pins nothing")
+            .isGreaterThan(0);
+
+        var resolved = repo.collectionForTuple(TENANT_A, "code", "qsib", "voyage-code-3");
+        assertThat(resolved).as("the tuple must still resolve to something").isNotNull();
+        assertThat(resolved.get("name"))
+            .as("a quarantine sibling must NEVER win a tuple, however it sorts")
+            .isEqualTo(real);
+    }
+
     // Order(63) was importCollection_overwritesStubRow: it seeded a "stub" row (all
     // three discriminator columns blank) via a bare importCollection call, then
     // asserted a second importCollection call upgraded it in place. RDR-204 Phase 1

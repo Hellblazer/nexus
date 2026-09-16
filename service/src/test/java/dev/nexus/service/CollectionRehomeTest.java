@@ -296,11 +296,28 @@ class CollectionRehomeTest {
                 + "destroyed it silently")
             .isEqualTo(1);
         assertThat(taxonomyMetaCount(p.dst())).isEqualTo(1);
+        // THIS ASSERTION WAS INVERTED WHEN THE OP SHIPPED, and the inverted form
+        // read as the principled one: "done() is false while a row still names
+        // the source -- tell the caller the truth". It was the defect. Colliding
+        // rows are parked BY DESIGN and never move, so done() could never become
+        // true on any estate where anything collides, and a caller looping on the
+        // terminator this contract advertises would spin forever against a
+        // finished move. Found in production on the owner-1.1 repair
+        // (conexus-2e, 2026-09-16): 31 search_telemetry rows parked, done() false
+        // indefinitely, the operator forced to invent "remaining_rows stopped
+        // decreasing" to stop. A terminator the operation guarantees will never
+        // be reached is not a contract.
         assertThat(r.status().done())
-            .as("done() is false while a left-behind row still names the source, so a "
-                + "caller polling for completion is told the truth rather than a "
-                + "convenient one")
-            .isFalse();
+            .as("the move is FINISHED: everything movable moved, and the only rows "
+                + "left are ones this operation will never move. done() must say so")
+            .isTrue();
+        assertThat(r.status().remainingMovableRows())
+            .as("nothing movable is left -- this is what done() keys on")
+            .isZero();
+        assertThat(r.status().remainingRows())
+            .as("while remaining_rows still counts the parked row honestly, so the "
+                + "two numbers together say 'finished, and one row stayed behind'")
+            .isEqualTo(1);
         assertThat(r.status().remainingByTable()).containsEntry("taxonomy_meta", 1);
     }
 
