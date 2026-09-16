@@ -1,0 +1,271 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  nexus-a6mon: a BOUNDED quarantine sweep.
+
+  nexus.gc_quarantine_orphans moves every eligible row in ONE unbounded
+  transaction, so its runtime scales with the collection while the public edge
+  deadline (about 30 s) does not. Measured during the owner-1.1 cleanup on
+  engine v0.1.121 (conexus-2e, 2026-09-16; note the instrument —
+  gc_audit.created_at defaults to now(), which is TRANSACTION START, not
+  commit):
+
+    knowledge__1-1   5,831 rows  tx start 00:12:15.27  HTTP 200 at 00:12:37   (22.3 s, inside the deadline)
+    docs__1-1        5,679 rows  tx start 00:10:20.21  edge 499 at 00:10:50   (cut at ~30 s, committed later)
+    code__1-1       41,032 rows  tx start 00:13:12.35  edge 499 at 00:13:42   (STILL OPEN at 00:14:10, committed by 00:18:53)
+
+  This adds a SEPARATE bounded function rather than changing the existing one.
+  The unbounded form keeps today's semantics for the small incremental prune the
+  indexer does (the bead asks for exactly that), and a distinct name keeps the
+  per-signature EXECUTE grants and the jOOQ codegen unambiguous — an overload
+  differing only in arity is the kind of thing that reads wrong at 3am.
+
+  THREE PROPERTIES THE UNBOUNDED FORM DOES NOT HAVE:
+
+  1. ONE CALL IS ONE COMMIT BOUNDARY, not merely a row cap. A caller cut
+     mid-loop keeps every batch that committed. That is requirement 1 on the
+     bead, and it also dissolves requirement 2 (a census cannot verify a cut
+     sweep while its transaction is open — with fast batches that window
+     effectively closes rather than needing an in-flight-transaction probe).
+
+  2. IT RETURNS `remaining`, so the caller has a terminator it does not have to
+     invent. Learned the hard way on nexus-wsx4l the same night: that op shipped
+     with a `done` flag keyed on a count that merge-and-report guaranteed would
+     never reach zero, and the operator had to fall back to "the number stopped
+     decreasing". A bounded loop needs to know whether to go round again, so the
+     function says.
+
+  3. created_at IS CARRIED THROUGH. The unbounded form's INSERT omits it, so the
+     column default applies and every quarantined row reads as created at
+     quarantine time — the owner-1.1 move restamped all 41,032 rows to
+     2026-09-16, destroying the generation history of everything in the
+     collection and leaving timestamps that read as a mass creation event.
+
+  THE VICTIM SET IS MATERIALIZED ONCE. The unbounded form re-evaluates the
+  orphan anti-join separately in its INSERT and its DELETE, which is safe only
+  because both see every eligible row. Under a LIMIT that would be a bug: the
+  two statements could choose DIFFERENT rows and the DELETE could remove
+  something the INSERT never copied. So the bounded form selects the victim
+  chashes ONCE in a CTE, ordered by chash for deterministic progress across
+  calls, and both the INSERT and the DELETE key off that set.
+
+  No DATA EFFECT line: this changeset creates a function and grants EXECUTE on
+  it. It modifies no existing row (see scripts/data_effect_lint.py's docstring
+  for what that line is for).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-037-1" author="nexus-a6mon">
+        <comment>
+            nexus.gc_quarantine_orphans_bounded: move at most p_row_limit orphan
+            chunks to the quarantine collection per call, carry created_at
+            through, and return (moved, sample, remaining) so a caller can loop
+            and terminate. One call is one commit. The unbounded
+            gc_quarantine_orphans is left untouched for the indexer's
+            incremental prune.
+        </comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans_bounded(
+    dim                      int,
+    p_tenant_id              text,
+    p_collection             text,
+    p_quarantine_collection  text,
+    p_quarantined_at         text,
+    p_sample_limit           int,
+    p_row_limit              int
+)
+RETURNS TABLE(moved bigint, sample jsonb, remaining bigint)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_moved            bigint;
+    v_sample           jsonb;
+    v_remaining        bigint;
+    v_seg              text[];
+    v_collision_count  bigint;
+    v_collision_sample text[];
+    v_sample_limit     int;
+    v_row_limit        int;
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    -- A non-positive bound is a caller error, not "unbounded". The whole point
+    -- of this function is the bound; silently removing it would hand back the
+    -- 58-second transaction this exists to prevent.
+    IF COALESCE(p_row_limit, 0) <= 0 THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: p_row_limit must be positive, got %. Use nexus.gc_quarantine_orphans for the unbounded sweep.',
+            p_row_limit
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    v_sample_limit := LEAST(GREATEST(COALESCE(p_sample_limit, 20), 0), 5000);
+    v_row_limit    := LEAST(p_row_limit, 100000);
+
+    PERFORM set_config('lock_timeout', '2000', true);
+    PERFORM set_config('statement_timeout', '25000', true);
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('sweepgate:' || p_tenant_id || '/' || p_collection));
+    EXCEPTION
+        WHEN lock_not_available THEN
+            -- nexus-a6mon requirement 4: name the caller's OWN in-flight call as
+            -- a possibility. The unbounded form advised "retry", which cannot
+            -- succeed while the holder IS the caller's previous, still-committing
+            -- call -- the exact state a cut-then-resubmit loop produces.
+            RAISE EXCEPTION
+                'gc_quarantine_orphans_bounded: timed out acquiring the RDR-191 sweep gate for tenant=%, collection=% -- a manifest writer holds it, OR your own previous bounded call is still committing after the edge cut you. Poll pg_stat_activity for an active sweep on this collection before retrying; a fixed sleep builds a lock convoy.',
+                p_tenant_id, p_collection
+                USING ERRCODE = 'lock_not_available';
+    END;
+
+    -- THE VICTIM SET, chosen ONCE and ordered for deterministic progress.
+    CREATE TEMP TABLE IF NOT EXISTS _a6mon_victim(chash bytea PRIMARY KEY) ON COMMIT DROP;
+    DELETE FROM _a6mon_victim;
+    INSERT INTO _a6mon_victim(chash)
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+       AND NOT EXISTS (
+             SELECT 1 FROM nexus.catalog_document_chunks m
+              WHERE m.tenant_id  = c.tenant_id
+                AND m.collection = c.collection
+                AND m.chash      = c.chash
+           )
+     ORDER BY c.chash
+     LIMIT v_row_limit;
+
+    IF NOT EXISTS (SELECT 1 FROM _a6mon_victim) THEN
+        RETURN QUERY SELECT 0::bigint, NULL::jsonb, 0::bigint;
+        RETURN;
+    END IF;
+
+    -- Cross-dim collision guard, same contract as the unbounded form
+    -- (vectors-004's N7 guard, T2 22454) but scoped to this batch.
+    SELECT count(*),
+           COALESCE(array_agg(encode(x.chash, 'hex') ORDER BY x.chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM nexus.chunks c
+          JOIN _a6mon_victim v ON v.chash = c.chash
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND e.collection = p_quarantine_collection
+           AND e.chash      = c.chash
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+      ) x
+     WHERE x.src_dim IS DISTINCT FROM x.existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_bounded: % cross-dim (tenant_id, collection, chash) collision(s) at quarantine target % for tenant=%, origin collection=%. Sample chashes: %. Refusing to overwrite.',
+            v_collision_count, p_quarantine_collection, p_tenant_id, p_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    v_seg := string_to_array(p_quarantine_collection, '__');
+    INSERT INTO nexus.catalog_collections
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version, lifecycle_state)
+    VALUES (
+        p_tenant_id, p_quarantine_collection,
+        CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[1] ELSE 'unknown' END,
+        CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[2] ELSE p_tenant_id END,
+        CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[3] ELSE 'bge-base-en-v15-768' END,
+        CASE WHEN array_length(v_seg, 1) = 4 THEN v_seg[4] ELSE '' END,
+        'quarantine'
+    )
+    ON CONFLICT (tenant_id, name) DO NOTHING;
+
+    -- created_at CARRIED THROUGH (nexus-a6mon's second finding): the unbounded
+    -- form omits it, so the default restamps every moved row to quarantine time
+    -- and the collection's generation history is destroyed.
+    INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                               embedding_384, embedding_768, embedding_1024,
+                               metadata, created_at)
+    SELECT p_tenant_id, p_quarantine_collection, c.chash, c.chunk_text,
+           c.embedding_384, c.embedding_768, c.embedding_1024,
+           COALESCE(c.metadata, '{}'::jsonb)
+             || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                    'origin_collection', p_collection),
+           c.created_at
+      FROM nexus.chunks c
+      JOIN _a6mon_victim v ON v.chash = c.chash
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+    ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+      SET chunk_text     = EXCLUDED.chunk_text,
+          embedding_384  = EXCLUDED.embedding_384,
+          embedding_768  = EXCLUDED.embedding_768,
+          embedding_1024 = EXCLUDED.embedding_1024,
+          metadata       = EXCLUDED.metadata,
+          created_at     = EXCLUDED.created_at;
+
+    WITH del AS (
+        DELETE FROM nexus.chunks c
+         USING _a6mon_victim v
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+           AND c.chash = v.chash
+        RETURNING c.chash, c.metadata->>'title' AS title
+    ),
+    counted AS (SELECT count(*) AS n FROM del),
+    sampled AS (
+        SELECT jsonb_agg(jsonb_build_object('chash', encode(chash, 'hex'), 'title', title)) AS s
+          FROM (SELECT chash, title FROM del LIMIT v_sample_limit) lim
+    )
+    SELECT counted.n, sampled.s INTO v_moved, v_sample FROM counted, sampled;
+
+    -- What is LEFT after this commit, so the caller has a terminator it does not
+    -- have to invent from a stalling count.
+    SELECT count(*) INTO v_remaining
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+       AND NOT EXISTS (
+             SELECT 1 FROM nexus.catalog_document_chunks m
+              WHERE m.tenant_id  = c.tenant_id
+                AND m.collection = c.collection
+                AND m.chash      = c.chash
+           );
+
+    -- nexus-a6mon requirement 5: instrument it. The unbounded form logged only
+    -- the edge's 499 -- no completion line, no timing, nothing between the cut
+    -- and the eventual commit.
+    INSERT INTO nexus.gc_audit
+        (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
+    VALUES (
+        p_tenant_id, 'gc_quarantine_orphans_bounded', p_collection, 'engine', false, v_moved,
+        COALESCE(
+            (SELECT jsonb_agg(elem->>'chash') FROM jsonb_array_elements(COALESCE(v_sample, '[]'::jsonb)) elem),
+            '[]'::jsonb),
+        jsonb_build_object(
+            'quarantine_collection', p_quarantine_collection,
+            'sample_limit', v_sample_limit,
+            'row_limit', v_row_limit,
+            'remaining_after', v_remaining,
+            'chashes_is_sample', true));
+
+    RETURN QUERY SELECT v_moved, v_sample, v_remaining;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION nexus.gc_quarantine_orphans_bounded(int, text, text, text, text, int, int) TO nexus_svc;
+]]>
+        </sql>
+        <rollback>
+            DROP FUNCTION IF EXISTS nexus.gc_quarantine_orphans_bounded(int, text, text, text, text, int, int);
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from nexus.chunk_floor import plan_merges
 from nexus.db.limits import SAFE_CHUNK_BYTES
 
 if TYPE_CHECKING:
@@ -359,6 +360,47 @@ def _enforce_byte_cap(
     return result
 
 
+def _merge_short_chunks(result: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Apply the nexus-x50jb minimum-size floor to this chunker's dicts.
+
+    The policy (which spans are too short and which neighbour absorbs them)
+    lives in :mod:`nexus.chunk_floor`; this is only the materialization for
+    ``chunk_file``'s dict shape — concatenate the texts, widen the line range,
+    renumber.
+
+    JOIN CONVENTION: ``"\\n"``. Exact for the line-chunk path by construction,
+    since :func:`_line_chunk` builds each chunk as ``"\\n".join(lines[a:b])``
+    with no trailing newline, so rejoining adjacent chunks reproduces the
+    original text. On the AST path the node texts are contiguous character
+    slices, so this can insert a newline the source did not have; that changes
+    the stored chunk text (and therefore its chash) but not its meaning, and
+    this chunker emits no character offsets for a citation to disagree with.
+
+    Runs BEFORE :func:`_enforce_byte_cap`, deliberately: merging makes chunks
+    bigger and the cap is the hard limit that must have the last word. A merge
+    that pushes a chunk over the cap is then split by the cap exactly as any
+    other over-cap chunk is.
+    """
+    if len(result) < 2:
+        return result
+    plan = plan_merges([c["text"] for c in result])
+    if len(plan) == len(result):
+        return result
+    merged: list[dict[str, Any]] = []
+    for new_index, group in enumerate(plan):
+        base = dict(result[group[0]])
+        if len(group) > 1:
+            base["text"] = "\n".join(result[j]["text"] for j in group)
+            last = result[group[-1]]
+            if "line_end" in last:
+                base["line_end"] = last["line_end"]
+        base["chunk_index"] = new_index
+        merged.append(base)
+    for c in merged:
+        c["chunk_count"] = len(merged)
+    return merged
+
+
 def chunk_file(
     file: Path,
     content: str,
@@ -407,9 +449,13 @@ def chunk_file(
                     meta["line_end"] = line_end
                     meta["text"] = node.text
                     result.append(meta)
-                # Post-process: split any AST node that exceeds the byte cap
-                # (e.g. a single function body longer than _CHUNK_MAX_BYTES).
-                return _enforce_byte_cap(result, token_window=token_window)
+                # nexus-x50jb floor FIRST (merging grows chunks), then the byte
+                # cap, which splits any AST node that exceeds it (e.g. a single
+                # function body longer than _CHUNK_MAX_BYTES). The cap has the
+                # last word because it is the hard limit.
+                return _enforce_byte_cap(
+                    _merge_short_chunks(result), token_window=token_window
+                )
         except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
             _log.debug("AST chunking failed, falling back to line chunks", file=str(file), exc_info=True)
 
@@ -432,6 +478,7 @@ def chunk_file(
                 "text": text,
             }
         )
+    result = _merge_short_chunks(result)
     if token_window is not None:
         return _enforce_byte_cap(result, token_window=token_window)
     return result

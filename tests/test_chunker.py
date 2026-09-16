@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from nexus.chunk_floor import MIN_CHUNK_CHARS
 from nexus.chunker import chunk_file, _enforce_byte_cap, _line_chunk, _CHUNK_MAX_BYTES
 
 
@@ -96,10 +97,18 @@ def _make_ast_node(text: str, start_char_idx: int = 0) -> MagicMock:
 
 
 def test_chunk_file_python_calls_codesplitter(tmp_path: Path):
+    # Each node body is deliberately over MIN_CHUNK_CHARS. The subject here is
+    # that chunk_file routes through the AST splitter and numbers what comes
+    # back -- not chunk arithmetic -- but nexus-x50jb's floor merges adjacent
+    # sub-64-char spans, so a toy two-liner would collapse to one chunk and the
+    # numbering assertions below would test nothing. Keep the bodies long.
+    body_a = "def foo():\n    return 'a value long enough to clear the size floor'"
+    body_b = "def bar():\n    return 'another value long enough to clear the floor'"
+    assert min(len(body_a), len(body_b)) >= MIN_CHUNK_CHARS, "fixture under the floor"
     f = tmp_path / "module.py"
-    f.write_text("def foo():\n    pass\n\ndef bar():\n    pass\n")
-    nodes = [_make_ast_node("def foo():\n    pass", 0),
-             _make_ast_node("def bar():\n    pass", 21)]
+    f.write_text(body_a + "\n\n" + body_b + "\n")
+    nodes = [_make_ast_node(body_a, 0),
+             _make_ast_node(body_b, len(body_a) + 2)]
     with patch("nexus.chunker._make_code_splitter", return_value=nodes):
         chunks = chunk_file(f, f.read_text())
     assert len(chunks) == 2
@@ -247,19 +256,18 @@ def test_chunk_file_ast_oversized_node_is_split(tmp_path: Path):
 # ── AST line range accuracy (RDR-016) ────────────────────────────────────────
 
 def test_chunk_file_ast_line_ranges(tmp_path: Path):
-    content = (
-        "class Foo:\n"
-        "    def a(self):\n"
-        "        return 1\n"
-        "\n\n"
-        "class Bar:\n"
-        "    def b(self):\n"
-        "        return 2\n"
-    )
+    # Bodies sized over MIN_CHUNK_CHARS and offsets DERIVED rather than
+    # hand-typed: the subject is that line_start/line_end come out of
+    # start_char_idx correctly, and nexus-x50jb's floor would merge two
+    # sub-64-char nodes into one chunk, leaving nothing to check the ranges on.
+    node_a = "class Foo:\n    def a(self):\n        return 1 + 1 + 1 + 1 + 1 + 1"
+    node_b = "class Bar:\n    def b(self):\n        return 2 + 2 + 2 + 2 + 2 + 2"
+    assert min(len(node_a), len(node_b)) >= MIN_CHUNK_CHARS, "fixture under the floor"
+    content = node_a + "\n\n\n" + node_b + "\n"
     f = tmp_path / "two_classes.py"
     f.write_text(content)
-    nodes = [_make_ast_node("class Foo:\n    def a(self):\n        return 1", 0),
-             _make_ast_node("class Bar:\n    def b(self):\n        return 2", 48)]
+    nodes = [_make_ast_node(node_a, 0),
+             _make_ast_node(node_b, len(node_a) + 3)]
     with patch("nexus.chunker._make_code_splitter", return_value=nodes):
         chunks = chunk_file(f, content)
     assert len(chunks) == 2

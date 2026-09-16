@@ -130,7 +130,7 @@ class TestFrecencyServiceModeRouting:
                 "nexus.indexer._build_frecency_doc_id_map",
                 return_value={tmp_path / "file.py": "1.1.1"},
             ),
-            patch("nexus.catalog.factory.make_catalog_reader", side_effect=Exception("no catalog")),
+            patch("nexus.catalog.factory.make_catalog_reader", return_value=None),  # no catalog: explicit None, not a raised failure (nexus-n9xjy)
         ):
             from nexus.indexer import _run_index_frecency_only
             _run_index_frecency_only(tmp_path, _make_registry())
@@ -168,7 +168,7 @@ class TestFrecencyServiceModeRouting:
                 "nexus.indexer._build_frecency_doc_id_map",
                 return_value={tmp_path / "file.py": "1.1.1"},
             ),
-            patch("nexus.catalog.factory.make_catalog_reader", side_effect=Exception("no catalog")),
+            patch("nexus.catalog.factory.make_catalog_reader", return_value=None),  # no catalog: explicit None, not a raised failure (nexus-n9xjy)
         ):
             from nexus.indexer import _run_index_frecency_only
             _run_index_frecency_only(tmp_path, _make_registry())
@@ -258,7 +258,6 @@ class TestFrecencyNonServiceMode:
             patch("nexus.db.make_t3", return_value=fake_db) as mock_make_t3,
             patch("nexus.db.http_vector_client.get_http_vector_client") as mock_get_svc,
             patch("nexus.frecency.batch_frecency", return_value={}),
-            patch("nexus.indexer.check_local_path_writable"),
             patch("nexus.indexer._build_frecency_doc_id_map", return_value={}),
             patch("nexus.config.is_local_mode", return_value=True),
         ):
@@ -307,7 +306,7 @@ class TestFrecencyRdrCollection:
             patch("nexus.db.http_vector_client.get_http_vector_client", return_value=svc),
             patch("nexus.frecency.batch_frecency", return_value={tmp_path / "f.py": 0.5}),
             patch("nexus.indexer._build_frecency_doc_id_map", return_value={}),
-            patch("nexus.catalog.factory.make_catalog_reader", side_effect=Exception("no catalog")),
+            patch("nexus.catalog.factory.make_catalog_reader", return_value=None),  # no catalog: explicit None, not a raised failure (nexus-n9xjy)
         ):
             from nexus.indexer import _run_index_frecency_only
             _run_index_frecency_only(tmp_path, reg)

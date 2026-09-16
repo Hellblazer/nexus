@@ -33,6 +33,11 @@ public final class PgSession {
         "hnsw.ef_search",
         "pg_trgm.word_similarity_threshold",
         "statement_timeout",
+        // nexus-r0vkh: the taxonomy assign transaction bounds its lock WAIT as
+        // well as its run time, so a caller queued behind a slow head on the
+        // topics row locks (doc_count recount trigger + the FK's KEY SHARE)
+        // gives its pool connection back in seconds instead of minutes.
+        "lock_timeout",
         "plan_cache_mode",
         "enable_indexscan",
         "enable_seqscan",
@@ -99,7 +104,141 @@ public final class PgSession {
     private static final int SEARCH_STATEMENT_TIMEOUT_MS =
         searchStatementTimeoutMs(System.getenv("NX_SEARCH_STATEMENT_TIMEOUT_MS"));
 
+    /**
+     * Server-side bound on ONE {@code assign_from_chashes_<dim>} transaction
+     * (nexus-r0vkh). Sized to the client's own 30s per-request timeout
+     * ({@code _refreshable_client._DEFAULT_TIMEOUT_S}): a bound longer than
+     * the caller's wait keeps a pool connection burning CPU after the client
+     * has already recorded the batch as lost. Measured 2026-09-16 09:05Z on
+     * engine-service-v0.1.123: one assign call ran 782s of DB CPU with the
+     * server's 30s statement_timeout never reaching it, and every other
+     * request on the box starved behind the pool it held.
+     */
+    static final int DEFAULT_TAXONOMY_ASSIGN_STATEMENT_TIMEOUT_MS = 30_000;
+
+    /**
+     * Server-side bound on the lock WAIT inside that same transaction
+     * (nexus-r0vkh). The doc_count recount trigger (taxonomy-017) and the
+     * FK's implicit KEY SHARE both take row locks on {@code nexus.topics},
+     * so N concurrent assign calls for overlapping topic sets serialize
+     * behind the first: eight callers sat 667-780s on the head's
+     * transactionid, each holding one of the pool's ten connections. With
+     * the client's own fires serialized (the hook's serialize opt-out is
+     * withdrawn in the same change) only cross-process callers ever wait
+     * here; five seconds is generous for a healthy head and short enough
+     * that a wedged one cannot take the pool with it. Postgres raises
+     * SQLSTATE 55P03 ({@code lock_not_available}) when it trips; the
+     * client's tripwire records the batch, and the index write itself is
+     * already committed, so nothing is lost but that batch's assignment.
+     */
+    static final int DEFAULT_TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS = 5_000;
+
+    /**
+     * Env-resolved bounds ({@code NX_TAXONOMY_ASSIGN_STATEMENT_TIMEOUT_MS},
+     * {@code NX_TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS}), same precedent as
+     * {@link #SEARCH_STATEMENT_TIMEOUT_MS}: read once at class load,
+     * validated at boot by {@link #startupTaxonomyAssignStatementTimeoutMs()}
+     * and {@link #startupTaxonomyAssignLockTimeoutMs()}.
+     */
+    private static final int TAXONOMY_ASSIGN_STATEMENT_TIMEOUT_MS =
+        boundedTimeoutMs("NX_TAXONOMY_ASSIGN_STATEMENT_TIMEOUT_MS",
+                         System.getenv("NX_TAXONOMY_ASSIGN_STATEMENT_TIMEOUT_MS"),
+                         DEFAULT_TAXONOMY_ASSIGN_STATEMENT_TIMEOUT_MS);
+    private static final int TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS =
+        boundedTimeoutMs("NX_TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS",
+                         System.getenv("NX_TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS"),
+                         DEFAULT_TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS);
+
     private PgSession() {
+    }
+
+    /**
+     * Parse one millisecond-bound env override (nexus-r0vkh): null/blank
+     * means {@code defaultMs}; anything else must be an integer in
+     * [1, {@link #SEARCH_STATEMENT_TIMEOUT_MAX_MS}]. Zero is refused for the
+     * same reason {@link #searchStatementTimeoutMs} refuses it: to Postgres
+     * {@code statement_timeout=0} and {@code lock_timeout=0} both mean
+     * DISABLED, the unbounded state the setting exists to end.
+     */
+    static int boundedTimeoutMs(String envName, String raw, int defaultMs) {
+        if (raw == null || raw.isBlank()) {
+            return defaultMs;
+        }
+        int ms;
+        try {
+            ms = Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                envName + " must be an integer, got: " + raw, e);
+        }
+        if (ms < 1 || ms > SEARCH_STATEMENT_TIMEOUT_MAX_MS) {
+            throw new IllegalArgumentException(
+                envName + " must be in 1.." + SEARCH_STATEMENT_TIMEOUT_MAX_MS
+                + " (0 would DISABLE the bound), got: " + ms);
+        }
+        return ms;
+    }
+
+    /** Boot-time touch for {@code NX_TAXONOMY_ASSIGN_STATEMENT_TIMEOUT_MS}. */
+    public static int startupTaxonomyAssignStatementTimeoutMs() {
+        return TAXONOMY_ASSIGN_STATEMENT_TIMEOUT_MS;
+    }
+
+    /** Boot-time touch for {@code NX_TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS}. */
+    public static int startupTaxonomyAssignLockTimeoutMs() {
+        return TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS;
+    }
+
+    /**
+     * Bound the taxonomy assign transaction (nexus-r0vkh): every statement
+     * in it to {@link #TAXONOMY_ASSIGN_STATEMENT_TIMEOUT_MS} and every lock
+     * wait to {@link #TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS}. Called at the top of
+     * {@code TaxonomyRepository#assignFromChashes}'s {@code withTenant}
+     * block; the pairing is pinned by {@code TaxonomyAssignBoundsIntegrationTest}.
+     * Postgres raises 57014 ({@code query_canceled}) on the first bound and
+     * 55P03 ({@code lock_not_available}) on the second.
+     */
+    public static void setTaxonomyAssignBounds(DSLContext ctx) {
+        setTaxonomyAssignBounds(ctx, TAXONOMY_ASSIGN_STATEMENT_TIMEOUT_MS,
+                                TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS);
+    }
+
+    /** Explicit-bound form, for tests that need bounds shorter than the env-resolved ones. */
+    static void setTaxonomyAssignBounds(DSLContext ctx, int statementTimeoutMs, int lockTimeoutMs) {
+        setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);
+    }
+
+    /**
+     * Bounds for one bounded quarantine batch ({@code gc_quarantine_orphans_bounded},
+     * nexus-a6mon). The function body's own {@code set_config('statement_timeout',
+     * '25000', true)} is INERT for the statement running it: Postgres arms
+     * statement_timeout once, when the top-level statement starts, from the value
+     * in effect at that moment, and nothing a plpgsql body sets later re-arms it
+     * (the unbounded function's identical in-body 5 s bound was live throughout
+     * the 2026-09-16 incident in which one call ran 5m41s). {@code lock_timeout}
+     * IS armed at each lock wait, so the body's 2 s gate bound works. The values
+     * here mirror the body's, set as their OWN statement before the call so the
+     * statement bound is real; substantive-critic finding on a990fe8f1.
+     */
+    public static final int DEFAULT_GC_QUARANTINE_BOUNDED_STATEMENT_TIMEOUT_MS = 25_000;
+    public static final int DEFAULT_GC_QUARANTINE_BOUNDED_LOCK_TIMEOUT_MS = 2_000;
+
+    public static void setGcQuarantineBoundedBounds(DSLContext ctx) {
+        setStatementAndLockBounds(ctx, DEFAULT_GC_QUARANTINE_BOUNDED_STATEMENT_TIMEOUT_MS,
+                                  DEFAULT_GC_QUARANTINE_BOUNDED_LOCK_TIMEOUT_MS);
+    }
+
+    /**
+     * Bound every later statement in this transaction to {@code statementTimeoutMs}
+     * and every lock wait to {@code lockTimeoutMs}. Two {@code set_config} calls,
+     * each its own top-level statement, so the statement bound applies to the
+     * statements that FOLLOW; a bound set from inside a running function body
+     * never applies to that body's own statement (see
+     * {@link #setGcQuarantineBoundedBounds}).
+     */
+    public static void setStatementAndLockBounds(DSLContext ctx, int statementTimeoutMs, int lockTimeoutMs) {
+        setLocal(ctx, "statement_timeout", Integer.toString(statementTimeoutMs));
+        setLocal(ctx, "lock_timeout", Integer.toString(lockTimeoutMs));
     }
 
     /**
@@ -110,22 +249,8 @@ public final class PgSession {
      * which is exactly the unbounded state this setting exists to end.
      */
     static int searchStatementTimeoutMs(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return DEFAULT_SEARCH_STATEMENT_TIMEOUT_MS;
-        }
-        int ms;
-        try {
-            ms = Integer.parseInt(raw.trim());
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(
-                "NX_SEARCH_STATEMENT_TIMEOUT_MS must be an integer, got: " + raw, e);
-        }
-        if (ms < 1 || ms > SEARCH_STATEMENT_TIMEOUT_MAX_MS) {
-            throw new IllegalArgumentException(
-                "NX_SEARCH_STATEMENT_TIMEOUT_MS must be in 1.." + SEARCH_STATEMENT_TIMEOUT_MAX_MS
-                + " (0 would DISABLE the bound), got: " + ms);
-        }
-        return ms;
+        return boundedTimeoutMs("NX_SEARCH_STATEMENT_TIMEOUT_MS", raw,
+                                DEFAULT_SEARCH_STATEMENT_TIMEOUT_MS);
     }
 
     /**

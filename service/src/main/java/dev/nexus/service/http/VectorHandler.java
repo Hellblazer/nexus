@@ -978,10 +978,17 @@ public final class VectorHandler implements HttpHandler {
      *   "collection": "code__owner__voyage-code-3__v1",
      *   "quarantine_collection": "quarantine-code__owner__voyage-code-3__v1",
      *   "quarantined_at": "2026-08-10T12:00:00Z",
-     *   "sample_limit": 20
+     *   "sample_limit": 20,
+     *   "row_limit": 2000            // optional (nexus-a6mon): the BOUNDED sweep
      * }
      * </pre>
-     * <p>Response 200: {"moved": N, "sample": [{"chash": "...", "title": "..."}, ...]}
+     * <p>Response 200 without {@code row_limit} (unbounded, one transaction over
+     * every eligible row; the indexer's small incremental prune):
+     * {"moved": N, "sample": [{"chash": "...", "title": "..."}, ...]}
+     * <p>Response 200 with {@code row_limit} (at most that many rows moved, one
+     * commit, statement bound 25 s and gate-lock bound 2 s set by the engine):
+     * {"moved": N, "sample": [...], "remaining": R, "row_limit": L} — loop while
+     * {@code remaining > 0}; {@code row_limit <= 0} is a 400, never "unbounded".
      */
     private void handleGcQuarantineOrphans(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -1001,8 +1008,56 @@ public final class VectorHandler implements HttpHandler {
         // #clampSampleLimit's javadoc).
         int sampleLimit = clampSampleLimit(optInt(body, "sample_limit", 20));
 
+        // nexus-a6mon: an optional `row_limit` selects the BOUNDED sweep. Additive:
+        // a request without it is the unbounded form exactly as before, so no
+        // released client changes behaviour. With it, one call moves at most
+        // row_limit rows in one committed transaction and the response gains
+        // `remaining`, which is the caller's loop terminator -- loop while it is
+        // positive, and wait on pg_stat_activity (never a clock) between calls,
+        // or the still-committing previous call and the next one build a lock
+        // convoy (measured on the owner-1.1 repair: three stacked UPDATEs, one
+        // working at 81 s, two blocked).
+        int rowLimit = resolveRowLimit(body);
+        if (rowLimit > 0) {
+            var bounded = repo.quarantineOrphansBounded(
+                tenant, collection, quarantineCollection, quarantinedAt, sampleLimit, rowLimit);
+            HttpUtil.send(ex, 200, json(Map.of(
+                "moved", bounded.moved(),
+                "sample", bounded.sample(),
+                "remaining", bounded.remaining(),
+                "row_limit", rowLimit)));
+            return;
+        }
+
         var outcome = repo.quarantineOrphans(tenant, collection, quarantineCollection, quarantinedAt, sampleLimit);
         HttpUtil.send(ex, 200, json(Map.of("moved", outcome.moved(), "sample", outcome.sample())));
+    }
+
+    /**
+     * {@code row_limit} routing for {@code handleGcQuarantineOrphans} (nexus-a6mon,
+     * code-review finding on a990fe8f1): ABSENT means the unbounded sweep (0);
+     * PRESENT must be a positive integer, and a present zero or negative value
+     * is a 400, never silently the unbounded transaction the bound exists to
+     * prevent. The first cut folded "present but non-positive" into "absent",
+     * so the SQL function's own refusal was unreachable through the route.
+     * Pinned by {@code VectorHandlerRowLimitRoutingTest}.
+     */
+    static int resolveRowLimit(Map<String, Object> body) {
+        if (!body.containsKey("row_limit")) {
+            return 0;
+        }
+        Object raw = body.get("row_limit");
+        if (!(raw instanceof Number n)) {
+            throw new IllegalArgumentException(
+                "row_limit must be a positive integer, got: " + raw);
+        }
+        int rowLimit = n.intValue();
+        if (rowLimit <= 0) {
+            throw new IllegalArgumentException(
+                "row_limit must be >= 1 when present (omit it for the unbounded sweep), got: "
+                + rowLimit);
+        }
+        return rowLimit;
     }
 
     /**

@@ -171,6 +171,33 @@ def _extract_fake_routes(source: str) -> set[str]:
 #: live fake server, delete the entry (the completeness gate below refuses a
 #: stale one).
 ROUTE_EXCLUSIONS: dict[str, str] = {
+    "/collections/rehome/status": (
+        "nexus-wsx4l: the pollable half of the engine-only re-home below, and "
+        "excluded for the same reason. It exists as a separate route because a "
+        "re-home measured 169 s against a ~30 s edge read deadline, so the "
+        "submit's response never reaches the caller and the outcome has to be "
+        "readable afterwards; CatalogHandlerRehomeTest validates its wire shape "
+        "Java-side"
+    ),
+    "/collections/rehome": (
+        "nexus-wsx4l: DELIBERATELY engine-only — there is no Catalog or "
+        "HttpCatalogClient method for it, so it is outside the "
+        "shared-surface parity gate by construction rather than by "
+        "oversight. The bounded re-home is an operator primitive driven "
+        "from the conexus side against the engine's HTTP surface directly; "
+        "adding a Python half would make every commit carrying it a "
+        "both-halves wire-contract commit (docs/wire-contract-pending.md) "
+        "and put an operator repair verb on the paired-release choreography "
+        "for no caller that wants it. Its wire shape — the required "
+        "source/target/max_documents keys, the 409 refusal mapping, and the "
+        "exact response field names a caller's loop reads, remaining_rows "
+        "and done included — is validated Java-side by "
+        "CatalogHandlerRehomeTest, and its transaction semantics by "
+        "CollectionRehomeTest. If a Python client method is ever added, "
+        "DELETE this entry and fake the route instead; the census checks "
+        "both directions, so a stale exclusion here fails just as loudly as "
+        "a missing one"
+    ),
     "/collections/delete": (
         "backs HttpCatalogClient.delete_collection() (RDR-164 P2) — NOT "
         "Catalog.delete_collection_projection (different name/shape by "

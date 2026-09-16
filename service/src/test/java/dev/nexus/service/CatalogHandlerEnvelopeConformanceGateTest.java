@@ -308,6 +308,12 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         collectionOk("/embedding_profile", "handleEmbeddingProfile"),
         neither("/collections/supersede", "handleCollectionSupersede"),
         neither("/collections/rename", "handleCollectionRename"),
+        // nexus-wsx4l: both return a flat map of counts, not a collection and not an id
+        // list -- the same shape as their sibling rename above. The pair is deliberate:
+        // a re-home takes ~169 s against a ~30 s edge deadline, so the submit's response
+        // is never seen and /status is where a caller actually reads the outcome.
+        neither("/collections/rehome", "handleCollectionRehome"),
+        neither("/collections/rehome/status", "handleCollectionRehomeStatus"),
         neither("/collections/delete", "handleCollectionDelete"),
         neither("/collections/for_tuple", "handleCollectionForTuple"),
         neither("/collections/health", "handleCollectionHealth"),

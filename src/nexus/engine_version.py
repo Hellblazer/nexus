@@ -521,7 +521,17 @@ from __future__ import annotations
 #: new changesets (memory-004-1..3); no data-effecting changesets in this delta
 #: (scripts/list_data_effects.py). Local-mode installs get
 #: quarantine-instead-of-delete ONLY through this pin.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 121)
+#:
+#: 7.49.0 pairs with engine-service-v0.1.125 (tagged d0af27152, engine tree
+#: 33ac72e02): the taxonomy assign transaction is bounded in statement time
+#: and lock wait with one lock-timeout retry (nexus-r0vkh), the bounded
+#: quarantine sweep's statement bound is set Java-side and the route refuses
+#: a present non-positive row_limit (nexus-a6mon review fixes). The three
+#: tags between (v0.1.122 re-home, v0.1.123 resolver predicate, v0.1.124
+#: bounded sweep with changeset catalog-037-1) ride along; no /version field
+#: changed. The one both-halves commit (33ac72e02) is [additive], so the
+#: engine deployed BEFORE this client tag (nexus-1emxn choreography (a)).
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 125)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

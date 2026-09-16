@@ -73,6 +73,8 @@ import java.util.*;
  *   GET   /v1/catalog/collections/get    get collection by name
  *   POST  /v1/catalog/collections/supersede supersede collection
  *   POST  /v1/catalog/collections/rename rename collection (cascade)
+ *   POST  /v1/catalog/collections/rehome re-home a collection onto a live target (one txn)
+ *   POST  /v1/catalog/collections/rehome/status what still names the source (pollable)
  *   POST  /v1/catalog/collections/delete delete collection + cascade all in-PG lifecycle state (RDR-164 P2)
  *   GET   /v1/catalog/coverage            link coverage by content type (nexus-3cwnx)
  *   POST  /v1/catalog/import/owner       ETL import owner
@@ -218,6 +220,8 @@ public final class CatalogHandler implements HttpHandler {
                 case "/collections/get"       -> handleCollectionGet(exchange, tenant, method);
                 case "/collections/supersede" -> handleCollectionSupersede(exchange, tenant, method);
                 case "/collections/rename"    -> handleCollectionRename(exchange, tenant, method);
+                case "/collections/rehome"    -> handleCollectionRehome(exchange, tenant, method);
+                case "/collections/rehome/status" -> handleCollectionRehomeStatus(exchange, tenant, method);
                 case "/collections/delete"    -> handleCollectionDelete(exchange, tenant, method);
                 case "/collections/for_tuple" -> handleCollectionForTuple(exchange, tenant, method);
                 case "/collections/health"    -> handleCollectionHealth(exchange, tenant, method);
@@ -277,6 +281,13 @@ public final class CatalogHandler implements HttpHandler {
             // transaction — the TOCTOU case that assertion exists for. It is a REFUSAL, so it
             // gets the same 409 the pre-check gives, with the message that names the remedy.
             // It fell into the generic catch below for one commit and surfaced as an opaque 500.
+            HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+        } catch (CatalogRepository.RehomeRefused e) {
+            // nexus-wsx4l: the bounded re-home refused — same endpoints, an absent or
+            // retired registry row, a non-positive bound, or shared-chash closure
+            // reaching an already-torn document. All are REFUSALS with the reason in
+            // the message, so they get the 409 CollectionMergeRefused gets above, not
+            // the generic 500 that would discard the only text naming the remedy.
             HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (CatalogRepository.TombstonedDocumentException e) {
             // nexus-eldyi: a manifest write (write/append/purge) refused a
@@ -1808,6 +1819,81 @@ public final class CatalogHandler implements HttpHandler {
                     + supersededBy) + "}"); return;
         }
         HttpUtil.send(exchange, 200, "{\"updated\":" + updated + "}");
+    }
+
+    /**
+     * POST /v1/catalog/collections/rehome — ONE bounded, committed batch of a
+     * collection re-home (nexus-wsx4l). The caller loops on {@code remaining_rows}.
+     *
+     * <p>Deliberately NOT idempotent-by-token and deliberately NOT a whole-collection
+     * verb: each call is one transaction, so a client disconnect keeps the batches
+     * that committed, and re-reading {@code remaining_rows} on the next call IS the
+     * progress check. See {@link CatalogRepository#rehomeCollectionBatch} for why
+     * neither rename branch can do this and why the batch unit is a shared-chash
+     * component rather than a document.
+     */
+    private void handleCollectionRehome(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String source = body.get("source") instanceof String s ? s : null;
+        String target = body.get("target") instanceof String s ? s : null;
+        if (source == null || target == null) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"source/target required\"}"); return;
+        }
+        // EXPECT NOT TO SEE THIS RESPONSE. A real re-home measured 169 s on a PITR
+        // fork of production against an edge read deadline of about 30 s, so the
+        // caller is cut long before the work ends. The engine finishes and commits
+        // anyway (proven on this handler by CatalogHandlerRehomeTest#
+        // clientCutMidRequest_transactionStillCommits); the caller then polls
+        // /collections/rehome/status. This body is the fast-path courtesy for a
+        // small collection, never the contract.
+        var r = repo.rehomeCollection(tenant, source, target);
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("moved_chunks", r.movedChunks());
+        out.put("moved_documents", r.movedDocuments());
+        out.put("moved_by_table", r.movedByTable());
+        out.put("left_behind_by_table", r.leftBehindByTable());
+        putStatus(out, r.status());
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(out));
+    }
+
+    /**
+     * POST /v1/catalog/collections/rehome/status — what still names the source.
+     *
+     * <p>The pollable half of the re-home, and the half a caller actually reads: the
+     * submit above is cut by the edge long before it returns. Cheap by construction —
+     * one count per collection-scoped table, no writes, no locks.
+     */
+    private void handleCollectionRehomeStatus(HttpExchange exchange, String tenant, String method)
+            throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String source = body.get("source") instanceof String s ? s : null;
+        if (source == null) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"source required\"}"); return;
+        }
+        // `target` is OPTIONAL but wanted: whether a row is STUCK is a question
+        // about what is already at the target, so without it this can only
+        // report what is left, not what is movable, and `done` degrades to
+        // remaining_rows == 0 -- the unreachable terminator this pair of fields
+        // exists to fix. A poller that knows its target should always pass it.
+        String target = body.get("target") instanceof String s ? s : null;
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        putStatus(out, repo.rehomeStatus(tenant, source, target));
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(out));
+    }
+
+    /** One rendering of {@link CatalogRepository.RehomeStatus}, so submit and poll cannot drift. */
+    private static void putStatus(Map<String, Object> out, CatalogRepository.RehomeStatus s) {
+        out.put("remaining_chunks", s.remainingChunks());
+        out.put("remaining_documents", s.remainingDocuments());
+        out.put("remaining_rows", s.remainingRows());
+        // What is still MOVABLE, which is what `done` keys on. It differs from
+        // remaining_rows exactly when merge-and-report has parked colliding
+        // rows at the source; those are finished business, not pending work.
+        out.put("remaining_movable_rows", s.remainingMovableRows());
+        out.put("remaining_by_table", s.remainingByTable());
+        out.put("done", s.done());
     }
 
     private void handleCollectionRename(HttpExchange exchange, String tenant, String method) throws IOException {

@@ -1251,6 +1251,10 @@
         established late-append convention.
     -->
     <include file="db/changelog/hygiene-005-gc-registration-from-origin-row.xml"/>
+    <!-- nexus-a6mon: bounded quarantine sweep. A NEW function beside the
+         unbounded one, so the indexer's incremental prune is untouched. After
+         hygiene-005 because it copies that changeset's registration shape. -->
+    <include file="db/changelog/catalog-037-gc-quarantine-orphans-bounded.xml"/>
 
     <!--
         nexus-zhxxd (GH #1489): a 6.18.1-era fidelity import (engine-service-v0.1.52,

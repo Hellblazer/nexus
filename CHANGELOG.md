@@ -6,6 +6,66 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.49.0] - 2026-09-16
+
+Paired engine: engine-service-v0.1.125 (`REQUIRED_ENGINE_VERSION` (0, 1, 125);
+was engine-service-v0.1.121), deployed before this client tag on the additive
+branch of the paired-release choreography. The four engine tags since 7.48.0
+carry: the bounded collection re-home used for the owner-1.1 repair
+(nexus-wsx4l, v0.1.122); the resolver predicate that stops a quarantine
+sibling winning a tuple (nexus-bc7ps, v0.1.123); the bounded quarantine sweep
+(nexus-a6mon, v0.1.124, changeset catalog-037); and the taxonomy assign bounds
+plus the a6mon review fixes below (nexus-r0vkh, v0.1.125). Local-mode installs
+get all of it only through this pin.
+
+### Added
+- **Code chunks have a minimum-size floor: a chunk under 64 characters is
+  merged into its neighbour instead of indexed alone (bead nexus-x50jb).**
+  Prose is deliberately not floored: two attempts were backed out on
+  evidence (a length floor destroys short sections' `header_path`; a
+  bare-heading predicate merges a parent heading into its child with the
+  wrong path and breaks cross-file paragraph dedup); the reasoning is in
+  `plan_merges`'s docstring.
+
+### Fixed
+- **Taxonomy assign convoy no longer wedges the engine pool (bead nexus-r0vkh).**
+  On 2026-09-16 one `assign_from_chashes_1024` call ran 782 s and eight
+  identical calls queued on its `nexus.topics` row locks, each holding a
+  pool connection; every PG-backed route timed out for 11 minutes. Engine:
+  the assign transaction now carries a transaction-local `statement_timeout`
+  (`NX_TAXONOMY_ASSIGN_STATEMENT_TIMEOUT_MS`, default 30000) and
+  `lock_timeout` (`NX_TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS`, default 5000), so a
+  queued caller fails in seconds and a runaway head is cancelled; the
+  client already records a failed assignment on its taxonomy tripwire
+  without failing the index write. Client: `taxonomy_assign_batch_hook`'s
+  `serialize = False` opt-out (2026-08-08) is withdrawn; its safety claim
+  covered `topic_assignments` and missed the `topics` row locks the FK and
+  the doc_count recount trigger take, so one index run's parallel flushes
+  convoyed on themselves. Same-hook fires now serialize in-process. A lock
+  timeout gets one retry after a pause, so an ordinary two-process overlap
+  behind a healthy head recovers; a second trip is the wedged case and fails.
+- **Bounded quarantine sweep: the statement bound is now real, and an explicit
+  non-positive `row_limit` is refused at the route (bead nexus-a6mon, review
+  findings on the v0.1.124 change).** The function body's own
+  `set_config('statement_timeout', ...)` cannot bound the statement already
+  running it (Postgres arms that timer once, at statement start, which is
+  also why the unbounded sweep's in-body 5 s bound never stopped the
+  5-minute call in the incident); the engine now sets the 25 s statement
+  bound and the 2 s gate-lock bound as their own statement before the call.
+  The route folded a present `row_limit` of 0 or less into "absent" and ran
+  the unbounded sweep; it is now a 400.
+- **A name-resolution failure fails the index run instead of silently
+  renaming the corpus (bead nexus-n9xjy).** The two resolver wrappers
+  absorbed any resolver exception at DEBUG and returned a path-derived
+  synthesized collection name; the indexer then repointed every document to
+  it (2026-09-08: `code__1-1` to `code__nexus-571b8edd`, 41,032 chunks
+  orphaned). Only an unregistered owner (`LookupError`) falls through to
+  synthesis now. The SessionStart RDR hook keeps its best-effort guess by
+  calling the pure synthesis directly.
+- **Deleted `check_local_path_writable`, a Chroma-era probe that created
+  `~/.local/share/nexus/chroma` on every index run and raised
+  `CredentialsMissingError` for a filesystem fault (bead nexus-7a8rn).**
+
 ## [7.48.0] - 2026-09-15
 
 Paired engine: engine-service-v0.1.121 (`REQUIRED_ENGINE_VERSION` (0, 1, 121)),

@@ -340,9 +340,13 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
     # Patch:
     #   - batch_frecency → fake_frecency (controlled score)
     #   - make_t3 → sentinel (proves daemon-Chroma is NOT written)
-    #   - catalog reader → unavailable (forces the doc_id-keyed
-    #     where-filter path — manifest resolution is skipped — so the
-    #     update path is exercised without a live catalog manifest)
+    #   - catalog reader → None, the explicit no-catalog spelling (forces
+    #     the doc_id-keyed where-filter path — manifest resolution is
+    #     skipped — so the update path is exercised without a live
+    #     catalog manifest). Not a raised Exception: since nexus-n9xjy
+    #     the indexer's collection resolver lets a catalog FAILURE
+    #     propagate (that swallow is how the 2026-09-08 corpus rename
+    #     happened) and only an explicit absence synthesizes a name.
     #   - _build_frecency_doc_id_map → fake doc_id map (nexus-afudo,
     #     2026-08-05: the legacy source_path where-filter this test
     #     used to fall through to when the catalog is unavailable is
@@ -361,8 +365,7 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
     with (
         patch("nexus.frecency.batch_frecency", return_value=fake_frecency),
         patch("nexus.db.make_t3", side_effect=sentinel_make_t3),
-        patch("nexus.catalog.factory.make_catalog_reader",
-              side_effect=Exception("no catalog in test")),
+        patch("nexus.catalog.factory.make_catalog_reader", return_value=None),
         patch("nexus.indexer._build_frecency_doc_id_map",
               return_value={test_file: "1.1.1"}),
     ):

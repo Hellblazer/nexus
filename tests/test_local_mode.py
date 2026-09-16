@@ -694,21 +694,10 @@ class TestFrecencyOnlyLocalMode:
             _run_index_frecency_only(tmp_path, registry)
 
 
-# ── Check local path writable ────────────────────────────────────────────────
-
-
-class TestCheckLocalPathWritable:
-    def test_writable_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma"))
-        from nexus.indexer_utils import check_local_path_writable
-        check_local_path_writable()
-
-    def test_unwritable_path_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", "/proc/nonexistent/chroma")
-        from nexus.indexer_utils import check_local_path_writable
-        from nexus.errors import CredentialsMissingError
-        with pytest.raises(CredentialsMissingError, match="not writable"):
-            check_local_path_writable()
+# (TestCheckLocalPathWritable removed with check_local_path_writable itself,
+# nexus-7a8rn: the probe it tested was a Chroma-era relic that manufactured
+# ~/.local/share/nexus/chroma on every index run and raised a credentials error
+# for a filesystem fault. A test of a deleted behaviour dies with the code.)
 
 
 @pytest.fixture(autouse=True)

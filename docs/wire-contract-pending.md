@@ -71,6 +71,8 @@ carries no method signature for a contract change to reconcile against) is a
 
 ## Unshipped
 
+- `33ac72e02` -- bead nexus-r0vkh -- engine tag `engine-service-v0.1.125` -- [additive] (engine half engine-service-v0.1.125, tagged on 33ac72e02's engine tree; deploy BEFORE the next client tag, the additive branch of the nexus-1emxn choreography.) Engine half: `TaxonomyRepository.assignFromChashes` bounds its own transaction (SET LOCAL `statement_timeout` 30 s and `lock_timeout` 5 s, one retry after a lock timeout) and `PgVectorRepository.quarantineOrphansBounded` sets its 25 s statement bound Java-side; `VectorHandler.resolveRowLimit` refuses a PRESENT non-positive `row_limit` with a 400, a value no released client can send (`http_vector_client.gc_quarantine_orphans` has no `row_limit` parameter). Client half, same commit: `taxonomy_assign_batch_hook`'s `serialize = False` opt-out withdrawn (in-process serialization of the hook's own fires), no request or response shape changed. OLD client + NEW engine: safe, every wire shape is unchanged, and a bounded assign that trips reaches the old client as the same 500 its tripwire already records without failing the index write. NEW client + OLD engine: safe, the client sends nothing the old engine does not accept; only the in-process fan-out changes.
+
 
 
 

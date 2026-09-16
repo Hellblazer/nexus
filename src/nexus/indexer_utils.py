@@ -18,7 +18,6 @@ from pathlib import Path
 
 import structlog
 
-from nexus.errors import CredentialsMissingError
 from nexus.retry import _vector_with_retry
 
 _log = structlog.get_logger(__name__)
@@ -1243,25 +1242,6 @@ def check_staleness(
     ):
         return False
     return True
-
-
-def check_local_path_writable() -> None:
-    """Validate that the local ChromaDB path is writable.
-
-    Raises:
-        CredentialsMissingError: When the local path cannot be written to.
-    """
-    from nexus.stranded_install import legacy_chroma_dir  # noqa: PLC0415 — deferred import; legacy leg, dies at RDR-155 P3
-    local_path = legacy_chroma_dir()
-    try:
-        local_path.mkdir(parents=True, exist_ok=True)
-        test_file = local_path / ".write_test"
-        test_file.touch()
-        test_file.unlink()
-    except OSError as exc:
-        raise CredentialsMissingError(
-            f"Local ChromaDB path {local_path} is not writable: {exc}"
-        ) from exc
 
 
 def build_context_prefix(
