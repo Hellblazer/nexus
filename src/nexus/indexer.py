@@ -37,7 +37,6 @@ from nexus.hook_registry import record_catalog_hook_failure
 from nexus.indexer_utils import (
     build_doc_id_resolver,
     build_staleness_cache,
-    check_local_path_writable,
     check_staleness,
     should_ignore as _should_ignore,  # shared implementation
     _DEFAULT_IGNORE,
@@ -2371,7 +2370,6 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
                 "no longer embeds via Voyage. Set NX_STORAGE_BACKEND_"
                 "VECTORS=service (the default) or unset it."
             )
-        check_local_path_writable()
         db = make_t3()
 
     frecency_map = batch_frecency(repo)
@@ -4640,7 +4638,6 @@ def _run_index(
     _service_mode: bool = False  # resolved in the cloud/service branch below; False in local mode
 
     if _local_mode:
-        check_local_path_writable()
         from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         _local_ef = LocalEmbeddingFunction()
         local_model = _local_ef.model_name

@@ -2823,7 +2823,6 @@ def test_run_index_registration_loop_skips_when_vectors_opt_out_of_service(tmp_p
         "nexus.corpus.ensure_collection_registered": {
             "side_effect": _fake_ensure_registered,
         },
-        "nexus.indexer.check_local_path_writable": {},
     }):
         _run_index(repo, _reg())
 
