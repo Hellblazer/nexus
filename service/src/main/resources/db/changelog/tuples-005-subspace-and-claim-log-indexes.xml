@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-xapt8 (a scalability research pass over this design, additions 5/6/13/15/17):
+    two index fixes surfaced by that research, both additive (CREATE/DROP
+    INDEX only — no row ever changes, so neither changeset needs a DATA
+    EFFECT line per scripts/data_effect_lint.py's own scope).
+
+    ── Changeset 1: idx_tuples_subspace_scan ──────────────────────────────
+    nexus.tuples carries no index whose leading columns are
+    (tenant_id, subspace) alone. The two existing indexes on this shape are
+    both PARTIAL and serve narrower predicates:
+      - idx_tuples_claim_scan (tuples-001-baseline.xml): WHERE consumed_at
+        IS NULL AND claim_state IS NULL — excludes every consumed, dead, or
+        claimed-and-live row.
+      - idx_tuples_claim_lease / idx_tuples_claim_id (tuples-002-sweep-
+        indexes.xml): WHERE claim_state = 'claimed' AND consumed_at IS
+        NULL — the opposite subset.
+    TupleRepository.queryOnce (rd/rdp's read path, ~line 590-606) needs
+    EVERY row for a (tenant, subspace) equality match, regardless of
+    claim_state or consumed_at: tenant_id = ? AND subspace = ? AND
+    consumed_at IS NULL AND expires_at > now() [+ since cursor], ORDER BY
+    created_at, id. A single NON-partial index on (tenant_id, subspace,
+    created_at, id) serves it: the leading two columns give Postgres an
+    index-range scan for the equality predicate, and the trailing
+    (created_at, id) pair matches rd's own ORDER BY exactly, so a large,
+    long-lived subspace with many already-consumed or already-expired rows
+    no longer forces a sequential scan (or a scan of one of the ABOVE
+    partial indexes, which cannot serve this query at all since neither
+    covers a consumed/expired row). Proven by EXPLAIN against seeded
+    cardinality: TupleSweepIndexPlanShapeTest#rdQuery_usesSubspaceScanIndex_noSeqScan.
+
+    This index does NOT serve TupleRepository.subspaceListPage's UNFILTERED
+    GROUP BY census query (the shape health.py's doctor row issues via
+    subspace_list(prefix=None) — no subspace predicate at all, so there is
+    nothing for a (tenant_id, subspace, ...) index to seek on, and none of
+    the aggregated columns — claim_state, consumed_at, expires_at — are
+    covered). MEASURED, not assumed (fix-round correction: an earlier draft
+    of this comment claimed coverage this test disproves):
+    TupleSweepIndexPlanShapeTest#unfilteredGroupByCensusQuery_doesNotUseTheSubspaceScanIndex_seqScanInstead
+    shows Postgres chooses Seq Scan + HashAggregate at 10,000 seeded rows.
+    The doctor's unpaged call is bounded instead by subspaceListPage's own
+    request-path statement_timeout (NX_TUPLE_SUBSPACE_LIST_TIMEOUT_SECONDS),
+    not by this index — see that method's own javadoc.
+
+    ── Changeset 2 / 3: nexus.tuple_claim_log purge index ─────────────────
+    TupleRepository.purgeOldClaimLogBatch (~line 1312-1322) filters
+    tenant_id = ? AND expires_at < now(), ORDER BY log_id — the log ROW's
+    own retention deadline (insertClaimLog stamps expires_at = at +
+    claimLogTtlSeconds at write time; see that method's own javadoc,
+    nexus-em75s.37). The only existing index on this table,
+    idx_tuple_claim_log_tenant_at (tuples-002-sweep-indexes.xml, changeset
+    4), is on (tenant_id, at) — built when the purge arm filtered on the
+    INSERT timestamp `at` directly, a design the code has since moved off
+    of. Changeset 2 adds the index the CURRENT purge query actually needs,
+    on (tenant_id, expires_at).
+
+    Changeset 3 drops idx_tuple_claim_log_tenant_at. Grepped first
+    (`grep -rn "TUPLE_CLAIM_LOG\.AT\b" service/src/main/java`): the ONLY
+    reference to TUPLE_CLAIM_LOG.AT anywhere in the Java source is
+    insertClaimLog's own INSERT column list (~line 1367) — nothing filters
+    or orders on `at` in any WHERE/ORDER BY clause, so nothing can be using
+    this index today. It is dead weight: every write to the table still
+    pays to maintain it, for a query shape nothing issues. Not editing
+    tuples-002-sweep-indexes.xml itself — that changeset is already
+    checksummed on any cluster that has run it; the drop is its own new
+    changeset here, per the applied-changesets-are-checksummed rule
+    (tuples-004-clear-consumed-body.xml's own header makes the same call
+    for a different reason). Rollback recreates the dropped index verbatim
+    (the exact DDL tuples-002-4 used), so a rollback of this changeset
+    restores the pre-nexus-xapt8 index set exactly.
+
+    Placed after memory-004-quarantine-and-rollup.xml (current tail at
+    authoring time) and before the grants-nexus-svc.xml runAlways block,
+    matching the established late-append convention (D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: unrestricted (tenant, subspace) scan for rd/rdp and subspace_list ─── -->
+    <changeSet id="tuples-005-1" author="nexus-xapt8">
+        <comment>idx_tuples_subspace_scan: non-partial index on nexus.tuples (tenant_id, subspace, created_at, id), serving TupleRepository.queryOnce (rd/rdp, ORDER BY created_at, id) and the new subspaceList GROUP BY subspace query -- neither can use the existing partial indexes, which both exclude a claim_state/consumed_at subset these two queries need in full.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE INDEX idx_tuples_subspace_scan ON nexus.tuples (tenant_id, subspace, created_at, id);
+        </sql>
+        <rollback>DROP INDEX IF EXISTS nexus.idx_tuples_subspace_scan</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: claim-log purge, by its ACTUAL filter column ─────── -->
+    <changeSet id="tuples-005-2" author="nexus-xapt8">
+        <comment>idx_tuple_claim_log_tenant_expires_at: serves TupleRepository.purgeOldClaimLogBatch's tenant_id + expires_at &lt; now() scan, ORDER BY log_id -- the query's CURRENT filter column, distinct from idx_tuple_claim_log_tenant_at's (tenant_id, at), which nothing filters or orders on any more (see changeset 3).</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE INDEX idx_tuple_claim_log_tenant_expires_at ON nexus.tuple_claim_log (tenant_id, expires_at);
+        </sql>
+        <rollback>DROP INDEX IF EXISTS nexus.idx_tuple_claim_log_tenant_expires_at</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: drop the now-dead (tenant_id, at) index ──────────── -->
+    <changeSet id="tuples-005-3" author="nexus-xapt8">
+        <comment>Drops idx_tuple_claim_log_tenant_at (tuples-002-sweep-indexes.xml changeset 4): grep confirms TUPLE_CLAIM_LOG.AT appears nowhere in a WHERE/ORDER BY in the Java source, only in insertClaimLog's INSERT column list -- the purge arm this index was built for now filters on expires_at (changeset 2 above), so this index serves no live query and costs upkeep on every claim-log write for nothing.</comment>
+        <sql splitStatements="true" stripComments="false">
+DROP INDEX IF EXISTS nexus.idx_tuple_claim_log_tenant_at;
+        </sql>
+        <rollback>CREATE INDEX idx_tuple_claim_log_tenant_at ON nexus.tuple_claim_log (tenant_id, at)</rollback>
+    </changeSet>
+
+</databaseChangeLog>

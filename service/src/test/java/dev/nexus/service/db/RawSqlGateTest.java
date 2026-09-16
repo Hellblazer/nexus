@@ -1098,7 +1098,13 @@ class RawSqlGateTest {
         // TRIGGER, then DROP TRIGGER IF EXISTS + DROP FUNCTION IF EXISTS in the
         // finally block) -- 5 raw statements, no jOOQ codegen for CREATE FUNCTION/
         // TRIGGER exists.
-        Map.entry("dev/nexus/service/TupleRepositoryTest.java", 5),
+        // nexus-xapt8 fix round (critique finding 10): 5 -> 6, +1 --
+        // subspaceListPage_realStatementTimeout_raisesCensusTimeoutException's
+        // TEST_ONLY_SUBSPACE_LIST_PRE_QUERY_HOOK installs a raw "SELECT
+        // pg_sleep(2)" to force a GENUINE Postgres-side 57014 cancellation
+        // inside the transaction where statement_timeout is already SET
+        // LOCAL -- pg_sleep() has no jOOQ codegen equivalent to convert onto.
+        Map.entry("dev/nexus/service/TupleRepositoryTest.java", 6),
         Map.entry("dev/nexus/service/TupleSweepIndexPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/UpdatedAtTriggerTest.java", 7),
         Map.entry("dev/nexus/service/VectorsChashIndexLiquibaseTest.java", 3),

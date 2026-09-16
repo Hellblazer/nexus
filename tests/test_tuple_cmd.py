@@ -191,6 +191,40 @@ class TestTupleTemplatesListStats:
         assert census["total"] == 0
         assert census["available"] == 0
 
+    def test_list_with_limit_pages_via_after(self, t2_service_env) -> None:
+        prefix = f"mailbox/{_uniq('page')}-"
+        addrs = [f"{prefix}{i}" for i in range(3)]
+        for addr in addrs:
+            _invoke([
+                "out", addr, "--key", f"to={addr}",
+                "--dim", "from=sender", "--nonce", _uniq("nonce"),
+            ])
+
+        page1 = _invoke(["list", "--prefix", prefix, "--limit", "2", "--json"])
+        assert page1.exit_code == 0, page1.output
+        rows1 = _last_json_line(page1.output)
+        assert len(rows1) == 3  # 2 census rows + 1 {"next_cursor": ...} tail entry
+        cursor = rows1[-1]["next_cursor"]
+        assert cursor
+
+        page2 = _invoke(["list", "--prefix", prefix, "--limit", "2", "--after", cursor, "--json"])
+        assert page2.exit_code == 0, page2.output
+        rows2 = _last_json_line(page2.output)
+        assert len(rows2) == 1
+        assert "next_cursor" not in rows2[-1]
+
+    def test_list_with_no_limit_is_unpaged(self, t2_service_env) -> None:
+        addr = _uniq("addr")
+        _invoke([
+            "out", f"mailbox/{addr}", "--key", f"to={addr}",
+            "--dim", "from=sender", "--nonce", _uniq("nonce"),
+        ])
+        lst = _invoke(["list", "--prefix", f"mailbox/{addr}", "--json"])
+        assert lst.exit_code == 0, lst.output
+        rows = _last_json_line(lst.output)
+        assert len(rows) == 1
+        assert "next_cursor" not in rows[0]
+
 
 class TestTupleDirectoryCmd:
     """RDR-208 Phase 2 Step 4 (bead nexus-galkv.11): ``nx tuple directory

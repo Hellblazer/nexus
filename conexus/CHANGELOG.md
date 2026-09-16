@@ -4,6 +4,12 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.48.0] - 2026-09-15
+
+Paired engine: engine-service-v0.1.121 (`REQUIRED_ENGINE_VERSION` (0, 1, 121)),
+bead nexus-xapt8. Plugin version aligned with conexus 7.48.0. No plugin-side
+changes: `PENDING_RELEASE.md` held no entries at this cut.
+
 ## [7.47.0] - 2026-09-15
 
 Paired engine: engine-service-v0.1.120 (`REQUIRED_ENGINE_VERSION` (0, 1, 120)),

@@ -86,6 +86,15 @@ public final class TupleRepository {
     public static final String PARK_CAP_GLOBAL_ENV = "NX_TUPLE_PARK_CAP_GLOBAL";
     public static final int DEFAULT_PARK_CAP_GLOBAL = 16;
 
+    /** nexus-xapt8 (a scalability research pass over this design): request-path ceiling for
+     *  {@link #subspaceListPage}'s own statement, mirroring {@link SweepBounds}'
+     *  is_local=true pattern (reverts at transaction end, never leaks onto the
+     *  pooled connection). Deliberately generous like {@link SweepBounds
+     *  #STATEMENT_TIMEOUT} -- its job is a ceiling where there was none, not a
+     *  tight budget a healthy call routinely brushes. */
+    public static final String SUBSPACE_LIST_TIMEOUT_SECONDS_ENV = "NX_TUPLE_SUBSPACE_LIST_TIMEOUT_SECONDS";
+    public static final int DEFAULT_SUBSPACE_LIST_TIMEOUT_SECONDS = 10;
+
     private static final String CLAIM_STATE_CLAIMED = "claimed";
     private static final String CLAIM_STATE_DEAD = "dead";
     private static final String TRANSITION_CLAIM = "claim";
@@ -147,12 +156,27 @@ public final class TupleRepository {
         TupleWaitRegistry.TEST_ONLY_SIGNAL_HOOK = hookOrNull == null ? (tenant, subspace) -> { } : hookOrNull;
     }
 
+    /**
+     * Cross-package installer for {@link #TEST_ONLY_SUBSPACE_LIST_PRE_QUERY_HOOK}
+     * (nexus-xapt8, critique finding 10) -- same reasoning as {@link
+     * #setTestOnlySignalHook}: the field itself stays package-private, this
+     * installer is public so a test outside {@code dev.nexus.service.db}
+     * (e.g. {@code TupleRepositoryTest}, package {@code dev.nexus.service})
+     * can still install it. Pass {@code null} to restore the no-op default.
+     * Never call this outside test code.
+     */
+    public static void setTestOnlySubspaceListPreQueryHook(
+            java.util.function.Consumer<org.jooq.DSLContext> hookOrNull) {
+        TEST_ONLY_SUBSPACE_LIST_PRE_QUERY_HOOK = hookOrNull == null ? ctx -> { } : hookOrNull;
+    }
+
     private final TenantScope tenantScope;
     private final TemplateRegistry registry;
     private final TupleWaitRegistry waitRegistry;
     private final int readMax;
     private final int claimPasses;
     private final int timeoutCapSeconds;
+    private final int subspaceListTimeoutSeconds;
 
     public TupleRepository(TenantScope tenantScope, TemplateRegistry registry) {
         this(tenantScope, registry, DEFAULT_READ_MAX, DEFAULT_CLAIM_PASSES, DEFAULT_TIMEOUT_CAP_SECONDS,
@@ -162,11 +186,23 @@ public final class TupleRepository {
     public TupleRepository(TenantScope tenantScope, TemplateRegistry registry,
                             int readMax, int claimPasses, int timeoutCapSeconds,
                             int parkCapPerClaimant, int parkCapGlobal) {
+        this(tenantScope, registry, readMax, claimPasses, timeoutCapSeconds,
+                parkCapPerClaimant, parkCapGlobal, DEFAULT_SUBSPACE_LIST_TIMEOUT_SECONDS);
+    }
+
+    /** nexus-xapt8: the full-arity constructor, adding {@code
+     *  subspaceListTimeoutSeconds} without disturbing the 7-arg overload above
+     *  (which every existing test call site uses) -- an additive overload
+     *  rather than a widened existing signature. */
+    public TupleRepository(TenantScope tenantScope, TemplateRegistry registry,
+                            int readMax, int claimPasses, int timeoutCapSeconds,
+                            int parkCapPerClaimant, int parkCapGlobal, int subspaceListTimeoutSeconds) {
         this.tenantScope = tenantScope;
         this.registry = registry;
         this.readMax = readMax;
         this.claimPasses = claimPasses;
         this.timeoutCapSeconds = timeoutCapSeconds;
+        this.subspaceListTimeoutSeconds = subspaceListTimeoutSeconds;
         this.waitRegistry = new TupleWaitRegistry(parkCapPerClaimant, parkCapGlobal);
     }
 
@@ -177,7 +213,8 @@ public final class TupleRepository {
                 intEnv(CLAIM_PASSES_ENV, DEFAULT_CLAIM_PASSES),
                 intEnv(TIMEOUT_CAP_SECONDS_ENV, DEFAULT_TIMEOUT_CAP_SECONDS),
                 intEnv(PARK_CAP_PER_CLAIMANT_ENV, DEFAULT_PARK_CAP_PER_CLAIMANT),
-                intEnv(PARK_CAP_GLOBAL_ENV, DEFAULT_PARK_CAP_GLOBAL));
+                intEnv(PARK_CAP_GLOBAL_ENV, DEFAULT_PARK_CAP_GLOBAL),
+                intEnv(SUBSPACE_LIST_TIMEOUT_SECONDS_ENV, DEFAULT_SUBSPACE_LIST_TIMEOUT_SECONDS));
     }
 
     private static int intEnv(String name, int defaultValue) {
@@ -215,6 +252,12 @@ public final class TupleRepository {
             String subspace, long total, long available, long claimed, long dead,
             long consumed, long expiredUnpurged,
             OffsetDateTime oldestCreatedAt, OffsetDateTime newestCreatedAt) {
+    }
+
+    /** {@code subspace_list}'s paged form (nexus-xapt8): {@code nextCursor} is
+     *  non-null exactly when {@code items} was truncated by a caller-supplied
+     *  {@code limit} -- {@code null} means every matching subspace was returned. */
+    public record SubspacePage(List<SubspaceCensus> items, String nextCursor) {
     }
 
     /**
@@ -614,21 +657,47 @@ public final class TupleRepository {
 
     // ── in / inp ─────────────────────────────────────────────────────────────
 
-    /** {@code inp(subspace, keys_pattern, *, claimant, lease_s) -> (Tuple, claim_id) | None} — probe, never blocks. */
+    /** {@code inp(subspace, keys_pattern, *, claimant, lease_s) -> (Tuple, claim_id) | None} — probe, never blocks.
+     *  Back-compat overload for a caller that always has a {@code lease_s}
+     *  (every existing test call site, unchanged) -- see the {@link Long}
+     *  overload below for the optional form nexus-xapt8 adds. */
     public Optional<ClaimedTuple> inp(String tenant, String subspace, Map<String, String> pattern,
                                        String claimant, long leaseSeconds) {
         return claimOnce(tenant, subspace, pattern, claimant, leaseSeconds);
     }
 
-    /** {@code in(subspace, keys_pattern, *, claimant, lease_s, timeout_s=0) -> (Tuple, claim_id) | None} — blocks up to {@code timeoutSeconds}. */
+    /** {@code inp(subspace, keys_pattern, *, claimant, lease_s?) -> (Tuple, claim_id) | None} — probe, never blocks.
+     *  {@code leaseSecondsOrNull} nullable (nexus-xapt8, additive): {@code null} uses the
+     *  matched template's own {@code take.default_lease_seconds}; see {@link #claimOnce}
+     *  for the refusal when the template has none. A DISTINCT overload from the
+     *  primitive {@code long} form above, not a widened replacement of it -- {@code int}/
+     *  {@code long} literal call sites resolve to that overload unchanged (Java method
+     *  overload resolution prefers a strict/widening-primitive match over one requiring
+     *  a box), so this is additive at the Java API surface too. */
+    public Optional<ClaimedTuple> inp(String tenant, String subspace, Map<String, String> pattern,
+                                       String claimant, Long leaseSecondsOrNull) {
+        return claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
+    }
+
+    /** {@code in(subspace, keys_pattern, *, claimant, lease_s, timeout_s=0) -> (Tuple, claim_id) | None} —
+     *  blocks up to {@code timeoutSeconds}. Back-compat overload; see {@link #inp}'s
+     *  own javadoc for why this and the {@link Long} overload below coexist. */
     public Optional<ClaimedTuple> in(String tenant, String subspace, Map<String, String> pattern,
                                       String claimant, long leaseSeconds, long timeoutSeconds) {
+        return in(tenant, subspace, pattern, claimant, (Long) leaseSeconds, timeoutSeconds);
+    }
+
+    /** {@code in(subspace, keys_pattern, *, claimant, lease_s?, timeout_s=0) -> (Tuple, claim_id) | None} —
+     *  blocks up to {@code timeoutSeconds}. {@code leaseSecondsOrNull} nullable
+     *  (nexus-xapt8): see {@link #inp}. */
+    public Optional<ClaimedTuple> in(String tenant, String subspace, Map<String, String> pattern,
+                                      String claimant, Long leaseSecondsOrNull, long timeoutSeconds) {
         validateTimeout(timeoutSeconds);
         if (timeoutSeconds <= 0) {
-            return claimOnce(tenant, subspace, pattern, claimant, leaseSeconds);
+            return claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
         }
         TupleWaitRegistry.Waiter waiter = waitRegistry.register(tenant, subspace);
-        Optional<ClaimedTuple> found = claimOnce(tenant, subspace, pattern, claimant, leaseSeconds);
+        Optional<ClaimedTuple> found = claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
         if (found.isPresent()) {
             return found;
         }
@@ -637,15 +706,15 @@ public final class TupleRepository {
             long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
             while (true) {
                 if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
-                    return claimOnce(tenant, subspace, pattern, claimant, leaseSeconds);
+                    return claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
                 }
                 try {
                     waiter.awaitSignalOrTimer();
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
-                    return claimOnce(tenant, subspace, pattern, claimant, leaseSeconds);
+                    return claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
                 }
-                Optional<ClaimedTuple> again = claimOnce(tenant, subspace, pattern, claimant, leaseSeconds);
+                Optional<ClaimedTuple> again = claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
                 if (again.isPresent()) {
                     return again;
                 }
@@ -657,7 +726,7 @@ public final class TupleRepository {
     }
 
     private Optional<ClaimedTuple> claimOnce(String tenant, String subspace, Map<String, String> pattern,
-                                              String claimant, long leaseSeconds) {
+                                              String claimant, Long leaseSecondsOrNull) {
         checkFieldSize("subspace", subspace, TupleLimits.MAX_SUBSPACE_BYTES);
         checkFieldSize("claimant", claimant, TupleLimits.MAX_CLAIMANT_BYTES);
         Map<String, String> patternSafe = pattern == null ? Map.of() : pattern;
@@ -665,6 +734,27 @@ public final class TupleRepository {
         TemplateSchema t = resolveOrThrow(subspace);
         if (!t.take().enabled()) {
             throw new TakeDisabledException(subspace, t.name());
+        }
+        // nexus-xapt8 (a scalability research pass over this design,
+        // addition 6): lease_s is optional on the wire -- an omitted value
+        // falls through to the template's own take.default_lease_seconds.
+        // Review fix (nexus-xapt8 fix round, code review finding 2): a
+        // template with no default configured throws the EXACT
+        // pre-commit shape (IllegalArgumentException("lease_s required"),
+        // rendered by TupleHandler's catch ladder as HTTP 400
+        // {"error":"lease_s required"}), not the new SchemaViolation shape
+        // an earlier draft used -- this branch is reachable by every
+        // shipped template today (none declares a default), so the old
+        // flat error body is a presently-observable contract, not merely
+        // a historical one, and it must not move out from under an
+        // existing caller. See TupleHandlerWiringTest's pinned-shape test.
+        long leaseSeconds;
+        if (leaseSecondsOrNull != null) {
+            leaseSeconds = leaseSecondsOrNull;
+        } else if (t.take().defaultLeaseSeconds() != null) {
+            leaseSeconds = t.take().defaultLeaseSeconds();
+        } else {
+            throw new IllegalArgumentException("lease_s required");
         }
         if (leaseSeconds <= 0) {
             throw new SchemaViolationException("lease_s", "must be positive");
@@ -1396,22 +1486,162 @@ public final class TupleRepository {
         return tenantScope.withTenant(tenant, ctx -> computeCensus(ctx, tenant, subspace));
     }
 
-    /** {@code subspace_list(prefix) -> [{subspace, total, available, ..., oldest_created_at, newest_created_at}]}. */
+    /** {@code subspace_list(prefix) -> [{subspace, total, available, ..., oldest_created_at, newest_created_at}]}.
+     *  Unbounded / unpaged form: EVERY matching subspace, no cursor -- the
+     *  pre-nexus-xapt8 wire shape and behaviour, byte-identical for a caller
+     *  that never opts into paging. {@code HealthCheck}'s {@code
+     *  tuples.oldest_unclaimed} doctor row (Python {@code health.py}) needs
+     *  every claimable subspace and deliberately keeps this unbounded form. */
     public List<SubspaceCensus> subspaceList(String tenant, String prefix) {
+        return subspaceListPage(tenant, prefix, null, null).items();
+    }
+
+    /**
+     * {@code subspace_list(prefix, limit?, after?) -> {items, next_cursor?}}
+     * (nexus-xapt8, a scalability research pass over this design, addition
+     * 2): ONE {@code GROUP BY subspace} query computing every {@link
+     * SubspaceCensus} field for every matching subspace in a single round
+     * trip -- replaces the prior {@code SELECT DISTINCT subspace} plus one
+     * {@link #computeCensus} call PER subspace, an N+1 shape whose cost
+     * scaled with subspace count rather than row count. Semantics match
+     * {@link #computeCensus} exactly: {@code total} is live rows only
+     * (available+claimed+dead); the two timestamps span every row, live or
+     * not.
+     *
+     * <p>{@code limit} is optional and capped at {@link #readMax} (the same
+     * ceiling {@code rd}/{@code rdp}'s own {@code n} uses). Review fix
+     * (nexus-xapt8 fix round): {@code null} -- the param genuinely
+     * omitted -- means UNBOUNDED, matching {@link #subspaceList}'s
+     * pre-existing contract exactly (the caller opted out of paging
+     * entirely). A non-null but non-positive {@code limit} (an explicit
+     * {@code 0} or negative value) instead clamps to 1, matching {@code
+     * rd}/{@code rdp}'s OWN {@code n <= 0 -> 1} convention at {@link
+     * #readMax}'s sibling call site (~line 617) -- the two "unbounded"
+     * and "clamp to the minimum" cases are no longer folded into one
+     * bucket the way an earlier draft of this method did. {@code after} is
+     * a subspace-name cursor (the last subspace name from a prior
+     * truncated page); results are always ordered by subspace name, and
+     * {@link SubspacePage#nextCursor} is non-null exactly when the page
+     * was truncated by {@code limit}.
+     *
+     * <p>A request-path {@code statement_timeout} applies ({@link
+     * SweepBounds#applyStatementTimeout}'s {@code is_local=true} pattern, at
+     * {@link #subspaceListTimeoutSeconds}) -- unlike the scheduled sweep's
+     * own bounded batch arms, this query runs ON DEMAND against whatever
+     * cardinality a tenant has accumulated, so nothing else bounds it. This
+     * matters most for the UNFILTERED call ({@code prefix=null}, exactly
+     * what {@link #subspaceList}'s unpaged form and the {@code
+     * tuples.oldest_unclaimed} doctor row issue): {@code
+     * idx_tuples_subspace_scan} (the sibling index this changeset also
+     * adds) does NOT serve this shape -- there is no subspace predicate for
+     * it to seek on, and none of the aggregated columns are covered, so
+     * Postgres chooses a full scan + hash aggregate (MEASURED, fix-round
+     * correction: {@code TupleSweepIndexPlanShapeTest
+     * #unfilteredGroupByCensusQuery_doesNotUseTheSubspaceScanIndex_seqScanInstead}).
+     * The statement_timeout, not the index, is what bounds this call.
+     */
+    public SubspacePage subspaceListPage(String tenant, String prefix, Integer limit, String after) {
+        Integer effectiveLimit = (limit == null) ? null : Math.min(limit <= 0 ? 1 : limit, readMax);
+        try {
+            return subspaceListPageUnguarded(tenant, prefix, after, effectiveLimit);
+        } catch (RuntimeException e) {
+            if (isStatementTimeout(e)) {
+                throw new CensusTimeoutException(subspaceListTimeoutSeconds);
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Critique finding 10 (nexus-xapt8 fix round): walks {@code e}'s cause
+     * chain for a {@link java.sql.SQLException} whose SQLState is {@code
+     * 57014} ({@code query_canceled}) -- the exact signal {@code
+     * SweepBounds#applyStatementTimeout}'s {@code statement_timeout}
+     * produces on cancellation. Same walk-the-chain idiom {@code
+     * CatalogRepository#classifySweepFailureReason} already uses for the
+     * identical SQLState.
+     */
+    private static boolean isStatementTimeout(Throwable e) {
+        for (Throwable c = e; c != null; c = c.getCause()) {
+            if (c instanceof java.sql.SQLException se && "57014".equals(se.getSQLState())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * TEST-ONLY (nexus-xapt8, critique finding 10): runs BEFORE {@link
+     * #subspaceListPageUnguarded}'s own {@code SELECT}, inside the SAME
+     * transaction where {@link SweepBounds#applyStatementTimeout} has
+     * already run {@code SET LOCAL statement_timeout} -- a test installs a
+     * {@code ctx -> ctx.resultQuery("SELECT pg_sleep(...)").fetch()} hook to
+     * force a GENUINE Postgres-side {@code 57014} cancellation (the
+     * statement_timeout applies to every statement in that transaction, not
+     * only the census query), proving {@link #isStatementTimeout} and the
+     * {@link CensusTimeoutException} rethrow against a real cancellation
+     * rather than an unrealistically large seeded fixture. A no-op by
+     * default (costs nothing in production); package-private, never
+     * assigned outside test code -- same shape as {@link
+     * #TEST_ONLY_CLAIM_SELECT_TO_UPDATE_DELAY}.
+     */
+    static volatile java.util.function.Consumer<DSLContext> TEST_ONLY_SUBSPACE_LIST_PRE_QUERY_HOOK = ctx -> { };
+
+    private SubspacePage subspaceListPageUnguarded(String tenant, String prefix, String after, Integer effectiveLimit) {
         return tenantScope.withTenant(tenant, ctx -> {
+            SweepBounds.applyStatementTimeout(ctx, Duration.ofSeconds(subspaceListTimeoutSeconds));
+            TEST_ONLY_SUBSPACE_LIST_PRE_QUERY_HOOK.accept(ctx);
+
             Condition cond = TUPLES.TENANT_ID.eq(tenant);
             if (prefix != null && !prefix.isBlank()) {
                 cond = cond.and(TUPLES.SUBSPACE.startsWith(prefix));
             }
-            List<String> subspaces = ctx.selectDistinct(TUPLES.SUBSPACE)
+            if (after != null && !after.isBlank()) {
+                cond = cond.and(TUPLES.SUBSPACE.gt(after));
+            }
+
+            Field<OffsetDateTime> now = DSL.currentOffsetDateTime();
+            Condition live = TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.gt(now));
+
+            var baseQuery = ctx.select(
+                            TUPLES.SUBSPACE,
+                            DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.isNull())).cast(Long.class),
+                            DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED)))
+                                    .cast(Long.class),
+                            DSL.count().filterWhere(live.and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_DEAD)))
+                                    .cast(Long.class),
+                            DSL.count().filterWhere(TUPLES.CONSUMED_AT.isNotNull()).cast(Long.class),
+                            DSL.count().filterWhere(TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.le(now)))
+                                    .cast(Long.class),
+                            DSL.min(TUPLES.CREATED_AT),
+                            DSL.max(TUPLES.CREATED_AT))
                     .from(TUPLES)
                     .where(cond)
-                    .fetch(TUPLES.SUBSPACE);
+                    .groupBy(TUPLES.SUBSPACE)
+                    .orderBy(TUPLES.SUBSPACE.asc());
+
+            var recs = (effectiveLimit != null) ? baseQuery.limit(effectiveLimit + 1).fetch() : baseQuery.fetch();
+
             List<SubspaceCensus> out = new ArrayList<>();
-            for (String s : subspaces) {
-                out.add(computeCensus(ctx, tenant, s));
+            String nextCursor = null;
+            for (int i = 0; i < recs.size(); i++) {
+                if (effectiveLimit != null && i >= effectiveLimit) {
+                    nextCursor = out.get(out.size() - 1).subspace();
+                    break;
+                }
+                var rec = recs.get(i);
+                String subspace = rec.get(0, String.class);
+                long available = rec.get(1, Long.class);
+                long claimed = rec.get(2, Long.class);
+                long dead = rec.get(3, Long.class);
+                long consumed = rec.get(4, Long.class);
+                long expiredUnpurged = rec.get(5, Long.class);
+                OffsetDateTime oldest = rec.get(6, OffsetDateTime.class);
+                OffsetDateTime newest = rec.get(7, OffsetDateTime.class);
+                out.add(new SubspaceCensus(subspace, available + claimed + dead, available, claimed, dead,
+                        consumed, expiredUnpurged, oldest, newest));
             }
-            return out;
+            return new SubspacePage(out, nextCursor);
         });
     }
 

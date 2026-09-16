@@ -318,6 +318,52 @@ class TestSubspaceList:
         assert censuses[0].total == 1
         assert censuses[0].available == 1
 
+    def test_subspace_list_with_no_limit_returns_a_plain_list_not_a_tuple(self, t2_service_env) -> None:
+        """nexus-xapt8: the pre-paging call shape must be unchanged -- a plain
+        list, not (rows, next_cursor) -- for a caller (like the
+        tuples.oldest_unclaimed doctor row) that never opts into paging."""
+        store = HttpTupleStore()
+        session = _uniq("sess")
+        subspace = f"ledger/{session}"
+        store.out(subspace, {"agent_id": "a1", "kind": "start"}, None, None)
+
+        result = store.subspace_list(prefix=subspace)
+        assert isinstance(result, list)
+        assert len(result) == 1
+
+    def test_subspace_list_with_limit_pages_to_completion(self, t2_service_env) -> None:
+        store = HttpTupleStore()
+        prefix = f"ledger/{_uniq('page')}-"
+        sessions = [f"{prefix}{i}" for i in range(5)]
+        for session in sessions:
+            store.out(session, {"agent_id": "a1", "kind": "start"}, None, None)
+
+        collected: list = []
+        after = None
+        pages = 0
+        while True:
+            rows, next_cursor = store.subspace_list(prefix=prefix, limit=2, after=after)
+            assert isinstance(rows, list)
+            collected.extend(rows)
+            pages += 1
+            assert pages <= 10, "paging loop must terminate -- runaway guard"
+            if next_cursor is None:
+                break
+            after = next_cursor
+
+        assert pages == 3  # 5 subspaces at limit=2: 2, 2, 1
+        assert sorted(c.subspace for c in collected) == sorted(sessions)
+
+    def test_subspace_list_with_limit_and_nothing_truncated_has_no_cursor(self, t2_service_env) -> None:
+        store = HttpTupleStore()
+        session = _uniq("sess")
+        subspace = f"ledger/{session}"
+        store.out(subspace, {"agent_id": "a1", "kind": "start"}, None, None)
+
+        rows, next_cursor = store.subspace_list(prefix=subspace, limit=100)
+        assert len(rows) == 1
+        assert next_cursor is None
+
 
 class TestSubspaceStats:
     def test_subspace_stats_matches_a_written_row(self, t2_service_env) -> None:
@@ -735,7 +781,7 @@ class TestTypedErrorMapping:
         assert exc_info.value.__cause__ is exc
 
     def test_unrecognised_error_code_falls_through_unchanged(self) -> None:
-        exc = _status_error(404, "SomeFutureCode", "not one of the nine")
+        exc = _status_error(404, "SomeFutureCode", "not one of the eleven")
         with pytest.raises(httpx.HTTPStatusError) as exc_info:
             _raise_typed(exc)
         assert exc_info.value is exc

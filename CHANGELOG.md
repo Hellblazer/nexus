@@ -6,6 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.48.0] - 2026-09-15
+
+Paired engine: engine-service-v0.1.121 (`REQUIRED_ENGINE_VERSION` (0, 1, 121)),
+carrying bead nexus-xapt8's tuple-space scale fixes: a subspace-scan index and a
+claim-log purge-by-expiry index (changeset tuples-005), a single-query subspace
+census with a request-path statement timeout and a typed CensusTimeout error, an
+optional `lease_s` that falls back to the template's own default, and an atomic
+per-claimant park counter.
+
+### Changed
+- **`tuple_list` MCP tool now pages, 100 subspaces by default (bead nexus-xapt8).**
+  Previously unbounded (every matching subspace, always). A truncated page
+  appends a `_pagination` entry naming the next cursor. `subspace_list`'s
+  paging is additive on the wire — an omitted `limit`/`after` still returns
+  everything, and `HttpTupleStore.subspace_list`/`nx tuple list` both keep
+  their prior unbounded default; only the MCP tool's own default changed,
+  to bound what an unqualified call inlines into an agent's context.
+
+### Fixed
+- **`nx doctor`'s `tuples.sweep_freshness` row now judges staleness by the
+  least-recently-swept tenant** (`MIN(last_swept_at)`), not the freshest
+  one — a per-tenant `MAX` could let one recently-swept tenant mask every
+  stale tenant behind it (bead nexus-xapt8).
+
 ## [7.47.0] - 2026-09-15
 
 Paired with engine-service-v0.1.120 (RDR-207 Phase 1), deployed before this

@@ -3,7 +3,7 @@
 package dev.nexus.service.db;
 
 /**
- * Base of the nine typed RDR-205 tuple-space errors (bead nexus-em75s.4,
+ * Base of the eleven typed RDR-205-family tuple-space errors (bead nexus-em75s.4,
  * §Technical Design "Operations"). Each carries a {@link #code()} matching
  * its RDR-205 name verbatim (e.g. {@code "UnknownSubspace"}) and the HTTP
  * status {@link TupleHandlerErrorMapping} uses when rendering it — the

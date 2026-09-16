@@ -228,6 +228,106 @@ class TupleHandlerWiringTest {
         assertThat(tuple).doesNotContainKey("claim_id");
     }
 
+    // ── lease_s optional on /in and /inp (nexus-xapt8, scalability research) ──
+
+    /**
+     * mailbox.yaml declares {@code take.max_lease_seconds} but no {@code
+     * take.default_lease_seconds} -- an omitted {@code lease_s} against it
+     * must still refuse, not silently succeed with some fallback the
+     * template never configured. Review fix (nexus-xapt8 fix round, code
+     * review finding 2): this refusal must be BYTE-IDENTICAL to what an
+     * omitted {@code lease_s} against ANY of today's three production
+     * templates already produced before this bead -- HTTP 400 {@code
+     * {"error":"lease_s required"}} ({@code TupleHandler}'s plain {@code
+     * IllegalArgumentException} catch, not the typed {@code SchemaViolation}
+     * shape an earlier draft of this fix used -- see {@code TupleRepository
+     * #claimOnce}'s own comment on why). This branch is reachable by every
+     * shipped template today, so it is a presently-observable contract, not
+     * a hypothetical one. The happy-path "omitted lease_s uses the
+     * template's own default" case needs a template WITH a default, which
+     * none of the three production templates declare -- proved instead at
+     * the repository layer against a test-only template (
+     * {@code TupleRepositoryTest#inp_leaseSecondsOmitted_templateHasDefault_usesTemplateDefault}).
+     */
+    @Test
+    void in_leaseSOmitted_mailboxHasNoDefault_illegalArgument400_matchesPreCommitShape() throws Exception {
+        String to = "wire-lease-omitted-addr";
+        assertThat(post(withRegistry, "/v1/tuples/out", Map.of(
+                "subspace", "mailbox/" + to,
+                "keys", Map.of("to", to),
+                "dims", Map.of("from", "sender"),
+                "nonce", "wire-lease-omitted-nonce")).statusCode()).isEqualTo(200);
+
+        var inResp = post(withRegistry, "/v1/tuples/in", Map.of(
+                "subspace", "mailbox/" + to,
+                "keys_pattern", Map.of("to", to),
+                "claimant", "wire-lease-omitted-claimant"));
+        assertThat(inResp.statusCode()).isEqualTo(400);
+        assertThat(inResp.body())
+                .as("byte-identical to the pre-commit shape: flat {\"error\":\"lease_s required\"}, "
+                        + "never the typed SchemaViolation envelope")
+                .isEqualTo("{\"error\":\"lease_s required\"}")
+                .doesNotContain("SchemaViolation");
+    }
+
+    // ── subspace_list paging (a scalability research pass over this design, nexus-xapt8) ────
+
+    /**
+     * The additive-paging contract's own wire-shape proof: no {@code limit}
+     * param at all must render EXACTLY the pre-paging response shape -- no
+     * {@code next_cursor} key present (not even {@code null}), so an old
+     * client's JSON parse sees nothing new.
+     */
+    @Test
+    void subspaceList_noLimitParam_omitsNextCursorKeyEntirely() throws Exception {
+        String to = "wire-paging-nolimit-addr";
+        assertThat(post(withRegistry, "/v1/tuples/out", Map.of(
+                "subspace", "mailbox/" + to,
+                "keys", Map.of("to", to),
+                "dims", Map.of("from", "sender"),
+                "nonce", "wire-paging-nolimit-nonce")).statusCode()).isEqualTo(200);
+
+        var resp = get(withRegistry, "/v1/tuples/subspace_list?prefix=mailbox/" + to);
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var json = mapper.readValue(resp.body(), MAP_T);
+        assertThat(json).containsKey("subspaces").doesNotContainKey("next_cursor");
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void subspaceList_withLimit_truncatesAndCarriesNextCursor() throws Exception {
+        // mailbox/<address> is a SINGLE path segment after "mailbox/" -- no "/" inside
+        // the prefix itself, or the address segment fails to resolve against the
+        // template pattern (an earlier draft of this test used a trailing "/" and
+        // every /out call 404'd as an unresolvable subspace).
+        String prefix = "wire-paging-limit-" + java.util.UUID.randomUUID() + "-";
+        for (int i = 0; i < 3; i++) {
+            String to = prefix + "addr-" + i;
+            assertThat(post(withRegistry, "/v1/tuples/out", Map.of(
+                    "subspace", "mailbox/" + to,
+                    "keys", Map.of("to", to),
+                    "dims", Map.of("from", "sender"),
+                    "nonce", "wire-paging-limit-nonce-" + i)).statusCode()).isEqualTo(200);
+        }
+
+        var page1 = get(withRegistry, "/v1/tuples/subspace_list?prefix=mailbox/" + prefix + "&limit=2");
+        assertThat(page1.statusCode()).isEqualTo(200);
+        var page1Json = mapper.readValue(page1.body(), MAP_T);
+        var page1Subspaces = (java.util.List<Map<String, Object>>) page1Json.get("subspaces");
+        assertThat(page1Subspaces).hasSize(2);
+        String cursor = (String) page1Json.get("next_cursor");
+        assertThat(cursor).as("a truncated page must carry a next_cursor").isNotNull();
+
+        var page2 = get(withRegistry,
+                "/v1/tuples/subspace_list?prefix=mailbox/" + prefix + "&limit=2&after="
+                        + java.net.URLEncoder.encode(cursor, java.nio.charset.StandardCharsets.UTF_8));
+        assertThat(page2.statusCode()).isEqualTo(200);
+        var page2Json = mapper.readValue(page2.body(), MAP_T);
+        var page2Subspaces = (java.util.List<Map<String, Object>>) page2Json.get("subspaces");
+        assertThat(page2Subspaces).hasSize(1);
+        assertThat(page2Json).doesNotContainKey("next_cursor");
+    }
+
     private HttpResponse<String> get(NexusService svc, String path) throws Exception {
         var req = TestHttp.request("http://127.0.0.1:" + svc.getPort() + path)
                 .header("Authorization", "Bearer " + TOKEN)

@@ -216,35 +216,10 @@ A parked call never holds a pooled connection. Waking every waiter on a subspace
 
 Every six hours the existing sweep scheduler runs a second task. It enumerates tenants from `nexus.tuple_tenants`, least-recently-swept first, and per tenant releases lapsed claims nobody re-took, purges expired and consumed-past-retention rows, then purges claim-log rows past the log's own longer TTL, a few hundred rows per committed batch. Two bounds keep it from starving the T1 sweep that shares the scheduler: a statement timeout on every arm and a per-run budget of batches per tenant and wall clock. See [The sweep](tuple-space.md#the-sweep).
 
-<svg viewBox="0 0 760 210" role="img" aria-label="The sweep visits tenants in last_swept_at order, stamps a tenant only when its sweep finishes, and a tenant cut short by the budget keeps its old stamp so it is first next run.">
-  <defs><marker id="tuple-sweep-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
-  <g font-family="monospace" font-size="12" fill="currentColor" stroke="currentColor">
-    <text x="20" y="28" font-weight="700" font-size="13" stroke="none">Run N (budget: 50 batches per tenant, 120 s wall clock)</text>
-    <rect x="20" y="44" width="150" height="46" rx="4" fill="none"/>
-    <text x="95" y="63" text-anchor="middle" stroke="none">tenant c</text>
-    <text x="95" y="80" text-anchor="middle" stroke="none" font-size="11">last_swept_at NULL</text>
-    <rect x="215" y="44" width="150" height="46" rx="4" fill="none"/>
-    <text x="290" y="63" text-anchor="middle" stroke="none">tenant a</text>
-    <text x="290" y="80" text-anchor="middle" stroke="none" font-size="11">swept 18 h ago</text>
-    <rect x="410" y="44" width="150" height="46" rx="4" fill="none" stroke-dasharray="4 3"/>
-    <text x="485" y="63" text-anchor="middle" stroke="none">tenant b</text>
-    <text x="485" y="80" text-anchor="middle" stroke="none" font-size="11">swept 6 h ago</text>
-    <line x1="170" y1="67" x2="213" y2="67" marker-end="url(#tuple-sweep-arrow)"/>
-    <line x1="365" y1="67" x2="408" y2="67" marker-end="url(#tuple-sweep-arrow)"/>
-    <text x="95" y="112" text-anchor="middle" stroke="none" font-size="11">release, purge, purge log</text>
-    <text x="95" y="128" text-anchor="middle" stroke="none" font-size="11">stamped</text>
-    <text x="290" y="112" text-anchor="middle" stroke="none" font-size="11">release, purge, purge log</text>
-    <text x="290" y="128" text-anchor="middle" stroke="none" font-size="11">stamped</text>
-    <text x="485" y="112" text-anchor="middle" stroke="none" font-size="11">budget exhausted mid-tenant</text>
-    <text x="485" y="128" text-anchor="middle" stroke="none" font-size="11">stamp unchanged</text>
-    <line x1="485" y1="140" x2="485" y2="168" marker-end="url(#tuple-sweep-arrow)"/>
-    <text x="485" y="190" text-anchor="middle" stroke="none" font-size="12">first in run N+1: order lives in the table, no cursor in the JVM</text>
-    <text x="640" y="63" stroke="none" font-size="11">logged: tenants visited,</text>
-    <text x="640" y="79" stroke="none" font-size="11">oldest last_swept_at,</text>
-    <text x="640" y="95" stroke="none" font-size="11">scanned, released, dead,</text>
-    <text x="640" y="111" stroke="none" font-size="11">purged, budget exhausted?</text>
-  </g>
-</svg>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="tuple-sweep-order-dark.png">
+  <img src="tuple-sweep-order-light.png" width="840" alt="The sweep visits tenants in last_swept_at order, stamps a tenant only when its sweep finishes, and a tenant cut short by the budget keeps its old stamp so it is first next run.">
+</picture>
 
 A run that finds nothing expired is the healthy state. The failure the counts detect is a run that scanned nothing or a run that did not happen; the doctor row on last-sweep age reports the second.
 

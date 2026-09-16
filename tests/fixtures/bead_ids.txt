@@ -1402,6 +1402,7 @@ nexus-7niu
 nexus-7nrvr
 nexus-7nxc2
 nexus-7o1zh
+nexus-7or3f
 nexus-7pm24
 nexus-7q46m
 nexus-7q46m.1
@@ -1460,6 +1461,7 @@ nexus-7zy
 nexus-80tk
 nexus-81183
 nexus-8143o
+nexus-8143o.1
 nexus-81b9f
 nexus-82ihm
 nexus-830c
@@ -3070,6 +3072,7 @@ nexus-gff3g
 nexus-gfl3y
 nexus-gggzn
 nexus-ggonw
+nexus-ggonw.1
 nexus-ggvi0
 nexus-ggvi0.1
 nexus-ggzwl
@@ -5741,6 +5744,7 @@ nexus-um47z
 nexus-ume6q
 nexus-ume6q.1
 nexus-umm29
+nexus-umm29.1
 nexus-umoh
 nexus-umue1
 nexus-umue1.1
@@ -6194,6 +6198,7 @@ nexus-x9kwh
 nexus-x9mly
 nexus-x9mly.1
 nexus-xa6a
+nexus-xapt8
 nexus-xavu7
 nexus-xbw0f
 nexus-xc3w

@@ -6579,18 +6579,37 @@ def tuple_registry() -> dict:
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
+# a scalability research pass over this design, bead nexus-xapt8: paged, default limit=100
+# rather than unbounded. Deliberately bounded (not merely capped for the
+# engine's own protection) -- an agent calling this tool with no arguments
+# gets the result inlined into its own context, and the live tenant's
+# subspace count is already double digits and growing roughly 10/day, so
+# an unbounded default would put an ever-larger, unbounded blob into
+# context on every unqualified call. The footer entry names the next
+# cursor so a caller that genuinely needs everything can still walk it.
 def tuple_list(
     prefix: Annotated[str, Field(description="Optional subspace-name prefix filter (e.g. \"agents.mailbox.\").")] = "",
+    limit: Annotated[int, Field(description="Max subspaces to return per page.")] = 100,
+    after: Annotated[str, Field(description="Subspace-name cursor from a prior truncated page's footer.")] = "",
 ) -> list[dict]:
     """List concrete tuple subspaces that currently exist, each with its row census.
 
     Use `tuple_registry` instead to see the template definitions rather
-    than live subspaces. Returns one census row per subspace.
+    than live subspaces. Returns one census row per subspace, paged: a
+    truncated page appends a `_pagination` entry with `next_cursor` -- the
+    catalog tools' own convention for a `list[dict]`-shaped paged result --
+    pass that back as `after` to continue. Bounded to 100 by default
+    (rather than unbounded) so an unqualified call cannot dump an
+    ever-growing subspace list into the caller's own context; a caller
+    that genuinely wants everything pages through with `after`.
     """
     try:
         with _t2_ctx() as db:
-            rows = db.tuples.subspace_list(prefix or None)
-        return [_tuple_census_to_dict(c) for c in rows]
+            rows, next_cursor = db.tuples.subspace_list(prefix or None, limit=limit, after=after or None)
+        out = [_tuple_census_to_dict(c) for c in rows]
+        if next_cursor:
+            out.append({"_pagination": {"next_cursor": next_cursor}})
+        return out
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return [{"error": _mcp_tool_error("tuple_list", e)}]
 

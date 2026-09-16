@@ -470,7 +470,7 @@ class TestCheckTupleSweepFreshness:
             calls["n"] += 1
             if calls["n"] == 1:
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="t\n", stderr="")
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0||\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0|||\n", stderr="")
 
         r = h._check_tuple_sweep_freshness(
             creds_path=creds, psql_bin=Path("/fake/psql"), psql_runner=_psql_runner(responder),
@@ -488,7 +488,7 @@ class TestCheckTupleSweepFreshness:
             calls["n"] += 1
             if calls["n"] == 1:
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="t\n", stderr="")
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=f"3|0|{recent}\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=f"3|0|{recent}|0\n", stderr="")
 
         r = h._check_tuple_sweep_freshness(
             creds_path=creds, psql_bin=Path("/fake/psql"), psql_runner=_psql_runner(responder),
@@ -504,7 +504,7 @@ class TestCheckTupleSweepFreshness:
             calls["n"] += 1
             if calls["n"] == 1:
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="t\n", stderr="")
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="2|2|\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="2|2||0\n", stderr="")
 
         r = h._check_tuple_sweep_freshness(
             creds_path=creds, psql_bin=Path("/fake/psql"), psql_runner=_psql_runner(responder),
@@ -523,13 +523,41 @@ class TestCheckTupleSweepFreshness:
             calls["n"] += 1
             if calls["n"] == 1:
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="t\n", stderr="")
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=f"1|0|{stale}\n", stderr="")
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=f"1|0|{stale}|1\n", stderr="")
 
         r = h._check_tuple_sweep_freshness(
             creds_path=creds, psql_bin=Path("/fake/psql"), psql_runner=_psql_runner(responder),
         )[0]
         assert r.ok is False and r.warn is not True
         assert "over the" in r.detail
+
+    def test_one_fresh_and_one_stale_tenant_warns_on_the_laggard(self, tmp_path) -> None:
+        """nexus-xapt8: the defect this row existed to catch. Before the
+        MIN-vs-MAX fix, a query aggregating on MAX(last_swept_at) would
+        report the FRESH tenant's recent sweep and the row would pass --
+        masking the stale tenant entirely. The SQL under test is faked here
+        (the responder does the MIN/stale-count arithmetic the real
+        query would do server-side), so this pins the ROW's interpretation
+        of that output, not Postgres's own aggregate behaviour."""
+        import datetime as _dt
+        creds = _make_creds_file(tmp_path)
+        laggard = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(hours=24)).isoformat(sep=" ")
+        calls = {"n": 0}
+
+        def responder(sql, cmd):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="t\n", stderr="")
+            # total=2, never=0, MIN(last_swept_at)=the 24h-stale laggard
+            # (not the fresh tenant's timestamp), stale_count=1.
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=f"2|0|{laggard}|1\n", stderr="")
+
+        r = h._check_tuple_sweep_freshness(
+            creds_path=creds, psql_bin=Path("/fake/psql"), psql_runner=_psql_runner(responder),
+        )[0]
+        assert r.ok is False and r.warn is not True
+        assert "over the" in r.detail
+        assert "1 stale" in r.detail
 
     def test_engine_unreachable(self, tmp_path) -> None:
         creds = _make_creds_file(tmp_path)
@@ -540,6 +568,110 @@ class TestCheckTupleSweepFreshness:
         r = h._check_tuple_sweep_freshness(
             creds_path=creds, psql_bin=Path("/fake/psql"), psql_runner=_psql_runner(responder),
         )[0]
+        assert r.ok is False and r.warn is True
+        assert "engine unreachable" in r.detail
+
+
+class TestCheckTupleSweepFreshnessRealPostgres:
+    """Code review finding 8 / test-validator gap (nexus-xapt8 fix round):
+    every test above fakes the ``psql_runner`` and hands the row a pre-baked
+    SQL response string, so none of them proves the ACTUAL SQL text in
+    ``_check_tuple_sweep_freshness`` computes ``MIN`` (versus, if someone
+    reverted it, ``MAX``) correctly against a real ``nexus.tuple_tenants``
+    table -- the exact defect class the row exists to catch. This class
+    closes that gap: it runs the row's REAL SQL, through a REAL ``psql``
+    binary, against the REAL Postgres the Python unit suite's own engine
+    substrate boots for every test (``tests/_engine_substrate.py`` --
+    the same cluster ``t2_service_env`` points the T2 HTTP client at, not a
+    separate fixture). No ``psql_runner`` override anywhere in this class.
+
+    Deliberately NOT folded into ``TestCheckTupleSweepFreshness`` above:
+    that class's own docstring (this file's module docstring too) promises
+    "no subprocesses, no real PG" for the row's LOGIC tests -- true of every
+    test there, and worth keeping true. This is a second, explicitly-scoped
+    layer for the SQL itself.
+    """
+
+    def test_min_based_staleness_against_a_real_tuple_tenants_table(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        import datetime as _dt
+        import subprocess as _subprocess
+
+        from tests._engine_substrate import ensure_engine
+
+        state = ensure_engine()
+        psql_bin = state["pg_bin"] / "psql"
+        pg_port = state["pg_port"]
+        pg_user = state["pg_user"]
+        dbname = "nexus_t2_substrate"  # tests/_engine_substrate.py's _DBNAME
+
+        fresh_tenant = f"xapt8-fresh-{tmp_path.name}"
+        stale_tenant = f"xapt8-stale-{tmp_path.name}"
+        now = _dt.datetime.now(_dt.UTC)
+        fresh_swept_at = now.isoformat(sep=" ")
+        stale_swept_at = (now - _dt.timedelta(hours=24)).isoformat(sep=" ")
+
+        # No RLS on nexus.tuple_tenants (tuples-001-3's own header: "this
+        # table names tenants and holds no tenant-owned data of its own"),
+        # so a plain INSERT as the cluster's own admin/superuser role needs
+        # no tenant GUC. first_seen/last_seen are NOT NULL with no default.
+        insert_sql = (
+            "INSERT INTO nexus.tuple_tenants (tenant_id, first_seen, last_seen, last_swept_at) VALUES "
+            f"('{fresh_tenant}', now(), now(), '{fresh_swept_at}'), "
+            f"('{stale_tenant}', now(), now(), '{stale_swept_at}') "
+            "ON CONFLICT (tenant_id) DO UPDATE SET last_swept_at = EXCLUDED.last_swept_at;"
+        )
+        proc = _subprocess.run(
+            [str(psql_bin), "-h", "127.0.0.1", "-p", str(pg_port), "-U", pg_user,
+             "-d", dbname, "-v", "ON_ERROR_STOP=1", "-c", insert_sql],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, f"seeding nexus.tuple_tenants failed: {proc.stderr}"
+
+        creds = _make_creds_file(
+            tmp_path,
+            PG_PORT=str(pg_port),
+            NX_DB_ADMIN_URL=f"jdbc:postgresql://127.0.0.1:{pg_port}/{dbname}",
+            NX_DB_ADMIN_USER=pg_user,
+            NX_DB_ADMIN_PASS="",
+        )
+
+        # No psql_runner override: this is the row's REAL SQL running
+        # through a REAL psql subprocess against the REAL table.
+        r = h._check_tuple_sweep_freshness(creds_path=creds, psql_bin=psql_bin)[0]
+
+        assert r.ok is False, (
+            "the stale_tenant row (24h old) must make this row a hard finding via the "
+            f"real MIN(last_swept_at) SQL, not the fresh_tenant's own recent sweep: {r.detail!r}"
+        )
+        assert r.warn is not True
+        assert "over the" in r.detail
+        assert stale_tenant not in r.detail  # detail carries counts, not tenant ids -- non-vacuity on the message shape
+        assert "stale" in r.detail
+
+    def test_engine_unreachable_bad_port_is_a_real_connection_failure(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        """Companion non-vacuity check: the REAL psql binary against a port
+        nothing listens on must produce the SAME 'engine unreachable' warn
+        this file's mocked test asserts -- proving the mocked responder's
+        shape (returncode != 0, stderr populated) is not a fiction of the
+        test double."""
+        from tests._engine_substrate import ensure_engine
+
+        state = ensure_engine()
+        psql_bin = state["pg_bin"] / "psql"
+        dead_port = 1  # privileged, nothing listens; refused immediately, no timeout wait
+
+        creds = _make_creds_file(
+            tmp_path,
+            PG_PORT=str(dead_port),
+            NX_DB_ADMIN_URL=f"jdbc:postgresql://127.0.0.1:{dead_port}/nexus_t2_substrate",
+            NX_DB_ADMIN_USER=state["pg_user"],
+            NX_DB_ADMIN_PASS="",
+        )
+        r = h._check_tuple_sweep_freshness(creds_path=creds, psql_bin=psql_bin)[0]
         assert r.ok is False and r.warn is True
         assert "engine unreachable" in r.detail
 
