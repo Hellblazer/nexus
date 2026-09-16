@@ -71,6 +71,8 @@ carries no method signature for a contract change to reconcile against) is a
 
 ## Unshipped
 
+- `169388ec9` -- bead nexus-bc7ps -- engine tag `engine-service-v0.1.126 (the next cut, not yet tagged; the cut moves this entry to Shipped with the tag actually cut)` -- [additive] Engine half: `GET /v1/catalog/collections/list` and `GET /v1/vectors/stats` accept `lifecycle_state=live|quarantine|dormant|disputed` as an exact match on the joined `catalog_collections` row; blank and `all` are the unchanged full inventory; any other value is a 400 naming the accepted set (`CatalogRepository.normalizeLifecycleFilter`). No response shape changed and the default response is byte-identical. Client half, same commit: routing consumers (taxonomy discovery, corpus resolution, repo-to-collection routing, the MCP fan-out) read the live view through `HttpVectorClient.list_live_collections` / `HttpCatalogClient.list_collections("live")`, and an explicitly named non-live collection is excluded from the MCP fan-out. OLD client + NEW engine: safe, it sends no `lifecycle_state` and the default it receives is unchanged; the catalog route already accepted the param before this commit and the vectors route ignored it, so the only new refusal (400 on an unknown value) is for a value no released client sends. NEW client + OLD engine: safe, the vectors route ignores the param and returns the full inventory, and `list_live_collections` filters those rows client-side through `is_live_collection_row` on the `lifecycle_state` the pre-bc7ps join already emitted per row, so routing stays live-only with no engine floor bump (pinned by `test_list_live_collections_filters_client_side_when_the_engine_ignores_the_param`).
+
 
 
 
