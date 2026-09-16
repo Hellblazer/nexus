@@ -564,7 +564,7 @@ idempotency, and it loses history.
 
 - [x] All Critical Assumptions verified (the three spikes ran 2026-09-16;
   the lock attempts question is answered by the engine as built).
-- [ ] Sam decides the Open Questions below.
+- [x] Sam decides the Open Questions below (all five answered by 2026-09-16).
 
 ### Minimum Viable Validation
 
@@ -668,8 +668,10 @@ the number.
 
 1. **Lock attempts.** Answered by the engine as built: the lock template omits
    `max_attempts`, so it never dead-letters. No new rule is needed.
-2. **Board retention.** Proposed: a 7-day ceiling from the template, and a post
-   may set a shorter `ttl_seconds`. There is no per-topic engine configuration.
+2. **Board retention.** Answered (Sam, 2026-09-16): a 7-day ceiling from the
+   template, and a post may set a shorter `ttl_seconds`. There is no per-topic
+   engine configuration. A reader away longer than seven days misses the posts
+   that expired (Failure Modes).
    Keeping a board's history beyond retention is a curation question for the
    separate lifecycle-events work, not for this RDR.
 3. **Lock retention.** Answered by the lock flag: retention bounds only an idle
@@ -760,3 +762,7 @@ sized to the one real engine change (`release`) and the three template decisions
   sites (`writeOut`, `claimOnce`, `renew`), recorded in Technical Design. The
   claim-log transition column has no check constraint, so `release` needs no
   changeset. Prerequisite 1 ticked; Open Question 2 still waits on Sam.
+- 2026-09-16: Sam answered Open Question 2: board retention is a 7-day ceiling
+  from the template, a post may set a shorter `ttl_seconds`, nothing per topic
+  (T2 `nexus_rdr/211-decision-oq2-board-retention-2026-09-16`). Both
+  prerequisites ticked; the RDR goes to gate.
