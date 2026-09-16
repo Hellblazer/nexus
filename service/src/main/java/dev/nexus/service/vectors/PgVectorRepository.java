@@ -2751,16 +2751,37 @@ public final class PgVectorRepository {
      * <p>{@code rowLimit <= 0} is refused by the SQL function, not defaulted to
      * unbounded — silently removing the bound would hand back the transaction
      * this exists to prevent.
+     *
+     * <p>The statement bound is set HERE, as its own statement before the call
+     * ({@link PgSession#setGcQuarantineBoundedBounds}), because the function
+     * body's own {@code set_config('statement_timeout', ...)} cannot bound the
+     * statement already running it; the body's {@code lock_timeout} works, since
+     * that one is armed per lock wait. Pinned by
+     * {@code GcQuarantineOrphansBoundedTest#theStatementBoundIsRealBecauseItIsSetBeforeTheCall}.
      */
     public QuarantineBoundedOutcome quarantineOrphansBounded(String tenant, String collection,
                                                               String quarantineCollection,
                                                               String quarantinedAt, int sampleLimit,
                                                               int rowLimit) {
+        return quarantineOrphansBounded(tenant, collection, quarantineCollection, quarantinedAt,
+                                        sampleLimit, rowLimit,
+                                        PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_STATEMENT_TIMEOUT_MS,
+                                        PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_LOCK_TIMEOUT_MS);
+    }
+
+    /** Explicit-bound form, for tests that need a bound shorter than the default. */
+    public QuarantineBoundedOutcome quarantineOrphansBounded(String tenant, String collection,
+                                                              String quarantineCollection,
+                                                              String quarantinedAt, int sampleLimit,
+                                                              int rowLimit, int statementTimeoutMs,
+                                                              int lockTimeoutMs) {
         int dim = dimForCollection(tenant, collection);
-        var rec = tenantScope.withTenant(tenant, ctx ->
-            ctx.selectFrom(GC_QUARANTINE_ORPHANS_BOUNDED.call(
+        var rec = tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);
+            return ctx.selectFrom(GC_QUARANTINE_ORPHANS_BOUNDED.call(
                     dim, tenant, collection, quarantineCollection, quarantinedAt, sampleLimit, rowLimit))
-               .fetchOne());
+               .fetchOne();
+        });
         long moved = rec.get(GC_QUARANTINE_ORPHANS_BOUNDED.MOVED);
         long remaining = rec.get(GC_QUARANTINE_ORPHANS_BOUNDED.REMAINING);
         JSONB sampleJson = rec.get(GC_QUARANTINE_ORPHANS_BOUNDED.SAMPLE);

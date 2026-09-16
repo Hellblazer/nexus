@@ -279,9 +279,16 @@ public final class Main {
             // nexus-g17tf: same fail-fast for NX_SEARCH_STATEMENT_TIMEOUT_MS.
             log.info("event=search_statement_timeout timeout_ms={}",
                      dev.nexus.service.db.PgSession.startupSearchStatementTimeoutMs());
+            // nexus-r0vkh: same fail-fast for the taxonomy assign bounds.
+            log.info("event=taxonomy_assign_bounds statement_timeout_ms={} lock_timeout_ms={}",
+                     dev.nexus.service.db.PgSession.startupTaxonomyAssignStatementTimeoutMs(),
+                     dev.nexus.service.db.PgSession.startupTaxonomyAssignLockTimeoutMs());
         } catch (Throwable t) {
             ds.close();
-            log.error("event=hnsw_ef_search_env_invalid error=\"{}\"", t.getMessage(), t);
+            // One catch for every env-resolved PgSession bound above (ef_search,
+            // the search statement timeout, the taxonomy assign bounds); the
+            // parse's own message names the variable that failed.
+            log.error("event=pg_session_env_invalid error=\"{}\"", t.getMessage(), t);
             System.exit(1);
         }
 

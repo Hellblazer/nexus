@@ -744,6 +744,76 @@ public final class TaxonomyRepository {
         int dim = CollectionRegistry.lookup(tenantScope, tenant, collection).dimension();
         String[] chashArr = chashes.toArray(new String[0]);
 
+        // nexus-r0vkh: ONE bounded retry after a lock timeout (55P03), outside
+        // DeadlockRetry on purpose. The lock bound exists so a caller queued
+        // behind a wedged head frees its pool connection in seconds; but an
+        // ordinary two-process overlap (the post-commit hook beside a manual
+        // run) puts a healthy head in front of the waiter for a few seconds
+        // too, and failing that batch outright on the first trip would turn a
+        // slow-but-correct path into a routinely lossy one (substantive-critic
+        // finding on this change). One retry after a short pause recovers the
+        // healthy-head case; a second trip is the wedged case and fails.
+        // Worst-case connection hold is bounded either way: two lock bounds
+        // plus the pause, never a head's lifetime.
+        try {
+            return assignFromChashesRetryingDeadlocks(tenant, collection, chashes, chashArr, dim, crossCollection);
+        } catch (RuntimeException first) {
+            String state = sqlState(first);
+            if (LOCK_NOT_AVAILABLE.equals(state)) {
+                log.warn("event=taxonomy_assign_lock_timeout attempt=1 collection={} chashes={} retrying_after_ms={}",
+                         collection, chashes.size(), LOCK_TIMEOUT_RETRY_PAUSE_MS);
+                pause(LOCK_TIMEOUT_RETRY_PAUSE_MS);
+                try {
+                    return assignFromChashesRetryingDeadlocks(tenant, collection, chashes, chashArr, dim, crossCollection);
+                } catch (RuntimeException second) {
+                    if (LOCK_NOT_AVAILABLE.equals(sqlState(second))) {
+                        log.warn("event=taxonomy_assign_lock_timeout attempt=2 collection={} chashes={} outcome=failed",
+                                 collection, chashes.size());
+                    }
+                    throw second;
+                }
+            }
+            if (QUERY_CANCELED.equals(state)) {
+                // The statement bound tripped: this batch's assignment is lost
+                // (the client's tripwire records it) and the count of these in
+                // production is the reading that says whether the bound is too
+                // tight for legitimate large batches (critic finding, open).
+                log.warn("event=taxonomy_assign_statement_timeout collection={} chashes={} cross_collection={}",
+                         collection, chashes.size(), crossCollection);
+            }
+            throw first;
+        }
+    }
+
+    /** SQLSTATE for {@code lock_not_available}: the lock bound tripped. */
+    static final String LOCK_NOT_AVAILABLE = "55P03";
+    /** SQLSTATE for {@code query_canceled}: the statement bound tripped. */
+    static final String QUERY_CANCELED = "57014";
+    /** Pause before the single lock-timeout retry (nexus-r0vkh). */
+    static final long LOCK_TIMEOUT_RETRY_PAUSE_MS = 1_000L;
+
+    private static String sqlState(Throwable t) {
+        Throwable c = t;
+        for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
+            if (c instanceof java.sql.SQLException se && se.getSQLState() != null) {
+                return se.getSQLState();
+            }
+        }
+        return null;
+    }
+
+    private static void pause(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("interrupted during lock-timeout retry pause", ie);
+        }
+    }
+
+    private Map<String, Object> assignFromChashesRetryingDeadlocks(
+            String tenant, String collection, List<String> chashes, String[] chashArr,
+            int dim, boolean crossCollection) {
         // nexus-0uuit: belt, mirroring assignMany's own DeadlockRetry wrap above.
         // taxonomy-013-doc-count-lock-order.xml fixes the topics.doc_count trigger's
         // OWN lock-order self-conflict (Hal's named production root cause). That fix
@@ -763,6 +833,18 @@ public final class TaxonomyRepository {
         // back by Postgres before this retry re-runs, so a retry can never double-assign
         // or double-count.
         return DeadlockRetry.run("taxonomy.assignFromChashes", () -> tenantScope.withTenant(tenant, ctx -> {
+            // nexus-r0vkh: bound this transaction's run time AND its lock wait
+            // (SET LOCAL, so it dies with the transaction). 2026-09-16 09:05Z:
+            // one of these calls ran 782s on engine-service-v0.1.123 with eight
+            // identical calls queued on its transactionid (the recount trigger's
+            // and the FK's row locks on nexus.topics), nine of the pool's ten
+            // connections gone, every PG route on the box timing out for 11
+            // minutes. A bounded call fails with 57014/55P03; the client records
+            // the batch on its tripwire and the index write itself, already
+            // committed before this hook fired, is untouched. A lock timeout is
+            // NOT a DeadlockRetry trigger; the single bounded retry lives in
+            // assignFromChashes above, outside this belt.
+            PgSession.setTaxonomyAssignBounds(ctx);
             // chunks_<dim>.chash is bytea (RDR-180); the HTTP/route boundary carries
             // hex text, so the existence probe goes through ChashHex.hex(...) — the
             // house-blessed jOOQ seam that binds hex->bytes / fetches bytes->hex

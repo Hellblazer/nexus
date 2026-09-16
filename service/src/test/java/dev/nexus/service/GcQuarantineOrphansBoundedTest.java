@@ -162,6 +162,59 @@ class GcQuarantineOrphansBoundedTest {
         assertThat(chunkCount(p.src())).as("and nothing moved").isEqualTo(2);
     }
 
+    @Test
+    void theStatementBoundIsRealBecauseItIsSetBeforeTheCall() throws Exception {
+        // substantive-critic finding on a990fe8f1: the function body's own
+        // set_config('statement_timeout', '25000', true) cannot bound the
+        // statement already running it (Postgres arms that timer once, at
+        // top-level statement start), which is why the unbounded sweep's
+        // in-body 5 s bound never stopped the 5m41s incident call. The engine
+        // now sets the bound as its OWN statement before the call. This test
+        // discriminates the two mechanisms: a foreign transaction holds the
+        // sweep gate, the call is given a 300 ms statement bound and a 5 s
+        // lock bound, and it must die at ~300 ms with 57014 (query_canceled).
+        // With only the body's bounds in force it would instead die at the
+        // body's 2 s lock_timeout with 55P03 (measured red that way with the
+        // Java-side set removed).
+        var p = seed("stmtbound", 2);
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            DSL.using(holder, SQLDialect.POSTGRES)
+               .select(DSL.function("pg_advisory_xact_lock", Object.class,
+                       DSL.function("hashtext", Integer.class,
+                                    DSL.val("sweepgate:" + TENANT + "/" + p.src()))))
+               .fetch();
+            long started = System.nanoTime();
+            Throwable thrown = null;
+            try {
+                vecRepo.quarantineOrphansBounded(
+                    TENANT, p.src(), p.dst(), "2026-09-16T00:00:00Z", 20, 2, 300, 5_000);
+            } catch (RuntimeException ex) {
+                thrown = ex;
+            }
+            long elapsedMs = (System.nanoTime() - started) / 1_000_000L;
+            holder.rollback();
+            assertThat(thrown).as("the bounded call must fail while the gate is held").isNotNull();
+            assertThat(sqlState(thrown))
+                .as("died on the STATEMENT bound (57014), not the body's 2 s lock bound (55P03): %s", thrown)
+                .isEqualTo("57014");
+            assertThat(elapsedMs)
+                .as("at the 300 ms statement bound, well inside the body's 2 s lock bound")
+                .isLessThan(1_900L);
+        }
+        assertThat(chunkCount(p.src())).as("a cancelled batch moves nothing").isEqualTo(2);
+    }
+
+    private static String sqlState(Throwable t) {
+        Throwable c = t;
+        for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
+            if (c instanceof java.sql.SQLException se && se.getSQLState() != null) {
+                return se.getSQLState();
+            }
+        }
+        return null;
+    }
+
     // ── fixtures ──────────────────────────────────────────────────────────────
 
     private record Pair(String src, String dst) {}

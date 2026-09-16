@@ -790,8 +790,10 @@ def _service_t2_write_locked(
     this narrowing): releasing the lock around the round trip means
     MULTIPLE threads can be genuinely mid-``write_fn`` against the SAME
     shared ``T2Database`` at once — this bundle's own
-    ``taxonomy_assign_batch_hook.serialize = False`` is what first makes
-    that routine in production. Blast radius if an eviction naively
+    ``taxonomy_assign_batch_hook.serialize = False`` was what first made
+    that routine in production (that opt-out was withdrawn at nexus-r0vkh;
+    different hooks firing from parallel flush workers still overlap here,
+    so the argument below stands). Blast radius if an eviction naively
     ``close()``s the instance it evicts: ``T2Database.close()`` tears down
     ALL its substores' own httpx clients (memory, plans, taxonomy,
     telemetry, chash_index, document_aspects, aspect_queue,
@@ -1225,20 +1227,25 @@ def taxonomy_assign_batch_hook(
 # and pinned by tests/test_hook_grain.py.
 taxonomy_assign_batch_hook.batch_grain = "flush"
 
-# nexus-eslkl: opts OUT of LockedHookRegistry's per-hook serialization.
-# Sole justification (corrected from the design memo's original framing,
-# which also cited the T2 singleton's resolution lock — REMOVED as a
-# justification by nexus-ldab2's CAS narrowing of that very lock (now
-# _default_t2_slot's, nexus-w1ip), so it cannot be part of this claim any
-# more): server-side idempotency ALONE. TaxonomyRepository.assignFromChashes
-# runs in ONE tenantScope transaction; the own-collection pass is
-# `ON CONFLICT DO NOTHING` and the cross-collection pass is `GREATEST`-wins —
-# both commutative and safely re-runnable under any interleaving. Per-flush
-# chash sets are disjoint by construction (ChunkBatcher is file-atomic), so
-# concurrent fires of this hook never contend for the same row. Nothing else
-# about this hook's execution needs mutual exclusion with itself or with any
-# other registered hook.
-taxonomy_assign_batch_hook.serialize = False
+# nexus-r0vkh: this hook SERIALIZES against concurrent fires of itself (the
+# LockedHookRegistry default; no ``serialize`` attribute is declared here on
+# purpose). From nexus-eslkl (2026-08-08) to 2026-09-16 it opted OUT with the
+# claim that per-flush chash sets are disjoint, so concurrent fires "never
+# contend for the same row". That was true of topic_assignments and false of
+# nexus.topics: every assignFromChashes INSERT takes KEY SHARE on the topics
+# rows it references (the FK), and the doc_count recount trigger
+# (taxonomy-017) UPDATEs those same rows, so N parallel flushes of ONE run
+# issue N assign calls that queue on the head's transactionid. Measured live
+# on engine-service-v0.1.123: one head ran 782 s, eight callers waited
+# 667-780 s each holding a pool connection, and every PG route on the box
+# timed out for 11 minutes. Cross-hook interleaving (taxonomy beside the
+# manifest hook) stays unlocked, which is what the eslkl narrowing measured
+# as the cost; same-hook serialization costs one assign round trip per flush,
+# paid sequentially instead of in a convoy (unmeasured for this call: a first
+# draft cited plain_search's mean here by mistake). The
+# engine bounds its side of the same call (statement_timeout + lock_timeout
+# inside the assign transaction) so a cross-PROCESS overlap cannot wedge the
+# pool either. Pinned by tests/test_r0vkh_taxonomy_assign_serializes.py.
 
 
 # _fetch_or_embed lived here. It fetched T3 embeddings for a batch and fell

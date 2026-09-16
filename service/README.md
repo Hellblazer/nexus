@@ -75,6 +75,14 @@ would disable the bound and is refused at boot. The shutdown hook also
 terminates this process's own backends (`BackendReaper`, keyed on a
 per-boot `application_name`) before closing the pool, since a CPU-bound
 backend never notices a closed socket.
+`NX_TAXONOMY_ASSIGN_STATEMENT_TIMEOUT_MS` (default 30000) and
+`NX_TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS` (default 5000), both range 1..600000,
+bound the taxonomy assign transaction (`assign_from_chashes_<dim>`) the
+same way (nexus-r0vkh): a runaway call cancels (57014) and a call queued on
+the `nexus.topics` row locks behind it fails (55P03) instead of holding a
+pool connection for the head's lifetime. 2026-09-16: one 782s assign call
+plus eight queued on it took nine of the pool's ten connections and every
+PG-backed route on the box for 11 minutes. `0` is refused at boot.
 
 ### CI
 
