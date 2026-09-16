@@ -2,7 +2,7 @@
 title: "Plan-IR Fan-Out and Fold: Add `loop` and `collect` Step Primitives So Plans Can Process More Than 100 Items Without Truncating or Round-Tripping Through the Agent"
 id: RDR-190
 type: Architecture
-status: draft
+status: deferred
 priority: medium
 author: Hal Hildebrand
 reviewed-by: unreviewed
@@ -245,3 +245,10 @@ truncation envelope as the reporting mechanism.
   `parallel` deferred with RDR-079's event-loop defect named as the
   reason; conditionals excluded per the source paper. P0 is an evidence
   gate empowered to close the RDR in favour of a constant bump.
+- 2026-09-16 — deferred. `_OPERATOR_MAX_INPUTS` is still 100 with positional
+  truncation and no `loop`/`collect` in the plan vocabulary. The P0 evidence
+  gate was never run. The sibling plan-IR primitive `rule` (nexus-chr25) was
+  groomed WONTFIX for having no consumer, and RDR-196 shipped its escalate
+  loop without `loop`. Reopen trigger: run P0 (count the
+  `auto_hydration_overflow` warnings); a count near zero closes this in
+  favour of a constant bump.

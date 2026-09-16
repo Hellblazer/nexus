@@ -2,7 +2,7 @@
 title: "Display Projection via the MessageDisplay Hook: One-Way Output Mirroring and Routing-Marker Hiding"
 id: RDR-136
 type: Architecture
-status: draft
+status: deferred
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
@@ -208,3 +208,12 @@ plan, finalization gate: to be completed during research.]
   Ownership) — the routing-hook discipline this consumes.
 - RDR-127 (Substrate-Decoupled Surface Rendering — palinex as
   downstream) — the natural consumer of the mirrored stream.
+
+## Revision History
+
+- 2026-05-27 — created (draft).
+- 2026-09-16 — deferred. The `MessageDisplay` hook exists in Claude Code
+  2.1.273 and conexus registers no handler for it, so the substrate half is
+  still available. The marker half has no producer: nothing in `src/nexus`
+  or `conexus` emits `[NX:...]` markers. Reopen trigger: a producer that
+  emits routing markers into assistant output.
