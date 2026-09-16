@@ -471,9 +471,20 @@ Trigger: `service/` since the last engine tag includes a new Liquibase changeset
 
 Full rationale and evidence citations: `docs/contributing.md` § Schema/data-migration releases.
 
-### 6. Relay deploy + post-deploy cloud validation to conexus (passive bus)
+### 6. Relay deploy + post-deploy cloud validation to conexus
 
-Deploy and cloud-validation are **conexus-side operations** — the bus is passive, so surface an explicit relay to Hal; never frame the cross-instance deploy as autonomous:
+Deploy and cloud-validation are **conexus-side operations**. Send the relay to
+the conexus instance DIRECTLY — the RDR-205 tuple mailbox (`nx tuple watch`,
+`tuple_out` to `mailbox/<instance>`) and cross-session `SendMessage` both reach
+it; the older wording here ("the bus is passive, so surface an explicit relay to
+Hal") predates both and read, on 2026-09-16, as "you cannot talk to conexus, hand
+the relay to a human", which is false and cost a round trip. What has NOT changed
+is the substance: never frame the cross-instance deploy as autonomous. A relay
+carries the tag, the gate evidence and what changed; it never carries
+authorization. conexus owns every production write, and its flip runs on Sam's go
+typed in THEIR session — a go relayed through this instance is refused there, by
+design, exactly as a ruling relayed from them is not acted on here (same rule,
+both directions). Say the deploy is theirs; do not say it is happening:
 
 > **Before the relay, when this tag carries a changeset: ask conexus to run the PITR-fork walk rehearsal.** conexus can restore a Crunchy fork of production to a point in time (~6 min, `deploy/RESTORE.md`) and replay the Liquibase walk against the real row set before it runs live. That is the pre-deploy gate for a schema-carrying tag, and it is the one this skill used to omit. It caught `v0.1.78`'s zero-grant `nexus_diag` regression. The walk is CUMULATIVE — it replays everything the target cluster is behind on — so confirm the cloud's live `release_version` from the engine and size the walk from THAT, not from how many changesets you added.
 >
@@ -544,7 +555,20 @@ finds no green report until conexus's STEP-6 has actually reported. The `commit`
 provenance is resolved from the LIVE version's tag after the probe, never from
 the floor tag (the floor is only a lower bound on what is running).
 
-Manual fallback only (a verify you cannot run from the box that holds the reports):
+**The direct form is REQUIRED, not a fallback, whenever the floor legitimately
+trails the newest published tag** — which is every engine cut after the first
+since the last client release, because `REQUIRED_ENGINE_VERSION` moves only with
+a client release (its pin derives from CHANGELOG's newest released section) while
+engine tags keep shipping. `check_engine_release_floor.py`'s wrapper runs the
+ENGINE PIN CHECK before the tracker write and fails closed on that state, so it
+cannot record the deploy at all. Measured 2026-09-16: the v0.1.122 write went
+through only because the floor had been bumped and not yet reverted; the v0.1.123
+write was refused (`published v0.1.123 but this release pins v0.1.121`) and
+recorded via the command below instead, which verifies against the LIVE
+`/version` rather than the pin and has no pin check by construction. Use it
+whenever the wrapper refuses on the pin; do not bump the floor to get past the
+wrapper. Also the form for a verify you cannot run from the box that holds the
+reports:
 
 ```
 nx service record-deploy engine-service-vX.Y.Z --commit <sha> --gate-report-dir <conexus checkout>/deploy
