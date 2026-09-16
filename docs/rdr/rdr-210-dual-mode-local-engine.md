@@ -166,6 +166,36 @@ lines cited above were re-read for this draft.
 
 ### Key Discoveries
 
+Re-embed section, 2026-09-16 (T2 `nexus_rdr/210-research-1` to `-4`):
+
+- **✅ Verified** (source search) — The engine embeds server-side on
+  `upsert-chunks` when no vectors are sent (`VectorHandler.java:368`), and with
+  `force_re_embed` unset a chash that already carries a vector gets a
+  metadata-only update (`PgVectorRepository.java:641`), so skipping present
+  chashes falls out of the ordinary write.
+  *Source: T2 210-research-1*
+- **✅ Verified** (source search) — Cutover reuses existing branches: the
+  cross-model rename repoints `catalog_documents` and `catalog_document_chunks`
+  and needs a live target (`CatalogHandler.java:1963, 2049`); the manifest-to-
+  chunk foreign key has no pre-check, so a chash absent from the target aborts
+  the repoint rather than skipping; `supersedeCollection`
+  (`CatalogRepository.java:6884`) and the resolver's superseded-row exclusion
+  (`:6954`) exist; the profile is one row per tenant and content type
+  (catalog-036-3).
+  *Source: T2 210-research-2*
+- **✅ Verified, draft corrected** (source search) — Voyage batches are planned
+  under a token budget up to 1,000 inputs (`VoyageEmbedder.MAX_BATCH_TEXTS`),
+  not 128, and the 300-row write cap is a client convention
+  (`limits.py:60`) the engine does not enforce on `upsert-chunks`.
+  *Source: T2 210-research-3*
+- **✅ Verified, draft corrected** (source search) — `nexus.live_chunks` is the
+  tombstone-filtered view; chash-ordered pagination exists in the repository
+  (`PgVectorRepository.list`), while `getAllMetadata` is a single call capped at
+  200,000 rows; the engine has a boot-registered periodic scheduler (the tuple
+  sweep) but no persisted, resumable job, so the `reembed_jobs` row and cursor
+  are new.
+  *Source: T2 210-research-4*
+
 - **Documented**: the posture is chosen once, from key presence (`Main.java:150,
   163`).
 - **Documented**: an engine constructor that holds a local embedder and Voyage
@@ -251,8 +281,10 @@ candidates; they drain through their own lifecycle.
 **The move is a copy into the model sibling, never an in-place rewrite.** The
 target is the sibling named for the profile model
 (`code__1-1__voyage-code-3__v1` beside `code__1-1__bge-base-en-v15-768__v1`),
-registered live if absent. The job walks the source's live chunks in chash order
-and upserts each batch's text and metadata into the target with no vectors, so
+registered live if absent. The job walks the source's live chunks (`nexus.live_chunks`) in chash
+order by keyset pagination on the repository (`PgVectorRepository.list`'s
+ordering; the unpaged `getAllMetadata` is capped at 200,000 rows and is not the
+tool) and upserts each batch's text and metadata into the target with no vectors, so
 the engine embeds them with the target's model exactly as an index write would.
 Chunks are content-addressed, so a chash already present in the target is done
 and is skipped; a batch that was written and not acknowledged is rewritten to
@@ -271,18 +303,23 @@ through the ordinary quarantine sweep; the job never deletes them itself. Client
 reads already span both siblings during the window (design item 6), so search is
 whole throughout.
 
-**Batched.** One bounded transaction per batch of at most 300 chunks (the write
-cap), each with its own statement bound, so the job never holds a lock across a
-Voyage round trip and a cancelled batch is one batch. The engine's embed path
-already pages Voyage at 128 inputs and retries transient failures.
+**Batched.** One bounded transaction per batch, each with its own statement
+bound, so the job never holds a lock across a Voyage round trip and a cancelled
+batch is one batch. The batch size is the job's own bound (300, the client
+write convention in `limits.py`; the engine enforces no row count on
+`upsert-chunks`). The engine's embed path already plans Voyage batches under a
+token budget of up to 1,000 inputs per request and retries 429s with the
+server's `Retry-After` budget.
 
 **Managed.** The job is a row in a new engine table, `reembed_jobs` (tenant,
 source, target, state, chash cursor, batches done, chunks done, chunks skipped,
 tokens billed, started, updated, finished, last error), created through
 Liquibase. States: `planned`, `running`, `paused`, `cutover`, `done`, `failed`.
-The engine's job runner picks up `running` rows at boot, so a job survives a
-service restart and a closed lid, and a client is not needed once the job is
-started. `nx collection reembed --all` plans (lists every stale collection with
+A job runner registered at construction, the shape the tuple sweep already
+uses, picks up `running` rows at boot, so a job survives a service restart and
+a closed lid, and a client is not needed once the job is started. The persisted
+row and the cursor are new: the engine's existing sweeps are stateless per run
+or hold their memory in-process. `nx collection reembed --all` plans (lists every stale collection with
 its chunk count and an estimated Voyage token spend, and exits with a plan under
 `--dry-run`), starts, and then reports; `reembed status`, `pause`, `resume` and
 `abort` act on the row. Abort leaves the target in place and unreferenced, so a
@@ -507,3 +544,7 @@ To be completed at gate time.
   chashes already present, cuts over through the existing cross-model rename
   and supersede, with a job table, status route, doctor rows, per-batch events
   and a cost estimate. Phase 5, Open Questions 4 to 6, and six test scenarios.
+- 2026-09-16: research pass on the re-embed section (T2 210-research-1 to -4):
+  four claims verified against source, two numbers corrected (Voyage batch cap
+  1,000 under a token budget; the 300-row cap is the client's convention), the
+  enumeration and job-runner sentences rewritten to what the engine has.
