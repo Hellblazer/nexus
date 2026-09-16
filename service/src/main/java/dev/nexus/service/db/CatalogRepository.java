@@ -7483,6 +7483,21 @@ public final class CatalogRepository {
             int topicAssignmentsPreCount = ctx.selectCount().from(TOPIC_ASSIGNMENTS)
                 .where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(oldName))
                 .fetchOne(0, Integer.class);
+            // NOT a pre-count for catalog_document_chunks, deliberately, and this note
+            // exists because it looks like the exact sibling of the case above and is
+            // not (nexus-wsx4l considered and rejected adding one). The mechanism IS
+            // identical -- fk_catalog_chunks_chunk is ON UPDATE CASCADE with chunks as
+            // parent, chunks is list entry ONE and the manifest entry TWO, so the
+            // manifest's own UPDATE matches zero rows. The DIFFERENCE is what the count
+            // is for: this map's manifest key has no consumer (collection_rename.py maps
+            // topic_assignments, taxonomy, aspects, audit and catalog_documents into its
+            // own dict and never reads this one), and
+            // ManifestCollectionStampTest#renameCollection_reHomesManifestRows PINS the
+            // 0 with the reasoning that a per-statement affected-row count of 0 is
+            // legitimate when the cascade did the work. Changing it would flip a
+            // documented contract for no caller. If the two keys should ever report on
+            // the same basis, that is one deliberate decision about the whole map, not a
+            // drive-by in a bead about re-homing.
             for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
                 counts.put(t.countKey(),
                     ctx.update(t.table()).set(t.collection(), newName)
@@ -7526,6 +7541,257 @@ public final class CatalogRepository {
                    .execute());
             return counts;
         });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // COLLECTION RE-HOME (nexus-wsx4l)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * What a re-home left at the source — the pollable half of the operation.
+     *
+     * <p>THIS IS READ SEPARATELY FROM THE WRITE, and that is the whole point rather
+     * than an ergonomic preference. A measured re-home of the real owner-1.1 source
+     * takes 169 s (46,034 code chunks at 128 s, 6,309 docs chunks at 39 s; the cost
+     * is the FK cascade firing for ~95k dependent rows) against an edge read deadline
+     * of about 30 s, so the caller is ALWAYS cut long before the work ends and a
+     * return value can never reach them. The engine finishes anyway — verified on
+     * this handler by {@code CatalogHandlerRehomeTest#clientCutMidRequest_
+     * transactionStillCommits} and independently observed in production on
+     * VectorHandler (2026-09-16: 28 s of work after the edge logged 499, all 41,032
+     * rows committed) — so the caller submits, gets cut, and reads this afterwards.
+     *
+     * @param remainingRows     rows still naming the source across every
+     *                          {@link #COLLECTION_SCOPED_TABLES} entry; the one
+     *                          quantity a caller polls to decide the move is finished
+     * @param remainingByTable  the same broken out per table, so "not done" names
+     *                          which table is not done
+     */
+    public record RehomeStatus(int remainingChunks, int remainingDocuments, int remainingRows,
+                               Map<String, Integer> remainingByTable) {
+
+        /** True when nothing this operation moves still names the source. */
+        public boolean done() { return remainingRows == 0; }
+    }
+
+    /**
+     * What one re-home moved, and what it deliberately did not.
+     *
+     * @param leftBehindByTable rows this operation REFUSED TO MOVE because moving
+     *                          them would have collided with a row already at the
+     *                          target, per table. Empty when nothing collided. This is
+     *                          reported rather than silently dropped: the colliding
+     *                          tables are audit tables, and {@code ON CONFLICT DO
+     *                          NOTHING} there is exactly the silent loss {@code
+     *                          gc_audit} exists to prevent (Sam's ruling 2026-09-16,
+     *                          "move and report").
+     */
+    public record RehomeResult(int movedChunks, int movedDocuments,
+                               Map<String, Integer> movedByTable,
+                               Map<String, Integer> leftBehindByTable,
+                               RehomeStatus status) {}
+
+    /** The re-home refused, with the reason in the message. Mapped to 409 by the handler. */
+    public static final class RehomeRefused extends RuntimeException {
+        public RehomeRefused(String message) { super(message); }
+    }
+
+    /**
+     * The two tables the FK cascade moves for us, named once so {@link
+     * #rehomeCollection} cannot drift from the constraints it relies on. Both are ON
+     * UPDATE CASCADE with {@code nexus.chunks} as parent: {@code
+     * fk_catalog_chunks_chunk} (catalog-029) and {@code topic_assignments_chunk_fk}
+     * (taxonomy-012). Writing either directly would duplicate work the database
+     * already did and can conflict with the cascade mid-statement.
+     */
+    private static final java.util.Set<String> CASCADE_CARRIED_TABLES =
+        java.util.Set.of("catalog_document_chunks", "topic_assignments");
+
+    /**
+     * Move collection {@code source} onto the LIVE collection {@code target}, whole,
+     * in ONE transaction (nexus-wsx4l).
+     *
+     * <p>WHY THIS EXISTS, since {@link #renameCollection} already moves a collection:
+     * neither of that method's branches can move a populated source onto a live,
+     * chunk-empty target, which is the shape the owner-1.1 repair needs. The canonical
+     * branch requires the target absent or retired, and retiring a live target runs
+     * into {@link #blockingTable} — for the real targets that guard names {@code
+     * topics}, which is NOT an audit table, so the refusal is not merely "you would
+     * lose audit history". The RDR-162 cross-model COPY branch repoints {@code
+     * catalog_document_chunks} at a target holding no chunks, violating {@code
+     * fk_catalog_chunks_chunk}; that FK is DEFERRABLE INITIALLY IMMEDIATE, so the
+     * violation surfaces at COMMIT and the whole transaction unwinds after appearing
+     * to proceed.
+     *
+     * <p>THE MECHANISM IS THAT SAME FK. An UPDATE of {@code chunks.collection} carries
+     * the manifest and the topic assignments atomically, with no intermediate
+     * violating state, so this method never writes those two directly (see {@link
+     * #CASCADE_CARRIED_TABLES}). Everything else in {@link #COLLECTION_SCOPED_TABLES}
+     * gets its own UPDATE in the same transaction — including {@code
+     * catalog_documents.physical_collection}, which carries no FK at all.
+     *
+     * <p><b>THIS IS A MERGE, NOT A RENAME, AND THAT IS THE HARD PART.</b> The target is
+     * live and already populated in its own audit tables, which is precisely the case
+     * {@code renameCollectionTxn}'s emptiness precondition exists to refuse (see the
+     * branch-selector comment there: "a populated non-live target ... the canonical
+     * branch would merge them"). So a row moved here can COLLIDE with a row already at
+     * the target. Measured on a PITR fork of production, 2026-09-16: the naive whole-set
+     * UPDATE fails outright with {@code search_telemetry_pk}, because that table carries
+     * {@code collection} IN ITS PRIMARY KEY and both sides hold rows. Every other
+     * populated table keys on a surrogate id and merges cleanly.
+     *
+     * <p>MOVE AND REPORT is the ruling (Sam, 2026-09-16). A colliding row is left where
+     * it is and COUNTED in {@link RehomeResult#leftBehindByTable}, never dropped. The
+     * collision test is derived from each table's own unique keys rather than
+     * hard-coded to {@code search_telemetry}, so a table that GAINS a {@code
+     * collection}-bearing constraint later is handled without anyone remembering to
+     * come back here — that drift is the failure mode {@link #COLLECTION_SCOPED_TABLES}
+     * itself exists to prevent.
+     *
+     * <p>AFTERWARDS THE SOURCE PERSISTS. It is left registered and empty of content,
+     * holding only whatever collided. Do not write that the ghost sweep will reclaim
+     * it: {@code ensureGhostSweepRanOnce} is at-most-once per tenant for the life of
+     * the estate (durable {@code rdr204_ghost_sweep_v1} marker in {@code
+     * nexus.catalog_meta}), and production has already spent it — see nexus-29drn.
+     *
+     * @throws RehomeRefused if source and target are the same, or either is not a
+     *                       registered live collection
+     */
+    public RehomeResult rehomeCollection(String tenant, String source, String target) {
+        if (source.equals(target)) {
+            throw new RehomeRefused("source and target are the same collection: " + source);
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            // Same gate, same order, same reason as renameCollectionTxn: this
+            // bulk-repoints the manifest's collection (via the cascade) and so shares
+            // the manifest-INSERT hazard class against a concurrent sweep of either
+            // endpoint. Sorted so two concurrent operations sharing an endpoint acquire
+            // in one consistent global order.
+            for (String c : java.util.stream.Stream.of(source, target).sorted().distinct().toList()) {
+                acquireSweepGateShared(ctx, tenant, c);
+            }
+            requireLiveCollection(ctx, source, "source");
+            requireLiveCollection(ctx, target, "target");
+
+            Map<String, Integer> moved = new LinkedHashMap<>();
+            Map<String, Integer> leftBehind = new LinkedHashMap<>();
+            for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
+                if (CASCADE_CARRIED_TABLES.contains(t.countKey())) {
+                    continue;
+                }
+                moved.put(t.countKey(), moveScopedTable(ctx, t, source, target, leftBehind));
+            }
+            return new RehomeResult(
+                moved.getOrDefault("chunks", 0),
+                moved.getOrDefault("catalog_documents", 0),
+                moved, leftBehind, rehomeStatus(ctx, source));
+        });
+    }
+
+    /**
+     * What still names {@code source} — the cheap read a caller polls after its
+     * connection is cut. RLS-scoped wrapper over {@link #rehomeStatus(DSLContext,
+     * String)}; see {@link RehomeStatus} for why this is a separate call at all.
+     */
+    public RehomeStatus rehomeStatus(String tenant, String source) {
+        return tenantScope.withTenant(tenant, ctx -> rehomeStatus(ctx, source));
+    }
+
+    private RehomeStatus rehomeStatus(DSLContext ctx, String source) {
+        Map<String, Integer> byTable = new LinkedHashMap<>();
+        int total = 0;
+        for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
+            int n = ctx.fetchCount(t.table(), t.collection().eq(source));
+            if (n > 0) {
+                byTable.put(t.countKey(), n);
+            }
+            total += n;
+        }
+        // Spelled as selectCount().from(...) rather than fetchCount(TABLE, cond) so the
+        // TombstoneFilterGateTest scan can SEE these two reads: it recognizes a literal
+        // table identifier next to a jOOQ initiator, and the terser form is invisible to
+        // it. Being policed (and carrying an exemption that states why tombstones are
+        // deliberately counted) beats being unpoliced by accident.
+        return new RehomeStatus(
+            ctx.selectCount().from(CHUNKS)
+               .where(CHUNKS.COLLECTION.eq(source)).fetchOne(0, Integer.class),
+            ctx.selectCount().from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(source)).fetchOne(0, Integer.class),
+            total, byTable);
+    }
+
+    /** Refuse unless {@code name} is a registered, live (non-superseded) collection. */
+    private void requireLiveCollection(DSLContext ctx, String name, String role) {
+        boolean live = ctx.fetchExists(
+            ctx.selectOne().from(CATALOG_COLLECTIONS)
+               .where(CATALOG_COLLECTIONS.NAME.eq(name)
+                   .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))));
+        if (!live) {
+            throw new RehomeRefused(role + " collection " + name
+                + " is not a registered live collection; a re-home moves between two live "
+                + "registry rows and never creates, revives or retires one.");
+        }
+    }
+
+    /**
+     * Move one table's rows from {@code source} to {@code target}, skipping any row
+     * whose move would collide with a row already at the target, and recording the
+     * skipped count in {@code leftBehind}. Returns the number actually moved.
+     *
+     * <p>The collision predicate is DERIVED from the table's own unique keys: for each
+     * key that contains the collection column, a row is excluded when the target
+     * already holds a row agreeing on every OTHER column of that key. A table with no
+     * collection-bearing key cannot collide and takes a plain UPDATE.
+     *
+     * <p>Deriving it beats listing the colliding tables. Today only {@code
+     * search_telemetry} collides on this estate ({@code taxonomy_meta} and {@code
+     * taxonomy_centroids} also carry {@code collection} in their keys but hold no
+     * source rows, so they never fire), and a hard-coded list would be correct until
+     * the day a changeset adds a constraint — which is the same drift
+     * {@link #COLLECTION_SCOPED_TABLES} was introduced to stop after two literals
+     * disagreed 17-vs-5.
+     *
+     * <p>TOMBSTONES MOVE TOO, deliberately, and nothing polices that here. This loop
+     * addresses tables through {@code t.table()} rather than by literal identifier, so
+     * {@code TombstoneFilterGateTest}'s scan — which keys on a literal table name next
+     * to a jOOQ initiator — cannot see it and will never flag it. That is a blind spot
+     * in the gate rather than a clean bill of health (nexus-571e6), so state the
+     * intent here: a re-home must move ALL rows under the source name, tombstoned or
+     * not, exactly as {@code renameCollectionTxn} does. {@code nexus.chunks} carries no
+     * {@code deleted_at} to filter on in any case, so filtering the document side alone
+     * would move a tombstoned document's chunks while its own row stayed behind.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private int moveScopedTable(DSLContext ctx, CollectionScopedTable t, String source,
+                                String target, Map<String, Integer> leftBehind) {
+        Condition where = t.collection().eq(source);
+        int aliasSeq = 0;
+        for (org.jooq.UniqueKey<?> key : t.table().getKeys()) {
+            boolean keyed = key.getFields().stream()
+                .anyMatch(f -> f.getName().equals(t.collection().getName()));
+            if (!keyed) {
+                continue;
+            }
+            Table<?> peer = t.table().as("rehome_peer_" + (aliasSeq++));
+            Condition match = ((Field<String>) peer.field(t.collection().getName())).eq(target);
+            for (Field<?> f : key.getFields()) {
+                if (f.getName().equals(t.collection().getName())) {
+                    continue;
+                }
+                match = match.and(((Field) peer.field(f.getName()))
+                    .eq((Field) t.table().field(f.getName())));
+            }
+            where = where.and(DSL.notExists(ctx.selectOne().from(peer).where(match)));
+        }
+        int movedRows = ctx.update(t.table()).set(t.collection(), target).where(where).execute();
+        // Whatever still names the source in a table we just moved is, by construction,
+        // a row the collision predicate excluded. Count it so "done" can never be read
+        // as "nothing was left behind".
+        int stillHere = ctx.fetchCount(t.table(), t.collection().eq(source));
+        if (stillHere > 0) {
+            leftBehind.put(t.countKey(), stillHere);
+        }
+        return movedRows;
     }
 
     // ══════════════════════════════════════════════════════════════════════════

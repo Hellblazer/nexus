@@ -269,6 +269,18 @@ class TombstoneFilterGateTest {
             + "track the collection's CURRENT name so a later restore does not resurrect it "
             + "pointing at a retired name (found during gate authorship; undocumented before "
             + "this — see the in-code marker at the call site for the fix)"),
+        // NOTE: moveScopedTable, which does the re-home's actual writes, carries NO entry
+        // here -- not because it filters tombstones (it deliberately does not) but because
+        // this gate cannot see it at all: it addresses tables through COLLECTION_SCOPED_TABLES
+        // rather than by literal identifier, and the scan keys on a literal table name beside
+        // a jOOQ initiator. An entry was added and then REMOVED when the scan refused to
+        // re-derive it, which is this gate's unused-entry check working correctly. The blind
+        // spot is real and tracked as nexus-571e6; the intent is stated at the method itself.
+        new ExemptEntry("CatalogRepository.java", "rehomeStatus",
+            "nexus-wsx4l: counts what still names the source so a caller can tell the move "
+            + "is finished. A deleted_at filter would make a source holding only tombstoned "
+            + "documents read as EMPTY, so the poll would report done() with rows still "
+            + "there -- the exact false completion this status read exists to prevent"),
         new ExemptEntry("PgVectorRepository.java", "fetchDocumentChunks",
             "the manifest chunk read is gated by the PRECEDING live-document existence check "
             + "in the same method: a tombstoned or unknown tumbler throws IllegalStateException "
