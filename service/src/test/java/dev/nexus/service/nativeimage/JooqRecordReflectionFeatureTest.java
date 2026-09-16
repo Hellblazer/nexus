@@ -196,7 +196,13 @@ class JooqRecordReflectionFeatureTest {
     // rollup.xml added nexus.memory_summaries, one generated Record type
     // (MemorySummariesRecord). The two stamp columns on the pre-existing
     // nexus.memory table are a column-count change only, no new Record type.
-    private static final int EXPECTED_RECORD_TYPES = 96;
+    // 96 -> 97: nexus-a6mon, catalog-037-gc-quarantine-orphans-bounded.xml
+    // added ONE RETURNS TABLE function, nexus.gc_quarantine_orphans_bounded
+    // (the bounded quarantine sweep beside the unbounded one), one generated
+    // Record type (GcQuarantineOrphansBoundedRecord) -- same shape as the
+    // taxonomy-016 RETURNS TABLE functions above, +1. The pre-existing
+    // gc_quarantine_orphans is untouched, so this is the whole delta.
+    private static final int EXPECTED_RECORD_TYPES = 97;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

@@ -1001,6 +1001,27 @@ public final class VectorHandler implements HttpHandler {
         // #clampSampleLimit's javadoc).
         int sampleLimit = clampSampleLimit(optInt(body, "sample_limit", 20));
 
+        // nexus-a6mon: an optional `row_limit` selects the BOUNDED sweep. Additive:
+        // a request without it is the unbounded form exactly as before, so no
+        // released client changes behaviour. With it, one call moves at most
+        // row_limit rows in one committed transaction and the response gains
+        // `remaining`, which is the caller's loop terminator -- loop while it is
+        // positive, and wait on pg_stat_activity (never a clock) between calls,
+        // or the still-committing previous call and the next one build a lock
+        // convoy (measured on the owner-1.1 repair: three stacked UPDATEs, one
+        // working at 81 s, two blocked).
+        int rowLimit = optInt(body, "row_limit", 0);
+        if (rowLimit > 0) {
+            var bounded = repo.quarantineOrphansBounded(
+                tenant, collection, quarantineCollection, quarantinedAt, sampleLimit, rowLimit);
+            HttpUtil.send(ex, 200, json(Map.of(
+                "moved", bounded.moved(),
+                "sample", bounded.sample(),
+                "remaining", bounded.remaining(),
+                "row_limit", rowLimit)));
+            return;
+        }
+
         var outcome = repo.quarantineOrphans(tenant, collection, quarantineCollection, quarantinedAt, sampleLimit);
         HttpUtil.send(ex, 200, json(Map.of("moved", outcome.moved(), "sample", outcome.sample())));
     }

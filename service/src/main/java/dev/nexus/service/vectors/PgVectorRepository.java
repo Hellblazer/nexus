@@ -37,6 +37,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_EXPIRE_QUARANTINE;
 import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS;
+import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS_BOUNDED;
 import dev.nexus.service.jooq.nexus.Routines;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_1024;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_384;
@@ -2730,6 +2731,42 @@ public final class PgVectorRepository {
      * @param sampleLimit         cap on the logging sample's size
      */
     public record QuarantineOutcome(long moved, List<Map<String, Object>> sample) {}
+
+    /**
+     * One bounded quarantine batch (nexus-a6mon). {@code remaining} is what is
+     * still eligible after this call COMMITTED, so the caller loops on it rather
+     * than inventing a terminator from a stalling count — the lesson nexus-wsx4l's
+     * unreachable {@code done()} taught the same night this was written.
+     */
+    public record QuarantineBoundedOutcome(long moved, List<Map<String, Object>> sample, long remaining) {}
+
+    /**
+     * nexus-a6mon: move at most {@code rowLimit} orphan chunks per call, one
+     * transaction, one commit. {@link #quarantineOrphans} moves every eligible
+     * row in one unbounded transaction, which on a 41,032-row collection ran 58 s
+     * past the edge's ~30 s cut before committing (owner-1.1 cleanup, v0.1.121).
+     * The unbounded form stays for the indexer's small incremental prune; this is
+     * for draining a large collection under a deadline.
+     *
+     * <p>{@code rowLimit <= 0} is refused by the SQL function, not defaulted to
+     * unbounded — silently removing the bound would hand back the transaction
+     * this exists to prevent.
+     */
+    public QuarantineBoundedOutcome quarantineOrphansBounded(String tenant, String collection,
+                                                              String quarantineCollection,
+                                                              String quarantinedAt, int sampleLimit,
+                                                              int rowLimit) {
+        int dim = dimForCollection(tenant, collection);
+        var rec = tenantScope.withTenant(tenant, ctx ->
+            ctx.selectFrom(GC_QUARANTINE_ORPHANS_BOUNDED.call(
+                    dim, tenant, collection, quarantineCollection, quarantinedAt, sampleLimit, rowLimit))
+               .fetchOne());
+        long moved = rec.get(GC_QUARANTINE_ORPHANS_BOUNDED.MOVED);
+        long remaining = rec.get(GC_QUARANTINE_ORPHANS_BOUNDED.REMAINING);
+        JSONB sampleJson = rec.get(GC_QUARANTINE_ORPHANS_BOUNDED.SAMPLE);
+        return new QuarantineBoundedOutcome(
+            moved, fromJsonList(sampleJson != null ? sampleJson.data() : null), remaining);
+    }
 
     public QuarantineOutcome quarantineOrphans(String tenant, String collection,
                                                 String quarantineCollection,
