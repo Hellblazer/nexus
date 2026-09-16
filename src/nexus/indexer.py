@@ -420,32 +420,45 @@ def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
     Catalog-aware path: when the catalog is initialized and the repo
     owner is registered, returns the catalog-minted conformant name.
 
-    No-catalog / unregistered-owner path: synthesizes a conformant
-    name from the path-derived ``<basename>-<hash8>`` identity so the
-    no-catalog ad-hoc workflow (tests, single-shot CLI runs on a fresh
-    repo) continues to satisfy ``T3Database``'s strict-naming guard.
+    Unregistered-owner path: synthesizes a conformant name from the
+    path-derived ``<basename>-<hash8>`` identity so the ad-hoc workflow
+    (tests, single-shot CLI runs on a fresh repo) continues to satisfy
+    ``T3Database``'s strict-naming guard.
+
+    ONLY ``LookupError`` (owner not registered) falls through to synthesis
+    (nexus-n9xjy). Every other failure propagates: a ``ValueError`` from
+    name resolution (the catalog resolved the tuple to a name the client
+    cannot parse, e.g. a ``quarantine-`` sibling) or an unreachable
+    catalog. Before this, a bare ``except Exception`` absorbed those at
+    DEBUG and returned the synthesized name, and the indexer then
+    repointed every document of the repo to it: on 2026-09-08 the whole
+    ``code`` corpus moved from ``code__1-1`` to ``code__nexus-571b8edd``
+    inside 81 minutes with nothing above DEBUG logged. A name the catalog
+    cannot resolve is a failure to index, never evidence that the
+    collection moved.
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.factory)
 
+    # Service-only since nexus-i711w: the catalog is the remote Postgres
+    # service in every mode — no local is_initialized gate remains. The
+    # factory never returns None in production (its docstring calls the
+    # None leg historical); the guard stays because ``None`` is the
+    # explicit "no catalog" spelling the indexer tests stub, and an
+    # explicit absence is not a swallowed failure.
+    cat = make_catalog_reader()
+    if cat is None:
+        return _conformant_name_for_repo(repo, content_type)
     try:
-        # Service-only since nexus-i711w: the catalog is the remote Postgres
-        # service in every mode — no local is_initialized gate remains.
-        cat = make_catalog_reader()
-        if cat is not None:
-            try:
-                return cat.collection_for_repo(repo, content_type).render()
-            except LookupError:
-                # Owner not yet registered; fall through to the
-                # path-derived synthesis below. This happens for
-                # callers that bypass the ``_catalog_hook`` upfront
-                # flow (e.g. ad-hoc CLI invocations on a fresh repo).
-                pass
-    except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
+        return cat.collection_for_repo(repo, content_type).render()
+    except LookupError:
+        # Owner not yet registered; fall through to the path-derived
+        # synthesis below. This happens for callers that bypass the
+        # ``_catalog_hook`` upfront flow (e.g. ad-hoc CLI invocations on
+        # a fresh repo).
         _log.debug(
-            "repo_collection_catalog_lookup_failed",
+            "repo_collection_owner_unregistered_synthesizing",
             repo=str(repo),
             content_type=content_type,
-            exc_info=True,
         )
     return _conformant_name_for_repo(repo, content_type)
 
@@ -2325,8 +2338,9 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
       service handles its own Chroma/Voyage.  This replaces the
       nexus-67ljl early-return skip-guard that previously prevented
       split-brain writes to daemon-Chroma.
-    - Local mode: checks the local path is writable, then obtains a
-      :class:`T3Database` via ``make_t3()`` and updates directly.
+    - Local mode: obtains a :class:`T3Database` via ``make_t3()`` and
+      updates directly (the Chroma-era writability probe that used to
+      precede this was deleted at nexus-7a8rn).
       Non-service cloud mode is retired (nexus-sghyo) and raises loud.
     """
     from nexus.frecency import batch_frecency  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)

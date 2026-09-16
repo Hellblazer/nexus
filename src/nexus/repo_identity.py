@@ -346,19 +346,23 @@ def _resolve_repo_collection(
 
     No-catalog / unregistered-owner path: synthesizes a conformant
     name from the path-derived ``<basename>-<hash8>`` identity.
+
+    With a catalog supplied, ONLY ``LookupError`` (owner not registered)
+    falls through to synthesis (nexus-n9xjy). A ``ValueError`` from name
+    resolution or a transport failure propagates; the previous bare
+    ``except Exception`` turned an unparseable resolver result into a
+    silent path-derived rename of the repo's collections. See
+    ``nexus.indexer._repo_collection_or_legacy`` for the incident.
     """
     if cat is not None:
         try:
             return cat.collection_for_repo(repo, content_type).render()
         except LookupError:
             # Owner not registered; fall through to synthesis.
-            pass
-        except Exception as exc:  # noqa: BLE001 — best-effort catalog resolve; logged then falls through to synthesis
             _log.debug(
-                "registry_resolve_catalog_failed",
+                "registry_resolve_owner_unregistered_synthesizing",
                 repo=str(repo),
                 content_type=content_type,
-                error=str(exc),
             )
     from nexus.corpus import resolve_write_embedding_model  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
 

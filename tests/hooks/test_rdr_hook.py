@@ -5,9 +5,11 @@ RDR-103 Phase 3b + Phase 5: ``rdr_hook.py`` resolves the indexed
 collection name through the catalog (via
 ``Catalog.collection_for_repo``) when both the catalog and the owner
 exist. Without a catalog or owner row, the helper falls back to
-:func:`nexus.indexer._repo_collection_or_legacy` which synthesises a
+:func:`nexus.indexer._conformant_name_for_repo` which synthesises a
 conformant 4-segment name from the path-derived identity (Phase 5
-tightening; pre-Phase-5 the fallback was the legacy 2-segment shape).
+tightening; pre-Phase-5 the fallback was the legacy 2-segment shape;
+since nexus-n9xjy the hook calls the pure synthesis directly, because
+``_repo_collection_or_legacy`` no longer absorbs an unreachable catalog).
 The test surface pins:
 
   - The helper synthesises a conformant 4-segment name when no catalog
@@ -279,6 +281,34 @@ def test_resolution_failure_is_logged_not_swallowed(rdr_hook_module, monkeypatch
     assert name == "rdr__isolated-abcdef12__voyage-context-3__v1"
     assert any(
         e["event"] == "rdr_hook_collection_resolution_failed" and e.get("source") == "catalog"
+        for e in logged
+    ), logged
+
+
+def test_unparseable_resolver_name_falls_back_to_the_path_derived_guess(
+    rdr_hook_module, monkeypatch, tmp_path,
+) -> None:
+    """nexus-n9xjy: the resolver's ValueError (the catalog returned a
+    quarantine- sibling the client cannot parse) is loud for every writer,
+    but this read-only hook keeps its best-effort guess: the ValueError is
+    logged under source=catalog and the path-derived name comes back."""
+    from nexus.catalog.collection_name import CollectionName
+
+    mod = rdr_hook_module
+
+    class _Cat:
+        def collection_for_repo(self, repo, content_type, *, bump=False):
+            return CollectionName.parse("quarantine-rdr__1-1__voyage-context-3__v1")
+
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Cat())
+    monkeypatch.setattr("nexus.repo_identity._repo_identity", lambda r: ("isolated", "abcdef12"))
+    with capture_logs() as logged:
+        name = mod._resolve_rdr_collection(tmp_path)
+    assert name == "rdr__isolated-abcdef12__voyage-context-3__v1"
+    assert any(
+        e["event"] == "rdr_hook_collection_resolution_failed"
+        and e.get("source") == "catalog"
+        and "quarantine-rdr" in str(e)
         for e in logged
     ), logged
 

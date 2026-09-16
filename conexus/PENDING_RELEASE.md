@@ -32,3 +32,10 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.48.0)
 
+- `conexus/hooks/scripts/rdr_hook.py` (nexus-n9xjy) — the SessionStart hook's
+  path-derived fallback now calls `nexus.indexer._conformant_name_for_repo`
+  directly: `_repo_collection_or_legacy` no longer absorbs an
+  unreachable catalog, so the installed hook, paired with a client past
+  that change, would log "resolution failed (path-derived)" and report the
+  repo as not indexed whenever the engine is down at session start.
+

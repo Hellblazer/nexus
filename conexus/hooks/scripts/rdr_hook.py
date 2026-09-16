@@ -78,12 +78,18 @@ def _resolve_rdr_collection(repo_root: Path) -> str | None:
 
     Returns the conformant ``rdr__<owner>__voyage-context-3__v1`` name
     when both the catalog and an owner row exist; otherwise asks the
-    indexer's :func:`_repo_collection_or_legacy` for the
-    path-derived conformant fallback so SessionStart keeps working
-    before ``nx index repo`` has run. Returns ``None`` when no
-    in-process resolution is available; the caller treats that as
-    "not indexed" rather than splicing a non-conformant 2-segment shape
-    that the post-Phase-5 strict-naming guard would later reject.
+    indexer's :func:`_conformant_name_for_repo` for the path-derived
+    conformant fallback so SessionStart keeps working before ``nx index
+    repo`` has run. Returns ``None`` when no in-process resolution is
+    available; the caller treats that as "not indexed" rather than
+    splicing a non-conformant 2-segment shape that the post-Phase-5
+    strict-naming guard would later reject.
+
+    The fallback is the pure synthesis, not ``_repo_collection_or_legacy``:
+    since nexus-n9xjy that wrapper lets an unreachable catalog or an
+    unparseable resolver result propagate (a synthesized name must never
+    reach a writer), and this read-only hook is the one caller whose
+    contract is a best-effort guess.
     """
     try:
         # RDR-158 P4 (nrxs9 final review Critical-1): this branch imported
@@ -100,9 +106,9 @@ def _resolve_rdr_collection(repo_root: Path) -> str | None:
     except Exception as exc:  # noqa: BLE001 — the SessionStart hook must never fail; the reason is logged, not swallowed (nexus-owna8)
         _log_resolution_error("catalog", exc)
     try:
-        from nexus.indexer import _repo_collection_or_legacy  # noqa: PLC0415
+        from nexus.indexer import _conformant_name_for_repo  # noqa: PLC0415
 
-        return _repo_collection_or_legacy(repo_root, "rdr")
+        return _conformant_name_for_repo(repo_root, "rdr")
     except Exception as exc:  # noqa: BLE001 — same contract as above
         _log_resolution_error("path-derived", exc)
         return None
