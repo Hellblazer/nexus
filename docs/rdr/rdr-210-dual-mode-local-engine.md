@@ -189,11 +189,13 @@ Re-embed section, 2026-09-16 (T2 `nexus_rdr/210-research-1` to `-4`):
   (`limits.py:60`) the engine does not enforce on `upsert-chunks`.
   *Source: T2 210-research-3*
 - **✅ Verified, draft corrected** (source search) — `nexus.live_chunks` is the
-  tombstone-filtered view; chash-ordered pagination exists in the repository
-  (`PgVectorRepository.list`), while `getAllMetadata` is a single call capped at
-  200,000 rows; the engine has a boot-registered periodic scheduler (the tuple
-  sweep) but no persisted, resumable job, so the `reembed_jobs` row and cursor
-  are new.
+  tombstone-filtered view; chash-ordered enumeration exists in the repository
+  (`PgVectorRepository.list`, `getWhere`, the 200,000-row-capped
+  `getAllMetadata`) but every form returns ids and metadata without chunk
+  text, so the copy needs one new keyset query; the engine has a
+  boot-registered periodic scheduler (the tuple sweep) but no persisted,
+  resumable job, so the `reembed_jobs` row and cursor are new. The client's
+  `_voyage_with_retry` has no production callers; retry is engine-side.
   *Source: T2 210-research-4*
 
 - **Documented**: the posture is chosen once, from key presence (`Main.java:150,
@@ -282,9 +284,11 @@ candidates; they drain through their own lifecycle.
 target is the sibling named for the profile model
 (`code__1-1__voyage-code-3__v1` beside `code__1-1__bge-base-en-v15-768__v1`),
 registered live if absent. The job walks the source's live chunks (`nexus.live_chunks`) in chash
-order by keyset pagination on the repository (`PgVectorRepository.list`'s
-ordering; the unpaged `getAllMetadata` is capped at 200,000 rows and is not the
-tool) and upserts each batch's text and metadata into the target with no vectors, so
+order through a new repository query, keyset-paged on chash and returning
+chash, text and metadata together: every existing enumeration
+(`PgVectorRepository.list`, `getWhere`, the 200,000-row-capped
+`getAllMetadata`) returns ids and metadata without the text the copy needs.
+It upserts each batch's text and metadata into the target with no vectors, so
 the engine embeds them with the target's model exactly as an index write would.
 Chunks are content-addressed, so a chash already present in the target is done
 and is skipped; a batch that was written and not acknowledged is rewritten to
@@ -351,6 +355,7 @@ so.
 | Sibling reads | `corpus.py` collection resolution | Extend from one collection to every sibling |
 | Egress guard | none | New test |
 | Re-embed copy | `nx collection reembed` (in-place, nexus-bw65), `embed_migrate.migrate_collection_safe` (reindex) | Replace both cross-model paths with the engine job; keep the in-place verb for same-model refreshes |
+| Live-chunk keyset read with text | `PgVectorRepository.list` / `getWhere` / `getAllMetadata` (metadata only) | New repository query: chash-keyset page of `live_chunks` returning chash, text, metadata |
 | Cutover | `renameCollectionTxn` cross-model branch, `supersedeCollection` | Reuse unchanged |
 | Job table | none | New Liquibase changeset `reembed_jobs` |
 
