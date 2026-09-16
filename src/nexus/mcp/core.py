@@ -49,7 +49,11 @@ from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
     get_catalog as _get_catalog,
     get_collection_counts as _get_collection_counts,
-    get_collection_names as _get_collection_names,
+    # nexus-bc7ps: the fan-out's name source is the LIVE projection (a
+    # quarantine / dormant / disputed collection is gc machinery, never a
+    # search target). It keeps the `_get_collection_names` alias because that
+    # name is the routing seam the MCP tests monkeypatch to inject a corpus.
+    get_live_collection_names as _get_collection_names,
     get_recent_search_traces as _get_recent_search_traces,
     get_t1 as _get_t1,
     get_t3 as _get_t3,
@@ -2734,6 +2738,11 @@ def _resolve_corpus_target(
     the same ``list_collections()`` call this function already makes
     below, so the floor check costs no additional round trip.
     """
+    # nexus-bc7ps: fan-out is ROUTING; a quarantine / dormant / disputed
+    # collection is gc machinery, never a search target, whether reached by
+    # fan-out or named explicitly (the `__` branch below applies the same
+    # rule). The cache behind this stays complete for get_collection_row's
+    # identity reads.
     all_names = _get_collection_names()
     if corpus == "all":
         seen: list[str] = []
@@ -2758,7 +2767,27 @@ def _resolve_corpus_target(
         # as nexus.corpus.t3_collection_name's own ct/rest split, which
         # this delegates to on the next line.
         if split_candidate_collection_name(part)[1] != part:
-            target.append(t3_collection_name(part, t3=t3))
+            name = t3_collection_name(part, t3=t3)
+            # nexus-bc7ps (Sam, 2026-09-16: an explicit corpus name is LLM
+            # navigation, never a human choice): a registered non-live
+            # collection named explicitly is excluded exactly like a fan-out
+            # member. A name with no cached row is unregistered, not non-live.
+            from nexus.db.http_vector_client import is_live_collection_row  # noqa: PLC0415 — circular-dep avoidance (http_vector_client)
+            from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
+            # refresh=False: _get_collection_names() above already warmed
+            # this cache; a second fetch here would be a second round trip.
+            row = get_collection_row(name, refresh=False)
+            if row is not None and not is_live_collection_row(row):
+                _log.info(
+                    "corpus_explicit_non_live_excluded",
+                    collection=name,
+                    lifecycle_state=row.get("lifecycle_state"),
+                    corpus_part=part,
+                )
+                if excluded_out is not None:
+                    excluded_out.append(name)
+                continue
+            target.append(name)
         else:
             fanned_out = resolve_corpus(part, all_names)
             counts = _get_collection_counts()
@@ -8779,15 +8808,13 @@ async def _nx_answer_plan_miss(
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
     from nexus.plans.match import Match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-    from nexus.mcp_infra import get_collection_names  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
-
     corpus_hint = f" Focus on the '{scope}' corpus." if scope else ""
 
     # Give the planner the actual collection names it can search against.
     # Without this, the LLM writes `corpus="knowledge,code,docs"` — generic
     # tokens that may not match any collection in the caller's sandbox.
     try:
-        available = get_collection_names()
+        available = _get_collection_names()
     except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
         available = []
     corpus_names_hint = ""

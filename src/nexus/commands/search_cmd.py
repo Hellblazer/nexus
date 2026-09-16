@@ -373,8 +373,12 @@ def search_cmd(
                 continue
             target_collections.append(c)
     else:
+        from nexus.db.http_vector_client import is_live_collection_row  # noqa: PLC0415 — deferred import (http_vector_client)
+
+        # The FULL listing primes the row cache below (identity reads need every
+        # row); the ROUTING candidates are the live rows only (nexus-bc7ps).
         collection_rows = db.list_collections()
-        all_collections = [c["name"] for c in collection_rows]
+        all_collections = [c["name"] for c in collection_rows if is_live_collection_row(c)]
         # RDR-204 Phase 3 fix round (nexus-ft04v.28 S1): resolve_corpus's
         # Stage 2 (bare content-type fan-out) reads nexus.mcp_infra's
         # SEPARATE, process-local row cache via get_collection_row for

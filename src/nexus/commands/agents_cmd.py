@@ -167,6 +167,40 @@ def worktree_developer_drift(*, dest: Path = AGENTS_DIR / "worktree-developer.md
     return None
 
 
+def refresh_worktree_developer(*, dest: Path = AGENTS_DIR / "worktree-developer.md",
+                               sn_dir: Path | None = None, conexus_dir: Path | None = None,
+                               manifest: Path = INSTALLED_PLUGINS,
+                               dry_run: bool = False) -> str | None:
+    """Regenerate the opt-in worktree-developer agent when it lags the
+    installed plugins (nexus-4a, 2026-09-16). ``None`` when the agent is
+    absent (opt-in, nothing to do) or already current; otherwise one line
+    saying what was written, or would be under *dry_run*.
+
+    Called from ``nx upgrade`` right after plugin lockstep: the plugins are
+    the agent's SOURCE, so every plugin advance left the generated file
+    stale until someone read the doctor warning and ran
+    ``nx agents install`` by hand (7.49.0: the drift was found by the
+    post-release shakedown, not by the upgrade that caused it). Never
+    raises: a missing plugin is reported, not thrown.
+    """
+    if not dest.is_file():
+        return None
+    try:
+        text = compose_worktree_developer(
+            sn_dir=sn_dir or installed_plugin_dir("sn", manifest=manifest),
+            conexus_dir=conexus_dir or installed_plugin_dir("conexus", manifest=manifest),
+        )
+    except click.ClickException as exc:
+        return f"worktree-developer agent: cannot recompose {dest}: {exc.message}"
+    if dest.read_text(encoding="utf-8") == text:
+        return None
+    if dry_run:
+        return f"worktree-developer agent: {dest} lags the installed plugins; would regenerate"
+    dest.write_text(text, encoding="utf-8")
+    _log.info("agent_refreshed", agent="worktree-developer", dest=str(dest))
+    return f"worktree-developer agent: regenerated {dest} from the installed plugins"
+
+
 @click.group("agents")
 def agents_group() -> None:
     """Generate user-scope Claude Code agents from installed plugin parts."""

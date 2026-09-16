@@ -1161,7 +1161,18 @@ public final class VectorHandler implements HttpHandler {
         requireMethod(ex, method, "GET");
         var repo   = requirePgRepo(ex);
         var tenant = requireTenant(ex);
-        var stats = repo.collectionStats(tenant);
+        // nexus-bc7ps: absent/blank/"all" lifecycle_state = the full inventory (default);
+        // a named state is an exact match on the joined catalog row; anything else is a
+        // 400 naming the set rather than a silently empty list.
+        String lifecycleFilter;
+        try {
+            lifecycleFilter = dev.nexus.service.db.CatalogRepository
+                .normalizeLifecycleFilter(optionalQueryParam(ex, "lifecycle_state"));
+        } catch (IllegalArgumentException e) {
+            HttpUtil.send(ex, 400, json(Map.of("error", e.getMessage())));
+            return;
+        }
+        var stats = repo.collectionStats(tenant, lifecycleFilter);
         HttpUtil.send(ex, 200, json(stats));
     }
 
@@ -1470,6 +1481,27 @@ public final class VectorHandler implements HttpHandler {
         catch (NumberFormatException e) {
             throw new IllegalArgumentException("field '" + key + "' must be an integer");
         }
+    }
+
+    /**
+     * {@link #requireQueryParam} without the missing-param throw: {@code null} when the
+     * key is absent or blank. A malformed percent-encoding still propagates from
+     * {@code URLDecoder.decode} (an {@code IllegalArgumentException} the handler maps to
+     * a 400), never folded into "absent": a broken query must not silently widen a
+     * {@code lifecycle_state=live} request into the full inventory.
+     */
+    private String optionalQueryParam(HttpExchange ex, String key) {
+        String raw = ex.getRequestURI().getRawQuery();
+        if (raw == null) return null;
+        for (String pair : raw.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq <= 0) continue;
+            String k = java.net.URLDecoder.decode(pair.substring(0, eq), java.nio.charset.StandardCharsets.UTF_8);
+            if (!k.equals(key)) continue;
+            String v = java.net.URLDecoder.decode(pair.substring(eq + 1), java.nio.charset.StandardCharsets.UTF_8);
+            return v.isBlank() ? null : v;
+        }
+        return null;
     }
 
     private String requireQueryParam(HttpExchange ex, String key) {

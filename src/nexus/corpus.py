@@ -1252,10 +1252,13 @@ def t3_collection_name(
         and split_candidate_collection_name(user_arg)[1] == user_arg
         and user_arg in CONTENT_TYPES
     ):
+        from nexus.db.http_vector_client import live_collection_rows  # noqa: PLC0415 — circular-dep avoidance (http_vector_client)
+
         try:
+            # nexus-bc7ps: --corpus resolution is routing; live rows only.
             matches = [
                 c["name"]
-                for c in t3.list_collections()  # type: ignore[attr-defined]
+                for c in live_collection_rows(t3)
                 if c["name"].startswith(f"{user_arg}__")
             ]
         except Exception:  # noqa: BLE001 — best-effort collection-listing probe; empty match list on any backend failure
@@ -2049,12 +2052,12 @@ def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:
             # another process invisible to this scan regardless of
             # whether its row is now fresh.
             from nexus.mcp_infra import (  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
-                get_collection_names,
+                get_live_collection_names,
                 invalidate_collections_cache,
             )
             try:
                 invalidate_collections_cache()
-                matches = _scan(get_collection_names())
+                matches = _scan(get_live_collection_names())
             except Exception:  # noqa: BLE001 — best-effort bounded refresh: a failed refetch (no reachable T3) must fall back to the already-computed empty result, never turn a safe "no match" into a hard failure
                 _log.warning(
                     "resolve_corpus_bounded_refresh_failed",

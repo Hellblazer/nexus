@@ -79,6 +79,11 @@ class VectorStatsCatalogJoinTest {
     // Its catalog_collections row is deleted after the chunk write (see fixture below),
     // leaving an orphan stats row on purpose.
     private static final String COL_ORPHAN = "vscj-orphan-coll";
+    // nexus-bc7ps: a quarantine sibling of COL_REGISTERED, registered by insertCollection's
+    // quarantine branch (lifecycle_state=quarantine, same content_type/owner/model as the
+    // live row -- the exact shape hygiene-002-1 left in production). Holds one chunk so it
+    // has a collection_vector_stats row to be hidden.
+    private static final String COL_QUARANTINE = "quarantine-code__vscj-owner__voyage-code-3__v1";
 
     PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
@@ -114,6 +119,8 @@ class VectorStatsCatalogJoinTest {
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, TENANT, COL_REGISTERED);
             insertChunk1024(ctx, TENANT, COL_REGISTERED, chashBytes("vscj-reg-c1"), vector(1024));
+            PgContainerHelper.insertCollection(ctx, TENANT, COL_QUARANTINE);
+            insertChunk1024(ctx, TENANT, COL_QUARANTINE, chashBytes("vscj-qua-c1"), vector(1024));
         }
 
         // ── Fixture: COL_ORPHAN — register, write chunk (FK requires the row),
@@ -184,6 +191,39 @@ class VectorStatsCatalogJoinTest {
             .as("no catalog_collections row exists for " + COL_ORPHAN +
                 " — the four joined keys must be absent, not present-with-null")
             .doesNotContainKeys("content_type", "owner_id", "embedding_model", "lifecycle_state");
+    }
+
+    // ── nexus-bc7ps: lifecycle filter ─────────────────────────────────────────
+
+    private static java.util.List<String> names(List<Map<String, Object>> rows) {
+        return rows.stream().map(r -> (String) r.get("name")).toList();
+    }
+
+    @Test
+    void statsDefault_isTheFullInventory_includingNonLiveRows() {
+        // Non-vacuity: the quarantine sibling must exist with a stats row AND be
+        // registered non-live, or the live filter below has nothing to exclude.
+        var byDefault = repo.collectionStats(TENANT);
+        var sibling = byDefault.stream().filter(r -> COL_QUARANTINE.equals(r.get("name"))).findFirst().orElseThrow(
+            () -> new AssertionError("guard: the quarantine sibling has no stats row"));
+        assertThat(sibling.get("lifecycle_state")).as("guard: seeded as quarantine").isEqualTo("quarantine");
+
+        assertThat(names(byDefault))
+            .as("default = every row: live, the unregistered orphan, and the quarantine sibling")
+            .contains(COL_REGISTERED, COL_ORPHAN, COL_QUARANTINE);
+        assertThat(names(repo.collectionStats(TENANT, null))).as("null filter is the default").isEqualTo(names(byDefault));
+        assertThat(names(repo.collectionStats(TENANT, ""))).as("blank filter is the default").isEqualTo(names(byDefault));
+    }
+
+    @Test
+    void statsNamedState_isAnExactMatch() {
+        assertThat(names(repo.collectionStats(TENANT, "live")))
+            .as("'live' is what routing consumers ask for: no quarantine sibling, and no unregistered orphan either")
+            .contains(COL_REGISTERED)
+            .doesNotContain(COL_ORPHAN, COL_QUARANTINE);
+        assertThat(names(repo.collectionStats(TENANT, "quarantine")))
+            .as("an explicit state returns exactly that state")
+            .containsExactly(COL_QUARANTINE);
     }
 
     // ── HELPERS (typed jOOQ DSL — mirrors PgContainerHelper.insertChunk384/1024

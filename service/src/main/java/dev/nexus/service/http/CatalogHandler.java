@@ -1659,17 +1659,30 @@ public final class CatalogHandler implements HttpHandler {
     /**
      * GET /v1/catalog/collections/list — optional {@code content_type} and
      * {@code lifecycle_state} query filters (RDR-204 Phase 2, bead nexus-ft04v.24).
+     *
      * Absent/blank filters reproduce the pre-P2.4 unfiltered result exactly (a
      * pre-Phase-2 client sending neither param is unaffected). Follows {@link
      * #handleList}'s own blank-is-absent convention for optional query params.
+     *
+     * <p>nexus-bc7ps: {@code lifecycle_state} is validated. A named state is an exact
+     * match, {@code all} is the same as absent, and any other value is a 400 naming the
+     * accepted set rather than a silently empty list. Routing consumers pass {@code live}
+     * so a {@code quarantine-<name>} row never reaches a name parser; the default stays
+     * the full inventory. See {@link CatalogRepository#normalizeLifecycleFilter}.
      */
     private void handleCollectionList(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        String contentType    = queryParam(exchange, "content_type");
-        String lifecycleState = queryParam(exchange, "lifecycle_state");
+        String contentType = queryParam(exchange, "content_type");
+        String lifecycleFilter;
+        try {
+            lifecycleFilter = CatalogRepository.normalizeLifecycleFilter(queryParam(exchange, "lifecycle_state"));
+        } catch (IllegalArgumentException e) {
+            HttpUtil.send(exchange, 400, MAPPER.writeValueAsString(Map.of("error", e.getMessage())));
+            return;
+        }
         var colls = repo.listCollections(tenant,
             (contentType != null && !contentType.isBlank()) ? contentType : null,
-            (lifecycleState != null && !lifecycleState.isBlank()) ? lifecycleState : null);
+            lifecycleFilter);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("collections", colls)));
     }
 

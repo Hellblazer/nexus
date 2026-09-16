@@ -531,7 +531,13 @@ from __future__ import annotations
 #: bounded sweep with changeset catalog-037-1) ride along; no /version field
 #: changed. The one both-halves commit (33ac72e02) is [additive], so the
 #: engine deployed BEFORE this client tag (nexus-1emxn choreography (a)).
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 125)
+#:
+#: 7.50.0 pairs with engine-service-v0.1.126 (tagged 636fc5591, engine tree
+#: 169388ec9): both collection-list routes take a validated exact-match
+#: lifecycle_state filter, default unchanged (nexus-bc7ps engine half). No
+#: changeset, no /version field change. The one both-halves commit is
+#: [additive], so the engine deployed BEFORE this client tag again.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 126)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

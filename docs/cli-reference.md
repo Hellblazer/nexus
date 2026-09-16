@@ -3450,6 +3450,15 @@ reported without running under `--dry-run`. This is the reverse of the
 RDR-143 hook, which drives `nx self install` + `nx upgrade` from a plugin
 update; together they make either entry point converge all three.
 
+**Generated agents follow the plugins (7.50.0).** Right after plugin
+lockstep, and under the same `--auto`/`--dry-run` gating, the upgrade
+regenerates the opt-in user-scope agents that are composed FROM the
+installed plugins (`worktree-developer`, the one `nx agents install`
+produces) when the installed file lags them; an absent agent means nothing
+to do. Before this the plugin advance left the generated file stale until
+someone read `nx doctor`'s warning and ran `nx agents install` by hand
+(found by the 7.49.0 post-release shakedown, not by the upgrade that caused it).
+
 **Plan-library precondition runs on every invocation, never skipped.**
 Beside package/engine/process/lockstep, `nx upgrade` also converges the
 builtin plan-template library (reconciling it against the templates this

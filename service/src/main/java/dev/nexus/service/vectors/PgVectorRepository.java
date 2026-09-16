@@ -2370,7 +2370,8 @@ public final class PgVectorRepository {
      *         "content_type": ..., "owner_id": ..., "embedding_model": ...,
      *         "lifecycle_state": ...}]}, name ascending. {@code last_write} is
      *         ISO-8601 with offset, or absent if null. Collections with zero live
-     *         chunks do not appear. The four catalog-joined keys are ABSENT
+     *         chunks do not appear (the two-arg overload adds a lifecycle filter,
+     *         nexus-bc7ps). The four catalog-joined keys are ABSENT
      *         (omitted, not {@code null}-valued — same "absent means absent"
      *         convention {@code last_write} already uses above) for a collection
      *         with live vector stats but no {@code catalog_collections} row.
@@ -2402,6 +2403,30 @@ public final class PgVectorRepository {
      * lived in — that derivation lives entirely in SQL and is invisible from this method.
      */
     public List<Map<String, Object>> collectionStats(String tenant) {
+        return collectionStats(tenant, null);
+    }
+
+    /**
+     * {@link #collectionStats(String)} with a lifecycle filter (nexus-bc7ps).
+     *
+     * <p>{@code lifecycleFilter == null}/blank is the full inventory (every row, the
+     * default: this route feeds doctor, gc, backfill and export, which must not go blind).
+     * A state name is an exact match on the joined {@code lifecycle_state}, so {@code live}
+     * excludes both non-live rows AND the LEFT-JOIN orphan (a collection with chunks but no
+     * registry row, unreachable through the normal write path since fk-004). The value is
+     * expected to have passed {@link
+     * dev.nexus.service.db.CatalogRepository#normalizeLifecycleFilter} already (which also
+     * folds {@code all} to {@code null}); this method does not validate.
+     *
+     * <p>Why the filter exists: this route is what taxonomy discovery enumerates
+     * ({@code _enumerate_discoverable_collections} in the client), and a
+     * {@code quarantine-<name>} collection surfaced here was fed to a parser that cannot
+     * accept the prefix. Routing consumers now ask for {@code live}.
+     */
+    public List<Map<String, Object>> collectionStats(String tenant, String lifecycleFilter) {
+        org.jooq.Condition lifecycleCond = (lifecycleFilter == null || lifecycleFilter.isBlank())
+            ? org.jooq.impl.DSL.noCondition()
+            : CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq(lifecycleFilter);
         var result = tenantScope.withTenant(tenant, ctx ->
             ctx.select(COLLECTION_VECTOR_STATS.COLLECTION, COLLECTION_VECTOR_STATS.DIM,
                        COLLECTION_VECTOR_STATS.CHUNK_COUNT, COLLECTION_VECTOR_STATS.LAST_WRITE,
@@ -2411,6 +2436,7 @@ public final class PgVectorRepository {
                .leftJoin(CATALOG_COLLECTIONS)
                .on(CATALOG_COLLECTIONS.TENANT_ID.eq(COLLECTION_VECTOR_STATS.TENANT_ID)
                    .and(CATALOG_COLLECTIONS.NAME.eq(COLLECTION_VECTOR_STATS.COLLECTION)))
+               .where(lifecycleCond)
                .orderBy(COLLECTION_VECTOR_STATS.COLLECTION.asc(), COLLECTION_VECTOR_STATS.DIM.asc())
                .fetch());
         List<Map<String, Object>> out = new ArrayList<>(result.size());

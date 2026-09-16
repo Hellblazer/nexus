@@ -41,7 +41,7 @@ below maps to an exact ``case`` in the Java handler's switch:
   POST  /v1/catalog/owners/head_hash    {tumbler_prefix, head_hash}
   GET   /v1/catalog/docs/collection-counts
   POST  /v1/catalog/collections/upsert
-  GET   /v1/catalog/collections/list
+  GET   /v1/catalog/collections/list[?lifecycle_state=live|quarantine|dormant|disputed]
   GET   /v1/catalog/collections/get?name=X
   POST  /v1/catalog/collections/supersede
   POST  /v1/catalog/collections/rename  {old_name, new_name}
@@ -1047,10 +1047,15 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
         Backs repos.py which previously queried
         ``SELECT name, content_type FROM collections WHERE owner_id=?`` directly.
-        Filters the full list_collections() result client-side (collection list
+        Filters the list_collections() result client-side (collection list
         is small; avoids a dedicated server endpoint).
+
+        ROUTING view (nexus-bc7ps): its one consumer picks the collection a
+        repo's searches target, so it asks for ``live`` rows only. hygiene-002-1
+        gave quarantine rows the same ``owner_id`` as their origin, so without
+        the filter a quarantine sibling is a candidate here too.
         """
-        all_colls = self.list_collections()
+        all_colls = self.list_collections(lifecycle_state="live")
         return [c for c in all_colls if c.get("owner_id") == owner_id]
 
     def list_owners(self, *, include_deactivated: bool = False) -> list[dict]:
@@ -2756,8 +2761,15 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         )
         return False
 
-    def list_collections(self) -> list[dict]:
-        result = self._get("/collections/list")
+    def list_collections(self, lifecycle_state: str | None = None) -> list[dict]:
+        """Registry rows via ``GET /v1/catalog/collections/list``.
+
+        ``lifecycle_state`` (nexus-bc7ps) is the route's exact-match filter:
+        ``None`` is every state (inventory, doctor, gc), ``"live"`` is the
+        routing view in which a ``quarantine-<name>`` row never appears. An
+        unknown value is a 400 from the engine, never a silently empty list.
+        """
+        result = self._get("/collections/list", lifecycle_state=lifecycle_state)
         return [
             _coerce_legacy_grandfathered(c)
             for c in (result.get("collections", []) if result else [])

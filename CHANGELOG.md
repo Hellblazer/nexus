@@ -6,6 +6,45 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.50.0] - 2026-09-16
+
+Paired engine: engine-service-v0.1.126 (`REQUIRED_ENGINE_VERSION` (0, 1, 126);
+was engine-service-v0.1.125), deployed before this client tag on the additive
+branch of the paired-release choreography. That tag carries one change, the
+engine half of nexus-bc7ps below; no changeset, no `/version` field change.
+
+### Fixed
+- **A quarantine collection can no longer reach a name parser through a
+  collection listing (bead nexus-bc7ps).** A quarantined collection is
+  registered as a first-class row under `quarantine-<name>`, a name no client
+  parser accepts, so taxonomy discovery, corpus resolution and repo-to-
+  collection routing broke while one existed (discovery died on
+  `canonical_embedding_model` for `quarantine-knowledge`). Both engine list
+  routes now take a validated exact-match `lifecycle_state` filter with the
+  full inventory as the unchanged default, and every routing consumer reads
+  the live view through one client surface (`list_live_collections`,
+  `live_collection_rows`, `list_collections("live")`,
+  `get_live_collection_names`), with a client-side backstop so an older
+  engine that ignores the filter cannot hand routing a quarantine row.
+  Doctor, gc, backfill and export keep the full listing. An explicit
+  `corpus=<name>` in an MCP call naming a registered non-live collection is
+  excluded from the fan-out too: an explicit name there is the model's
+  navigation, not a person's choice. A lint pins that routing modules never
+  call the bare listing; a real-engine test makes the quarantine row through
+  the production prune path and asserts it is inventory, never routing.
+- **`nx upgrade` regenerates the generated agents after the plugin lockstep
+  (worktree-developer).** The agent is composed from the installed plugins,
+  so every plugin advance left `~/.claude/agents/worktree-developer.md` stale
+  until doctor flagged it. Absent stays opt-in, current is left alone, a
+  lagging agent is regenerated (named under `--dry-run`); advisory, never
+  fails the upgrade.
+- **Release harness: the artifact tree identity hashes working-tree content
+  (nexus-mbeke).** It read tracked entries from the index, so an unstaged
+  edit changed what a build produced without changing the identity the
+  manifest compares. Every regular file is now content-hashed from disk;
+  tests pin that unstaged, staged, mode, symlink and untracked changes each
+  move the identity.
+
 ## [7.49.0] - 2026-09-16
 
 Paired engine: engine-service-v0.1.125 (`REQUIRED_ENGINE_VERSION` (0, 1, 125);

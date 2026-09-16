@@ -6590,6 +6590,38 @@ public final class CatalogRepository {
         );
     }
 
+    /** The closed {@code catalog_collections.lifecycle_state} vocabulary (hygiene-002's CHECK). */
+    public static final java.util.Set<String> LIFECYCLE_STATES =
+        java.util.Set.of("live", "quarantine", "dormant", "disputed");
+
+    /** The one non-state value a {@code lifecycle_state} list filter accepts: every row, no filter. */
+    public static final String LIFECYCLE_FILTER_ALL = "all";
+
+    /**
+     * Normalise a raw {@code lifecycle_state} query value into a list filter (nexus-bc7ps).
+     *
+     * <p>{@code null}/blank and {@value #LIFECYCLE_FILTER_ALL} → {@code null}, meaning no
+     * filter (every state, the inventory view and the default); a value in {@link
+     * #LIFECYCLE_STATES} → itself, an exact match. Anything else is refused: an unknown state
+     * would otherwise be an exact match against nothing and come back as a silently empty
+     * list, which is how a typo reads as "no quarantine rows".
+     *
+     * <p>The default is deliberately the FULL inventory, not live-only (Sam, 2026-09-16,
+     * after the client census): 35 client sites are inventory, doctor, gc, backfill or export
+     * consumers that go silently blind under a hidden default, two of them into a wrong
+     * delete; the 12 routing consumers that must never see a {@code quarantine-<name>} row
+     * ask for {@code live} explicitly, and a missed one fails loud in a parser.
+     *
+     * @throws IllegalArgumentException naming the accepted set, for the handlers to map to 400
+     */
+    public static String normalizeLifecycleFilter(String raw) {
+        if (raw == null || raw.isBlank() || LIFECYCLE_FILTER_ALL.equals(raw)) return null;
+        if (LIFECYCLE_STATES.contains(raw)) return raw;
+        throw new IllegalArgumentException(
+            "lifecycle_state must be one of " + new java.util.TreeSet<>(LIFECYCLE_STATES)
+            + " or '" + LIFECYCLE_FILTER_ALL + "', got '" + raw + "'");
+    }
+
     /** List all collections. Delegates to {@link #listCollections(String, String, String)}
      *  with no filters — byte-for-byte the pre-P2.4 unfiltered result. */
     public List<Map<String, Object>> listCollections(String tenant) {
@@ -6598,11 +6630,16 @@ public final class CatalogRepository {
 
     /**
      * List collections, optionally filtered by {@code content_type} and/or
-     * {@code lifecycle_state} (RDR-204 Phase 2, bead nexus-ft04v.24). A {@code null}
-     * or blank filter argument is a no-op; calling with both {@code null} reproduces
-     * {@link #listCollections(String)}'s unfiltered result exactly — same rows, same
-     * order, same shape (ADDITIVE overload: {@link #listCollections(String)} keeps its
-     * signature unchanged for {@code VectorHandler}'s and every other existing caller).
+     * {@code lifecycle_state} (RDR-204 Phase 2, bead nexus-ft04v.24).
+     *
+     * <p>A {@code null} or blank filter argument is a no-op; calling with both {@code null}
+     * reproduces {@link #listCollections(String)}'s unfiltered result exactly — same rows,
+     * same order, same shape. nexus-bc7ps: a quarantine collection is registered here as a
+     * first-class row under a name ({@code quarantine-<name>}) that no client parser
+     * accepts, so a ROUTING consumer (one that parses names) passes {@code live} and gets
+     * an exact match; the default stays the full inventory for doctor, gc and backfill
+     * callers. Handlers validate the raw query value through {@link
+     * #normalizeLifecycleFilter} before reaching here; this method does not validate.
      *
      * <p>Each row also now carries {@code dimension} and {@code lifecycle_state} —
      * columns that did not exist when {@link #collRow} was first written — via

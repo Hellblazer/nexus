@@ -140,6 +140,12 @@ def upgrade(
         if not auto_mode:
             _converge_plugins(dry_run=dry_run)
 
+        # Generated user-scope agents are composed FROM the installed plugins,
+        # so a plugin advance leaves them stale; regenerate right after
+        # lockstep. Opt-in (absent agent = nothing to do), advisory.
+        if not auto_mode:
+            _refresh_generated_agents(dry_run=dry_run)
+
         # nexus-cnzei.8: install/refresh the user-level beads PRIME.md when
         # beads is detected. Same gating as the git-hooks refresh above — a
         # filesystem write, not under --auto, never under --dry-run.
@@ -668,6 +674,22 @@ def _install_beads_prime_best_effort(*, no_beads_prime: bool = False) -> None:
         return
     if message:
         click.echo(message)
+
+
+def _refresh_generated_agents(*, dry_run: bool) -> None:
+    """Regenerate the opt-in generated agents that lag the plugins lockstep
+    just converged (worktree-developer today). Best-effort, never raised:
+    the plugin advance already happened and is the thing that matters."""
+    from nexus.commands.agents_cmd import refresh_worktree_developer  # noqa: PLC0415 — deferred, CLI cold start
+
+    try:
+        line = refresh_worktree_developer(dry_run=dry_run)
+    except Exception:  # noqa: BLE001 — advisory step, same posture as _converge_plugins
+        _log.warning("generated_agent_refresh_error", exc_info=True)
+        click.echo("Generated agents: could not check worktree-developer; run nx agents install worktree-developer")
+        return
+    if line:
+        click.echo(line)
 
 
 def _converge_plugins(*, dry_run: bool) -> None:
