@@ -687,3 +687,45 @@ def test_successor_flip_marks_predecessor_through_the_real_cli_and_substrate(
     audit = CliRunner().invoke(rdr, ["preamble", "rdr-audit", repo_name])
     assert audit.exit_code == 0, audit.output
     assert f"- `14`: {expected_marker}" in audit.output
+
+
+def test_supersede_writes_the_catalog_edge_through_the_real_cli_and_substrate(
+    tmp_path: Path, t2_service_env: str,
+) -> None:
+    """``nx rdr set-status <n> superseded`` writes the successor's
+    ``supersedes`` edge itself (``_ensure_supersedes_edge``). Until now no
+    real-store test reached that write: the set-status supersede test runs on
+    fakes that short-circuit before it, and the substrate test above installs
+    the edge by hand (critique of 14d65499c). Real CLI, real catalog, no
+    factory monkeypatched; the edge must exist afterwards and not before."""
+    del t2_service_env  # only requested to document the substrate dependency
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    rdr_dir = _rdr_dir(tmp_path)
+    old = _write_rdr(rdr_dir, 14, "closed")
+    old.write_text(old.read_text().replace("status: closed\n", "status: closed\nsuperseded_by: RDR-015\n"))
+    _write_rdr(rdr_dir, 15, "accepted")
+
+    cat = rdr_mod._catalog_reader_factory()
+    owner = cat.ensure_owner_for_repo(tmp_path)
+    predecessor = cat.register(
+        owner, "RDR-014: Thing 14", content_type="rdr", file_path="docs/rdr/rdr-014-thing-14.md",
+    )
+    successor = cat.register(
+        owner, "RDR-015: Thing 15", content_type="rdr", file_path="docs/rdr/rdr-015-thing-15.md",
+    )
+
+    def _edges() -> list[tuple[str, str]]:
+        return [
+            (str(link.from_tumbler), str(link.to_tumbler))
+            for link in cat.links_from(successor, link_type="supersedes")
+        ]
+
+    assert _edges() == []
+    result = CliRunner().invoke(rdr, ["set-status", "14", "superseded", "--root", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "catalog edge ensured" in result.output, result.output
+    assert _edges() == [(str(successor), str(predecessor))]
+
+    # Idempotent: a second run is a no-op on the file and adds no second edge.
+    CliRunner().invoke(rdr, ["set-status", "14", "superseded", "--root", str(tmp_path)])
+    assert _edges() == [(str(successor), str(predecessor))]
