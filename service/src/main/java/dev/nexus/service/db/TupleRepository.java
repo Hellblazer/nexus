@@ -226,6 +226,38 @@ public final class TupleRepository {
         this.waitRegistry = new TupleWaitRegistry(parkCapPerClaimant, parkCapGlobal);
     }
 
+    /**
+     * TEST-ONLY (nexus-rplay, the register/release leak fix): injects a caller-built
+     * {@link TupleWaitRegistry} directly, instead of constructing one from park-cap
+     * ints -- the only way a test can drive {@code rd}/{@code in}/{@code waitAny}
+     * through a registry built with the injectable {@link
+     * TupleWaitRegistry#TupleWaitRegistry(int, int, java.util.function.LongSupplier)}
+     * clock, so a test can advance idle time deterministically and then call this
+     * repository's own {@code groupCount()}-visible package-private registry to
+     * assert eviction. Package-private, matching {@link TupleWaitRegistry}'s own
+     * package-private visibility (a public overload could not even name the type
+     * outside this package). Never call this outside test code.
+     */
+    TupleRepository(TenantScope tenantScope, TemplateRegistry registry,
+                     int readMax, int claimPasses, int timeoutCapSeconds, int subspaceListTimeoutSeconds,
+                     TupleWaitRegistry waitRegistry) {
+        this.tenantScope = tenantScope;
+        this.registry = registry;
+        this.readMax = readMax;
+        this.claimPasses = claimPasses;
+        this.timeoutCapSeconds = timeoutCapSeconds;
+        this.subspaceListTimeoutSeconds = subspaceListTimeoutSeconds;
+        this.waitRegistry = waitRegistry;
+    }
+
+    /** TEST-ONLY (nexus-rplay): exposes this repository's own {@link
+     *  TupleWaitRegistry} so a same-package test can call its package-private
+     *  {@code groupCount()} without keeping a second, disconnected registry
+     *  instance of its own. Never call this outside test code. */
+    TupleWaitRegistry testOnlyWaitRegistry() {
+        return waitRegistry;
+    }
+
     /** Production boot call: reads every setting via {@code System.getenv} directly. */
     public static TupleRepository fromEnv(TenantScope tenantScope, TemplateRegistry registry) {
         return new TupleRepository(tenantScope, registry,
@@ -699,7 +731,12 @@ public final class TupleRepository {
         return queryOnce(tenant, subspace, pattern, n, since);
     }
 
-    /** {@code rd(subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0) -> [Tuple]} — blocks up to {@code timeoutSeconds}. */
+    /** {@code rd(subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0) -> [Tuple]} — blocks up to {@code timeoutSeconds}.
+     *  The {@link TupleWaitRegistry#register} call this makes is released ({@link
+     *  TupleWaitRegistry.Waiter#release}) on EVERY exit -- an immediate hit and an
+     *  exception from the first query included, not only the park-loop path -- so a
+     *  subspace that never actually parks is still eligible for {@link
+     *  TupleWaitRegistry#evictIdleGroups} (nexus-rplay). */
     public List<TupleRow> rd(String tenant, String subspace, Map<String, String> pattern, int n,
                               ReadCursor since, long timeoutSeconds) {
         validateTimeout(timeoutSeconds);
@@ -709,30 +746,33 @@ public final class TupleRepository {
         // Registered BEFORE the first query, so a write landing between that query and
         // the first park is not lost (RDR-205 §Technical Design "Wake").
         TupleWaitRegistry.Waiter waiter = waitRegistry.register(tenant, subspace);
-        List<TupleRow> found = queryOnce(tenant, subspace, pattern, n, since);
-        if (!found.isEmpty()) {
-            return found;
-        }
-        waitRegistry.tryAcquireParkSlot(null);
         try {
-            long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
-            while (true) {
-                if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
-                    return queryOnce(tenant, subspace, pattern, n, since);
+            List<TupleRow> found = queryOnce(tenant, subspace, pattern, n, since);
+            if (!found.isEmpty()) {
+                return found;
+            }
+            waitRegistry.tryAcquireParkSlot(null);
+            try {
+                long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+                while (true) {
+                    if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
+                        return queryOnce(tenant, subspace, pattern, n, since);
+                    }
+                    try {
+                        waiter.awaitSignalOrTimer();
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return queryOnce(tenant, subspace, pattern, n, since);
+                    }
+                    List<TupleRow> again = queryOnce(tenant, subspace, pattern, n, since);
+                    if (!again.isEmpty()) {
+                        return again;
+                    }
                 }
-                try {
-                    waiter.awaitSignalOrTimer();
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    return queryOnce(tenant, subspace, pattern, n, since);
-                }
-                List<TupleRow> again = queryOnce(tenant, subspace, pattern, n, since);
-                if (!again.isEmpty()) {
-                    return again;
-                }
+            } finally {
+                waitRegistry.releaseParkSlot(null);
             }
         } finally {
-            waitRegistry.releaseParkSlot(null);
             waiter.release();
         }
     }
@@ -813,6 +853,11 @@ public final class TupleRepository {
      * TupleWaitRegistry#tryAcquireParkSlot}/{@link TupleWaitRegistry#releaseParkSlot}
      * are still called exactly once for the whole call -- the same one-slot-per-call
      * contract {@code rd}/{@code in} already have.
+     *
+     * <p>Same every-exit release contract as {@link #rd} and {@link #in}
+     * (nexus-rplay): {@link TupleWaitRegistry.MultiWaiter#release} runs on EVERY
+     * exit -- an immediate hit and an exception from the first per-subspace query
+     * included, not only the park-loop path.
      */
     public List<WaitResult> waitAny(String tenant, List<WaitSpec> specs, long timeoutSeconds) {
         validateTimeout(timeoutSeconds);
@@ -844,32 +889,35 @@ public final class TupleRepository {
         // the first park is not lost (RDR-205 §Technical Design "Wake", the same
         // contract rd/in already honour).
         TupleWaitRegistry.MultiWaiter waiter = waitRegistry.registerMulti(tenant, subspaces);
-        List<WaitResult> found = queryEachOnce(tenant, specs);
-        if (!found.isEmpty()) {
-            return found;
-        }
-        // wait parks with NO claimant, exactly as rd does -- one global slot, nothing
-        // against the per-claimant cap of four.
-        waitRegistry.tryAcquireParkSlot(null);
         try {
-            long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
-            while (true) {
-                if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
-                    return queryEachOnce(tenant, specs);
+            List<WaitResult> found = queryEachOnce(tenant, specs);
+            if (!found.isEmpty()) {
+                return found;
+            }
+            // wait parks with NO claimant, exactly as rd does -- one global slot, nothing
+            // against the per-claimant cap of four.
+            waitRegistry.tryAcquireParkSlot(null);
+            try {
+                long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+                while (true) {
+                    if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
+                        return queryEachOnce(tenant, specs);
+                    }
+                    try {
+                        waiter.awaitSignalOrTimer();
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return queryEachOnce(tenant, specs);
+                    }
+                    List<WaitResult> again = queryEachOnce(tenant, specs);
+                    if (!again.isEmpty()) {
+                        return again;
+                    }
                 }
-                try {
-                    waiter.awaitSignalOrTimer();
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    return queryEachOnce(tenant, specs);
-                }
-                List<WaitResult> again = queryEachOnce(tenant, specs);
-                if (!again.isEmpty()) {
-                    return again;
-                }
+            } finally {
+                waitRegistry.releaseParkSlot(null);
             }
         } finally {
-            waitRegistry.releaseParkSlot(null);
             waiter.release();
         }
     }
@@ -923,7 +971,10 @@ public final class TupleRepository {
 
     /** {@code in(subspace, keys_pattern, *, claimant, lease_s?, timeout_s=0) -> (Tuple, claim_id) | None} —
      *  blocks up to {@code timeoutSeconds}. {@code leaseSecondsOrNull} nullable
-     *  (nexus-xapt8): see {@link #inp}. */
+     *  (nexus-xapt8): see {@link #inp}. The {@link TupleWaitRegistry#register} call
+     *  this makes is released ({@link TupleWaitRegistry.Waiter#release}) on EVERY
+     *  exit -- an immediate hit and an exception from the first claim attempt
+     *  included, not only the park-loop path (nexus-rplay). */
     public Optional<ClaimedTuple> in(String tenant, String subspace, Map<String, String> pattern,
                                       String claimant, Long leaseSecondsOrNull, long timeoutSeconds) {
         validateTimeout(timeoutSeconds);
@@ -931,30 +982,33 @@ public final class TupleRepository {
             return claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
         }
         TupleWaitRegistry.Waiter waiter = waitRegistry.register(tenant, subspace);
-        Optional<ClaimedTuple> found = claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
-        if (found.isPresent()) {
-            return found;
-        }
-        waitRegistry.tryAcquireParkSlot(claimant);
         try {
-            long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
-            while (true) {
-                if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
-                    return claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
+            Optional<ClaimedTuple> found = claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
+            if (found.isPresent()) {
+                return found;
+            }
+            waitRegistry.tryAcquireParkSlot(claimant);
+            try {
+                long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+                while (true) {
+                    if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
+                        return claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
+                    }
+                    try {
+                        waiter.awaitSignalOrTimer();
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
+                    }
+                    Optional<ClaimedTuple> again = claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
+                    if (again.isPresent()) {
+                        return again;
+                    }
                 }
-                try {
-                    waiter.awaitSignalOrTimer();
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    return claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
-                }
-                Optional<ClaimedTuple> again = claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
-                if (again.isPresent()) {
-                    return again;
-                }
+            } finally {
+                waitRegistry.releaseParkSlot(claimant);
             }
         } finally {
-            waitRegistry.releaseParkSlot(claimant);
             waiter.release();
         }
     }

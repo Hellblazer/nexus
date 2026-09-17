@@ -36,7 +36,13 @@ import java.util.function.LongSupplier;
  * whose OWN first (non-blocking) query already found a match never touches
  * the cap at all. {@code rd} has no claimant (its signature carries none)
  * and only ever consumes the global slot; {@code in}/{@code inp} consume
- * both the global slot and their claimant's own slot.
+ * both the global slot and their claimant's own slot. {@code rd}/{@code in}/
+ * {@code waitAny} each release their {@link #register}/{@link #registerMulti}
+ * registration on EVERY exit -- an immediate first-query hit and an exception
+ * thrown by that first query included, not only the park-loop path -- because
+ * an un-released registration leaves {@link Group#waiters} permanently
+ * non-zero and its group permanently ineligible for {@link #evictIdleGroups}
+ * (nexus-rplay, the register/release leak fix).
  *
  * <p><b>Lost-wakeup closure (RDR-205 Phase 1 review, bead nexus-em75s.7).</b>
  * {@link #register} alone records nothing a signal can observe — a {@code
