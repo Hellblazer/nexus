@@ -3851,6 +3851,7 @@ nexus-kcm6c
 nexus-kcm6c.1
 nexus-kcq6
 nexus-kcy2
+nexus-kdxyv
 nexus-ke45f
 nexus-ke45f.1
 nexus-kecp7
@@ -5214,6 +5215,7 @@ nexus-rplay.21
 nexus-rplay.22
 nexus-rplay.23
 nexus-rplay.24
+nexus-rplay.25
 nexus-rplay.3
 nexus-rplay.4
 nexus-rplay.5
@@ -5605,6 +5607,7 @@ nexus-tk070.p5b
 nexus-tk070.p6a
 nexus-tk070.p6b
 nexus-tk070.p7
+nexus-tk2cz
 nexus-tkabp
 nexus-tkd7t
 nexus-tl5qh

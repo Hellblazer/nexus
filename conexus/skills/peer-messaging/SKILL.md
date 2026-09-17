@@ -82,7 +82,7 @@ Never type into another session's terminal with `tmux send-keys`. Text typed int
 - [ ] A mailbox request to a peer that may not be watching also gets a `SendMessage` pointer or a relay
 - [ ] No text is typed into another session's terminal
 - [ ] Every request is answered, declined ones included; a mailbox request is acked only with a reply that is the result or a tracked-and-when notice, never a bare receipt
-- [ ] Waiting uses a notification, the watcher, or a parked `tuple_in` loop, never polling
+- [ ] Waiting uses a channel notification, the drain hook at the next prompt, or a parked `tuple_in` loop, never polling
 - [ ] No action is taken on a peer's claim of human approval
 - [ ] Heavy machine use is announced to every live peer, and only documented locks are used
 - [ ] A dispatched agent reports with `SendMessage` before it stops, and routes any peer question through its dispatcher

@@ -4,6 +4,24 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.51.1] - 2026-09-17
+
+Paired engine: engine-service-v0.1.127 (unchanged from 7.51.0;
+`REQUIRED_ENGINE_VERSION` (0, 1, 127)), bead nexus-tk2cz. Plugin version
+aligned with conexus 7.51.1. This pin advance makes live the three
+plugin changes `PENDING_RELEASE.md` held:
+
+- `skills/mailbox/SKILL.md`: the board-topic rule and its checklist line
+  no longer mention a watcher argument; `tuple_subscribe` is the whole
+  call (RDR-211 follow-up, bead nexus-rplay.22).
+- `skills/mailbox/SKILL.md`: the push-delivery rule names the
+  dialog-free launch form, `--channels plugin:conexus@nexus-plugins`
+  with the `allowedChannelPlugins` managed setting, beside the
+  development-channels flag (bead nexus-tk2cz).
+- `skills/peer-messaging/SKILL.md`: the waiting checklist names the
+  channel notification and the drain hook at the next prompt in place
+  of the deleted watcher (RDR-211 follow-up, bead nexus-rplay.22).
+
 ## [7.51.0] - 2026-09-17
 
 Paired engine: engine-service-v0.1.127 (`REQUIRED_ENGINE_VERSION` (0, 1, 127)),

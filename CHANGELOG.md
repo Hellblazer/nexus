@@ -6,6 +6,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.51.1] - 2026-09-17
+
+Paired engine: engine-service-v0.1.127 (unchanged from 7.51.0;
+`REQUIRED_ENGINE_VERSION` (0, 1, 127)).
+
+### Fixed
+- **The channel waiter died after its first mailbox delivery in any session
+  with no board topic subscribed (bead nexus-tk2cz).** An empty wait spec
+  (mailbox-only, no board topics) was refused by the engine and read as an
+  engine without wait support, so the waiter gave up after one tick instead
+  of retrying. The startup probe was also sent before Claude Code had
+  registered channel delivery for the session and was lost, leaving the
+  waiter looking dead from the first prompt. The argv gate that detects the
+  plugin-form channel launch now matches whole tokens, so
+  `--channels plugin:conexus@nexus-plugins-dev` no longer satisfies a check
+  meant for `plugin:conexus@nexus-plugins` (`server:nexusdev` is not
+  `server:nexus`). Any other single-tick failure is now logged and retried
+  instead of ending delivery for the rest of the session.
+
+### Changed
+- The dialog-free channel launch form, `--channels
+  plugin:conexus@nexus-plugins` with the `allowedChannelPlugins` managed
+  setting, is documented alongside the development-channels flag. The
+  coordination site page, `tuple-space.md`, and the mailbox and
+  peer-messaging skills no longer describe the deleted Monitor watcher.
+  RDR-211 is closed with its post-mortem.
+
 ## [7.51.0] - 2026-09-17
 
 Paired engine: engine-service-v0.1.127 (`REQUIRED_ENGINE_VERSION` (0, 1, 127);

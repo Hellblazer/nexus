@@ -170,7 +170,7 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 <main>
 <div class="topnav"><span class="eyebrow" style="margin:0">Nexus · coordination</span><a href="tuple-space.html">← The tuple space</a></div>
 <h1>Coordination Between Sessions and Agents</h1>
-<p class="lede">This is how we coordinate our Claude Code sessions and their agents. We ask a session in another repository to do a job, correct a background agent while it works, and check that every agent reported. The requests, the corrections, and the agents' reports are records in the Nexus tuple space, which is built on David Gelernter's Linda model. The sender continues its own work, and the reader acts when it is ready. You ask Claude in your own words, and Claude, the hooks, and the watcher do the rest.</p>
+<p class="lede">This is how we coordinate our Claude Code sessions and their agents. We ask a session in another repository to do a job, correct a background agent while it works, and check that every agent reported. The requests, the corrections, and the agents' reports are records in the Nexus tuple space, which is built on David Gelernter's Linda model. The sender continues its own work, and the reader acts when it is ready. You ask Claude in your own words, and Claude, the hooks, and the channel do the rest.</p>
 <p class="note">Words like <span class="ph">&lt;PEER NAME&gt;</span> are placeholders, and the prompts are examples. <a href="tuple-space.html">The Nexus Tuple Space</a> explains the operations underneath.</p>
 
 <div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><table class="terms">
@@ -190,10 +190,10 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 <tr><td>dispatch file</td><td>A local file for each session, outside the tuple space. Hooks add a row when an agent is expected, when it starts, and when it reports.</td></tr>
 <tr><td>census</td><td>The <code>expectations_census</code> report. It compares the agents a session expected with the agents that started and the agents that reported.</td></tr>
 <tr><td>hook</td><td>A script that Claude Code runs at a fixed point: session start, each prompt, and agent start and stop.</td></tr>
-<tr><td>drain hook</td><td>The hook that runs at each prompt. It takes and acks whatever is still waiting and shows it to Claude, watcher or no watcher.</td></tr>
+<tr><td>drain hook</td><td>The hook that runs at each prompt. It takes and acks whatever is still waiting and shows it to Claude, whether or not the channel delivered it first.</td></tr>
 <tr><td>SendMessage</td><td>The Claude Code tool that sends a message to an agent by name or to a live session.</td></tr>
-<tr><td>watcher</td><td>The session's own nexus MCP server, once its instance mailbox is subscribed. It pushes new messages over the Claude Code channel.</td></tr>
-<tr><td>ping</td><td>The channel notification the watcher pushes for a new message or board post. It names where the tuple is and, for a message, a claim id to ack or nack — never the body.</td></tr>
+<tr><td>channel</td><td>The push path from a session's own nexus MCP server to Claude, opt-in per launch. Once the session subscribes, it notifies Claude when a new message or board post arrives.</td></tr>
+<tr><td>ping</td><td>The channel notification for a new message or board post. It names where the tuple is and, for a message, a claim id to ack or nack — never the body.</td></tr>
 <tr><td>rendezvous</td><td>A meeting through a tuple: one side writes it, and the other reads it or waits for it. The two sides need not be running at the same time.</td></tr>
 <tr><td>take operation</td><td>A <code>tuple_in</code> call. It gives a message to one reader only, for a limited time called the lease.</td></tr>
 <tr><td>ack, nack</td><td><code>tuple_ack</code> removes a message that the reader took. <code>tuple_nack</code> returns the message to the mailbox.</td></tr>
@@ -207,7 +207,7 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 <p class="why">For work that must not get lost, or that other sessions need to see, we use the tuple space, the coordination part of Nexus persistent memory. Its records live in the engine, outside every conversation, so they survive compaction and <code>/clear</code>, and every session on the engine can read them.</p>
 
 <figure class="fig">
-<svg viewBox="0 0 760 256" role="img" aria-label="A timeline. Your session writes a request and keeps working. The request tuple waits in the engine while the peer session is busy with its own work. The peer takes the request and acks it with a reply. The reply tuple waits until your session's watcher pings, and your session takes the reply. Neither session stops to wait for the other.">
+<svg viewBox="0 0 760 256" role="img" aria-label="A timeline. Your session writes a request and keeps working. The request tuple waits in the engine while the peer session is busy with its own work. The peer takes the request and acks it with a reply. The reply tuple waits until your session's channel pings, and your session takes the reply. Neither session stops to wait for the other.">
   <text x="20" y="54" class="lbl">your session</text>
   <text x="20" y="132" class="lbl">engine</text>
   <text x="20" y="204" class="lbl">peer session</text>
@@ -236,7 +236,7 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
   <line x1="150" y1="240" x2="685" y2="240" class="dash"/>
   <text x="740" y="244" text-anchor="end" class="sm">time →</text>
 </svg>
-<figcaption>Your session writes a request and keeps working. The request waits in the engine until the peer is ready. The reply waits until your watcher pings.</figcaption>
+<figcaption>Your session writes a request and keeps working. The request waits in the engine until the peer is ready. The reply waits until your channel pings.</figcaption>
 </figure>
 
 <p>We use SendMessage when we need to inject something into a live agent or session, and we use it together with the tuple space. When the harness delivers an agent's report, the hooks also record that report in the ledger, as a tuple. What the tuple space adds is this persistent record of an interaction. Nexus keeps long-form content in its memory, and a tuple points to that content by reference, not by carrying it as its own value. So a reader learns that something is there without having to consume the thing itself. We formalize this as a simple exchange with three steps: <em>send</em>, <em>continue</em>, and <em>react</em> to the answer.</p>
@@ -266,7 +266,7 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 Send <span class="ph">&lt;PEER NAME&gt;</span> a note that <span class="ph">&lt;THE RELEASE IS PUBLISHED&gt;</span>.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What happens</div>
 <p>Claude calls <code>mailbox_send</code> with the peer's name, the kind <code>request</code>, and a new correlation id. The tool looks the name up in the directory and writes to the mailbox of the session that holds it. The request waits there until the peer is ready. The peer takes it, does the work, and acks it with a reply. The reply keeps the correlation id, which is how your session pairs the answer with its question.</p>
-<p>Your session does not wait. When the reply arrives, minutes or days later, the watcher pings with the claim already taken, and Claude acks it at its next step. If no watcher runs, the drain hook delivers it at your next prompt. A note needs no reply: it waits in the peer's mailbox for up to seven days, and the peer reads it when its own work allows.</p>
+<p>Your session does not wait. When the reply arrives, minutes or days later, the channel pings with the claim already taken, and Claude acks it at its next step. If the channel never reaches Claude, the drain hook delivers it at your next prompt. A note needs no reply: it waits in the peer's mailbox for up to seven days, and the peer reads it when its own work allows.</p>
 <div class="see">What you see</div>
 <details class="gloss out"><summary>The send</summary><pre class="out">mailbox_send  to: <b>nexus-8c</b>   kind: request   correlation_id: r-41
 → {"to": "<b>cdeb12b5-…</b>", "address_kind": "<b>session</b>", "from": "5b354c36-…"}</pre></details>
@@ -286,12 +286,12 @@ tuple_ack  … → Acked</pre></details>
 <details class="gloss out"><summary>A ping from a session on another machine</summary><pre class="out"><span class="c"># the send, on the second host</span>
 → {"tuple_id": "8ce10d62…", "to": "<b>5b354c36-d317-4a00-aa15-f567e65a7209</b>", "address_kind": "session", "from": "<b>5cab61d9-3c73-435c-b2f8-c75546df8db7</b>"}
 
-<span class="c"># the ping, in this session</span>
-nx-tuple-watch: new mail at mailbox/5b354c36-d317-4a00-aa15-f567e65a7209 from=5cab61d9-3c73-435c-b2f8-c75546df8db7 kind=<b>notice</b> correlation_id=… tuple_id=8ce10d62…. Drain it now …</pre></details>
+<span class="c"># the notification, in this session</span>
+nexus mailbox message: subspace mailbox/5b354c36-…, tuple 8ce10d62…, claim <b>91be7a44…</b> held by waiter:5b354c36-…. Read it with tuple_rd on that subspace, then tuple_ack (with a reply for a request), tuple_nack, or tuple_release with the claim id.</pre></details>
 
 <h3>Good practice</h3>
 <ul class="plain">
-<li>Send, then continue, because the watcher tells you when the reply arrives.</li>
+<li>Send, then continue, because the channel pings you when the reply arrives.</li>
 <li>Put long content in memory and send its title. A message is a pointer, and its body holds at most 4096 bytes.</li>
 <li>Use a new correlation id for every request, so that the reply pairs with it.</li>
 <li>Send to a name only when one live session holds it, because the name is looked up at send time. Otherwise, send to the session id.</li>
@@ -375,7 +375,7 @@ nx doctor  <span class="c"># includes six tuple rows</span></pre><button class="
 <tr><td>expired_unpurged</td><td>Past its time limit, so the next sweep removes it.</td></tr>
 </table></details>
 <p><code>nx doctor</code> adds six tuple rows. Three are older: the oldest untaken message, tuple-table cleanup, and time since the last sweep. Three came with RDR-211: how full the engine's wait slots are, how deep a work queue has grown, and whether this session's own channel push is alive. A healthy space shows small numbers in the first three and no warning in the other three.</p>
-<p>After <code>/clear</code> or <code>/resume</code>, Claude's session gets a new watcher for the new session id, and mail sent to the old session still arrives. <a href="#names">The appendix</a> shows how.</p>
+<p>After <code>/clear</code> or <code>/resume</code>, Claude's session subscribes again under the new session id, and mail sent to the old session still arrives. <a href="#names">The appendix</a> shows how.</p>
 </section>
 
 <!-- ============ 6 ============ -->
@@ -400,9 +400,9 @@ nx doctor  <span class="c"># includes six tuple rows</span></pre><button class="
 <details class="gloss"><summary>How a message arrives</summary><div style="padding:0 14px 12px">
 <p>A message arrives while Claude works on something else, and nothing stops. If Claude's session was launched with the Claude Code channel enabled, its own nexus MCP server takes the message for it and pushes a notification naming where it is and a claim id, never its body. Claude reads the body on purpose with <code>tuple_rd</code>, then answers with <code>tuple_ack</code> or, if it cannot act on the message, <code>tuple_nack</code>. If the channel was never enabled, or nobody answers the notification, the drain hook takes, acks and shows whatever is still waiting at Claude's next prompt, so a message reaches Claude either way.</p>
 <figure class="fig">
-<svg viewBox="0 0 760 262" role="img" aria-label="The watcher takes one message from the mailbox and pushes Claude a notification naming the subspace and a claim id, never the body. Claude reads the body on purpose, then answers with an ack or a nack. At the next prompt, the drain hook takes and acks any message still waiting and shows its body to Claude.">
+<svg viewBox="0 0 760 262" role="img" aria-label="The session's own nexus MCP server takes one message from the mailbox and pushes Claude a notification naming the subspace and a claim id, never the body. Claude reads the body on purpose, then answers with an ack or a nack. At the next prompt, the drain hook takes and acks any message still waiting and shows its body to Claude.">
   <rect class="bag" x="290" y="18" width="180" height="46" rx="4"/><text x="380" y="38" text-anchor="middle">mailbox</text><text x="380" y="55" text-anchor="middle" class="lbl">in the engine</text>
-  <rect class="box" x="40" y="116" width="200" height="48" rx="4"/><text x="140" y="136" text-anchor="middle">watcher</text><text x="140" y="153" text-anchor="middle" class="lbl">holds at most one claim</text>
+  <rect class="box" x="40" y="116" width="200" height="48" rx="4"/><text x="140" y="136" text-anchor="middle">channel</text><text x="140" y="153" text-anchor="middle" class="lbl">holds at most one claim</text>
   <rect class="box" x="520" y="116" width="200" height="48" rx="4"/><text x="620" y="136" text-anchor="middle">drain hook</text><text x="620" y="153" text-anchor="middle" class="lbl">takes and acks at the next prompt</text>
   <rect class="you" x="280" y="200" width="200" height="48" rx="4"/><text x="380" y="220" text-anchor="middle">Claude</text><text x="380" y="237" text-anchor="middle" class="lbl">tuple_rd, then tuple_ack or tuple_nack</text>
   <line x1="330" y1="64" x2="170" y2="116" class="dash"/>
@@ -414,15 +414,15 @@ nx doctor  <span class="c"># includes six tuple rows</span></pre><button class="
   <text x="226" y="212" text-anchor="end" class="lbl">notification: subspace + claim id</text>
   <text x="540" y="214" class="lbl">shows the body</text>
 </svg>
-<figcaption>The watcher takes the message and pushes a reference to it: where it is and a claim id, never the body. Claude reads the body itself, on purpose, then answers with the ack or nack that id names. If nothing answers in time, the drain hook takes, acks and shows it instead, at the next prompt.</figcaption>
+<figcaption>The channel takes the message and pushes a reference to it: where it is and a claim id, never the body. Claude reads the body itself, on purpose, then answers with the ack or nack that id names. If nothing answers in time, the drain hook takes, acks and shows it instead, at the next prompt.</figcaption>
 </figure>
-<p>The channel is opt-in, a Claude Code research preview: launching with <code>--dangerously-load-development-channels server:nexus</code> confirms once, at a one-keystroke dialog, on every launch. Once it's live, the watcher holds at most one claimed message at a time — nothing is taken ahead of an answer. It renews that claim and re-sends the same notification every 150 seconds while it waits, up to five times, then releases the message back to the mailbox unconsumed, for the drain hook to pick up at Claude's next prompt. This is deliberate back pressure, one message at a time, not a stream: it optimizes for a correct handoff of the message in front of Claude, not for throughput.</p>
-<p>A notification names only what the server already controls or has verified: the subspace, the tuple id and the claim id, so no sender's content ever rides along unread. Claude never calls <code>tuple_in</code> for a pushed message, since the watcher already holds the claim named in the notification. It does call <code>tuple_rd</code> first, to read the body on purpose, the same deliberate step a pull-based read always took. Then it calls <code>tuple_ack</code>, with a reply if one is due, and the engine writes the reply and consumes the message in one transaction. A <code>tuple_nack</code> returns the message to the mailbox for another try and counts as one failed attempt, the same as a lease that lapses with nobody renewing it.</p>
+<p>The channel is opt-in, a Claude Code research preview: launching with <code>--dangerously-load-development-channels server:nexus</code> confirms once, at a one-keystroke dialog, on every launch, and <code>--channels plugin:conexus@nexus-plugins</code> skips the dialog once the plugin is on Claude Code's channel allowlist (the <code>allowedChannelPlugins</code> managed setting). Once it's live, the session's own nexus MCP server holds at most one claimed message at a time — nothing is taken ahead of an answer. It renews that claim and re-sends the same notification every 150 seconds while it waits, up to five times, then releases the message back to the mailbox unconsumed, for the drain hook to pick up at Claude's next prompt. This is deliberate back pressure, one message at a time, not a stream: it optimizes for a correct handoff of the message in front of Claude, not for throughput.</p>
+<p>A notification names only what the server already controls or has verified: the subspace, the tuple id and the claim id, so no sender's content ever rides along unread. Claude never calls <code>tuple_in</code> for a pushed message, since the channel already holds the claim named in the notification. It does call <code>tuple_rd</code> first, to read the body on purpose, the same deliberate step a pull-based read always took. Then it calls <code>tuple_ack</code>, with a reply if one is due, and the engine writes the reply and consumes the message in one transaction. A <code>tuple_nack</code> returns the message to the mailbox for another try and counts as one failed attempt, the same as a lease that lapses with nobody renewing it.</p>
 <p>The drain hook is the safety net. At each prompt it takes and acks up to ten waiting messages and shows their bodies to Claude, whether or not the channel ever reached Claude first.</p>
 </div></details>
 
 <details class="gloss" id="names"><summary>Names, addresses, and a changed session</summary><div style="padding:0 14px 12px">
-<p>The hooks and the watcher keep every session reachable by id and by name, even when a session clears or resumes.</p>
+<p>The hooks and the channel keep every session reachable by id and by name, even when a session clears or resumes.</p>
 <p>At every start, resume, clear, and compact, the session-start hook gives Claude the session id, its main mailbox address, and a one-line subscribe instruction. It also writes a marker file, which the session's own MCP server later reads to learn that its session has changed. Claude calls <code>ListAgents</code> to learn the session's name, which the harness chooses. Then it calls <code>tuple_subscribe("mailbox/&lt;name&gt;")</code>.</p>
 <p>The subscribed mailbox set covers <code>mailbox/&lt;session id&gt;</code> (from the start) and <code>mailbox/&lt;name&gt;</code> (once subscribed). Subscribing also publishes <code>directory/&lt;name&gt;</code> with the session id and renews the entry every minute, so peers can find the session by name. An entry lasts five minutes, which means a name points only at a live session and is free again soon after the session ends.</p>
 <details class="gloss out"><summary>What Claude sees at session start</summary><pre class="out">Nexus ready (session: <b>5b354c36-d317-4a00-aa15-f567e65a7209</b>).
@@ -442,32 +442,32 @@ This session is <b>nexus-4a</b> [102a61] — the name other sessions use to mess
 <li><strong>Schema.</strong> The engine refuses a tuple for a subspace that has no template, and a tuple with an undeclared, missing, or disallowed key or dimension.</li>
 <li><strong>Retention.</strong> A message lasts at most seven days. Ledger records last 90 days, and nobody can take them.</li>
 <li><strong>Size.</strong> A message body is at most 4096 bytes. Each key or dimension value is at most 256 bytes.</li>
-<li><strong>Parking.</strong> A take operation on an empty mailbox can park for up to 25 seconds. A watched session seldom needs this.</li>
-<li><strong>Directory.</strong> An entry lasts five minutes, and the watcher writes it again every minute. <code>mailbox_send</code> refuses a name with no live holder or with two holders. <code>nx tuple directory &lt;name&gt;</code> shows the holders.</li>
-<li><strong>Watcher.</strong> The watcher holds at most one claimed message at a time. It renews that claim and re-sends the same notification every 150 seconds while unanswered, at most five times, then releases the message to the drain hook.</li>
-<li><strong>Drain hook.</strong> The drain hook takes at most ten messages at one prompt and uses at most six seconds. It repeats the arm instruction at most every ten minutes, or every minute after a failed attempt.</li>
+<li><strong>Parking.</strong> A take operation on an empty mailbox can park for up to 25 seconds. A session using the channel seldom needs this.</li>
+<li><strong>Directory.</strong> An entry lasts five minutes, and the subscription renews it every minute. <code>mailbox_send</code> refuses a name with no live holder or with two holders. <code>nx tuple directory &lt;name&gt;</code> shows the holders.</li>
+<li><strong>Channel.</strong> It holds at most one claimed message at a time. It renews that claim and re-sends the same notification every 150 seconds while unanswered, at most five times, then releases the message to the drain hook.</li>
+<li><strong>Drain hook.</strong> The drain hook takes at most ten messages at one prompt and uses at most six seconds.</li>
 <li><strong>Ledger writes.</strong> The dispatch file belongs to one session, and the ledger is the copy every session can read. A failed ledger write never stops the agent.</li>
 <li><strong>Sweep.</strong> Every six hours, the engine returns claims whose lease ended and removes expired rows.</li>
-<li><strong>/branch.</strong> <code>/branch</code> runs no session-start hook, so the drain hook moves the marker at the branch's first prompt, and the old watcher stops.</li>
+<li><strong>/branch.</strong> <code>/branch</code> runs no session-start hook, so the drain hook moves the marker at the branch's first prompt, and the old session's channel push stops.</li>
 <li><strong>Health.</strong> <code>nx doctor</code> shows six tuple rows. Lesson 5 lists them.</li>
 </ul>
 </div></details>
 <details class="gloss"><summary>Who does each step</summary><div style="padding:0 14px 12px">
-<p class="note"><span class="who">hook</span>, <span class="who">watcher</span>, <span class="who">engine</span>, and <span class="who">harness</span> steps run by themselves. <span class="who cl">Claude</span>, <span class="who cl">agent</span>, and <span class="who cl">peer</span> steps are tool calls that a model makes.</p>
+<p class="note"><span class="who">hook</span>, <span class="who">channel</span>, <span class="who">engine</span>, and <span class="who">harness</span> steps run by themselves. <span class="who cl">Claude</span>, <span class="who cl">agent</span>, and <span class="who cl">peer</span> steps are tool calls that a model makes.</p>
 <div class="tbl"><table class="steps">
 <tr><th>By</th><th>Step</th></tr>
 <tr><td><span class="who">hook</span></td><td>Gives Claude the session id and the subscribe instruction, and writes the session marker.</td></tr>
 <tr><td><span class="who cl">Claude</span></td><td>Learns the session's name from <code>ListAgents</code> and subscribes its instance mailbox once.</td></tr>
-<tr><td><span class="who">watcher</span></td><td>Publishes and renews the directory entry, holds one claimed message at a time, and pings on it and on each board post.</td></tr>
+<tr><td><span class="who">channel</span></td><td>Publishes and renews the directory entry, holds one claimed message at a time, and pings on it and on each board post.</td></tr>
 <tr><td><span class="who">engine</span></td><td>Keeps each message in its mailbox for up to seven days, until a reader acks it.</td></tr>
-<tr><td><span class="who cl">Claude</span></td><td>Sends requests and corrections. Acks or nacks a message the watcher pings, or takes one itself when checking a mailbox by hand.</td></tr>
+<tr><td><span class="who cl">Claude</span></td><td>Sends requests and corrections. Acks or nacks a message the channel pings, or takes one itself when checking a mailbox by hand.</td></tr>
 <tr><td><span class="who cl">peer</span></td><td>Takes a request and acks it with a reply.</td></tr>
-<tr><td><span class="who">hook</span></td><td>Takes and acks whatever is still waiting at each prompt, watcher or no watcher.</td></tr>
+<tr><td><span class="who">hook</span></td><td>Takes and acks whatever is still waiting at each prompt, channel or no channel.</td></tr>
 <tr><td><span class="who">hook</span></td><td>Writes the EXPECT, START, BLOCKED, and REPORTED rows to the dispatch file, and the ledger records with any <code>VERIFY:</code> line.</td></tr>
 <tr><td><span class="who cl">agent</span></td><td>Reads its own mailbox before it reports.</td></tr>
 <tr><td><span class="who">harness</span></td><td>Delivers a background agent's report to the session.</td></tr>
 <tr><td><span class="who cl">Claude</span></td><td>Runs the census.</td></tr>
-<tr><td><span class="who">watcher</span></td><td>Ends with its MCP server after <code>/clear</code> or <code>/resume</code>. Its directory entry lapses on its own within five minutes.</td></tr>
+<tr><td><span class="who">channel</span></td><td>Ends with its own MCP server after <code>/clear</code> or <code>/resume</code>. Its directory entry lapses on its own within five minutes.</td></tr>
 <tr><td><span class="who">hook</span></td><td>Drains the old session's mailbox, and moves the marker after <code>/branch</code>.</td></tr>
 </table></div>
 </div></details>

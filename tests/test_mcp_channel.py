@@ -134,6 +134,29 @@ class TestChannelArgvGate:
         argv = "claude --dangerously-load-development-channels server:nexus"
         assert channel.detect_channel_argv(123, argv_reader=lambda _pid: argv)
 
+    def test_plugin_form_is_detected_whatever_the_marketplace(self) -> None:
+        """Bead nexus-tk2cz (measured 2026-09-17): a plugin on the effective
+        channel allowlist loads with `--channels plugin:conexus@<marketplace>`
+        and no dialog; the argv leg must prove that launch too, or every
+        such session falls back to the probe."""
+        for argv in (
+            "claude --channels plugin:conexus@nexus-plugins",
+            "claude --dangerously-load-development-channels plugin:conexus@local-dev",
+        ):
+            assert channel.detect_channel_argv(123, argv_reader=lambda _pid, a=argv: a), argv
+
+    def test_a_server_whose_name_merely_starts_with_nexus_is_not_ours(self) -> None:
+        for argv in (
+            "claude --dangerously-load-development-channels server:nexusdev",
+            "claude --channels server:nexus-catalog",
+        ):
+            assert not channel.detect_channel_argv(123, argv_reader=lambda _pid, a=argv: a), argv
+
+    def test_another_plugins_channel_is_not_ours(self) -> None:
+        assert not channel.detect_channel_argv(
+            123, argv_reader=lambda _pid: "claude --channels plugin:telegram@claude-plugins-official",
+        )
+
     def test_plain_launch_is_not_detected(self) -> None:
         assert not channel.detect_channel_argv(123, argv_reader=lambda _pid: "claude --resume abc123")
 
@@ -231,13 +254,14 @@ class TestChannelWaiterFakeStore:
         sender = _FakeSender()
         waiter = channel.ChannelWaiter(
             session_id, _fake_store_factory(fake), _subs(session_id), channel_live=False, sender=sender,
+            probe_delay_s=0,
         )
         assert not waiter.channel_live.is_set()
         assert waiter.status()["proof"] == "none"
         run_task = asyncio.create_task(waiter.run())
         await asyncio.sleep(0.05)
-        # Sent exactly the one probe notification, never claimed anything.
-        assert any(meta.get("kind") == "channel_probe" for _content, meta in sender.calls)
+        # Sent exactly one probe notification so far, never claimed anything.
+        assert sum(1 for _content, meta in sender.calls if meta.get("kind") == "channel_probe") == 1
         assert fake.in_calls == []
         waiter.note_probe_ack()
         await asyncio.sleep(0.05)
@@ -257,6 +281,7 @@ class TestChannelWaiterFakeStore:
         fake.in_results[f"mailbox/{session_id}"] = (row, "claim-1")
         waiter = channel.ChannelWaiter(
             session_id, _fake_store_factory(fake), _subs(session_id), channel_live=False, sender=_FakeSender(),
+            probe_delay_s=0,
         )
         run_task = asyncio.create_task(waiter.run())
         await asyncio.sleep(0.1)
@@ -297,7 +322,11 @@ class TestChannelWaiterFakeStore:
         fake.in_results[addr] = (row2, "claim-2")
         await waiter.tick()
         assert len(fake.in_calls) == 1, "a second claim was attempted before the first was credited"
-        assert not any(spec.subspace == addr for specs, _t in fake.wait_calls[-1:] for spec in specs)
+        # With the one mailbox held out and no board subscribed there is
+        # nothing to park on, so the tick sleeps instead of sending the
+        # engine an empty `wait` (bead nexus-tk2cz): no new wait call at all.
+        assert len(fake.wait_calls) == 1
+        assert not any(spec.subspace == addr for specs, _t in fake.wait_calls[1:] for spec in specs)
 
         # The credit arrives (as tuple_ack/tuple_nack would supply it) --
         # only NOW may the second message be claimed.
@@ -1012,3 +1041,120 @@ class TestChannelStatusPublish:
         path.parent.mkdir(parents=True)
         path.write_text("not json", encoding="utf-8")
         assert channel.read_channel_status(tmp_path, "sess-1") is None
+
+
+class TestWaiterSurvivesMailboxOnlySessions:
+    """Bead nexus-tk2cz, found live 2026-09-17 on a session with no board
+    topic: the first mailbox delivery ended the waiter for good. With a
+    claim outstanding every mailbox is held out of the wait, so the spec
+    list was empty; the engine refuses an empty `wait` and the waiter read
+    that refusal as "engine without wait"."""
+
+    @pytest.mark.asyncio
+    async def test_outstanding_claim_with_no_board_never_sends_an_empty_wait(self) -> None:
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        row = _row("t1", addr, "hello")
+        fake.rd_results[addr] = [row]
+        fake.in_results[addr] = (row, "claim-1")
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=True, sender=sender,
+            wait_timeout_s=1,
+        )
+        await waiter.tick()  # parks on the one mailbox, claims t1, pushes its reference
+        assert len(fake.wait_calls) == 1
+        assert waiter.status()["unacked"] == 1
+        await waiter.tick()  # nothing to park on: must sleep, never call wait([])
+        assert len(fake.wait_calls) == 1, "an empty wait spec was sent to the engine"
+        assert waiter._stopped is False  # noqa: SLF001
+        assert waiter.status()["unacked"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_refused_wait_does_not_stop_the_waiter(self) -> None:
+        """A 400 (or any non-404 status) from `wait` is a fault of one
+        round-trip; `run()` logs, backs off and ticks again. Only the bare
+        404 of an engine without the route stops the loop."""
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        fake.wait_raises = httpx.HTTPStatusError(
+            "400", request=httpx.Request("POST", "http://x/v1/tuples/wait"),
+            response=httpx.Response(400, request=httpx.Request("POST", "http://x/v1/tuples/wait")),
+        )
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=True,
+            tick_error_backoff_s=0.01,
+        )
+        run_task = asyncio.create_task(waiter.run())
+        await asyncio.sleep(0.4)
+        assert waiter.status()["alive"] is True
+        assert waiter._stopped is False  # noqa: SLF001
+        assert len(fake.wait_calls) >= 2, "the loop must keep ticking through a refused wait"
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+    @pytest.mark.asyncio
+    async def test_a_store_exception_in_a_tick_does_not_end_the_loop(self) -> None:
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        fake.wait_raises = RuntimeError("engine hiccup")
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=True,
+            tick_error_backoff_s=0.01,
+        )
+        run_task = asyncio.create_task(waiter.run())
+        await asyncio.sleep(0.4)
+        assert waiter.status()["alive"] is True
+        assert len(fake.wait_calls) >= 2
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+
+class TestProbeTiming:
+    """Bead nexus-tk2cz: Claude Code registers channel delivery shortly
+    after the connection is up (0.5 s measured), so the probe is delayed
+    and, unanswered, sent a second and last time."""
+
+    @pytest.mark.asyncio
+    async def test_probe_waits_for_the_delay_then_resends_once(self) -> None:
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=False, sender=sender,
+            probe_delay_s=0.05, probe_resend_after_s=0.05,
+        )
+        run_task = asyncio.create_task(waiter.run())
+        await asyncio.sleep(0.02)
+        assert sender.calls == [], "the probe must not go out before the registration delay"
+        await asyncio.sleep(0.25)
+        probes = [m for _c, m in sender.calls if m.get("kind") == "channel_probe"]
+        assert len(probes) == 2, "exactly two probes: the delayed first and one re-send"
+        assert waiter.status()["proof"] == "none"
+        assert fake.in_calls == []
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+    @pytest.mark.asyncio
+    async def test_an_answered_probe_is_not_resent(self) -> None:
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=False, sender=sender,
+            probe_delay_s=0, probe_resend_after_s=0.2,
+        )
+        run_task = asyncio.create_task(waiter.run())
+        await asyncio.sleep(0.02)
+        waiter.note_probe_ack()
+        await asyncio.sleep(0.3)
+        probes = [m for _c, m in sender.calls if m.get("kind") == "channel_probe"]
+        assert len(probes) == 1
+        assert waiter.status()["proof"] == "probe"
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task

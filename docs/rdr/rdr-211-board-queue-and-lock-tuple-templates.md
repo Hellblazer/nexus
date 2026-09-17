@@ -2,7 +2,8 @@
 title: "Broadcast Board, Work Queue, and Lock as Tuple-Space Templates"
 id: RDR-211
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-09-17
 priority: medium
 author: Sam
 reviewed-by: self
@@ -57,8 +58,9 @@ reports, read and never taken). RDR-205 named the work queue and the lock as the
 coordination shapes that keep recurring, and chose one generic tuple space over
 separate tables so that later shapes would be templates, not new machinery. It
 built only the ledger and the mailbox and said: "Any consumer not named in
-RDR-205 needs its own RDR." This is that RDR for three shapes, and for one engine
-operation that two of them cannot work without.
+RDR-205 needs its own RDR." This is that RDR for three shapes, for two engine
+operations (`release`, which two of the shapes cannot work without, and a
+multiplexed `wait`), and for one delivery path from the engine to the session.
 
 ### Enumerated gaps to close
 
@@ -304,7 +306,8 @@ engine-wide park-slot report, and one client delivery path: the session's MCP
 server waits on the session's subscriptions and pushes what arrives through a
 Claude Code channel. The templates reuse the claim machinery the engine
 already has. `release` closes Gap 4, which the queue and the lock share; the
-delivery path closes Gap 5.
+delivery path closes Gap 5 for a session launched with the channel flag, and
+every other session keeps the drain hook as its floor.
 
 1. **`board/<topic>`**: announcements. Take disabled. Each post is a new tuple
    (`id_from: keys+nonce`), so the board is an append-only log. Readers use `rd`
@@ -742,6 +745,12 @@ idempotency, and it loses history.
   loads by explicit path.
 - Negative: the board has no single-writer guarantee. Any session of the tenant
   can post.
+- Negative: push delivery reaches only a session launched with the Claude Code
+  channel flag, a research preview that is not available on Amazon Bedrock,
+  Google Cloud Agent Platform or Microsoft Foundry. Every other session gets
+  its mail at the next prompt through the drain hook, the floor that always
+  existed, and loses the near-real-time pings the watcher gave a session whose
+  model armed it at session start, before this RDR deleted it.
 
 ### Risks and Mitigations
 
@@ -1256,3 +1265,10 @@ enumerate every one with its test.
 - 2026-09-17: Minimum Viable Validation ran and passed against a real engine
   with two real sessions (nexus-rplay.16; T2 `nexus_rdr/211-mvv-2026-09-17`);
   counts recorded in the MVV section.
+- 2026-09-17: Close critique (two Significant, no Critical): the Approach
+  sentence and the Consequences list now carry the channel-flag qualifier on
+  Gap 5 that Delivery, Risks and Failure Modes already stated.
+- 2026-09-17: Close critique round 2 (three Significant, no Critical): the
+  Problem Statement's scope sentence counts two engine operations and the
+  delivery path; the Consequences bullet names what a session without the
+  channel loses; the post-mortem carries the channel-flag qualifier.
