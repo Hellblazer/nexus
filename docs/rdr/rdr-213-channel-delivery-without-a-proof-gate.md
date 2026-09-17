@@ -181,7 +181,8 @@ throwaway engine with real sessions).
   mailbox stats: consumed=5, claimed=0).
 - [x] Re-announcing an unclaimed row at each wake, damped to the cadence in
   Technical Design, does not disturb an idle session more than RDR-211's
-  re-send did. **Status**: Verified, cadence and cap confirmed exactly as
+  re-send did (150 s and 5 are RDR-211's own `DEFAULT_RENEW_INTERVAL_S` and
+  `DEFAULT_MAX_RESENDS`). **Status**: Verified, cadence and cap confirmed exactly as
   designed. **Method**: Spike, live, with the re-announce interval
   temporarily shortened to 60s for the spike (T2
   `nexus_rdr/213-spike-2-reannounce-cadence-2026-09-17`). A row left
@@ -221,8 +222,11 @@ throwaway engine with real sessions).
    announced and not yet gone, 0 or 1 per mailbox), `oldest_pending_age_s`.
    The `proof`, `unacked` and `released` facts go.
 5. **Skills and docs say claim, not read.** The mailbox skill's push rule
-   becomes: on a reference, `tuple_in` your mailbox, act, then ack or nack.
-   The launch flag remains the only opt-in and both forms stay documented.
+   becomes: on a reference, `tuple_in` your mailbox, act, then ack or nack;
+   a row you are not going to act on now is given back with `tuple_release`,
+   never `tuple_nack`, because each announce is a fresh claim decision and
+   the mailbox template dead-letters after three nacks. The launch flag
+   remains the only opt-in and both forms stay documented.
 
 ### Technical Design
 
@@ -335,8 +339,9 @@ the drain hook or a restart mid-work; every lapse counts an attempt against
 - Negative: a message can be referenced by the channel and then rendered in
   full by the drain hook at the next prompt if the session did not claim it
   in between. That is a duplicate pointer, never a duplicate body.
-- Negative: a session must make one more tool call (`tuple_in`) before it can
-  read; the skill text changes and every installed plugin re-learns it at the
+- Negative: the session's two calls change shape: `tuple_in` (which returns
+  the body with the claim) replaces `tuple_rd`, then ack, nack or release as
+  today; the skill text changes and every installed plugin re-learns it at the
   next release.
 
 ### Risks and Mitigations
@@ -348,6 +353,11 @@ the drain hook or a restart mid-work; every lapse counts an attempt against
   ignored message.
   **Mitigation**: the same bound RDR-211 chose for re-sends; the second
   critical assumption measures it.
+- **Risk**: a session nacks a re-announced row it is only deferring; three
+  nacks across the five announces dead-letter the message, a path RDR-211's
+  single held claim never exposed the session to.
+  **Mitigation**: Approach item 5's rule (release, never nack, when deferring)
+  in the skill text and the reference itself; the Test Plan scenario below.
 - **Risk**: the drain hook and a session's `tuple_in` race for the same row.
   **Mitigation**: `in` is atomic; the loser gets nothing and does nothing,
   as the drain hook already handles today.
@@ -361,14 +371,18 @@ the drain hook or a restart mid-work; every lapse counts an attempt against
 - Session claims and then crashes before ack: the lease lapses and the row is
   available again; the drain hook or the next announce picks it up. One
   attempt is spent, as for any claimant.
+- Upgrade from 7.51.1 with a waiter claim outstanding: nothing adopts it; the
+  lease lapses within 300 s and the row is available again.
 
 ## Implementation Plan
 
 ### Prerequisites
 
-- [ ] Both Critical Assumptions verified by the spike named there.
-- [ ] 7.51.1 shipped, so the MVV compares against a live waiter, not the dead
-  one.
+- [x] Both Critical Assumptions verified by the spike named there (T2
+  `nexus_rdr/213-spike-1-session-claims-2026-09-17`,
+  `213-spike-2-reannounce-cadence-2026-09-17`).
+- [x] 7.51.1 shipped 2026-09-17 (tag `v7.51.1`), so the MVV compares against a
+  live waiter, not the dead one.
 
 ### Minimum Viable Validation
 
@@ -388,19 +402,23 @@ for ten minutes: at most five announcements, then silence, doctor row shows
 
 Replace `_maybe_claim_mail` and `_renew_or_release` with the announce table
 and cadence; mailboxes enter the wait spec on every tick. Delete the proof
-gate, the probe and the flag table. Tests before code: mailbox-only session
+gate, the probe and the flag table, including their call sites in
+`src/nexus/mcp/core.py` (the lifespan constructs the waiter with the argv
+result and defines the probe tool). Tests before code: mailbox-only session
 parks on its mailbox; oldest row announced once; re-announce cadence and cap;
 absent row dropped; restart announces once; 404 stops, other errors retry.
 
 #### Step 2: Tools, status record and doctor row
 
-Delete `tuple_channel_probe` and the credit hooks; write the new status
-facts; rewrite `tuples.channel_delivery`. Tool count and deletion census
-tests updated.
+Delete `tuple_channel_probe` (`src/nexus/mcp/core.py`) and the credit hooks;
+write the new status facts; rewrite `tuples.channel_delivery`. Tool count
+(`docs/mcp-servers.md`, the core.py docstring, `tests/test_mcp_package.py`)
+and deletion census tests updated.
 
 #### Step 3: Skills and docs
 
-Mailbox and peer-messaging skills: claim with `tuple_in` on a reference.
+Mailbox and peer-messaging skills: claim with `tuple_in` on a reference;
+release, never nack, a row you are deferring.
 `docs/tuple-space.md`, `web/coordination.html`, `web/tuple-space.html`,
 `docs/architecture.md` module map. RDR-211's Delivery section gains a note
 pointing here.
@@ -432,6 +450,10 @@ None.
 - **Scenario**: the session ignores a reference. **Verify**: re-announced at
   150 s intervals, five times, then silence; the drain hook renders it at the
   next prompt.
+- **Scenario**: the session claims a re-announced row and gives it back with
+  `tuple_release` three times. **Verify**: attempts unchanged, the row still
+  available, never dead-lettered; the same three hand-backs with `tuple_nack`
+  would dead-letter it, which is why the skill says release.
 - **Scenario**: notification dropped by Claude Code (fake sender returns
   false). **Verify**: no claim exists; the row is announced again at the next
   cadence point.
@@ -513,9 +535,6 @@ The MVV is Phase 1's exit, not deferred.
 1. Should the reference name the tuple id at all, given the session claims
    the oldest row rather than a specific one? Naming it lets the session
    check it got what was announced.
-2. Does the mailbox skill keep `tuple_rd` before `tuple_in` (read then
-   claim) or claim first? Claim first is one call fewer and avoids reading a
-   row another claimant takes.
 
 ## Revision History
 
@@ -530,3 +549,9 @@ The MVV is Phase 1's exit, not deferred.
   `nexus_rdr/213-spike-2-reannounce-cadence-2026-09-17`); checkboxes above
   updated accordingly.
 - 2026-09-17: Gate round 1 — PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `bb9e7193b`; critique `nexus_rdr/213-gate-critique-2026-09-17`.
+- 2026-09-17: Gate round 1 fix (research `nexus_rdr/213-research-2`):
+  Prerequisites ticked; the session's two calls stated once (claim returns the
+  body) and Open Question 2 removed; core.py, docs/mcp-servers.md and
+  tests/test_mcp_package.py named in Phase 1; release-never-nack on a deferred
+  re-announce in Approach 5, Risks, the Test Plan and Step 3; the cadence
+  constants and the upgrade lapse stated.
