@@ -193,7 +193,7 @@ above.
 | Engine template schema (TemplateSchema.java) | Yes | Fields: `name`, `keys` (optionally with allowed values), `dimensions` (type, values, required), `id_from` (`keys`, `keys+nonce`, `keys+body`), `id_dims`, `take` (`enabled`, `max_attempts`, `max_lease_seconds`), `retention_seconds`, `max_body_bytes` (lower only, at most 4096). |
 | Engine claim operations (TupleRepository.java) | Yes | `in` uses `FOR NO KEY UPDATE SKIP LOCKED`, oldest first; `ack` consumes and clears the body; `nack` and lease lapse both count an attempt; `renew` does not; no release-without-attempt operation exists. |
 | Engine wake-up (TupleRepository.java) | Yes | `out` and `ackWithReply` call `signalAll(tenant, subspace)` after commit, waking every reader parked on that subspace (lines 440 and 1009). |
-| Client tuple tools (core.py, tuple_cmd.py) | Yes | Subspace-agnostic; new templates need no client change. A new engine operation needs a new tool and CLI verb. |
+| Client tuple tools (core.py, tuple_cmd.py) | Yes | Subspace-agnostic; new templates need no client change. A new engine operation that a session calls needs a new tool and CLI verb; `wait` is called only by the session's own MCP server and gets neither (Open Question 6). |
 
 ### Key Discoveries
 
@@ -269,8 +269,9 @@ above.
   mid-turn is delivered at the next turn. **Status**: Documented (Claude Code
   channels reference, "Events queue into the session and are processed in
   order"; T2 `nexus_rdr/211-research-3`). **Method**: Spike, Phase 1 Step 0,
-  three observations on a real idle session; the spike is empowered to keep
-  the Monitor watcher as the primary path if it fails.
+  three observations on a real idle session; if it fails, the floor (the
+  drain hook) stays the only delivery and Step 3 reduces to the subscription
+  tools and the doctor row.
 - [x] The wait registry can register one waiter in several subspace groups and
   wake it from any of them, without losing a write that lands between the first
   query and the park. `rd` gets that guarantee by registering before it queries
@@ -338,10 +339,11 @@ delivery path closes Gap 5.
    which wakes an idle session into a turn and queues behind a busy one. Mail
    is claimed at delivery on the session's own claimant identity and handed
    over with its claim id, so the session acks or nacks what it was given; a
-   board post is handed over without a claim. The Monitor-driven watcher is
-   retired to a fallback for a session that cannot load the channel, and the
-   `UserPromptSubmit` drain hook stays as the floor (Technical Design,
-   Delivery).
+   board post is handed over without a claim. The server holds the claim,
+   renews it, and re-sends the notification until the session's ack or nack
+   passes through it, so a dropped notification costs nothing. The
+   Monitor-driven watcher and its arming are deleted; the `UserPromptSubmit`
+   drain hook stays as the floor (Technical Design, Delivery).
 8. **Subscriptions.** What the waiter covers is a per-session list the session
    can change while it runs: its own mailboxes by default, board topics added
    and removed by three MCP tools (`tuple_subscribe`, `tuple_unsubscribe`,
@@ -422,37 +424,56 @@ change and gets its own wire-contract ledger entry.
 `capabilities.experimental['claude/channel'] = {}` at initialize, which is what
 makes Claude Code register a listener, and runs one asyncio waiter in its
 lifespan beside the T1 lease refresher. The waiter loops on `wait` over the
-subscriptions with per-subspace cursors. For each new mailbox tuple it claims
-the row with `in` on the session's claimant identity, the same identity the
-session's `tuple_ack` and `tuple_nack` tools use, then sends
-`notifications/claude/channel` with the body as `content` and `meta` carrying
-`subspace`, `from`, `kind`, `correlation_id`, `tuple_id` and `claim_id`. The
-session acts and calls `tuple_ack` (with a reply when the mail was a request)
-or `tuple_nack`. Claude Code does not acknowledge notifications, so a dropped
-one is not detected; it is not lost either: the row stays claimed until its
-lease lapses, then `in` reclaims it and the waiter delivers it again, counting
-an attempt against the mailbox template's cap of three. For each new board
-post the waiter sends the post as `content` with `subspace`, `from`, `kind`
-and `tuple_id`, no claim, and advances that topic's cursor. Notifications
-carry the body up to the tuple body cap of 4096 bytes; a session busy in a
-turn receives everything that arrived, together, at its next turn.
+subscriptions with per-subspace cursors. The declaration itself goes through
+the low-level server's initialization options
+(`create_initialization_options(experimental_capabilities={"claude/channel":
+{}})`), since FastMCP exposes no experimental capabilities of its own. For
+each new mailbox tuple the waiter claims the row with `in` on the session's
+claimant, the address-derived identity the mailbox skill and the drain hook
+already use, then sends `notifications/claude/channel` with the body as
+`content` and `meta` carrying `subspace`, `from`, `kind`, `correlation_id`,
+`tuple_id`, `claim_id` and `claimant`. The session acts and calls `tuple_ack`
+(with a reply when the mail was a request) or `tuple_nack`, passing the claim
+id and claimant back. Claude Code does not acknowledge notifications, so the
+waiter does not rely on delivery: it holds the claim, renews it at half the
+lease (a renew counts no attempt), and, because the session's ack and nack
+run in this same process, it knows whether the ack for its claim id has
+arrived. If none has within a bound it re-sends the same notification.
+Redelivery is a re-notification by the holder and spends no attempt; an
+attempt is spent only when the server process dies and the lease lapses,
+which is when the next server's `in` reclaims the row, so the mailbox
+template's cap of three is reached only by three server deaths on one
+message, and that row is a dead letter the drain hook surfaces once, as
+today. For each new board post the waiter sends the post as `content` with
+`subspace`, `from`, `kind` and `tuple_id`, no claim, and advances that
+topic's cursor; a dropped post notification is not re-sent, the post stays
+readable by `rd` for its retention, and `tuple_subscriptions` shows the
+cursor to re-read from. Notifications carry the body up to the tuple body
+cap of 4096 bytes; a session busy in a turn receives everything that arrived,
+together, at its next turn.
 
 The channel is a Claude Code research preview: a session opts in per launch
 (`--channels server:nexus`, and during the preview a custom server loads only
 with `--dangerously-load-development-channels server:nexus`), the flag
-syntax may change, and the feature is absent on the cloud platforms. So the
-delivery path has a fallback and a floor. Fallback: when the session was not
-launched with the channel, the SessionStart injection arms the existing
-`nx tuple watch` Monitor loop as today; the injection reads one environment
-variable the launcher sets. Floor: the `UserPromptSubmit` drain hook keeps
-claiming and rendering anything unclaimed at the next prompt, so no path
-depends on the model arming anything. Queues and locks are not delivered: a
-worker or a would-be holder waits with `in`, which already wakes on `out`
-and `release`.
+syntax may change, and channels are not available on Amazon Bedrock, Google
+Cloud Agent Platform or Microsoft Foundry. The channel is the only push path.
+The Monitor-driven `nx tuple watch` loop, the SessionStart injection that
+armed it and the 30-minute re-arm rule are deleted, not kept as a fallback:
+two mechanisms for one delivery is the seam this gap names. What remains
+under the channel is the floor: the `UserPromptSubmit` drain hook keeps
+claiming and rendering anything unclaimed at the next prompt, so a session
+launched without the channel still gets its mail, at its next prompt rather
+than at once, and no path depends on the model arming anything. A new
+`nx doctor` row reports whether the channel is declared, the waiter is alive
+and when it last woke, so the absence of push is checkable. Queues and locks
+are not delivered: a worker or a would-be holder waits with `in`, which
+already wakes on `out` and `release`.
 
 **Subscriptions.** The waiter's list is per session. Defaults: `mailbox/<session
 id>` and, once registered, `mailbox/<instance name>`. `tuple_subscribe(subspace)`
-adds a board topic (or any `rd`-able subspace), `tuple_unsubscribe(subspace)`
+adds a board topic or a mailbox address and refuses a take-enabled template's
+subspace (a queue or a lock) with `SchemaViolation` naming `in`, since those
+are never delivered; `tuple_unsubscribe(subspace)`
 removes one, `tuple_subscriptions()` lists the set with each cursor. The list
 lives in T1 scratch under the session id, so a `/resume` restores it and a
 `/clear` starts clean. A change cancels the parked `wait` and re-issues it
@@ -537,7 +558,8 @@ no longer competes with the park cap, which stays first.
 | `release` operation | `nack` and `releaseOrDeadLetter` in TupleRepository.java | Extend: a variant of the release core that does not count an attempt. |
 | Template loading | `TemplateRegistry.RESOURCE_TEMPLATE_PATHS` | Extend: add three paths. |
 | Client tuple tools | src/nexus/mcp/core.py, src/nexus/commands/tuple_cmd.py | Reuse for the templates; add `release`. |
-| Board notifications | src/nexus/tuple_watch.py (mailbox only) | Extend with a read-only board mode on the new `wait` operation. |
+| Delivery to the session | src/nexus/mcp/core.py (the FastMCP server and its lifespan tasks) | Add the channel capability, the `wait` waiter, claim-at-delivery and the subscription tools here. |
+| Mailbox watcher | src/nexus/tuple_watch.py, src/nexus/mailbox_arm.py, the `nx tuple watch` verb, the mailbox skill's arming rule | Delete. The drain hook (conexus/hooks/scripts/mailbox_drain.py) stays as the floor. |
 | Health checks | src/nexus/health.py tuple rows | Extend: two rows, park-slot use and queue depth (Scale and Limits). |
 | Machine-local locks | `scripts/lib/build-lease.sh` and `tests/e2e/lib/lock.sh`, both mkdir-based | Keep. They are out of scope; RDR-205 excluded the build lease from the tuple space by name. |
 
@@ -660,14 +682,16 @@ idempotency, and it loses history.
   as unbounded, so a lock never dead-letters. Every lapse stays in the claim log.
 - **Risk**: the channel is a research preview; its flag may change, and a
   session launched without it, or on a platform without it, gets no push.
-  **Mitigation**: the delivery path is layered (Delivery): the Monitor watcher
-  is the fallback when the channel is absent, the drain hook is the floor, and
-  the engine side (`wait`, subscriptions) is the same under all three.
+  **Mitigation**: the drain hook is the floor (Delivery): mail still arrives at
+  the next prompt, and the doctor row says whether push is live. The flag is
+  documented as setup; nothing else changes with it.
 - **Risk**: a channel notification is dropped; Claude Code does not acknowledge
   them.
-  **Mitigation**: mail is claimed at delivery, so a drop is a lapsed lease and a
-  redelivery, never a lost message; a board post is re-read from its cursor at
-  the next `wait`.
+  **Mitigation**: the waiter holds and renews the claim and re-sends the
+  notification until the session's ack passes through it, spending no
+  attempt; only a server death spends one, and three of those on one message
+  is the dead letter the drain hook surfaces once. A dropped board post is
+  not re-sent; the post stays readable for its retention.
 - **Risk**: board volume grows with posts.
   **Mitigation**: retention and `max_live_rows` bound it, and the sweep purges
   expired posts.
@@ -685,15 +709,16 @@ idempotency, and it loses history.
   contract: 7 days, unless a post sets less.
 - An engine without `release` receives the call: the client gets an HTTP error,
   not a silent no-op, and the wire-contract ledger pairs the release.
-- An engine without `wait` receives the call: the waiter logs the 404 once,
-  stops, and the session falls back to the Monitor watcher through the same
-  SessionStart injection; the ledger pairs `wait` the same way.
-- A session without the channel: no notification is ever delivered; the
-  fallback watcher and the drain hook carry mail as today, and
-  `tuple_subscriptions` still answers.
-- A notification is dropped: the claimed row's lease lapses (900 s), `in`
-  reclaims it, and the waiter delivers it again; the claim log shows the
-  expiry.
+- An engine without `wait` receives the call: the waiter logs the 404 once
+  and stops, the doctor row reports it, and the drain hook carries mail at the
+  next prompt; the ledger pairs `wait` as it pairs `release`.
+- A session without the channel: no notification is ever delivered; the drain
+  hook carries mail at the next prompt, the doctor row says the channel is not
+  declared, and `tuple_subscriptions` still answers.
+- A notification is dropped: the waiter still holds the claim and re-sends it
+  after its bound; nothing in the claim log changes. If the server itself
+  dies, the lease lapses (900 s), the next server's `in` reclaims the row, and
+  the claim log shows one expiry.
 
 ## Implementation Plan
 
@@ -719,9 +744,10 @@ One end-to-end run against a real engine, with two sessions and one script:
    the lease lapses, and the first takes the lock again.
 4. The script sends a request to one session's mailbox. The session wakes with
    the body and a claim id in context, answers with `tuple_ack` and a reply, and
-   the script's parked `rd` on its own mailbox wakes with the reply. The same
-   session is then launched without the channel: the SessionStart injection arms
-   the fallback watcher, and the next message still arrives.
+   the script's parked `rd` on its own mailbox wakes with the reply. The
+   notification for a second request is suppressed in the test; the session
+   still receives it after the re-send bound, with the same claim id, and the
+   claim log shows no expiry.
 
 ### Phase 1: Code Implementation
 
@@ -732,8 +758,10 @@ capability and sends one notification from its lifespan to a real, fully idle
 Claude Code session launched with the development-channel flag. Three
 observations that the session wakes into a turn, one that a notification sent
 mid-turn arrives at the next turn, and one measurement of wake latency. A
-failure keeps the Monitor watcher as the primary path and reduces Step 3 to
-the subscription tools; the RDR records the result either way.
+failure leaves the drain hook as the only delivery, reduces Step 3 to the
+subscription tools and the doctor row, and keeps the watcher deletion (the
+watcher never wakes an idle session reliably either; it depends on the model
+arming it); the RDR records the result either way.
 
 #### Step 1: The `release` operation in the engine
 
@@ -766,21 +794,24 @@ tool, the `nx tuple release` CLI verb, and two doctor rows (park-slot use and
 queue depth), each with tests. Then delivery: the channel capability and the
 lifespan waiter in the nexus MCP server, claim-at-delivery for mail and
 cursor delivery for posts, the three subscription tools with their T1
-persistence, the SessionStart injection choosing channel or fallback from the
-launcher's environment variable, and `nx tuple watch` reduced to the fallback
-it already is plus a board mode that reads the same subscription list. Tests:
-a notification per new tuple with the documented shape; a dropped
-notification's row is redelivered after its lease; a subscription change
-re-issues `wait` and the old parked call is gone from the park report; the
-list survives a resume and not a clear; a session without the channel arms the
-watcher and receives the same mail.
+persistence, the doctor row (channel declared, waiter alive, last wake), and
+the deletion of `nx tuple watch`, `tuple_watch.py`, `mailbox_arm.py`'s
+SessionStart injection and the skill's arming rule. Tests: a notification per
+new tuple with the documented shape, `claimant` included; a suppressed
+notification is re-sent after the bound with the same claim id and no expiry
+in the claim log; a killed server's claim lapses and the next server's `in`
+reclaims it with one expiry logged; `tuple_subscribe` on a queue or lock
+subspace is refused; a subscription change re-issues `wait` and the old parked
+call is gone from the park report; the list survives a resume and not a clear;
+the doctor row reads not-declared for a server started without the
+capability; the SessionStart hook no longer emits the arm text.
 
 #### Step 4: Documentation
 
 Update web/tuple-space.html's uses table and web/coordination.html, which list
-these shapes as not built, docs/tuple-space.md, and the mailbox skill: the
-watcher-arming rule becomes the launch flag plus `tuple_subscribe`, with the
-Monitor arm kept only for the fallback.
+these shapes as not built, docs/tuple-space.md, docs/cli-reference.md (the
+`watch` verb removed), and the mailbox skill: the arming and re-arm rules are
+replaced by the launch flag and `tuple_subscribe`.
 
 ### Phase 2: Operational Activation
 
@@ -823,14 +854,18 @@ None.
   **Verify**: the session wakes with the body and claim id in context, acks,
   and the row is consumed; no watcher ran.
 - **Scenario**: the notification is dropped (the transport write is suppressed
-  in the test). **Verify**: after the lease lapses the row is redelivered with a
-  new claim id, and the claim log shows one expiry.
+  in the test). **Verify**: the waiter re-sends it after the bound with the
+  same claim id, and the claim log shows no expiry. Then the server is killed:
+  the lease lapses, the next server reclaims with a new claim id, and the log
+  shows one expiry.
 - **Scenario**: the session subscribes to a topic while the waiter is parked.
   **Verify**: the next post on that topic is delivered, and the park report
   never shows two slots for the session.
-- **Scenario**: the session is launched without the channel. **Verify**: the
-  SessionStart injection arms the watcher, the same mail arrives as a ping, and
-  the drain hook delivers it at the next prompt.
+- **Scenario**: the session is launched without the channel. **Verify**: no
+  notification, the drain hook delivers the mail at the next prompt, and the
+  doctor row reads not-declared.
+- **Scenario**: `tuple_subscribe("queue/builds")`. **Verify**:
+  `SchemaViolationException` naming `in`; the subscription list is unchanged.
 - **Scenario**: a lock holder's lease lapses. **Verify**: the next `in` reclaims
   the lock, and the lock is not dead-lettered under the chosen attempts rule.
 - **Scenario**: `release` on a lapsed claim. **Verify**: `ClaimNotFoundException`.
@@ -873,12 +908,15 @@ the number.
 6. **Delivery.** Answered (Sam, 2026-09-16, T2
    `nexus_rdr/211-decision-channel-delivery-2026-09-16`): push through the
    Claude Code channel, the emitter in this RDR, the Monitor watcher retired to
-   a fallback; engine-side SSE or WebSocket is a later decision. The author's
-   choice inside that ruling, open for Sam to reverse: mail is claimed at
-   delivery so a dropped notification redelivers, rather than pinged and
-   claimed by the session.
-7. **Subscriptions.** Answered (Sam): the set is managed, not fixed at startup:
-   three tools, per session, persisted in T1 across a resume.
+   a fallback and then, on Sam's second ruling the same day, deleted outright,
+   the drain hook alone as the floor; `wait` gets no standalone MCP tool or CLI
+   verb; engine-side SSE or WebSocket is a later decision. The author's choice
+   inside that ruling, open for Sam to reverse: mail is claimed at delivery and
+   the claim is held and re-notified until the session acks, rather than
+   pinged and claimed by the session.
+7. **Subscriptions.** Answered (Sam, 2026-09-16, the same decision record,
+   item 4): the set is managed, not fixed at startup: three tools, per session,
+   persisted in T1 across a resume, boards and mailboxes only.
 
 ## Finalization Gate
 
@@ -928,7 +966,8 @@ The Minimum Viable Validation is in scope and runs before the RDR closes.
 Three templates, two operations (`release`, `wait`), the lock flag at its four
 sites, two per-template guards and the park-slot report on the engine; on the
 client, one delivery path (the channel and its waiter), three subscription
-tools and the fallback, all reusing the MCP server the session already runs.
+tools and the watcher's deletion, all reusing the MCP server the session
+already runs.
 The document is sized to those changes and the three template decisions; Phase
 1 Steps 1 and 3 enumerate every one with its test.
 
@@ -993,3 +1032,15 @@ The document is sized to those changes and the three template decisions; Phase
   third effect, the RDR-206 row counts two operations, the `signalAll`
   citation re-read (440, 1009), a claim-log TTL test named in Step 1, a
   failure mode for an engine without `wait`.
+- 2026-09-16: Follow-up to fix check `nexus_rdr/211-fix-check-79dda06d8` and
+  Sam's ruling to replace the Monitor watcher outright (decision record items
+  4 and 5; research `nexus_rdr/211-research-4`): the waiter holds and renews
+  the claim and re-notifies until the session's ack passes through it, so a
+  dropped notification spends no attempt (the first draft's lapsed-lease
+  redelivery would have dead-lettered after three drops); `tuple_subscribe`
+  accepts boards and mailboxes only; the watcher, its arming injection and
+  the `watch` verb are deleted rather than kept as a fallback; the
+  infrastructure audit routes delivery to the MCP server; the capability
+  declaration named at the low-level server; `wait` has no tool or verb; the
+  claimant travels in the notification; the doctor row is in Step 3; the
+  platforms named.
