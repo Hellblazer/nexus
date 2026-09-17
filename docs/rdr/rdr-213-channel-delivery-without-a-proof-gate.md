@@ -2,12 +2,12 @@
 title: "Channel Delivery Without a Proof Gate: Notify a Reference, Let the Session Claim"
 id: RDR-213
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Sam
 reviewed-by: self
 created: 2026-09-17
-accepted_date:
+accepted_date: 2026-09-17
 related_issues: [nexus-tk2cz]
 related_rdrs: [RDR-211, RDR-205, RDR-206, RDR-208]
 ---
@@ -559,3 +559,4 @@ The MVV is Phase 1's exit, not deferred.
   raised one clause): the Risks mitigation no longer says the rule lives in
   the reference, which carries no body; the skill text is its only carrier.
 - 2026-09-17: Gate round 2 — PASSED (0 Critical, 0 Significant, 0 ship-blocker(s)); commit `7d3d14fe9`; critique `nexus_rdr/213-gate-critique-2026-09-17b`.
+- 2026-09-17: Accepted by Sam (gate round 2 PASSED on 7d3d14fe9, fix check nexus_rdr/213-fix-check-7d3d14fe9, no residuals).
