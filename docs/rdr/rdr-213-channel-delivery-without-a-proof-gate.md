@@ -163,10 +163,10 @@ throwaway engine with real sessions).
   regardless.
 - **Documented**: Claude Code drops a notification sent before it registers
   the channel; no acknowledgement of a notification exists in the protocol.
-- **Assumed**: a session that receives a reference and is told to claim with
-  `tuple_in` does so reliably. RDR-211's MVV showed sessions acting on
-  references (`tuple_rd` then `tuple_ack`); the claim step is one more tool
-  call on the same instruction.
+- **Verified**: a session that receives a reference and is told to claim with
+  `tuple_in` does so reliably: five of five messages claimed and acked by a
+  real session in the spike (T2 `nexus_rdr/213-spike-1-session-claims-2026-09-17`),
+  including two that arrived together, announced oldest first.
 
 ### Critical Assumptions
 
@@ -463,11 +463,27 @@ row. Measured, not estimated, in the MVV.
 
 ### Contradiction Check
 
-To be written at gate time.
+No contradictions found between research findings, design principles, and
+proposed solution. The one tension the research surfaced is stated in Trade-offs
+rather than hidden: RDR-211's single-render property (a message the channel
+delivered is never rendered again by the drain hook) is given up for a possible
+duplicate reference, and the back-pressure ruling is kept by the announce
+cadence rather than by a claim. The spikes measured the design as written: five
+messages claimed by the session with no waiter claim, and an ignored row
+announced five times then left to the floor.
 
 ### Assumption Verification
 
-To be written at gate time.
+Both Critical Assumptions are verified by live spikes against a throwaway
+engine with real Claude Code sessions (T2
+`nexus_rdr/213-spike-1-session-claims-2026-09-17` and
+`nexus_rdr/213-spike-2-reannounce-cadence-2026-09-17`). Nothing remains
+unverified. Two caveats from the spikes are recorded there, not here: a session
+told to ignore a reference still claims once, because the reference carries no
+body to read the instruction from, and releases it; and the spike harness has
+no plugin hooks, so the drain hook's rendering at the next prompt was not
+exercised there (it is unchanged by this RDR and covered by RDR-205 and
+RDR-211's own tests).
 
 #### API Verification
 
