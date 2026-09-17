@@ -412,7 +412,7 @@ Each load-bearing assumption is a checkbox with verification status:
 
 ## Post-Mortem Template
 
-Location: `docs/rdr/post-mortem/TEMPLATE.md` (copied from `conexus/resources/rdr/post-mortem/TEMPLATE.md`).
+Location: `conexus/resources/rdr/post-mortem/TEMPLATE.md` in the conexus plugin (not a copy under this repo's `docs/rdr/post-mortem/` — that directory holds only the filled-out post-mortems `rdr-close` produces from the template, never the template itself).
 
 Created automatically by `/conexus:rdr-close`. Fill it after implementation to analyze drift between what was decided and what was built.
 

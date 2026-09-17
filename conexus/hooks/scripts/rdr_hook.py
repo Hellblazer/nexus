@@ -36,8 +36,7 @@ import datetime as _dt
 import os
 import re
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeout
+import threading
 from collections import Counter
 from pathlib import Path
 
@@ -186,18 +185,41 @@ def _collection_exists(target: str) -> bool:
     (nexus-owna8: the previous substring match over ``nx collection list``
     output missed a listed collection when the resolved name and the
     listed name were rendered differently). The T3 call runs under
-    ``_T3_DEADLINE_S``; past it, or on any error, the listing is the fallback."""
+    ``_T3_DEADLINE_S``; past it, or on any error, the listing is the fallback.
+
+    nexus-r8643 (intrastate review [26115] #3): this used to hand the T3
+    call to a ``ThreadPoolExecutor`` and ``pool.shutdown(wait=False)`` on
+    timeout -- ``wait=False`` does not cancel or interrupt the already-
+    running worker, and ``ThreadPoolExecutor``'s worker threads are
+    NON-daemon (``concurrent.futures``' own ``atexit`` handler joins every
+    active worker before interpreter exit), so a genuinely hung T3 client
+    left a thread the process could not exit past: this hook could outlive
+    its own ``_T3_DEADLINE_S`` budget and get killed by the harness's 10s
+    cap instead of falling back to the listing cleanly. A bare
+    ``threading.Thread(daemon=True)`` has no such handler -- the process
+    can exit with it still running, which is exactly the property a
+    fire-and-abandon timeout needs."""
     try:
         from nexus.db import make_t3  # noqa: PLC0415
 
-        pool = ThreadPoolExecutor(max_workers=1)
-        try:
-            future = pool.submit(lambda: bool(make_t3().collection_exists(target)))
-            return future.result(timeout=_T3_DEADLINE_S)
-        finally:
-            pool.shutdown(wait=False)
-    except FutureTimeout:
-        _log_resolution_error("t3-exists", TimeoutError(f"no answer within {_T3_DEADLINE_S}s"))
+        outcome: dict[str, object] = {}
+
+        def _worker() -> None:
+            try:
+                outcome["value"] = bool(make_t3().collection_exists(target))
+            except Exception as exc:  # noqa: BLE001 — carried back via `outcome`, not raised across the thread boundary
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=_worker, daemon=True)
+        worker.start()
+        worker.join(timeout=_T3_DEADLINE_S)
+        if worker.is_alive():
+            raise TimeoutError(f"no answer within {_T3_DEADLINE_S}s")
+        if "error" in outcome:
+            raise outcome["error"]  # type: ignore[misc]
+        return bool(outcome.get("value", False))
+    except TimeoutError as exc:
+        _log_resolution_error("t3-exists", exc)
     except Exception as exc:  # noqa: BLE001 — the hook must never fail; fall back to the listing
         _log_resolution_error("t3-exists", exc)
     try:

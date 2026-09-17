@@ -33,7 +33,7 @@ mechanize, it matters enough to ship.
 ## Awaiting the next release or plugin cut (pinned: v7.51.1)
 
 - `conexus/skills/phase-review-gate/SKILL.md`: the evidence-key note says Pass 1 renumbers and heading-qualifies items when two §Approach lists each restart at 1, so keys are copied from the Pass 1 table (bead nexus-8tpw3).
-- `conexus/hooks/scripts/rdr_hook.py`: the SessionStart status loader keeps `RDR-NNN`-titled T2 status records, keyed on the bare number and counted once per RDR (bead nexus-nc08w.1).
+- `conexus/hooks/scripts/rdr_hook.py`: the SessionStart status loader keeps `RDR-NNN`-titled T2 status records, keyed on the bare number and counted once per RDR (bead nexus-nc08w.1); `_collection_exists`'s T3 timeout leg no longer leaks a non-daemon `ThreadPoolExecutor` worker past `_T3_DEADLINE_S` — a bare daemon thread cannot hold the hook process open past the harness's 10s cap (bead nexus-r8643, intrastate review [26115] #3).
 - `conexus/skills/rdr-close/SKILL.md`: the file-flip step names `--reason` for closing a never-accepted draft, the lifecycle table's guarded `close-unaccepted` edge (bead nexus-nc08w.4).
 - `conexus/skills/rdr-create/SKILL.md`: the T2 record template writes `status: draft`, the lifecycle domain's lower-case value, not `Draft` (bead nexus-nc08w.5).
 - `conexus/agents/code-review-expert.md`: a mandated terminal `## Verdict` block with the same `- **outcome**:` shape and the same three values `substantive-critic` emits (bead nexus-4hoc0).

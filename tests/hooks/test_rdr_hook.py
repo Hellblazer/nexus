@@ -356,6 +356,66 @@ def test_slow_t3_answer_falls_back_to_the_listing_within_the_hook_budget(
     assert time.monotonic() - started < 1.5
 
 
+def test_slow_t3_worker_cannot_hold_the_process_past_the_deadline(
+    rdr_hook_module, monkeypatch,
+) -> None:
+    """nexus-r8643 (intrastate review [26115] #3): the sibling test above
+    pins that a slow T3 answer falls back to the listing WITHIN budget, but
+    not that the process can actually exit once it does. The pre-fix code
+    handed the T3 call to a ``ThreadPoolExecutor`` and called
+    ``pool.shutdown(wait=False)`` on timeout -- that neither cancels nor
+    interrupts the already-running worker, and ``ThreadPoolExecutor``
+    threads are NON-daemon (``concurrent.futures`` installs an ``atexit``
+    handler that joins every active worker before interpreter exit), so a
+    genuinely hung T3 client left a thread the SessionStart hook process
+    could not exit past -- it would outlive ``_T3_DEADLINE_S`` and get
+    killed by the harness's 10s cap instead of falling back cleanly.
+
+    This pins the property that closes the gap: whatever thread a timed-out
+    call leaves running is a DAEMON thread (``threading.Thread(daemon=True)``
+    has no such atexit handler), so a real process hosting this hook can
+    exit immediately after the fallback runs, with the stalled T3 call
+    still in flight in the background."""
+    import threading
+    import time
+
+    mod = rdr_hook_module
+    monkeypatch.setattr(mod, "_T3_DEADLINE_S", 0.2)
+
+    release = threading.Event()
+
+    class _HangingT3:
+        def collection_exists(self, name):
+            # Never returns within the hook's own budget -- release() lets
+            # it finish at teardown so it does not leak across tests.
+            release.wait(timeout=5)
+            return True
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _HangingT3())
+
+    class _Done:
+        returncode = 0
+        stdout = ""
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Done())
+
+    before = {t.ident for t in threading.enumerate()}
+    started = time.monotonic()
+    try:
+        assert mod._collection_exists("rdr__1-1__voyage-context-3__v1") is False
+        assert time.monotonic() - started < 1.0
+
+        leftover = [
+            t for t in threading.enumerate()
+            if t.ident not in before and t.is_alive()
+        ]
+        assert leftover, "expected the still-running T3 worker thread to be observable"
+        assert all(t.daemon for t in leftover), (
+            "a NON-daemon thread survived the T3 timeout -- it would block "
+            f"process exit past the hook's deadline: {leftover}"
+        )
+    finally:
+        release.set()
+
+
 def test_resolution_failure_reaches_stderr_without_structlog(rdr_hook_module, monkeypatch, capsys):
     """nexus-4ti7e: the failure line must not depend on structlog, which the
     interpreter that ran this hook on 2026-09-08 did not have either."""
