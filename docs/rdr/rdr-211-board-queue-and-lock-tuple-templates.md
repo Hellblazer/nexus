@@ -830,7 +830,22 @@ idempotency, and it loses history.
 
 ### Minimum Viable Validation
 
-One end-to-end run against a real engine, with two sessions and one script:
+One end-to-end run against a real engine, with two sessions and one script.
+**Ran 2026-09-17, PASSED** (T2 `nexus_rdr/211-mvv-2026-09-17`): a throwaway PG
+plus the dev jar at origin/develop baaeaca20, two real Claude Code 2.1.274
+sessions launched with `--dangerously-load-development-channels server:nexus`,
+both waiters proving the channel by argv. Step 1: both idle sessions woke on
+the board reference and read the post about 6 s after the script posted it;
+`park_stats` showed two global slots, none per claimant. Step 2: two tasks;
+A released with attempts 0; B acked both (census consumed 2, dead 0). Step 3:
+one lock row for two `out`s; one holder; the parked contender took it within
+a second of the release; after the 45 s lease of an unreleased holder lapsed
+the first took it again (attempts 1, dead 0). Step 4: the request was read and
+acked with a reply the script's parked `rd` received 6 s after sending; the
+unacted second request was re-sent at 150 s with the same claim id and no
+expiry. Variances: the second notification was delivered and left unacted
+rather than suppressed at the transport; notifications carried references,
+not bodies.
 
 1. The script posts to a board. Both sessions, subscribed to the topic and
    launched with the channel, wake with the post's reference in context,
@@ -1238,3 +1253,6 @@ enumerate every one with its test.
   body; the session reads the body deliberately with `tuple_rd`. Delivery,
   the Test Plan and the MVV amended; the 4096-byte body cap no longer bounds
   a notification.
+- 2026-09-17: Minimum Viable Validation ran and passed against a real engine
+  with two real sessions (nexus-rplay.16; T2 `nexus_rdr/211-mvv-2026-09-17`);
+  counts recorded in the MVV section.
