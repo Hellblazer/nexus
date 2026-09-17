@@ -1079,6 +1079,7 @@ nexus-5pv8d
 nexus-5qcg0
 nexus-5qefg
 nexus-5qefg.1
+nexus-5r0ho
 nexus-5rea
 nexus-5ren2
 nexus-5sqnq
@@ -2281,6 +2282,9 @@ nexus-cd1k0.13
 nexus-cd1k0.14
 nexus-cd1k0.15
 nexus-cd1k0.16
+nexus-cd1k0.17
+nexus-cd1k0.18
+nexus-cd1k0.19
 nexus-cd1k0.2
 nexus-cd1k0.3
 nexus-cd1k0.4
@@ -5744,6 +5748,17 @@ nexus-tztf
 nexus-u0u8a
 nexus-u1f64
 nexus-u1hpu
+nexus-u1jxt
+nexus-u1jxt.1
+nexus-u1jxt.10
+nexus-u1jxt.2
+nexus-u1jxt.3
+nexus-u1jxt.4
+nexus-u1jxt.5
+nexus-u1jxt.6
+nexus-u1jxt.7
+nexus-u1jxt.8
+nexus-u1jxt.9
 nexus-u1xc9
 nexus-u26b4
 nexus-u2a
