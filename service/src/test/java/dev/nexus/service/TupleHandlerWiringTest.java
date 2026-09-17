@@ -580,6 +580,54 @@ class TupleHandlerWiringTest {
         assertThat(get(withoutRegistry, "/v1/tuples/park_stats").statusCode()).isEqualTo(404);
     }
 
+    // ── RDR-211 Phase 1 Step 1: the multiplexed wait route ───────────────────
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void wait_probeAcrossTwoSubspaces_returnsOnlyTheMatchingOne() throws Exception {
+        String to = "wait-wire-mailbox-addr";
+        assertThat(post(withRegistry, "/v1/tuples/out", Map.of(
+                "subspace", "mailbox/" + to,
+                "keys", Map.of("to", to),
+                "dims", Map.of("from", "wait-wire-sender"),
+                "body", "hello",
+                "nonce", "wait-wire-nonce")).statusCode()).isEqualTo(200);
+
+        var resp = post(withRegistry, "/v1/tuples/wait", Map.of(
+                "subspaces", java.util.List.of(
+                        Map.of("subspace", "mailbox/" + to, "keys_pattern", Map.of("to", to)),
+                        Map.of("subspace", "mailbox/wait-wire-empty-addr",
+                                "keys_pattern", Map.of("to", "wait-wire-empty-addr")))));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        var results = (java.util.List<Map<String, Object>>) body.get("results");
+        assertThat(results)
+                .as("only the subspace that actually matched appears -- never an empty-tuples entry")
+                .hasSize(1);
+        assertThat(results.get(0).get("subspace")).isEqualTo("mailbox/" + to);
+        var tuples = (java.util.List<Map<String, Object>>) results.get(0).get("tuples");
+        assertThat(tuples).hasSize(1);
+        assertThat(tuples.get(0).get("body")).isEqualTo("hello");
+    }
+
+    @Test
+    void wait_requiresPost() throws Exception {
+        assertThat(get(withRegistry, "/v1/tuples/wait").statusCode()).isEqualTo(405);
+    }
+
+    @Test
+    void wait_missingSubspaces_is400() throws Exception {
+        assertThat(post(withRegistry, "/v1/tuples/wait", Map.of()).statusCode()).isEqualTo(400);
+    }
+
+    @Test
+    void wait_unknownSubspace_is404() throws Exception {
+        var resp = post(withRegistry, "/v1/tuples/wait", Map.of(
+                "subspaces", java.util.List.of(Map.of("subspace", "not-a-real-template/x"))));
+        assertThat(resp.statusCode()).isEqualTo(404);
+        assertThat(resp.body()).contains("UnknownSubspace");
+    }
+
     private HttpResponse<String> post(NexusService svc, String path, Object body) throws Exception {
         var req = TestHttp.request("http://127.0.0.1:" + svc.getPort() + path)
                 .header("Authorization", "Bearer " + TOKEN)

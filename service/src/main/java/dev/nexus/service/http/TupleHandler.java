@@ -23,6 +23,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -42,6 +43,12 @@ import java.util.Optional;
  *   POST /v1/tuples/out             {subspace, keys, dims?, body?, nonce?, ttl_seconds?} -&gt; {"id": "&lt;hex&gt;"}
  *   POST /v1/tuples/rd              {subspace, keys_pattern?, n?, since?, timeout_s?} -&gt; {"tuples": [...]}
  *   POST /v1/tuples/rdp             {subspace, keys_pattern?, n?, since?} -&gt; {"tuples": [...]}
+ *   POST /v1/tuples/wait            {subspaces: [{subspace, keys_pattern?, n?, since?}, ...], timeout_s?}
+ *                                    -&gt; {"results": [{"subspace", "tuples": [...]}, ...]}
+ *                                    (RDR-211 Phase 1 Step 1, bead nexus-rplay.4 -- a multi-subspace {@code rd};
+ *                                    parks with NO claimant, one global slot regardless of subspace count; a
+ *                                    subspace with no match is simply absent from "results", never present
+ *                                    with an empty "tuples" list; see {@link TupleRepository#waitAny})
  *   POST /v1/tuples/in              {subspace, keys_pattern, claimant, lease_s?, timeout_s?} -&gt; {"tuple": ..|null, "claim_id": ..|null}
  *   POST /v1/tuples/inp             {subspace, keys_pattern, claimant, lease_s?} -&gt; same shape as /in
  *   POST /v1/tuples/ack             {claim_id, claimant, reply?{subspace, keys, dims?, body?, ttl_seconds?}}
@@ -126,6 +133,7 @@ public final class TupleHandler implements HttpHandler {
                 case "/out" -> handleOut(exchange, tenant, method);
                 case "/rd" -> handleRd(exchange, tenant, method);
                 case "/rdp" -> handleRdp(exchange, tenant, method);
+                case "/wait" -> handleWait(exchange, tenant, method);
                 case "/in" -> handleIn(exchange, tenant, method);
                 case "/inp" -> handleInp(exchange, tenant, method);
                 case "/ack" -> handleAck(exchange, tenant, method);
@@ -206,6 +214,56 @@ public final class TupleHandler implements HttpHandler {
 
         List<TupleRepository.TupleRow> rows = repo.rdp(tenant, subspace, pattern, n, since);
         HttpUtil.send(ex, 200, renderTuples(rows));
+    }
+
+    // ── wait (multiplexed rd, RDR-211 Phase 1 Step 1, bead nexus-rplay.4) ──────
+
+    /**
+     * {@code POST /v1/tuples/wait}: see this class's own route-table javadoc above
+     * and {@link TupleRepository#waitAny} for the full contract. {@code subspaces}
+     * is required and non-empty (refused as a plain 400 {@code IllegalArgumentException}
+     * before the request ever reaches {@link TupleRepository#waitAny}, same mapping
+     * every other missing-required-field case in this handler uses); the per-entry
+     * cap ({@link TupleRepository#MAX_WAIT_SUBSPACES}) and per-subspace/pattern
+     * validation are {@code waitAny}'s own {@code SchemaViolation}/{@code
+     * UnknownSubspace} refusals, not re-checked here.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleWait(HttpExchange ex, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) {
+            HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}");
+            return;
+        }
+        Map<String, Object> body = readBody(ex);
+        Object rawSpecs = body.get("subspaces");
+        if (!(rawSpecs instanceof List<?> rawList) || rawList.isEmpty()) {
+            throw new IllegalArgumentException("subspaces required");
+        }
+        List<TupleRepository.WaitSpec> specs = new ArrayList<>(rawList.size());
+        for (Object rawSpec : rawList) {
+            if (!(rawSpec instanceof Map)) {
+                throw new SchemaViolationException("subspaces", "each entry must be an object");
+            }
+            Map<String, Object> spec = (Map<String, Object>) rawSpec;
+            String subspace = requireString(spec, "subspace");
+            Map<String, String> pattern = stringMap((Map<String, Object>) spec.get("keys_pattern"));
+            int n = intOrDefault(spec.get("n"), 1);
+            TupleRepository.ReadCursor since = readCursor(spec.get("since"));
+            specs.add(new TupleRepository.WaitSpec(subspace, pattern, n, since));
+        }
+        long timeoutS = longOrDefault(body.get("timeout_s"), 0);
+
+        List<TupleRepository.WaitResult> results = repo.waitAny(tenant, specs, timeoutS);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("results", results.stream().map(this::renderWaitResult).toList());
+        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(out));
+    }
+
+    private Map<String, Object> renderWaitResult(TupleRepository.WaitResult r) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("subspace", r.subspace());
+        m.put("tuples", r.tuples().stream().map(this::renderTuple).toList());
+        return m;
     }
 
     // ── in / inp ─────────────────────────────────────────────────────────────

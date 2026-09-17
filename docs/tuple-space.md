@@ -10,7 +10,7 @@ Two consumers ship with this design and no others: the RDR-184 dispatch ledger (
 
 ## Operations
 
-Twelve HTTP routes under `/v1/tuples`. Signatures are the contract; the handler is the implementation.
+Thirteen HTTP routes under `/v1/tuples`. Signatures are the contract; the handler is the implementation.
 
 ```text
 out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> tuple_id
@@ -18,6 +18,20 @@ out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> tuple_id
                                                             # ttl_seconds defaults to the template's retention
 rd (subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0) -> [Tuple]   # non-destructive; blocks up to timeout_s
 rdp(subspace, keys_pattern=None, *, n=1, since=None) -> [Tuple]                # probe
+wait(subspaces: [{subspace, keys_pattern?, n?, since?}], *, timeout_s=0)
+                                                    -> [{subspace, tuples: [Tuple]}]
+                                                            # RDR-211 Phase 1 Step 1: a multi-subspace rd --
+                                                            # parks ONE call across several subspaces, each
+                                                            # with its own pattern and cursor, and returns as
+                                                            # soon as ANY of them has a matching tuple past its
+                                                            # cursor. Parks with NO claimant, like rd -- one
+                                                            # global slot, nothing against the per-claimant
+                                                            # cap, regardless of subspace count. At most 34
+                                                            # subspaces per call (32 board topics + 2 mailboxes,
+                                                            # the RDR's own subscription bound); a subspace with
+                                                            # no match is absent from the result, never present
+                                                            # with an empty tuples list. No MCP tool and no CLI
+                                                            # verb (Sam's decision) -- the client half is Step 3.
 in (subspace, keys_pattern, *, claimant, lease_s=None, timeout_s=0) -> (Tuple, claim_id) | None
                                                             # lease_s omitted (nexus-xapt8, additive) falls
                                                             # through to the template's own
@@ -67,6 +81,7 @@ park_stats() -> {max_global, max_per_claimant, global_in_use, refused_global,
 | `out` | no | yes: the id is derived from caller-supplied fields only, so a retry is the same tuple | none |
 | `rd` | yes, up to `timeout_s` | yes: a read takes nothing | `rdp` |
 | `rdp` | no | yes | is the probe form of `rd` |
+| `wait` | yes, up to `timeout_s` | yes: a read takes nothing | `timeout_s=0` is the probe form |
 | `in` | yes, up to `timeout_s` | a same-claimant retake within its lease returns the existing claim id, no new update or log row | `inp` |
 | `inp` | no | same same-claimant rule as `in` | is the probe form of `in` |
 | `ack` | no | no: a second `ack` on the same claim is `ClaimNotFound`; a reply written with it shares that rule, since the reply and the consumption commit in one transaction | none |

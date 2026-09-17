@@ -97,6 +97,18 @@ public final class TupleRepository {
     public static final String SUBSPACE_LIST_TIMEOUT_SECONDS_ENV = "NX_TUPLE_SUBSPACE_LIST_TIMEOUT_SECONDS";
     public static final int DEFAULT_SUBSPACE_LIST_TIMEOUT_SECONDS = 10;
 
+    /**
+     * RDR-211 Phase 1 Step 1 (bead nexus-rplay.4), a value the RDR leaves open: the
+     * RDR bounds one session's subscriptions at 32 board topics plus two mailboxes
+     * (§Scale and Limits), so 34 is the natural ceiling on how many subspaces one
+     * {@link #waitAny} call may name. A fixed constant, not an env-configurable
+     * setting like {@link #TIMEOUT_CAP_SECONDS_ENV} and its siblings above -- the
+     * RDR's own subscription bound is the reason for the number, not a per-deploy
+     * tuning knob. Refused with {@link SchemaViolationException}, never silently
+     * truncated.
+     */
+    public static final int MAX_WAIT_SUBSPACES = 34;
+
     private static final String CLAIM_STATE_CLAIMED = "claimed";
     private static final String CLAIM_STATE_DEAD = "dead";
     private static final String TRANSITION_CLAIM = "claim";
@@ -730,6 +742,121 @@ public final class TupleRepository {
             }
             return out;
         });
+    }
+
+    // ── wait (multiplexed rd, RDR-211 Phase 1 Step 1, bead nexus-rplay.4) ──────
+
+    /** One subspace subscription within a {@link #waitAny} call: {@code n}/{@code
+     *  since} carry the same meaning and defaults as {@link #rd}'s own parameters --
+     *  {@code n <= 0} clamps to 1, {@code since == null} reads from the start. */
+    public record WaitSpec(String subspace, Map<String, String> pattern, int n, ReadCursor since) {
+    }
+
+    /** One subspace's matched tuples from a {@link #waitAny} call. Only subspaces
+     *  that actually matched appear in {@link #waitAny}'s result list -- a subspace
+     *  with nothing to report is simply absent, never present with an empty {@code
+     *  tuples} list, so a client iterating results always has cursor-advancing work
+     *  to do for every entry it sees. */
+    public record WaitResult(String subspace, List<TupleRow> tuples) {
+    }
+
+    /**
+     * {@code wait(subspaces: [{subspace, keys_pattern?, n?, since?}], timeout_s=0) ->
+     * [{subspace, tuples}]} (RDR-211 Phase 1 Step 1 / §Approach item 6, bead
+     * nexus-rplay.4): a multi-subspace {@code rd} that parks ONE call across several
+     * subspaces, each with its own key pattern and cursor, and returns as soon as ANY
+     * of them holds a matching tuple past its cursor.
+     *
+     * <p>Mirrors {@link #rd} exactly -- validate, register before the first query,
+     * probe, park with no claimant, re-query on every wake, release in a finally.
+     * Every subspace and pattern is validated BEFORE anything registers or parks (a
+     * bad request never consumes a slot or a group registration); {@link
+     * #queryEachOnce} then runs each subspace's own {@link #queryOnce} in a loop,
+     * reusing that method's already-tested SQL rather than inventing a combined OR
+     * query, per the bead's own design note. {@code wait} parks with NO claimant,
+     * exactly as {@code rd} does, so it takes ONE global park slot and nothing
+     * against the per-claimant cap, regardless of how many subspaces {@code
+     * subspaces} names.
+     *
+     * <p>{@link TupleWaitRegistry#registerMulti} folds registration across every
+     * named subspace into a single {@link TupleWaitRegistry.MultiWaiter}; {@link
+     * TupleWaitRegistry#tryAcquireParkSlot}/{@link TupleWaitRegistry#releaseParkSlot}
+     * are still called exactly once for the whole call -- the same one-slot-per-call
+     * contract {@code rd}/{@code in} already have.
+     */
+    public List<WaitResult> waitAny(String tenant, List<WaitSpec> specs, long timeoutSeconds) {
+        validateTimeout(timeoutSeconds);
+        if (specs == null || specs.isEmpty()) {
+            throw new SchemaViolationException("subspaces", "must name at least one subspace");
+        }
+        if (specs.size() > MAX_WAIT_SUBSPACES) {
+            throw new SchemaViolationException("subspaces",
+                    "at most " + MAX_WAIT_SUBSPACES + " subspaces per wait");
+        }
+        // Validate EVERY subspace and pattern BEFORE anything registers or parks
+        // (RDR-211 Phase 1 Step 1) -- a bad request must never consume a park slot or
+        // a group registration. queryOnce (via queryEachOnce below) re-validates on
+        // every call, same as rd's own queryOnce does on every re-query; this pass is
+        // what makes that guarantee hold for the FIRST subspace in the list too,
+        // before registerMulti ever runs.
+        List<String> subspaces = new ArrayList<>(specs.size());
+        for (WaitSpec spec : specs) {
+            checkFieldSize("subspace", spec.subspace(), TupleLimits.MAX_SUBSPACE_BYTES);
+            resolveOrThrow(spec.subspace());
+            checkPatternSizes(spec.pattern() == null ? Map.of() : spec.pattern());
+            subspaces.add(spec.subspace());
+        }
+
+        if (timeoutSeconds <= 0) {
+            return queryEachOnce(tenant, specs);
+        }
+        // Registered BEFORE the first query, so a write landing between that query and
+        // the first park is not lost (RDR-205 §Technical Design "Wake", the same
+        // contract rd/in already honour).
+        TupleWaitRegistry.MultiWaiter waiter = waitRegistry.registerMulti(tenant, subspaces);
+        List<WaitResult> found = queryEachOnce(tenant, specs);
+        if (!found.isEmpty()) {
+            return found;
+        }
+        // wait parks with NO claimant, exactly as rd does -- one global slot, nothing
+        // against the per-claimant cap of four.
+        waitRegistry.tryAcquireParkSlot(null);
+        try {
+            long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+            while (true) {
+                if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
+                    return queryEachOnce(tenant, specs);
+                }
+                try {
+                    waiter.awaitSignalOrTimer();
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return queryEachOnce(tenant, specs);
+                }
+                List<WaitResult> again = queryEachOnce(tenant, specs);
+                if (!again.isEmpty()) {
+                    return again;
+                }
+            }
+        } finally {
+            waitRegistry.releaseParkSlot(null);
+            waiter.release();
+        }
+    }
+
+    /** Runs {@link #queryOnce} once per {@link WaitSpec} in {@code specs}, in list
+     *  order -- the per-subspace re-query {@link #waitAny}'s javadoc describes,
+     *  never a combined OR query. Only subspaces with at least one matching tuple
+     *  appear in the returned list. */
+    private List<WaitResult> queryEachOnce(String tenant, List<WaitSpec> specs) {
+        List<WaitResult> out = new ArrayList<>();
+        for (WaitSpec spec : specs) {
+            List<TupleRow> rows = queryOnce(tenant, spec.subspace(), spec.pattern(), spec.n(), spec.since());
+            if (!rows.isEmpty()) {
+                out.add(new WaitResult(spec.subspace(), rows));
+            }
+        }
+        return out;
     }
 
     // ── in / inp ─────────────────────────────────────────────────────────────
