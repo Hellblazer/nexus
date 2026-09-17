@@ -266,4 +266,37 @@ class TemplateSchemaParserTest {
                 () -> TemplateSchemaParser.parse("broken.yaml", doc));
         assertTrue(ex.getMessage().contains("max_body_bytes"), ex.getMessage());
     }
+
+    // ── lock (RDR-211 Phase 1 Step 1, bead nexus-rplay.3) ─────────────────────
+
+    @Test
+    void lockAbsent_defaultsFalse() {
+        TemplateSchema t = TemplateSchemaParser.parse("mailbox.yaml", validDoc());
+        assertFalse(t.lock());
+    }
+
+    @Test
+    void lockTrue_parsesVerbatim() {
+        Map<String, Object> doc = validDoc();
+        doc.put("lock", Boolean.TRUE);
+        TemplateSchema t = TemplateSchemaParser.parse("lock.yaml", doc);
+        assertTrue(t.lock());
+    }
+
+    @Test
+    void lockFalse_parsesVerbatim() {
+        Map<String, Object> doc = validDoc();
+        doc.put("lock", Boolean.FALSE);
+        TemplateSchema t = TemplateSchemaParser.parse("lock.yaml", doc);
+        assertFalse(t.lock());
+    }
+
+    @Test
+    void lockWrongType_isABreach() {
+        Map<String, Object> doc = validDoc();
+        doc.put("lock", "not-a-boolean");
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("lock"), ex.getMessage());
+    }
 }

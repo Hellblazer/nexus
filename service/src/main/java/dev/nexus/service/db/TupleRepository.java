@@ -418,7 +418,7 @@ public final class TupleRepository {
         Field<JSONB> dimsField = p.dimsJsonb() == null
                 ? DSL.castNull(org.jooq.impl.SQLDataType.JSONB)
                 : DSL.val(p.dimsJsonb());
-        ctx.insertInto(TUPLES,
+        var insertStep = ctx.insertInto(TUPLES,
                         TUPLES.ID, TUPLES.TENANT_ID, TUPLES.SUBSPACE, TUPLES.TEMPLATE,
                         TUPLES.KEYS, TUPLES.DIMS, TUPLES.BODY,
                         TUPLES.ATTEMPTS, TUPLES.EXPIRES_AT, TUPLES.CREATED_AT)
@@ -427,12 +427,42 @@ public final class TupleRepository {
                         DSL.val(0), DSL.currentOffsetDateTime().add(p.ttlInterval()),
                         DSL.currentOffsetDateTime())
                 .onConflict(TUPLES.ID)
-                .doUpdate()
-                // A refire touches expires_at ONLY -- never body, claim state or
-                // consumed state (every other column is simply absent from this
-                // DO UPDATE's .set() list, so Postgres leaves it untouched).
-                .set(TUPLES.EXPIRES_AT, DSL.least(candidateExpiry, ceiling))
-                .execute();
+                .doUpdate();
+        if (p.template().lock()) {
+            // RDR-211 Phase 1 Step 1 (bead nexus-rplay.3), Approach item 5: scoped to
+            // lock-flagged templates ONLY -- the `if` branch here, not a WHEN clause
+            // every template's SQL shares, is what keeps a non-flagged template's
+            // generated statement byte-identical to before this bead (regression-
+            // pinned by outOnANonFlaggedTemplateWithAnExistingIdIsUnchanged). An `out`
+            // that finds the existing row already EXPIRED resets it to available -- a
+            // fresh created_at/expires_at ceiling and a cleared claim -- instead of
+            // leaving it dead under a ceiling a refire can never move today (the "lock
+            // expiry cliff", Scale and Limits item 5). A still-live lock row is
+            // untouched beyond the ordinary refire clamp, so `out` stays the safe
+            // "make sure the lock exists" idempotent no-op Approach item 3 promises.
+            Condition expired = TUPLES.EXPIRES_AT.le(DSL.currentOffsetDateTime());
+            insertStep
+                    .set(TUPLES.CREATED_AT,
+                            DSL.when(expired, DSL.currentOffsetDateTime()).otherwise(TUPLES.CREATED_AT))
+                    .set(TUPLES.EXPIRES_AT,
+                            DSL.when(expired, candidateExpiry).otherwise(DSL.least(candidateExpiry, ceiling)))
+                    .set(TUPLES.CLAIM_STATE,
+                            DSL.when(expired, DSL.val((String) null, TUPLES.CLAIM_STATE)).otherwise(TUPLES.CLAIM_STATE))
+                    .set(TUPLES.CLAIMANT,
+                            DSL.when(expired, DSL.val((String) null, TUPLES.CLAIMANT)).otherwise(TUPLES.CLAIMANT))
+                    .set(TUPLES.CLAIM_ID,
+                            DSL.when(expired, DSL.val((String) null, TUPLES.CLAIM_ID)).otherwise(TUPLES.CLAIM_ID))
+                    .set(TUPLES.LEASE_UNTIL,
+                            DSL.when(expired, DSL.val((OffsetDateTime) null, TUPLES.LEASE_UNTIL))
+                                    .otherwise(TUPLES.LEASE_UNTIL))
+                    .execute();
+        } else {
+            // A refire touches expires_at ONLY -- never body, claim state or
+            // consumed state (every other column is simply absent from this
+            // DO UPDATE's .set() list, so Postgres leaves it untouched). Unchanged
+            // from before RDR-211 Phase 1 Step 1's lock flag above.
+            insertStep.set(TUPLES.EXPIRES_AT, DSL.least(candidateExpiry, ceiling)).execute();
+        }
         maintainTenant(ctx, tenant);
         return id;
     }
@@ -859,22 +889,33 @@ public final class TupleRepository {
                 // in the clamp branch already came from a DB fetch, so it is already at
                 // this precision; truncating it too is a no-op, not a second source of
                 // truth.
-                OffsetDateTime leaseUntil = clampedLeaseUntil(now, leaseSeconds, row.getExpiresAt());
-                ctx.update(TUPLES)
+                // RDR-211 Phase 1 Step 1 (bead nexus-rplay.3), Approach item 5: a
+                // lock-flagged template's claim moves the tuple's OWN expiry forward to
+                // now + retention, ahead of computing the lease clamp -- otherwise the
+                // lease would still be capped by the OLD (about-to-be-stale) expires_at,
+                // defeating "a lock lives as long as it is used". Every other template
+                // keeps row.getExpiresAt() unchanged, exactly as before this bead.
+                OffsetDateTime expiresAtForClaim = t.lock()
+                        ? now.plusSeconds(t.retentionSeconds()).truncatedTo(java.time.temporal.ChronoUnit.MICROS)
+                        : row.getExpiresAt();
+                OffsetDateTime leaseUntil = clampedLeaseUntil(now, leaseSeconds, expiresAtForClaim);
+                var claimUpdate = ctx.update(TUPLES)
                         .set(TUPLES.CLAIM_STATE, CLAIM_STATE_CLAIMED)
                         .set(TUPLES.CLAIMANT, claimant)
                         .set(TUPLES.CLAIM_ID, newClaimId)
                         .set(TUPLES.LEASE_UNTIL, leaseUntil)
-                        .set(TUPLES.ATTEMPTS, attempts)
-                        .where(TUPLES.ID.eq(row.getId()))
-                        .execute();
+                        .set(TUPLES.ATTEMPTS, attempts);
+                if (t.lock()) {
+                    claimUpdate.set(TUPLES.EXPIRES_AT, expiresAtForClaim);
+                }
+                claimUpdate.where(TUPLES.ID.eq(row.getId())).execute();
                 insertClaimLog(ctx, tenant, subspace, t.name(), row.getId(),
                         newClaimId, claimant, TRANSITION_CLAIM, now);
 
                 TupleRow claimed = new TupleRow(row.getId(), subspace, t.name(),
                         fromJsonb(row.getKeys()), fromJsonb(row.getDims()), row.getBody(),
                         CLAIM_STATE_CLAIMED, claimant, newClaimId, leaseUntil, attempts,
-                        null, null, row.getExpiresAt(), row.getCreatedAt());
+                        null, null, expiresAtForClaim, row.getCreatedAt());
                 return Optional.of(new ClaimedTuple(claimed, newClaimId));
             }
             return Optional.empty(); // NX_TUPLE_CLAIM_PASSES exhausted: the probe result
@@ -919,6 +960,24 @@ public final class TupleRepository {
         }
         if (!row.getClaimant().equals(claimant)) {
             throw new ClaimOwnershipException(claimId, claimant);
+        }
+        // RDR-211 Phase 1 Step 1 (bead nexus-rplay.3): a lock claim refuses ack.
+        // Placed here, inside the transaction, after liveClaimRow's read and before
+        // any column is written -- beside the stale-claim and wrong-claimant refusals
+        // just above -- because the template name lives on the ROW this method just
+        // read, and nothing about a bare claim_id encodes it, so the check cannot
+        // precede this method's own liveClaimRow lookup. Ack'ing a lock would clear
+        // the claim columns but never consumed_at (see writeOut's lock-reset branch),
+        // and claimOnce requires consumed_at IS NULL, so an acked lock would stay
+        // dead until the sweep purged it -- exactly the failure Alternative 1 was
+        // rejected for, reached here by an ordinary ack call instead. The claim stays
+        // live because nothing is written before this throw.
+        TemplateSchema template = resolveOrThrow(row.getSubspace());
+        if (template.lock()) {
+            throw new SchemaViolationException("claim_id",
+                    "template '" + template.name() + "' is a lock template; ack is refused because a "
+                    + "consumed lock row would be unobtainable until the sweep purges it -- call release "
+                    + "instead to return the lock without consuming it");
         }
         // TEST-ONLY (nexus-h61dl.2): widens the read-to-update race window under
         // test; a no-op Runnable on every production path.
@@ -1180,8 +1239,28 @@ public final class TupleRepository {
             // racing; renew is the first caller to want this clamp against an UNLOCKED
             // read, which is why the two express one rule in two places. See
             // clampedLeaseUntil.
-            var stored = ctx.update(TUPLES)
-                    .set(TUPLES.LEASE_UNTIL, DSL.least(DSL.val(candidate), TUPLES.EXPIRES_AT))
+            //
+            // RDR-211 Phase 1 Step 1 (bead nexus-rplay.3), Approach item 5: a
+            // lock-flagged template's renew ALSO moves the tuple's own expiry forward
+            // to now + retention -- "a lock lives as long as it is used" requires
+            // EXPIRES_AT itself to move, not merely LEASE_UNTIL's clamp against a
+            // ceiling that otherwise never advances. Every other template computes
+            // ceilingField from the OLD row (TUPLES.EXPIRES_AT, unchanged from before
+            // this bead); newExpiresAtOrNull is a plain Java value substituted as a SQL
+            // literal, so there is no ordering ambiguity between the two .set() calls.
+            Field<OffsetDateTime> ceilingField = TUPLES.EXPIRES_AT;
+            OffsetDateTime newExpiresAtOrNull = null;
+            if (t.lock()) {
+                newExpiresAtOrNull = now.plusSeconds(t.retentionSeconds())
+                        .truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+                ceilingField = DSL.val(newExpiresAtOrNull);
+            }
+            var renewUpdate = ctx.update(TUPLES)
+                    .set(TUPLES.LEASE_UNTIL, DSL.least(DSL.val(candidate), ceilingField));
+            if (t.lock()) {
+                renewUpdate.set(TUPLES.EXPIRES_AT, newExpiresAtOrNull);
+            }
+            var stored = renewUpdate
                     .where(liveClaimCondition(row.getId(), claimId))
                     .returningResult(TUPLES.LEASE_UNTIL)
                     .fetchOne();

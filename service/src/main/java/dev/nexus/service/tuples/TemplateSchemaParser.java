@@ -23,7 +23,7 @@ final class TemplateSchemaParser {
 
     private static final Set<String> TOP_LEVEL_FIELDS = Set.of(
             "name", "keys", "dimensions", "id_from", "id_dims", "take", "retention_seconds",
-            "max_body_bytes");
+            "max_body_bytes", "lock");
 
     private static final Set<String> DIMENSION_FIELDS = Set.of("type", "values", "required");
 
@@ -75,9 +75,25 @@ final class TemplateSchemaParser {
         TemplateSchema.Take take = parseTake(source, doc.get("take"));
         long retentionSeconds = requirePositiveLong(source, doc, "retention_seconds");
         Long maxBodyBytes = parseMaxBodyBytes(source, doc);
+        boolean lock = parseLock(source, doc);
 
         return new TemplateSchema(name, nameSegments, keys, keyValues, dimensions, idFrom, idDims, take,
-                retentionSeconds, maxBodyBytes);
+                retentionSeconds, maxBodyBytes, lock);
+    }
+
+    /**
+     * {@code lock} (RDR-211 Phase 1 Step 1, bead nexus-rplay.3): optional top-level
+     * boolean, defaults {@code false}. See {@link TemplateSchema#lock()}.
+     */
+    private static boolean parseLock(String source, Map<String, Object> doc) {
+        if (!doc.containsKey("lock") || doc.get("lock") == null) {
+            return false;
+        }
+        Object raw = doc.get("lock");
+        if (!(raw instanceof Boolean b)) {
+            throw breach(source, "lock", "must be a boolean");
+        }
+        return b;
     }
 
     /**

@@ -48,6 +48,22 @@ import java.util.Objects;
  *                           range, and a template can only LOWER the ceiling, never raise
  *                           it. {@code 0} means every {@code out}/reply against this
  *                           template must carry a null or empty body.
+ * @param lock              RDR-211 Phase 1 Step 1 (bead nexus-rplay.3), Approach item 5.
+ *                           {@code false} for every template shipped before this bead.
+ *                           When {@code true}: {@code out} against an already-EXPIRED row
+ *                           of this template resets it to available instead of leaving it
+ *                           dead until the sweep purges it; {@code claim} and {@code renew}
+ *                           move the tuple's own {@link #retentionSeconds expires_at}
+ *                           forward to now plus {@code retentionSeconds}, ahead of the
+ *                           lease clamp, so a long-held lock's lease is never capped
+ *                           against a stale ceiling ("a lock lives as long as it is
+ *                           used"); and {@code ack} on a claim against this template is
+ *                           refused ({@link dev.nexus.service.db.TupleRepository#ack}),
+ *                           because a consumed lock row is unobtainable until the sweep
+ *                           purges it — {@code release} is the only way to end a lock
+ *                           claim. Scoped entirely to templates carrying this flag: every
+ *                           other template's {@code out}/{@code claim}/{@code renew}/
+ *                           {@code ack} behaviour is byte-identical to before this bead.
  */
 public record TemplateSchema(
         String name,
@@ -59,7 +75,8 @@ public record TemplateSchema(
         List<String> idDims,
         Take take,
         long retentionSeconds,
-        Long maxBodyBytes) {
+        Long maxBodyBytes,
+        boolean lock) {
 
     public TemplateSchema {
         Objects.requireNonNull(name, "name");
