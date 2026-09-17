@@ -67,7 +67,7 @@ The status vocabulary is a checked table, `src/nexus/tables/rdr-lifecycle.toml`,
 ```
 draft --> accepted --> closed
   |          |
-  |          +--> deferred --> (resume) accepted
+  |          +--> deferred --> (resume) draft, then re-gate
   |
   +--> abandoned / superseded / closed (with a stated reason)
 ```
@@ -77,7 +77,7 @@ draft --> accepted --> closed
 | **draft** | Created, research in progress |
 | **accepted** | Gate passed, decision formally accepted |
 | **closed** | Done. `close_reason` says how: implemented, partial, reverted, or a stated reason for a close without acceptance |
-| **deferred** | Accepted work parked; resumes to accepted |
+| **deferred** | Accepted work parked; resumes to draft and re-gates |
 | **abandoned** | Dropped, with `close_reason` saying why |
 | **superseded** | Replaced by a newer RDR (linked via `superseded_by`) |
 

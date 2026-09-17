@@ -215,3 +215,29 @@ class TestAuditProcessRows:
         ]
         text = "\n".join(rdr_mod._post_mortem_coverage_lines(rows, pm))
         assert "closed: 1 of 2" in text and "abandoned: 0 of 1" in text, text
+
+
+class TestSetStatusWritesTheReason:
+    """Item 4, forward half: a reason given to set-status lands on the file
+    and on the T2 record as `close_reason`, so new terminated records never
+    join the ones with no machine-readable reason."""
+
+    def test_reason_lands_in_frontmatter_and_t2(self, rdr_env, monkeypatch):
+        d = rdr_env["rdr_dir"]
+        _write_rdr(d, "rdr-150-x.md", {"title": "X", "status": "draft"}, "x\n")
+        fake = _FakeT2ResearchClient(entries={"150": "id: RDR-150\nstatus: draft\n"})
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        res = _runner().invoke(rdr, ["set-status", "150", "abandoned", "--reason", "premise void after RDR-155"])
+        assert res.exit_code == 0, res.output
+        assert "close_reason: premise void after RDR-155" in (d / "rdr-150-x.md").read_text()
+        assert "close_reason: premise void after RDR-155\n" in fake._store["150"]
+
+    def test_no_reason_writes_no_field(self, rdr_env, monkeypatch):
+        d = rdr_env["rdr_dir"]
+        _write_rdr(d, "rdr-151-x.md", {"title": "X", "status": "accepted"}, "x\n")
+        fake = _FakeT2ResearchClient(entries={"151": "id: RDR-151\nstatus: accepted\n"})
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        res = _runner().invoke(rdr, ["set-status", "151", "deferred"])
+        assert res.exit_code == 0, res.output
+        assert "close_reason" not in (d / "rdr-151-x.md").read_text()
+        assert "close_reason" not in fake._store["151"]

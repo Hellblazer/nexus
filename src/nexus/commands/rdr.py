@@ -523,7 +523,7 @@ def _transition_event(table: Table, current_status: str, new_status: str) -> str
     return _target_status_to_event(table)[new_status]
 
 
-def _rewrite_frontmatter_status(text: str, new_status: str, date: str) -> str:
+def _rewrite_frontmatter_status(text: str, new_status: str, date: str, reason: str = "") -> str:
     """Return *text* with the frontmatter ``status:`` set to *new_status*.
 
     Operates on the raw frontmatter block (only the first two ``---`` fences)
@@ -577,6 +577,23 @@ def _rewrite_frontmatter_status(text: str, new_status: str, date: str) -> str:
                 fm,
                 count=1,
                 flags=re.MULTILINE,
+            )
+
+    if reason:
+        # A stated reason is the decision of record; it replaces a value
+        # already there (nexus-5r0ho item 4: nine terminated records with
+        # no machine-readable reason, the rest under four field names).
+        if re.search(r"^close_reason:", fm, re.MULTILINE):
+            fm = re.sub(
+                r"^close_reason:.*?(\r?)$",
+                lambda m: f"close_reason: {reason}{m.group(1)}",
+                fm, count=1, flags=re.MULTILINE,
+            )
+        else:
+            fm = re.sub(
+                r"^(status:.*?)(\r?)$",
+                lambda m: f"{m.group(1)}{m.group(2)}\nclose_reason: {reason}{m.group(2)}",
+                fm, count=1, flags=re.MULTILINE,
             )
 
     return "---" + fm + "---" + parts[2]
@@ -884,7 +901,9 @@ def _t2_statuses_for(repo_name: str, rdr_num: int) -> dict[str, str]:
     return found
 
 
-def _write_t2_status(repo_name: str, rdr_num: int, new_status: str, date: str) -> tuple[str | None, str | None]:
+def _write_t2_status(
+    repo_name: str, rdr_num: int, new_status: str, date: str, reason: str = "",
+) -> tuple[str | None, str | None]:
     """Mirror a successful file flip onto the record's own T2 entry
     (project ``<repo>_rdr``, title ``"<n>"`` or ``"RDR-<n>"``): rewrite the
     ``status:`` line (or prepend one -- several live records carried only
@@ -924,6 +943,9 @@ def _write_t2_status(repo_name: str, rdr_num: int, new_status: str, date: str) -
                     out.insert(0, f"status: {new_status}")
                 if date_key and not seen_date:
                     out.insert(1 if not seen_status else out.index(f"status: {new_status}") + 1, f"{date_key}: {date}")
+                if reason:
+                    out = [ln for ln in out if not ln.strip().startswith("close_reason:")]
+                    out.insert(out.index(f"status: {new_status}") + 1, f"close_reason: {reason}")
                 tags = entry.get("tags", "")
                 if isinstance(tags, (list, tuple)):
                     tags = ",".join(str(t) for t in tags)
@@ -1440,7 +1462,7 @@ def set_status(
 
     text = rdr_file.read_text(encoding="utf-8")
     try:
-        new_text = _rewrite_frontmatter_status(text, new_status, date)
+        new_text = _rewrite_frontmatter_status(text, new_status, date, reason or "")
     except ValueError as exc:
         click.echo(f"cannot set status on {rdr_file.name}: {exc}", err=True)
         sys.exit(1)
@@ -1475,7 +1497,9 @@ def set_status(
     flipped_num_match = re.search(r"\d+", rdr_file.stem)
     if flipped_num_match:
         repo_name = _gate_repo_name(repo_root)
-        t2_title, t2_note = _write_t2_status(repo_name, int(flipped_num_match.group(0)), new_status, date)
+        t2_title, t2_note = _write_t2_status(
+            repo_name, int(flipped_num_match.group(0)), new_status, date, reason or "",
+        )
         if t2_title:
             click.echo(f"updated T2 {repo_name}_rdr/{t2_title} status -> {new_status}")
         if t2_note:
@@ -2283,7 +2307,7 @@ def _preamble_regate_block(
             # HttpMemoryStore.get_all docstring), so every critique's
             # content rides this ONE call for free — sorted by title, which
             # is chronological by construction (``{id}-gate-critique-
-            # {date}``, same-day re-gates append a letter).
+            # {date}-r{N}``; older records carry a letter instead).
             critique_rows: list[tuple[str, str]] = []
             get_all = getattr(client, "get_all", None)
             if callable(get_all):
