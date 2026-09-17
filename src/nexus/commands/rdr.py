@@ -3091,6 +3091,17 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
         return
 
     id_match = re.match(r"^(?:RDR-)?(\d+)$", parsed.rdr_id or "", re.IGNORECASE)
+    if not id_match and force_implemented_reason:
+        last_word = force_implemented_reason.split()[-1]
+        if _PREAMBLE_ID_TOKEN_RE.match(last_word):
+            # An unquoted reason runs to the next flag, so an id placed
+            # straight after it became its last word. Say so; the bare usage
+            # banner gave no hint (critique of 1b5d48093).
+            print(
+                f"> **ERROR**: no RDR id found, and the --force-implemented reason ends in "
+                f"`{last_word}`. Put the id first, or quote the reason."
+            )
+            return
 
     if not id_match:
         print("> **Usage**: `nx rdr preamble rdr-close <id> [--reason implemented|...]`")

@@ -153,7 +153,7 @@ Your review format should be:
 3. **Critical Issues**: Must-fix problems that could cause bugs or security issues
 4. **Important Improvements**: Should-fix items for better quality
 5. **Suggestions**: Nice-to-have enhancements
-6. **Overall Assessment**: Final thoughts and priority recommendations
+6. **Overall Assessment**: Final thoughts and priority recommendations, in prose. The Verdict block's `summary` is its one-sentence form; write both
 
 ## Structured Review with Sequential Thinking
 
@@ -314,7 +314,7 @@ not verification.
 
 **Order at the end of your output:** a Recommended Next Step block, when its condition fires, comes BEFORE this block. The Verdict block is always the last thing you emit.
 
-**You MUST end every review with this block, literally, outside any code fence, using bullet-dash markdown.** It is the same shape and the same vocabulary `substantive-critic` emits, so one parser and one census read both agents. Reviews used to close with whatever word came to hand: fifteen spellings in the record (PASS, APPROVE, LAND WITH FIXES, APPROVED, NOT READY, ...), which no census could classify.
+**You MUST end every review with this block, literally, outside any code fence, using bullet-dash markdown.** It is the same shape and the same vocabulary `substantive-critic` emits, so one parser and one census read both agents. The three words are the critic's; for a code review read `justified` as "the change is sound as written". They are borrowed for census parity and sit beside your own severity words (Critical / Important / Suggestion) and the FALSIFIED / NOT FALSIFIED test vocabulary, replacing neither. Reviews used to close with whatever word came to hand: fifteen spellings in the record (PASS, APPROVE, LAND WITH FIXES, APPROVED, NOT READY, ...), which no census could classify.
 
 The outcome field MUST be one of exactly three literal strings, `justified`, `partial`, or `not-justified`. Do not substitute `PASS`, `FAIL`, `APPROVE`, `APPROVED`, `LAND WITH FIXES`, `NOT READY`, or any other vocabulary, and do not add a second verdict line in other words.
 

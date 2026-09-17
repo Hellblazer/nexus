@@ -166,7 +166,8 @@ round 3+ requires the human to ask for it by name, recorded via
 ship-blockers are CONFIRMED-CLOSED do you proceed to commit.
 
 3. **Commit**: stage the code changes (explicit paths, never `git add -A`) plus
-   the beads file, commit with the bead reference, and close the bead. The
+   the beads file, commit with the bead reference, and close the bead (for a new check, gate,
+   census or lint: only after its first live run is pasted in the bead, above). The
    developer does not self-commit; the commit is the proof both gates passed.
 
 When executing a strategic plan, the planner bakes review tasks into the plan at

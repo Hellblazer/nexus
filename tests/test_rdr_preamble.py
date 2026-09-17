@@ -4153,6 +4153,14 @@ class TestRdrCloseArgv:
         ])
         assert "validation passed" not in res.output, res.output
 
+    def test_an_id_swallowed_by_an_unquoted_reason_is_named(self, rdr_env):
+        self._two_rdrs(rdr_env)
+        res = _runner().invoke(rdr, [
+            "preamble", "rdr-close", "--", "--force-implemented", "critic", "false", "positive", "069",
+        ])
+        assert "reason ends in `069`" in res.output, res.output
+        assert "rdr-069-c.md" not in res.output and "rdr-042-x.md" not in res.output
+
     def test_a_flag_is_never_taken_as_another_flags_value(self, rdr_env):
         from nexus.commands.rdr import _rdr_close_parse_args  # noqa: PLC0415 — deferred, matches the file's other in-test imports
         parsed = _rdr_close_parse_args(("069", "--reason", "--pointers", "Gap1=src/foo.py:42"))
