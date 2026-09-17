@@ -153,6 +153,90 @@ class TestTupleInAckNack:
         assert ack.exit_code == 1
         assert "Error" in ack.output
 
+    def test_release_ends_the_claim_without_counting_an_attempt(self, t2_service_env) -> None:
+        addr = _uniq("addr")
+        _invoke([
+            "out", f"mailbox/{addr}", "--key", f"to={addr}",
+            "--dim", "from=sender-d", "--body", "hand-back", "--nonce", _uniq("nonce"),
+        ])
+        claimant = _uniq("claimant")
+        inr = _invoke([
+            "in", f"mailbox/{addr}", "--pattern", f"to={addr}",
+            "--claimant", claimant, "--lease-s", "30", "--json",
+        ])
+        claim_id = _last_json_line(inr.output)["claim_id"]
+
+        release = _invoke(["release", claim_id, "--claimant", claimant])
+        assert release.exit_code == 0, release.output
+        assert "Released" in release.output
+
+        inr2 = _invoke([
+            "in", f"mailbox/{addr}", "--pattern", f"to={addr}",
+            "--claimant", _uniq("claimant2"), "--lease-s", "30", "--json",
+        ])
+        assert inr2.exit_code == 0
+        payload2 = _last_json_line(inr2.output)
+        assert payload2["tuple"]["body"] == "hand-back"
+        assert payload2["tuple"]["attempts"] == 0
+
+    def test_release_unknown_claim_exits_nonzero(self, t2_service_env) -> None:
+        release = _invoke(["release", "0" * 64, "--claimant", "nobody"])
+        assert release.exit_code == 1
+        assert "Error" in release.output
+
+    def test_release_by_wrong_claimant_exits_nonzero(self, t2_service_env) -> None:
+        addr = _uniq("addr")
+        _invoke([
+            "out", f"mailbox/{addr}", "--key", f"to={addr}",
+            "--dim", "from=sender-d", "--body", "mine", "--nonce", _uniq("nonce"),
+        ])
+        claimant = _uniq("claimant")
+        inr = _invoke([
+            "in", f"mailbox/{addr}", "--pattern", f"to={addr}",
+            "--claimant", claimant, "--lease-s", "30", "--json",
+        ])
+        claim_id = _last_json_line(inr.output)["claim_id"]
+
+        release = _invoke(["release", claim_id, "--claimant", _uniq("impostor")])
+        assert release.exit_code == 1
+        assert "ClaimOwnershipError" in release.output
+
+
+class TestTupleReleaseUnitPassThrough:
+    """Fast, no engine: proves the CLI is a thin pass-through to the
+    store's own ``release``, same shape as ``TestTupleRenewUnitPassThrough``."""
+
+    def test_cli_calls_the_store_with_exactly_the_given_arguments(self, monkeypatch) -> None:
+        captured: dict[str, tuple] = {}
+
+        def _fake_release(self, claim_id, claimant):
+            captured["args"] = (claim_id, claimant)
+
+        monkeypatch.setattr(HttpTupleStore, "release", _fake_release)
+        res = _invoke(["release", "claim-1", "--claimant", "me"])
+        assert res.exit_code == 0, res.output
+        assert captured["args"] == ("claim-1", "me")
+        assert res.output.strip() == "Released claim claim-1"
+
+    def test_typed_errors_print_the_typed_message_not_a_traceback(self, monkeypatch) -> None:
+        for exc_cls, code in (
+            (ClaimNotFoundError, "ClaimNotFound"),
+            (ClaimOwnershipError, "ClaimOwnership"),
+        ):
+            def _fake_release(self, claim_id, claimant, _exc=exc_cls, _code=code):
+                raise _exc(_code)
+
+            monkeypatch.setattr(HttpTupleStore, "release", _fake_release)
+            res = _invoke(["release", "c", "--claimant", "m"])
+            assert res.exit_code == 1
+            assert exc_cls.__name__ in res.output
+            assert "Traceback" not in res.output
+
+    def test_missing_required_claimant_is_a_usage_error(self, t2_service_env) -> None:
+        res = _invoke(["release", "x"])  # no --claimant
+        assert res.exit_code != 0
+        assert "claimant" in res.output.lower()
+
 
 class TestTupleTemplatesListStats:
     def test_templates_lists_the_registered_templates(self, t2_service_env) -> None:

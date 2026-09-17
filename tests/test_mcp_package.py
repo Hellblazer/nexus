@@ -54,8 +54,10 @@ def test_core_registered_tools():
         # RDR-205 Phase 2 Step 2 (bead nexus-em75s.10): the eight Linda
         # tuple-space tools over HttpTupleStore (nexus-em75s.9). RDR-206
         # Phase 2 (bead nexus-h61dl.9) added the ninth, tuple_renew.
+        # RDR-211 Phase 1 Step 3 (bead nexus-rplay.9) added the tenth,
+        # tuple_release.
         "tuple_out", "tuple_rd", "tuple_in", "tuple_ack", "tuple_nack",
-        "tuple_renew", "tuple_registry", "tuple_list", "tuple_stats",
+        "tuple_renew", "tuple_release", "tuple_registry", "tuple_list", "tuple_stats",
         # RDR-208 Phase 2 Step 2 (bead nexus-galkv.10): send-time name
         # resolution over the RDR-208 session directory.
         "mailbox_send",
@@ -204,9 +206,10 @@ def test_init_reexports_all():
         "operator_groupby", "operator_aggregate",
         "nx_answer", "nx_tidy", "nx_enrich_beads", "nx_plan_audit",
         # RDR-205 Phase 2 Step 2 (bead nexus-em75s.10); RDR-206 Phase 2
-        # (bead nexus-h61dl.9) added tuple_renew.
+        # (bead nexus-h61dl.9) added tuple_renew; RDR-211 Phase 1 Step 3
+        # (bead nexus-rplay.9) added tuple_release.
         "tuple_out", "tuple_rd", "tuple_in", "tuple_ack", "tuple_nack",
-        "tuple_renew", "tuple_registry", "tuple_list", "tuple_stats",
+        "tuple_renew", "tuple_release", "tuple_registry", "tuple_list", "tuple_stats",
         # RDR-208 Phase 2 Step 2 (bead nexus-galkv.10)
         "mailbox_send",
         # demoted

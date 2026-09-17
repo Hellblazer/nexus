@@ -6246,16 +6246,21 @@ def plan_delete(
 
 # ── Tuple space tools (RDR-205 Phase 2 Step 2, bead nexus-em75s.10; ─────────
 # RDR-206 Phase 2 added tuple_renew and tuple_ack's reply argument, bead
-# nexus-h61dl.9) ─────────────────────────────────────────────────────────
-# Nine MCP tools over nexus.db.t2.http_tuple_store.HttpTupleStore
+# nexus-h61dl.9; RDR-211 Phase 1 Step 3 added the tenth, tuple_release,
+# bead nexus-rplay.9) ─────────────────────────────────────────────────────
+# Ten MCP tools over nexus.db.t2.http_tuple_store.HttpTupleStore
 # (nexus-em75s.9). ``structured_output=False`` is declared explicitly on
-# EVERY one of the nine tools below, regardless of return-annotation
+# EVERY one of the ten tools below, regardless of return-annotation
 # shape (nexus-em75s.12 review fix — this comment previously claimed it
 # was set only where the annotation is a union or a list, which the code
-# never did: ``tuple_out``/``tuple_ack``/``tuple_nack`` return a bare
-# ``str`` and ``tuple_registry``/``tuple_stats``/``tuple_renew`` a bare
-# ``dict``, and all of them carry the same explicit
+# never did: ``tuple_out``/``tuple_ack``/``tuple_nack``/``tuple_release``
+# return a bare ``str`` and ``tuple_registry``/``tuple_stats``/
+# ``tuple_renew`` a bare ``dict``, and all of them carry the same explicit
 # ``structured_output=False``).
+# RDR-211's other two new client operations, ``wait`` and ``park_stats``,
+# deliberately get NO tool here (Sam's decision, RDR-211 Open Question 6):
+# the session MCP server's own lifespan waiter and a later doctor-row bead
+# are their only intended callers.
 # The real rule is the nexus-r90ao registration census
 # (``tests/test_mcp_wire_shapes.py``): every ``@mcp.tool()`` must declare
 # ``structured_output=`` explicitly, so a future signature edit to a
@@ -6575,6 +6580,33 @@ def tuple_renew(
         return {"lease_until": lease_until.isoformat()}
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return {"error": _mcp_tool_error("tuple_renew", e)}
+
+
+@mcp.tool(
+    title="Release Tuple Claim",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
+)
+def tuple_release(
+    claim_id: Annotated[str, Field(description="The claim id returned by `tuple_in`.")],
+    claimant: Annotated[str, Field(description="Must match the identity that made the claim.")],
+) -> str:
+    """Consume a claimed tuple (`release`, RDR-211): release ends a live
+    claim WITHOUT counting an attempt -- a hand-back that is not a
+    failure. Use `tuple_nack` instead when the work genuinely failed and
+    should count toward the template's `max_attempts`; `nack` counts one.
+
+    Returns a confirmation naming the claim. Refused on a lapsed claim
+    (`ClaimNotFound`) rather than resurrecting it, and on a claim held by
+    another claimant (`ClaimOwnership`).
+    """
+    try:
+        _t2_index_write(
+            lambda db: db.tuples.release(claim_id, claimant), op="tuple_release",
+        )
+        return f"Released claim {claim_id}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("tuple_release", e)
 
 
 @mcp.tool(

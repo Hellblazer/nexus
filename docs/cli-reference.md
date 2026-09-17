@@ -3792,6 +3792,18 @@ Extend a live claim held by `--claimant` before its lease lapses (RDR-206). Prin
 | `--claimant ID` | Must match the identity that made the claim (required) |
 | `--lease-s N` | New lease length from now, refused above the template's `max_lease_seconds` and silently clipped to the tuple's own expiry (required) |
 
+### nx tuple release
+
+```
+nx tuple release CLAIM_ID --claimant ID
+```
+
+End a live claim WITHOUT counting an attempt (`release`, RDR-211): a hand-back that is not a failure. Use `nx tuple nack` instead when the work genuinely failed and should count toward the template's `max_attempts`. Refused on a lapsed claim as `ClaimNotFound` rather than resurrecting it, and on a claim held by another claimant as `ClaimOwnership` — the same two refusals `renew` raises.
+
+| Flag | Description |
+|------|-------------|
+| `--claimant ID` | Must match the identity that made the claim (required) |
+
 ### nx tuple templates
 
 ```

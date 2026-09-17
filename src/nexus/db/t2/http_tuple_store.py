@@ -13,20 +13,27 @@ Config:
     NX_SERVICE_PORT  — service port (required; raises if missing)
     NX_SERVICE_TOKEN — bearer token (required; raises if missing)
 
-Ten operations (RDR-205 §Technical Design "Operations", verbatim
+Fourteen operations (RDR-205 §Technical Design "Operations", verbatim
 signatures — ``in`` is a Python keyword, spelled ``in_`` here; every
-other name matches):
+other name matches). RDR-206 added ``renew``; RDR-211 Phase 1 Step 1
+(bead nexus-rplay.9) added ``release``, ``wait`` and ``park_stats`` --
+the latter two are internal transport with no MCP tool or CLI verb (Sam's
+decision, RDR-211 Open Question 6): the session MCP server's own lifespan
+waiter and a later doctor-row bead are their only intended callers:
 
     out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> tuple_id
     rd (subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0) -> [TupleRow]
     rdp(subspace, keys_pattern=None, *, n=1, since=None) -> [TupleRow]
     in_(subspace, keys_pattern, *, claimant, lease_s, timeout_s=0) -> (TupleRow, claim_id) | None
     inp(subspace, keys_pattern, *, claimant, lease_s) -> (TupleRow, claim_id) | None
-    ack(claim_id, claimant) ; nack(claim_id, claimant)
+    ack(claim_id, claimant) ; nack(claim_id, claimant) ; release(claim_id, claimant)
+    renew(claim_id, claimant, lease_s) -> datetime
+    wait(specs: [WaitSpec], timeout_s) -> [WaitResult]
     registry() -> {digest, sources, templates: [...]}
     subspace_list(prefix=None, *, limit=None, after=None) -> [SubspaceCensus]
         (with limit: -> ([SubspaceCensus], next_cursor | None) instead)
     subspace_stats(subspace) -> SubspaceCensus
+    park_stats() -> ParkStats
 
 Two things no other T2 domain store needs, both new code (RDR-205
 §Technical Design "Operations" and §Existing Infrastructure Audit):
@@ -82,13 +89,14 @@ timeout could fire on its own.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, NoReturn
 
 import httpx
 import structlog
 
-from nexus.db.t2.records import ReplySpec, SubspaceCensus, TupleRow
+from nexus.db.t2.records import ParkStats, ReplySpec, SubspaceCensus, TupleRow, WaitResult, WaitSpec
 
 # nexus-em75s.9: construction, credential/endpoint refresh-on-401, and the
 # HTTP transport itself (_post/_get) are inherited wholesale from
@@ -120,6 +128,13 @@ _MAX_SUBSPACE_BYTES: int = 256
 _MAX_NONCE_BYTES: int = 128
 _MAX_CLAIMANT_BYTES: int = 128
 _MAX_CLAIM_ID_BYTES: int = 128
+
+#: RDR-211 Phase 1 Step 1 (bead nexus-rplay.4): mirrors
+#: ``TupleRepository.MAX_WAIT_SUBSPACES`` verbatim -- ``wait``'s own
+#: per-call cap on how many subspaces one parked call can multiplex.
+#: Enforced client-side, before sending, with the SAME error class
+#: (``SchemaViolationError``) the engine would refuse it with server-side.
+_MAX_WAIT_SPECS: int = 34
 
 #: Per-call HTTP-timeout margin (seconds) added on top of a caller-supplied
 #: ``timeout_s`` for a blocking ``rd``/``in_`` call, so the request-level
@@ -757,6 +772,110 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         _check_field_size("claim_id", claim_id, _MAX_CLAIM_ID_BYTES)
         _check_field_size("claimant", claimant, _MAX_CLAIMANT_BYTES)
         self._post("/nack", {"claim_id": claim_id, "claimant": claimant})
+
+    def release(self, claim_id: str, claimant: str) -> None:
+        """End a live claim WITHOUT counting an attempt (RDR-211 Phase 1
+        Step 1, bead nexus-rplay.2, Gap 4) -- a hand-back that is NOT a
+        failure. Use :meth:`nack` instead when the work genuinely failed
+        and should count toward the template's ``max_attempts``.
+
+        Follows the exact pattern RDR-206 set for :meth:`renew`: no new
+        typed error was needed, because the two this can raise --
+        :class:`ClaimNotFoundError` (a claim that is no longer live) and
+        :class:`ClaimOwnershipError` (a live claim held by a different
+        claimant) -- already exist with their statuses from ``ack``/
+        ``nack``/``renew``.
+
+        Against an engine predating ``/release`` the unknown route answers
+        404 with ``{"error": "unknown tuples op: /release"}`` (the route
+        switch's default branch) -- the body's ``error`` field is not one
+        of the twelve recognised codes, so ``_raise_typed`` finds no class
+        for it and re-raises the bare ``httpx.HTTPStatusError``, loud by
+        design, exactly as :meth:`renew` behaves against the same old
+        engine: a silent no-op here would let a caller believe a claim was
+        returned to available while the engine quietly kept it live.
+        """
+        if not claim_id:
+            raise ValueError("claim_id must not be empty")
+        if not claimant:
+            raise ValueError("claimant must not be empty")
+        _check_field_size("claim_id", claim_id, _MAX_CLAIM_ID_BYTES)
+        _check_field_size("claimant", claimant, _MAX_CLAIMANT_BYTES)
+        self._post("/release", {"claim_id": claim_id, "claimant": claimant})
+
+    # ── wait ──────────────────────────────────────────────────────────────
+
+    def wait(self, specs: Sequence[WaitSpec], timeout_s: int) -> list[WaitResult]:
+        """Multiplex ``rd`` over several subspaces in ONE parked call
+        (RDR-211 Phase 1 Step 1, bead nexus-rplay.4): parks with NO
+        claimant, so it takes one GLOBAL park slot regardless of how many
+        subspaces *specs* names, unlike ``in_``'s per-claimant slot. A
+        subspace with no match is simply ABSENT from the returned list,
+        never present with an empty ``tuples``.
+
+        Internal transport (RDR-211 Open Question 6, Sam's decision): the
+        session's own MCP server lifespan waiter (a later bead) is the
+        ONLY intended caller. There is deliberately no MCP tool or CLI verb
+        for ``wait`` -- a session parks on its own mailboxes and subscribed
+        board topics through that waiter, never by calling this method
+        directly.
+
+        Refused BEFORE sending, client-side, with :class:`SchemaViolationError`
+        -- the SAME class and reason the engine would refuse it with,
+        server-side, past :data:`_MAX_WAIT_SPECS` (mirrors
+        ``TupleRepository.MAX_WAIT_SUBSPACES``). Every ``subspace`` and
+        ``keys_pattern`` value in *specs* is also checked against the
+        RDR-205 per-field size limits first, exactly as :meth:`rd` checks
+        its own.
+        """
+        if len(specs) > _MAX_WAIT_SPECS:
+            raise SchemaViolationError(
+                f"at most {_MAX_WAIT_SPECS} subspaces per wait, got {len(specs)} -- "
+                "refused before sending"
+            )
+        payload_specs: list[dict[str, Any]] = []
+        for spec in specs:
+            if not spec.subspace:
+                raise ValueError("subspace must not be empty")
+            _check_field_size("subspace", spec.subspace, _MAX_SUBSPACE_BYTES)
+            _check_pattern_sizes(spec.keys_pattern)
+            entry: dict[str, Any] = {"subspace": spec.subspace, "n": spec.n}
+            if spec.keys_pattern:
+                entry["keys_pattern"] = spec.keys_pattern
+            since_body = _since_payload(spec.since)
+            if since_body is not None:
+                entry["since"] = since_body
+            payload_specs.append(entry)
+        payload: dict[str, Any] = {"subspaces": payload_specs}
+        if timeout_s:
+            payload["timeout_s"] = timeout_s
+        req_timeout = timeout_s + _PARK_TIMEOUT_MARGIN_S if timeout_s > 0 else None
+        r = self._post("/wait", payload, mutates=False, timeout=req_timeout)
+        return [
+            WaitResult(
+                subspace=entry.get("subspace", ""),
+                tuples=[_body_to_tuple_row(t) for t in entry.get("tuples", [])],
+            )
+            for entry in (r or {}).get("results", [])
+        ]
+
+    # ── park_stats ────────────────────────────────────────────────────────
+
+    def park_stats(self) -> ParkStats:
+        """Engine-wide (never per-tenant) parked-call gauges (RDR-211
+        Phase 1 Step 1, bead nexus-rplay.7) -- mirrors :meth:`registry`'s
+        own lack of tenant scoping. Internal transport: a later ``nx
+        doctor`` row bead is the one intended consumer.
+        """
+        r = self._get("/park_stats")
+        return ParkStats(
+            max_global=int(r.get("max_global", 0)),
+            max_per_claimant=int(r.get("max_per_claimant", 0)),
+            global_in_use=int(r.get("global_in_use", 0)),
+            refused_global=int(r.get("refused_global", 0)),
+            refused_claimant=int(r.get("refused_claimant", 0)),
+            per_claimant=dict(r.get("per_claimant") or {}),
+        )
 
     # ── registry / census ────────────────────────────────────────────────
 

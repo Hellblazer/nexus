@@ -10,7 +10,9 @@ Subcommands:
   ack        -- consume a claimed tuple, optionally writing a reply in the
                 same transaction (--reply-* flags, RDR-206).
   renew      -- extend a live claim's lease before it lapses (RDR-206).
-  nack       -- release a claim back to available.
+  nack       -- release a claim back to available, counting an attempt.
+  release    -- end a live claim without counting an attempt (RDR-211):
+                a hand-back that is not a failure.
   templates  -- the boot-loaded template registry (digest, sources, templates).
   list       -- concrete subspaces that exist.
   stats      -- the census for one subspace.
@@ -60,7 +62,7 @@ def _print_tuple_error(e: Exception) -> None:
 
 @click.group(name="tuple")
 def tuple_group() -> None:
-    """RDR-205 Linda tuple space: out / rd / in / ack (with an optional reply) / nack / renew / templates / list / stats / directory / watch."""
+    """RDR-205 Linda tuple space: out / rd / in / ack (with an optional reply) / nack / renew / release / templates / list / stats / directory / watch."""
 
 
 @tuple_group.command(name="out")
@@ -280,6 +282,25 @@ def tuple_nack_cmd(claim_id: str, claimant: str) -> None:
         _print_tuple_error(e)
         raise SystemExit(1) from e
     click.echo(f"Nacked claim {claim_id}")
+
+
+@tuple_group.command(name="release")
+@click.argument("claim_id")
+@click.option("--claimant", required=True, help="Must match the identity that made the claim.")
+def tuple_release_cmd(claim_id: str, claimant: str) -> None:
+    """End a live claim WITHOUT counting an attempt (RDR-211) -- a
+    hand-back that is not a failure. Use nack instead when the work
+    genuinely failed and should count toward the template's max_attempts.
+
+    Refused on a lapsed claim (ClaimNotFound) rather than resurrecting it,
+    and on a claim held by another claimant (ClaimOwnership).
+    """
+    try:
+        _store().release(claim_id, claimant)
+    except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
+        _print_tuple_error(e)
+        raise SystemExit(1) from e
+    click.echo(f"Released claim {claim_id}")
 
 
 @tuple_group.command(name="templates")

@@ -39,6 +39,7 @@ from nexus.mcp.core import (  # noqa: F401
     tuple_ack,
     tuple_nack,
     tuple_renew,
+    tuple_release,
     tuple_registry,
     tuple_list,
     tuple_stats,

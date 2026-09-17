@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""The nine RDR-205/RDR-206 tuple-space MCP tools (beads nexus-em75s.10,
-nexus-h61dl.9), plus mailbox_send (RDR-208 Phase 2 Step 2, bead
-nexus-galkv.10), against the real engine substrate (``t2_service_env``).
+"""The ten RDR-205/RDR-206/RDR-211 tuple-space MCP tools (beads
+nexus-em75s.10, nexus-h61dl.9, nexus-rplay.9), plus mailbox_send (RDR-208
+Phase 2 Step 2, bead nexus-galkv.10), against the real engine substrate
+(``t2_service_env``).
 
 Uses the ``mailbox/<address>`` template loaded at engine boot (keys
 ``[to]``, dims ``{from, kind, correlation_id, address_kind}``,
@@ -29,6 +30,7 @@ from nexus.mcp.core import (
     tuple_out,
     tuple_rd,
     tuple_registry,
+    tuple_release,
     tuple_renew,
     tuple_stats,
 )
@@ -282,6 +284,40 @@ class TestTupleRenew:
 
         result = tuple_renew(claim["claim_id"], _uniq("impostor"), 60)
         assert "error" in result
+
+
+class TestTupleRelease:
+    def test_release_ends_the_claim_without_counting_an_attempt(self, t2_service_env) -> None:
+        addr = _uniq("addr")
+        tuple_out(f"mailbox/{addr}", {"to": addr}, {"from": "sender-h"}, "hand-back", nonce=_uniq("nonce"))
+        claimant = _uniq("claimant")
+        claim = tuple_in(f"mailbox/{addr}", {"to": addr}, claimant=claimant, lease_s=30)
+        assert claim is not None
+        assert claim["tuple"]["attempts"] == 0
+
+        msg = tuple_release(claim["claim_id"], claimant)
+        assert "Released" in msg
+
+        # released back to available with attempts unchanged -- a second
+        # claimant can take it, and it is not a dead-letter retry.
+        claim2 = tuple_in(f"mailbox/{addr}", {"to": addr}, claimant=_uniq("claimant2"), lease_s=30)
+        assert claim2 is not None
+        assert claim2["tuple"]["body"] == "hand-back"
+        assert claim2["tuple"]["attempts"] == 0
+
+    def test_release_on_unknown_claim_returns_error_string(self, t2_service_env) -> None:
+        msg = tuple_release("0" * 64, "nobody")
+        assert "Error" in msg
+
+    def test_release_by_a_different_claimant_returns_error_string(self, t2_service_env) -> None:
+        addr = _uniq("addr")
+        tuple_out(f"mailbox/{addr}", {"to": addr}, {"from": "sender-i"}, "mine", nonce=_uniq("nonce"))
+        claimant = _uniq("claimant")
+        claim = tuple_in(f"mailbox/{addr}", {"to": addr}, claimant=claimant, lease_s=30)
+        assert claim is not None
+
+        msg = tuple_release(claim["claim_id"], _uniq("impostor"))
+        assert "Error" in msg
 
 
 class TestTupleRegistryListStats:
