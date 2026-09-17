@@ -223,6 +223,28 @@ def test_extract_context(source, lang, start, end, exp_class, exp_method):
     assert method == exp_method
 
 
+# ── _extract_context "c_sharp" tree-sitter-language-pack alias (nexus-yrc7q #7) ──
+#
+# tree-sitter-language-pack's get_parser() knows the language only as
+# "csharp"; chunker.py's _make_code_splitter (52) and this module's own
+# _is_import_only_chunk (425) both apply the "c_sharp" -> "csharp" alias
+# before calling get_parser(), but _extract_context (270) called
+# get_parser(language) directly with the unaliased "c_sharp" name, which
+# tree-sitter-language-pack raises LookupError on. Every C# chunk therefore
+# hit the except-Exception fallback, logged one WARNING, and returned
+# ("", ""): no class/method context on any C# chunk ever.
+
+def test_extract_context_c_sharp_resolves_parser_via_alias():
+    from nexus.code_indexer import _extract_context
+
+    src = (
+        b"using System;\nnamespace N {\n  class Foo {\n    void Bar() {\n"
+        b"      int x = 1;\n    }\n  }\n}\n"
+    )
+    cls, method = _extract_context(src, "c_sharp", 4, 4)
+    assert (cls, method) == ("Foo", "Bar")
+
+
 # ── index_code_file ──────────────────────────────────────────────────────────
 
 def test_index_code_file_skips_current_file(tmp_path, make_ctx):
