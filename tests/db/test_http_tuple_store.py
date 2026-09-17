@@ -7,8 +7,9 @@ timeout-ordering arithmetic, the parked-502 gateway retry) that do not need
 a live tuple row and are cheaper and more deterministic as mock-transport /
 monkeypatch tests than as engine round trips.
 
-Three v1 templates are loaded at engine boot (``service/src/main/resources/
-tuples/templates/{directory,ledger,mailbox}.yaml``):
+Six templates are loaded at engine boot (``service/src/main/resources/
+tuples/templates/{board,directory,ledger,lock,mailbox,queue}.yaml``; the
+tests below exercise the original three):
 
   - ``ledger/<session_id>``: keys ``[agent_id, kind]``, ``id_from=keys``,
     ``take.enabled=false`` (never claimable).
