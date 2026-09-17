@@ -357,7 +357,7 @@ the drain hook or a restart mid-work; every lapse counts an attempt against
   nacks across the five announces dead-letter the message, a path RDR-211's
   single held claim never exposed the session to.
   **Mitigation**: Approach item 5's rule (release, never nack, when deferring)
-  in the skill text and the reference itself; the Test Plan scenario below.
+  in the skill text; the Test Plan scenario below.
 - **Risk**: the drain hook and a session's `tuple_in` race for the same row.
   **Mitigation**: `in` is atomic; the loser gets nothing and does nothing,
   as the drain hook already handles today.
@@ -555,3 +555,6 @@ The MVV is Phase 1's exit, not deferred.
   tests/test_mcp_package.py named in Phase 1; release-never-nack on a deferred
   re-announce in Approach 5, Risks, the Test Plan and Step 3; the cadence
   constants and the upgrade lapse stated.
+- 2026-09-17: Fix check `nexus_rdr/213-fix-check-6945efe4a` (two of three
+  raised one clause): the Risks mitigation no longer says the rule lives in
+  the reference, which carries no body; the skill text is its only carrier.
