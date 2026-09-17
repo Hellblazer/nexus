@@ -486,9 +486,16 @@ no attempt, and continues.
 
 The waiter then sends `notifications/claude/channel` as a raw
 `JSONRPCNotification` on the session's write stream (the SDK's typed
-notification union has no member for it) with the body as `content` and
-`meta` carrying `subspace`, `from`, `kind`, `correlation_id`, `tuple_id`,
-`claim_id` and `claimant`. The session acts and calls `tuple_ack` (with a
+notification union has no member for it). Its `content` is a REFERENCE,
+never the body (Sam, 2026-09-17, T2
+`nexus_rdr/211-decision-push-reference-2026-09-17`): a fixed template naming
+the subspace, the tuple id, the claim id and the waiter's claimant, and
+telling the session to read the tuple with `tuple_rd` on that subspace and
+answer with the claim id; `meta` carries `subspace`, `from`, `kind`,
+`correlation_id`, `tuple_id`, `claim_id` and `claimant`. Peer-written text
+never enters the session unread: the model reads the body deliberately, as
+it always has with pull, so a poster cannot inject text into a session by
+sending it mail. The session reads, acts and calls `tuple_ack` (with a
 reply when the mail was a request) or `tuple_nack`, passing the claim id and
 claimant back. Claude Code does not acknowledge notifications, so the waiter
 does not rely on delivery: it claims with a 300 s lease, renews at 150 s (a
@@ -505,12 +512,13 @@ no successor inside 300 s, after which the sweep's
 `releaseLapsedClaimsBatch` (TupleRepository.java:1280) or the next `in`
 reclaims the row; or the session nacks the message. Any three of those on
 one message reach the mailbox template's cap of three, and that row is a
-dead letter the drain hook surfaces once, as today. For each new board post the waiter sends the post as `content` with
-`subspace`, `from`, `kind` and `tuple_id`, no claim, and advances that
+dead letter the drain hook surfaces once, as today. For each new board post the waiter sends a reference as `content` (the
+subspace and the tuple id, and where to read from) with `subspace`, `from`,
+`kind` and `tuple_id` in `meta`, no claim, and advances that
 topic's cursor; a dropped post notification is not re-sent, the post stays
 readable by `rd` for its retention, and `tuple_subscriptions` shows the
-cursor to re-read from. Notifications carry the body up to the tuple body
-cap of 4096 bytes; a session busy in a turn receives everything that arrived,
+cursor to re-read from. Notifications are small and fixed in shape, since
+they carry no body; a session busy in a turn receives everything that arrived,
 together, at its next turn.
 
 The channel is a Claude Code research preview: a session opts in per launch
@@ -825,8 +833,9 @@ idempotency, and it loses history.
 One end-to-end run against a real engine, with two sessions and one script:
 
 1. The script posts to a board. Both sessions, subscribed to the topic and
-   launched with the channel, wake with the post in context, delivered by
-   their own MCP servers' single `wait` each; neither ran a watcher.
+   launched with the channel, wake with the post's reference in context,
+   delivered by their own MCP servers' single `wait` each, and read the post
+   with `tuple_rd`; neither ran a watcher.
 2. The script puts two tasks on a queue. Each session takes a different one. One
    session releases its task, and the task's attempt count stays at zero. The
    other session takes and acks it.
@@ -834,7 +843,8 @@ One end-to-end run against a real engine, with two sessions and one script:
    and the other takes it at once. The second holder is killed without releasing,
    the lease lapses, and the first takes the lock again.
 4. The script sends a request to one session's mailbox. The session wakes with
-   the body and a claim id in context, answers with `tuple_ack` and a reply, and
+   the reference and a claim id in context, reads the body with `tuple_rd`,
+   answers with `tuple_ack` and a reply, and
    the script's parked `rd` on its own mailbox wakes with the reply. The
    notification for a second request is suppressed in the test; the session
    still receives it at the next renew, 150 s later, with the same claim id,
@@ -956,8 +966,9 @@ None.
   with that topic's cursor advanced, a mailbox write wakes the same call, and
   the engine's park report shows one slot for the session.
 - **Scenario**: mail arrives for an idle session launched with the channel.
-  **Verify**: the session wakes with the body and claim id in context, acks,
-  and the row is consumed; no watcher ran.
+  **Verify**: the session wakes with the reference and claim id in context,
+  reads the body with `tuple_rd`, acks, and the row is consumed; no watcher
+  ran.
 - **Scenario**: the notification is dropped (the transport write is suppressed
   in the test). **Verify**: the waiter re-sends it at the next renew, 150 s
   later, with the same claim id, and the claim log shows no expiry. Then the server is killed:
@@ -1221,3 +1232,9 @@ enumerate every one with its test.
   sentences (Failure Modes, Day 2 Operations, one Test Plan scenario) still
   describing the superseded handshake capability set; swept to the gate's
   proof wording (T2 `nexus_rdr/211-critique-phase1-step3-client-2026-09-17`).
+- 2026-09-17: Sam's decision on the client review's injection finding (T2
+  `nexus_rdr/211-decision-push-reference-2026-09-17`): a channel notification
+  carries a reference (subspace, tuple id, claim id, claimant), never the
+  body; the session reads the body deliberately with `tuple_rd`. Delivery,
+  the Test Plan and the MVV amended; the 4096-byte body cap no longer bounds
+  a notification.
