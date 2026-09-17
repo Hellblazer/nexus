@@ -288,7 +288,29 @@ async def send_channel_notification(content: str, meta: dict[str, str]) -> bool:
 _CHANNEL_ARGV_FLAGS: tuple[str, ...] = (
     "--channels server:nexus",
     "--dangerously-load-development-channels server:nexus",
+    # The plugin form (bead nexus-tk2cz, measured 2026-09-17): a plugin on
+    # the effective channel allowlist (Anthropic's, or `allowedChannelPlugins`
+    # in managed settings) loads with no dialog as
+    # `--channels plugin:conexus@<marketplace>`; the marketplace segment is
+    # not fixed, so the match stops at the `@`.
+    "--channels plugin:conexus@",
+    "--dangerously-load-development-channels plugin:conexus@",
 )
+
+#: Seconds `run()` waits before the FIRST probe notification. Claude Code
+#: registers channel delivery for a server shortly AFTER the connection is
+#: up (0.5 s measured 2026-09-17, bead nexus-tk2cz); a probe sent at
+#: lifespan start raced that registration and was dropped, and a dropped
+#: probe meant no claim ever in that process.
+DEFAULT_PROBE_DELAY_S: float = 5.0
+#: Seconds `run()` waits for the probe's answer before sending the probe a
+#: SECOND (and last) time. Two probes total, not one: the RDR-211 design's
+#: "one probe" assumed the first one always reached the session.
+DEFAULT_PROBE_RESEND_AFTER_S: float = 60.0
+#: Seconds `run()` sleeps after a tick fails for a reason other than
+#: "engine without wait" (a transient HTTP or store error) before the next
+#: tick. The loop never dies on one bad round-trip.
+DEFAULT_TICK_ERROR_BACKOFF_S: float = 5.0
 
 _PROBE_CONTENT = (
     "The nexus MCP server's channel waiter is checking whether this session "
@@ -417,6 +439,9 @@ class ChannelWaiter:
         renew_interval_s: float = DEFAULT_RENEW_INTERVAL_S,
         wait_timeout_s: int = DEFAULT_WAIT_TIMEOUT_S,
         max_resends: int = DEFAULT_MAX_RESENDS,
+        probe_delay_s: float = DEFAULT_PROBE_DELAY_S,
+        probe_resend_after_s: float = DEFAULT_PROBE_RESEND_AFTER_S,
+        tick_error_backoff_s: float = DEFAULT_TICK_ERROR_BACKOFF_S,
     ) -> None:
         self.session_id = session_id
         self.store_factory = store_factory
@@ -438,6 +463,9 @@ class ChannelWaiter:
         self.renew_interval_s = renew_interval_s
         self.wait_timeout_s = wait_timeout_s
         self.max_resends = max_resends
+        self.probe_delay_s = probe_delay_s
+        self.probe_resend_after_s = probe_resend_after_s
+        self.tick_error_backoff_s = tick_error_backoff_s
 
         self._proof = "argv" if channel_live else "none"
         self.channel_live = asyncio.Event()
@@ -449,7 +477,7 @@ class ChannelWaiter:
         self._stopped = False
         self._last_wake: datetime | None = None
         self._released_count = 0
-        self._probe_sent = False
+        self._probes_sent = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task | None = None
 
@@ -550,18 +578,43 @@ class ChannelWaiter:
         self._publish_status()
         try:
             if not self.channel_live.is_set():
-                await self._send_probe_once()
-                await self.channel_live.wait()
+                await self._probe_until_live()
             while not self._stopped:
-                await self.tick()
+                try:
+                    await self.tick()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 — one bad round-trip must never end delivery for the session
+                    _log.warning(
+                        "channel_waiter_tick_failed", session_id=self.session_id,
+                        error=repr(exc), backoff_s=self.tick_error_backoff_s,
+                    )
+                    await asyncio.sleep(self.tick_error_backoff_s)
         finally:
             self._alive = False
             self._publish_status()
 
-    async def _send_probe_once(self) -> None:
-        if self._probe_sent:
+    async def _probe_until_live(self) -> None:
+        """Send the probe after :attr:`probe_delay_s` (Claude Code registers
+        channel delivery shortly after the connection is up, so an immediate
+        probe is dropped), wait :attr:`probe_resend_after_s` for the
+        session's `tuple_channel_probe` call, send the probe once more if it
+        has not come, then wait for as long as the process lives. Two probes
+        total; no call, no claim, ever, in this process."""
+        await asyncio.sleep(self.probe_delay_s)
+        await self._send_probe()
+        try:
+            await asyncio.wait_for(self.channel_live.wait(), timeout=self.probe_resend_after_s)
             return
-        self._probe_sent = True
+        except TimeoutError:
+            pass
+        await self._send_probe()
+        await self.channel_live.wait()
+
+    async def _send_probe(self) -> None:
+        if self._probes_sent >= 2:
+            return
+        self._probes_sent += 1
         await self.sender(_PROBE_CONTENT, {"kind": "channel_probe"})
 
     async def _adopt_persisted_outstanding(self) -> None:
@@ -636,11 +689,27 @@ class ChannelWaiter:
         if self._outstanding is not None:
             remaining = self._outstanding.next_renew_at - time.monotonic()
             timeout_s = max(0, min(self.wait_timeout_s, int(remaining)))
+        if not specs:
+            # Mailbox-only subscriptions with a claim outstanding: every
+            # mailbox is held out of the wait by back pressure and there is
+            # no board to park on. The engine refuses an empty `wait`
+            # (SchemaViolation, "must name at least one subspace"), and
+            # before bead nexus-tk2cz that refusal ended the loop for good
+            # after the FIRST mailbox delivery of any session without a
+            # board topic. Sleep until the renew is due instead.
+            await asyncio.sleep(max(1, timeout_s))
+            self._publish_status()
+            return
         try:
             results: list[WaitResult] = await asyncio.to_thread(self._call, lambda t: t.wait(specs, timeout_s))
-        except httpx.HTTPStatusError:
-            self._stop_no_wait_support()
-            return
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                # The route switch's default branch on an engine predating
+                # `/wait` (`unknown tuples op: /wait`, a bare 404): no wait,
+                # no waiter; the drain hook is the floor.
+                self._stop_no_wait_support()
+                return
+            raise  # any other status is a transient fault: `run()` logs, backs off and ticks again
         self._last_wake = datetime.now(UTC)
         await self._process_results(results)
         if self._outstanding is None:
