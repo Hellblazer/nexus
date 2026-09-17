@@ -229,6 +229,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-210](rdr-210-dual-mode-local-engine.md) | One Local Engine Serves Both Embedders: bge-768 and Voyage Collections Side by Side | Architecture | Draft | 2026-09-15 |
 | [RDR-211](rdr-211-board-queue-and-lock-tuple-templates.md) | Broadcast Board, Work Queue, and Lock as Tuple-Space Templates | Feature | Closed | 2026-09-15 |
 | [RDR-212](rdr-212-orb-cockpit-surfaces-over-the-tuple-space.md) | ORB Cockpit Surfaces over the Tuple Space | Architecture | Draft | 2026-09-16 |
+| [RDR-213](rdr-213-bound-and-freshen-tombstone-filter-vector-reads.md) | Bound and Freshen the Tombstone-Filter Vector Read Path: a Statement Ceiling and Autovacuum Tuning | Bug Fix | Draft | 2026-09-16 |
 
 > **Scrapped 2026-05-19 (RDR-110-119 arc).** Bundled the storage-substrate split with new abstractions (tuplespace, ORB, host-trust, surfaces-as-tuples, UI fabric); scope discipline failed across nine RDRs and 67 stranded beads. Files preserved as tombstones per the "never delete RDR files" rule. Postmortem: [docs/postmortem/2026-05-16-rdr110-113-remediation-chain.md](../postmortem/2026-05-16-rdr110-113-remediation-chain.md). Active substrate work continues as [RDR-120](rdr-120-storage-substrate-split.md) with an explicit moratorium on co-shipped consumers. Numbers RDR-114 through RDR-117 are unused on `main` (drafted on feature branches that never merged).
 
