@@ -19,8 +19,11 @@ from nexus.catalog.membership import (
 
 def test_collection_is_known_true_when_get_collection_returns_row():
     cat = MagicMock()
-    cat.get_collection.return_value = {"name": "docs__nexus-1-1__voyage-context-3__v1"}
-    assert collection_is_known(cat, "docs__nexus-1-1__voyage-context-3__v1") is True
+    # A mode-neutral name: the helper never reads the model segment, and a
+    # cloud embedding-model token here would claim a cloud-mode dependency this pure-mock
+    # test does not have (tests/test_mode_declarations_are_explicit.py).
+    cat.get_collection.return_value = {"name": "docs__nexus-1-1__stub-model__v1"}
+    assert collection_is_known(cat, "docs__nexus-1-1__stub-model__v1") is True
 
 
 def test_collection_is_known_false_when_get_collection_returns_none():
