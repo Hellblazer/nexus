@@ -44,7 +44,7 @@ PACKAGED_TABLES = Path(__file__).resolve().parent.parent.parent / "src" / "nexus
 
 def test_missing_dimension_is_unknown_value():
     table = load_packaged_table("rdr-lifecycle.toml")
-    assignment = {"status": "draft", "event": "accept", "gate": "passed"}  # successor omitted
+    assignment = {"status": "draft", "event": "accept", "gate": "passed", "reason": "absent"}  # successor omitted
     res = resolve(table, assignment)
     assert res.row is None
     assert res.refusal == UNKNOWN_VALUE
@@ -54,7 +54,7 @@ def test_missing_dimension_is_unknown_value():
 
 def test_out_of_domain_value_is_unknown_value():
     table = load_packaged_table("rdr-lifecycle.toml")
-    assignment = {"status": "bogus", "event": "accept", "gate": "passed", "successor": "absent"}
+    assignment = {"status": "bogus", "event": "accept", "gate": "passed", "successor": "absent", "reason": "absent"}
     res = resolve(table, assignment)
     assert res.row is None
     assert res.refusal == UNKNOWN_VALUE
@@ -118,7 +118,7 @@ def test_ambiguous_match_names_every_candidate_row_id():
 
 def test_hit_to_outcome_draft_accept_gate_passed():
     table = load_packaged_table("rdr-lifecycle.toml")
-    res = resolve(table, {"status": "draft", "event": "accept", "gate": "passed", "successor": "absent"})
+    res = resolve(table, {"status": "draft", "event": "accept", "gate": "passed", "successor": "absent", "reason": "absent"})
     assert res.refusal is None
     assert res.escaped is False
     assert res.row.outcome_kind == "to"
@@ -127,7 +127,7 @@ def test_hit_to_outcome_draft_accept_gate_passed():
 
 def test_hit_refuse_outcome_draft_accept_gate_none():
     table = load_packaged_table("rdr-lifecycle.toml")
-    res = resolve(table, {"status": "draft", "event": "accept", "gate": "none", "successor": "absent"})
+    res = resolve(table, {"status": "draft", "event": "accept", "gate": "none", "successor": "absent", "reason": "absent"})
     assert res.refusal is None
     assert res.escaped is False
     assert res.row.outcome_kind == "refuse"
@@ -136,7 +136,7 @@ def test_hit_refuse_outcome_draft_accept_gate_none():
 
 def test_hit_deferred_resume_to_draft():
     table = load_packaged_table("rdr-lifecycle.toml")
-    res = resolve(table, {"status": "deferred", "event": "resume", "gate": "none", "successor": "absent"})
+    res = resolve(table, {"status": "deferred", "event": "resume", "gate": "none", "successor": "absent", "reason": "absent"})
     assert res.refusal is None
     assert res.escaped is False
     assert res.row.outcome_kind == "to"
@@ -145,7 +145,7 @@ def test_hit_deferred_resume_to_draft():
 
 def test_hit_accepted_defer_to_deferred():
     table = load_packaged_table("rdr-lifecycle.toml")
-    res = resolve(table, {"status": "accepted", "event": "defer", "gate": "none", "successor": "absent"})
+    res = resolve(table, {"status": "accepted", "event": "defer", "gate": "none", "successor": "absent", "reason": "absent"})
     assert res.refusal is None
     assert res.escaped is False
     assert res.row.outcome_kind == "to"
@@ -154,7 +154,7 @@ def test_hit_accepted_defer_to_deferred():
 
 def test_hit_closed_close_is_escaped_illegal_transition():
     table = load_packaged_table("rdr-lifecycle.toml")
-    res = resolve(table, {"status": "closed", "event": "close", "gate": "none", "successor": "absent"})
+    res = resolve(table, {"status": "closed", "event": "close", "gate": "none", "successor": "absent", "reason": "absent"})
     assert res.refusal is None
     assert res.escaped is True
     assert res.row.outcome_kind == "refuse"
