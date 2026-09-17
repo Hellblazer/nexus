@@ -86,6 +86,27 @@ class ProductTooLargeError(Exception):
     """A group's guard-dimension cross-product exceeds ``PRODUCT_BOUND``."""
 
 
+def _check_bound(dims: list[str], dimensions: dict[str, Dimension]) -> None:
+    """Raise :class:`ProductTooLargeError` before any enumeration over
+    ``dims`` is attempted -- on EVERY branch that is about to enumerate,
+    not only inside :func:`full_product` ([26114] #3). Before this, the
+    bound was checked only inside ``full_product``, which ``_check_group``
+    calls from ``_check_coverage`` AFTER ``_check_overlap`` had already
+    materialized every participating row's accepted-assignment set over
+    the whole product; and the unprovable-dimension branch never called
+    ``full_product`` at all, so a pathological group with one non-enum
+    guard dimension plus a huge decidable product ran ``_check_overlap``
+    to completion with no bound check, ever -- exactly what the bound
+    exists to prevent."""
+    size = 1
+    for d in dims:
+        size *= len(dimensions[d].domain)
+    if size > PRODUCT_BOUND:
+        raise ProductTooLargeError(
+            f"scoped product over {dims} is {size} assignments, above the published bound of {PRODUCT_BOUND}"
+        )
+
+
 @dataclass(frozen=True)
 class Finding:
     """``group`` is coerced to :class:`FrozenMapping` in ``__post_init__``
@@ -192,14 +213,8 @@ def full_product(
     cell. The limit was inherited from the design this borrows from and
     went undocumented on both sides until the 2026-09-04 reanalysis.
     """
+    _check_bound(dims, dimensions)
     ranges = [dimensions[d].domain for d in dims]
-    size = 1
-    for r in ranges:
-        size *= len(r)
-    if size > PRODUCT_BOUND:
-        raise ProductTooLargeError(
-            f"scoped product over {dims} is {size} assignments, above the published bound of {PRODUCT_BOUND}"
-        )
     return set(itertools.product(*ranges)) - impossible_assignments(dims, dimensions, impossible)
 
 
@@ -394,12 +409,17 @@ def _check_group(table: Table, group: Group) -> list[Finding]:
                 )
             )
         # Coverage cannot be proved with an unprovable dimension in play, but
-        # overlap is still decidable on the dims that ARE provable.
+        # overlap is still decidable on the dims that ARE provable -- bound
+        # the DECIDABLE product before enumerating it, same as the fully
+        # decidable branch below (a group can have a huge decidable product
+        # even with one dimension excluded from it).
         decidable = [d for d in dims if d not in unprovable]
         if decidable:
+            _check_bound(decidable, table.dimensions)
             findings.extend(_check_overlap(group, decidable, table.dimensions, table.impossible))
         return findings
 
+    _check_bound(dims, table.dimensions)
     findings.extend(_check_overlap(group, dims, table.dimensions, table.impossible))
     findings.extend(_check_coverage(group, dims, table.dimensions, table.impossible))
     return findings

@@ -727,3 +727,76 @@ emit = { exit_code = "0", message_key = "wide" }
 def test_malformed_impossible_blocks_are_refused_at_load(tmp_path, block, err):
     with pytest.raises(TableLoadError, match=err):
         load_table(_write(tmp_path, _IMPOSSIBLE_BASE + block))
+
+
+# --------------------------------------------------------------------------
+# [26114] #3: PRODUCT_BOUND must be checked before any enumeration is
+# attempted, on every branch -- not only inside full_product, which
+# _check_coverage calls AFTER _check_overlap has already materialized the
+# whole product, and which the unprovable-dimension branch never calls at
+# all.
+
+
+def _bound_table(n_dims: int, n_vals: int, *, extra_nonenum: bool = False) -> Table:
+    """One decision-table group whose guard-dimension product is
+    ``n_vals ** n_dims`` -- ``(6, 10)`` is 20x ``PRODUCT_BOUND``.
+    ``extra_nonenum`` adds one more guard dimension the checker can never
+    enumerate (kind != "enum"), mirroring scenario B: an unprovable
+    dimension in the group must not exempt it from the bound check on the
+    dimensions that ARE decidable."""
+    dimensions: dict[str, Dimension] = {
+        f"d{i}": Dimension(name=f"d{i}", domain=tuple(f"v{j}" for j in range(n_vals)))
+        for i in range(n_dims)
+    }
+    dimensions["k"] = Dimension(name="k", domain=("a",))
+    if extra_nonenum:
+        dimensions["free"] = Dimension(name="free", domain=(), kind="text")
+    rows = []
+    for j in range(n_vals):
+        guard: dict[str, tuple[str, ...]] = {"d0": (f"v{j}",)}
+        if extra_nonenum:
+            guard["free"] = ("anything",)
+        rows.append(
+            Row(id=f"r{j}", match={"k": "a"}, guard=guard, outcome_kind="emit", outcome={"x": "1"}, escape=False)
+        )
+    rows.append(
+        Row(
+            id="wide",
+            match={"k": "a"},
+            guard={f"d{i}": ("v0",) for i in range(n_dims)},
+            outcome_kind="emit",
+            outcome={"x": "1"},
+            escape=False,
+        )
+    )
+    return Table(id="t", kind="decision-table", dimensions=dimensions, match_keys=("k",), rows=tuple(rows))
+
+
+def test_product_bound_is_checked_before_overlap_enumeration_not_after():
+    """Scenario A: every guard dimension is a provable enum, so the OLD
+    code raised ProductTooLargeError eventually -- but only after
+    _check_overlap had already built every participating row's full
+    accepted-assignment set over the whole 10**6 product (a bare
+    ``pytest.raises`` alone would pass on the OLD code too, since it
+    already raised -- just too late; the ordering is the point, so this
+    proves _check_overlap is never reached at all). The bound is now
+    checked before that enumeration starts."""
+    from unittest.mock import patch  # noqa: PLC0415 — test-local
+
+    table = _bound_table(6, 10)
+    with patch.object(check_mod, "_check_overlap", return_value=[]) as mock_overlap:
+        with pytest.raises(check_mod.ProductTooLargeError):
+            check_table(table)
+    mock_overlap.assert_not_called()
+
+
+def test_product_bound_is_checked_on_the_unprovable_branch_too():
+    """Scenario B: one guard dimension in the group is non-enum
+    (unprovable). _check_group's unprovable branch calls _check_overlap
+    directly over the remaining DECIDABLE dims and never calls
+    full_product at all -- so the OLD code enumerated the full 10**6
+    decidable product with no ProductTooLargeError, ever. The bound now
+    applies on this branch too."""
+    table = _bound_table(6, 10, extra_nonenum=True)
+    with pytest.raises(check_mod.ProductTooLargeError):
+        check_table(table)
