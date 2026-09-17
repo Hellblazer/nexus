@@ -40,7 +40,7 @@ Two things no other T2 domain store needs, both new code (RDR-205
   :func:`_check_request_size` — before any network call, and refuses
   before sending.
 - **Typed-error mapping** (:func:`_raise_typed`): the engine renders
-  each of its eleven RDR-205-family typed errors (``TupleException`` and its
+  each of its twelve RDR-205-family typed errors (``TupleException`` and its
   subtypes) as ``{"error": "<code>", "detail": "<message>"}`` at the
   error's own HTTP status. Some codes SHARE a status (``UnknownSubspace``
   and ``ClaimNotFound`` are both 404), so classification reads the
@@ -132,11 +132,11 @@ _PARK_TIMEOUT_MARGIN_S: float = 5.0
 _ROUTE_PREFIX: str = "/v1/tuples"
 
 
-# ── Typed errors (mirrors dev.nexus.service.db.TupleException's ten subtypes) ──
+# ── Typed errors (mirrors dev.nexus.service.db.TupleException's twelve subtypes) ──
 
 
 class TupleError(RuntimeError):
-    """Base of the eleven RDR-205-family typed tuple-space client errors.
+    """Base of the twelve RDR-205-family typed tuple-space client errors.
 
     ``code`` matches the engine's ``TupleException#code()`` verbatim
     (e.g. ``"UnknownSubspace"``); the exception's message is the
@@ -189,6 +189,18 @@ class ParkCapExceededError(TupleError):
     code = "ParkCapExceeded"
 
 
+class MaxLiveRowsExceededError(TupleError):
+    """``out`` refused because the subspace already holds its template's
+    ``max_live_rows`` ceiling of live rows (``consumed_at IS NULL AND
+    expires_at > now()``; RDR-211 Scale and Limits item 2, the runaway-writer
+    guard). 429: the ceiling clears as rows are consumed or expire, so back
+    off and retry rather than change the request. An idempotent re-``out``
+    of an existing identity never raises this; only a genuinely new row
+    counts."""
+
+    code = "MaxLiveRowsExceeded"
+
+
 class TtlTooLongError(TupleError):
     """``out``'s explicit ``ttl_seconds`` exceeds the template's
     ``retention_seconds`` ceiling."""
@@ -224,6 +236,7 @@ _ERROR_CLASSES_BY_CODE: dict[str, type[TupleError]] = {
         ClaimNotFoundError,
         ClaimOwnershipError,
         ParkCapExceededError,
+        MaxLiveRowsExceededError,
         TtlTooLongError,
         LeaseTooLongError,
         CensusTimeoutError,
@@ -340,7 +353,7 @@ def _check_request_size(payload: dict[str, Any]) -> None:
 
 
 def _raise_typed(exc: httpx.HTTPStatusError) -> NoReturn:
-    """Re-raise *exc* as one of the eleven typed :class:`TupleError`
+    """Re-raise *exc* as one of the twelve typed :class:`TupleError`
     subclasses when the engine's response body names one; otherwise
     re-raise *exc* unchanged.
 
@@ -713,7 +726,7 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         404 with ``{"error": "unknown tuples op: /renew"}`` (the route
         switch's default branch, verified at ``engine-service-v0.1.116``).
         The body DOES carry an ``error`` field; its value is simply not one
-        of the eleven recognised codes, so ``_raise_typed`` finds no class for
+        of the twelve recognised codes, so ``_raise_typed`` finds no class for
         it and re-raises the bare ``httpx.HTTPStatusError`` -- loud by
         design. A silent no-op here would let a caller believe its lease was
         extended while the claim lapses underneath it. (An earlier version
