@@ -302,97 +302,233 @@ follows from the file and the failure scenario, so it can be assigned by rule.
 
 ## Proposed Solution
 
-Not decided. The options below are what the research phase has to choose
-between, with the evidence each one needs.
+Review each package of standing code once with an uncapped brief, and return
+to a package only after it has changed. Decide what happens to each finding
+from what it affects, not from the reviewer's severity label. Limit how much
+remediation is in flight, because the measurements say remediation, not
+review, is the expensive and risky half.
+
+The research changed the question. The draft asked how often to review. The
+measurements show that review is cheap (about 1.6 agent-minutes per thousand
+lines) and productive to the point of excess: 4.5 to 13 findings per thousand
+lines, most of them low severity. About 165,000 lines under `src/nexus/` are
+still unreviewed. At those rates a full sweep costs under five agent-hours and
+returns between 750 and 2,100 findings. One day of fixing about 55 findings
+took 40 commits, drew about 30 reviewer findings against the fixes, turned
+the integration branch red four times and shipped two regressions. Fixing
+everything a sweep finds is not possible at that cost, so the design has to
+say which findings are acted on.
 
 ### Approach
 
-1. **Decide whether to repeat at all.** Answered by the second run: yes. The
-   yield on unpromising code was higher than the pilot's, so the remaining
-   packages are swept once. Whether to return to a package later is item 2,
-   and needs the one measurement still missing: a second pass over a package
-   already reviewed and remediated.
-2. **Decide the scope rule.** Candidates: every package once, then only
-   packages whose non-test lines changed by more than a threshold since their
-   last review; or a fixed rotation. The first needs a record of what was
-   reviewed when, which does not exist.
-3. **Decide where findings land.** The second run did it the proposed way and
-   it worked: 24 findings became one epic and 16 beads in one step, each
-   carrying its probe, with nothing written to memory stores but the research
-   record. The re-run of the probes by a second session belongs in this step
-   (see the second run above). The proposal as first written: the reviewer's output
-   is a list of bead drafts, each carrying its reproduction, and nothing is
-   written to memory stores except a one-line index of the run. A finding with
-   no reproduction becomes a bead whose first task is to write one.
-4. **Decide the isolation rule for repeat runs.** The proposal to test: the
-   reviewer keeps the pilot's rule (no history, judge the code), and a
-   separate, cheap step afterwards matches its findings against open and closed
-   beads so known items are dropped before anyone reads them.
+1. **One uncapped pass per package.** The brief loses its cap of 12 findings.
+   One uncapped pass found 89 and 83 percent of what two passes found
+   together, and a second pass over unchanged code adds about a tenth. A
+   package counts as reviewed after one pass.
+2. **Every finding carries an "affects" class.** The class is one of eight
+   values in a checked table (below). It is assigned by rule from the file and
+   the failure scenario. The reviewer proposes it and the session that takes
+   the run confirms it. The severity label stays in the report as the
+   reviewer's opinion and decides nothing, because it did not reproduce
+   between passes.
+3. **The class decides what happens to the finding.** Three tiers:
+   - *Act now*: security, user content, data integrity. Each finding's probe
+     is re-run by a second session, then it becomes its own bead and is fixed
+     before the next run starts.
+   - *Act if reachable by default*: service operations, and release tooling
+     that can report a false pass. A finding reachable on a shipped default
+     path (the installed service unit, the default configuration, a release
+     gate as the release skill runs it) becomes its own bead. Otherwise it
+     joins the package's batch bead.
+   - *Batch*: search quality, process tooling, other release tooling,
+     diagnostics. One batch bead per package lists them with their probes.
+     They are fixed when someone next changes that file for another reason.
+4. **Remediation in flight is bounded.** No run starts while an act-now bead
+   from an earlier run is open. This is the rule that stops the loop the
+   pilot fell into, where each round of fixes fed the next round of findings.
+5. **Return on change, not on a calendar.** A ledger records, per package,
+   the commit reviewed, the date, the line count, the brief's hash and the
+   finding counts by class. A package is due again when more than a fifth of
+   its non-test lines differ from the reviewed commit. The fraction is a
+   starting value and is not measured. Each return run records a predicted
+   finding count first, so the fraction can be corrected from evidence.
+6. **The reviewer stays isolated; matching happens afterwards.** The reviewer
+   reads no memory, tracker or RDR. After the run, a separate step drops
+   findings that match an open bead, a closed bead or a recorded disposition.
+   A disposition is a finding already judged to be intended behaviour. The
+   recapture re-reported one such finding (the frontmatter rule that a test
+   pins as the contract), so dispositions are kept in the ledger and matched
+   like beads.
+7. **Each run records its own cost.** The ledger row gets, when the run's
+   act-now beads close: commits made, reviewer findings against the fixes,
+   red runs on the integration branch, and regressions shipped. Three runs
+   after the first, those rows decide whether the practice continues.
 
 ### Technical Design
 
-To be written once the four decisions above are made. Nothing here needs new
-infrastructure: the brief exists, the reviewers are ordinary agents, and beads
-are the tracker. If a record of "reviewed when" is wanted, it is one checked
-table under `docs/tables/`, not a new store.
+Nothing here needs new infrastructure. The reviewers are ordinary agents and
+beads are the tracker.
+
+**The brief.** `docs/review/standing-code-review-brief.md`, moved into the
+repository from the probe directory so its hash means something. Changes from
+the recapture version: each finding states its affects class and whether the
+failing path is reachable with default settings.
+
+**The affects table.** `docs/tables/standing-review-affects.toml`, a checked
+table in the sense of `docs/rdr/AGENTS.md`: a closed vocabulary that a test
+loads and validates. Each class has a name, a one-sentence test, a tier, and
+path patterns that make it the default for a file.
+
+| Class | The finding means | Tier |
+|---|---|---|
+| security | something runs, is read or is written that the user did not authorise | act now |
+| user-content | indexed or stored content is missing, truncated, duplicated into loss, or never retried | act now |
+| data-integrity | service state can be corrupted: schema lock, queue rows, leases that lie | act now |
+| service-operations | start, stop, upgrade, install or configuration behaves wrongly | act if reachable by default |
+| release-tooling | a release gate or checked table can report a wrong result | act if it can pass falsely, else batch |
+| search-quality | results are worse or mislabelled, and nothing is lost | batch |
+| process-tooling | this project's RDR gates, hooks and review tooling | batch |
+| diagnostics | a message, log line or exit text is wrong | batch |
+
+When a finding fits two classes, the higher tier wins. A function documented
+as never raising that raises on a malformed local file takes the class of
+what the caller then loses, which is usually diagnostics or service
+operations.
+
+**The ledger.** `docs/tables/standing-review-ledger.toml`. One row per run:
+package, reviewed commit, date, lines, brief hash, findings by class, beads
+filed, and the cost fields of Approach item 7. A second section lists
+dispositions: file, one-line description, the test or decision that settles
+it. The six capped passes and two recapture passes are entered as the first
+rows so the record starts complete.
+
+**Order of the sweep.** By where act-now findings are most likely, from the
+classes of what each package handles: `db`, `catalog`, the indexing and
+search modules at the top level not yet covered, `mcp`, then `commands`
+(largest, mostly dispatch), `plans`, and the rest. The plugin hooks and
+`scripts/` come last: they are process and release tooling.
 
 ### Decision Rationale
 
-Deferred to the research phase.
+- **Uncapped, one pass.** The cap made every count meaningless (five of six
+  passes returned exactly 12). With it removed, one pass reaches close to the
+  ceiling of what this reviewer can see.
+- **Affects over severity.** The same defect was labelled high in one pass
+  and low in the next. What it affects follows from the file and the failure
+  scenario and did not move. A high-severity defect in this project's own
+  gate tooling was fixed first on the pilot day, ahead of defects that
+  silently dropped pages from a user's index. That ordering was wrong, and
+  the label caused it.
+- **Bounded remediation.** Review costs minutes and remediation costs days
+  and produces defects. The bound is on the expensive half.
+- **Batch beads are not a way to forget.** The project rule is to fix what is
+  found instead of filing it. That rule was written for a residual found
+  while working in a file. A sweep that returns hundreds of low-impact
+  findings in files nobody is working in is a different case, and the pilot
+  day shows what applying the rule to it costs. The batch bead keeps the
+  probes, and the fix happens with the file open for a real reason, when the
+  sibling sweep and the tests are already being paid for.
 
 ## Alternatives Considered
 
 ### Alternative 1: Do nothing further
 
-The pilot cleared a backlog and the existing gates carry on. This was the
-correct choice had the second run come back near zero. It came back at 17
-reproduced defects, three of them high severity, so this alternative is
-rejected on evidence.
+Rejected on evidence. Code chosen for being unpromising returned 46 and 26
+findings uncapped, including a supervisor that never stands down when fenced
+and a search query that could run a program.
 
 ### Alternative 2: Review every package on a fixed rotation
 
-Simple to state and to check. At the pilot's cost, the roughly 183,000
-non-blank lines under `src/nexus/` (measured 2026-09-17) would take about four
-agent-hours per full pass, before any remediation. It spends the same effort on code that has not
-changed as on code that has.
+Simple to state and to check. It spends the same effort on unchanged code as
+on changed code, and the recapture shows a repeat pass over unchanged code
+adds about a tenth. Rejected in favour of return on change.
+
+### Alternative 3: Fix every finding as it arrives
+
+This is what the pilot day did. The cost is in the Proposed Solution above.
+At sweep scale it is weeks of remediation whose own defect rate is measured
+and not small. Rejected.
+
+### Alternative 4: Two independent passes per package
+
+It gives a population estimate for every package. It doubles the cost for
+about a tenth more findings, mostly low. Kept as a measuring tool for the
+return runs, rejected as the routine.
 
 ### Briefly Rejected
 
 - **A per-commit reviewer.** Removed once already (f17277f48); it reviews
   changes, which the per-bead reviewers already do.
 - **More lint tests instead.** A lint checks an invariant someone has already
-  named. None of the 33 findings was an instance of a named invariant.
+  named. None of the pilot's 33 findings was an instance of a named invariant.
+- **Triage by the reviewer's severity.** The label does not reproduce.
 
 ## Trade-offs
 
 ### Consequences
 
-- Each run produces remediation work, and the pilot shows remediation produces
-  its own defects. A cadence commits the project to that loop.
-- Findings in release tooling or the plugin surface ride the release trains
-  other sessions own, so a run has to be timed against them.
+- Most findings will sit in batch beads for a long time. That is the design
+  and not a backlog to be ashamed of, but the beads must stay findable by
+  file, so each carries the paths it covers.
+- Findings in release tooling or the plugin surface ride release trains other
+  sessions own, so a run is timed against them.
+- The affects class is a judgment. Two people can disagree on whether a wrong
+  line number is search quality or diagnostics. The tier is what matters, and
+  those two share one.
 
 ### Risks and Mitigations
 
+- **The affects rule is untested.** It was applied once, by hand, by one
+  session. Phase 1 measures it before anything depends on it.
+- **An act-now finding mislabelled into a batch.** The second session that
+  confirms classes reads every batch entry's failure scenario, not only its
+  class. The probe re-run covers the act-now tier only.
+- **The instrument's blind spot.** Both recapture passes are one model under
+  one brief. Nothing here measures what that reviewer cannot see. The design
+  claims to find defects, not to certify their absence.
 - **A reviewer that reports style as defects.** The brief's rule (state an
-  input and a wrong result) held in the pilot: 29 of 33 reproduced.
-- **Findings nobody acts on.** Addressed by Gap 3: no run is started without a
-  named session to take its beads.
+  input and a wrong result) held: 43 of 46 and 16 of 26 reproduced.
+- **Findings nobody acts on.** No run starts without a named session to take
+  its beads, and no run starts over an open act-now bead.
 
 ### Failure Modes
 
 A run that finds nothing is ambiguous: the code may be sound or the reviewer
-may have examined little. The brief already requires the lines reviewed, the
-time spent and a "not reviewed" list; a run is accepted only with those.
+may have examined little. The brief requires the lines reviewed, the time
+spent and a "not reviewed" list; a run is accepted only with those, and its
+ledger row records them.
 
 ## Implementation Plan
 
-To be written after the decisions in Approach. No implementation starts before
-this RDR is accepted.
+No implementation starts before this RDR is accepted.
+
+**Phase 1: the rule, measured.**
+1. Move the brief into the repository and add the affects and reachability
+   fields.
+2. Add the affects table and the ledger with their loading tests, and enter
+   the eight existing passes.
+3. Measure the rule. Two sessions that have not seen this RDR's
+   classification each classify the 141 existing finding reports (some
+   describe one defect twice) from the table alone. Recorded before the result: they agree with each other on the tier
+   for at least 90 percent. Below that, the table's tests are rewritten and
+   the measurement repeated before Phase 2.
+
+**Phase 2: the first run under the rule.** Review `db` with the new brief.
+Match, classify, re-run act-now probes, file beads by tier. Fix the act-now
+beads. Fill in the cost fields.
+
+**Phase 3: the sweep.** One package per run in the order above, each gated
+by Approach item 4. After the third run, read the cost rows and decide with
+Sam whether to continue, change the tiers or stop.
 
 ## Test Plan
 
-Not applicable until there is a design.
+- The two tables load and validate under the checked-table tests: every
+  ledger row names a class that exists, every class names a tier that exists,
+  every disposition names a file that exists.
+- The Phase 1 agreement measurement, with its prediction recorded first.
+- Each run's acceptance check: lines reviewed, time, and the not-reviewed
+  list are present, and the reviewed commit is an ancestor of the branch.
 
 ## Finalization Gate
 
