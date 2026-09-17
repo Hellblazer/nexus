@@ -119,7 +119,8 @@ and the remediation that followed:
 
 That is 29 reproduced defects over 29,888 lines: one per 1,031 lines, at 1.36
 agent-minutes per thousand lines, and the cost per line was flat across the
-three targets (1.32 to 1.38).
+three targets (1.32 to 1.38). The one-per-1,031 figure is a floor: two of the
+three reports hit the brief's cap of 12 findings (see the withdrawal below).
 
 What the remediation added, also measured:
 
@@ -149,12 +150,17 @@ session from the reviewer's own probe scripts.
 | `src/nexus/daemon` | 6,980 | 12 | 7 | 2 | about 7 |
 | seven quiet modules | 3,828 | 12 | 10 counted (1 disputed) | 1 | about 5.5 |
 
-Counted: 17 reproduced defects over 10,808 lines, one per 636 lines, at 1.16
-agent-minutes per thousand lines. The pilot found one per 1,031 lines at 1.36.
-
 The prediction was 5 reproduced and no high-severity finding. It was wrong on
-both: 17 and 3. The rule fixed in advance said 5 or more refutes the
-"backlog in rich packages" reading, so that reading is refuted.
+both: 17 and 3.
+
+**Withdrawn.** This section first concluded that unpromising code yielded more
+defects per line than the pilot's targets (one per 636 lines against one per
+1,031). That conclusion does not stand. The brief capped each report at 12
+findings, and five of the six passes returned exactly 12. A per-line rate
+computed from a capped count is mostly the target's line count divided by 12.
+What the run does show is that both unpromising targets filled the cap. The
+uncapped measurement is in the recapture section below
+(T2 `nexus_rdr/214-research-4`).
 
 Three things in the detail matter for the design:
 
@@ -171,6 +177,75 @@ Three things in the detail matter for the design:
   behaviour as the contract. A reviewer that may not read history cannot know
   that, which is what Gap 4's matching step is for.
 
+### Second pass over a remediated package (2026-09-17)
+
+`src/nexus/commands/rdr.py` and the RDR hook were reviewed a second time after
+all 12 first-pass findings, and about ten more from review rounds, had been
+fixed. Prediction recorded first (T2 `nexus_rdr/214-research-3`): 4 reproduced,
+none high. Result: 12 reproduced, 1 high, none a repeat of the first pass, none
+matching any bead, about 3 in code written during that day's fixes. The
+prediction was wrong, but the count is capped like the others, so it shows only
+that one capped pass does not exhaust a package
+(T2 `nexus_rdr/214-research-4`; beads under epic nexus-u1jxt).
+
+### Recapture: two independent passes over unfixed code (2026-09-17)
+
+To replace the capped counts, the daemon package and the seven quiet modules
+were each reviewed again at HEAD d8d45f761 by a fresh isolated reviewer under
+the same brief with the cap removed. Nothing was fixed between the passes
+except the ripgrep argument fix, which is left out of the match. Findings were
+matched by hand. The overlap between two independent passes estimates the
+population they draw from (Lincoln-Petersen: first-pass count times second-pass
+count, divided by the overlap).
+
+| Target | Lines | Pass A | Pass B (uncapped) | In both | Estimated population | Known so far |
+|---|---|---|---|---|---|---|
+| seven quiet modules | 3,834 | 19 | 46 | 17 | 51 | 48 |
+| `src/nexus/daemon` | 6,980 | 12 (capped) | 26 | 10 | 31 | 28 |
+
+Pass B took about 6 and 11 agent-minutes. Its findings were not re-run by a
+second session. Result of record: T2 `nexus_rdr/214-research-5`.
+
+What this shows:
+
+- The set of defects this reviewer can see is finite, and one uncapped pass
+  finds most of it. Pass B alone re-found 17 of 19 and 10 of 12. A second pass
+  over an unchanged package would add roughly a tenth.
+- The estimate is a floor. Both passes are the same model under the same
+  brief, so what one misses the other tends to miss. The figure bounds what the
+  instrument sees, not how many defects the code has.
+- Severity labels did not reproduce. The defect behind the P1 bead
+  nexus-cd1k0.1 (stop waits on a zombie, so the supervisor is killed and the
+  operating system restarts the stack) was high in pass A and low in pass B.
+  The fenced-supervisor defect was high in A and medium in B. Pass B's one high
+  finding was absent from pass A. The finding reproduces; its label does not.
+- Most of what uncapping added is low severity: 28 of 46 and 17 of 26, largely
+  functions documented as never raising that raise on a malformed local file.
+
+### What a finding affects
+
+Severity says how wrong a result is. It does not say what the wrong result
+touches, and a high-severity defect in this project's own RDR tooling is not
+comparable to a high-severity loss of a user's indexed content. The 69 ranked
+findings from the six capped passes, sorted by what each affects:
+
+| Affects | Count |
+|---|---|
+| Security: something runs or escapes that should not | 1 |
+| The user's indexed content: missing, truncated or never retried | 8 |
+| Running the service: start, stop, upgrade, configuration | 16 |
+| Search quality: worse results, nothing lost | 10 |
+| This project's development-process tooling (RDR gates, hooks) | 21 |
+| Release tooling (checked tables, choreography) | 8 |
+| Messages and diagnostics only | 5 |
+
+Half (34) touch only process tooling, release tooling and messages. That share
+reflects where the reviewer was pointed (three of six passes), not the
+codebase. Pass B sorted the same way: quiet modules 22 search quality, 20
+service and configuration robustness, 4 indexed content; daemon 22 service
+operations, 4 data-integrity risk. Unlike the severity label, this attribute
+follows from the file and the failure scenario, so it can be assigned by rule.
+
 ### Key Discoveries
 
 - **Verified**: a fixed brief, run without access to project history, finds
@@ -179,17 +254,32 @@ Three things in the detail matter for the design:
   sub-reviewers, produced fewer defects per line but both of the targets with a
   high-severity finding were ones the reviewer dug into with probes. The
   effort-asymmetry note is in T2 `intrastate` entry 26124.
-- **Verified** (spike, 2026-09-17): the yield is not a backlog confined to
-  rich packages. Code chosen for being unpromising yielded more per line
-  than the pilot's targets, including two high-severity defects in a package
-  governed by a conformance suite.
-  *Source: T2 `nexus_rdr/214-research-2`; beads under epic nexus-cd1k0; probes
-  in `~/git/nexus-rdr214-probes`.*
+- **Verified** (spike, 2026-09-17): the yield is not confined to rich
+  packages. Code chosen for being unpromising filled the 12-finding cap,
+  including two defects in a package governed by a conformance suite. The
+  per-line comparison first drawn from this run is withdrawn (capped counts).
+  *Source: T2 `nexus_rdr/214-research-2` and `-4`; beads under epic
+  nexus-cd1k0; probes in `~/git/nexus-rdr214-probes`.*
+- **Verified** (spike, 2026-09-17): uncapped, the reviewer reports about 13
+  findings per thousand lines in the quiet modules and about 4.5 in the daemon
+  package, most of them low severity. Two independent passes put the
+  population this reviewer can see at about 51 and 31, of which 48 and 28 are
+  now known. This is a floor on the true count.
+  *Source: T2 `nexus_rdr/214-research-5`.*
+- **Verified** (spike): the reviewer's severity label does not reproduce
+  between passes over the same defect; what the defect affects does.
+- **Verified** (spike): one capped pass does not exhaust a package. A second
+  capped pass over remediated code found 12 defects, none a repeat.
 - **Verified** (spike): an independent re-run of the reviewer's probes is not
   a formality. It reproduced all of them and raised one finding from
   "possible lost results" to "a search query can execute a program".
-- **Not measured**: whether yield falls on a second pass over the same
-  package. No package has been reviewed twice.
+- **Not measured**: what the instrument cannot see. Both recapture passes are
+  the same model under the same brief, so their overlap says nothing about
+  defects neither would find.
+- **Not measured**: the cost of acting on findings against the cost of finding
+  them. One day's remediation of the pilot's findings took 40 commits, drew
+  about 30 reviewer findings against the fixes, turned develop red four times
+  and shipped at least two regressions. A pass costs minutes.
 - **Not measured**: whether the rate holds for the two largest packages
   (`db`, about 28,700 lines; `commands`, about 45,000), which no run has
   covered whole.
@@ -197,10 +287,14 @@ Three things in the detail matter for the design:
 ### Critical Assumptions
 
 - **Verified, was Assumed**: the yield holds for packages not chosen for
-  being rich. Two unpromising targets yielded one reproduced defect per 636
-  lines (second run, above).
+  being rich. Two unpromising targets filled the cap, and uncapped they
+  returned 46 and 26 findings (recapture, above).
 - **Assumed**: the cost stays near 1.4 agent-minutes per thousand lines for a
-  different model or a changed brief.
+  different model. Measured for the uncapped brief: about 1.6 for both
+  recapture targets.
+- **Assumed**: a finding's "affects" class can be assigned by rule from its
+  file and failure scenario. It was assigned by hand here, once, by one
+  session.
 - **Assumed**: findings of this kind are worth more than the remediation they
   trigger costs. The pilot's remediation took one working day of one session
   plus its sub-agents; no cost figure was kept for it, which is itself a gap
