@@ -67,6 +67,17 @@ class TestMailboxArmInstructionText:
         assert "one-keystroke confirmation dialog" in text
         assert "research preview" in text
 
+    def test_names_the_plugin_form_first_and_the_alias(self) -> None:
+        """nexus-tk2cz: the dialog-free plugin form leads, ahead of the
+        dev-channels form, and the sentence points at the alias that
+        makes either form apply on every launch without retyping it."""
+        text = mailbox_arm_instruction("sess-abc")
+        plugin_at = text.index("--channels plugin:conexus@nexus-plugins")
+        dev_at = text.index("--dangerously-load-development-channels server:nexus")
+        assert plugin_at < dev_at
+        assert "allowlisted" in text
+        assert "alias" in text
+
     def test_states_the_drain_hook_is_the_floor_without_the_channel(self) -> None:
         text = mailbox_arm_instruction("sess-abc")
         assert "drain hook" in text

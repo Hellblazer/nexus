@@ -1063,6 +1063,21 @@ class TestCheckTupleChannelDelivery:
         assert "not proven live" in r.detail
         assert "drain hook" in r.detail
 
+    def test_proof_none_names_both_flag_forms_plugin_first_and_the_alias(
+        self, monkeypatch, tmp_path: Path,
+    ) -> None:
+        """nexus-tk2cz: the remedy text for a plain launch names the
+        dialog-free plugin form ahead of the dev-channels form, and
+        points at the alias that makes either stick on every launch."""
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        _write_status(tmp_path, "sess-1", proof="none", alive=True)
+        r = h._check_tuple_channel_delivery()[0]
+        plugin_at = r.detail.index("--channels plugin:conexus@nexus-plugins")
+        dev_at = r.detail.index("--dangerously-load-development-channels server:nexus")
+        assert plugin_at < dev_at
+        assert "alias" in r.detail
+
     def test_proof_none_mentions_released_count(self, monkeypatch, tmp_path: Path) -> None:
         monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))

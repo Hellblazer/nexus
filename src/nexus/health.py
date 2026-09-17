@@ -5843,9 +5843,11 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
 
     Declared but never proven live (`proof == "none"`) is ALSO
     informational, ok=True, never a WARN -- Sam's decision makes the
-    channel opt-in, so a session launched without `--channels
-    server:nexus` and never calling `tuple_channel_probe` is the ordinary
-    case, not a defect; the drain hook is the floor either way.
+    channel opt-in, so a session launched without a channel flag
+    (`--channels plugin:conexus@nexus-plugins` or
+    `--dangerously-load-development-channels server:nexus`) and never
+    calling `tuple_channel_probe` is the ordinary case, not a defect; the
+    drain hook is the floor either way.
 
     Proof `"argv"` or `"probe"` and the waiter alive with a fresh
     `last_wake` (within :data:`_TUPLE_CHANNEL_DELIVERY_STALE_S` of now) is
@@ -5907,9 +5909,11 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
     if proof == "none":
         detail = (
             "capability declared; channel not proven live for this session "
-            "(no `--channels server:nexus` on the claude command line and no "
-            "probe reply); mail arrives at the next prompt through the drain "
-            "hook"
+            "(no launch flag on the claude command line -- `--channels "
+            "plugin:conexus@nexus-plugins` (dialog-free once allowlisted) or "
+            "`--dangerously-load-development-channels server:nexus` -- and no "
+            "probe reply; alias claude to the first form to make it stick); "
+            "mail arrives at the next prompt through the drain hook"
         )
         if released:
             detail += f"; {released} message(s) previously released to the floor after exhausting resends"
