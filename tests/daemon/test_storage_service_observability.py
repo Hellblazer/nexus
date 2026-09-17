@@ -212,6 +212,7 @@ class _FakeStorageSupervisor:
     start_raises: Exception | None = None
 
     owns_process = True  # models the real spawn path, not the lease short-circuit
+    fenced = False  # nexus-cd1k0.2: the loop's fenced_exit_code check reads this
 
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs

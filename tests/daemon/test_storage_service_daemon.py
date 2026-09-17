@@ -1965,6 +1965,7 @@ class _ScriptedSupervisor:
         *,
         ensure_pg_raises: Exception | None = None,
         owns_process: bool = True,
+        fence_after_beats: int | None = None,
     ) -> None:
         self._beats = list(beats)
         self._stop = stop_requested
@@ -1972,6 +1973,13 @@ class _ScriptedSupervisor:
         self.owns_process = owns_process
         self.calls: list[str] = []
         self.heartbeat_calls = 0
+        # nexus-cd1k0.2: matches the real StorageServiceSupervisor.fenced
+        # property the run loop now checks every tick via fenced_exit_code.
+        # Defaults False so every pre-existing scripted test (none of which
+        # touch fencing) is unaffected.
+        self.fenced = False
+        self._fence_after_beats = fence_after_beats
+        self._scope = "test-scope"  # read by the loop's fenced-exit log line
 
     def start(self) -> None:
         self.calls.append("start")
@@ -1983,7 +1991,12 @@ class _ScriptedSupervisor:
             self._stop.set()
             return True, True
         beat = self._beats.pop(0)
-        if not self._beats:
+        if self._fence_after_beats is not None and self.heartbeat_calls >= self._fence_after_beats:
+            # Mirrors heartbeat_tick() discovering StaleOwnerError on THIS
+            # tick and setting .fenced synchronously, before the run loop's
+            # next check.
+            self.fenced = True
+        elif not self._beats:
             self._stop.set()  # last scripted beat — loop exits after handling
         return beat
 
@@ -2093,6 +2106,38 @@ class TestMinimalSuperviseLoop:
             "a supervisor with nothing to own must never call heartbeat_once()"
         )
         assert sup.calls == ["start", "stop"]
+
+    def test_fenced_owner_exits_0_within_one_tick_even_when_healthy(
+        self,
+    ) -> None:
+        """nexus-cd1k0.2: a fenced-but-otherwise-healthy (True, True) beat
+        must not fall through to time.sleep() forever. Before this fix the
+        loop only ever checked service_running/pg_ok — fencing was logged
+        (heartbeat_once's own internal warning) and then completely
+        ignored by the loop, so a fenced owner heartbeated a lease it no
+        longer held while its own engine kept running beside the
+        successor's."""
+        sup, code = self._run(
+            lambda stop: _ScriptedSupervisor(
+                # Three healthy beats scripted; fencing on tick 1 must stop
+                # the loop before ticks 2/3 are ever reached.
+                [(True, True), (True, True), (True, True)], stop,
+                fence_after_beats=1,
+            )
+        )
+        assert code == 0, (
+            "a fenced stand-down must be a CLEAN exit (0), not a failure — "
+            "a non-zero exit would trip the OS unit into a doomed rematch "
+            "against the owner that already won the race"
+        )
+        assert sup.heartbeat_calls == 1, (
+            "the loop must stop on the SAME tick fencing was discovered, "
+            f"not keep heartbeating; got {sup.heartbeat_calls} calls"
+        )
+        assert sup.calls == ["start", "stop"], (
+            "stop() must still run through the shared loop tail so the "
+            f"fenced owner's own engine is torn down; got {sup.calls}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -3107,6 +3152,75 @@ class TestKillAfterReadinessFailureReapsOwnChild:
         )
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=1)
+
+
+class TestFencedSupervisorStopsAndStandsDown:
+    """nexus-cd1k0.2: on ``StaleOwnerError`` the supervisor's RUN LOOP must
+    stop — not merely log and keep returning (True, True) forever while
+    its own engine runs on beside the successor's (two engines, one
+    Postgres). Real engine child; a REAL successor lease published at a
+    strictly higher generation, exactly as ``ensure_storage_supervisor``
+    would produce on a lease-miss respawn."""
+
+    def test_fenced_supervisor_reaps_engine_exits_0_and_leaves_successor_untouched(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        import threading
+
+        from nexus.daemon import storage_service_daemon as ssd
+
+        sup = _make_supervisor(config_dir, clock, supervised=True)
+        engine = subprocess.Popen(  # noqa: S603
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        sup._proc = engine
+        sup._service_port = 18200
+        sup._publish(18200)  # generation 1, owner A
+
+        # A genuine successor republishes at a strictly higher generation
+        # (e.g. spawned by ensure_storage_supervisor after A's lease aged
+        # out past its TTL while A was still alive).
+        scope = str(os.getuid())
+        successor_registry = ServiceRegistry(
+            dir=config_dir, tier="storage_service", clock=clock,
+        )
+        successor = ServiceSupervisor(
+            successor_registry, scope, version="1.0.0",
+            endpoint_provider=lambda: {"pid": 999999, "host": "127.0.0.1", "port": 0},
+        )
+        successor.publish_once()
+        lease_path = config_dir / f"storage_service_addr.{scope}"
+        successor_bytes_before = lease_path.read_bytes()
+
+        stop_requested = threading.Event()
+        with patch.object(sup, "start"), \
+             patch.object(sup, "_probe_service_health", return_value=HealthProbe.OK), \
+             patch.object(sup, "_pg_reachable", return_value=True):
+            exit_code = ssd._supervise_until_stopped(sup, stop_requested, lambda: None)
+
+        assert exit_code == 0, (
+            "a fenced stand-down must be a CLEAN exit, not a failure — a "
+            "non-zero exit would trip the OS unit's restart policy into "
+            "respawning a supervisor whose only move is to lose the same "
+            "race again"
+        )
+        assert sup._supervisor is None, "stop() must have run through the loop's tail"
+
+        try:
+            engine_rc = engine.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            engine.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                engine.wait(timeout=5)
+            pytest.fail("fenced supervisor did not stop its own engine child")
+        assert engine_rc is not None
+
+        assert lease_path.read_bytes() == successor_bytes_before, (
+            "a fenced predecessor's stand-down must not touch the "
+            "successor's lease record (CA-4: mark_shutting_down/relinquish "
+            "no-op on an owner_token mismatch)"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -95,6 +95,7 @@ from nexus.daemon.service_registry import (
     ServiceRegistry,
     ServiceSupervisor,
     exit_if_process_unowned,
+    fenced_exit_code,
     pid_alive,
     pid_running,
     ttl_for_tier,
@@ -2251,6 +2252,32 @@ def _supervise_until_stopped(
     exit_code = 0
     while not stop_requested.is_set():
         service_running, pg_ok = sup.heartbeat_once()
+
+        # nexus-cd1k0.2: heartbeat_once() -> heartbeat_tick() may have just
+        # discovered a newer-generation owner (StaleOwnerError) and set
+        # sup.fenced. Checked EVERY tick, independent of service_running/
+        # pg_ok — a fenced-but-otherwise-healthy beat returns (True, True)
+        # and would otherwise fall straight through to time.sleep() forever,
+        # heartbeating a lease this owner no longer holds while its own
+        # engine keeps running beside the successor's (two engines, one
+        # Postgres). fenced_exit_code (shared primitive) is the single
+        # place naming the exit code every tier uses for this fact: always
+        # 0 (a clean stand-down, not a failure — see its docstring for why
+        # a non-zero exit here would only trip the OS unit into a doomed
+        # rematch). The shared loop tail below (breadcrumb -> flush ->
+        # sup.stop()) then tears down THIS owner's own engine child and is
+        # safe to call unconditionally even though the lease is no longer
+        # ours (mark_shutting_down/relinquish no-op on an owner_token
+        # mismatch, CA-4).
+        fenced_exit = fenced_exit_code(sup.fenced)
+        if fenced_exit is not None:
+            _log.warning(
+                "storage_service_lease_fenced",
+                scope=sup._scope,
+                msg="a newer-generation owner holds the lease; standing down",
+            )
+            exit_code = fenced_exit
+            break
 
         if not service_running:
             # Service process exited OR the stuck-process detection threshold

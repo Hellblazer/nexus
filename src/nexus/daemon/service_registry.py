@@ -800,6 +800,38 @@ def exit_if_process_unowned(
     return True
 
 
+def fenced_exit_code(fenced: bool) -> int | None:
+    """The run-loop exit code a tier's supervisor MUST use once its
+    ``ServiceSupervisor.fenced`` flag is True, or ``None`` when not
+    fenced (keep heartbeating as usual).
+
+    Shared primitive (RDR-149 §shared primitive, nexus-cd1k0.2): fencing
+    itself already lives here (``ServiceSupervisor.heartbeat_tick`` sets
+    ``.fenced`` on ``StaleOwnerError``); what was missing was a SINGLE
+    place naming what a fenced owner's run loop does next, so two tiers
+    could not independently pick two different answers (one exiting 0,
+    one exiting non-zero, for the identical fact). The answer is always
+    0: a fenced owner already lost the race for this scope to a
+    strictly-higher-generation successor — there is no rematch to win by
+    respawning, so exiting non-zero here would only trip the OS unit's
+    restart policy (``Restart=on-failure`` / ``KeepAlive
+    SuccessfulExit=false``) into a doomed repeat.
+
+    This helper is a pure predicate; it does not call ``sup.stop()``.
+    The caller's own run-loop tail already calls ``stop()`` uniformly for
+    every exit reason, and doing so on a fenced owner is safe BY
+    CONSTRUCTION: ``ServiceRegistry.mark_shutting_down``/``relinquish``
+    both compare ``owner_token`` against the CURRENT record under the
+    election flock and no-op on a mismatch (CA-4) — a fenced
+    predecessor's own last-known record never matches the successor's,
+    so its shutdown path can never touch the successor's lease. Nothing
+    else in a tier's ``stop()`` reaches into a resource this owner does
+    not exclusively hold (Postgres, notably, is never stopped by any
+    tier's ``stop()``); only THIS owner's own child process is torn down.
+    """
+    return 0 if fenced else None
+
+
 # ── Process-table fallback (nexus-oyo2g) ────────────────────────────────────
 #
 # ``ServiceRegistry.discover()``'s liveness contract is "lease freshness, not

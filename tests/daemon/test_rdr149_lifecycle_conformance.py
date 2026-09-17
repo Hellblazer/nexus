@@ -68,6 +68,7 @@ from nexus.daemon.service_registry import (
     LeaseRecord,
     ServiceRegistry,
     ServiceSupervisor,
+    fenced_exit_code,
     pid_alive,
     pid_running,
     process_state,
@@ -235,6 +236,13 @@ class RecordHarness:
     def owners_in_scope(self, session_id: str) -> int:
         raise NotImplementedError
 
+    def fenced_owner_run_loop_would_stop(self, owner: int) -> bool:
+        """True when the tier's run loop, on the NEXT tick after ``owner``
+        was fenced (see ``stale_reassert``), must exit rather than keep
+        heartbeating a lease it no longer holds (nexus-cd1k0.2, AGENTS.md's
+        must-stop-when-fenced contract)."""
+        raise NotImplementedError
+
 
 class _LeaseHarness(RecordHarness):
     """Shared harness for tiers migrated onto the leased registry (T2 in P2,
@@ -313,6 +321,11 @@ class _LeaseHarness(RecordHarness):
 
     def owners_in_scope(self, session_id: str) -> int:
         return 1 if self.discover() is not None else 0
+
+    def fenced_owner_run_loop_would_stop(self, owner: int) -> bool:
+        sup = self._supervisors.get(owner)
+        assert sup is not None, "owner never published"
+        return fenced_exit_code(sup.fenced) is not None
 
 
 # NO T3RecordHarness: RDR-149 P3 migrated the T3-daemon lease onto this same
@@ -407,6 +420,18 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
     "restart_race_fencing": {
         "storage_service": "pass",  # RDR-149 P5.1: CA-4 heartbeat-fencing arm
         "aspect_worker": "pass",  # RDR-173 P1: CA-4 heartbeat-fencing arm
+    },
+    "fenced_owner_stops": {
+        # nexus-cd1k0.2: being fenced (StaleOwnerError) is not enough on its
+        # own -- the RUN LOOP has to act on it. storage_service's loop did
+        # not, and kept heartbeating a lease it no longer held while its own
+        # engine ran on beside the successor's (two engines, one Postgres).
+        # Fixed via the shared primitive's fenced_exit_code(); the aspect-worker
+        # tier already honoured this contract (its threaded heartbeat loop
+        # sets its stop Event on sup.fenced, AGENTS.md :376-380) before this
+        # property existed to check it.
+        "storage_service": "pass",  # nexus-cd1k0.2: _supervise_until_stopped checks fenced_exit_code
+        "aspect_worker": "pass",  # RDR-173 P1: _heartbeat_loop already stands down on fenced
     },
 }
 
@@ -567,6 +592,20 @@ class TestLifecycleConformance:
         assert rec is not None
         assert rec["owner"] == _SIBLING_PID, "stale predecessor clobbered the record"
 
+    def test_fenced_owner_stops(self, harness: RecordHarness, tier: str) -> None:
+        # nexus-cd1k0.2: a fenced owner's run loop must stop within one
+        # tick, not keep heartbeating (successfully or not) a lease a
+        # higher-generation successor now owns -- the two-engines-on-one-
+        # Postgres defect. AGENTS.md's must-stop-when-fenced contract, held
+        # uniformly across every tier via the shared fenced_exit_code().
+        _maybe_xfail("fenced_owner_stops", tier)
+        harness.publish(_OWNER_PID)  # predecessor
+        harness.publish(_SIBLING_PID)  # successor takes over (higher generation)
+        harness.stale_reassert(_OWNER_PID)  # predecessor wakes late, gets fenced
+        assert harness.fenced_owner_run_loop_would_stop(_OWNER_PID), (
+            "a fenced owner's run loop must stop (nexus-cd1k0.2)"
+        )
+
 
 # NO "T1-only property (CA-3)" section: the locked RF-2 transient-key ->
 # session-id re-key (TestT1SessionRekey, T1LeasePublisher, _t1_publisher)
@@ -659,6 +698,7 @@ class TestMatrixIsNotVacuous:
             "pid_reuse_immunity",
             "restart_higher_generation",
             "restart_race_fencing",
+            "fenced_owner_stops",  # nexus-cd1k0.2 ratchet
         ):
             assert EXPECTATIONS[prop]["storage_service"] == "pass", (
                 f"storage_service lease property {prop!r} regressed to non-pass after P5.1"
