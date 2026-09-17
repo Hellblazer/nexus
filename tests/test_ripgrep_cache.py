@@ -258,3 +258,32 @@ def test_search_ripgrep_frecency_decay(tmp_path: Path) -> None:
     assert results[0]["frecency_score"] == pytest.approx(1.0)
     assert results[1]["frecency_score"] == pytest.approx(1.0 - 1 / 3)
     assert results[2]["frecency_score"] == pytest.approx(1.0 - 2 / 3)
+
+
+# ── A query is a pattern, never an rg option (RDR-214 research, 2026-09-17) ──
+
+
+def test_a_query_shaped_like_an_rg_flag_cannot_execute_a_program(tmp_path: Path) -> None:
+    """``search_ripgrep("--pre=<program>", cache)`` made rg RUN that program:
+    the query sat in argv as a bare positional, so rg parsed it as its
+    ``--pre`` preprocessor option. A search query can come from an agent
+    reading untrusted text. The query is now passed with ``-e`` behind
+    ``--``-terminated options, so it can only ever be a pattern."""
+    marker = tmp_path / "EXECUTED"
+    pre = tmp_path / "pre.sh"
+    pre.write_text(f'#!/bin/sh\ntouch "{marker}"\ncat "$1"\n')
+    pre.chmod(0o755)
+    cache = tmp_path / "rg.cache"
+    cache.write_text("/r/a.py:1:needle one\n")
+
+    assert search_ripgrep(f"--pre={pre}", cache) == []
+    assert not marker.exists(), "rg executed a program named by the search query"
+
+
+def test_a_query_starting_with_a_dash_is_searched_for(tmp_path: Path) -> None:
+    """Ordinary code queries start with a dash (``-> None``, ``--verbose``);
+    rg rejected them as unknown flags and the hybrid leg returned nothing."""
+    cache = tmp_path / "rg.cache"
+    cache.write_text("/r/a.py:1:def f() -> None:\n/r/a.py:2:    run(--count marker)\n")
+    assert [h["line_number"] for h in search_ripgrep("-> None", cache)] == [1]
+    assert [h["line_number"] for h in search_ripgrep("--count marker", cache)] == [2]
