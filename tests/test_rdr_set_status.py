@@ -267,10 +267,29 @@ def test_accepted_to_deferred_succeeds(tmp_path):
     assert "status: deferred" in text
 
 
-def test_supersede_with_successor_named_succeeds(tmp_path):
+def test_supersede_with_successor_named_succeeds(tmp_path, monkeypatch):
+    """A ``superseded`` flip is the one transition that additionally calls
+    ``_ensure_supersedes_edge``, which can WRITE a catalog link
+    (``cat.link_if_absent``) -- unlike every other transition in this file,
+    which only ever GETs. nexus-r8643 (intrastate review [26115] #3's
+    sibling finding on this test): with no fakes installed here, that write
+    path ran against the real ``_catalog_reader_factory`` /
+    ``_t2_client_factory`` production seams. On a random ``tmp_path`` repo
+    root it always fell through to the "no catalog owner registered"
+    no-write branch in practice (nothing before this test ever registers
+    an owner for that path), but the test itself gave no guarantee of
+    that -- it asserted only on file text and relied on incidental
+    non-collision. Fakes here make the "no live store" property
+    unconditional rather than incidental; behavior asserted is unchanged
+    (file text + README row only -- the catalog/T2 side effects this
+    covers are pinned for real in
+    tests/test_rdr_needs_reexamination.py's substrate-backed test)."""
     rdr_dir = _rdr_dir(tmp_path)
     f = _write_rdr(rdr_dir, 222, "accepted", extra_fm="superseded_by: RDR-999\n")
     readme = _write_readme(rdr_dir, 222, "Accepted")
+    _install_fake_t2(monkeypatch, entries={})
+    monkeypatch.setattr(rdr_mod, "_catalog_reader_factory", lambda: object())
+    monkeypatch.setattr(rdr_mod, "_rdr_repo_scope", lambda _cat, root: (None, ""))
 
     res = _invoke(rdr_dir, "222", "superseded", "--date", "2026-06-24")
     assert res.exit_code == 0, res.output
