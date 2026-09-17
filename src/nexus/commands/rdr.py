@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tomllib
@@ -2924,6 +2925,68 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
     print()
 
 
+@dataclass(frozen=True)
+class _RdrCloseArgs:
+    rdr_id: str | None
+    reason: str | None
+    pointers: str | None
+    force: bool
+    force_implemented: str | None
+    force_implemented_present: bool
+
+
+def _rdr_close_parse_args(args: tuple[str, ...]) -> _RdrCloseArgs:
+    """Parse ``rdr-close``'s pass-through argv without losing token
+    boundaries. A single element carrying the whole line (how a skill may
+    hand it over) is split with ``shlex`` so its quotes still group words.
+
+    ``--reason`` and ``--pointers`` take exactly one token.
+    ``--force-implemented`` takes one token when that token was quoted (it
+    contains whitespace); otherwise it takes every following token up to
+    the next ``--flag``, which is how an unquoted multi-word reason
+    arrives. The RDR id is the first POSITIONAL token shaped like an id
+    (``69``, ``069``, ``RDR-069``), never digits found inside a value.
+    """
+    tokens = list(args)
+    if len(tokens) == 1 and re.search(r"\s", tokens[0]):
+        try:
+            tokens = shlex.split(tokens[0])
+        except ValueError:
+            tokens = tokens[0].split()
+
+    rdr_id: str | None = None
+    reason: str | None = None
+    pointers: str | None = None
+    force = False
+    force_implemented: str | None = None
+    force_implemented_present = False
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+        if tok == "--reason" and nxt is not None:
+            reason, i = nxt, i + 2
+        elif tok == "--pointers" and nxt is not None:
+            pointers, i = nxt, i + 2
+        elif tok == "--force-implemented":
+            force_implemented_present = True
+            i += 1
+            words: list[str] = []
+            while i < len(tokens) and not tokens[i].startswith("--"):
+                words.append(tokens[i])
+                i += 1
+                if len(words) == 1 and re.search(r"\s", words[0]):
+                    break  # a quoted value is complete in one token
+            force_implemented = " ".join(words) if words else None
+        elif tok == "--force":
+            force, i = True, i + 1
+        else:
+            if rdr_id is None and re.match(r"^(?:RDR-)?\d+$", tok, re.IGNORECASE):
+                rdr_id = tok
+            i += 1
+    return _RdrCloseArgs(rdr_id, reason, pointers, force, force_implemented, force_implemented_present)
+
+
 # ---------------------------------------------------------------------------
 # preamble rdr-close
 # ---------------------------------------------------------------------------
@@ -2944,49 +3007,27 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
         print(f"> No RDRs found — `{rdr_dir}` does not exist in this repo.")
         return
 
-    # Strip flags from args before extracting ID
-    reason_match = re.search(r"--reason\s+(\S+)", args_str)
-    close_reason = reason_match.group(1) if reason_match else None
-    force = bool(re.search(r"--force(?!-)", args_str))
-    pointers_match = (
-        re.search(r"--pointers\s+'([^']+)'", args_str)
-        or re.search(r'--pointers\s+"([^"]+)"', args_str)
-        or re.search(r"--pointers\s+(\S+)", args_str)
-    )
-    pointers_arg = pointers_match.group(1) if pointers_match else None
-    force_implemented_match = (
-        re.search(r"--force-implemented\s+'([^']*)'", args_str)
-        or re.search(r'--force-implemented\s+"([^"]*)"', args_str)
-        or re.search(r"--force-implemented\s+(\S+)", args_str)
-    )
-    force_implemented_reason = (
-        force_implemented_match.group(1) if force_implemented_match else None
-    )
+    # Parse the argument VECTOR, token by token. The old form joined it into
+    # one string and re-scanned with regexes, so a multi-word
+    # --force-implemented reason kept one word and the rest fell into the
+    # positional remainder, where the first digits anywhere won the RDR
+    # lookup: the skill's own example reason ("... src/foo.py:42") closed
+    # rdr-042 ([26115] #7, nexus-my04w).
+    parsed = _rdr_close_parse_args(args)
+    close_reason = parsed.reason
+    force = parsed.force
+    pointers_arg = parsed.pointers
+    force_implemented_reason = parsed.force_implemented
     # S1: guard — --force-implemented requires a non-empty reason string (original rdr_close.py:133-137).
-    # Detect the flag either via regex match OR by presence in the raw args tuple (CLI path where
-    # an empty-string arg won't produce a \S+ regex match but the flag token is still present).
-    _force_impl_flag_present = (
-        force_implemented_match is not None
-        or "--force-implemented" in args
-    )
-    if _force_impl_flag_present and not (force_implemented_reason or "").strip():
+    if parsed.force_implemented_present and not (force_implemented_reason or "").strip():
         print("> **ERROR**: `--force-implemented` requires a non-empty reason string.")
         print(
-            "> Example: `nx rdr preamble rdr-close 069 --reason implemented"
+            "> Example: `nx rdr preamble rdr-close -- 069 --reason implemented"
             " --force-implemented 'critic false positive — gap addressed at src/foo.py:42'`"
         )
         return
 
-    args_clean = re.sub(r"--reason\s+\S+", "", args_str)
-    args_clean = re.sub(r"--force-implemented\s+'[^']*'", "", args_clean)
-    args_clean = re.sub(r'--force-implemented\s+"[^"]*"', "", args_clean)
-    args_clean = re.sub(r"--force-implemented\s+\S+", "", args_clean)
-    args_clean = re.sub(r"--force(?!-)", "", args_clean)
-    args_clean = re.sub(r"--pointers\s+'[^']+'", "", args_clean)
-    args_clean = re.sub(r'--pointers\s+"[^"]+"', "", args_clean)
-    args_clean = re.sub(r"--pointers\s+\S+", "", args_clean).strip()
-
-    id_match = re.search(r"\d+", args_clean)
+    id_match = re.match(r"^(?:RDR-)?(\d+)$", parsed.rdr_id or "", re.IGNORECASE)
 
     if not id_match:
         print("> **Usage**: `nx rdr preamble rdr-close <id> [--reason implemented|...]`")
@@ -3003,9 +3044,9 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
             print(f"No RDRs found in `{rdr_dir}`")
         return
 
-    rdr_file = _preamble_find_rdr_file(rdr_path, id_match.group(0))
+    rdr_file = _preamble_find_rdr_file(rdr_path, id_match.group(1))
     if not rdr_file:
-        print(f"> RDR not found for ID: `{id_match.group(0)}`")
+        print(f"> RDR not found for ID: `{id_match.group(1)}`")
         return
 
     fm, text = _preamble_parse_frontmatter(rdr_file)
@@ -3131,8 +3172,11 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
                         f"{gap_key}: pointer '{ptr}' has no line number after ':'"
                     )
                     continue
-                if not (Path(repo_root) / file_part).exists():
-                    failures.append(f"{gap_key}: file '{file_part}' does not exist in repo")
+                if not file_part.strip():
+                    failures.append(f"{gap_key}: pointer '{ptr}' names no file before ':'")
+                    continue
+                if not (Path(repo_root) / file_part).is_file():
+                    failures.append(f"{gap_key}: '{file_part}' is not a file in this repo")
             if failures:
                 print("> **ERROR**: Problem Statement pointer validation failed:")
                 for f in failures:

@@ -4076,3 +4076,80 @@ class TestRdrResearchKeyShapes:
         )
         assert result.exit_code == 0, result.output
         assert [t for t, _ in fake.put_calls] == ["097-research-1"], result.output
+
+
+class TestRdrCloseArgv:
+    """Intrastate [26115] #7 HIGH and #11 (nexus-my04w, probes P6 and P7).
+    The preamble joined its argv into one string and re-scanned it with
+    regexes, so a multi-word ``--force-implemented`` reason kept one word
+    and the rest fell where the first digits won the RDR lookup: the
+    skill's own example reason (``... src/foo.py:42``) closed rdr-042."""
+
+    _GAP_BODY = "## Problem Statement\n\n#### Gap 1: g\n\n## X\n"
+
+    def _two_rdrs(self, rdr_env):
+        _write_rdr(rdr_env["rdr_dir"], "rdr-042-x.md", {"title": "X", "status": "accepted"}, self._GAP_BODY)
+        _write_rdr(rdr_env["rdr_dir"], "rdr-069-c.md", {"title": "C", "status": "accepted"}, self._GAP_BODY)
+
+    def test_multi_word_force_reason_is_kept_whole(self, rdr_env):
+        self._two_rdrs(rdr_env)
+        reason = "critic false positive - gap addressed at src/foo.py:42"
+        res = _runner().invoke(rdr, [
+            "preamble", "rdr-close", "--", "069", "--reason", "implemented",
+            "--force-implemented", reason,
+        ])
+        assert res.exit_code == 0, res.output
+        assert f"**Force Implemented (audit):** {reason}" in res.output
+        assert "rdr-069-c.md" in res.output
+
+    def test_digits_inside_the_reason_never_select_the_rdr(self, rdr_env):
+        """Flag before the id: ``:42`` in the reason must not close rdr-042."""
+        self._two_rdrs(rdr_env)
+        res = _runner().invoke(rdr, [
+            "preamble", "rdr-close", "--",
+            "--force-implemented", "critic false positive - gap addressed at src/foo.py:42",
+            "--reason", "reverted", "069",
+        ])
+        assert res.exit_code == 0, res.output
+        assert "rdr-069-c.md" in res.output
+        assert "rdr-042-x.md" not in res.output
+
+    def test_one_shell_string_is_split_with_its_quotes(self, rdr_env):
+        """The skill may hand the whole line over as one argv element."""
+        self._two_rdrs(rdr_env)
+        res = _runner().invoke(rdr, [
+            "preamble", "rdr-close", "--",
+            "069 --reason implemented --force-implemented 'gap addressed at src/foo.py:42'",
+        ])
+        assert res.exit_code == 0, res.output
+        assert "**Force Implemented (audit):** gap addressed at src/foo.py:42" in res.output
+        assert "rdr-069-c.md" in res.output
+
+    def test_unquoted_reason_words_run_to_the_next_flag(self, rdr_env):
+        self._two_rdrs(rdr_env)
+        res = _runner().invoke(rdr, [
+            "preamble", "rdr-close", "--", "069", "--force-implemented",
+            "critic", "false", "positive", "--reason", "implemented",
+        ])
+        assert "**Force Implemented (audit):** critic false positive" in res.output, res.output
+
+    @pytest.mark.parametrize("pointer, why", [
+        ("Gap1=:12", "empty file part"),
+        ("Gap1=docs:1", "a directory"),
+    ])
+    def test_pointer_needs_a_regular_file(self, rdr_env, pointer, why):
+        self._two_rdrs(rdr_env)
+        res = _runner().invoke(rdr, [
+            "preamble", "rdr-close", "--", "069", "--reason", "implemented", "--pointers", pointer,
+        ])
+        assert "validation passed" not in res.output, (why, res.output)
+        assert "Gap1" in res.output
+
+    def test_pointer_to_a_real_file_still_passes(self, rdr_env):
+        self._two_rdrs(rdr_env)
+        (rdr_env["repo_root"] / "src").mkdir()
+        (rdr_env["repo_root"] / "src" / "foo.py").write_text("x = 1\n")
+        res = _runner().invoke(rdr, [
+            "preamble", "rdr-close", "--", "069", "--reason", "implemented", "--pointers", "Gap1=src/foo.py:1",
+        ])
+        assert "validation passed" in res.output, res.output
