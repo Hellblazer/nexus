@@ -138,25 +138,18 @@ Read the RDR markdown file. Check that these sections are present AND non-empty 
 - STOP — do not proceed to Layer 2 or 3
 - Status remains Draft
 
-### Layer 2 — Assumption Audit (from T2, no AI)
+### Layer 2 — Assumption Audit (computed by the preamble, no AI)
 
-mcp__plugin_conexus_nexus__memory_get(project="{repo}_rdr", title=""
+The preamble's `### T2 Research Findings` section IS Layer 2: it counts the
+RDR's `NNN-research-*` records by classification and by verification method
+and names every high-risk one (assumed, with no evidence beyond documents).
+Read it there; do not recount by hand.
 
-Filter entries matching `NNN-research-*`. Analyze:
-
-1. Count by classification: verified, documented, assumed
-2. Count by verification method: source_search, spike, docs_only
-3. Flag high-risk items: classification=assumed AND verification_method=docs_only
-
-Display:
-```
-Assumption Audit for RDR NNN:
-- 3 verified (2 source search, 1 spike)
-- 1 documented (docs only)
-- 2 assumed — ⚠ UNRESOLVED
-  [seq 4] "Library X supports feature Y" (docs only) ← HIGH RISK
-  [seq 6] "Latency under 100ms" (docs only) ← HIGH RISK
-```
+A line reading `Layer 2 VACUOUS` means the RDR has no research records, so
+the audit examined nothing and did not pass. Either record findings
+(`nx rdr preamble rdr-research -- add <id> --classification ... --method ...`)
+or write `research: none (<why>)` into the gate record so the vacuity is a
+decision on record, then continue.
 
 If assumed findings remain:
 - Ask: "Proceed with 2 unverified assumptions? (recorded as acknowledged)"
@@ -252,8 +245,8 @@ by hand. The rules it applies (`review-rounds.toml`, contract `rdr-gate`):
 
 ### On Pass
 
-1. Store the critique in T2 FIRST: mcp__plugin_conexus_nexus__memory_put(content="{critique}", project="{repo}_rdr", title="{id}-gate-critique-{date}", tags="rdr,gate,critique") — omit `ttl` (memory_put's ttl is int|None; permanent by omission). Same-day re-gates append a letter (`{date}b`, `{date}c`). T2 is where the preamble reads; a T3 copy (collection="<subject>", title="gate-rdr-NNN-{date}") is optional and never the only copy.
-2. Write gate result to T2: mcp__plugin_conexus_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nship_blockers: 0\nsummary: One-sentence summary\ncritique: {repo}_rdr/{id}-gate-critique-{date}\ncommit: <git log -1 --format=%h -- <rdr file>>\nfix_check: <{repo}_rdr/{id}-fix-check-<sha>, sha equal to commit:, or 'none (no change since <sha>)'; mandatory on every re-gate>\nresiduals: <one line per residual finding, round 3+, each `  - [<class>] <title>`, or `  - [<class>] <title> (carried from round <N>)` when it is carried forward from the prior record>\nprior: [<the previous round's own critique record id, never the latest record's id>] (<OUTCOME> <nC> <nS>), <the previous record's own prior chain>", project="{repo}_rdr", title="{id}-gate-latest", tags="rdr,gate") — omit `ttl` (memory_put's ttl is int|None; permanent by omission). `critique:`, `commit:` and `prior:` are what the re-gate block reads; `fix_check:` must equal `commit:`. `nx rdr preamble rdr-verdict` computes and prints this whole block, `prior:` included — copy it verbatim rather than retyping the chain by hand.
+1. Store the critique in T2 FIRST, under the exact title the preamble printed (`Write this round's critique as ...`, the shape `{id}-gate-critique-{date}-r{N}` with N the round): mcp__plugin_conexus_nexus__memory_put(content="{critique}", project="{repo}_rdr", title="{id}-gate-critique-{date}-r{N}", tags="rdr,gate,critique") — omit `ttl` (memory_put's ttl is int|None; permanent by omission). The round in the title is what keeps two rounds on one day from upserting over each other. `{repo}_rdr` is the only home a gate critique has: the critic agent may also write its report under T2 project `{repo}`, and nothing reads it there; the copy under this title is the record. A T3 copy (collection="<subject>", title="gate-rdr-NNN-{date}") is optional and never the only copy.
+2. Write gate result to T2: mcp__plugin_conexus_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nship_blockers: 0\nsummary: One-sentence summary\ncritique: {repo}_rdr/{id}-gate-critique-{date}-r{N}\ncommit: <git log -1 --format=%h -- <rdr file>>\nfix_check: <{repo}_rdr/{id}-fix-check-<sha>, sha equal to commit:, or 'none (no change since <sha>)'; mandatory on every re-gate>\nresiduals: <one line per residual finding, round 3+, each `  - [<class>] <title>`, or `  - [<class>] <title> (carried from round <N>)` when it is carried forward from the prior record>\nprior: [<the previous round's own critique record id, never the latest record's id>] (<OUTCOME> <nC> <nS>), <the previous record's own prior chain>", project="{repo}_rdr", title="{id}-gate-latest", tags="rdr,gate") — omit `ttl` (memory_put's ttl is int|None; permanent by omission). `critique:`, `commit:` and `prior:` are what the re-gate block reads; `fix_check:` must equal `commit:`. `nx rdr preamble rdr-verdict` computes and prints this whole block, `prior:` included — copy it verbatim rather than retyping the chain by hand.
 3. Append the one printed Revision History line to the RDR's Revision History
    section — never the findings themselves; those live only in the two T2
    records written in steps 1 and 2.
@@ -320,7 +313,7 @@ For additional optional fields, see [RELAY_TEMPLATE.md](../../resources/agent-sh
 
 Outputs generated by the substantive-critic agent (Layer 3):
 
-- **T2 memory**: the critique itself via memory_put tool: project="{repo}_rdr", title="{id}-gate-critique-{date}", tags="rdr,gate,critique" (the preamble reads this on a re-gate); T3 copy optional
+- **T2 memory**: the critique itself via memory_put tool: project="{repo}_rdr", title="{id}-gate-critique-{date}-r{N}", tags="rdr,gate,critique" (the preamble reads this on a re-gate); T3 copy optional
 - **T2 memory**: Gate result record via memory_put tool: project="{repo}_rdr", title="{id}-gate-latest", tags="rdr,gate" (outcome: PASSED or BLOCKED; omit `ttl` — permanent by omission)
 - **T1 scratch**: Layer 1/2 validation notes via scratch tool: action="put", content="Gate RDR NNN: Layer 1 structural check", tags="rdr,gate" (promoted to T2 on completion)
 

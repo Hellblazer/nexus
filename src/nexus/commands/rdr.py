@@ -1906,11 +1906,19 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
 
     # nexus-7vdf9: a re-gate after a BLOCKED round leads with the prior
     # findings and the diff since the gated commit.
+    _regate_printed = False
     for _line in _preamble_regate_block(
         repo_root=repo_root, repo_name=repo_name, t2_key=t2_key, rdr_file=rdr_file,
         status=str(fm.get("status", "")),
     ):
         print(_line)
+        _regate_printed = True
+    if not _regate_printed:
+        print(
+            "First gate. Write the critique as "
+            f"`{_critique_title_to_write(f'{repo_name}_rdr', t2_key, 1)}`."
+        )
+        print()
 
     clean = _strip_code_blocks(text)
 
@@ -1943,15 +1951,19 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
     )
     print()
 
-    # T2 research findings (instruction only)
+    # T2 research findings: Layer 2 computed here (nexus-5r0ho item 8).
     print("### T2 Research Findings")
+    try:
+        with _t2_client_factory() as _client:
+            _rows = _client.get_all(project=f"{repo_name}_rdr") or []
+        for _line in _layer2_census_lines([r for r in _rows if isinstance(r, dict)], t2_key):
+            print(_line)
+    except Exception as _exc:  # noqa: BLE001 — T2 unreachable is a named note, never a silent Layer 2 pass
+        print(f"Layer 2: T2 unreachable ({type(_exc).__name__}: {_exc}); the assumption audit could not run.")
+        print()
     print(
-        f"Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"\" "
-        f"to list all entries, then filter for {t2_key}-research* titles."
-    )
-    print(
-        f"If no research findings exist, run `nx rdr preamble rdr-research -- {t2_key}` "
-        "to record findings before gating."
+        f"Use **memory_get** tool: project=\"{repo_name}_rdr\", title=\"{t2_key}-research-<seq>\" "
+        "to read a finding in full."
     )
 
 
@@ -2251,14 +2263,20 @@ def _preamble_regate_block(
             # Tolerate the "project/title [id]" form the skill writes into the pointer.
             critique_title = re.sub(r"\s*\[\d+\]\s*$", "", critique_title)
             # The pointer may carry ANY project prefix ("nexus_rdr/<title>"); the
-            # title is what T2 keys on within this project.
+            # title is what T2 keys on within this project. A prefix naming a
+            # different project is a misplaced record (nexus-5r0ho item 6).
+            critique_project = critique_title.rsplit("/", 1)[0] if "/" in critique_title else project
             critique_title = critique_title.rsplit("/", 1)[-1]
             gated_commit = (_preamble_parse_t2_field(content, "commit") or "").strip()
             fix_check_field = (_preamble_parse_t2_field(content, "fix_check") or "").strip()
             fix_check_exists: bool | None = None
+            fix_check_content: str | None = None
             fc = re.search(r"fix-check-([0-9a-f]{6,40})", fix_check_field)
             if fc:
-                fix_check_exists = client.get(project=project, title=f"{t2_key}-fix-check-{fc.group(1)}") is not None
+                fc_row = client.get(project=project, title=f"{t2_key}-fix-check-{fc.group(1)}")
+                fix_check_exists = fc_row is not None
+                if isinstance(fc_row, dict):
+                    fix_check_content = str(fc_row.get("content", ""))
             # Every gate round writes a critique record; their count is the
             # round count nobody retypes (deep critique [24873] Critical 1).
             # nexus-yjf5l.11: get_all already returns full column data (the
@@ -2269,11 +2287,7 @@ def _preamble_regate_block(
             critique_rows: list[tuple[str, str]] = []
             get_all = getattr(client, "get_all", None)
             if callable(get_all):
-                prefix = f"{t2_key}-gate-critique-"
-                for row in (get_all(project=project) or []):
-                    if isinstance(row, dict) and str(row.get("title", "")).startswith(prefix):
-                        critique_rows.append((str(row.get("title", "")), str(row.get("content", ""))))
-                critique_rows.sort(key=lambda tc: tc[0])
+                critique_rows = _distinct_critique_rows(get_all(project=project) or [], t2_key)
             critique_count = len(critique_rows)
             critique = None
             fetch_failed = False
@@ -2341,9 +2355,21 @@ def _preamble_regate_block(
         lines.append(f"Critique: `{project}/{critique_title}`")
     lines.append("")
     lines.extend(_gate_round_lines(content, critique_count))
+    round_no = _gate_round_number(content, critique_count)
+    lines.append(f"Write this round's critique as `{_critique_title_to_write(project, t2_key, round_no)}`.")
+    lines.append("")
+    if critique_project != project:
+        lines.append(
+            f"**Misplaced critique:** the record's `critique:` pointer names `{critique_project}/"
+            f"{critique_title}`, outside `{project}`. Gate critiques live in `{project}` as "
+            f"`{t2_key}-gate-critique-<date>-r<N>`; nothing reads them anywhere else, so the round "
+            "count and the survivor sweep cannot see this one. Copy it there under that title."
+        )
+        lines.append("")
     lines.extend(_fix_check_pointer_lines(
         fix_check_field, gated_commit,
         is_regate=bool(_t2_field_block(content, "prior")), record_exists=fix_check_exists,
+        record_content=fix_check_content,
     ))
     if second_missing:
         lines.append(
@@ -2600,6 +2626,228 @@ def _t2_field_block(content: str, field: str) -> str:
     return " ".join(out).strip()
 
 
+def _distinct_critique_rows(rows: list[dict], t2_key: str) -> list[tuple[str, str]]:
+    """Every ``{id}-gate-critique-*`` row of one RDR, sorted by title, with a
+    same-day copy of one critique counted once. A same-day re-gate used to
+    survive only by a hand-appended letter, and a copy of one critique
+    under a second title on the same date counted as a round (RDR-207
+    printed round 4 of 3; nexus-5r0ho item 2). A later round that re-raises
+    a finding verbatim is a different date and still counts. The first
+    title wins for a duplicate, so the sort stays chronological."""
+    prefix = f"{t2_key}-gate-critique-"
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+    for row in sorted(
+        (r for r in rows if isinstance(r, dict) and str(r.get("title", "")).startswith(prefix)),
+        key=lambda r: str(r.get("title", "")),
+    ):
+        title = str(row.get("title", ""))
+        content = str(row.get("content", ""))
+        day = re.search(r"\d{4}-\d{2}-\d{2}", title[len(prefix):])
+        key = (day.group(0) if day else title, content)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((title, content))
+    return out
+
+
+def _critique_title_to_write(project: str, t2_key: str, round_no: int) -> str:
+    """The one title this round's critique is stored under: the date plus the
+    round, so two rounds on one day never upsert over each other and the
+    round count needs no letter convention (nexus-5r0ho items 2 and 6)."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    return f"{project}/{t2_key}-gate-critique-{today}-r{round_no}"
+
+
+_RESEARCH_CLASSIFICATIONS: Final = ("verified", "documented", "assumed")
+_RESEARCH_METHODS: Final = ("source_search", "spike", "docs_only")
+
+
+def _research_rows_for(rows: list[dict], t2_key: str) -> list[tuple[int, str]]:
+    """``(seq, content)`` for every ``<id>-research-N`` row of one RDR, any
+    zero-padding of the id."""
+    pat = re.compile(rf"^0*{int(t2_key)}-research-(\d+)$")
+    out: list[tuple[int, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        m = pat.match(str(row.get("title", "")))
+        if m:
+            out.append((int(m.group(1)), str(row.get("content", ""))))
+    return sorted(out)
+
+
+def _layer2_census_lines(rows: list[dict], t2_key: str) -> list[str]:
+    """Layer 2 of the gate, computed: the research records counted by
+    classification and method, the high-risk ones named, and zero records
+    called VACUOUS. The skill used to describe this audit in prose and no
+    tool performed it, so a gate with no research passed Layer 2 on nothing
+    (nexus-5r0ho item 8)."""
+    research = _research_rows_for(rows, t2_key)
+    if not research:
+        return [
+            "**Layer 2 VACUOUS**: no research records exist for this RDR, so the assumption "
+            "audit has nothing to examine and cannot pass. Record findings first "
+            f"(`nx rdr preamble rdr-research -- add {t2_key} --classification <verified|documented|assumed> "
+            "--method <source_search|spike|docs_only> <finding>`), or write "
+            "`research: none (<why>)` in the gate record so the vacuity is a decision on record.",
+            "",
+        ]
+    by_class: Counter[str] = Counter()
+    by_method: Counter[str] = Counter()
+    high_risk: list[str] = []
+    for seq, content in research:
+        cls = (_preamble_parse_t2_field(content, "classification") or "").strip().lower() or "unclassified"
+        method = (
+            _preamble_parse_t2_field(content, "verification_method")
+            or _preamble_parse_t2_field(content, "method") or ""
+        ).strip().lower() or "unstated"
+        by_class[cls] += 1
+        by_method[method] += 1
+        if cls == "assumed" and method in ("docs_only", "unstated"):
+            finding = (_preamble_parse_t2_field(content, "finding") or "").strip()
+            high_risk.append(f"  [seq {seq}] {finding[:120]} ({method}) HIGH RISK")
+    lines = [
+        f"**Layer 2 (assumption audit)**: {len(research)} research records; "
+        + ", ".join(f"{k} {v}" for k, v in sorted(by_class.items()))
+        + "; by method: " + ", ".join(f"{k} {v}" for k, v in sorted(by_method.items())) + ".",
+    ]
+    if by_class.get("unclassified") or by_method.get("unstated"):
+        lines.append(
+            "Records with no classification or method were written before "
+            "`rdr-research add` took them as flags; classify them by hand or re-add them."
+        )
+    if high_risk:
+        lines.append("Assumed findings with no evidence beyond documents:")
+        lines.extend(high_risk)
+        lines.append("Verify or remove each before Layer 3, or record `acknowledged: true` on it.")
+    lines.append("")
+    return lines
+
+
+_TERMINATED_STATUSES: Final = frozenset({"abandoned", "deferred", "superseded"})
+_REASON_FIELDS: Final = ("close_reason", "scrap_reason", "abandon_reason", "defer_reason", "reason", "superseded_by")
+
+
+def _rdr_number_of_title(title: str) -> str | None:
+    m = re.fullmatch(r"(?:rdr-)?0*(\d+)", title.strip(), re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _terminated_reason_lines(rows: list[dict]) -> list[str]:
+    """Audit row: every abandoned, deferred or superseded record, which field
+    carries its reason, and which carry none. Nine of 24 had none and the
+    rest used four field names (nexus-5r0ho item 4); `close_reason` is the
+    one set-status writes."""
+    by_field: Counter[str] = Counter()
+    missing: list[str] = []
+    off_field: list[str] = []
+    total = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        num = _rdr_number_of_title(str(row.get("title", "")))
+        if num is None:
+            continue
+        content = str(row.get("content", ""))
+        status = (_preamble_parse_t2_field(content, "status") or "").strip().lower()
+        if status not in _TERMINATED_STATUSES:
+            continue
+        total += 1
+        field = next((f for f in _REASON_FIELDS if (_preamble_parse_t2_field(content, f) or "").strip()), None)
+        if field is None:
+            missing.append(f"RDR-{num} ({status})")
+        else:
+            by_field[field] += 1
+            if field != "close_reason":
+                off_field.append(f"RDR-{num} ({field})")
+    if not total:
+        return []
+    lines = [
+        f"**Terminated records**: {total} terminated (abandoned, deferred, superseded); "
+        f"no reason: {len(missing)}; reason fields in use: "
+        + (", ".join(f"{k} {v}" for k, v in by_field.most_common()) or "none") + ".",
+    ]
+    if missing:
+        lines.append("No machine-readable reason: " + ", ".join(missing) + ".")
+    if off_field:
+        lines.append("Reason under a field other than `close_reason`: " + ", ".join(off_field) + ".")
+    lines.append("")
+    return lines
+
+
+def _close_override_lines(rows: list[dict], today: str) -> list[str]:
+    """Audit row: closes and `*-close-override-*` records in the last 30 days
+    and their ratio against the 20% trigger the close skill names. Nothing
+    computed it before, and no override record had ever been written
+    (nexus-5r0ho item 3)."""
+    from datetime import date, timedelta  # noqa: PLC0415 — local to keep the module's date handling in one place
+
+    end = date.fromisoformat(today)
+    start = end - timedelta(days=30)
+
+    def _in_window(s: str) -> bool:
+        try:
+            return start <= date.fromisoformat(s[:10]) <= end
+        except ValueError:
+            return False
+
+    closes = 0
+    overrides = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title", ""))
+        content = str(row.get("content", ""))
+        if "-close-override-" in title:
+            if _in_window(title.rsplit("-close-override-", 1)[-1]):
+                overrides += 1
+            continue
+        if _rdr_number_of_title(title) is None:
+            continue
+        if (_preamble_parse_t2_field(content, "status") or "").strip().lower() != "closed":
+            continue
+        closed_on = (_preamble_parse_t2_field(content, "closed_date") or _preamble_parse_t2_field(content, "closed") or "").strip()
+        if _in_window(closed_on):
+            closes += 1
+    pct = (100 * overrides / closes) if closes else 0.0
+    verdict = "above the 20% trigger" if closes and pct > 20 else "under the 20% trigger"
+    if not closes and overrides:
+        verdict = "overrides with no dated closes in the window; check `closed_date` fields"
+    return [
+        f"**Close overrides (last 30 days to {today})**: {overrides} override{'s' if overrides != 1 else ''} "
+        f"against {closes} close{'s' if closes != 1 else ''} ({pct:.0f}%), {verdict}.",
+        "",
+    ]
+
+
+def _post_mortem_coverage_lines(rows: list[dict], postmortem_dir: Path) -> list[str]:
+    """Audit row: post-mortems per terminal status. 44% of closed records had
+    one and no abandoned or deferred record did (nexus-5r0ho item 10)."""
+    have: set[str] = set()
+    for f in postmortem_dir.glob("*.md"):
+        nums = re.findall(r"\d+", f.stem)
+        if nums:
+            have.add(str(int(nums[0])))
+    per_status: dict[str, list[int]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        num = _rdr_number_of_title(str(row.get("title", "")))
+        if num is None:
+            continue
+        status = (_preamble_parse_t2_field(str(row.get("content", "")), "status") or "").strip().lower()
+        if status not in ("closed", "abandoned", "deferred", "superseded"):
+            continue
+        n_total, n_have = per_status.get(status, [0, 0])
+        per_status[status] = [n_total + 1, n_have + (1 if num in have else 0)]
+    if not per_status:
+        return []
+    parts = [f"{s}: {h} of {n}" for s, (n, h) in sorted(per_status.items())]
+    return ["**Post-mortem coverage**: " + "; ".join(parts) + ".", ""]
+
+
 def _gate_round_lines(gate_record: str, critique_count: int = 0) -> list[str]:
     """The gate round number and its rule.
 
@@ -2657,6 +2905,7 @@ def _gate_round_lines(gate_record: str, critique_count: int = 0) -> list[str]:
 
 def _fix_check_pointer_lines(
     fix_check_field: str, gated_commit: str, *, is_regate: bool, record_exists: bool | None,
+    record_content: str | None = None,
 ) -> list[str]:
     """Flag a gate record whose ``fix_check:`` is missing on a re-gate, names
     a sha other than its ``commit:``, or points at a T2 record that does not
@@ -2699,6 +2948,21 @@ def _fix_check_pointer_lines(
             "the fix check and store its verdict before Layer 3.",
             "",
         ]
+    if record_content is not None:
+        # The consensus rule is three dispatches; nothing counted them
+        # (nexus-5r0ho item 9). The record names the count in a
+        # ``dispatches:`` field or carries one ``FIX CHECK:`` line per run.
+        declared = (_preamble_parse_t2_field(record_content, "dispatches") or "").strip()
+        verdict_lines = len(re.findall(r"^\s*FIX CHECK:\s*(?:PASS|FAIL)", record_content, re.MULTILINE))
+        n = int(declared) if declared.isdigit() else verdict_lines
+        if n < 3:
+            return [
+                f"**Fix check under-dispatched:** the record `*-fix-check-{sha}` shows {n} dispatch"
+                f"{'' if n == 1 else 'es'}; the consensus rule is three dispatches of the brief on the "
+                "same range, and a verdict from fewer is one run's sampling. Store a record carrying "
+                "`dispatches: 3` and one `FIX CHECK:` line per run before Layer 3.",
+                "",
+            ]
     return []
 
 
@@ -3098,6 +3362,33 @@ def _rdr_close_parse_args(args: tuple[str, ...]) -> _RdrCloseArgs:
 # preamble rdr-close
 # ---------------------------------------------------------------------------
 
+def _revision_history_after_accept_lines(text: str, fm: dict) -> list[str]:
+    """One named line when the RDR's Revision History carries no entry after
+    its acceptance: the implementation phases left no trace in the file.
+    Acceptance is the frontmatter ``accepted_date``, else the history's own
+    entry mentioning acceptance."""
+    m = re.search(r"^##\s+Revision History\s*\n(.*?)(?=^##\s|\Z)", text, re.MULTILINE | re.DOTALL)
+    if not m:
+        return ["> **Revision History stops at accept**: the RDR has no `## Revision History` section.", ""]
+    section = m.group(1)
+    dated = [(d.group(1), ln) for ln in section.splitlines() if (d := re.search(r"(\d{4}-\d{2}-\d{2})", ln))]
+    accepted = str(fm.get("accepted_date") or fm.get("accepted") or "").strip()[:10]
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", accepted):
+        acc = [d for d, ln in dated if re.search(r"accept", ln, re.IGNORECASE)]
+        accepted = acc[-1] if acc else ""
+    if not accepted:
+        return []  # never accepted through the lifecycle: nothing to be past
+    after = [d for d, _ in dated if d > accepted]
+    if after:
+        return []
+    return [
+        f"> **Revision History stops at accept**: accepted {accepted} and no later entry. Add one "
+        "line per implementation phase (date, what landed, the closing bead) before closing; "
+        "the record of what was built must not live only in the tracker.",
+        "",
+    ]
+
+
 @preamble.command("rdr-close")
 @click.argument("args", nargs=-1)
 def preamble_rdr_close(args: tuple[str, ...]) -> None:
@@ -3209,6 +3500,27 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
             print("> Run `nx rdr preamble rdr-gate` to validate, or use `--force` to override.")
             print()
             return
+
+    # Revision History must continue past acceptance (nexus-5r0ho item 5;
+    # the close critic raised it by hand on RDR-206 and RDR-207).
+    for _line in _revision_history_after_accept_lines(text, fm):
+        print(_line)
+
+    # The override audit record the close skill describes in prose: print
+    # the exact record so it is written every time (nexus-5r0ho item 3;
+    # zero such records existed against one override in git history).
+    if force_implemented_reason:
+        _today = datetime.now(timezone.utc).date().isoformat()
+        print("### Override audit record (write it; the 20% trigger is computed from these)")
+        print()
+        print(
+            f'mcp__plugin_conexus_nexus__memory_put(project="{repo_name}_rdr", '
+            f'title="{t2_key}-close-override-{_today}", content="critic_verdict: <outcome|skipped>\\n'
+            f'user_reason: {force_implemented_reason}\\nfinal_close_reason: {close_reason or ""}\\n'
+            f'timestamp: {datetime.now(timezone.utc).isoformat(timespec="seconds")}\\nrdr_id: {t2_key}", '
+            f'tags="rdr,close-override,rdr-{t2_key}")'
+        )
+        print()
 
     # Gap-check for --reason implemented
     if (close_reason or "").lower() == "implemented":
@@ -3418,7 +3730,9 @@ def _rdr_research_next_seq(entries: list[dict], t2_key: str) -> int:
     return max(seqs) + 1 if seqs else 1
 
 
-def _rdr_research_add(t2_key: str, finding_text: str, repo_name: str) -> str:
+def _rdr_research_add(
+    t2_key: str, finding_text: str, repo_name: str, *, classification: str = "", method: str = "",
+) -> str:
     """Record a research finding for RDR *t2_key* in T2, returning the title.
 
     Bug this closes (nexus-zu1q0): the previous scheme (list existing
@@ -3443,7 +3757,12 @@ def _rdr_research_add(t2_key: str, finding_text: str, repo_name: str) -> str:
         for _ in range(_RDR_RESEARCH_MAX_SEQ_ATTEMPTS):
             title = f"{t2_key}-research-{seq}"
             if client.get(project=project, title=title) is None:
-                content = f"rdr_id: {t2_key}\nseq: {seq}\nfinding: {finding_text}\n"
+                content = f"rdr_id: {t2_key}\nseq: {seq}\n"
+                if classification:
+                    content += f"classification: {classification}\n"
+                if method:
+                    content += f"verification_method: {method}\n"
+                content += f"finding: {finding_text}\n"
                 client.put(project=project, title=title, content=content, tags="rdr,research", ttl=None)
                 return title
             seq += 1
@@ -3477,8 +3796,37 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
         # ``RDR-97`` token is the same id (probe P9: it used to fall
         # through to the context print, exit 0, nothing written).
         t2_key = f"{int(add_id.group(1)):03d}"
-        finding_text = " ".join(args[2:]).strip()
-        title = _rdr_research_add(t2_key, finding_text, repo_name)
+        # --classification and --method are flags of the add, never part of
+        # the finding text (nexus-5r0ho item 8); each is one of a closed set.
+        rest: list[str] = []
+        classification = ""
+        method = ""
+        toks = list(args[2:])
+        k = 0
+        while k < len(toks):
+            tok = toks[k]
+            nxt = toks[k + 1] if k + 1 < len(toks) else None
+            if tok in ("--classification", "--method"):
+                if nxt is None or nxt.startswith("--"):
+                    raise click.ClickException(f"rdr-research add: {tok} needs a value.")
+                val = nxt.strip().lower().replace("-", "_")
+                allowed = _RESEARCH_CLASSIFICATIONS if tok == "--classification" else _RESEARCH_METHODS
+                if val not in allowed:
+                    raise click.ClickException(
+                        f"rdr-research add: {tok} must be one of {', '.join(allowed)}; got {nxt!r}."
+                    )
+                if tok == "--classification":
+                    classification = val
+                else:
+                    method = val
+                k += 2
+                continue
+            rest.append(tok)
+            k += 1
+        finding_text = " ".join(rest).strip()
+        if not finding_text:
+            raise click.ClickException("rdr-research add: the finding text is empty.")
+        title = _rdr_research_add(t2_key, finding_text, repo_name, classification=classification, method=method)
         print(f"Recorded T2 research finding: `{repo_name}_rdr/{title}`")
         return
 
@@ -3671,10 +4019,7 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
             critique_title = (_preamble_parse_t2_field(content, "critique") or "").strip()
             critique_title = re.sub(r"\s*\[\d+\]\s*$", "", critique_title).rsplit("/", 1)[-1]
             rows = client.get_all(project=project) or [] if callable(getattr(client, "get_all", None)) else []
-            prefix = f"{t2_key}-gate-critique-"
-            critique_count = sum(
-                1 for r in rows if isinstance(r, dict) and str(r.get("title", "")).startswith(prefix)
-            )
+            critique_count = len(_distinct_critique_rows(rows, t2_key))
             next_seq = _rdr_research_next_seq(rows, t2_key)
             critique = client.get(project=project, title=critique_title) if critique_title else None
             tip = (_git_out(repo_root, "log", "-1", "--format=%h", "--", rel) or "").strip()
@@ -3891,10 +4236,7 @@ def _gate_loop_health_lines(rows: list[dict]) -> list[str]:
         # The critique records are the count nobody retypes; the chain can
         # undercount (deep critique [24873]), so the larger wins, exactly as
         # in _gate_round_lines.
-        prefix = f"{rdr_id}-gate-critique-"
-        critique_count = sum(
-            1 for r in rows if isinstance(r, dict) and str(r.get("title", "")).startswith(prefix)
-        )
+        critique_count = len(_distinct_critique_rows(rows, rdr_id))
         rounds = max(len(entries) + 1, critique_count)
         n_res = _residual_count(content)
         line = (
@@ -4132,10 +4474,13 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
             # never `latest`'s own id — see `_prior_round_identity`.
             prev_round_id = _prior_round_identity(client, project, latest_content)
             rows = client.get_all(project=project) or [] if callable(getattr(client, "get_all", None)) else []
-            prefix = f"{t2_key}-gate-critique-"
+            # Distinct by content, and never this round's own critique
+            # (whatever title it was stored under).
+            _this = client.get(project=project, title=critique_title)
+            _this_content = str(_this.get("content", "")) if isinstance(_this, dict) else None
             critique_count = sum(
-                1 for r in rows if isinstance(r, dict) and str(r.get("title", "")).startswith(prefix)
-                and str(r.get("title", "")) != critique_title
+                1 for title, content in _distinct_critique_rows(rows, t2_key)
+                if title != critique_title and content != _this_content
             )
     except Exception as exc:  # noqa: BLE001 — T2 unreachable must be a visible note, never silence
         print(f"> T2 unreachable ({type(exc).__name__}: {exc}); the verdict cannot be computed.")
@@ -4607,15 +4952,25 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
         print()
         print("### Gate loop health")
         print()
+        audit_rows: list[dict] = []
         try:
             with _t2_client_factory() as client:
                 rows = client.get_all(project=f"{target}_rdr") or []
-            health = _gate_loop_health_lines([r for r in rows if isinstance(r, dict)])
+            audit_rows = [r for r in rows if isinstance(r, dict)]
+            health = _gate_loop_health_lines(audit_rows)
             if health:
                 for line in health:
                     print(line)
             else:
                 print(f"No gate records in `{target}_rdr`.")
+            print()
+            print("### Process records")
+            print()
+            _today = datetime.now(timezone.utc).date().isoformat()
+            for line in _close_override_lines(audit_rows, _today):
+                print(line)
+            for line in _terminated_reason_lines(audit_rows):
+                print(line)
         except Exception as exc:  # noqa: BLE001 — an unreachable T2 is a named note, never a silent skip
             print(f"Gate loop health: T2 unreachable ({type(exc).__name__}: {exc}).")
         print()
@@ -4647,6 +5002,8 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
             if postmortem_dir.exists():
                 count = len(list(postmortem_dir.glob("*.md")))
                 print(f"**Post-mortems available:** {count} files in `{postmortem_dir}`")
+                for line in _post_mortem_coverage_lines(audit_rows, postmortem_dir):
+                    print(line)
             else:
                 print(
                     f"> No `docs/rdr/post-mortem/` directory found at `{found_path}`."

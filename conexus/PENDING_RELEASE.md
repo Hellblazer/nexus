@@ -39,3 +39,6 @@ mechanize, it matters enough to ship.
 - `conexus/agents/code-review-expert.md`: a mandated terminal `## Verdict` block with the same `- **outcome**:` shape and the same three values `substantive-critic` emits (bead nexus-4hoc0).
 - `conexus/skills/development/SKILL.md`: a new check, gate, census or lint pastes its first live run, with examined and skipped counts, into its bead before close (bead nexus-uuf3w).
 - `conexus/agents/substantive-critic.md`: one sentence fixing the order at the end of the output: a Recommended Next Step block precedes the Verdict block, which is always last (bead nexus-4hoc0).
+- `conexus/skills/rdr-gate-checklist/SKILL.md`: the critique is stored under the round-numbered title the preamble prints (`{id}-gate-critique-{date}-r{N}`), `{repo}_rdr` is named as its only home, and Layer 2 reads the preamble's computed census, with `Layer 2 VACUOUS` as a named non-pass (bead nexus-5r0ho).
+- `conexus/skills/rdr-research/SKILL.md`: `add` takes `--classification` and `--method` from closed sets; the gate's Layer 2 reads them (bead nexus-5r0ho).
+- `conexus/skills/rdr-fix-checklist/SKILL.md`: the fix-check record opens with `dispatches: 3` and one `FIX CHECK:` line per run; the gate preamble counts them (bead nexus-5r0ho).

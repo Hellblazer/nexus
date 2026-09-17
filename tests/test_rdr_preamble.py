@@ -2868,7 +2868,7 @@ class TestRdrGateRoundAndFixCheck:
         sha = self._commit(rdr_env, self._BODY, "gated")
         fake = _FakeT2ResearchClient({
             "204-gate-latest": f"outcome: \"BLOCKED\"\ndate: \"2026-09-07\"\ncommit: {sha}\n",
-            **{f"204-gate-critique-2026-09-0{i}": "x" for i in range(1, 6)},
+            **{f"204-gate-critique-2026-09-0{i}": f"round {i}" for i in range(1, 6)},
         })
         monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
         out = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"]).output
@@ -3305,7 +3305,7 @@ class TestRdrAuditGateLoopHealth:
 
         fake = _FakeT2ResearchClient({
             "150-gate-latest": "outcome: \"PASSED\"\ncritical_count: 0\n",
-            **{f"150-gate-critique-2026-09-0{i}": "x" for i in range(1, 5)},
+            **{f"150-gate-critique-2026-09-0{i}": f"round {i}" for i in range(1, 5)},
         })
         monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
         out = _runner().invoke(rdr, ["preamble", "rdr-audit"]).output
