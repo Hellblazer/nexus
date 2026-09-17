@@ -130,6 +130,21 @@ def extractor_loop(
         # rather than trusting pages_extracted_at_start's stale value for
         # the on_page dedup skip below.
         pages_extracted_at_start = actual_pages
+    elif pages_extracted_at_start > 0:
+        # nexus-6m9zy.1 (#1): total_pages is None whenever the previous
+        # attempt did NOT complete cleanly — either a SIGKILL mid-stream
+        # (WAL rows for the pages already written stay intact) or a
+        # caught exception followed by pipeline_index_pdf's
+        # mark_failed + clear_orphan_wal (the WAL is wiped but
+        # pages_extracted survives it, per the nexus-gl99l comment above).
+        # pages_extracted alone cannot distinguish the two: verify against
+        # the actual WAL before trusting it, exactly as the fast path
+        # above does for the total_pages-set case. When the WAL still
+        # backs the counter this is a no-op (actual_pages ==
+        # pages_extracted_at_start); when clear_orphan_wal wiped it, this
+        # is what stops on_page from skipping pages the retry needs to
+        # re-extract.
+        pages_extracted_at_start = len(db.read_pages(content_hash))
 
     def on_page(page_index: int, page_text: str, page_metadata: dict) -> None:
         if cancel.is_set():
@@ -502,7 +517,19 @@ def uploader_loop(
     stage's client-side embedder, local/dry-run mode only) has nothing to
     do with it, see ``pipeline_index_pdf``'s docstring.
     """
-    total_uploaded = 0
+    # nexus-6m9zy.1 (#3): seed the running total from persisted progress,
+    # not 0. On a crash-resume, chunks uploaded before the crash are
+    # already marked uploaded=true and read_uploadable_chunks never
+    # returns them again, so a running total that restarts at 0 can only
+    # ever count THIS run's uploads — chunks_uploaded then never reaches
+    # chunks_created and both resume-completion checks below poll
+    # forever.
+    _resume_state = db.get_pipeline_state(content_hash)
+    total_uploaded = (
+        _resume_state["chunks_uploaded"]
+        if _resume_state and _resume_state["chunks_uploaded"] is not None
+        else 0
+    )
 
     while not cancel.is_set():
         chunks = db.read_uploadable_chunks(content_hash, limit=_UPLOAD_BATCH_SIZE)

@@ -262,6 +262,39 @@ class TestExtractorLoop:
             ret = extractor_loop(Path("/a.pdf"), "h1", db, threading.Event())
         assert ret.metadata["table_regions"] == [{"page": 2, "html": "<table/>"}]
 
+    def test_retry_after_caught_failure_reextracts_all_pages(self, db: HttpPipelineDB) -> None:
+        """nexus-6m9zy.1 (#1): pages_extracted survives clear_orphan_wal.
+
+        pipeline_index_pdf's caught-exception handler is
+        mark_failed + clear_orphan_wal (see :func:`extractor_loop`'s
+        nexus-gl99l comment) -- it wipes the pdf_pages WAL rows but never
+        resets the pages_extracted progress counter. A retry must not
+        trust that stale counter to skip pages the WAL no longer holds,
+        or the document completes with the skipped pages missing.
+        """
+        db.create_pipeline("h1", "/a.pdf", "docs__test")
+        with patch(_P_EXT) as ME:
+            def fail_mid(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False):
+                for i in range(10):
+                    if i == 6:
+                        raise RuntimeError("boom mid-extraction")
+                    on_page(i, f"Page {i} text.", {"page_number": i + 1, "text_length": 12})
+                return _er(10)
+            ME.return_value.extract.side_effect = fail_mid
+            with pytest.raises(RuntimeError):
+                extractor_loop(Path("/a.pdf"), "h1", db, threading.Event())
+        # pipeline_index_pdf's own caught-exception handling, replayed directly.
+        db.mark_failed("h1", error="boom")
+        db.clear_orphan_wal("h1")
+        state = db.get_pipeline_state("h1")
+        assert state["pages_extracted"] == 6  # counter survives the clear
+        assert db.read_pages("h1") == []  # but the WAL does not
+
+        with patch(_P_EXT) as ME:
+            ME.return_value.extract.side_effect = _fx(10)
+            extractor_loop(Path("/a.pdf"), "h1", db, threading.Event())
+        indices = sorted(r["page_index"] for r in db.read_pages("h1"))
+        assert indices == list(range(10)), f"retry skipped pages the cleared WAL no longer had: {indices}"
 
 
 class TestChunkerLoop:
@@ -498,6 +531,34 @@ class TestUploaderLoop:
         s = db.get_pipeline_state("h1")
         assert s["chunks_uploaded"] == 3 and s["status"] == "completed"
         t3.upsert_chunks_with_embeddings.assert_called_once()
+
+    def test_resume_adds_to_persisted_chunks_uploaded(self, db) -> None:
+        """nexus-6m9zy.1 (#3): a crash-resume must ADD this run's uploads
+        to the persisted chunks_uploaded count, not overwrite it.
+        read_uploadable_chunks never returns an already-uploaded row, so
+        if the running total restarts at 0 on every resume, chunks_uploaded
+        can never reach chunks_created again and the uploader polls
+        forever. Run on a thread with a bounded join so a regression
+        hangs the assertion, not the test process."""
+        _pop_chunks(db, "h1", 6)
+        db.mark_uploaded("h1", [0, 1, 2, 3])  # run 1 uploaded 4 of 6, then crashed
+        db.update_progress("h1", chunks_uploaded=4)
+        t3 = MagicMock()
+        cancel = threading.Event()
+        th = threading.Thread(
+            target=uploader_loop, args=("h1", db, t3, "docs__test", cancel), daemon=True,
+        )
+        th.start()
+        th.join(timeout=2.0)
+        completed_in_time = not th.is_alive()
+        cancel.set()
+        th.join(timeout=1.0)
+        assert completed_in_time, "uploader never reached completion: chunks_uploaded never caught up to chunks_created"
+        t3.upsert_chunks_with_embeddings.assert_called_once()
+        assert len(t3.upsert_chunks_with_embeddings.call_args[0][1]) == 2
+        s = db.get_pipeline_state("h1")
+        assert s["chunks_uploaded"] == 6, f"expected 4 already-uploaded + 2 this run, got {s['chunks_uploaded']}"
+        assert s["status"] == "completed"
 
     def test_uploader_injects_global_chunk_index_into_hook_payload(self, db) -> None:
         """RDR-108 Phase 3 (nexus-bdag): the streaming uploader populates
