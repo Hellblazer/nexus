@@ -31,3 +31,7 @@ mechanize, it matters enough to ship.
 
 
 ## Awaiting the next release or plugin cut (pinned: v7.51.1)
+
+- `conexus/skills/phase-review-gate/SKILL.md`: the evidence-key note says Pass 1 renumbers and heading-qualifies items when two §Approach lists each restart at 1, so keys are copied from the Pass 1 table (bead nexus-8tpw3).
+- `conexus/hooks/scripts/rdr_hook.py`: the SessionStart status loader keeps `RDR-NNN`-titled T2 status records, keyed on the bare number and counted once per RDR (bead nexus-nc08w.1).
+- `conexus/skills/rdr-close/SKILL.md`: the file-flip step names `--reason` for closing a never-accepted draft, the lifecycle table's guarded `close-unaccepted` edge (bead nexus-nc08w.4).

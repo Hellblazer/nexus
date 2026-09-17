@@ -4012,3 +4012,47 @@ class TestPhaseReviewGateSubsetParses:
         )
         assert "BLOCKED" in res.output, res.output
         assert "2 of 4" in res.output, res.output
+
+
+class TestRdrResearchKeyShapes:
+    """Intrastate [26115] #6 and probe P9 (nexus-nc08w.2). The research
+    namespace's canonical title is ``%03d-research-N`` (``097-research-9``);
+    the context listing filtered on the unpadded key and so reported no
+    findings over entries the add verb had just written, and an ``RDR-97``
+    id token fell through the add path to the context print, exit 0."""
+
+    @staticmethod
+    def _fake_list(monkeypatch, rows: str):
+        import subprocess as _sp
+
+        import nexus.commands.rdr as rdr_mod
+
+        def _fake_run(cmd, *a, **k):
+            if cmd[:3] == ["nx", "memory", "list"]:
+                return _sp.CompletedProcess(cmd, 0, stdout=rows, stderr="")
+            return _sp.CompletedProcess(cmd, 1, stdout="", stderr="unavailable")
+
+        monkeypatch.setattr(rdr_mod.subprocess, "run", _fake_run)
+
+    def test_listing_finds_zero_padded_titles_for_an_rdr_below_100(self, rdr_env, monkeypatch):
+        _write_rdr(rdr_env["rdr_dir"], "rdr-097-z.md", {"title": "Z", "status": "draft"},
+                   body="## Research Findings\n\nx\n")
+        self._fake_list(monkeypatch, "[1] fakerepo_rdr/097-research-1  (rdr,research)\n"
+                                     "[2] fakerepo_rdr/197-research-1  (rdr,research)\n")
+        for verb in ("rdr-research", "rdr-show"):
+            result = _runner().invoke(rdr, ["preamble", verb, "--", "97"])
+            assert result.exit_code == 0, result.output
+            assert "097-research-1" in result.output, (verb, result.output)
+            assert "197-research-1" not in result.output, (verb, result.output)
+            assert "No research findings recorded" not in result.output, (verb, result.output)
+
+    def test_add_accepts_an_rdr_prefixed_id_token(self, monkeypatch):
+        import nexus.commands.rdr as rdr_mod
+
+        fake = _FakeT2ResearchClient()
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(
+            rdr, ["preamble", "rdr-research", "--", "add", "RDR-97", "some", "finding"]
+        )
+        assert result.exit_code == 0, result.output
+        assert [t for t, _ in fake.put_calls] == ["097-research-1"], result.output

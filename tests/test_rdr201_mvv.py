@@ -24,8 +24,8 @@ Design) means every one of the packaged table's ``*-otherwise`` escape
 rows, each alone in its own zero-guard-dimension group after list-valued
 match expansion, earns a ``closed-by-escape`` advisory: a group closed
 only by its catch-all still gets flagged, exactly as a guarded group does.
-Leg 1 asserts the packaged table's exact advisory count (24, the number of
-escape-only groups: 6 events' explicit-status complements — see
+Leg 1 asserts the packaged table's exact advisory count (29, the number of
+escape-only groups: 7 events' explicit-status complements — see
 ``rdr-lifecycle.toml``'s own header comment for the per-event enumeration)
 rather than merely "at least one", so a regression that silently drops or
 duplicates an ``-otherwise`` row's expansion is caught, not just a
@@ -102,7 +102,7 @@ def _leg1_lifecycle_table_lints_clean() -> None:
     # table (six events, each with at least its own row plus an
     # "-otherwise" escape row) rather than trivially no-oping on an empty
     # or near-empty one.
-    assert len(table.dimensions["event"].domain) == 6
+    assert len(table.dimensions["event"].domain) == 7
     assert len(table.rows) >= 12
     assert len(groups_of(table)) >= 6
 
@@ -118,8 +118,8 @@ def _leg1_lifecycle_table_lints_clean() -> None:
     assert not (BLOCKING_CODES & {f.code for f in findings})
 
     closed_by_escape = [f for f in findings if f.code == CLOSED_BY_ESCAPE]
-    assert len(closed_by_escape) == 24, (
-        f"expected exactly 24 closed-by-escape advisories (one per escape-only "
+    assert len(closed_by_escape) == 29, (
+        f"expected exactly 29 closed-by-escape advisories (one per escape-only "
         f"group), got {len(closed_by_escape)}: {[f.to_json() for f in closed_by_escape]}"
     )
     assert {f.code for f in findings} == {CLOSED_BY_ESCAPE}, (
@@ -144,7 +144,7 @@ def _leg2_draft_to_closed_refuses_illegal_transition(root: Path) -> None:
     res = _invoke_set_status(root, "601", "closed")
 
     assert res.exit_code != 0, res.output
-    assert "illegal-transition" in res.output
+    assert "reason-not-stated" in res.output  # draft -> closed is the guarded close-unaccepted edge (nexus-nc08w.4)
     assert f.read_text() == before  # untouched
 
 

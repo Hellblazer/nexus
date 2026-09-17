@@ -334,16 +334,16 @@ def test_open_to_accepted_with_gate_passed_succeeds(tmp_path, monkeypatch):
     assert "alias" in res.output.lower() or "open" in res.output.lower()
 
 
-def test_open_to_closed_refuses_illegal_transition(tmp_path):
-    """open == draft for resolution purposes; draft -> closed is illegal
-    (only accepted -> closed is a legal `close` edge)."""
+def test_open_to_closed_without_reason_refuses(tmp_path):
+    """open == draft for resolution purposes; draft -> closed is the guarded
+    `close-unaccepted` edge (nexus-nc08w.4) and refuses without --reason."""
     rdr_dir = _rdr_dir(tmp_path)
     f = _write_rdr(rdr_dir, 237, "open")
     before = f.read_text()
 
     res = _invoke(rdr_dir, "237", "closed", "--date", "2026-06-24")
     assert res.exit_code != 0
-    assert "illegal-transition" in res.output
+    assert "reason-not-stated" in res.output
     assert f.read_text() == before  # untouched, including status: open preserved
 
 
@@ -423,15 +423,43 @@ def test_body_with_horizontal_rule_is_preserved(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_draft_to_closed_refuses_illegal_transition(tmp_path):
+def test_draft_to_closed_without_reason_refuses(tmp_path):
+    """The stale-draft close edge (RDR-122, RDR-179 were hand-edited closed
+    because none existed; nexus-nc08w.4) is guarded on a stated reason."""
     rdr_dir = _rdr_dir(tmp_path)
     f = _write_rdr(rdr_dir, 203, "draft")
     before = f.read_text()
 
     res = _invoke(rdr_dir, "203", "closed", "--date", "2026-06-24")
     assert res.exit_code != 0
-    assert "illegal-transition" in res.output
+    assert "reason-not-stated" in res.output
+    assert "--reason" in res.output
     assert f.read_text() == before  # untouched
+
+
+def test_draft_to_closed_with_reason_succeeds(tmp_path):
+    rdr_dir = _rdr_dir(tmp_path)
+    f = _write_rdr(rdr_dir, 203, "draft")
+    readme = _write_readme(rdr_dir, 203, "Draft")
+
+    res = _invoke(rdr_dir, "203", "closed", "--date", "2026-06-24",
+                  "--reason", "shipped under nexus-xyz without a gate")
+    assert res.exit_code == 0, res.output
+    text = f.read_text()
+    assert "status: closed" in text
+    assert "closed_date: 2026-06-24" in text
+    row = [ln for ln in readme.read_text().splitlines() if "RDR-203" in ln][0]
+    assert "| Closed |" in row
+
+
+def test_reason_does_not_license_other_illegal_edges(tmp_path):
+    rdr_dir = _rdr_dir(tmp_path)
+    f = _write_rdr(rdr_dir, 205, "deferred")
+    before = f.read_text()
+    res = _invoke(rdr_dir, "205", "closed", "--reason", "no")
+    assert res.exit_code != 0
+    assert "illegal-transition" in res.output
+    assert f.read_text() == before
 
 
 def test_closed_to_abandoned_refuses_illegal_transition(tmp_path):
@@ -1047,3 +1075,126 @@ refuse = "illegal-transition"
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# Intrastate review [26115] #2, #10, #12 (nexus-nc08w.3, nexus-nc08w.6)
+# ---------------------------------------------------------------------------
+
+
+class _FakeT2ReadWriteClient(_FakeT2Client):
+    """``_FakeT2Client`` plus ``put``; ``fail_put`` simulates T2 down."""
+
+    def __init__(self, entries, *, fail_put: bool = False) -> None:
+        super().__init__(entries=entries)
+        self.fail_put = fail_put
+
+    def put(self, project, title, content, tags="", ttl=None, **kw):
+        if self.fail_put:
+            raise ConnectionError("T2 down")
+        self._entries[(project, title)] = {"title": title, "content": content, "tags": tags}
+
+
+def test_rerun_completes_the_t2_mirror_the_first_run_could_not(tmp_path, monkeypatch):
+    """P1: with T2 unreachable the first run flips the file and exits 0 with
+    a note; the re-run used to say 'already deferred (no-op)' before any T2
+    work, so the record could never be mirrored."""
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 1, "draft")
+    project = f"{tmp_path.name}_rdr"
+    entries = {(project, "1"): {"title": "1", "content": "status: draft\ntitle: Foo\n"}}
+    fake = _FakeT2ReadWriteClient(entries, fail_put=True)
+    monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+
+    res = _invoke(rdr_dir, "1", "deferred")
+    assert res.exit_code == 0, res.output
+    assert "T2 status not mirrored" in res.output
+    assert entries[(project, "1")]["content"].startswith("status: draft")
+
+    fake.fail_put = False
+    res = _invoke(rdr_dir, "1", "deferred")
+    assert res.exit_code == 0, res.output
+    assert entries[(project, "1")]["content"].startswith("status: deferred"), res.output
+    assert "no-op" not in res.output.lower()
+
+
+def test_rerun_with_t2_already_mirrored_is_still_a_noop(tmp_path, monkeypatch):
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 2, "deferred")
+    project = f"{tmp_path.name}_rdr"
+    entries = {(project, "2"): {"title": "2", "content": "status: deferred\n"}}
+    fake = _FakeT2ReadWriteClient(entries)
+    monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+    res = _invoke(rdr_dir, "2", "deferred")
+    assert res.exit_code == 0, res.output
+    assert "no-op" in res.output.lower()
+
+
+def test_readme_rewrite_targets_the_status_column_not_a_title_starting_with_a_status_word(tmp_path):
+    """P2 ([26115] #10): a title cell beginning with ``Deferred`` was the
+    first cell whose leading word is a status, and was destroyed."""
+    from nexus.commands.rdr import _update_readme_status_row
+
+    readme = tmp_path / "README.md"
+    readme.write_text(
+        "| ID | Title | Status |\n|---|---|---|\n"
+        "| [RDR-002](rdr-002-x.md) | Deferred indexing of large trees | Draft |\n"
+    )
+    dom = frozenset(["draft", "accepted", "deferred", "closed", "superseded", "abandoned"])
+    assert _update_readme_status_row(readme, "rdr-002-x.md", "Accepted", dom) is True
+    row = readme.read_text().splitlines()[-1]
+    assert row == "| [RDR-002](rdr-002-x.md) | Deferred indexing of large trees | Accepted |", row
+
+
+def test_frontmatter_rewrite_splits_on_fence_lines_only():
+    """P8 ([26115] #12): a ``---`` inside a frontmatter value before
+    ``status:`` broke the split and the command refused with 'no status key'."""
+    from nexus.commands.rdr import _preamble_parse_frontmatter
+
+    text = '---\ntitle: "A --- B"\nstatus: draft\n---\n# body\n'
+    out = _rewrite_frontmatter_status(text, "deferred", "2026-09-17")
+    assert out == '---\ntitle: "A --- B"\nstatus: deferred\n---\n# body\n'
+
+
+def test_frontmatter_parse_splits_on_fence_lines_only(tmp_path):
+    from nexus.commands.rdr import _preamble_parse_frontmatter
+
+    f = tmp_path / "fm.md"
+    f.write_text('---\ntitle: "A --- B"\nstatus: draft\n---\n# body\n')
+    meta, _ = _preamble_parse_frontmatter(f)
+    assert meta == {"title": "A --- B", "status": "draft"}
+
+
+def test_rerun_mirror_goes_through_the_table(tmp_path, monkeypatch):
+    """A hand-edited file (draft -> closed) is not a decision this command
+    made: the re-run mirror advances T2 only along an edge the table admits,
+    so it refuses without --reason and completes with one (nexus-nc08w.4)."""
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 122, "closed")
+    project = f"{tmp_path.name}_rdr"
+    entries = {(project, "122"): {"title": "122", "content": "status: draft\n"}}
+    fake = _FakeT2ReadWriteClient(entries)
+    monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+
+    res = _invoke(rdr_dir, "122", "closed")
+    assert res.exit_code != 0, res.output
+    assert "reason-not-stated" in res.output
+    assert entries[(project, "122")]["content"].startswith("status: draft")
+
+    res = _invoke(rdr_dir, "122", "closed", "--reason", "shipped without acceptance", "--date", "2026-09-17")
+    assert res.exit_code == 0, res.output
+    assert entries[(project, "122")]["content"].startswith("status: closed"), res.output
+    assert "closed_date: 2026-09-17" in entries[(project, "122")]["content"]
+
+
+def test_rerun_mirror_refuses_an_edge_the_table_lacks(tmp_path, monkeypatch):
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 49, "closed")
+    project = f"{tmp_path.name}_rdr"
+    entries = {(project, "49"): {"title": "49", "content": "status: abandoned\n"}}
+    fake = _FakeT2ReadWriteClient(entries)
+    monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+    res = _invoke(rdr_dir, "49", "closed", "--reason", "x")
+    assert res.exit_code != 0, res.output
+    assert "illegal-transition" in res.output
+    assert entries[(project, "49")]["content"].startswith("status: abandoned")

@@ -164,12 +164,31 @@ def _preamble_rdr_dir(repo_root: str) -> str:
     return rdr_dir
 
 
+_FRONTMATTER_FENCE_RE = re.compile(r"^---[ \t]*\r?$", re.MULTILINE)
+
+
+def _split_frontmatter_fences(text: str) -> list[str]:
+    """``[before, frontmatter, rest]`` split on the first two ``---`` FENCE
+    LINES, or a shorter list when there are fewer. ``text.split("---", 2)``
+    cut at a ``---`` inside a frontmatter value (``title: "A --- B"``), so
+    the status key was reported missing ([26115] #12)."""
+    fences = list(_FRONTMATTER_FENCE_RE.finditer(text))
+    if len(fences) < 2:
+        return [text]
+    first, second = fences[0], fences[1]
+    return [
+        text[: first.start()],
+        text[first.end(): second.start()],
+        text[second.end():],
+    ]
+
+
 def _preamble_parse_frontmatter(filepath: Path) -> tuple[dict, str]:
     """Parse YAML frontmatter from *filepath*; return (meta, full_text)."""
     text = filepath.read_text(errors="replace")
     meta: dict = {}
     if text.startswith("---"):
-        parts = text.split("---", 2)
+        parts = _split_frontmatter_fences(text)
         if len(parts) >= 3:
             block = parts[1]
             try:
@@ -445,12 +464,27 @@ def _target_status_to_event(table: Table) -> dict[str, str]:
     (current, target) in :func:`set_status` instead (RDR-201 P1.4 audit
     residual, T2 nexus/plan-rdr-201-audit-round-3-residuals [23999] item 1)
     -- that is the one Python-side rule this derivation does not absorb.
+    ``close-unaccepted`` (draft -> closed, nexus-nc08w.4) shares ``close``'s
+    target and is likewise resolved from (current, target) in
+    :func:`_transition_event`.
     """
     return {
         _to_status_for_event(table, event): event
         for event in table.dimensions["event"].domain
-        if event != "resume"
+        if event not in ("resume", "close-unaccepted")
     }
+
+
+def _transition_event(table: Table, current_status: str, new_status: str) -> str:
+    """The table event a (current, target) status pair requests. Two
+    targets are ambiguous on their own and are resolved here: ``draft``
+    (``resume``) and ``closed`` from ``draft`` (``close-unaccepted``, the
+    guarded edge for a draft whose work shipped without acceptance)."""
+    if new_status == "draft":
+        return "resume"
+    if new_status == "closed" and current_status == "draft":
+        return "close-unaccepted"
+    return _target_status_to_event(table)[new_status]
 
 
 def _rewrite_frontmatter_status(text: str, new_status: str, date: str) -> str:
@@ -468,7 +502,7 @@ def _rewrite_frontmatter_status(text: str, new_status: str, date: str) -> str:
     """
     if not text.startswith("---"):
         raise ValueError("RDR file has no YAML frontmatter fence")
-    parts = text.split("---", 2)
+    parts = _split_frontmatter_fences(text)
     if len(parts) < 3:
         raise ValueError("RDR file frontmatter fence is malformed")
     fm = parts[1]
@@ -543,17 +577,34 @@ def _update_readme_status_row(
     lines = readme.read_text(encoding="utf-8").splitlines(keepends=True)
     target_cell = label
     changed = False
+    status_col: int | None = None
     for idx, line in enumerate(lines):
-        if rdr_filename not in line or "|" not in line:
+        if "|" not in line:
             continue
         cells = line.split("|")
-        for i, cell in enumerate(cells):
-            m = _README_CELL_LEADING_WORD.match(cell.strip())
-            leading_word = m.group(1).lower() if m else ""
-            if leading_word in status_domain:
-                cells[i] = f" {target_cell} "
-                changed = True
-                break
+        # A header row names the Status column; the row's cell at that
+        # position is the one to rewrite. A title cell whose leading word
+        # is a status ("Deferred indexing of large trees") was the first
+        # cell to match under the leading-word scan and was destroyed
+        # ([26115] #10); that scan is now only the fallback for a table
+        # with no Status header.
+        header_cols = [i for i, c in enumerate(cells) if c.strip().lower() == "status"]
+        if header_cols:
+            status_col = header_cols[0]
+            continue
+        if rdr_filename not in line:
+            continue
+        if status_col is not None and status_col < len(cells):
+            cells[status_col] = f" {target_cell} "
+            changed = True
+        else:
+            for i, cell in enumerate(cells):
+                m = _README_CELL_LEADING_WORD.match(cell.strip())
+                leading_word = m.group(1).lower() if m else ""
+                if leading_word in status_domain:
+                    cells[i] = f" {target_cell} "
+                    changed = True
+                    break
         if changed:
             lines[idx] = "|".join(cells)
             break
@@ -764,6 +815,24 @@ def _append_marker_to_t2(client: object, project: str, number: int, marker: str)
 
 
 _STATUS_DATE_KEY: dict[str, str] = {"accepted": "accepted_date", "closed": "closed_date"}
+
+
+def _t2_status_for(repo_name: str, rdr_num: int) -> str | None:
+    """The ``status:`` a record's own T2 entry carries (first title shape
+    found, see :func:`_t2_rdr_titles`), lower-cased; ``None`` when there is
+    no entry, no status line, or T2 is unreachable. Read-only; never raises."""
+    project = f"{repo_name}_rdr"
+    try:
+        with _t2_client_factory() as client:
+            for title in _t2_rdr_titles(rdr_num):
+                entry = client.get(project=project, title=title)
+                if not entry:
+                    continue
+                status = _preamble_parse_t2_field(str(entry.get("content", "")), "status")
+                return status.strip().lower() if status else None
+    except Exception:  # noqa: BLE001 — a read failure means "unknown", which the caller treats as nothing to complete
+        return None
+    return None
 
 
 def _write_t2_status(repo_name: str, rdr_num: int, new_status: str, date: str) -> tuple[str | None, str | None]:
@@ -1079,6 +1148,67 @@ def repeat(
     click.echo(render_report(rdr_id, plans[0], plans[1], divergence))
 
 
+
+def _resolve_transition_or_exit(
+    table: Table, rdr_file: Path, repo_root: str, current_status: str, new_status: str,
+    *, superseded_by: str, reason: str | None,
+) -> str:
+    """Resolve ``current_status -> new_status`` through the lifecycle table
+    and return the event, or print the refusal and exit. Shared by the
+    flip path and the re-run mirror path of :func:`set_status`, so a T2
+    record is only ever advanced along an edge the table admits."""
+    event = _transition_event(table, current_status, new_status)
+
+    # Only `accept` FROM `draft` ever consults the table's `gate` guard
+    # (accept's other match rows are all escape/illegal-transition and
+    # never reference `gate`) — consulting T2 for any other (status,
+    # event) would cost a live round-trip for a refusal it can't affect,
+    # and would attach a misleading "T2 unreachable" tail to an
+    # illegal-transition refusal that never touched T2 (code review, T2
+    # nexus/code-review-nexus-j9z30-4-2026-09-01 [24033] finding 3).
+    gate_value = "none"
+    gate_note: str | None = None
+    if event == "accept" and current_status == "draft":
+        rdr_num_match = re.search(r"\d+", rdr_file.stem)
+        rdr_num = rdr_num_match.group(0) if rdr_num_match else rdr_file.stem
+        gate_value, gate_note = _gate_outcome_for(rdr_num, _gate_repo_name(repo_root))
+
+    assignment = {
+        "status": current_status,
+        "event": event,
+        "gate": gate_value,
+        "successor": "named" if superseded_by else "absent",
+        "reason": "stated" if (reason or "").strip() else "absent",
+    }
+
+    resolution = resolve(table, assignment)
+    if resolution.refusal is not None:
+        # Evaluator-level defect (unknown-value / ambiguous-match / no-match):
+        # the checker's lint bucket should have made this unreachable for a
+        # well-formed table; treat it as a defect, not a business refusal.
+        click.echo(
+            f"cannot resolve transition for {rdr_file.name}: "
+            f"{resolution.refusal} {dict(resolution.detail)}",
+            err=True,
+        )
+        sys.exit(2)
+
+    row = resolution.row
+    assert row is not None  # exactly one of row/refusal is set (Resolution invariant)
+    if row.outcome_kind == "refuse":
+        msg = (
+            f"{rdr_file.name}: refused ({row.outcome}) for "
+            f"(status={current_status!r}, event={event!r})"
+        )
+        if row.outcome == "reason-not-stated":
+            msg += " — closing a never-accepted draft needs --reason \"<why it shipped without acceptance>\""
+        if gate_note:
+            msg += f" — {gate_note}"
+        click.echo(msg, err=True)
+        sys.exit(1)
+    return event
+
+
 @rdr.command("set-status")
 @click.argument("rdr_id")
 @click.argument("new_status")
@@ -1093,8 +1223,16 @@ def repeat(
     default=None,
     help="Repo root (default: git toplevel / cwd).",
 )
+@click.option(
+    "--reason",
+    default=None,
+    help=(
+        "Why a draft is being closed without acceptance; required for "
+        "draft -> closed (the table's close-unaccepted edge), ignored otherwise."
+    ),
+)
 def set_status(
-    rdr_id: str, new_status: str, date: str | None, root: Path | None
+    rdr_id: str, new_status: str, date: str | None, root: Path | None, reason: str | None
 ) -> None:
     """Flip an RDR's file frontmatter status (and README index row).
 
@@ -1183,57 +1321,47 @@ def set_status(
     # 2026-09-02). This also resolves draft's own ambiguity: draft ->
     # draft is caught here before `event` is ever computed.
     if new_status == current_status:
+        # A previous run may have flipped the file and failed to mirror T2
+        # (T2 unreachable exits 0 with a note); the re-run used to no-op
+        # before any T2 work, so the record could never be mirrored
+        # ([26115] #2). Completing that write is finishing what this
+        # command already decided, not arbitrating between the two ledgers
+        # (nexus-e19sa: no reconciler).
+        num_match = re.search(r"\d+", rdr_file.stem)
+        if num_match:
+            repo_name = _gate_repo_name(repo_root)
+            t2_status = _t2_status_for(repo_name, int(num_match.group(0)))
+            if t2_status is not None and t2_status != new_status:
+                # The record advances only along an edge the table admits
+                # (from what T2 holds to what the file holds): a hand-edited
+                # file is not a decision this command made, so an edge the
+                # table lacks is refused here exactly as it is on the flip
+                # path (RDR-201: no bypass).
+                t2_current = "draft" if t2_status == _OPEN_STATUS_ALIAS else t2_status
+                _resolve_transition_or_exit(
+                    table, rdr_file, repo_root, t2_current, new_status,
+                    superseded_by=str(meta.get("superseded_by") or "").strip(), reason=reason,
+                )
+                click.echo(
+                    f"{rdr_file.name} is already {new_status}; T2 holds {t2_status}, "
+                    "completing the mirror"
+                )
+                t2_title, t2_note = _write_t2_status(
+                    repo_name, int(num_match.group(0)), new_status,
+                    date or datetime.now(timezone.utc).date().isoformat(),
+                )
+                if t2_title:
+                    click.echo(f"updated T2 {repo_name}_rdr/{t2_title} status -> {new_status}")
+                if t2_note:
+                    click.echo(t2_note, err=True)
+                return
         click.echo(f"{rdr_file.name} is already {new_status} (no-op)")
         return
-    target_status_to_event = _target_status_to_event(table)
-    event = "resume" if new_status == "draft" else target_status_to_event[new_status]
-
     superseded_by = str(meta.get("superseded_by") or "").strip()
-
-    # Only `accept` FROM `draft` ever consults the table's `gate` guard
-    # (accept's other match rows are all escape/illegal-transition and
-    # never reference `gate`) — consulting T2 for any other (status,
-    # event) would cost a live round-trip for a refusal it can't affect,
-    # and would attach a misleading "T2 unreachable" tail to an
-    # illegal-transition refusal that never touched T2 (code review, T2
-    # nexus/code-review-nexus-j9z30-4-2026-09-01 [24033] finding 3).
-    gate_value = "none"
-    gate_note: str | None = None
-    if event == "accept" and current_status == "draft":
-        rdr_num_match = re.search(r"\d+", rdr_file.stem)
-        rdr_num = rdr_num_match.group(0) if rdr_num_match else rdr_file.stem
-        gate_value, gate_note = _gate_outcome_for(rdr_num, _gate_repo_name(repo_root))
-
-    assignment = {
-        "status": current_status,
-        "event": event,
-        "gate": gate_value,
-        "successor": "named" if superseded_by else "absent",
-    }
-
-    resolution = resolve(table, assignment)
-    if resolution.refusal is not None:
-        # Evaluator-level defect (unknown-value / ambiguous-match / no-match):
-        # the checker's lint bucket should have made this unreachable for a
-        # well-formed table; treat it as a defect, not a business refusal.
-        click.echo(
-            f"cannot resolve transition for {rdr_file.name}: "
-            f"{resolution.refusal} {dict(resolution.detail)}",
-            err=True,
-        )
-        sys.exit(2)
-
-    row = resolution.row
-    assert row is not None  # exactly one of row/refusal is set (Resolution invariant)
-    if row.outcome_kind == "refuse":
-        msg = (
-            f"{rdr_file.name}: refused ({row.outcome}) for "
-            f"(status={current_status!r}, event={event!r})"
-        )
-        if gate_note:
-            msg += f" — {gate_note}"
-        click.echo(msg, err=True)
-        sys.exit(1)
+    event = _resolve_transition_or_exit(
+        table, rdr_file, repo_root, current_status, new_status,
+        superseded_by=superseded_by, reason=reason,
+    )
 
     if date is None:
         date = datetime.now(timezone.utc).date().isoformat()
@@ -1526,7 +1654,7 @@ def preamble_rdr_show(args: tuple[str, ...]) -> None:
                 # them; caught on RDR-188, 2026-07-22).
                 research_lines = [
                     ln for ln in list_out.splitlines()
-                    if re.search(rf"/{t2_key}-research", ln)
+                    if _RDR_RESEARCH_LIST_RE(t2_key).search(ln)
                 ]
                 print("\n".join(research_lines) if research_lines
                       else "No research findings recorded")
@@ -3065,6 +3193,16 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
 # seq 1 over sixteen existing entries (measured live, nexus-zbdm0).
 _RDR_RESEARCH_TITLE_RE = re.compile(r"^(\d+)-research-(\d+)(?::.*)?$")
 
+
+def _RDR_RESEARCH_LIST_RE(rdr_key: str) -> re.Pattern[str]:  # noqa: N802 — a regex factory, named with the pattern constants it sits beside
+    """Matches an ``nx memory list`` row for RDR *rdr_key*'s research
+    findings under any zero-padding: the canonical title is ``%03d``
+    (``097-research-9``, the shape ``add`` writes), and the listing used to
+    filter on the unpadded key, so for any RDR below 100 it reported no
+    findings over entries the verb had just written ([26115] #6)."""
+    number = int(re.search(r"\d+", rdr_key).group(0))  # type: ignore[union-attr]
+    return re.compile(rf"/0*{number}-research-")
+
 #: Bound on the "advance past a collision" retry loop in
 #: :func:`_rdr_research_add` — a defensive ceiling against looping forever
 #: under sustained contention, never expected to be hit in practice.
@@ -3138,11 +3276,14 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
     # write here, deterministically — see _rdr_research_add. ``add <id>``
     # alone (no text) is unchanged: it falls through to the context-printing
     # path below, exactly as before (nexus-zu1q0 scope).
-    if len(args) >= 3 and args[0].lower() == "add" and re.match(r"^\d+$", args[1]):
+    add_id = re.match(r"^(?:rdr-)?(\d+)$", args[1], re.IGNORECASE) if len(args) >= 3 else None
+    if add_id and args[0].lower() == "add":
         # Zero-padded to three digits: that is the shape every live
         # ``<id>-research-N`` title carries (``097-research-9``), so an
-        # unpadded ``97`` must find them, not fork a second namespace.
-        t2_key = f"{int(args[1]):03d}"
+        # unpadded ``97`` must find them, not fork a second namespace. An
+        # ``RDR-97`` token is the same id (probe P9: it used to fall
+        # through to the context print, exit 0, nothing written).
+        t2_key = f"{int(add_id.group(1)):03d}"
         finding_text = " ".join(args[2:]).strip()
         title = _rdr_research_add(t2_key, finding_text, repo_name)
         print(f"Recorded T2 research finding: `{repo_name}_rdr/{title}`")
@@ -3202,7 +3343,7 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
                 # them; caught on RDR-188, 2026-07-22).
                 research_lines = [
                     ln for ln in list_out.splitlines()
-                    if re.search(rf"/{t2_key}-research", ln)
+                    if _RDR_RESEARCH_LIST_RE(t2_key).search(ln)
                 ]
                 print(
                     "\n".join(research_lines) if research_lines
