@@ -130,7 +130,7 @@ class TestCoreMainWiring:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """core.main() must wire the notice onto the live server before serving
-        — proven by stopping at mcp.run and inspecting the instructions."""
+        — proven by stopping at the stdio run call and inspecting the instructions."""
         import nexus.mcp.core as core
 
         _pin(monkeypatch, local=True, choice=None, active=_TIER0_MODEL)
@@ -144,10 +144,14 @@ class TestCoreMainWiring:
         class _Stop(Exception):
             pass
 
-        def _stop_run(*a, **k):
+        async def _stop_run(*a, **k):
             raise _Stop
 
-        monkeypatch.setattr(core.mcp, "run", _stop_run)
+        # RDR-211 (nexus-rplay.10): main() serves through
+        # channel.run_stdio_with_channel, not mcp.run, so that is the stop.
+        import nexus.mcp.channel as channel
+
+        monkeypatch.setattr(channel, "run_stdio_with_channel", _stop_run)
 
         with pytest.raises(_Stop):
             core.main()

@@ -211,7 +211,7 @@ def _read_parent_command(pid: int) -> str:
     Never raises -- this is a liveness probe, not a precondition."""
     try:
         result = subprocess.run(
-            ["ps", "-o", "command=", "-p", str(pid)],
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
             capture_output=True, text=True, timeout=2.0, check=False,
         )
         return result.stdout or ""

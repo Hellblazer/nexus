@@ -6990,8 +6990,8 @@ def tuple_subscriptions() -> list[dict]:
 def tuple_channel_probe() -> str:
     """Confirm the Claude Code channel is live for this session (RDR-211).
 
-    The lifespan waiter's gate (T2 `nexus_rdr/211-decision-waiter-gate-
-    2026-09-17`) first checks whether this session's launch command line
+    The lifespan waiter's gate (T2 the waiter-gate decision record (T2 project nexus_rdr, title
+    211-decision-waiter-gate, dated in the record)) first checks whether this session's launch command line
     named the channel flag for `server:nexus`; when it cannot tell, the
     waiter sends one `notifications/claude/channel` notification asking
     the session to call this tool. Calling it is what proves the channel
@@ -12095,8 +12095,6 @@ def main():
         # (SSE, streamable-http) is untouched -- this substitution is
         # stdio-only, matching where nx-mcp actually runs.
         import anyio  # noqa: PLC0415 — rare/branch-local path; stdlib-adjacent import deferred to call site
-
-        from nexus.mcp import channel as _channel  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
 
         anyio.run(_channel.run_stdio_with_channel, mcp)
     except (KeyboardInterrupt, SystemExit):
