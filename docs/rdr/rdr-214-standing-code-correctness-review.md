@@ -132,6 +132,45 @@ What the remediation added, also measured:
   all fixed. One fix (a new dimension on the RDR lifecycle table) broke seven
   existing tests, which went unseen because the next push cancelled its CI run.
 
+### Second run: code chosen for being unpromising (2026-09-17)
+
+Approach item 1 asked whether the pilot had only measured a backlog in
+packages picked because they looked rich. The same brief, unchanged, was run
+at HEAD 92e3de0f7 over two targets picked for the opposite reason:
+`src/nexus/daemon` (governed by a conformance suite) and seven quiet modules
+with little recent change. The reviewers had no access to memory, the tracker
+or the RDRs. A prediction and a decision rule were recorded before either
+result arrived (T2 `nexus_rdr/214-research-1`); the result is
+`nexus_rdr/214-research-2`. Every reproduced finding was re-run by a second
+session from the reviewer's own probe scripts.
+
+| Target | Lines | Findings | Reproduced | High | Agent-minutes |
+|---|---|---|---|---|---|
+| `src/nexus/daemon` | 6,980 | 12 | 7 | 2 | about 7 |
+| seven quiet modules | 3,828 | 12 | 10 counted (1 disputed) | 1 | about 5.5 |
+
+Counted: 17 reproduced defects over 10,808 lines, one per 636 lines, at 1.16
+agent-minutes per thousand lines. The pilot found one per 1,031 lines at 1.36.
+
+The prediction was 5 reproduced and no high-severity finding. It was wrong on
+both: 17 and 3. The rule fixed in advance said 5 or more refutes the
+"backlog in rich packages" reading, so that reading is refuted.
+
+Three things in the detail matter for the design:
+
+- The reviewer under-called its most serious finding. It reported that a
+  search query beginning `--pre=` might make ripgrep run a program and marked
+  that unconfirmed. The second session deleted a stale marker file and re-ran
+  the probe; the program ran. Severity came from the re-run, not the review.
+  Fixed the same hour (commit 2c2b1b045).
+- Two findings were siblings of defects fixed earlier the same day, in files
+  those fixes' sweeps did not reach: a duplicate tail chunk in the markdown
+  chunker (the PDF chunker was fixed in 482c4bb57) and a `git log` without
+  `-z` in frecency (the index path was fixed in a8413b364).
+- One finding was disputed and left out of the count: a test pins the
+  behaviour as the contract. A reviewer that may not read history cannot know
+  that, which is what Gap 4's matching step is for.
+
 ### Key Discoveries
 
 - **Verified**: a fixed brief, run without access to project history, finds
@@ -140,14 +179,26 @@ What the remediation added, also measured:
   sub-reviewers, produced fewer defects per line but both of the targets with a
   high-severity finding were ones the reviewer dug into with probes. The
   effort-asymmetry note is in T2 `intrastate` entry 26124.
-- **Documented, not measured here**: whether yield falls on a second pass over
-  the same package. One run cannot show that.
+- **Verified** (spike, 2026-09-17): the yield is not a backlog confined to
+  rich packages. Code chosen for being unpromising yielded more per line
+  than the pilot's targets, including two high-severity defects in a package
+  governed by a conformance suite.
+  *Source: T2 `nexus_rdr/214-research-2`; beads under epic nexus-cd1k0; probes
+  in `~/git/nexus-rdr214-probes`.*
+- **Verified** (spike): an independent re-run of the reviewer's probes is not
+  a formality. It reproduced all of them and raised one finding from
+  "possible lost results" to "a search query can execute a program".
+- **Not measured**: whether yield falls on a second pass over the same
+  package. No package has been reviewed twice.
+- **Not measured**: whether the rate holds for the two largest packages
+  (`db`, about 28,700 lines; `commands`, about 45,000), which no run has
+  covered whole.
 
 ### Critical Assumptions
 
-- **Assumed**: the yield of one defect per thousand lines holds for packages
-  not yet reviewed. The three pilot targets were chosen because they looked
-  rich; an arbitrary package may yield less.
+- **Verified, was Assumed**: the yield holds for packages not chosen for
+  being rich. Two unpromising targets yielded one reproduced defect per 636
+  lines (second run, above).
 - **Assumed**: the cost stays near 1.4 agent-minutes per thousand lines for a
   different model or a changed brief.
 - **Assumed**: findings of this kind are worth more than the remediation they
@@ -162,15 +213,20 @@ between, with the evidence each one needs.
 
 ### Approach
 
-1. **Decide whether to repeat at all.** Run the same brief once over two
-   packages nobody expects to be rich. If the yield there is near zero, the
-   pilot measured a backlog, and one sweep of the remaining packages, once,
-   is the whole answer.
+1. **Decide whether to repeat at all.** Answered by the second run: yes. The
+   yield on unpromising code was higher than the pilot's, so the remaining
+   packages are swept once. Whether to return to a package later is item 2,
+   and needs the one measurement still missing: a second pass over a package
+   already reviewed and remediated.
 2. **Decide the scope rule.** Candidates: every package once, then only
    packages whose non-test lines changed by more than a threshold since their
    last review; or a fixed rotation. The first needs a record of what was
    reviewed when, which does not exist.
-3. **Decide where findings land.** The proposal to test: the reviewer's output
+3. **Decide where findings land.** The second run did it the proposed way and
+   it worked: 24 findings became one epic and 16 beads in one step, each
+   carrying its probe, with nothing written to memory stores but the research
+   record. The re-run of the probes by a second session belongs in this step
+   (see the second run above). The proposal as first written: the reviewer's output
    is a list of bead drafts, each carrying its reproduction, and nothing is
    written to memory stores except a one-line index of the run. A finding with
    no reproduction becomes a bead whose first task is to write one.
@@ -194,9 +250,10 @@ Deferred to the research phase.
 
 ### Alternative 1: Do nothing further
 
-The pilot cleared a backlog and the existing gates carry on. This is the
-correct choice if the second measurement in Approach item 1 comes back near
-zero. It costs nothing and risks the next backlog growing unseen.
+The pilot cleared a backlog and the existing gates carry on. This was the
+correct choice had the second run come back near zero. It came back at 17
+reproduced defects, three of them high severity, so this alternative is
+rejected on evidence.
 
 ### Alternative 2: Review every package on a fixed rotation
 
