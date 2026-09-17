@@ -1170,5 +1170,7 @@ enumerate every one with its test.
 - 2026-09-17: Gate round 3 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `0b42e5019`; critique `nexus_rdr/211-gate-critique-2026-09-16c`.
 - 2026-09-17: Accept-time residual dispositions (gate record
   `nexus_rdr/211-gate-latest`, round 3; research `nexus_rdr/211-research-7`):
-  residuals 1 to 3 by this commit (fix check `nexus_rdr/211-fix-check-599418d5f`);
+  residuals 1 to 3 by this commit (fix check recorded in T2 as
+  `nexus_rdr/211-fix-check-<tip>`, `<tip>` the RDR file's commit after this
+  disposition);
   residual 4 by `0b42e5019`, confirmed closed by the round-3 critique.
