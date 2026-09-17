@@ -514,8 +514,9 @@ observation the row reports as seen, not a contract. Queues and locks
 are not delivered: a worker or a would-be holder waits with `in`, which
 already wakes on `out` and `release`.
 
-**Subscriptions.** The waiter's list is per session. Defaults: `mailbox/<session
-id>` and, once registered, `mailbox/<instance name>`. `tuple_subscribe(subspace)`
+**Subscriptions.** The waiter's list is per session. Mailboxes:
+`mailbox/<session id>` from startup, and `mailbox/<instance name>` once the
+session subscribes it (below). `tuple_subscribe(subspace)`
 adds a board topic; it refuses a take-enabled template's subspace (a queue or
 a lock) with `SchemaViolation` naming `in`, since those are never delivered.
 It accepts exactly one mailbox, the session's own instance-name mailbox: the
@@ -812,8 +813,8 @@ One end-to-end run against a real engine, with two sessions and one script:
    the body and a claim id in context, answers with `tuple_ack` and a reply, and
    the script's parked `rd` on its own mailbox wakes with the reply. The
    notification for a second request is suppressed in the test; the session
-   still receives it after the re-send bound, with the same claim id, and the
-   claim log shows no expiry.
+   still receives it at the next renew, 150 s later, with the same claim id,
+   and the claim log shows no expiry.
 
 ### Phase 1: Code Implementation
 
@@ -934,8 +935,8 @@ None.
   **Verify**: the session wakes with the body and claim id in context, acks,
   and the row is consumed; no watcher ran.
 - **Scenario**: the notification is dropped (the transport write is suppressed
-  in the test). **Verify**: the waiter re-sends it after the bound with the
-  same claim id, and the claim log shows no expiry. Then the server is killed:
+  in the test). **Verify**: the waiter re-sends it at the next renew, 150 s
+  later, with the same claim id, and the claim log shows no expiry. Then the server is killed:
   the lease lapses, the next server reclaims with a new claim id, and the log
   shows one expiry.
 - **Scenario**: the session subscribes to a topic while the waiter is parked.
@@ -1053,12 +1054,17 @@ The Minimum Viable Validation is in scope and runs before the RDR closes.
 ### Proportionality
 
 Three templates, two operations (`release`, `wait`), the lock flag at its four
-sites, two per-template guards and the park-slot report on the engine; on the
-client, one delivery path (the channel and its waiter), three subscription
-tools and the watcher's deletion, all reusing the MCP server the session
-already runs.
-The document is sized to those changes and the three template decisions; Phase
-1 Steps 1 and 3 enumerate every one with its test.
+sites, two per-template guards and the park-slot report on the engine. On the
+client, more than one clause carries: the channel capability declared at the
+low-level server, a lifespan waiter with a claim state machine (claim, renew,
+re-send, release), a raw notification path beside the SDK's typed one, a
+T1-persisted subscription list with three tools, the instance registration
+and directory lease moved out of the watcher, a doctor row, and the deletion
+of `tuple_watch.py` (1308 lines), the arm injection and the `watch` verb.
+That is the weight Steps 0, 3 and 4 carry, and it reuses the MCP server the
+session already runs rather than adding a process. The document is sized to
+those changes and the three template decisions; Phase 1 Steps 1 and 3
+enumerate every one with its test.
 
 ## References
 
@@ -1162,3 +1168,7 @@ The document is sized to those changes and the three template decisions; Phase
   mechanism (`rd` both, `in` the oldest's subspace). No new design; recorded
   as a reconciliation, not a fourth check.
 - 2026-09-17: Gate round 3 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `0b42e5019`; critique `nexus_rdr/211-gate-critique-2026-09-16c`.
+- 2026-09-17: Accept-time residual dispositions (gate record
+  `nexus_rdr/211-gate-latest`, round 3; research `nexus_rdr/211-research-7`):
+  residuals 1 to 3 by this commit (fix check `nexus_rdr/211-fix-check-599418d5f`);
+  residual 4 by `0b42e5019`, confirmed closed by the round-3 critique.
