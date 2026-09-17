@@ -220,7 +220,7 @@ def _write_tuple_watch_session_marker(new_session_id: str, source: str | None) -
     RDR-208 Phase 2 Step 3: on ``source == "clear"`` this also records the
     session a ``/clear`` just stranded, so
     ``conexus/hooks/scripts/mailbox_drain.py`` can empty that mailbox once
-    (:func:`nexus.tuple_watch.record_clear_and_write_session_marker`). Never
+    (:func:`nexus.session_marker.record_clear_and_write_session_marker`). Never
     on an INHERITED session id (``NX_SESSION_ID`` set): that names a nested
     subprocess reusing its parent's session, not a real ``/clear`` boundary
     a mailbox was stranded at, and recording one there would name a
@@ -236,7 +236,7 @@ def _write_tuple_watch_session_marker(new_session_id: str, source: str | None) -
     try:
         from nexus import config as _nx_config  # noqa: PLC0415 — deferred import; module attribute so a patched nexus.config reaches it (nexus-78blw)
         from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — deferred import; rare/branch-local path
-        from nexus.tuple_watch import (  # noqa: PLC0415 — deferred import; rare/branch-local path
+        from nexus.session_marker import (  # noqa: PLC0415 — deferred import; rare/branch-local path
             record_clear_and_write_session_marker,
         )
 

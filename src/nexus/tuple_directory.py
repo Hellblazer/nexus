@@ -35,7 +35,7 @@ T2 nexus_rdr/208-decision-gate-2026-09-14):
 
 `from` resolution mirrors the bead's rejected-alternatives reasoning: the
 default is the tuple-watch session marker for this MCP server's claude
-ancestor (`nexus.tuple_watch._read_session_marker`, written synchronously
+ancestor (`nexus.session_marker._read_session_marker`, written synchronously
 by SessionStart on every source -- see that module's own docstrings),
 falling back to `NX_T1_SESSION_ID`. `resolve_active_session_id()` and a
 bare `NX_T1_SESSION_ID` read are deliberately NOT used here: the former
@@ -182,7 +182,7 @@ def resolve_default_from(*, state_dir: Path | None = None, claude_pid: int | Non
     """
     from nexus import config as _nx_config  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
     from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
-    from nexus.tuple_watch import _read_session_marker  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
+    from nexus.session_marker import _read_session_marker  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
 
     sd = state_dir if state_dir is not None else _nx_config.nexus_config_dir()
     pid = claude_pid if claude_pid is not None else find_immediate_claude_pid()

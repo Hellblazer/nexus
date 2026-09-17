@@ -528,7 +528,7 @@ class TestMailboxSend:
         the marker and leaves the env var stale, so only the fix (reading
         the marker first) can pass it."""
         import nexus.session as session_mod
-        from nexus.tuple_watch import write_session_marker
+        from nexus.session_marker import write_session_marker
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr(session_mod, "find_immediate_claude_pid", lambda: 4242)
@@ -616,7 +616,7 @@ class TestMailboxSend:
         proves from_address WINS over it -- not merely that from_address
         works when nothing else is set."""
         import nexus.session as session_mod
-        from nexus.tuple_watch import write_session_marker
+        from nexus.session_marker import write_session_marker
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr(session_mod, "find_immediate_claude_pid", lambda: 4242)

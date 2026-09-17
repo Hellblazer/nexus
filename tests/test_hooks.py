@@ -232,7 +232,7 @@ class TestT1HandoffMarkerWriter:
 # ── tuple-watch session marker writer (nexus-6konb.12, MM-3.4 fix 1) ────────
 #
 # On every SessionStart source, session_start() ALSO writes the tuple-watch
-# stale-self-stop marker (nexus.tuple_watch.write_session_marker) for the
+# stale-self-stop marker (nexus.session_marker.write_session_marker) for the
 # hook's own claude ancestor pid, alongside (not instead of) the T1 handoff
 # marker above -- on every source (pid reuse), same claude-pid derivation, different
 # consumer (a live ``nx tuple watch`` Monitor rather than the MCP lifespan).
@@ -250,7 +250,7 @@ class TestTupleWatchSessionMarkerWriter:
             return session_start(claude_session_id="new-sess-id", source=source)
 
     def test_clear_writes_the_session_marker(self, tmp_path, monkeypatch) -> None:
-        from nexus.tuple_watch import session_marker_path
+        from nexus.session_marker import session_marker_path
 
         self._session_start(monkeypatch, tmp_path, source="clear", claude_pid=4242)
         marker = session_marker_path(tmp_path, 4242)
@@ -258,7 +258,7 @@ class TestTupleWatchSessionMarkerWriter:
         assert marker.read_text(encoding="utf-8").strip() == "new-sess-id"
 
     def test_resume_writes_the_session_marker(self, tmp_path, monkeypatch) -> None:
-        from nexus.tuple_watch import session_marker_path
+        from nexus.session_marker import session_marker_path
 
         self._session_start(monkeypatch, tmp_path, source="resume", claude_pid=4242)
         marker = session_marker_path(tmp_path, 4242)
@@ -274,7 +274,7 @@ class TestTupleWatchSessionMarkerWriter:
         session id and stops itself on its first cycle (pid reuse; MM-3.4
         round-2 critic). compact and a missing source write the same id,
         which the watcher treats as no change."""
-        from nexus.tuple_watch import session_marker_path, write_session_marker
+        from nexus.session_marker import session_marker_path, write_session_marker
 
         write_session_marker(tmp_path, 4242, "dead-process-session")
         self._session_start(monkeypatch, tmp_path, source=source, claude_pid=4242)
@@ -284,7 +284,7 @@ class TestTupleWatchSessionMarkerWriter:
     def test_unresolvable_claude_pid_writes_no_session_marker(
         self, tmp_path, monkeypatch,
     ) -> None:
-        from nexus.tuple_watch import session_marker_path
+        from nexus.session_marker import session_marker_path
 
         self._session_start(monkeypatch, tmp_path, source="clear", claude_pid=0)
         assert not session_marker_path(tmp_path, 0).exists()
@@ -321,7 +321,7 @@ class TestClearRecordsThePreviousSession:
     def test_clear_with_a_prior_marker_writes_the_cleared_record(
         self, tmp_path, monkeypatch,
     ) -> None:
-        from nexus.tuple_watch import (
+        from nexus.session_marker import (
             cleared_record_path,
             session_marker_path,
             write_session_marker,
@@ -340,7 +340,7 @@ class TestClearRecordsThePreviousSession:
     def test_every_other_source_writes_no_record(
         self, tmp_path, monkeypatch, source,
     ) -> None:
-        from nexus.tuple_watch import cleared_record_path, write_session_marker
+        from nexus.session_marker import cleared_record_path, write_session_marker
 
         write_session_marker(tmp_path, 4242, "old-sess-id")
         self._session_start(monkeypatch, tmp_path, source=source)
@@ -348,7 +348,7 @@ class TestClearRecordsThePreviousSession:
         assert not cleared_record_path(tmp_path, "new-sess-id").exists()
 
     def test_clear_to_the_same_id_writes_no_record(self, tmp_path, monkeypatch) -> None:
-        from nexus.tuple_watch import cleared_record_path, write_session_marker
+        from nexus.session_marker import cleared_record_path, write_session_marker
 
         write_session_marker(tmp_path, 4242, "new-sess-id")
         self._session_start(monkeypatch, tmp_path, source="clear")
@@ -358,7 +358,7 @@ class TestClearRecordsThePreviousSession:
     def test_clear_with_no_prior_marker_writes_no_record(
         self, tmp_path, monkeypatch,
     ) -> None:
-        from nexus.tuple_watch import cleared_record_path
+        from nexus.session_marker import cleared_record_path
 
         self._session_start(monkeypatch, tmp_path, source="clear")
 
@@ -369,7 +369,7 @@ class TestClearRecordsThePreviousSession:
         for S3 names both S2 and S1, and S2's own now-unreachable record is
         removed rather than left to strand S1's id.
         """
-        from nexus.tuple_watch import cleared_record_path, write_session_marker
+        from nexus.session_marker import cleared_record_path, write_session_marker
 
         write_session_marker(tmp_path, 4242, "s1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
@@ -387,7 +387,7 @@ class TestClearRecordsThePreviousSession:
         assert not cleared_record_path(tmp_path, "s2").exists()
 
     def test_inherited_session_id_writes_no_record(self, tmp_path, monkeypatch) -> None:
-        from nexus.tuple_watch import cleared_record_path, write_session_marker
+        from nexus.session_marker import cleared_record_path, write_session_marker
 
         write_session_marker(tmp_path, 4242, "old-sess-id")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
@@ -404,7 +404,7 @@ class TestClearRecordsThePreviousSession:
     def test_cleared_record_write_failure_does_not_crash_session_start(
         self, tmp_path, monkeypatch,
     ) -> None:
-        from nexus.tuple_watch import write_session_marker
+        from nexus.session_marker import write_session_marker
 
         write_session_marker(tmp_path, 4242, "old-sess-id")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
@@ -414,7 +414,7 @@ class TestClearRecordsThePreviousSession:
             patch("nexus.session.find_immediate_claude_pid", return_value=4242),
             patch("nexus.session.find_mcp_sibling_pids", return_value=[]),
             patch(
-                "nexus.tuple_watch.record_clear_and_write_session_marker",
+                "nexus.session_marker.record_clear_and_write_session_marker",
                 side_effect=RuntimeError("boom"),
             ),
         ):

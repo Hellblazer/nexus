@@ -22,10 +22,12 @@ from typing import Any
 import pytest
 
 from nexus.db.limits import MAX_QUERY_RESULTS
+from nexus.session_marker import write_session_marker
 from nexus.tuple_directory import (
     DirectoryResolutionError,
     classify_directory_holders,
     list_directory_entries,
+    resolve_default_from,
     resolve_send_address,
     validate_from_address,
 )
@@ -160,3 +162,31 @@ class TestValidateFromAddress:
     def test_neither_shape_is_refused(self) -> None:
         with pytest.raises(DirectoryResolutionError, match="neither a session id nor an agent id"):
             validate_from_address("not-a-valid-shape")
+
+
+class TestResolveDefaultFrom:
+    """`resolve_default_from`'s own unit coverage (RDR-211 nexus-rplay.24):
+    previously exercised only indirectly, through `mailbox_send`'s
+    engine-substrate tests in `tests/test_mcp_tuple_tools.py`. Pins the
+    reader through the REHOMED contract (`nexus.session_marker`) directly,
+    with no engine and no process-table read: *state_dir*/*claude_pid* are
+    both overridable for exactly this.
+    """
+
+    def test_resolves_through_the_rehomed_marker_reader(self, tmp_path) -> None:
+        write_session_marker(tmp_path, 4242, "marker-session-id")
+        assert resolve_default_from(state_dir=tmp_path, claude_pid=4242) == "marker-session-id"
+
+    def test_falls_back_to_env_when_no_marker_present(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("NX_T1_SESSION_ID", "env-session-id")
+        assert resolve_default_from(state_dir=tmp_path, claude_pid=4242) == "env-session-id"
+
+    def test_marker_wins_over_a_stale_env_var(self, tmp_path, monkeypatch) -> None:
+        write_session_marker(tmp_path, 4242, "marker-session-id")
+        monkeypatch.setenv("NX_T1_SESSION_ID", "stale-env-session-id")
+        assert resolve_default_from(state_dir=tmp_path, claude_pid=4242) == "marker-session-id"
+
+    def test_refuses_when_neither_marker_nor_env_is_present(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+        with pytest.raises(DirectoryResolutionError, match="unresolvable"):
+            resolve_default_from(state_dir=tmp_path, claude_pid=4242)
