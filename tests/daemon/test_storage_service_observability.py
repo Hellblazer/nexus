@@ -220,7 +220,7 @@ class _FakeStorageSupervisor:
         self.stopped = False
         type(self).instances.append(self)
 
-    def start(self) -> None:
+    def start(self, *, stop_requested=None) -> None:
         if type(self).start_raises is not None:
             raise type(self).start_raises
         self.started = True

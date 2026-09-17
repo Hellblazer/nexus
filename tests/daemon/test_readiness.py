@@ -25,6 +25,7 @@ from nexus.daemon.readiness import (
     ReadinessPhase,
     ReadinessProcessExitedError,
     ReadinessStalledError,
+    ReadinessStopRequestedError,
 )
 
 
@@ -431,6 +432,66 @@ class TestWaitReadyLoop:
 
         with pytest.raises(ReadinessStalledError):
             monitor.wait_ready(sleep=fake_sleep, poll_interval=10.0)
+
+    def test_stop_check_raises_before_the_stall_timeout(self):
+        """nexus-cd1k0.19: a stop request must be noticed on the VERY NEXT
+        tick, not only once some other terminal condition (stall, process
+        exit) would eventually fire on its own -- the whole point is that
+        a real migration wait can otherwise run unattended for up to
+        migration_unobservable_timeout (an hour) with the request sitting
+        unread."""
+        clock = _FakeClock()
+        monitor, *_ = _make_monitor(clock)
+
+        sleeps: list[float] = []
+
+        def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock.advance(seconds)
+
+        calls = {"n": 0}
+
+        def stop_check() -> bool:
+            calls["n"] += 1
+            return calls["n"] >= 3
+
+        with pytest.raises(ReadinessStopRequestedError):
+            monitor.wait_ready(
+                sleep=fake_sleep, poll_interval=1.0, stop_check=stop_check,
+            )
+        # Raised on the 3rd tick, well before the 600s default stall
+        # timeout would ever fire.
+        assert calls["n"] == 3
+        assert sum(sleeps) < 10.0
+
+    def test_no_stop_check_behaves_exactly_as_before(self):
+        """stop_check=None (the default) must not change behavior at all —
+        every existing caller that never passes it is unaffected."""
+        clock = _FakeClock()
+        hp = _ScriptedHealthProbe()
+        hp.queue(HealthAnswer.OK)
+        monitor, *_ = _make_monitor(clock, health_probe=hp)
+        result = monitor.wait_ready(sleep=lambda _s: None, poll_interval=0.5)
+        assert result.ready is True
+
+    def test_on_tick_never_sees_the_stop_check_decision(self):
+        """on_tick stays a pure side-effect hook (its own documented
+        contract) -- it must not be consulted, or even called, on the tick
+        where stop_check fires; the loop must raise BEFORE calling tick()
+        at all on that iteration."""
+        clock = _FakeClock()
+        monitor, *_ = _make_monitor(clock)
+        on_tick_calls: list = []
+        with pytest.raises(ReadinessStopRequestedError):
+            monitor.wait_ready(
+                sleep=lambda _s: None,
+                on_tick=on_tick_calls.append,
+                stop_check=lambda: True,
+            )
+        assert on_tick_calls == [], (
+            "stop_check firing on tick 1 must pre-empt tick()/on_tick "
+            "entirely, not race it"
+        )
 
 
 class TestMigrationLogScanner:

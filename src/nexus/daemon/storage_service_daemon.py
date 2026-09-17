@@ -1372,6 +1372,8 @@ class StorageServiceSupervisor:
         proc: subprocess.Popen[bytes],
         port: int,
         timeout: float = _READY_TIMEOUT,
+        *,
+        stop_requested: threading.Event | None = None,
     ) -> None:
         """Migration-aware wait for ``/health`` 200 (nexus-8vp0i / GH #1486).
 
@@ -1436,7 +1438,30 @@ class StorageServiceSupervisor:
         )
 
         try:
-            monitor.wait_ready(poll_interval=_READY_POLL_INTERVAL, on_tick=on_tick)
+            monitor.wait_ready(
+                poll_interval=_READY_POLL_INTERVAL,
+                on_tick=on_tick,
+                stop_check=(
+                    stop_requested.is_set if stop_requested is not None else None
+                ),
+            )
+        except readiness.ReadinessStopRequestedError:
+            # nexus-cd1k0.19: a SIGTERM/SIGINT arrived while still waiting
+            # for readiness (a real migration can leave /health unreachable
+            # for 20+ minutes). Kill the not-yet-ready process — it never
+            # published a lease (Step 4 runs only after this call returns),
+            # so there is nothing else to clean up here; the caller
+            # (_start_locked -> start() -> _supervise_until_stopped) treats
+            # this as a clean stop, not a failure, and must NOT wrap it in
+            # StorageServiceStartError.
+            _log.info(
+                "storage_service_start_interrupted_by_stop",
+                port=port,
+                pid=proc.pid,
+                msg="stop requested mid-readiness-wait; killing the not-yet-ready process",
+            )
+            self._kill_after_readiness_failure(proc)
+            raise
         except readiness.ReadinessProcessExitedError as exc:
             # nexus-8vp0i review round 2 (code-review-expert Significant 1):
             # a JVM crash mid-changeset (OOM, SIGKILL, or the LockException
@@ -1585,12 +1610,19 @@ class StorageServiceSupervisor:
 
     # -- Public lifecycle API -----------------------------------------------
 
-    def start(self) -> dict[str, Any]:
+    def start(
+        self, *, stop_requested: threading.Event | None = None,
+    ) -> dict[str, Any]:
         """Acquire spawn lock, ensure PG is up, spawn service, publish lease.
 
         Returns the flat discovery payload {host, port, pid, generation, token}.
         Idempotent: a live lease short-circuits without a duplicate spawn.
         Raises :class:`StorageServiceStartError` on failure (LOUD).
+
+        ``stop_requested`` (nexus-cd1k0.19), when given, is polled during
+        the readiness wait so a SIGTERM/SIGINT arriving mid-start is not
+        invisible for the rest of a potentially 20+ minute migration wait
+        — see ``readiness.ReadinessStopRequestedError``.
         """
         import fcntl  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
@@ -1599,7 +1631,7 @@ class StorageServiceSupervisor:
         lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            return self._start_locked()
+            return self._start_locked(stop_requested=stop_requested)
         finally:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -1610,7 +1642,9 @@ class StorageServiceSupervisor:
             except OSError:
                 pass
 
-    def _start_locked(self) -> dict[str, Any]:
+    def _start_locked(
+        self, *, stop_requested: threading.Event | None = None,
+    ) -> dict[str, Any]:
         """Inner start, called under the spawn lock."""
         # Short-circuit: a live lease already exists (parallel caller won the race).
         registry = ServiceRegistry(
@@ -1689,8 +1723,15 @@ class StorageServiceSupervisor:
         self._proc = proc
 
         # Step 3: wait for /health 200 — LOUD failure if it doesn't come up.
+        # nexus-cd1k0.19: readiness.ReadinessStopRequestedError (a deliberate
+        # stop mid-wait, NOT a failure) is deliberately NOT caught here —
+        # _wait_for_service_ready already killed the not-yet-ready proc for
+        # that case, and letting it propagate past _start_locked/start()
+        # lets the run loop's own call site treat it as a clean stop rather
+        # than routing it through the StorageServiceStartError LOUD-failure
+        # contract below, which is for genuine start failures only.
         try:
-            self._wait_for_service_ready(proc, port)
+            self._wait_for_service_ready(proc, port, stop_requested=stop_requested)
         except StorageServiceStartError:
             self._stop_service()
             raise
@@ -2252,7 +2293,29 @@ def _supervise_until_stopped(
     instead of an in-process respawn. The lone in-place recovery is the
     ``(True, False)`` PG-only arm: PG is restarted directly while the alive JVM
     keeps running (the OS supervises the supervisor process, not PG)."""
-    sup.start()
+    try:
+        sup.start(stop_requested=stop_requested)
+    except readiness.ReadinessStopRequestedError:
+        # nexus-cd1k0.19: a SIGTERM/SIGINT arrived while start() was still
+        # waiting for readiness. This is a CLEAN stop, not a crash: the
+        # not-yet-ready process was already killed inside
+        # _wait_for_service_ready, and no lease was ever published for
+        # this attempt (publish happens only after health succeeds), so
+        # sup.stop() below has nothing further to reclaim — it is still
+        # safe to call unconditionally (mark_shutting_down/relinquish
+        # no-op when self._registry/self._supervisor were never assigned).
+        # Exit 0: this is the SAME "deliberate stand-down, not a failure"
+        # reasoning as the fenced-exit path (fenced_exit_code) — a
+        # non-zero exit here would trip the OS unit's restart policy into
+        # respawning a supervisor that would just start over from scratch
+        # anyway, having lost nothing worth resuming.
+        _log.info(
+            "storage_service_start_stopped_cleanly",
+            msg="SIGTERM/SIGINT arrived mid-start; standing down without a lease",
+        )
+        flush_logging()
+        sup.stop()
+        return 0
 
     # GH #1369, shared across tiers (RDR-149 §shared primitive) via
     # exit_if_process_unowned: start() may have found an existing, healthy

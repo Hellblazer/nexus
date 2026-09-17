@@ -2047,7 +2047,7 @@ class _ScriptedSupervisor:
         self._fence_after_beats = fence_after_beats
         self._scope = "test-scope"  # read by the loop's fenced-exit log line
 
-    def start(self) -> None:
+    def start(self, *, stop_requested=None) -> None:
         self.calls.append("start")
 
     def heartbeat_once(self) -> tuple[bool, bool]:
@@ -3625,6 +3625,114 @@ class TestWaitForServiceReadyMigrationAware:
             sup._wait_for_service_ready(fake_proc, 19999, timeout=60.0)
 
         cleanup.assert_not_called()
+
+
+class TestWaitForServiceReadyRespondsToStopRequested:
+    """nexus-cd1k0.19: a SIGTERM/SIGINT arriving while the supervisor is
+    still waiting for readiness (a real migration can leave /health
+    unreachable for 20+ minutes) was previously invisible until the wait
+    finished or timed out on its own — nothing inside start()/
+    _wait_for_service_ready()/readiness.wait_ready() ever read
+    stop_requested; only the run loop's OWN while-condition did, AFTER
+    start() had already returned. Real child process throughout (never
+    becomes ready): the whole point is proving the wait unwinds PROMPTLY,
+    not merely that a mocked probe eventually notices."""
+
+    def test_stop_requested_mid_wait_kills_the_proc_and_raises_stop_requested(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        import threading
+
+        from nexus.daemon import readiness
+
+        sup = _make_supervisor(config_dir, clock)
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+            [sys.executable, "-c", "import time; time.sleep(120)"],
+            start_new_session=True,
+        )
+        stop_requested = threading.Event()
+
+        def stop_soon() -> None:
+            time.sleep(0.2)
+            stop_requested.set()
+
+        threading.Thread(target=stop_soon, daemon=True).start()
+
+        t0 = time.monotonic()
+        with patch.object(sup, "_probe_service_health", return_value=HealthProbe.UNREADY), \
+             patch.object(sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE):
+            with pytest.raises(readiness.ReadinessStopRequestedError):
+                sup._wait_for_service_ready(proc, 19999, timeout=600.0, stop_requested=stop_requested)
+        elapsed = time.monotonic() - t0
+
+        assert elapsed < 5.0, (
+            f"a stop request must unwind the readiness wait promptly, not "
+            f"wait out the 600s timeout; took {elapsed:.2f}s"
+        )
+        try:
+            rc = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            pytest.fail("the not-yet-ready process must be killed on a stop request")
+        assert rc is not None
+
+    def test_no_stop_requested_is_unaffected(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        """stop_requested=None (the default) must behave exactly as
+        before — the happy-path healthy-boot case is unaffected."""
+        sup = _make_supervisor(config_dir, clock)
+        fake_proc = _FakeProc(pid=51050)
+        with patch.object(sup, "_probe_service_health", return_value=HealthProbe.OK):
+            sup._wait_for_service_ready(fake_proc, 19999, timeout=0.5)  # must not raise
+
+    def test_full_supervise_loop_stops_cleanly_mid_slow_start(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        """End-to-end through _supervise_until_stopped: exit code 0, not a
+        crash, and the run loop's own try/finally tail (nexus-cd1k0.18)
+        still runs sup.stop() exactly once."""
+        import threading
+
+        from nexus.daemon import storage_service_daemon as ssd
+        from nexus.daemon import readiness
+
+        sup = _make_supervisor(config_dir, clock, supervised=True)
+        proc = subprocess.Popen(  # noqa: S603
+            [sys.executable, "-c", "import time; time.sleep(120)"],
+            start_new_session=True,
+        )
+        stop_requested = threading.Event()
+
+        def fake_start_locked(self, *, stop_requested=None):  # noqa: ANN001
+            self._proc = proc
+            self._wait_for_service_ready(proc, 19999, timeout=600.0, stop_requested=stop_requested)
+            raise AssertionError("readiness never succeeds in this test")
+
+        def stop_soon() -> None:
+            time.sleep(0.2)
+            stop_requested.set()
+
+        threading.Thread(target=stop_soon, daemon=True).start()
+
+        t0 = time.monotonic()
+        with patch.object(type(sup), "_start_locked", fake_start_locked), \
+             patch.object(sup, "_probe_service_health", return_value=HealthProbe.UNREADY), \
+             patch.object(sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE):
+            exit_code = ssd._supervise_until_stopped(sup, stop_requested, lambda: None)
+        elapsed = time.monotonic() - t0
+
+        assert exit_code == 0, (
+            "a stop mid-start is a CLEAN stand-down, not a crash — a "
+            "non-zero exit would trip the OS unit's restart policy"
+        )
+        assert elapsed < 5.0
+        try:
+            rc = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            pytest.fail("the not-yet-ready engine must be killed and reaped")
+        assert rc is not None
 
 
 class TestStartLockedReleasesStaleLockBeforeSpawn:

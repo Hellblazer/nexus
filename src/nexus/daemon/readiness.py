@@ -311,6 +311,15 @@ class ReadinessMigrationFailedError(ReadinessError):
         super().__init__(f"migration failed: {raw_line!r}")
 
 
+class ReadinessStopRequestedError(ReadinessError):
+    """A stop was requested (SIGTERM/SIGINT) while still waiting for
+    readiness (nexus-cd1k0.19). NOT a failure: the caller must unwind
+    through its own normal stop path (kill the not-yet-ready process,
+    exit clean) rather than waiting out the rest of a readiness window
+    that can otherwise run for up to ``migration_unobservable_timeout``
+    (an hour) with the request sitting unread the whole time."""
+
+
 # ── The state machine ────────────────────────────────────────────────────────
 
 
@@ -506,6 +515,7 @@ class ReadinessMonitor:
         sleep: Callable[[float], None] = time.sleep,
         poll_interval: float = 0.5,
         on_tick: Callable[[TickResult], None] | None = None,
+        stop_check: Callable[[], bool] | None = None,
     ) -> TickResult:
         """Loop :meth:`tick` until ready or a :class:`ReadinessError` is
         raised. ``sleep`` and ``poll_interval`` are injected so this loop
@@ -514,8 +524,23 @@ class ReadinessMonitor:
         ``on_tick`` is the caller's side-effect hook (throttled structlog,
         stale-changelog-lock cleanup on ``waiting_for_lock``) — it never
         affects the state machine's own decisions.
+
+        ``stop_check`` (nexus-cd1k0.19), when given, is polled once per
+        tick, BEFORE :meth:`tick` runs: when it returns True,
+        :class:`ReadinessStopRequestedError` is raised immediately instead
+        of continuing to wait. Kept as its OWN parameter rather than
+        folded into ``on_tick`` — ``on_tick`` is documented above as never
+        affecting the loop's own flow, and a stop request is exactly a
+        flow-affecting fact, not a side effect. Without this, a deliberate
+        stop (SIGTERM/SIGINT) arriving mid-wait is invisible for as long as
+        this call keeps blocking — up to ``migration_unobservable_timeout``
+        (an hour) in the worst case.
         """
         while True:
+            if stop_check is not None and stop_check():
+                raise ReadinessStopRequestedError(
+                    "stop requested during readiness wait"
+                )
             result = self.tick()
             if on_tick is not None:
                 on_tick(result)
