@@ -2202,18 +2202,33 @@ def index_repository(
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         _sweep_stale_locks(lock_path.parent)
         _clear_stale_lock(lock_path)
-        lock_fd = open(lock_path, "w")  # noqa: SIM115  (must stay open while locked)
+        # nexus-6m9zy.2 (#2): open without O_TRUNC (and without O_APPEND —
+        # "a+" would fight the post-lock seek(0)+truncate() below on some
+        # platforms). A losing --on-locked=skip contender must be able to
+        # open the SAME inode the live holder has flocked without
+        # mutating it — the old `open(path, "w")` truncated and wrote the
+        # caller's PID unconditionally, BEFORE the flock outcome was
+        # known, so a loser left its own (soon-dead) PID in the file the
+        # winner still held; the next arrival's stale-lock sweep then saw
+        # ESRCH on that dead PID and unlinked the live holder's lock.
+        raw_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+        lock_fd = os.fdopen(raw_fd, "r+")  # noqa: SIM115  (must stay open while locked)
         try:
+            lock_file(lock_fd, blocking=(on_locked == "wait"))
+        except BlockingIOError:
+            # on_locked == "skip" and another process holds the lock.
+            # Nothing has been written to the file — close and leave the
+            # holder's content exactly as it was.
+            lock_fd.close()
+            return {}
+        # We now hold the exclusive flock: safe to stamp our own PID.
+        try:
+            lock_fd.seek(0)
+            lock_fd.truncate()
             lock_fd.write(str(os.getpid()))
             lock_fd.flush()
         except OSError:
             pass  # PID write is best-effort; lock still works without it
-        try:
-            lock_file(lock_fd, blocking=(on_locked == "wait"))
-        except BlockingIOError:
-            # on_locked == "skip" and another process holds the lock
-            lock_fd.close()
-            return {}
 
     if hooks is None:
         from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
