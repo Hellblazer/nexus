@@ -2,9 +2,12 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
@@ -110,6 +113,12 @@ final class TupleWaitRegistry {
     private final ConcurrentHashMap<WaitKey, Group> groups = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicInteger> perClaimantParked = new ConcurrentHashMap<>();
     private final AtomicInteger globalParked = new AtomicInteger();
+    /** Cumulative {@code ParkCapExceededException("global")} refusal count (RDR-211
+     *  Phase 1 Step 1, bead nexus-rplay.7) -- see {@link #globalRefusedCount}. */
+    private final AtomicLong globalRefused = new AtomicLong();
+    /** Cumulative {@code ParkCapExceededException("claimant")} refusal count
+     *  (RDR-211 Phase 1 Step 1) -- see {@link #claimantRefusedCount}. */
+    private final AtomicLong claimantRefused = new AtomicLong();
     private volatile boolean shuttingDown = false;
 
     TupleWaitRegistry(int maxPerClaimant, int maxGlobal) {
@@ -321,6 +330,10 @@ final class TupleWaitRegistry {
         int newGlobal = globalParked.incrementAndGet();
         if (newGlobal > maxGlobal) {
             globalParked.decrementAndGet();
+            // RDR-211 Phase 1 Step 1 (bead nexus-rplay.7): counted AFTER the rollback,
+            // same ordering as the per-claimant branch below -- a refusal must never
+            // skew globalInUse(), only the separate refusal counter.
+            globalRefused.incrementAndGet();
             throw new ParkCapExceededException("global");
         }
         if (claimantOrNull != null) {
@@ -339,6 +352,9 @@ final class TupleWaitRegistry {
             });
             if (exceeded[0]) {
                 globalParked.decrementAndGet();
+                // RDR-211 Phase 1 Step 1 (bead nexus-rplay.7): see the global branch's
+                // matching comment above.
+                claimantRefused.incrementAndGet();
                 throw new ParkCapExceededException("claimant");
             }
         }
@@ -367,6 +383,64 @@ final class TupleWaitRegistry {
      *  returns to empty once every parked call releases. */
     int perClaimantTrackedCount() {
         return perClaimantParked.size();
+    }
+
+    // ── park report (RDR-211 Phase 1 Step 1, bead nexus-rplay.7) ────────────
+
+    /** This registry's configured global park cap -- exposed so {@link
+     *  TupleRepository#parkStats} can report it without keeping its own copy
+     *  of the constructor argument it already handed to this registry. */
+    int maxGlobal() {
+        return maxGlobal;
+    }
+
+    /** This registry's configured per-claimant park cap. See {@link #maxGlobal}. */
+    int maxPerClaimant() {
+        return maxPerClaimant;
+    }
+
+    /** Current global in-use gauge -- the same value {@link #tryAcquireParkSlot}
+     *  compares against {@link #maxGlobal}. A null-claimant park ({@code rd}, and
+     *  RDR-211 Phase 1 Step 1's {@code wait}) is counted here and ONLY here --
+     *  it never appears in {@link #perClaimantSnapshot}. */
+    int globalInUse() {
+        return globalParked.get();
+    }
+
+    /** Cumulative count of {@code ParkCapExceededException("global")} refusals
+     *  since this registry was constructed. Never reset; a fresh count starts
+     *  only with a fresh registry (one per JVM process in production, so this
+     *  is a process lifetime total, not a point-in-time gauge like {@link
+     *  #globalInUse}). */
+    long globalRefusedCount() {
+        return globalRefused.get();
+    }
+
+    /** Cumulative count of {@code ParkCapExceededException("claimant")}
+     *  refusals. See {@link #globalRefusedCount}. */
+    long claimantRefusedCount() {
+        return claimantRefused.get();
+    }
+
+    /**
+     * Point-in-time snapshot of {@link #perClaimantParked} as a plain
+     * claimant-to-count map: unlike {@link #perClaimantTrackedCount} (a bare
+     * size, kept for the existing map-shrinks-back-to-empty test), the park
+     * report distinguishes slots BY CLAIMANT so a caller can observe "one slot
+     * per session" and "never two slots for one session" directly, rather than
+     * inferring it from a total. A claimant with no currently-parked call is
+     * never a key here (its entry is removed the instant {@link
+     * #releaseParkSlot} brings its count to zero) -- an empty map means no
+     * claimant-scoped park is in flight, not that none was ever counted. A
+     * plain copy, not a live view: the caller gets one moment's numbers, never
+     * a reference that mutates under it.
+     */
+    Map<String, Integer> perClaimantSnapshot() {
+        Map<String, Integer> out = new LinkedHashMap<>();
+        for (var e : perClaimantParked.entrySet()) {
+            out.put(e.getKey(), e.getValue().get());
+        }
+        return out;
     }
 
     boolean isShuttingDown() {

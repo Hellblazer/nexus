@@ -239,6 +239,45 @@ public final class TupleRepository {
         waitRegistry.shutdown();
     }
 
+    // ── park stats (RDR-211 Phase 1 Step 1, bead nexus-rplay.7) ─────────────
+
+    /**
+     * {@code park_stats() -> {max_global, max_per_claimant, global_in_use,
+     * refused_global, refused_claimant, per_claimant}}: read access to {@link
+     * #waitRegistry}'s park-slot bookkeeping, otherwise invisible outside
+     * {@link TupleWaitRegistry}'s own package-private fields. RDR-211 §Scale
+     * and Limits item 1 named this gap directly -- the park cap has existed
+     * since RDR-205 (bead nexus-em75s.4), but nothing reported parked or
+     * refused calls before this bead.
+     *
+     * <p>Counters are held on THIS JVM process, not per-tenant and not
+     * aggregated across a cluster -- a caller behind a load balancer sees
+     * only the instance it happens to land on. {@code GET /v1/tuples/
+     * park_stats} still requires the usual {@code Authorization: Bearer}
+     * and {@code X-Nexus-Tenant} headers (auth is enforced ahead of every
+     * {@code /v1/tuples} route, this one included), even though the numbers
+     * themselves carry no tenant dimension.
+     */
+    public ParkStats parkStats() {
+        return new ParkStats(
+                waitRegistry.maxGlobal(), waitRegistry.maxPerClaimant(),
+                waitRegistry.globalInUse(), waitRegistry.globalRefusedCount(),
+                waitRegistry.claimantRefusedCount(), waitRegistry.perClaimantSnapshot());
+    }
+
+    /**
+     * RDR-211 Phase 1 Step 1: a snapshot of {@link #parkStats}. {@code
+     * perClaimant} carries only claimants CURRENTLY parked -- an entry
+     * disappears the instant its count reaches zero, same as {@link
+     * TupleWaitRegistry#perClaimantSnapshot}. A null-claimant park ({@code
+     * rd}, and RDR-211 Phase 1 Step 1's {@code wait}) is never a key here; it
+     * counts toward {@code globalInUse} only.
+     */
+    public record ParkStats(int maxGlobal, int maxPerClaimant, int globalInUse,
+                             long refusedGlobal, long refusedClaimant,
+                             Map<String, Integer> perClaimant) {
+    }
+
     // ── records ──────────────────────────────────────────────────────────────
 
     public record TupleRow(

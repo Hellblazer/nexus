@@ -52,6 +52,10 @@ import java.util.Optional;
  *   GET  /v1/tuples/registry        -&gt; {"digest", "sources", "templates": [...]}
  *   GET  /v1/tuples/subspace_list   ?prefix=&amp;limit=&amp;after= -&gt; {"subspaces": [...], "next_cursor"?: "&lt;subspace&gt;"}
  *   GET  /v1/tuples/subspace_stats  ?subspace= -&gt; {subspace, total, available, claimed, dead, consumed, expired_unpurged, oldest_created_at, newest_created_at}
+ *   GET  /v1/tuples/park_stats      -&gt; {max_global, max_per_claimant, global_in_use, refused_global,
+ *                                        refused_claimant, per_claimant: {claimant: slots}}
+ *                                       (RDR-211 Phase 1 Step 1, bead nexus-rplay.7 -- process-wide counters,
+ *                                       never per-tenant; see {@link TupleRepository#parkStats})
  * </pre>
  *
  * <p>{@code lease_s} on {@code /in}/{@code /inp} is OPTIONAL (nexus-xapt8,
@@ -131,6 +135,7 @@ public final class TupleHandler implements HttpHandler {
                 case "/registry" -> handleRegistry(exchange, method);
                 case "/subspace_list" -> handleSubspaceList(exchange, tenant, method);
                 case "/subspace_stats" -> handleSubspaceStats(exchange, tenant, method);
+                case "/park_stats" -> handleParkStats(exchange, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"unknown tuples op: " + op + "\"}");
             }
         } catch (TupleException e) {
@@ -444,6 +449,30 @@ public final class TupleHandler implements HttpHandler {
         }
         TupleRepository.SubspaceCensus census = repo.subspaceStats(tenant, subspace);
         HttpUtil.send(ex, 200, MAPPER.writeValueAsString(renderCensus(census)));
+    }
+
+    /**
+     * {@code GET /v1/tuples/park_stats} (RDR-211 Phase 1 Step 1, bead
+     * nexus-rplay.7). No tenant scoping -- mirrors {@link #handleRegistry}: the
+     * counters {@link TupleRepository#parkStats} reports live on the JVM
+     * process, not per-tenant, so there is nothing here to filter by {@code
+     * X-Nexus-Tenant} even though the header is still required to reach this
+     * handler at all (see {@link #handle}'s tenant resolution above).
+     */
+    private void handleParkStats(HttpExchange ex, String method) throws IOException {
+        if (!"GET".equals(method)) {
+            HttpUtil.send(ex, 405, "{\"error\":\"GET required\"}");
+            return;
+        }
+        TupleRepository.ParkStats stats = repo.parkStats();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("max_global", stats.maxGlobal());
+        out.put("max_per_claimant", stats.maxPerClaimant());
+        out.put("global_in_use", stats.globalInUse());
+        out.put("refused_global", stats.refusedGlobal());
+        out.put("refused_claimant", stats.refusedClaimant());
+        out.put("per_claimant", stats.perClaimant());
+        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(out));
     }
 
     private Map<String, Object> renderCensus(TupleRepository.SubspaceCensus c) {

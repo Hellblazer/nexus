@@ -10,7 +10,7 @@ Two consumers ship with this design and no others: the RDR-184 dispatch ledger (
 
 ## Operations
 
-Eleven HTTP routes under `/v1/tuples`. Signatures are the contract; the handler is the implementation.
+Twelve HTTP routes under `/v1/tuples`. Signatures are the contract; the handler is the implementation.
 
 ```text
 out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> tuple_id
@@ -51,6 +51,15 @@ registry() -> {digest, sources, templates: [TemplateSchema]}
 subspace_stats(subspace) -> {total, available, claimed, dead, consumed, expired_unpurged}
                                                             # the exact-name form of subspace_list, kept
                                                             # for the CLI verb; total counts live rows only
+park_stats() -> {max_global, max_per_claimant, global_in_use, refused_global,
+                 refused_claimant, per_claimant: {claimant: slots}}
+                                                            # RDR-211 Phase 1 Step 1: the blocking rd/in park
+                                                            # cap's own bookkeeping (RDR-205's cap has existed
+                                                            # since Phase 1, but nothing reported it before this).
+                                                            # Counters are per JVM PROCESS, never per-tenant or
+                                                            # cluster-aggregated. per_claimant carries only
+                                                            # claimants currently parked; a null-claimant park
+                                                            # (rd, wait) counts toward global_in_use only.
 ```
 
 | Operation | Parks | Idempotent | Probe form |
@@ -66,6 +75,7 @@ subspace_stats(subspace) -> {total, available, claimed, dead, consumed, expired_
 | `registry` | no | yes | none |
 | `subspace_list` | no | yes | none |
 | `subspace_stats` | no | yes | none |
+| `park_stats` | no | yes | none |
 
 Matching differs by read. `in` and `inp` require every pinned key and match by equality, because exclusion needs an exact target. `rd` and `rdp` match by equality on every key the pattern supplies and place no condition on keys it omits; a pattern of `None` or `{}` reads the whole subspace, which is what a census does and what a claimant never may. `rd` and `rdp` return up to `n` live tuples, live meaning `expires_at > now()` and not acked, whatever the claim state: a row under a live claim and a dead-lettered row are both returned, with their state — but never their `claim_id`: that field is rendered only by `in`/`inp`'s own top-level response, the ack/nack credential, so reading a claimed row without having won the claim never leaks the means to ack or nack it. `n` is capped by the engine setting `NX_TUPLE_READ_MAX` (default 300, the client's paging convention); an `n` above the cap is clamped, not refused. Results are ordered by `(created_at, id)`, resuming strictly after `since`, a `(created_at, id)` cursor the caller keeps. Acked rows are never returned by any read.
 
@@ -202,7 +212,7 @@ Eleven typed errors, one base class (`TupleException`) carrying a `code` and the
 - `TooLarge` (413): a field, or the whole request body, exceeds its size limit (see § Size limits above) — never echoes the oversized value.
 - `CensusTimeout` (503): `subspace_list`'s own request-path `statement_timeout` (`NX_TUPLE_SUBSPACE_LIST_TIMEOUT_SECONDS`) fired — the census query genuinely ran too long against the tenant's current row count, not a connectivity or availability problem. Retryable: a narrower `prefix`/`limit`, or a retry once load subsides, can succeed where an unbounded scan timed out. The client and `nx doctor`'s `tuples.oldest_unclaimed` row (the one caller that always issues the unbounded call) both recognise this specifically, rather than folding it into a generic "engine unreachable" diagnosis — the engine is fully up; one statement ran past its own budget.
 
-Three refusals outside the eleven, all in `TupleHandler` itself: a request against a route with the wrong HTTP method refuses 405 (every write route is POST-only, `registry`/`subspace_list`/`subspace_stats` are GET-only); a malformed or missing required field in the request body refuses 400 (`IllegalArgumentException`, the same mapping every other handler in this package uses); a request with no tenant resolved refuses 500 (`internal: tenant not set` — never reachable through the auth filter on a correctly configured route).
+Three refusals outside the eleven, all in `TupleHandler` itself: a request against a route with the wrong HTTP method refuses 405 (every write route is POST-only, `registry`/`subspace_list`/`subspace_stats`/`park_stats` are GET-only); a malformed or missing required field in the request body refuses 400 (`IllegalArgumentException`, the same mapping every other handler in this package uses); a request with no tenant resolved refuses 500 (`internal: tenant not set` — never reachable through the auth filter on a correctly configured route).
 
 ## Client surface
 

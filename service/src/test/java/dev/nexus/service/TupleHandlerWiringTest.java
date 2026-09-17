@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.TenantConstants;
+import dev.nexus.service.db.TupleRepository;
 import dev.nexus.service.tuples.TemplateRegistry;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -550,6 +551,33 @@ class TupleHandlerWiringTest {
     @Test
     void release_requiresPost() throws Exception {
         assertThat(get(withRegistry, "/v1/tuples/release").statusCode()).isEqualTo(405);
+    }
+
+    // ── RDR-211 Phase 1 Step 1: the park-slot report route ───────────────────
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void parkStats_returnsCapsAndGaugesShape() throws Exception {
+        var resp = get(withRegistry, "/v1/tuples/park_stats");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat(body).containsKeys("max_global", "max_per_claimant", "global_in_use",
+                "refused_global", "refused_claimant", "per_claimant");
+        assertThat(((Number) body.get("max_global")).intValue())
+                .isEqualTo(TupleRepository.DEFAULT_PARK_CAP_GLOBAL);
+        assertThat(((Number) body.get("max_per_claimant")).intValue())
+                .isEqualTo(TupleRepository.DEFAULT_PARK_CAP_PER_CLAIMANT);
+        assertThat((Map<String, Object>) body.get("per_claimant")).isEmpty();
+    }
+
+    @Test
+    void parkStats_requiresGet() throws Exception {
+        assertThat(post(withRegistry, "/v1/tuples/park_stats", Map.of()).statusCode()).isEqualTo(405);
+    }
+
+    @Test
+    void parkStats_registryAbsent_notRegistered() throws Exception {
+        assertThat(get(withoutRegistry, "/v1/tuples/park_stats").statusCode()).isEqualTo(404);
     }
 
     private HttpResponse<String> post(NexusService svc, String path, Object body) throws Exception {

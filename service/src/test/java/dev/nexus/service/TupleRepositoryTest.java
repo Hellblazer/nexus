@@ -905,15 +905,32 @@ class TupleRepositoryTest {
         String session = "session-globalcap-" + UUID.randomUUID();
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
+            long refusedBefore = capped.parkStats().refusedGlobal();
+            assertThat(capped.parkStats().globalInUse())
+                    .as("nothing parked yet")
+                    .isZero();
+
             Future<List<TupleRepository.TupleRow>> holder = pool.submit(() ->
                     // occupies the single global slot for the duration of its timeout
                     capped.rd(TENANT_A, "ledger/" + session, null, 10, null, 3));
             Thread.sleep(500); // let it register, query, and enter the park loop
 
+            assertThat(capped.parkStats().globalInUse())
+                    .as("RDR-211 Phase 1 Step 1: the park report must show the holder's slot in use")
+                    .isEqualTo(1);
+
             assertThatThrownBy(() -> capped.rd(TENANT_A, "ledger/" + session, null, 10, null, 3))
                     .isInstanceOf(ParkCapExceededException.class);
 
+            assertThat(capped.parkStats().refusedGlobal())
+                    .as("the 429 must be counted in the park report")
+                    .isEqualTo(refusedBefore + 1);
+
             holder.get(6, TimeUnit.SECONDS); // drain
+
+            assertThat(capped.parkStats().globalInUse())
+                    .as("the holder's slot is released once it returns")
+                    .isZero();
         } finally {
             pool.shutdownNow();
         }
@@ -925,17 +942,32 @@ class TupleRepositoryTest {
                 TupleRepository.DEFAULT_READ_MAX, TupleRepository.DEFAULT_CLAIM_PASSES,
                 10, /* parkCapPerClaimant */ 1, /* parkCapGlobal */ 16);
         String to = "agent-claimantcap-" + UUID.randomUUID();
+        String claimant = "capped-claimant-" + UUID.randomUUID();
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
+            long refusedBefore = capped.parkStats().refusedClaimant();
+
             Future<Optional<TupleRepository.ClaimedTuple>> holder = pool.submit(() ->
-                    capped.in(TENANT_A, "mailbox/" + to, Map.of("to", to), "capped-claimant", 60, 3));
+                    capped.in(TENANT_A, "mailbox/" + to, Map.of("to", to), claimant, 60, 3));
             Thread.sleep(500);
 
+            assertThat(capped.parkStats().perClaimant())
+                    .as("RDR-211 Phase 1 Step 1: the park report distinguishes slots BY CLAIMANT")
+                    .containsEntry(claimant, 1);
+
             assertThatThrownBy(() ->
-                    capped.in(TENANT_A, "mailbox/" + to, Map.of("to", to), "capped-claimant", 60, 3))
+                    capped.in(TENANT_A, "mailbox/" + to, Map.of("to", to), claimant, 60, 3))
                     .isInstanceOf(ParkCapExceededException.class);
 
+            assertThat(capped.parkStats().refusedClaimant())
+                    .as("the 429 must be counted in the park report")
+                    .isEqualTo(refusedBefore + 1);
+
             holder.get(6, TimeUnit.SECONDS);
+
+            assertThat(capped.parkStats().perClaimant())
+                    .as("a claimant with no currently-parked call is never two slots, and never even one")
+                    .doesNotContainKey(claimant);
         } finally {
             pool.shutdownNow();
         }
