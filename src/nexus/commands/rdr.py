@@ -1775,7 +1775,10 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
         print(f"> No RDRs found — `{rdr_dir}` does not exist in this repo.")
         return
 
-    id_match = re.search(r"\d+", args_str)
+    # First positional id-shaped token, never digits inside another
+    # argument (nexus-my04w sweep; see _preamble_id_token).
+    _id_token = _preamble_id_token(args)
+    id_match = re.match(r"\d+", _id_token) if _id_token else None
 
     if not id_match:
         print("> **Usage**: `nx rdr preamble rdr-gate <id>`")
@@ -2779,7 +2782,10 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
     pre_accept_statuses = _from_statuses_for_event(table, "accept") | {_OPEN_STATUS_ALIAS}
     accept_target_status = _to_status_for_event(table, "accept")
 
-    id_match = re.search(r"\d+", args_str)
+    # First positional id-shaped token, never digits inside another
+    # argument (nexus-my04w sweep; see _preamble_id_token).
+    _id_token = _preamble_id_token(args)
+    id_match = re.match(r"\d+", _id_token) if _id_token else None
 
     if not id_match:
         print("> **Usage**: `nx rdr preamble rdr-accept <id>`")
@@ -2925,6 +2931,52 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
     print()
 
 
+_PREAMBLE_ID_TOKEN_RE = re.compile(r"^(?:RDR-)?(\d+)$", re.IGNORECASE)
+
+
+def _preamble_tokens(args: tuple[str, ...]) -> list[str]:
+    """The preamble's pass-through argv as tokens. A single element carrying
+    a whole line (how a skill may hand it over) is split with ``shlex`` so
+    its quotes still group words; anything else is taken as given, so a
+    value the shell already grouped stays one token."""
+    tokens = list(args)
+    if len(tokens) == 1 and re.search(r"\s", tokens[0]):
+        try:
+            return shlex.split(tokens[0])
+        except ValueError:
+            return tokens[0].split()
+    return tokens
+
+
+def _preamble_id_token(args: tuple[str, ...], value_flags: tuple[str, ...] = ()) -> str | None:
+    """The RDR number a preamble was asked about: the first POSITIONAL token
+    shaped like an id (``69``, ``069``, ``RDR-069``), skipping the value of
+    every flag in *value_flags*. Every preamble used to join its argv into
+    one string and take the first digits ANYWHERE in it, so digits inside a
+    flag's value could select a different RDR (nexus-my04w and its sweep).
+    With no id-shaped token, falls back to the first digits in a positional
+    token, which is how a filename (``rdr-097-foo.md``) has always worked."""
+    tokens = _preamble_tokens(args)
+    positional: list[str] = []
+    i = 0
+    while i < len(tokens):
+        if tokens[i] in value_flags:
+            i += 2
+            continue
+        if not tokens[i].startswith("--"):
+            positional.append(tokens[i])
+        i += 1
+    for tok in positional:
+        m = _PREAMBLE_ID_TOKEN_RE.match(tok)
+        if m:
+            return m.group(1)
+    for tok in positional:
+        m = re.search(r"\d+", tok)
+        if m:
+            return m.group(0)
+    return None
+
+
 @dataclass(frozen=True)
 class _RdrCloseArgs:
     rdr_id: str | None
@@ -2947,12 +2999,7 @@ def _rdr_close_parse_args(args: tuple[str, ...]) -> _RdrCloseArgs:
     arrives. The RDR id is the first POSITIONAL token shaped like an id
     (``69``, ``069``, ``RDR-069``), never digits found inside a value.
     """
-    tokens = list(args)
-    if len(tokens) == 1 and re.search(r"\s", tokens[0]):
-        try:
-            tokens = shlex.split(tokens[0])
-        except ValueError:
-            tokens = tokens[0].split()
+    tokens = _preamble_tokens(args)
 
     rdr_id: str | None = None
     reason: str | None = None
@@ -3366,7 +3413,10 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
         return
 
     # Extract numeric ID from args (skip subcommand words like "add", "status")
-    id_match = re.search(r"\d+", args_str)
+    # First positional id-shaped token, never digits inside another
+    # argument (nexus-my04w sweep; see _preamble_id_token).
+    _id_token = _preamble_id_token(args)
+    id_match = re.match(r"\d+", _id_token) if _id_token else None
 
     if id_match:
         rdr_file = _preamble_find_rdr_file(rdr_path, id_match.group(0))
@@ -3496,7 +3546,10 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
     rdr_dir = _preamble_rdr_dir(repo_root)
     rdr_path = Path(repo_root) / rdr_dir
     args_str = " ".join(args).strip()
-    id_match = re.search(r"\d+", args_str)
+    # First positional id-shaped token, never digits inside another
+    # argument (nexus-my04w sweep; see _preamble_id_token).
+    _id_token = _preamble_id_token(args)
+    id_match = re.match(r"\d+", _id_token) if _id_token else None
     if not id_match:
         print("> **Usage**: `nx rdr preamble rdr-fix <id>`")
         return
@@ -5083,24 +5136,31 @@ def preamble_phase_review_gate(args: tuple[str, ...]) -> None:
     rdr_path = Path(repo_root) / rdr_dir
     args_str = " ".join(args).strip()
 
-    # Parse flags
-    phase_match = re.search(r"--phase\s+(\S+)", args_str)
-    phase_arg = phase_match.group(1) if phase_match else None
+    # Parse flags from the argument VECTOR (nexus-my04w sweep): the joined
+    # string was stripped of `--evidence <no-spaces>`, so a value holding a
+    # space ("Item1=a, Item2=b") left "Item2=b" behind and "2" won the RDR
+    # lookup; the --phase number could do the same.
+    tokens = _preamble_tokens(args)
+    phase_arg: str | None = None
+    evidence_arg: str | None = None
+    for k, tok in enumerate(tokens):
+        nxt = tokens[k + 1] if k + 1 < len(tokens) else None
+        if tok == "--phase" and nxt is not None:
+            phase_arg = nxt
+        elif tok == "--evidence" and nxt is not None:
+            parts = [nxt]
+            for more in tokens[k + 2:]:
+                if not re.match(r"^Item\d+=", more, re.IGNORECASE):
+                    break
+                parts.append(more)  # an unquoted "Item1=a, Item2=b" arrives as two tokens
+            evidence_arg = ",".join(p.strip().strip(",") for p in parts)
 
-    evidence_match = (
-        re.search(r"--evidence\s+'([^']+)'", args_str)
-        or re.search(r'--evidence\s+"([^"]+)"', args_str)
-        or re.search(r"--evidence\s+(\S+)", args_str)
+    evidence_tokens = set(evidence_arg.split(",")) if evidence_arg else set()
+    rdr_id_token = _preamble_id_token(
+        tuple(t for t in tokens if t.strip(",") not in evidence_tokens),
+        value_flags=("--phase", "--evidence"),
     )
-    evidence_arg = evidence_match.group(1) if evidence_match else None
-
-    # Strip flags to find RDR ID
-    args_clean = re.sub(r"--phase\s+\S+", "", args_str)
-    args_clean = re.sub(r"--evidence\s+'[^']+'", "", args_clean)
-    args_clean = re.sub(r'--evidence\s+"[^"]+"', "", args_clean)
-    args_clean = re.sub(r"--evidence\s+\S+", "", args_clean).strip()
-
-    id_match = re.search(r"\d+", args_clean)
+    id_match = re.match(r"(\d+)", rdr_id_token) if rdr_id_token else None
 
     if not id_match:
         print(

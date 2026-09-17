@@ -4153,3 +4153,39 @@ class TestRdrCloseArgv:
             "preamble", "rdr-close", "--", "069", "--reason", "implemented", "--pointers", "Gap1=src/foo.py:1",
         ])
         assert "validation passed" in res.output, res.output
+
+
+class TestPreambleArgvSiblings:
+    """Sweep for the nexus-my04w class: every preamble joined argv to one
+    string and took the RDR id from the first digits anywhere in it."""
+
+    def test_phase_review_gate_evidence_with_a_space_does_not_pick_the_rdr(self, rdr_env):
+        """One properly quoted argv element ``Item1=a, Item2=b`` was stripped
+        by a no-spaces pattern, leaving ``Item2=b`` behind, and ``2`` won
+        the RDR lookup."""
+        body = "### Approach\n\n1. **A**: one\n2. **B**: two\n\n## Consequences\n"
+        _write_rdr(rdr_env["rdr_dir"], "rdr-002-other.md", {"title": "Other", "status": "accepted"}, body)
+        _write_rdr(rdr_env["rdr_dir"], "rdr-112-real.md", {"title": "Real", "status": "accepted"}, body)
+        res = _runner().invoke(rdr, [
+            "preamble", "phase-review-gate", "--",
+            "--phase", "1", "--evidence", "Item1=nexus-a, Item2=nexus-b", "112",
+        ])
+        assert res.exit_code == 0, res.output
+        assert "rdr-112-real.md" in res.output, res.output
+        assert "APPROACH CROSS-WALK PASSED" in res.output, res.output
+
+    def test_phase_number_never_selects_the_rdr(self, rdr_env):
+        body = "### Approach\n\n1. **A**: one\n\n## Consequences\n"
+        _write_rdr(rdr_env["rdr_dir"], "rdr-003-other.md", {"title": "Other", "status": "accepted"}, body)
+        _write_rdr(rdr_env["rdr_dir"], "rdr-112-real.md", {"title": "Real", "status": "accepted"}, body)
+        res = _runner().invoke(rdr, ["preamble", "phase-review-gate", "--", "--phase", "3", "112"])
+        assert "rdr-112-real.md" in res.output, res.output
+
+    def test_id_token_helper_prefers_an_id_shaped_positional(self):
+        from nexus.commands.rdr import _preamble_id_token  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        assert _preamble_id_token(("--skip-gaps", "RDR-097")) == "097"
+        assert _preamble_id_token(("status", "97")) == "97"
+        assert _preamble_id_token(("069 --reason implemented",)) == "069"
+        assert _preamble_id_token(("--phase", "3", "112"), value_flags=("--phase",)) == "112"
+        assert _preamble_id_token(("rdr-097-foo.md",)) == "097"  # no id-shaped token: digits as before
+        assert _preamble_id_token(()) is None
