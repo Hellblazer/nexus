@@ -2985,6 +2985,7 @@ class _RdrCloseArgs:
     force: bool
     force_implemented: str | None
     force_implemented_present: bool
+    missing_value: tuple[str, ...] = ()
 
 
 def _rdr_close_parse_args(args: tuple[str, ...]) -> _RdrCloseArgs:
@@ -2998,6 +2999,12 @@ def _rdr_close_parse_args(args: tuple[str, ...]) -> _RdrCloseArgs:
     the next ``--flag``, which is how an unquoted multi-word reason
     arrives. The RDR id is the first POSITIONAL token shaped like an id
     (``69``, ``069``, ``RDR-069``), never digits found inside a value.
+
+    Put the id first. An unquoted multi-word reason followed directly by the
+    id, with no flag between them, takes the id as its last word; the
+    preamble then prints its usage banner (no id), it never picks another
+    RDR. A ``--reason`` or ``--pointers`` with no value is reported in
+    ``missing_value``, never filled from the next flag.
     """
     tokens = _preamble_tokens(args)
 
@@ -3007,14 +3014,21 @@ def _rdr_close_parse_args(args: tuple[str, ...]) -> _RdrCloseArgs:
     force = False
     force_implemented: str | None = None
     force_implemented_present = False
+    missing_value: list[str] = []
     i = 0
     while i < len(tokens):
         tok = tokens[i]
         nxt = tokens[i + 1] if i + 1 < len(tokens) else None
-        if tok == "--reason" and nxt is not None:
-            reason, i = nxt, i + 2
-        elif tok == "--pointers" and nxt is not None:
-            pointers, i = nxt, i + 2
+        if tok in ("--reason", "--pointers"):
+            # A following flag is not this flag's value: taking it swallowed
+            # the real flag and its value both (review of 1b5d48093).
+            if nxt is None or nxt.startswith("--"):
+                missing_value.append(tok)
+                i += 1
+            elif tok == "--reason":
+                reason, i = nxt, i + 2
+            else:
+                pointers, i = nxt, i + 2
         elif tok == "--force-implemented":
             force_implemented_present = True
             i += 1
@@ -3031,7 +3045,7 @@ def _rdr_close_parse_args(args: tuple[str, ...]) -> _RdrCloseArgs:
             if rdr_id is None and re.match(r"^(?:RDR-)?\d+$", tok, re.IGNORECASE):
                 rdr_id = tok
             i += 1
-    return _RdrCloseArgs(rdr_id, reason, pointers, force, force_implemented, force_implemented_present)
+    return _RdrCloseArgs(rdr_id, reason, pointers, force, force_implemented, force_implemented_present, tuple(missing_value))
 
 
 # ---------------------------------------------------------------------------
@@ -3045,7 +3059,6 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
     repo_root, repo_name = _preamble_resolve_repo()
     rdr_dir = _preamble_rdr_dir(repo_root)
     rdr_path = Path(repo_root) / rdr_dir
-    args_str = " ".join(args).strip()
 
     print(f"**Repo:** `{repo_name}`  **RDR directory:** `{rdr_dir}`")
     print()
@@ -3061,6 +3074,9 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
     # lookup: the skill's own example reason ("... src/foo.py:42") closed
     # rdr-042 ([26115] #7, nexus-my04w).
     parsed = _rdr_close_parse_args(args)
+    if parsed.missing_value:
+        print(f"> **ERROR**: {', '.join(parsed.missing_value)} needs a value.")
+        return
     close_reason = parsed.reason
     force = parsed.force
     pointers_arg = parsed.pointers
@@ -3222,7 +3238,11 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
                 if not file_part.strip():
                     failures.append(f"{gap_key}: pointer '{ptr}' names no file before ':'")
                     continue
-                if not (Path(repo_root) / file_part).is_file():
+                # Resolved, so an absolute path or a ../ walk cannot pass as
+                # "in this repo": Path(root) / "/etc/hosts" drops the root.
+                root_resolved = Path(repo_root).resolve()
+                target = (root_resolved / file_part).resolve()
+                if not target.is_file() or root_resolved not in target.parents:
                     failures.append(f"{gap_key}: '{file_part}' is not a file in this repo")
             if failures:
                 print("> **ERROR**: Problem Statement pointer validation failed:")

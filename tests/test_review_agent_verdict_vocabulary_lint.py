@@ -45,7 +45,12 @@ def test_both_agents_name_the_same_example_field_set() -> None:
     fields = []
     for name in REVIEW_AGENTS:
         text = (AGENTS_DIR / name).read_text(encoding="utf-8")
-        fields.append(set(re.findall(r"^- \*\*([a-z_]+)\*\*:", text, re.MULTILINE)))
+        # Scoped to the Verdict section, so an unrelated bold bullet
+        # elsewhere in a definition cannot change the field set.
+        section = text[text.index("\n## Verdict"):]
+        nxt = re.search(r"\n## (?!Verdict)", section[1:])
+        section = section[: nxt.start() + 1] if nxt else section
+        fields.append(set(re.findall(r"^- \*\*([a-z_]+)\*\*:", section, re.MULTILINE)))
     assert fields[0] == fields[1], f"verdict fields differ: {fields[0] ^ fields[1]}"
     assert {"outcome", "confidence", "critical_count", "significant_count", "ship_blockers", "summary"} <= fields[0]
 

@@ -38,3 +38,4 @@ mechanize, it matters enough to ship.
 - `conexus/skills/rdr-create/SKILL.md`: the T2 record template writes `status: draft`, the lifecycle domain's lower-case value, not `Draft` (bead nexus-nc08w.5).
 - `conexus/agents/code-review-expert.md`: a mandated terminal `## Verdict` block with the same `- **outcome**:` shape and the same three values `substantive-critic` emits (bead nexus-4hoc0).
 - `conexus/skills/development/SKILL.md`: a new check, gate, census or lint pastes its first live run, with examined and skipped counts, into its bead before close (bead nexus-uuf3w).
+- `conexus/agents/substantive-critic.md`: one sentence fixing the order at the end of the output: a Recommended Next Step block precedes the Verdict block, which is always last (bead nexus-4hoc0).

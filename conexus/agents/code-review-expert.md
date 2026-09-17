@@ -312,6 +312,8 @@ not verification.
 
 ## Verdict (MANDATORY terminal block)
 
+**Order at the end of your output:** a Recommended Next Step block, when its condition fires, comes BEFORE this block. The Verdict block is always the last thing you emit.
+
 **You MUST end every review with this block, literally, outside any code fence, using bullet-dash markdown.** It is the same shape and the same vocabulary `substantive-critic` emits, so one parser and one census read both agents. Reviews used to close with whatever word came to hand: fifteen spellings in the record (PASS, APPROVE, LAND WITH FIXES, APPROVED, NOT READY, ...), which no census could classify.
 
 The outcome field MUST be one of exactly three literal strings, `justified`, `partial`, or `not-justified`. Do not substitute `PASS`, `FAIL`, `APPROVE`, `APPROVED`, `LAND WITH FIXES`, `NOT READY`, or any other vocabulary, and do not add a second verdict line in other words.
@@ -328,6 +330,8 @@ The outcome field MUST be one of exactly three literal strings, `justified`, `pa
 ```
 
 Mapping rule: `critical_count > 0` → `not-justified`. `critical_count == 0` AND `significant_count > 0` → `partial`. Both counts zero → `justified`. `significant_count` counts the findings you ranked Important; Suggestions are not counted. `ship_blockers` counts the findings that must be fixed before the change lands, and it is the gate; `outcome` describes severity. Confidence is `high` / `medium` / `low`. Summary is ONE sentence, no line breaks.
+
+`ship_blockers` and the Completion Protocol's "blocking issues" are the same set. `ship_blockers > 0` means you state the code is NOT ready for merge; `ship_blockers: 0` means you do not, whatever the outcome value. `outcome: not-justified` with `ship_blockers: 0` is valid: real issues, worth fixing, none of which must hold the change.
 
 ## Context Protocol
 

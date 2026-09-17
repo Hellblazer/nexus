@@ -4145,6 +4145,25 @@ class TestRdrCloseArgv:
         assert "validation passed" not in res.output, (why, res.output)
         assert "Gap1" in res.output
 
+    @pytest.mark.parametrize("pointer", ["Gap1=/etc/hosts:1", "Gap1=../../../../../../etc/hosts:1"])
+    def test_pointer_outside_the_repo_is_refused(self, rdr_env, pointer):
+        self._two_rdrs(rdr_env)
+        res = _runner().invoke(rdr, [
+            "preamble", "rdr-close", "--", "069", "--reason", "implemented", "--pointers", pointer,
+        ])
+        assert "validation passed" not in res.output, res.output
+
+    def test_a_flag_is_never_taken_as_another_flags_value(self, rdr_env):
+        from nexus.commands.rdr import _rdr_close_parse_args  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        parsed = _rdr_close_parse_args(("069", "--reason", "--pointers", "Gap1=src/foo.py:42"))
+        assert parsed.reason is None and parsed.pointers == "Gap1=src/foo.py:42"
+        assert parsed.missing_value == ("--reason",)
+        parsed = _rdr_close_parse_args(("069", "--pointers", "--force"))
+        assert parsed.pointers is None and parsed.force is True
+        self._two_rdrs(rdr_env)
+        res = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "069", "--reason"])
+        assert "--reason needs a value" in res.output, res.output
+
     def test_pointer_to_a_real_file_still_passes(self, rdr_env):
         self._two_rdrs(rdr_env)
         (rdr_env["repo_root"] / "src").mkdir()

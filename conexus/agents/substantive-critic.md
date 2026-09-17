@@ -314,6 +314,8 @@ The canonical structure (in emission order):
 
 ## Verdict
 
+**Order at the end of your output:** a Recommended Next Step block, when its condition fires, comes BEFORE this block. The Verdict block is always the last thing you emit.
+
 **You MUST emit this block literally, at the end of your critique, outside any code fence, using bullet-dash markdown.** The RDR-069 close-flow parser greps for the exact line `- **outcome**:`, alternative phrasings (`outcome: FAILED`, plain-text key-value pairs, code-block emission) force the parser onto the fallback path and degrade CA-2.
 
 **This directive applies in all invocation contexts**, including headless (`claude -p '/conexus:substantive-critique <id>'`), scheduled remote sessions (CCR via the `schedule` skill), GitHub Actions via `anthropics/claude-code-action@v1`, and interactive sessions. The headless context is not exempt from the canonical format. In a documented 2026-04-11 incident (see T2 `nexus_rdr/067-research-2-ca3-phase1b-spike-result` id 743), a headless invocation of this skill produced section headings `## Significant Findings` / `## Minor Findings` / `## Summary` with no `## Critical Issues`, no `## Verification Performed`, and no `## Verdict` block, improvising an entirely different output structure. This directive exists to prevent that class of drift.
