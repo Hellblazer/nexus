@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-49 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
+52 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
 RDR-182 consent-gated ``forensics``/``remediate`` pair (nexus-ykzbj.10/.11)
 was deleted at nexus-lgdel — the chash-rekey upgrade rung it steered
 operators toward no longer exists.
@@ -91,6 +91,12 @@ from nexus.tuple_directory import (
     resolve_send_address,
     validate_from_address,
 )
+# RDR-211 Phase 1 Step 3 (bead nexus-rplay.11): the session's subscription
+# set (tuple_subscribe/tuple_unsubscribe/tuple_subscriptions below) and the
+# instance-mailbox takeover it owns. Imported as a module, not individual
+# names, so the tools below read as `_subscriptions.<fn>` next to their
+# `_t2_ctx`/`_get_t1` sibling helpers.
+from nexus.mcp import subscriptions as _subscriptions
 
 #: Module logger for MCP tool handlers (nexus-yttqr). Read-path handlers return a
 #: string to the agent rather than raising; before returning an error they must
@@ -6769,6 +6775,125 @@ def mailbox_send(
         return {"tuple_id": tuple_id, "to": address, "address_kind": address_kind, "from": from_id}
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return {"error": _mcp_tool_error("mailbox_send", e)}
+
+
+def _current_subscription_session_id() -> str:
+    """The session id `tuple_subscribe`/`tuple_unsubscribe`/
+    `tuple_subscriptions` scope the subscription set to.
+
+    Deliberately `NX_T1_SESSION_ID` alone, NOT `resolve_default_from`
+    (mailbox_send's own resolution, which reads the tuple-watch session
+    marker first): that marker's contract is being rehomed out of
+    `nexus.tuple_watch` by a concurrent bead, and the subscription set
+    already IS the thing that owns this session's identity for T1 scoping
+    (the same env var the MCP lifespan's T1 mint sets) -- one lookup, not
+    two disagreeing ones.
+    """
+    return _os.environ.get("NX_T1_SESSION_ID", "").strip()
+
+
+@mcp.tool(
+    title="Subscribe To Tuple Subspace",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
+)
+def tuple_subscribe(
+    subspace: Annotated[str, Field(
+        description=(
+            "A board topic (`board/<topic>`), or, once, this session's own "
+            "instance-name mailbox (`mailbox/<name>`)."
+        ),
+    )],
+) -> str:
+    """Add `subspace` to this session's MCP server's subscription list (RDR-211).
+
+    The session's MCP server waits on this list and pushes what arrives
+    through the Claude Code channel (delivery is a later bead);
+    `tuple_subscriptions` lists the current set with each entry's cursor.
+    Only board topics and the session's own instance-name mailbox are
+    accepted: a queue or a lock is refused naming `in`, since those are
+    never delivered, and any mailbox other than the session's own
+    instance name is refused, since it would claim another session's
+    mail. At most 32 board topics may be subscribed at once, beyond the
+    two mailboxes (the session's own, always present from startup, and at
+    most one instance-name mailbox).
+
+    Subscribing the session's own instance-name mailbox also takes over
+    what `nx tuple watch --instance NAME` used to do for it: it writes
+    the per-session registration file the `UserPromptSubmit` drain hook
+    reads, and starts the RDR-208 `directory/<name>` lease so the name
+    resolves to this session.
+
+    A `/resume` (same session id) restores this list; a `/clear` (a new
+    session id) starts clean.
+    """
+    try:
+        session_id = _current_subscription_session_id()
+        if not session_id:
+            raise ValueError("no resolvable session id (NX_T1_SESSION_ID is unset)")
+        with _t2_ctx() as db:
+            templates = (db.tuples.registry() or {}).get("templates", [])
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — rare/branch-local path
+        t1, _ = _get_t1()
+        subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
+        subs.subscribe(subspace, templates=templates, store_factory=_t2_ctx, state_dir=nexus_config_dir())
+        _subscriptions.persist(t1, subs)
+        return f"Subscribed {subspace}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("tuple_subscribe", e)
+
+
+@mcp.tool(
+    title="Unsubscribe From Tuple Subspace",
+    annotations={"readOnlyHint": False, "destructiveHint": True},
+    structured_output=False,
+)
+def tuple_unsubscribe(
+    subspace: Annotated[str, Field(description="A subspace previously added via `tuple_subscribe`.")],
+) -> str:
+    """Remove `subspace` from this session's MCP server's subscription list (RDR-211).
+
+    The session's own mailbox can never be unsubscribed -- it is the
+    floor's address. Unsubscribing the session's instance-name mailbox
+    stops its `directory/<name>` lease. Unsubscribing a board topic, or a
+    subspace not currently subscribed, is otherwise a plain removal (a
+    no-op when it was never subscribed).
+    """
+    try:
+        session_id = _current_subscription_session_id()
+        if not session_id:
+            raise ValueError("no resolvable session id (NX_T1_SESSION_ID is unset)")
+        t1, _ = _get_t1()
+        subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
+        subs.unsubscribe(subspace)
+        _subscriptions.persist(t1, subs)
+        return f"Unsubscribed {subspace}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("tuple_unsubscribe", e)
+
+
+@mcp.tool(
+    title="List Tuple Subscriptions",
+    annotations={"readOnlyHint": True},
+    structured_output=False,
+)
+def tuple_subscriptions() -> list[dict]:
+    """List this session's MCP server's subscription set, each with its cursor (RDR-211).
+
+    Always the session's own mailbox first, then the instance-name
+    mailbox if one was subscribed, then subscribed board topics. A
+    `cursor` of `null` means the delivery waiter (a later bead) has not
+    advanced past that subspace's start.
+    """
+    try:
+        session_id = _current_subscription_session_id()
+        if not session_id:
+            raise ValueError("no resolvable session id (NX_T1_SESSION_ID is unset)")
+        t1, _ = _get_t1()
+        subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
+        return subs.entries()
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return [{"error": _mcp_tool_error("tuple_subscriptions", e)}]
 
 
 # ── Demoted tools (plain functions, no @mcp.tool()) ──────────────────────────

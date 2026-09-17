@@ -1,15 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""The ten RDR-205/RDR-206/RDR-211 tuple-space MCP tools (beads
-nexus-em75s.10, nexus-h61dl.9, nexus-rplay.9), plus mailbox_send (RDR-208
-Phase 2 Step 2, bead nexus-galkv.10), against the real engine substrate
-(``t2_service_env``).
+"""The thirteen RDR-205/RDR-206/RDR-211 tuple-space MCP tools (beads
+nexus-em75s.10, nexus-h61dl.9, nexus-rplay.9, nexus-rplay.11), plus
+mailbox_send (RDR-208 Phase 2 Step 2, bead nexus-galkv.10), against the
+real engine substrate (``t2_service_env``).
 
 Uses the ``mailbox/<address>`` template loaded at engine boot (keys
 ``[to]``, dims ``{from, kind, correlation_id, address_kind}``,
 ``take.enabled=true``) and the ``directory/<name>`` template (keys
 ``[name]``, dims ``{session_id}``) — see ``tests/db/test_http_tuple_store.py``'s
 module docstring for the full template shapes.
+
+``TestTupleSubscriptions`` (nexus-rplay.11) is the first class in this
+file to touch T1, and its own ``_isolated_t1_session`` fixture resets both
+``nexus.mcp_infra``'s process-lifetime T1 singleton and
+``nexus.mcp.subscriptions``'s process-lifetime cache before AND after each
+test — ``mcp_infra.get_t1()`` caches across tests in one worker process,
+so without the reset a later test's fresh ``NX_T1_SESSION_ID`` (minted by
+the suite-wide autouse ``_isolate_t1_sessions`` fixture) would never take
+effect, and any instance-mailbox lease thread a test starts would outlive
+it.
 """
 from __future__ import annotations
 
@@ -33,6 +43,9 @@ from nexus.mcp.core import (
     tuple_release,
     tuple_renew,
     tuple_stats,
+    tuple_subscribe,
+    tuple_subscriptions,
+    tuple_unsubscribe,
 )
 
 
@@ -644,3 +657,118 @@ class TestMailboxSend:
 
         stats = tuple_stats(f"mailbox/{dest}")
         assert stats["total"] == 0
+
+
+class TestTupleSubscriptions:
+    """RDR-211 Phase 1 Step 3 (bead nexus-rplay.11): ``tuple_subscribe``,
+    ``tuple_unsubscribe``, ``tuple_subscriptions`` against the real engine
+    and a real T1 handle. See this module's own docstring for why the T1
+    singleton and the subscriptions process cache are reset around every
+    test in this class."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_t1_session(self):
+        from nexus import mcp_infra
+        from nexus.mcp import subscriptions as subs_mod
+
+        mcp_infra.reset_t1_for_release()
+        subs_mod.reset_cache()
+        yield
+        subs_mod.reset_cache()
+        mcp_infra.reset_t1_for_release()
+
+    def test_queue_is_refused_naming_in_and_the_list_is_unchanged(self, t2_service_env) -> None:
+        msg = tuple_subscribe("queue/builds")
+        assert "Error" in msg
+        assert "`in`" in msg
+        entries = tuple_subscriptions()
+        assert len(entries) == 1  # only the session mailbox
+        assert "error" not in entries[0]
+
+    def test_lock_is_refused_naming_in(self, t2_service_env) -> None:
+        msg = tuple_subscribe("lock/release-train")
+        assert "Error" in msg
+        assert "`in`" in msg
+
+    def test_thirty_second_board_topic_accepted_thirty_third_refused(self, t2_service_env) -> None:
+        for i in range(32):
+            msg = tuple_subscribe(f"board/topic-{i}")
+            assert "Error" not in msg
+        entries = tuple_subscriptions()
+        assert len(entries) == 33  # the session mailbox + 32 topics
+
+        msg = tuple_subscribe("board/topic-33rd")
+        assert "Error" in msg
+        entries = tuple_subscriptions()
+        assert len(entries) == 33  # unchanged by the refusal
+
+    def test_subscribe_and_unsubscribe_a_board_topic(self, t2_service_env) -> None:
+        msg = tuple_subscribe("board/release-notes")
+        assert "Subscribed" in msg
+
+        entries = tuple_subscriptions()
+        subspaces = {e["subspace"] for e in entries}
+        assert "board/release-notes" in subspaces
+        assert all("cursor" in e for e in entries)
+
+        msg = tuple_unsubscribe("board/release-notes")
+        assert "Unsubscribed" in msg
+        entries = tuple_subscriptions()
+        assert "board/release-notes" not in {e["subspace"] for e in entries}
+
+    def test_instance_mailbox_takeover_writes_registration_and_lease_refused_for_any_other_name(
+        self, t2_service_env, tmp_path, monkeypatch,
+    ) -> None:
+        import os
+
+        from nexus.mcp.subscriptions import registration_path
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        session_id = os.environ["NX_T1_SESSION_ID"]
+        name = f"inst-{uuid.uuid4().hex[:8]}"
+
+        msg = tuple_subscribe(f"mailbox/{name}")
+        assert "Subscribed" in msg
+
+        reg = registration_path(tmp_path, session_id)
+        assert reg.read_text(encoding="utf-8") == f"{name}\n"
+
+        rows = tuple_rd(f"directory/{name}", {"name": name})
+        assert len(rows) == 1
+        assert rows[0]["dims"]["session_id"] == session_id
+
+        other = f"other-{uuid.uuid4().hex[:8]}"
+        refusal = tuple_subscribe(f"mailbox/{other}")
+        assert "Error" in refusal
+
+        msg = tuple_unsubscribe(f"mailbox/{name}")
+        assert "Unsubscribed" in msg
+        entries = tuple_subscriptions()
+        assert f"mailbox/{name}" not in {e["subspace"] for e in entries}
+
+    def test_subscriptions_lists_entries_with_cursors(self, t2_service_env) -> None:
+        entries = tuple_subscriptions()
+        assert isinstance(entries, list)
+        assert len(entries) == 1
+        assert "cursor" in entries[0]
+        assert entries[0]["cursor"] is None
+
+    def test_a_change_fires_the_observer(self, t2_service_env) -> None:
+        import os
+
+        from nexus.mcp import subscriptions as subs_mod
+        from nexus.mcp_infra import get_t1, t2_ctx
+
+        session_id = os.environ["NX_T1_SESSION_ID"]
+        t1, _ = get_t1()
+        subs = subs_mod.get_or_load(t1, session_id, store_factory=t2_ctx)
+        seen: list[int] = []
+        subs.add_listener(lambda s: seen.append(s.version))
+
+        # tuple_subscribe's own get_or_load resolves the SAME cached
+        # object (keyed by this session id), so its mutation fires the
+        # listener registered directly above -- the unit-level stand-in
+        # for the not-yet-built waiter re-issuing its parked `wait`.
+        msg = tuple_subscribe("board/observed-topic")
+        assert "Subscribed" in msg
+        assert seen == [1]

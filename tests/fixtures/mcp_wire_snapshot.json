@@ -1788,6 +1788,47 @@
         "type": "object"
       },
       "qualname": "tuple_stats"
+    },
+    "tuple_subscribe": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "subspace": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subspace"
+        ],
+        "type": "object"
+      },
+      "qualname": "tuple_subscribe"
+    },
+    "tuple_subscriptions": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {},
+        "type": "object"
+      },
+      "qualname": "tuple_subscriptions"
+    },
+    "tuple_unsubscribe": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "subspace": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subspace"
+        ],
+        "type": "object"
+      },
+      "qualname": "tuple_unsubscribe"
     }
   },
   "nexus-catalog": {
