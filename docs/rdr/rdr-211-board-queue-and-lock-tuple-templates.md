@@ -117,7 +117,7 @@ every few seconds with a zero-timeout `rd` and prints a ping line the session
 must then act on, and a `UserPromptSubmit` hook (`mailbox_drain.py`) that
 claims and renders at the next prompt. The watcher must be armed by the model
 at every session start and re-armed at every 30-minute expiry, it can only
-watch the two addresses it resolved at startup, and that plan itself names push
+watch the one or two addresses it resolved at startup, and that plan itself names push
 as "the structurally right transport" and the loop as "an interim" (its item
 E). A board makes the gap wider: a session that follows ten topics has ten
 things to watch, and nothing lets it change that set while it runs. What is
@@ -428,22 +428,32 @@ subscriptions with per-subspace cursors. The declaration itself goes through
 the low-level server's initialization options
 (`create_initialization_options(experimental_capabilities={"claude/channel":
 {}})`), since FastMCP exposes no experimental capabilities of its own. For
-each new mailbox tuple the waiter claims the row with `in` on the session's
-claimant, the address-derived identity the mailbox skill and the drain hook
-already use, then sends `notifications/claude/channel` with the body as
-`content` and `meta` carrying `subspace`, `from`, `kind`, `correlation_id`,
-`tuple_id`, `claim_id` and `claimant`. The session acts and calls `tuple_ack`
-(with a reply when the mail was a request) or `tuple_nack`, passing the claim
-id and claimant back. Claude Code does not acknowledge notifications, so the
-waiter does not rely on delivery: it holds the claim, renews it at half the
-lease (a renew counts no attempt), and, because the session's ack and nack
-run in this same process, it knows whether the ack for its claim id has
-arrived. If none has within a bound it re-sends the same notification.
-Redelivery is a re-notification by the holder and spends no attempt; an
-attempt is spent only when the server process dies and the lease lapses,
-which is when the next server's `in` reclaims the row, so the mailbox
-template's cap of three is reached only by three server deaths on one
-message, and that row is a dead letter the drain hook surfaces once, as
+each new mailbox tuple the waiter claims the row with `in` under a claimant
+that is stable per session, `waiter:<session id>`, minted once at server
+start from the session id the server already leases. It is not the drain
+hook's claimant, which is random per call so that two concurrent drainers of
+one address never share one; a session has one MCP server, so the waiter has
+no concurrent twin, and a stable claimant is what lets a restarted server for
+the same session take back its own live claims at once through the engine's
+same-claimant retake (TupleRepository.java:777-793), spending no attempt.
+The waiter then sends `notifications/claude/channel` as a raw
+`JSONRPCNotification` on the session's write stream (the SDK's typed
+notification union has no member for it) with the body as `content` and
+`meta` carrying `subspace`, `from`, `kind`, `correlation_id`, `tuple_id`,
+`claim_id` and `claimant`. The session acts and calls `tuple_ack` (with a
+reply when the mail was a request) or `tuple_nack`, passing the claim id and
+claimant back. Claude Code does not acknowledge notifications, so the waiter
+does not rely on delivery: it claims with a 300 s lease, renews at 150 s (a
+renew counts no attempt), and, because the session's ack and nack run in this
+same process, it knows whether the ack for its claim id has arrived. At each
+renew while unacked it re-sends the same notification, at most five times,
+then keeps renewing silently and the doctor row counts the row as unacked.
+Redelivery is a re-notification by the holder and spends no attempt. An
+attempt is spent in two cases: the lease lapses before any retake, which is
+a server death with no successor inside 300 s, after which the next server's
+`in` reclaims the row; or the session nacks the message. Any three of those on
+one message reach the mailbox template's cap of three, and that row is a
+dead letter the drain hook surfaces once, as
 today. For each new board post the waiter sends the post as `content` with
 `subspace`, `from`, `kind` and `tuple_id`, no claim, and advances that
 topic's cursor; a dropped post notification is not re-sent, the post stays
@@ -464,16 +474,25 @@ under the channel is the floor: the `UserPromptSubmit` drain hook keeps
 claiming and rendering anything unclaimed at the next prompt, so a session
 launched without the channel still gets its mail, at its next prompt rather
 than at once, and no path depends on the model arming anything. A new
-`nx doctor` row reports whether the channel is declared, the waiter is alive
-and when it last woke, so the absence of push is checkable. Queues and locks
+`nx doctor` row reports three observable facts: the capability is declared
+by the server, the waiter is alive with its last wake time and its count of
+unacked claims, and the client's experimental capabilities as received in
+the initialize handshake (`ServerSession.client_params`), which is what a
+Claude Code launched without the flag leaves empty; the channels reference
+does not document what Claude Code declares there, so that last fact is an
+observation the row reports as seen, not a contract. Queues and locks
 are not delivered: a worker or a would-be holder waits with `in`, which
 already wakes on `out` and `release`.
 
 **Subscriptions.** The waiter's list is per session. Defaults: `mailbox/<session
 id>` and, once registered, `mailbox/<instance name>`. `tuple_subscribe(subspace)`
-adds a board topic or a mailbox address and refuses a take-enabled template's
-subspace (a queue or a lock) with `SchemaViolation` naming `in`, since those
-are never delivered; `tuple_unsubscribe(subspace)`
+adds a board topic; it refuses a take-enabled template's subspace (a queue or
+a lock) with `SchemaViolation` naming `in`, since those are never delivered,
+and refuses any mailbox, since a session subscribing to another session's
+mailbox would claim that session's mail; the two default mailboxes are the
+session's own and fixed. The list holds at most 32 subscriptions, refused
+past that with `SchemaViolation`; spike 3 tested three, and the bound guards
+the engine's per-call work, not slots. `tuple_unsubscribe(subspace)`
 removes one, `tuple_subscriptions()` lists the set with each cursor. The list
 lives in T1 scratch under the session id, so a `/resume` restores it and a
 `/clear` starts clean. A change cancels the parked `wait` and re-issues it
@@ -689,9 +708,10 @@ idempotency, and it loses history.
   them.
   **Mitigation**: the waiter holds and renews the claim and re-sends the
   notification until the session's ack passes through it, spending no
-  attempt; only a server death spends one, and three of those on one message
-  is the dead letter the drain hook surfaces once. A dropped board post is
-  not re-sent; the post stays readable for its retention.
+  attempt; a lease lapsing before a retake, or the session's own nack, spends
+  one, and any three of those on one message is the dead letter the drain
+  hook surfaces once. A dropped board post is not re-sent; the post stays
+  readable for its retention.
 - **Risk**: board volume grows with posts.
   **Mitigation**: retention and `max_live_rows` bound it, and the sweep purges
   expired posts.
@@ -713,12 +733,14 @@ idempotency, and it loses history.
   and stops, the doctor row reports it, and the drain hook carries mail at the
   next prompt; the ledger pairs `wait` as it pairs `release`.
 - A session without the channel: no notification is ever delivered; the drain
-  hook carries mail at the next prompt, the doctor row says the channel is not
-  declared, and `tuple_subscriptions` still answers.
+  hook carries mail at the next prompt, the doctor row shows an empty client
+  capability set from the handshake, and `tuple_subscriptions` still answers.
 - A notification is dropped: the waiter still holds the claim and re-sends it
-  after its bound; nothing in the claim log changes. If the server itself
-  dies, the lease lapses (900 s), the next server's `in` reclaims the row, and
-  the claim log shows one expiry.
+  at its next renew, 150 s; nothing in the claim log changes. If the server
+  itself dies and no successor for the session starts within the 300 s lease,
+  the lease lapses, the next server's `in` reclaims the row, and the claim log
+  shows one expiry; a successor inside the lease retakes the claim with no
+  expiry logged.
 
 ## Implementation Plan
 
@@ -727,7 +749,7 @@ idempotency, and it loses history.
 - [x] All engine-side Critical Assumptions verified (the three spikes ran
   2026-09-16; the lock attempts question is answered by the engine as built).
 - [ ] The channel assumption spiked (Phase 1 Step 0).
-- [x] Sam decides the Open Questions below (all five answered by 2026-09-16).
+- [x] Sam decides the Open Questions below (all seven answered by 2026-09-16).
 
 ### Minimum Viable Validation
 
@@ -798,10 +820,13 @@ persistence, the doctor row (channel declared, waiter alive, last wake), and
 the deletion of `nx tuple watch`, `tuple_watch.py`, `mailbox_arm.py`'s
 SessionStart injection and the skill's arming rule. Tests: a notification per
 new tuple with the documented shape, `claimant` included; a suppressed
-notification is re-sent after the bound with the same claim id and no expiry
-in the claim log; a killed server's claim lapses and the next server's `in`
-reclaims it with one expiry logged; `tuple_subscribe` on a queue or lock
-subspace is refused; a subscription change re-issues `wait` and the old parked
+notification is re-sent at the next renew with the same claim id and no expiry
+in the claim log, and stops after five re-sends while the renew continues; a
+restarted server for the same session retakes its live claims with no expiry
+logged; a killed server with no successor inside the lease lapses and the next
+server's `in` reclaims with one expiry logged; a session's `tuple_nack` on
+delivered mail counts one attempt; `tuple_subscribe` on a queue, a lock or a
+mailbox subspace is refused, and so is the thirty-third subscription; a subscription change re-issues `wait` and the old parked
 call is gone from the park report; the list survives a resume and not a clear;
 the doctor row reads not-declared for a server started without the
 capability; the SessionStart hook no longer emits the arm text.
@@ -1044,3 +1069,13 @@ The document is sized to those changes and the three template decisions; Phase
   declaration named at the low-level server; `wait` has no tool or verb; the
   claimant travels in the notification; the doctor row is in Step 3; the
   platforms named.
+- 2026-09-16: Follow-up to fix check `nexus_rdr/211-fix-check-3fc5d76b3`
+  (research `nexus_rdr/211-research-5`): the waiter's claimant is stable per
+  session, so a same-session restart retakes its claims with no attempt; an
+  attempt is spent on a lapse before retake or on the session's nack, not
+  only on a server death; the lease (300 s), renew (150 s), re-send cadence
+  and cap (5) named; the notification goes out as a raw JSON-RPC
+  notification; the doctor row's three observable facts named, the client's
+  handshake capabilities as an observation; subscriptions are board topics
+  only beyond the session's own mailboxes, at most 32; the Open Question
+  count and Gap 5's address count corrected.
