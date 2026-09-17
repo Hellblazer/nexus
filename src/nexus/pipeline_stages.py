@@ -1284,6 +1284,28 @@ def pipeline_index_pdf(
             content_hash=content_hash,
             reason="one or more post-passes failed — data kept for retry",
         )
+        # nexus-6m9zy.5 (#10): uploader_loop already called
+        # db.mark_completed() -- BEFORE any post-pass ran -- the moment
+        # chunks_uploaded caught up to chunks_created. Leaving the row at
+        # status='completed' here means the NEXT create_pipeline() call
+        # returns "skip" (status=='completed' is the ONLY skip
+        # condition), so pipeline_index_pdf never even reaches this
+        # function again — "kept for retry" data that can never actually
+        # be retried. Move the row to 'failed' (never clear_orphan_wal:
+        # that would delete the very chunk/page data this branch exists
+        # to preserve) so the next create_pipeline() call sees
+        # 'failed' -> 'resuming'. All three stages then short-circuit
+        # near-instantly on resume (everything is already uploaded), and
+        # execution reaches the post-passes again for a genuine retry.
+        try:
+            db.mark_failed(content_hash, error="post-pass failed — kept for retry")
+        except Exception:  # noqa: BLE001 — boundary catch: best-effort, mirrors the other terminal-state writes in this function
+            _log.warning(
+                "pipeline_terminal_mark_failed",
+                content_hash=content_hash,
+                reason="post-pass retry re-arm",
+                exc_info=True,
+            )
 
     # Catalog hook: register PDF in catalog (opt-in, graceful absence)
     # 2026-08-19: this used to read ``metadata["title"]`` / ``["author"]`` —

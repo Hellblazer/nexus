@@ -711,6 +711,62 @@ class TestPipelineIndexPdf:
         mock_t3.upsert_chunks_with_embeddings.assert_called_once()
         assert db.get_pipeline_state("abc123") is None
 
+    def test_post_pass_failure_can_be_retried_not_skipped(self, db) -> None:
+        """nexus-6m9zy.5 (#10, no probe -- READ finding, test written from
+        the bead description). uploader_loop already calls
+        db.mark_completed() -- BEFORE any post-pass runs -- the moment
+        chunks_uploaded catches up with chunks_created. When a post-pass
+        (metadata enrichment here) then fails, delete_pipeline_data is
+        skipped so the checkpoint data is 'kept for retry', but the row's
+        status stayed 'completed' -- the ONLY status create_pipeline()
+        treats as skip -- so the very next `nx index pdf` of that file
+        returned 0 chunks immediately, on every subsequent run, until
+        --force. Drives a real pipeline row to that exact state via a
+        failing t3.update_chunks call, then asserts a second real
+        pipeline_index_pdf call re-enters (and this time succeeds)
+        instead of skipping.
+        """
+        mock_col = MagicMock()
+        mock_col.get.return_value = {"ids": ["abc123_0"], "metadatas": [
+            {"page_number": 1, "chunk_type": "text", "content_hash": "abc123"}]}
+        t3 = create_autospec(T3Database, instance=True)
+        t3.get_or_create_collection.return_value = mock_col
+        t3.update_chunks.side_effect = [Exception("quota exceeded"), None]
+
+        fr = _er(1)
+        fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}))
+
+        # Run 1: extraction/chunking/upload all succeed (the row is
+        # marked 'completed' by uploader_loop mid-run), then the
+        # enrichment post-pass fails.
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(1, fr)
+            MC.return_value.chunk.return_value = fc
+            first_total = pipeline_index_pdf(Path("/postpass.pdf"), "abc123", "docs__test",
+                                             t3, db=db, embed_fn=_embed, corpus="test")
+        assert first_total > 0  # chunks WERE uploaded -- only the post-pass failed
+
+        state = db.get_pipeline_state("abc123")
+        assert state is not None, "pipeline data must be kept for retry, not deleted"
+        assert state["status"] != "completed", (
+            f"row wrongly left 'completed' after a failed post-pass: {state['status']!r} "
+            f"-- the next create_pipeline() call would skip instead of retrying"
+        )
+
+        # Run 2: update_chunks now succeeds. Everything else is already
+        # uploaded, so all three stages short-circuit near-instantly on
+        # resume and execution reaches the post-pass again for a genuine
+        # retry -- this must NOT be a silent 0-chunk skip.
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(1, fr)
+            MC.return_value.chunk.return_value = fc
+            second_total = pipeline_index_pdf(Path("/postpass.pdf"), "abc123", "docs__test",
+                                              t3, db=db, embed_fn=_embed, corpus="test")
+        assert second_total > 0, "the retry silently skipped instead of re-entering the pipeline"
+        assert t3.update_chunks.call_count == 2, (
+            "the retry must actually re-attempt the failed post-pass, not just re-report the old total"
+        )
+
     def test_force_re_embed_true_forwards_true(self, db, mock_t3) -> None:
         """nexus-8143o: pipeline_index_pdf's own force_re_embed kwarg
         reaches uploader_loop's upsert_chunks_with_embeddings call as
