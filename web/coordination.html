@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="How we coordinate Claude Code sessions and agents through the Nexus tuple space: what it gives you, what we use it for, how each step works, and how to watch it.">
+<meta name="description" content="How you coordinate Claude Code sessions and agents through the Nexus tuple space: what it gives you, what Claude uses it for, how each step works, and how to watch it.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
 <title>Coordination Between Sessions and Agents</title>
@@ -170,8 +170,8 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 <main>
 <div class="topnav"><span class="eyebrow" style="margin:0">Nexus · coordination</span><a href="tuple-space.html">← The tuple space</a></div>
 <h1>Coordination Between Sessions and Agents</h1>
-<p class="lede">This is how we coordinate our Claude Code sessions and their agents. We ask a session in another repository to do a job, correct a background agent while it works, and check that every agent reported. The requests, the corrections, and the agents' reports are records in the Nexus tuple space, which is built on David Gelernter's Linda model. The sender continues its own work, and the reader acts when it is ready. You ask Claude in your own words, and Claude, the hooks, and the channel do the rest.</p>
-<p class="note">Words like <span class="ph">&lt;PEER NAME&gt;</span> are placeholders, and the prompts are examples. <a href="tuple-space.html">The Nexus Tuple Space</a> explains the operations underneath.</p>
+<p class="lede">This page shows how you coordinate Claude Code sessions and their agents. You can ask a session in another repository to do a job, correct a background agent while it works, and check that every agent reported. You ask Claude in your own words. Claude writes each request and each correction as a record in <a href="tuple-space.html">the Nexus tuple space</a>, and the hooks record each agent's report there. So your session continues its own work, and the other session acts when it is ready.</p>
+<p class="note">Words like <span class="ph">&lt;PEER NAME&gt;</span> are placeholders, and the prompts are examples. If tuples are new to you, read <a href="tuple-space.html">The Nexus Tuple Space</a> first, because it explains the operations underneath.</p>
 
 <div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><table class="terms">
 <tr><th>Term</th><th>Meaning</th></tr>
@@ -204,7 +204,7 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 <!-- ============ 1 ============ -->
 <section class="lesson" id="l1">
 <div class="lhead"><span class="lnum">1</span><h2>What it gives you</h2><span class="ltime">3 min · reading only</span></div>
-<p class="why">For work that must not get lost, or that other sessions need to see, we use the tuple space, the coordination part of Nexus persistent memory. Its records live in the engine, outside every conversation, so they survive compaction and <code>/clear</code>, and every session on the engine can read them.</p>
+<p class="why">For work that must not get lost, or that other sessions need to see, Claude uses the tuple space, the coordination part of Nexus persistent memory. Its records live in the engine, outside every conversation, so they survive compaction and <code>/clear</code>, and every session on the engine can read them.</p>
 
 <figure class="fig">
 <svg viewBox="0 0 760 256" role="img" aria-label="A timeline. Your session writes a request and keeps working. The request tuple waits in the engine while the peer session is busy with its own work. The peer takes the request and acks it with a reply. The reply tuple waits until your session's channel pings, and your session takes the reply. Neither session stops to wait for the other.">
@@ -239,7 +239,7 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 <figcaption>Your session writes a request and keeps working. The request waits in the engine until the peer is ready. The reply waits until your channel pings.</figcaption>
 </figure>
 
-<p>We use SendMessage when we need to inject something into a live agent or session, and we use it together with the tuple space. When the harness delivers an agent's report, the hooks also record that report in the ledger, as a tuple. What the tuple space adds is this persistent record of an interaction. Nexus keeps long-form content in its memory, and a tuple points to that content by reference, not by carrying it as its own value. So a reader learns that something is there without having to consume the thing itself. We formalize this as a simple exchange with three steps: <em>send</em>, <em>continue</em>, and <em>react</em> to the answer.</p>
+<p>Claude uses SendMessage to inject something into a live agent or session, and it uses SendMessage together with the tuple space. When the harness delivers an agent's report, the hooks also record that report in the ledger, as a tuple. What the tuple space adds is this persistent record of an interaction. Nexus keeps long-form content in its memory, and a tuple points to that content by reference, not by carrying it as its own value. So a reader learns that something is there without having to consume the thing itself. The exchange has three steps: <em>send</em>, <em>continue</em>, and <em>react</em> to the answer.</p>
 <div class="tbl"><table>
 <tr><th>What you can rely on</th><th>How it works</th></tr>
 <tr><td>You can see the coordination</td><td>Every live message, name, and agent record is a row that every session on the engine can read. From any session you see what waits, what is in progress, and who reported.</td></tr>
@@ -247,10 +247,10 @@ table.steps td:first-child{width:6.5em;white-space:nowrap}
 <tr><td>The other side need not be there</td><td>A writer can end before any reader starts. An agent's report record stays in the ledger after the agent is gone. A message stays in the mailbox after the session that sent it ends. A reader can also wait for a tuple that nobody has written yet: a rendezvous. This holds for sessions and agents alike.</td></tr>
 <tr><td>Every record has a schema</td><td>Each kind of tuple has a template registered in the engine: its keys, its dimensions, how long it lasts, and whether a reader can take it. The engine refuses a tuple that does not match, so a reader knows what it will get. A SendMessage message is plain text.</td></tr>
 </table></div>
-<p>We use both, because they do different jobs:</p>
+<p>Claude uses both, because they do different jobs:</p>
 <ul class="plain">
-<li>We use SendMessage when the reader is live and the exchange is quick: steering a running agent, or a question for a live session. It can also ask for one notice when a session on this machine goes idle.</li>
-<li>We use the tuple space when the work must outlast the conversation, because others must see it or the other side may not exist yet.</li>
+<li>Claude uses SendMessage when the reader is live and the exchange is quick: steering a running agent, or a question for a live session. It can also ask for one notice when a session on this machine goes idle.</li>
+<li>Claude uses the tuple space when the work must outlast the conversation, because others must see it or the other side may not exist yet.</li>
 </ul>
 <p>One record also serves every reader. A directory entry or a ledger record is written once, and every session that reads it sees the same row. A SendMessage call reaches one recipient. <a href="#cmp">The appendix</a> compares the two tools point by point.</p>
 <p>The mailbox and the ledger deliver to one reader or record one fact. Three more subspaces build on the same three operations for coordination they do not cover. A board posts one announcement to every session watching a topic. A queue hands each task in a shared list to exactly one worker. A lock lets one process at a time hold a named resource. <a href="tuple-space.html">The Nexus Tuple Space</a> covers all three. This page stays with sessions and agents.</p>
@@ -295,7 +295,7 @@ nexus mailbox message: subspace mailbox/5b354c36-…, tuple 8ce10d62…, claim <
 <li>Put long content in memory and send its title. A message is a pointer, and its body holds at most 4096 bytes.</li>
 <li>Use a new correlation id for every request, so that the reply pairs with it.</li>
 <li>Send to a name only when one live session holds it, because the name is looked up at send time. Otherwise, send to the session id.</li>
-<li>Use the kind to tell the reader what to do. Our sessions use <code>request</code> for a message that needs a reply and <code>notice</code> for one that needs none. The engine does not check which kind you use.</li>
+<li>Use the kind to tell the reader what to do. Use <code>request</code> for a message that needs a reply and <code>notice</code> for one that needs none. The engine does not check which kind you use.</li>
 </ul>
 </section>
 
@@ -475,7 +475,7 @@ This session is <b>nexus-4a</b> [102a61] — the name other sessions use to mess
 </div></details>
 </section>
 
-<p class="footer">Further reading: <a href="https://github.com/Hellblazer/nexus/blob/main/docs/exploration/linda-in-nexus.md">Linda in Nexus</a> says what we took from Linda, and <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-205-linda-tuple-space-over-postgres.md">RDR-205</a> and <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-208-session-id-mail-addressing.md">RDR-208</a> record the design. Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a>.</p>
+<p class="footer">Further reading: <a href="https://github.com/Hellblazer/nexus/blob/main/docs/exploration/linda-in-nexus.md">Linda in Nexus</a> says what Nexus took from Linda, and <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-205-linda-tuple-space-over-postgres.md">RDR-205</a> and <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-208-session-id-mail-addressing.md">RDR-208</a> record the design. Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a>.</p>
 </main>
 </div>
 
