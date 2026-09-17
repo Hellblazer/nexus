@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import functools
 import pathlib
+import re
 import sys
 from collections.abc import Callable
 
@@ -60,6 +61,25 @@ EMIT_KEYS = frozenset({"exit_code", "message_key", "stream", "advisory", "adviso
 #: no-bare-green line (nexus-1c7oq, ``nexus.gate_advisory``) after the
 #: message so a summary can count it.
 ADVISORY_PASSED_BY_DEFAULT = "passed-by-default"
+
+_PLACEHOLDER_RE = re.compile(r"\[([\w.]+)\]")
+
+
+def _fill_placeholders(message: str, substitutions: dict[str, str]) -> str:
+    """Fill every ``[key]`` bracket in ``message`` from ``substitutions`` in
+    ONE pass over the ORIGINAL text; an unfilled bracket (no matching key)
+    is left verbatim.
+
+    Was successive ``str.replace`` calls, one per substitution -- so a
+    substitution VALUE that itself contained a LATER placeholder's bracket
+    text got rewritten on that later pass too ([26114] #9). A single
+    regex scan over the original string can substitute each occurrence at
+    most once, so a value containing ``[tag]``-looking text can never be
+    re-substituted by a later ``tag`` replacement.
+    """
+    if not substitutions:
+        return message
+    return _PLACEHOLDER_RE.sub(lambda m: substitutions.get(m.group(1), m.group(0)), message)
 
 
 class TableDefect(RuntimeError):
@@ -187,9 +207,7 @@ def emit_choreography(
     if unknown_keys:
         raise TableDefect(f"row {row.id!r}: unknown emit key(s) {sorted(unknown_keys)}; allowed: {sorted(EMIT_KEYS)}")
     exit_code = int(outcome["exit_code"])
-    message = _release_messages.get(row.id)
-    for key, value in (substitutions or {}).items():
-        message = message.replace(f"[{key}]", value)
+    message = _fill_placeholders(_release_messages.get(row.id), substitutions or {})
     # Stream: stderr for a refusal, stdout for a pass -- unless the row says
     # otherwise. Exactly one row does (main_dispatch::main_bare_tracker_opt_out,
     # an exit-0 NOTE the pre-table code sent to stderr): the P2.6 per-stream

@@ -296,6 +296,29 @@ class TestFloorOrchestratorCells:
             observed = erc.drive_check_floor_auto_paired(cell)
             assert erc.verify_cell(cell, observed), cell
 
+    def test_check_floor_auto_paired_classifier_reads_the_observed_text(self) -> None:
+        """[26114] #4: _classify_check_floor_auto_paired used to derive its
+        message_key from the cell's own DRIVING inputs (probe/battery/
+        pin_currency) without ever reading `rc` or `text` -- so a real
+        function replaced by a stub that returns the right exit code but
+        prints the WRONG text (or nothing at all) still "verified" clean;
+        drive_*/verify_cell could only ever fail on exit code. Mirrors the
+        sibling _classify_check_floor_paired's existing rc/marker-text
+        asserts. Pick a cell whose printed text is this catalog's own (not
+        a delegating sub-call's) and confirm a silent stub is now caught."""
+        import check_engine_release_floor as floor  # noqa: PLC0415 — test-local
+        from unittest.mock import patch  # noqa: PLC0415 — test-local
+
+        result = erc.check_floor_auto_paired_cells()
+        cell = next(c for c in result.reachable if c.message_key == "auto_probe_unreachable")
+
+        def _silent(**_kw: object) -> int:
+            return cell.exit_code
+
+        with patch.object(floor, "_check_floor_auto_paired", side_effect=_silent):
+            with pytest.raises(AssertionError, match="is unreachable"):
+                erc.drive_check_floor_auto_paired(cell)
+
     def test_main_dispatch_cells_are_non_vacuous_and_driven(self) -> None:
         """code-review CRITICAL, 2026-09-01: main()'s FULL post-argparse tail --
         mode dispatch (bare/--paired-deploy/--paired-deploy-auto/--ledger-only),

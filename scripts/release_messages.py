@@ -77,8 +77,11 @@ RELEASE_MESSAGES: dict[str, str] = {
         "published tag"
     ),
     "check_pin_currency::pin_currency_current_below_floor": (
-        "engine pin is current: REQUIRED_ENGINE_VERSION v[floor] == newest "
-        "published tag"
+        "engine pin is ahead of publication: REQUIRED_ENGINE_VERSION v[floor] "
+        "names no published engine-service tag -- the newest published is "
+        "v[newest]. Not a failure (the paired-release choreography cuts the "
+        "engine tag before bumping this pin), but the pin is NOT \"current\" "
+        "against any published tag yet."
     ),
     # -- check_source_ancestry (check_engine_release_floor.py) -------------
     "check_source_ancestry::ancestry_tag_unavailable": (

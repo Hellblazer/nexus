@@ -69,6 +69,29 @@ def test_resolve_choreography_row_refuses_out_of_domain_value_as_table_defect() 
         _choreo.resolve_choreography_row("check_pin_currency", {"newest": "not-a-real-value"})
 
 
+def test_pin_currency_below_floor_message_does_not_claim_the_pin_is_current(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """[26114] #5: ``pin_currency_current_below_floor`` (the pin names a
+    tag that no published engine has -- REQUIRED_ENGINE_VERSION is AHEAD
+    of the newest published ``engine-service-v*`` tag) used to print the
+    exact same "engine pin is current: ... == newest published tag" text
+    as the genuinely-current ``at_floor`` cell -- a "documented defect" in
+    enumerate_release_cells.py's own Leaf docstring. The two must not
+    read identically, and below_floor must not claim equality with a
+    published tag it does not actually match."""
+    code = _choreo.emit_choreography("check_pin_currency", {"newest": "below_floor"}, {"floor": "0.1.90"})
+    below_floor_msg = capsys.readouterr().out.strip()
+    assert code == 0
+
+    code = _choreo.emit_choreography("check_pin_currency", {"newest": "at_floor"}, {"floor": "0.1.90"})
+    at_floor_msg = capsys.readouterr().out.strip()
+    assert code == 0
+
+    assert below_floor_msg != at_floor_msg
+    assert "== newest published tag" not in below_floor_msg
+
+
 def test_resolve_choreography_row_refuses_a_misspelt_guard_key() -> None:
     """[26114] #1: a misspelt guard key (``ledgr`` for ``ledger``) used to
     be silently dropped -- the real ``ledger`` dimension then defaulted to
@@ -100,6 +123,38 @@ def test_resolve_choreography_row_refuses_a_guard_chain_supplied_only_up_to_its_
     member."""
     with pytest.raises(_choreo.TableDefect, match="check_source_ancestry.diff_result"):
         _choreo.resolve_choreography_row("check_source_ancestry", {"tag_exists": "true"})
+
+
+def test_emit_fills_placeholders_from_the_original_message_not_sequentially(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """[26114] #9: substitutions used to be applied with successive
+    ``str.replace`` calls, so a substitution VALUE that itself contains a
+    later placeholder's bracket text got re-substituted on a later pass.
+    ``check_release_arming::arming_tag_mismatch`` reproduces it directly:
+    ``declared`` is filled with the literal string ``"'[tag]'"`` (an
+    attestation whose file genuinely contains that placeholder-looking
+    text), and the LATER ``tag`` substitution used to rewrite that
+    already-substituted ``[tag]`` too, so the printed message claimed the
+    declared tag MATCHED the real one. Every placeholder is now filled in
+    one pass over the ORIGINAL message."""
+    code = _choreo.emit_choreography(
+        "check_release_arming",
+        {"requirement": "required", "attestation": "present", "tag_match": "mismatch"},
+        {"path": "/p", "declared": "'[tag]'", "tag": "engine-service-v0.1.90"},
+    )
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "declares engine_tag '[tag]'" in err
+    assert "this release pairs with engine-service-v0.1.90" in err
+
+
+def test_emit_fills_a_placeholder_whose_key_contains_a_dot() -> None:
+    """Regression for the fix above: ``record_deploy_from_gate_report_leg``'s
+    real call site substitutes a key literally named ``report.basename``
+    (``check_engine_release_floor.py``) -- a placeholder-fill regex
+    constrained to ``\\w+`` would leave ``[report.basename]`` unfilled."""
+    assert _choreo._fill_placeholders("x [report.basename] y", {"report.basename": "report.json"}) == "x report.json y"
 
 
 def test_emit_rejects_an_unknown_emit_key(mutate_choreography_row, capsys: pytest.CaptureFixture[str]) -> None:

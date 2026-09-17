@@ -271,7 +271,7 @@ def _build_table(doc: dict, *, default_id: str) -> Table:
 
     _check_escape_multiplicity(rows)
 
-    impossible = tuple(_build_impossible(raw, dimensions) for raw in doc.get("impossible", []))
+    impossible = tuple(_build_impossible(raw, dimensions, match_keys) for raw in doc.get("impossible", []))
 
     return Table(
         id=table_id,
@@ -283,10 +283,22 @@ def _build_table(doc: dict, *, default_id: str) -> Table:
     )
 
 
-def _build_impossible(raw: dict, dimensions: dict[str, Dimension]) -> FrozenMapping:
-    """One ``[[impossible]]`` block: exactly two declared enum dimensions,
-    each pinned to one member of its domain. Refused at load, like an
-    out-of-domain literal, so a typo cannot silently subtract nothing."""
+def _build_impossible(
+    raw: dict, dimensions: dict[str, Dimension], match_keys: tuple[str, ...]
+) -> FrozenMapping:
+    """One ``[[impossible]]`` block: exactly two declared enum GUARD
+    dimensions, each pinned to one member of its domain. Refused at load,
+    like an out-of-domain literal, so a typo cannot silently subtract
+    nothing.
+
+    A MATCH-key dimension is refused too ([26114] #7): ``check.py``'s
+    ``impossible_assignments`` only ever applies a pair whose BOTH
+    dimensions are in a group's GUARD dims, and ``_check_match_totality``
+    ignores ``[[impossible]]`` entirely -- a block naming a match key
+    would load clean and silently subtract nothing, contradicting both
+    this docstring's "a typo cannot silently subtract nothing" and the
+    README's "exactly two enum guard dimensions".
+    """
     if not isinstance(raw, dict) or len(raw) != 2:
         raise ImpossibleShapeError(
             f"[[impossible]] block must name exactly two guard dimensions, got {raw!r}"
@@ -296,6 +308,13 @@ def _build_impossible(raw: dict, dimensions: dict[str, Dimension]) -> FrozenMapp
         if dim not in dimensions:
             raise UndeclaredDimensionError(
                 f"[[impossible]] names undeclared dimension {dim!r}"
+            )
+        if dim in match_keys:
+            raise ImpossibleShapeError(
+                f"[[impossible]] names {dim!r}, which is a MATCH-KEY dimension, not a "
+                "guard dimension; impossible_assignments only ever applies a pair whose "
+                "both dimensions are in a group's guard dims, so this pair would load "
+                "and subtract nothing"
             )
         if dimensions[dim].kind != "enum":
             raise ImpossibleShapeError(
@@ -309,6 +328,19 @@ def _build_impossible(raw: dict, dimensions: dict[str, Dimension]) -> FrozenMapp
     return FrozenMapping(pair)
 
 
+def _require_table_field(raw: dict, field: str, *, row_id: object = None) -> dict:
+    """``raw[field]`` (default ``{}``) refused as :class:`TableLoadError` if
+    present but not a table -- ``match = "k"`` (a bare string) used to reach
+    ``.keys()``/``.items()`` and escape as a raw ``AttributeError`` instead
+    of the loader's own refused-at-load-time contract ([26114] #6)."""
+    value = raw.get(field, {})
+    if not isinstance(value, dict):
+        raise TableLoadError(
+            f"row {row_id!r}: {field!r} must be a table, got {type(value).__name__}"
+        )
+    return value
+
+
 def _reference_match_keys(raw_rows: list[dict]) -> tuple[str, ...]:
     """Every row must name the same set of match keys; refuse the first mismatch.
 
@@ -319,9 +351,9 @@ def _reference_match_keys(raw_rows: list[dict]) -> tuple[str, ...]:
     """
     if not raw_rows:
         return ()
-    reference = frozenset(raw_rows[0].get("match", {}).keys())
+    reference = frozenset(_require_table_field(raw_rows[0], "match", row_id=raw_rows[0].get("id")).keys())
     for raw in raw_rows:
-        keys = frozenset(raw.get("match", {}).keys())
+        keys = frozenset(_require_table_field(raw, "match", row_id=raw.get("id")).keys())
         if keys != reference:
             raise MatchKeysMismatchError(
                 f"row {raw.get('id')!r} names match keys {sorted(keys)}, "
@@ -331,9 +363,14 @@ def _reference_match_keys(raw_rows: list[dict]) -> tuple[str, ...]:
 
 
 def _build_rows(raw: dict, dimensions: dict[str, Dimension]) -> list[Row]:
-    row_id = raw["id"]
-    match_raw = raw.get("match", {})
-    guard_raw = raw.get("guard", {})
+    row_id = raw.get("id")
+    if not isinstance(row_id, str) or not row_id:
+        # Was `raw["id"]`, which escaped as a raw KeyError('id') on an
+        # omitted id -- never TableLoadError, the loader's only promised
+        # refusal class ([26114] #6).
+        raise TableLoadError(f"row is missing a non-empty string 'id': {raw!r}")
+    match_raw = _require_table_field(raw, "match", row_id=row_id)
+    guard_raw = _require_table_field(raw, "guard", row_id=row_id)
     escape = bool(raw.get("escape", False))
 
     present = [f for f in _OUTCOME_FIELDS if f in raw]
@@ -400,6 +437,17 @@ def _normalize_literal_block(
         elif isinstance(value, list):
             if not value:
                 raise TableLoadError(f"row {row_id!r}: {block_name}.{key} is an empty list literal")
+            non_str = [v for v in value if not isinstance(v, str)]
+            if non_str:
+                # Was left to `_validate_domain`'s `set(values) - set(dim.domain)`
+                # then `sorted(bad)`, which escaped as a raw TypeError
+                # ("'<' not supported between instances of 'str' and
+                # 'int'") comparing a string domain member against a
+                # non-string literal, rather than TableLoadError ([26114] #6).
+                raise TableLoadError(
+                    f"row {row_id!r}: {block_name}.{key} list literal(s) must all be "
+                    f"strings, got non-string member(s) {non_str!r}"
+                )
             values = tuple(value)
         else:
             raise TableLoadError(f"row {row_id!r}: {block_name}.{key} must be a string or a list of strings")
@@ -412,6 +460,10 @@ def _normalize_match_scalars(
     match: dict[str, str], dimensions: dict[str, Dimension], row_id: str
 ) -> dict[str, str]:
     for key, value in match.items():
+        if not isinstance(value, str):
+            raise TableLoadError(
+                f"row {row_id!r}: match.{key} must be a string, got {type(value).__name__}"
+            )
         _validate_domain(key, (value,), dimensions, row_id, "match")
     return dict(match)
 

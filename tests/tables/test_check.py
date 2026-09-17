@@ -729,6 +729,49 @@ def test_malformed_impossible_blocks_are_refused_at_load(tmp_path, block, err):
         load_table(_write(tmp_path, _IMPOSSIBLE_BASE + block))
 
 
+def test_impossible_naming_a_match_key_dimension_is_refused_at_load(tmp_path):
+    """[26114] #7: check.py's impossible_assignments only ever applies a
+    pair whose both dimensions are in a group's GUARD dims, and
+    _check_match_totality ignores [[impossible]] entirely -- a block
+    naming a MATCH-key dimension ("fn" in _IMPOSSIBLE_BASE) used to load
+    clean and silently subtract nothing, contradicting the loader's own
+    "a typo cannot silently subtract nothing" and the README's "exactly
+    two enum guard dimensions". Refused at load instead, like any other
+    malformed [[impossible]] block."""
+    block = '[[impossible]]\n"fn" = "f"\n"fn.gate" = "passes"\n'
+    with pytest.raises(TableLoadError, match="MATCH-KEY"):
+        load_table(_write(tmp_path, _IMPOSSIBLE_BASE + block))
+
+
+# --------------------------------------------------------------------------
+# [26114] #6: a malformed row must escape _build_table as TableLoadError --
+# the loader's only promised refusal class, and the only one
+# src/nexus/commands/rdr.py's callers catch -- never a raw KeyError,
+# AttributeError, or TypeError.
+
+
+def test_a_row_with_no_id_is_a_table_load_error_not_a_key_error(tmp_path):
+    doc = '[table]\nid = "t"\nkind = "decision-table"\n\n[dimensions.k]\ndomain = ["a"]\n\n[[row]]\nmatch = { k = "a" }\nemit = { exit_code = "0", message_key = "m" }\n'
+    with pytest.raises(TableLoadError, match="id"):
+        load_table(_write(tmp_path, doc))
+
+
+def test_a_non_table_match_block_is_a_table_load_error_not_an_attribute_error(tmp_path):
+    doc = '[table]\nid = "t"\nkind = "decision-table"\n\n[dimensions.k]\ndomain = ["a"]\n\n[[row]]\nid = "r"\nmatch = "k"\nemit = { exit_code = "0", message_key = "m" }\n'
+    with pytest.raises(TableLoadError, match="match"):
+        load_table(_write(tmp_path, doc))
+
+
+def test_mixed_type_guard_literals_are_a_table_load_error_not_a_type_error(tmp_path):
+    doc = (
+        '[table]\nid = "t"\nkind = "decision-table"\n\n[dimensions.k]\ndomain = ["a"]\n'
+        '[dimensions.g]\ndomain = ["x"]\n\n[[row]]\nid = "r"\nmatch = { k = "a" }\n'
+        'guard = { g = ["zz", 3] }\nemit = { exit_code = "0", message_key = "m" }\n'
+    )
+    with pytest.raises(TableLoadError, match="non-string"):
+        load_table(_write(tmp_path, doc))
+
+
 # --------------------------------------------------------------------------
 # [26114] #3: PRODUCT_BOUND must be checked before any enumeration is
 # attempted, on every branch -- not only inside full_product, which
@@ -788,6 +831,59 @@ def test_product_bound_is_checked_before_overlap_enumeration_not_after():
         with pytest.raises(check_mod.ProductTooLargeError):
             check_table(table)
     mock_overlap.assert_not_called()
+
+
+# --------------------------------------------------------------------------
+# [26114] #8: overlap must not be misreported across two rows that are
+# provably disjoint on an unprovable guard dimension.
+
+
+def _unprovable_pair_table() -> Table:
+    """One group: two rows share a decidable guard cell (``x = "a"``) but
+    guard a non-enum dimension (``free``) with DISJOINT literal sets --
+    ``free="p"`` vs ``free="q"``. A third row covers ``x = "b"``."""
+    return Table(
+        id="t",
+        kind="decision-table",
+        dimensions={
+            "k": Dimension(name="k", domain=("a",)),
+            "x": Dimension(name="x", domain=("a", "b")),
+            "free": Dimension(name="free", domain=(), kind="text"),
+        },
+        match_keys=("k",),
+        rows=(
+            Row(id="row_a", match={"k": "a"}, guard={"x": ("a",), "free": ("p",)}, outcome_kind="emit", outcome={"e": "1"}, escape=False),
+            Row(id="row_b", match={"k": "a"}, guard={"x": ("a",), "free": ("q",)}, outcome_kind="emit", outcome={"e": "1"}, escape=False),
+            Row(id="row_c", match={"k": "a"}, guard={"x": ("b",)}, outcome_kind="emit", outcome={"e": "1"}, escape=False),
+        ),
+    )
+
+
+def test_overlap_is_not_misreported_across_disjoint_literals_on_an_unprovable_dimension():
+    """[26114] #8: _check_group's unprovable branch checks overlap over the
+    DECIDABLE dims only (``x``, here), projecting the unprovable ``free``
+    dimension away entirely -- so row_a (x="a", free="p") and row_b
+    (x="a", free="q") were reported OVERLAP on their shared x="a" cell,
+    even though no single assignment can satisfy free="p" AND free="q" at
+    once. A guard's own disjoint literal sets on the unprovable dimension
+    now suppress that false positive."""
+    findings = check_table(_unprovable_pair_table())
+    assert OVERLAP not in {f.code for f in findings}, [f.to_json() for f in findings]
+    assert UNPROVABLE_COVERAGE in {f.code for f in findings}
+
+
+def test_overlap_is_still_reported_when_neither_row_guards_the_unprovable_dimension():
+    """The suppression is earned, not blanket: two rows sharing a decidable
+    cell with NO guard at all on the unprovable dimension (so both match
+    "any free value") genuinely do overlap."""
+    table = _unprovable_pair_table()
+    rows = list(table.rows)
+    rows[1] = dataclasses.replace(rows[1], guard=FrozenMapping({"x": ("a",)}))  # drop row_b's `free` guard
+    table = dataclasses.replace(table, rows=tuple(rows))
+    findings = check_table(table)
+    overlaps = [f for f in findings if f.code == OVERLAP]
+    assert len(overlaps) == 1
+    assert {overlaps[0].detail["row_a"], overlaps[0].detail["row_b"]} == {"row_a", "row_b"}
 
 
 def test_product_bound_is_checked_on_the_unprovable_branch_too():
