@@ -543,8 +543,8 @@ The MVV is Phase 1's exit, not deferred.
 - 2026-09-17: Sam confirmed the design as his original intent for channel
   delivery (T2 `nexus_rdr/213-decision-notify-then-claim-2026-09-17`); the
   Provenance paragraph records it.
-- 2026-09-17: prototype implemented on branch `rdr-213-spikes` (commit
-  `40ce38aa2`) and both Critical Assumptions verified live against a
+- 2026-09-17: prototype implemented on branch `rdr-213-spikes` (its first
+  commit, unpushed, lifted by the Phase 1 beads) and both Critical Assumptions verified live against a
   throwaway engine (T2 `nexus_rdr/213-spike-1-session-claims-2026-09-17`,
   `nexus_rdr/213-spike-2-reannounce-cadence-2026-09-17`); checkboxes above
   updated accordingly.
