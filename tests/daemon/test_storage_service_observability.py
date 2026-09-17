@@ -270,32 +270,37 @@ class TestSupervisorLifecycleLog:
         assert "storage_service_supervisor_started" in text
         assert "storage_service_supervisor_exit" in text
 
-    def test_sigkill_diagnosable_by_started_without_exit(
+    def test_exception_mid_loop_still_writes_the_exit_breadcrumb_and_stops(
         self, config_dir: Path, fake_storage_sup, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """critic SIG-2: a SIGKILL is unblockable — no breadcrumb can be
-        written. The diagnostic convention is ABSENCE: ``supervisor_started``
-        present, ``supervisor_exit`` missing => the supervisor was killed,
-        it did not choose to exit. Pin the convention: the started
-        breadcrumb must be on disk (flushed) BEFORE the run loop begins,
-        so it survives any later hard kill.
-
-        Simulated by raising SystemExit from the heartbeat (the loop dies
-        without ever reaching the exit-breadcrumb path), since a real
-        SIGKILL would take pytest down with the process.
-        """
+        """nexus-cd1k0.18: an exception escaping ``heartbeat_once()`` is a
+        LIVE INTERPRETER exception, not a real SIGKILL — the process is
+        still running Python code and the try/finally tail in
+        ``_supervise_until_stopped`` now runs for it exactly as it does for
+        every other exit reason, so the exit breadcrumb IS written and
+        ``sup.stop()`` DOES run (tearing down the engine child) before the
+        exception re-propagates to the crash backstop. Before this fix, no
+        try/finally existed at all: an exception here skipped the entire
+        tail, silently leaving the engine child running with no supervisor
+        — the RED state this replaces (the old version of this test
+        asserted the breadcrumb was ABSENT on this exact path, which was
+        the symptom, not a feature)."""
         _write_creds(config_dir)
         fake_storage_sup.start_raises = None
 
-        def _killed(self):  # noqa: ANN001
-            raise KeyboardInterrupt("simulated hard kill mid-loop")
+        def _boom(self):  # noqa: ANN001
+            raise KeyboardInterrupt("an in-process exception, not a real SIGKILL")
 
-        monkeypatch.setattr(_FakeStorageSupervisor, "heartbeat_once", _killed)
+        monkeypatch.setattr(_FakeStorageSupervisor, "heartbeat_once", _boom)
         with pytest.raises(KeyboardInterrupt):
             ssd.run_storage_supervisor(config_dir=config_dir)
         text = (config_dir / "logs" / "storage_service.log").read_text()
         assert "storage_service_supervisor_started" in text
-        assert "storage_service_supervisor_exit" not in text
+        assert "storage_service_supervisor_exit" in text
+        assert fake_storage_sup.instances[-1].stopped is True, (
+            "the engine child must be torn down even when the loop exits "
+            "via an exception, not just a normal break/loop-condition exit"
+        )
 
     def test_run_storage_supervisor_crash_backstop_logs_exception(
         self, config_dir: Path, fake_storage_sup, monkeypatch: pytest.MonkeyPatch,

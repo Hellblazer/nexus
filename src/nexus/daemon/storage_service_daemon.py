@@ -2266,86 +2266,103 @@ def _supervise_until_stopped(
     ):
         return 0
 
+    # nexus-cd1k0.18: the loop body is wrapped in try/finally so the
+    # breadcrumb -> flush -> sup.stop() tail ALWAYS runs, exception
+    # included — an exception escaping heartbeat_once() (or anything else
+    # the loop body calls) used to propagate straight out of this function
+    # with no try/finally at all, so sup.stop() never ran and the engine
+    # child (self._proc) was left running with no supervisor whatsoever.
+    # `exit_code` is mutated in place by the loop (`break` after setting
+    # it) rather than returned from inside the try, so the finally block
+    # always logs and reports the value the loop last decided, exception
+    # or not; an exception itself is never swallowed here — the bare
+    # propagation through `finally` (no `except`) means it still reaches
+    # run_storage_supervisor's own crash backstop afterward, unchanged,
+    # only now AFTER this tier's own child has been torn down.
     exit_code = 0
-    while not stop_requested.is_set():
-        service_running, pg_ok = sup.heartbeat_once()
+    try:
+        while not stop_requested.is_set():
+            service_running, pg_ok = sup.heartbeat_once()
 
-        # nexus-cd1k0.2: heartbeat_once() -> heartbeat_tick() may have just
-        # discovered a newer-generation owner (StaleOwnerError) and set
-        # sup.fenced. Checked EVERY tick, independent of service_running/
-        # pg_ok — a fenced-but-otherwise-healthy beat returns (True, True)
-        # and would otherwise fall straight through to time.sleep() forever,
-        # heartbeating a lease this owner no longer holds while its own
-        # engine keeps running beside the successor's (two engines, one
-        # Postgres). fenced_exit_code (shared primitive) is the single
-        # place naming the exit code every tier uses for this fact: always
-        # 0 (a clean stand-down, not a failure — see its docstring for why
-        # a non-zero exit here would only trip the OS unit into a doomed
-        # rematch). The shared loop tail below (breadcrumb -> flush ->
-        # sup.stop()) then tears down THIS owner's own engine child and is
-        # safe to call unconditionally even though the lease is no longer
-        # ours (mark_shutting_down/relinquish no-op on an owner_token
-        # mismatch, CA-4).
-        fenced_exit = fenced_exit_code(sup.fenced)
-        if fenced_exit is not None:
-            _log.warning(
-                "storage_service_lease_fenced",
-                scope=sup._scope,
-                msg="a newer-generation owner holds the lease; standing down",
-            )
-            exit_code = fenced_exit
-            break
-
-        if not service_running:
-            # Service process exited OR the stuck-process detection threshold
-            # was breached (wedged-but-alive JVM). Under the OS-watchdog model
-            # (RDR-175) the supervisor no longer respawns in-process: it exits
-            # non-zero so the OS init unit (launchd/systemd) restarts the whole
-            # supervisor, which re-runs start() — including a fresh
-            # _ensure_pg_running(). A both-down (False, False) beat is covered
-            # by the same exit: the OS restart brings PG back up via start().
-            # 3 = service-unrecoverable.
-            _log.warning(
-                "storage_service_exited",
-                msg="service child gone or wedged; exiting non-zero for OS restart",
-                pg_ok=pg_ok,
-            )
-            exit_code = 3
-            break
-
-        if not pg_ok:
-            # PG died independently while the service is still alive — restart
-            # PG directly without bouncing the JVM (PRESERVED under the OS
-            # watchdog: the OS supervises the supervisor process, not PG).
-            # 4 = PG-unrecoverable.
-            _log.warning(
-                "storage_service_pg_died_independently",
-                msg="PG unreachable while service alive; attempting PG restart",
-            )
-            try:
-                sup._ensure_pg_running()
-                _log.info("storage_service_pg_restarted_independently")
-            except StorageServiceStartError as exc:
-                _log.error(
-                    "storage_service_pg_restart_failed",
-                    error=str(exc),
-                    msg="Could not restart PG; supervisor exiting",
+            # nexus-cd1k0.2: heartbeat_once() -> heartbeat_tick() may have
+            # just discovered a newer-generation owner (StaleOwnerError)
+            # and set sup.fenced. Checked EVERY tick, independent of
+            # service_running/pg_ok — a fenced-but-otherwise-healthy beat
+            # returns (True, True) and would otherwise fall straight
+            # through to time.sleep() forever, heartbeating a lease this
+            # owner no longer holds while its own engine keeps running
+            # beside the successor's (two engines, one Postgres).
+            # fenced_exit_code (shared primitive) is the single place
+            # naming the exit code every tier uses for this fact: always 0
+            # (a clean stand-down, not a failure — see its docstring for
+            # why a non-zero exit here would only trip the OS unit into a
+            # doomed rematch). The shared tail below (breadcrumb -> flush
+            # -> sup.stop()) then tears down THIS owner's own engine child
+            # and is safe to call unconditionally even though the lease is
+            # no longer ours (mark_shutting_down/relinquish no-op on an
+            # owner_token mismatch, CA-4).
+            fenced_exit = fenced_exit_code(sup.fenced)
+            if fenced_exit is not None:
+                _log.warning(
+                    "storage_service_lease_fenced",
+                    scope=sup._scope,
+                    msg="a newer-generation owner holds the lease; standing down",
                 )
-                exit_code = 4
+                exit_code = fenced_exit
                 break
 
-        time.sleep(DEFAULT_HEARTBEAT_INTERVAL)
+            if not service_running:
+                # Service process exited OR the stuck-process detection
+                # threshold was breached (wedged-but-alive JVM). Under the
+                # OS-watchdog model (RDR-175) the supervisor no longer
+                # respawns in-process: it exits non-zero so the OS init
+                # unit (launchd/systemd) restarts the whole supervisor,
+                # which re-runs start() — including a fresh
+                # _ensure_pg_running(). A both-down (False, False) beat is
+                # covered by the same exit: the OS restart brings PG back
+                # up via start(). 3 = service-unrecoverable.
+                _log.warning(
+                    "storage_service_exited",
+                    msg="service child gone or wedged; exiting non-zero for OS restart",
+                    pg_ok=pg_ok,
+                )
+                exit_code = 3
+                break
 
-    # Exit breadcrumb BEFORE stop(): a death without this line means the
-    # supervisor was killed, not that it chose to exit. Flush immediately —
-    # stop() can stall, and the breadcrumb is the diagnostic (nexus-61539).
-    _log.info(
-        "storage_service_supervisor_exit",
-        exit_code=exit_code,
-        stop_requested=stop_requested.is_set(),
-    )
-    flush_logging()
-    sup.stop()
+            if not pg_ok:
+                # PG died independently while the service is still alive —
+                # restart PG directly without bouncing the JVM (PRESERVED
+                # under the OS watchdog: the OS supervises the supervisor
+                # process, not PG). 4 = PG-unrecoverable.
+                _log.warning(
+                    "storage_service_pg_died_independently",
+                    msg="PG unreachable while service alive; attempting PG restart",
+                )
+                try:
+                    sup._ensure_pg_running()
+                    _log.info("storage_service_pg_restarted_independently")
+                except StorageServiceStartError as exc:
+                    _log.error(
+                        "storage_service_pg_restart_failed",
+                        error=str(exc),
+                        msg="Could not restart PG; supervisor exiting",
+                    )
+                    exit_code = 4
+                    break
+
+            time.sleep(DEFAULT_HEARTBEAT_INTERVAL)
+    finally:
+        # Exit breadcrumb BEFORE stop(): a death without this line means
+        # the supervisor was killed, not that it chose to exit. Flush
+        # immediately — stop() can stall, and the breadcrumb is the
+        # diagnostic (nexus-61539).
+        _log.info(
+            "storage_service_supervisor_exit",
+            exit_code=exit_code,
+            stop_requested=stop_requested.is_set(),
+        )
+        flush_logging()
+        sup.stop()
     return exit_code
 
 
