@@ -316,6 +316,22 @@ class TestEmpty:
         assert result.exit_code != 0, result.output
         assert "rdr__nothing-here" in result.output
 
+    def test_verify_scoped_refuses_an_unknown_collection(self, env: Catalog) -> None:
+        """Sibling of the audit-membership site (nexus-v1zdu sweep,
+        catalog_cmds/integrity.py `_verify_scoped`): `nx catalog verify
+        --collection <typo>` rendered a clean zero-document report at exit 0,
+        so a mistyped name read as a verified-healthy collection."""
+        runner = CliRunner()
+        result = runner.invoke(catalog, ["verify", "--collection", "rdr__nothing-here"])
+        assert result.exit_code != 0, result.output
+        assert "rdr__nothing-here" in result.output
+
+    def test_verify_scoped_known_empty_collection_stays_clean(self, env: Catalog) -> None:
+        env.register_collection("rdr__known-empty")
+        runner = CliRunner()
+        result = runner.invoke(catalog, ["verify", "--collection", "rdr__known-empty"])
+        assert result.exit_code == 0, result.output
+
 
 # ── --all-collections sweep mode (nexus-3e4s Phase 3) ───────────────────────
 

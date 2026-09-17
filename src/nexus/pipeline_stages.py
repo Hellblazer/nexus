@@ -890,6 +890,54 @@ def _force_t3_orphan_cleanup(t3: Any, collection: str, content_hash: str) -> int
     return actual
 
 
+def _mark_failed_and_reset_wal(db: HttpPipelineDB, content_hash: str, first_exc: BaseException) -> None:
+    """Terminal bookkeeping for a failed pipeline run: mark the row failed,
+    wipe its WAL, and reset the ``chunks_uploaded`` counter the wipe leaves
+    behind. Never raises: the caller re-raises *first_exc*, and nothing here
+    may mask it. A named function, not inline in :func:`pipeline_index_pdf`,
+    so the regression test for the counter reset runs THESE lines (review of
+    df5c4f035: a test that replayed the three calls in its own body stayed
+    green with the production reset deleted)."""
+    try:
+        db.mark_failed(content_hash, error=str(first_exc))
+        db.clear_orphan_wal(content_hash)
+        # nexus-6m9zy.1 (#3): clear_orphan_wal wipes every pdf_chunks
+        # row for this content_hash -- uploaded=true rows included --
+        # but (like pages_extracted, nexus-gl99l) never resets the
+        # chunks_uploaded progress counter. uploader_loop's resume
+        # seed trusts that counter directly (see its own comment), so
+        # leaving it stale here would have the retry's genuine
+        # re-upload count added ON TOP of a prior count nothing in
+        # the now-empty WAL backs -- reproduced by substantive-critic
+        # as a persisted chunks_uploaded of 20 for a true 10-chunk
+        # document (T2 nexus/critique-59c07fe5b-uploader-chunks-
+        # uploaded-inflation-nexus-6m9zy [26147]). Reset it here, in
+        # the same breath as the WAL wipe it must track.
+        try:
+            db.update_progress(content_hash, chunks_uploaded=0)
+        except Exception:  # noqa: BLE001 — boundary catch: must never mask first_exc; named on its own because a wiped WAL with a surviving counter IS the inflation bug
+            # The wipe landed and the reset did not: the retry will seed
+            # from a counter nothing in the WAL backs and the completion
+            # fence will refuse it (IndexRunVerifyRefused). Two client
+            # calls cannot be made atomic here; the structural fix is the
+            # engine resetting the counter inside clearOrphanWal
+            # (nexus-33q80). Until then this is at least diagnosable
+            # under its own name (critique of df5c4f035).
+            _log.error(
+                "pipeline_chunks_uploaded_reset_failed_after_wal_wipe",
+                content_hash=content_hash,
+                remedy="re-run with --force, or reset chunks_uploaded for this content_hash",
+                exc_info=True,
+            )
+    except Exception:  # noqa: BLE001 — boundary catch: terminal-state bookkeeping must never mask first_exc
+        _log.warning(
+            "pipeline_terminal_mark_failed",
+            content_hash=content_hash,
+            original_error=str(first_exc),
+            exc_info=True,
+        )
+
+
 def pipeline_index_pdf(
     pdf_path: Path,
     content_hash: str,
@@ -1186,29 +1234,7 @@ def pipeline_index_pdf(
         # stays 'running' when the engine's /fail endpoint is down) is
         # covered systemically by lcmbp's young-running-row conflict
         # semantics: the NEXT retry is loud, never a silent skip.
-        try:
-            db.mark_failed(content_hash, error=str(first_exc))
-            db.clear_orphan_wal(content_hash)
-            # nexus-6m9zy.1 (#3): clear_orphan_wal wipes every pdf_chunks
-            # row for this content_hash -- uploaded=true rows included --
-            # but (like pages_extracted, nexus-gl99l) never resets the
-            # chunks_uploaded progress counter. uploader_loop's resume
-            # seed trusts that counter directly (see its own comment), so
-            # leaving it stale here would have the retry's genuine
-            # re-upload count added ON TOP of a prior count nothing in
-            # the now-empty WAL backs -- reproduced by substantive-critic
-            # as a persisted chunks_uploaded of 20 for a true 10-chunk
-            # document (T2 nexus/critique-59c07fe5b-uploader-chunks-
-            # uploaded-inflation-nexus-6m9zy [26147]). Reset it here, in
-            # the same breath as the WAL wipe it must track.
-            db.update_progress(content_hash, chunks_uploaded=0)
-        except Exception:  # noqa: BLE001 — boundary catch: terminal-state bookkeeping must never mask first_exc
-            _log.warning(
-                "pipeline_terminal_mark_failed",
-                content_hash=content_hash,
-                original_error=str(first_exc),
-                exc_info=True,
-            )
+        _mark_failed_and_reset_wal(db, content_hash, first_exc)
         # nexus-5xn3k.4: _fence_fail never raises, so first_exc propagation
         # below cannot be masked by a fence-write failure. nexus-uxg4u:
         # never touch the catalog on a dry run (doc_id is already "" in

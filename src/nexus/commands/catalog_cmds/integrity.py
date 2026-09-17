@@ -1427,7 +1427,15 @@ def _verify_scoped(cat: "CatalogReader", collection: str, *, heal: bool, json_ou
     """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
-    entries = [e for e in cat.list_by_collection(collection) if not e.alias_of]
+    from nexus.catalog.membership import refuse_if_collection_unknown  # noqa: PLC0415 — command-local import (nexus.catalog.membership)
+
+    all_entries = cat.list_by_collection(collection)
+    # An unknown name must refuse, not render a clean zero-document report
+    # at exit 0: a typo read as a verified-healthy collection (nexus-v1zdu
+    # sweep; the same false-clean shape audit-membership carried). Judged on
+    # the unfiltered list, so an all-alias collection is not called unknown.
+    refuse_if_collection_unknown(cat, collection, all_entries)
+    entries = [e for e in all_entries if not e.alias_of]
     total_docs = len(entries)
 
     if not entries:

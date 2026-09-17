@@ -573,10 +573,9 @@ class TestUploaderLoop:
         TOP of the resumed run's genuine re-upload count: reproduced as a
         persisted chunks_uploaded of 20 for a true 10-chunk document.
 
-        This replays pipeline_index_pdf's first_exc handler verbatim
-        (mark_failed + clear_orphan_wal + the fix's chunks_uploaded=0
-        reset), the same technique test_resume_from_partial uses for the
-        mark_failed-without-clear_orphan_wal case, since driving the real
+        This calls pipeline_index_pdf's own first_exc handler
+        (_mark_failed_and_reset_wal: mark_failed + clear_orphan_wal + the
+        chunks_uploaded=0 reset) directly, since driving the real
         three-stage concurrent orchestrator to fail deterministically
         AFTER genuine upload progress is not reproducible without a race.
         """
@@ -586,14 +585,19 @@ class TestUploaderLoop:
             db.write_chunk(h, i, f"chunk {i} text", f"{h}_{i}",
                            metadata={"page": 1}, embedding=_fake_embedding(i))
         db.update_progress(h, chunks_created=4, chunks_embedded=4)
-        uploader_loop(h, db, MagicMock(), "docs__test", threading.Event())
+        # chunking_done is a real, already-set Event: the orchestrated branch
+        # every production caller takes (pipeline_index_pdf always passes one),
+        # not the chunking_done=None resume branch (critique of df5c4f035).
+        _done = threading.Event()
+        _done.set()
+        uploader_loop(h, db, MagicMock(), "docs__test", threading.Event(), _done)
         assert db.get_pipeline_state(h)["chunks_uploaded"] == 4
 
-        # A later stage now fails -- pipeline_index_pdf's first_exc
-        # handler, replayed verbatim (including the fix's reset line).
-        db.mark_failed(h, error="boom")
-        db.clear_orphan_wal(h)
-        db.update_progress(h, chunks_uploaded=0)
+        # A later stage now fails: pipeline_index_pdf's own first_exc
+        # handler, called, not replayed, so deleting the production reset
+        # turns this test red (review of df5c4f035).
+        from nexus.pipeline_stages import _mark_failed_and_reset_wal  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        _mark_failed_and_reset_wal(db, h, RuntimeError("boom"))
 
         assert db.get_pipeline_state(h)["chunks_uploaded"] == 0, "the fix must reset the stale counter"
         assert db.read_uploadable_chunks(h) == []
@@ -605,7 +609,12 @@ class TestUploaderLoop:
             db.write_chunk(h, i, f"chunk {i} text v2", f"{h}_{i}",
                            metadata={"page": 1}, embedding=_fake_embedding(i))
         db.update_progress(h, chunks_created=10, chunks_embedded=10)
-        uploader_loop(h, db, MagicMock(), "docs__test", threading.Event())
+        # chunking_done is a real, already-set Event: the orchestrated branch
+        # every production caller takes (pipeline_index_pdf always passes one),
+        # not the chunking_done=None resume branch (critique of df5c4f035).
+        _done = threading.Event()
+        _done.set()
+        uploader_loop(h, db, MagicMock(), "docs__test", threading.Event(), _done)
 
         final = db.get_pipeline_state(h)
         assert final["chunks_uploaded"] == 10, (

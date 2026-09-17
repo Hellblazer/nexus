@@ -393,3 +393,38 @@ def test_drain_markers_no_failures_omits_failure_text():
     )
     _drain_batcher_with_markers(b, phases.append)
     assert not any("failed" in p for p in phases), phases
+
+
+def test_run_index_reports_transient_upsert_deferred_files_in_stats(tmp_path, monkeypatch):
+    """nexus-6m9zy.6 producer side (critique of 891e28aed: the gate tests
+    mock ``_run_index`` wholesale, so nothing proved the counter increments,
+    resets per run, or lands under its stats key). A per-file indexer that
+    times out on upsert is deferred by ``_contain_transient_upsert``; the
+    real ``_run_index`` must report it, and a second clean run must report
+    zero, not carry the first run's count."""
+    from nexus.db.http_vector_client import HttpVectorClient
+    from nexus.indexer import _run_index
+    from nexus.retry import VectorUpsertTimeoutError
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "hello.py").write_text("x = 1\n")
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
+    monkeypatch.setenv("NX_LOCAL", "0")
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
+    monkeypatch.setenv("CHROMA_API_KEY", "fake")
+    db = MagicMock(spec=HttpVectorClient)
+
+    def _batcher_factory(*, flush, **kw):
+        return _FakeBatcherWithFailures(flush=flush, failed={}, **kw)
+
+    timeout = {"side_effect": VectorUpsertTimeoutError("upsert timed out")}
+    with _service_mode_patches(db, extra={"nexus.indexer._index_code_file": timeout}), patch(
+        "nexus.chunk_batcher.ChunkBatcher", _batcher_factory,
+    ):
+        stats = _run_index(repo, _reg())
+    assert stats["transient_upsert_deferred_files"] == 1
+
+    with _service_mode_patches(db), patch("nexus.chunk_batcher.ChunkBatcher", _batcher_factory):
+        stats = _run_index(repo, _reg())
+    assert stats["transient_upsert_deferred_files"] == 0

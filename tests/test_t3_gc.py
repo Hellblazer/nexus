@@ -1430,3 +1430,29 @@ def test_gc_reports_tombstone_protected_as_unavailable_on_an_older_engine(
     assert "Protected by pending tombstones: 0" not in result.output
     assert len(audit_calls) == 1
     assert audit_calls[0]["details"]["tombstone_protected"] is None
+
+
+def test_gc_override_on_an_unknown_collection_says_so_out_loud(runner: CliRunner, t3_db) -> None:
+    """Review of 6129b9d35: --allow-empty-manifest-set overrides both
+    refusals, so with it an unknown name reaches deletion. That is the
+    override's purpose (a fully orphaned collection has no catalog row), so
+    it stays; the run names the unknown collection before it proceeds."""
+    from unittest.mock import MagicMock
+
+    coll = "code__v1zdu-unknown-override__stub-code-1024__v1"
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="c1", content="x",
+        chunk_text_hash="b" * 64, indexed_at="2020-01-01T00:00:00Z",
+    )
+    unknown_cat = MagicMock()
+    unknown_cat.get_collection.return_value = None
+    unknown_cat.list_by_collection.return_value = []
+    unknown_cat.chashes_for_collection_with_tombstone_protected.return_value = (set(), 0)
+
+    with patch("nexus.db.make_t3", return_value=t3_db), \
+         patch("nexus.commands.t3._make_catalog", return_value=unknown_cat):
+        result = runner.invoke(
+            main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes", "--allow-empty-manifest-set"],
+        )
+    assert "WARNING: the catalog does not know a collection named" in result.output, result.output
+    assert coll in result.output

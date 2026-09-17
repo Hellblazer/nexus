@@ -1695,6 +1695,9 @@ class TestVerifyCommand:
         """Ghosts are a whole-catalog census (they have no collection to
         scope into by definition) -- `--collection` scoped mode must not
         claim to carry the section."""
+        # Registered, because an unknown name now refuses (nexus-v1zdu sweep):
+        # this test is about the report's shape for a known, empty collection.
+        initialized_catalog.register_collection("knowledge__thing", embedding_model="bge-base-en-v15-768")
         runner = CliRunner()
         result = runner.invoke(
             main, ["catalog", "verify", "--collection", "knowledge__thing", "--json"],
