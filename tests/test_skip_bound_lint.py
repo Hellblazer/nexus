@@ -174,6 +174,40 @@ _GATE_KEYWORDS: tuple[str, ...] = (
     "lint",
 )
 
+#: Gate-like files no filename word gives away, named one by one with the
+#: sentence in their own header that makes them a gate (critique of
+#: 253d0bc4a: all three sat unenforced in the substrate bucket).
+_GATE_LIKE_BY_NAME: dict[str, str] = {
+    "tests/scripts/test_generation_flip_live_holder.py":
+        "AGENTS.md step 1c: required for any change to the shim / flip / GC machinery",
+    "tests/scripts/test_reinstall_tool_generations.py":
+        "its own docstring: 'THIS MODULE IS THE ACCEPTANCE CRITERION' (nexus-utpuw.8)",
+    "tests/scripts/test_post_publish_dispatch_check.py":
+        "drives tests/e2e/post-publish-dispatch-check.sh end to end: an e2e wiring test one directory over",
+}
+
+#: KNOWN DETECTOR GAPS. ``_ENV_MARKERS`` sees os.environ / os.getenv /
+#: sys.platform / platform.* / shutil.which / find_spec. It does not see a
+#: skip keyed on a subprocess's output or on a path existing, and these
+#: gate-like files carry one. They produce zero detected sites, so "0
+#: unbounded violations" is NOT "0 debt" for them. Listed so the gap is a
+#: fact of record; ``test_known_detector_gaps_are_still_real`` fails when an
+#: entry stops being true, so the list cannot rot into a standing excuse.
+_KNOWN_UNDETECTED_GATE_SKIPS: dict[str, str] = {
+    "tests/scripts/test_check_engine_release_floor.py": "skips keyed on `git tag -l` output (shallow CI clone)",
+    "tests/test_decision_coverage_census.py": "skip keyed on a frozen-fixture Path.exists()",
+    "tests/test_plan_audit_guidance_lint.py": "skip keyed on `git` subprocess output via _drifts_from_pin()",
+}
+
+#: KNOWN FALSE-POSITIVE CLASS. Widening step 2 tags a pytest.skip as
+#: environment-keyed when ANY env marker appears in the enclosing function,
+#: so a data-dependent skip in a function that also reads os.environ for an
+#: unrelated reason is counted: tests/scripts/test_flip_current.py:164
+#: (``banned_misses == 0``; the function builds a subprocess PATH from
+#: os.environ). Substrate bucket today, so unenforced; a gate-like file with
+#: this shape would need an allowlist entry it does not deserve. Narrow the
+#: widening to the skip's own condition before enforcing on more buckets.
+
 # ---------------------------------------------------------------------------
 # Step 2: bound tokens + shrink-only named allowlist
 # ---------------------------------------------------------------------------
@@ -245,15 +279,31 @@ GATE_LIKE_SKIP_ALLOWLIST: dict[str, int] = {
     # skipif(os.name == "nt") -- POSIX chmod permission semantics; this repo
     # has no Windows CI leg to bound it against.
     "tests/test_session_end_capability_census.py": 1,
+    # Named gate-like 2026-09-17 by _GATE_LIKE_BY_NAME (review of this lint's
+    # first cut); the debt is as old as the files, only its visibility is new.
+    #
+    # shutil.which("uv") is None -> skip: the whole module builds two real
+    # generations with uv, so on a box without uv the required flip gate
+    # reports green having run nothing. uv is present on every dev/CI box
+    # today; nothing asserts that.
+    "tests/scripts/test_generation_flip_live_holder.py": 1,
+    # module-level skipif(os.uname().sysname not in Darwin/Linux): ps/argv
+    # shapes are platform specific, and there is no third platform leg to
+    # bound it against.
+    "tests/scripts/test_reinstall_tool_generations.py": 1,
+    # class-level skipif(sys.platform == "win32"): POSIX permission bits; no
+    # Windows CI leg.
+    "tests/scripts/test_post_publish_dispatch_check.py": 1,
 }
 
 #: NEVER RAISE this without a fresh review; LOWER it as an allowlist entry
 #: shrinks (a site gets bounded or the file is deleted). This is the
 #: shrink-only tripwire: growing GATE_LIKE_SKIP_ALLOWLIST's sum without also
 #: lowering (or at least not raising) this ceiling fails
-#: test_allowlist_is_shrink_only. Seeded 2026-09-17 at the sum below (16) --
-#: see GATE_LIKE_SKIP_ALLOWLIST's own comments for what each entry covers.
-_ALLOWLIST_TOTAL_CEILING = 16
+#: test_allowlist_is_shrink_only. Seeded 2026-09-17 at 16, raised to 19 the
+#: same day when three gate-like files the filename rule missed were named
+#: in _GATE_LIKE_BY_NAME: a correction to the partition, not new debt.
+_ALLOWLIST_TOTAL_CEILING = 19
 
 
 @dataclasses.dataclass(frozen=True)
@@ -467,7 +517,15 @@ def _classify_file(rel_posix: str, tree: ast.AST) -> str:
     name = pathlib.PurePosixPath(rel_posix).name
     if _is_lint_marked(tree):
         return "gate-like"
-    if any(kw in name for kw in _GATE_KEYWORDS):
+    if rel_posix in _GATE_LIKE_BY_NAME:
+        return "gate-like"
+    # Whole ``_``-separated words of the filename, never substrings: "pin"
+    # matched test_install_ping.py and (via "scoping") test_c53hy_delete_reap_
+    # scoping.py (review of 253d0bc4a). A multi-word keyword (plugin_structure)
+    # is matched as a run of words.
+    stem_words = pathlib.PurePosixPath(name).stem.split("_")
+    joined = "_" + "_".join(stem_words) + "_"
+    if any(f"_{kw}_" in joined for kw in _GATE_KEYWORDS):
         return "gate-like"
     if rel_posix.startswith("tests/e2e/"):
         return "gate-like"
@@ -777,3 +835,37 @@ def test_allowlist_is_shrink_only():
                 "gate-like skip site(s) actually found -- lower the entry"
             )
     assert stale == [], "stale GATE_LIKE_SKIP_ALLOWLIST entr(y/ies):\n" + "\n".join(stale)
+
+
+def test_known_detector_gaps_are_still_real():
+    """``_KNOWN_UNDETECTED_GATE_SKIPS`` names gate-like files whose skips the
+    detector cannot see. Each entry must stay true: the file exists, sorts
+    gate-like, still calls a pytest skip, and still yields zero detected
+    sites. When the detector learns the shape, or the skip goes, this fails
+    and the entry is deleted, so the list cannot become a standing excuse."""
+    result = scan_tests_dir()
+    detected = {site.file for site in result.sites}
+    untrue: list[str] = []
+    for file in _KNOWN_UNDETECTED_GATE_SKIPS:
+        path = REPO_ROOT / file
+        if not path.is_file():
+            untrue.append(f"{file}: file no longer exists")
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        if _classify_file(file, tree) != "gate-like":
+            untrue.append(f"{file}: no longer sorts gate-like")
+        if "pytest.skip(" not in source and "skipif(" not in source:
+            untrue.append(f"{file}: carries no pytest skip any more")
+        if file in detected:
+            untrue.append(f"{file}: the detector sees it now; drop the entry and bound or allowlist the site")
+    assert untrue == [], "\n".join(untrue)
+
+
+def test_keywords_match_whole_words_not_substrings():
+    tree = ast.parse("x = 1\n")
+    assert _classify_file("tests/test_install_ping.py", tree) == "substrate-dependent"
+    assert _classify_file("tests/test_c53hy_delete_reap_scoping.py", tree) == "substrate-dependent"
+    assert _classify_file("tests/test_tuple_error_table_pin.py", tree) == "gate-like"
+    assert _classify_file("tests/test_plugin_structure.py", tree) == "gate-like"
+    assert _classify_file("tests/scripts/test_reinstall_tool_generations.py", tree) == "gate-like"
