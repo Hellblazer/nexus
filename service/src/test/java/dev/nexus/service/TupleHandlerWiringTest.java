@@ -501,6 +501,57 @@ class TupleHandlerWiringTest {
         assertThat(get(withRegistry, "/v1/tuples/renew").statusCode()).isEqualTo(405);
     }
 
+    // ── RDR-211 Phase 1 Step 1 (bead nexus-rplay.2): the release route ───────
+
+    @Test
+    void release_endsTheClaimWithoutCountingAnAttempt_andReturnsReleasedTrue() throws Exception {
+        String to = "release-ok-addr";
+        String claimId = outAndClaim(to, "release-ok-claimant");
+
+        var resp = post(withRegistry, "/v1/tuples/release", Map.of(
+                "claim_id", claimId, "claimant", "release-ok-claimant"));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(mapper.readValue(resp.body(), MAP_T)).containsEntry("released", Boolean.TRUE);
+
+        // The tuple is available again -- a fresh claimant can take it.
+        var reclaim = post(withRegistry, "/v1/tuples/in", Map.of(
+                "subspace", "mailbox/" + to,
+                "keys_pattern", Map.of("to", to),
+                "claimant", "release-ok-claimant-2",
+                "lease_s", 60));
+        assertThat(reclaim.statusCode()).isEqualTo(200);
+        assertThat(mapper.readValue(reclaim.body(), MAP_T).get("claim_id")).isNotNull();
+    }
+
+    @Test
+    void release_onANotLiveClaim_is404() throws Exception {
+        String to = "release-notlive-addr";
+        String claimId = outAndClaim(to, "release-notlive-claimant");
+        // Consume the claim first, via ack, so it is no longer live.
+        assertThat(post(withRegistry, "/v1/tuples/ack", Map.of(
+                "claim_id", claimId, "claimant", "release-notlive-claimant")).statusCode())
+                .isEqualTo(200);
+
+        var resp = post(withRegistry, "/v1/tuples/release", Map.of(
+                "claim_id", claimId, "claimant", "release-notlive-claimant"));
+        assertThat(resp.body()).contains("ClaimNotFound");
+    }
+
+    @Test
+    void release_byAnotherClaimant_isRefused() throws Exception {
+        String to = "release-wrongowner-addr";
+        String claimId = outAndClaim(to, "release-owner-claimant");
+
+        var resp = post(withRegistry, "/v1/tuples/release", Map.of(
+                "claim_id", claimId, "claimant", "release-someone-else"));
+        assertThat(resp.body()).contains("ClaimOwnership");
+    }
+
+    @Test
+    void release_requiresPost() throws Exception {
+        assertThat(get(withRegistry, "/v1/tuples/release").statusCode()).isEqualTo(405);
+    }
+
     private HttpResponse<String> post(NexusService svc, String path, Object body) throws Exception {
         var req = TestHttp.request("http://127.0.0.1:" + svc.getPort() + path)
                 .header("Authorization", "Bearer " + TOKEN)

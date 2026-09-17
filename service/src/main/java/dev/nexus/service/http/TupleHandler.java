@@ -48,6 +48,7 @@ import java.util.Optional;
  *                                   -&gt; {"acked": true, "reply_id": "&lt;hex&gt;"|null}
  *   POST /v1/tuples/nack            {claim_id, claimant} -&gt; {"nacked": true}
  *   POST /v1/tuples/renew           {claim_id, claimant, lease_s} -&gt; {"lease_until": "&lt;ISO-8601&gt;"}
+ *   POST /v1/tuples/release         {claim_id, claimant} -&gt; {"released": true}
  *   GET  /v1/tuples/registry        -&gt; {"digest", "sources", "templates": [...]}
  *   GET  /v1/tuples/subspace_list   ?prefix=&amp;limit=&amp;after= -&gt; {"subspaces": [...], "next_cursor"?: "&lt;subspace&gt;"}
  *   GET  /v1/tuples/subspace_stats  ?subspace= -&gt; {subspace, total, available, claimed, dead, consumed, expired_unpurged, oldest_created_at, newest_created_at}
@@ -126,6 +127,7 @@ public final class TupleHandler implements HttpHandler {
                 case "/ack" -> handleAck(exchange, tenant, method);
                 case "/nack" -> handleNack(exchange, tenant, method);
                 case "/renew" -> handleRenew(exchange, tenant, method);
+                case "/release" -> handleRelease(exchange, tenant, method);
                 case "/registry" -> handleRegistry(exchange, method);
                 case "/subspace_list" -> handleSubspaceList(exchange, tenant, method);
                 case "/subspace_stats" -> handleSubspaceStats(exchange, tenant, method);
@@ -323,6 +325,24 @@ public final class TupleHandler implements HttpHandler {
         var leaseUntil = repo.renew(tenant, requireString(body, "claim_id"),
                 requireString(body, "claimant"), requireLong(body, "lease_s"));
         HttpUtil.send(ex, 200, MAPPER.writeValueAsString(Map.of("lease_until", leaseUntil)));
+    }
+
+    /**
+     * {@code POST /v1/tuples/release} (RDR-211 Phase 1 Step 1, bead nexus-rplay.2). A
+     * hand-back that is NOT a failure: ends a live claim without counting an attempt.
+     *
+     * <p>No new typed error: the two this can raise -- ClaimNotFound, ClaimOwnership --
+     * already exist with their statuses, the same reasoning {@link #handleRenew}'s own
+     * javadoc gives.
+     */
+    private void handleRelease(HttpExchange ex, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) {
+            HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}");
+            return;
+        }
+        Map<String, Object> body = readBody(ex);
+        repo.release(tenant, requireString(body, "claim_id"), requireString(body, "claimant"));
+        HttpUtil.send(ex, 200, "{\"released\":true}");
     }
 
     // ── registry / census ────────────────────────────────────────────────────

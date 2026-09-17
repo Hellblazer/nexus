@@ -46,9 +46,11 @@ import static dev.nexus.service.jooq.nexus.Tables.TUPLE_TENANTS;
  * RDR-205 Phase 1 Step 4 (bead nexus-em75s.4): the Linda tuple space's jOOQ
  * repository — {@code out}, {@code rd}/{@code rdp}, {@code in}/{@code inp},
  * {@code ack}/{@code nack}, {@code registry}, {@code subspace_list}/{@code
- * subspace_stats}. See {@code docs/rdr/rdr-205-linda-tuple-space-over-
- * postgres.md} §Technical Design — this class, not the RDR's illustrative
- * jOOQ block, is the authority on the claim statement's exact shape.
+ * subspace_stats}. RDR-206 added {@code renew}; RDR-211 Phase 1 Step 1 (bead
+ * nexus-rplay.2) added {@code release}, a hand-back that is not a failure. See
+ * {@code docs/rdr/rdr-205-linda-tuple-space-over-postgres.md} §Technical Design
+ * — this class, not the RDR's illustrative jOOQ block, is the authority on the
+ * claim statement's exact shape.
  *
  * <p>Reuses {@link TenantScope} (forced-RLS tenant-scoped transactions) and
  * mirrors {@link AspectRepository#claimNext}'s {@code FOR ... SKIP LOCKED}
@@ -103,6 +105,11 @@ public final class TupleRepository {
     private static final String TRANSITION_RENEW = "renew";
     private static final String TRANSITION_EXPIRE = "expire";
     private static final String TRANSITION_DEAD = "dead";
+    /**
+     * RDR-211 Phase 1 Step 1 (bead nexus-rplay.2): a hand-back that is NOT a
+     * failure -- see {@link #release}.
+     */
+    private static final String TRANSITION_RELEASE = "release";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TypeReference<Map<String, String>> STRING_MAP = new TypeReference<>() {
@@ -123,8 +130,9 @@ public final class TupleRepository {
 
     /**
      * TEST-ONLY seam (RDR-206 Phase 1 Step 1, bead nexus-h61dl.2): invoked inside
-     * every claim-MUTATING transaction — {@link #ack}, {@link #nack} and {@link
-     * #renew} — between {@link #liveClaimRow}'s unlocked read and the
+     * every claim-MUTATING transaction — {@link #ack}, {@link #nack}, {@link
+     * #renew} and, since RDR-211 Phase 1 Step 1 (bead nexus-rplay.2), {@link
+     * #release} — between {@link #liveClaimRow}'s unlocked read and the
      * compare-and-swap {@code UPDATE}, so a test can release the row in that window
      * (lapse the lease, run the sweep's release arm) and assert the stale update
      * matches zero rows and raises {@link ClaimNotFoundException} with no claim-log
@@ -385,9 +393,9 @@ public final class TupleRepository {
         }
     }
 
-    /** {@code claim_id}/{@code claimant} on {@code ack}/{@code nack}/{@code renew} (and
-     *  {@code ackWithReply}, which does not otherwise call {@code ack}'s own checks on
-     *  its reply-carrying path). */
+    /** {@code claim_id}/{@code claimant} on {@code ack}/{@code nack}/{@code renew}/
+     *  {@code release} (and {@code ackWithReply}, which does not otherwise call
+     *  {@code ack}'s own checks on its reply-carrying path). */
     private static void checkClaimIdentifiers(String claimId, String claimant) {
         checkFieldSize("claim_id", claimId, TupleLimits.MAX_CLAIM_ID_BYTES);
         checkFieldSize("claimant", claimant, TupleLimits.MAX_CLAIMANT_BYTES);
@@ -1037,6 +1045,59 @@ public final class TupleRepository {
             }
             return null;
         });
+    }
+
+    /**
+     * RDR-211 Phase 1 Step 1 (bead nexus-rplay.2): {@code release(claim_id, claimant)}
+     * — a hand-back that is NOT a failure. Closes RDR-211 Gap 4: until this operation,
+     * ending a live claim meant either consuming the tuple ({@link #ack}) or counting a
+     * failed attempt ({@link #nack}); nothing let a holder return a task, or a lock, to
+     * available without spending either.
+     *
+     * <p>Ends a live claim, returns the tuple to available WITHOUT counting an attempt
+     * (unlike {@link #nack}, which always does), logs a {@value #TRANSITION_RELEASE}
+     * transition (no schema change needed — {@code tuple_claim_log.transition} is a
+     * plain {@code TEXT NOT NULL} column with no {@code CHECK} constraint, per {@code
+     * tuples-001-baseline.xml}), and signals the subspace's waiters AFTER the commit,
+     * the same placement {@link #out} and {@link #ackWithReply} use — a parked reader
+     * must not be woken by a transaction that rolled back. A claim that is no longer
+     * live raises {@link ClaimNotFoundException}, exactly as {@link #ack}, {@link
+     * #nack} and {@link #renew} do; a claim held by someone else raises {@link
+     * ClaimOwnershipException}.
+     *
+     * <p>Reuses {@link #releaseOrDeadLetter} with {@code attempts} passed UNCHANGED
+     * (never incremented, unlike {@code nack}'s {@code attempts + 1}) and {@code
+     * maxAttempts} passed as {@link Long#MAX_VALUE} so a release can never itself
+     * dead-letter the tuple — a hand-back is not a failure, so it must never spend the
+     * template's failure budget or trip its dead-letter ceiling, regardless of how many
+     * attempts the row already carries.
+     */
+    public void release(String tenant, String claimId, String claimant) {
+        checkClaimIdentifiers(claimId, claimant);
+        String subspace = tenantScope.withTenant(tenant, ctx -> {
+            TuplesRecord row = liveClaimRow(ctx, tenant, claimId);
+            if (row == null) {
+                throw new ClaimNotFoundException(claimId);
+            }
+            if (!row.getClaimant().equals(claimant)) {
+                throw new ClaimOwnershipException(claimId, claimant);
+            }
+            // TEST-ONLY (nexus-h61dl.2): see ack.
+            TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY.run();
+            OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+
+            ReleaseOutcome outcome = releaseOrDeadLetter(ctx, tenant, row.getSubspace(), row.getTemplate(),
+                    row.getId(), claimId, claimant, TRANSITION_RELEASE, now, row.getAttempts(), Long.MAX_VALUE);
+            if (outcome == ReleaseOutcome.NOT_LIVE) {
+                // The compare-and-swap matched nothing: the sweep or a re-take moved the
+                // row between liveClaimRow's read and this update (RDR-206 Step 1).
+                throw new ClaimNotFoundException(claimId);
+            }
+            return row.getSubspace();
+        });
+        // Signal AFTER the commit, exactly as out and ackWithReply do -- a parked
+        // reader must not be woken by a transaction that rolled back.
+        waitRegistry.signalAll(tenant, subspace);
     }
 
     /**
