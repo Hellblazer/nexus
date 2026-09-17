@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import click
 
+from nexus.catalog.membership import refuse_if_collection_unknown
+
 
 @click.command("migrate-fallback")
 @click.argument("source")
@@ -131,6 +133,13 @@ def migrate_fallback_cmd(
     rows = [(str(e.tumbler),) for e in sorted(entries, key=lambda e: str(e.tumbler))]
 
     if not rows:
+        # nexus-v1zdu: routed through the shared known-vs-unknown helper
+        # (nexus-3ygp3) for consistency with the other three guarded
+        # sites — a no-op here in practice, since `source` was already
+        # confirmed registered by the `get_collection` check above
+        # (raises before this point for a genuinely unknown name), but
+        # this keeps the invariant explicit rather than assumed.
+        refuse_if_collection_unknown(cat, source, entries, known=True)
         click.echo(f"{source}: 0 doc(s) to migrate.")
         return
 

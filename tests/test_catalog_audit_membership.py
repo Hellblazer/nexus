@@ -17,8 +17,10 @@ Coverage:
 * ``--purge-non-canonical`` → actually deletes the non-canonical
   entries (with ``--yes`` to skip prompt).
 * ``--json`` emits structured output.
-* Empty collection → "no entries" exit 0.
-* Unknown collection → "no entries" exit 0 (degenerate of empty case).
+* Known, genuinely-empty collection → "no entries" exit 0.
+* Unknown collection → refuses, exit non-zero, names the collection
+  (nexus-v1zdu; was the false-clean "no entries" exit 0 nexus-3ygp3's
+  never-written shared helper was meant to close).
 """
 from __future__ import annotations
 
@@ -292,11 +294,27 @@ class TestPurge:
 
 
 class TestEmpty:
-    def test_empty_collection_exits_clean(self, env: Catalog) -> None:
+    def test_known_empty_collection_exits_clean(self, env: Catalog) -> None:
+        """A collection registered in the catalog's collections projection
+        (register_collection) but carrying zero documents is a legitimate
+        state — report informationally, exit 0."""
+        env.register_collection("rdr__known-empty")
         runner = CliRunner()
-        result = runner.invoke(catalog, ["audit-membership", "rdr__nothing-here"])
+        result = runner.invoke(catalog, ["audit-membership", "rdr__known-empty"])
         assert result.exit_code == 0, result.output
         assert "no entries" in result.output.lower() or "0" in result.output
+
+    def test_unknown_collection_refuses(self, env: Catalog) -> None:
+        """nexus-v1zdu: a collection the catalog has never heard of — never
+        registered via register_collection, never populated with any
+        document — is NOT the same as a genuinely empty one. Reporting
+        "no entries" at exit 0 for it is the false-clean shape nexus-3ygp3's
+        shared helper was meant to close but was never written for this
+        site. A planted unknown name ("rdr__nothing-here") must refuse."""
+        runner = CliRunner()
+        result = runner.invoke(catalog, ["audit-membership", "rdr__nothing-here"])
+        assert result.exit_code != 0, result.output
+        assert "rdr__nothing-here" in result.output
 
 
 # ── --all-collections sweep mode (nexus-3e4s Phase 3) ───────────────────────

@@ -140,11 +140,18 @@ def audit_membership_cmd(
             "Specify a COLLECTION or use --all-collections.",
         )
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
+    from nexus.catalog.membership import refuse_if_collection_unknown  # noqa: PLC0415 — command-local import (nexus.catalog.membership)
     cat = _cat_cmd._get_catalog()
     entries = cat.list_by_collection(collection)
     rows = [(str(e.tumbler), e.source_uri or "") for e in entries]
 
     if not rows:
+        # nexus-v1zdu: an UNKNOWN collection name (never registered) must
+        # refuse, not report "no entries" at exit 0 — the false-clean shape
+        # nexus-3ygp3's shared helper was meant to close. A collection the
+        # catalog DOES know about, genuinely holding zero entries, is a
+        # legitimate state and stays informational.
+        refuse_if_collection_unknown(cat, collection, entries)
         if as_json:
             click.echo(json.dumps({
                 "collection": collection,
