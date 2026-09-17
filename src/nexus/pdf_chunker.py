@@ -282,6 +282,15 @@ class PDFChunker:
                 )
                 chunk_index += 1
 
+            # This window already reached EOF: there is no more text to
+            # chunk, so stop here. Without this, next_start = end -
+            # overlap_chars could still land > start, running one more
+            # iteration whose [next_start, len(text)) slice is nothing but
+            # this chunk's own overlap tail — a pure duplicate of the text
+            # just emitted (nexus-yrc7q #9).
+            if end >= len(text):
+                break
+
             # Overlap is for prose. A break the table rules placed, or an
             # overlap that would reopen the next chunk mid-row, starts the
             # next chunk exactly at ``end``.
