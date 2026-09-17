@@ -353,7 +353,7 @@ Which session holds the name <span class="ph">&lt;NAME&gt;</span>?</pre><button 
 <div class="cmd"><pre>Is my channel push working?
 What is waiting in your mailbox?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What happens</div>
-<p>For the first question, Claude reports what <code>nx doctor</code>'s channel row shows for this session. That row names whether the channel is proven live, when it last woke, and how many messages it has released to the drain hook after too many resends. For the second, it reads its mailbox with <code>tuple_rd</code> and takes nothing.</p>
+<p>For the first question, Claude reports what <code>nx doctor</code>'s channel row shows for this session. That row names whether the channel is proven live, when it last woke, and how many messages it has released to the drain hook after too many resends. When the session's own launch command line carried no channel flag, the waiter cannot tell from that alone and instead sends a notification asking the session to confirm; Claude answers it by calling <code>tuple_channel_probe</code> itself, which is the same call this question can trigger directly. For the second, it reads its mailbox with <code>tuple_rd</code> and takes nothing.</p>
 
 <div class="see">From a terminal</div>
 <div class="cmd"><pre>nx tuple list --prefix mailbox/  <span class="c"># every mailbox, with counts</span>

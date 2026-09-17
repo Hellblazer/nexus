@@ -6902,8 +6902,12 @@ def tuple_subscribe(
     """Add `subspace` to this session's MCP server's subscription list (RDR-211).
 
     The session's MCP server waits on this list and pushes what arrives
-    through the Claude Code channel (delivery is a later bead);
-    `tuple_subscriptions` lists the current set with each entry's cursor.
+    through the Claude Code channel: the lifespan waiter (`mcp/channel.py`)
+    parks a `wait` over the subscriptions and, once live, sends a
+    notification carrying a REFERENCE only (subspace, tuple id, and for a
+    message a claim id) -- never the body -- which this session reads on
+    purpose with `tuple_rd`. `tuple_subscriptions` lists the current set
+    with each entry's cursor.
     Only board topics and the session's own instance-name mailbox are
     accepted: a queue or a lock is refused naming `in`, since those are
     never delivered, and any mailbox other than the session's own

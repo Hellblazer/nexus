@@ -10,7 +10,7 @@ Three consumers ship with this design and no others: the RDR-184 dispatch ledger
 
 ## Operations
 
-Thirteen HTTP routes under `/v1/tuples`. Signatures are the contract; the handler is the implementation.
+Fourteen HTTP routes under `/v1/tuples`. Signatures are the contract; the handler is the implementation.
 
 ```text
 out(subspace, keys, dims, body, *, nonce=None, ttl_seconds=None) -> tuple_id
@@ -47,6 +47,9 @@ nack(claim_id, claimant)                                   # ownership checked; 
 renew(claim_id, claimant, lease_s) -> lease_until          # ownership checked; extends a live claim, clamped
                                                             # to expires_at, refused above the template's
                                                             # max_lease_seconds; never counts an attempt (RDR-206)
+release(claim_id, claimant) -> {"released": true}          # ownership checked; ends a live claim WITHOUT
+                                                            # counting an attempt -- a hand-back that is not
+                                                            # a failure (RDR-211)
 subspace_list(prefix, limit=None, after=None) -> {subspaces: [{subspace, total, available, claimed, dead,
                            consumed, expired_unpurged, oldest_created_at, newest_created_at}], next_cursor?}
                                                                      # concrete subspaces that exist, ordered
@@ -87,6 +90,7 @@ park_stats() -> {max_global, max_per_claimant, global_in_use, refused_global,
 | `ack` | no | no: a second `ack` on the same claim is `ClaimNotFound`; a reply written with it shares that rule, since the reply and the consumption commit in one transaction | none |
 | `nack` | no | no: every call counts an attempt against `max_attempts` | none |
 | `renew` | no | no: a repeat renews again from the new `now`, extending the lease further; a lapsed claim is `ClaimNotFound`, not resurrected | none |
+| `release` | no | no: a second `release` on the same claim is `ClaimNotFound` | none |
 | `registry` | no | yes | none |
 | `subspace_list` | no | yes | none |
 | `subspace_stats` | no | yes | none |
@@ -247,7 +251,7 @@ Three refusals outside the twelve, all in `TupleHandler` itself: a request again
 Two access paths sit on top of `HttpTupleStore`:
 
 - **`nx tuple`** — `out`, `rd`, `in`, `ack`, `nack`, `renew`, `release`, `templates`, `list`, `stats`, `directory`. `ack` takes `--reply-subspace`/`--reply-key`/`--reply-dim`/`--reply-body`/`--reply-ttl-seconds` (RDR-206); there is no `--reply-nonce` flag, since the engine sets it. `release` (RDR-211) ends a live claim without counting an attempt — a hand-back that is not a failure, unlike `nack`. See [CLI Reference — nx tuple](cli-reference.md#nx-tuple) for every flag.
-- **Thirteen `tuple_*` MCP tools** — `tuple_out`, `tuple_rd`, `tuple_in`, `tuple_ack`, `tuple_nack`, `tuple_renew`, `tuple_release`, `tuple_registry`, `tuple_list`, `tuple_stats`, `tuple_subscribe`, `tuple_unsubscribe`, `tuple_subscriptions` (`rd`/`in`'s own `timeout_s=0` default covers the probe case; there are no separate `tuple_rdp`/`tuple_inp` tools). `tuple_ack` takes an optional `reply` object (RDR-206) with the same fields as `tuple_out` minus the nonce. `tuple_release` (RDR-211) is `tuple_nack`'s non-failure counterpart. `tuple_subscribe`/`tuple_unsubscribe`/`tuple_subscriptions` (RDR-211 Phase 1 Step 3) manage the session's own MCP server subscription list -- board topics and, once, the session's own instance-name mailbox -- persisted in T1 so a `/resume` restores it and a `/clear` starts clean. Subscribing the instance mailbox takes over the per-session registration file and the RDR-208 directory lease that the deleted per-session CLI watcher used to own. The session's own MCP server is the delivery endpoint: it parks a `wait` over the subscription list and pushes what arrives through the Claude Code channel (RDR-211 nexus-rplay.14). See [MCP Servers — Tuple space](mcp-servers.md#tuple-space-t2-adjacent-rdr-205) for signatures and the routing rule of thumb.
+- **Fourteen `tuple_*` MCP tools** — `tuple_out`, `tuple_rd`, `tuple_in`, `tuple_ack`, `tuple_nack`, `tuple_renew`, `tuple_release`, `tuple_registry`, `tuple_list`, `tuple_stats`, `tuple_subscribe`, `tuple_unsubscribe`, `tuple_subscriptions`, `tuple_channel_probe` (`rd`/`in`'s own `timeout_s=0` default covers the probe case; there are no separate `tuple_rdp`/`tuple_inp` tools). `tuple_ack` takes an optional `reply` object (RDR-206) with the same fields as `tuple_out` minus the nonce. `tuple_release` (RDR-211) is `tuple_nack`'s non-failure counterpart. `tuple_subscribe`/`tuple_unsubscribe`/`tuple_subscriptions` (RDR-211 Phase 1 Step 3) manage the session's own MCP server subscription list -- board topics and, once, the session's own instance-name mailbox -- persisted in T1 so a `/resume` restores it and a `/clear` starts clean. Subscribing the instance mailbox takes over the per-session registration file and the RDR-208 directory lease that the deleted per-session CLI watcher used to own. The session's own MCP server is the delivery endpoint: it parks a `wait` over the subscription list and pushes what arrives through the Claude Code channel (RDR-211 nexus-rplay.14). `tuple_channel_probe` is the gate's probe fallback: a session calls it to confirm the channel is live when the waiter's launch-command-line check can't tell on its own. See [MCP Servers — Tuple space](mcp-servers.md#tuple-space-t2-adjacent-rdr-205) for signatures and the routing rule of thumb.
 
 `wait` is an internal `HttpTupleStore` method only — for the session's own MCP server lifespan waiter — with deliberately no MCP tool or CLI verb (Sam's decision, RDR-211 Open Question 6): nothing outside that future consumer calls it directly. The park-slot report (RDR-211 Phase 1 Step 1) has the same internal-transport status, but its `nx doctor` consumer (`tuples.park_slots`, below) now exists.
 
