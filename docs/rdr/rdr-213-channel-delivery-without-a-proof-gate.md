@@ -22,7 +22,12 @@ related_rdrs: [RDR-211, RDR-205, RDR-206, RDR-208]
 
 **Provenance.** Sam, 2026-09-17, after the channel-waiter defects of bead
 nexus-tk2cz were fixed and verified live: "have we solved this or just fixed a
-bug", then "prep 7.51.1 with the bug fixes, then draft the amendment." This
+bug", then "prep 7.51.1 with the bug fixes, then draft the amendment." On
+reading the draft: "frankly, I thought that's what I asked for arch wise. the
+idea is the channel just notifies and the session has to claim. this solves
+this." So this design is Sam's original intent for channel delivery; RDR-211's
+claim-at-delivery was the drafting rounds' reading of the back-pressure ruling
+(one message outstanding, the ack as the credit), not the ruling itself. This
 RDR amends the Delivery design of RDR-211, which is closed; it changes the
 client only, no engine or wire change.
 
@@ -482,3 +487,6 @@ The MVV is Phase 1's exit, not deferred.
 
 - 2026-09-17: created (draft) from Sam's request after bead nexus-tk2cz;
   amends RDR-211's Delivery design.
+- 2026-09-17: Sam confirmed the design as his original intent for channel
+  delivery (T2 `nexus_rdr/213-decision-notify-then-claim-2026-09-17`); the
+  Provenance paragraph records it.
