@@ -558,3 +558,4 @@ The MVV is Phase 1's exit, not deferred.
 - 2026-09-17: Fix check `nexus_rdr/213-fix-check-6945efe4a` (two of three
   raised one clause): the Risks mitigation no longer says the rule lives in
   the reference, which carries no body; the skill text is its only carrier.
+- 2026-09-17: Gate round 2 — PASSED (0 Critical, 0 Significant, 0 ship-blocker(s)); commit `7d3d14fe9`; critique `nexus_rdr/213-gate-critique-2026-09-17b`.
