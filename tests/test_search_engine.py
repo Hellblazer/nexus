@@ -1993,10 +1993,13 @@ class TestApplyRankingBoosts:
         """No tuning/catalog supplied — falls back to TuningConfig defaults
         (0.7/0.3/30), matching apply_hybrid_scoring's own module defaults.
 
-        A single-item window is trivially "the maximum" on both sides of
-        min_max_normalize; since vector distance is inverted (smaller =
-        better) but frecency is not, a lone result nets
-        ``0.7 * (1.0 - 1.0) + 0.3 * 1.0 == 0.3`` — pins the module-default
+        A single-element distance window is treated as the best possible
+        match (nexus-yrc7q #8: a 0- or 1-element window can't stand in for
+        "worst" after inversion — min_max_normalize's own "trivially the
+        maximum" 1.0 was double-negating to v_norm=0.0, the WORST score,
+        for the only result there was to score). Frecency's own
+        single-element window is unaffected (not inverted): a lone result
+        nets ``0.7 * 1.0 + 0.3 * 1.0 == 1.0`` — pins the module-default
         weights actually reached this call, not a stand-in for
         hand-computed scoring.py internals.
         """
@@ -2005,7 +2008,7 @@ class TestApplyRankingBoosts:
                          metadata={"frecency_score": 1.0}),
         ]
         out = apply_ranking_boosts(results, hybrid=True)
-        assert out[0].hybrid_score == pytest.approx(0.3)
+        assert out[0].hybrid_score == pytest.approx(1.0)
 
 
 # ── apply_file_diversity_cap (RDR-006 supersession, nexus-0bmhd) ────────────
