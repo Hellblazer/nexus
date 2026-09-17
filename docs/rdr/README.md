@@ -227,7 +227,8 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-208](rdr-208-session-id-mail-addressing.md) | Session-Id Mail Addressing: One Mailbox per Session, Names Resolved at Send Time | Architecture | Accepted | 2026-09-14 |
 | [RDR-209](rdr-209-heat-based-graduation-between-memory-tiers.md) | Heat-Based Graduation Between Memory Tiers | Feature | Draft | 2026-09-14 |
 | [RDR-210](rdr-210-dual-mode-local-engine.md) | One Local Engine Serves Both Embedders: bge-768 and Voyage Collections Side by Side | Architecture | Draft | 2026-09-15 |
-| [RDR-211](rdr-211-board-queue-and-lock-tuple-templates.md) | Broadcast Board, Work Queue, and Lock as Tuple-Space Templates | Feature | Draft | 2026-09-15 |
+| [RDR-211](rdr-211-board-queue-and-lock-tuple-templates.md) | Broadcast Board, Work Queue, and Lock as Tuple-Space Templates | Feature | Accepted | 2026-09-15 |
+| [RDR-212](rdr-212-orb-cockpit-surfaces-over-the-tuple-space.md) | ORB Cockpit Surfaces over the Tuple Space | Architecture | Draft | 2026-09-16 |
 
 > **Scrapped 2026-05-19 (RDR-110-119 arc).** Bundled the storage-substrate split with new abstractions (tuplespace, ORB, host-trust, surfaces-as-tuples, UI fabric); scope discipline failed across nine RDRs and 67 stranded beads. Files preserved as tombstones per the "never delete RDR files" rule. Postmortem: [docs/postmortem/2026-05-16-rdr110-113-remediation-chain.md](../postmortem/2026-05-16-rdr110-113-remediation-chain.md). Active substrate work continues as [RDR-120](rdr-120-storage-substrate-split.md) with an explicit moratorium on co-shipped consumers. Numbers RDR-114 through RDR-117 are unused on `main` (drafted on feature branches that never merged).
 

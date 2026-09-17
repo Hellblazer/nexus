@@ -2,12 +2,12 @@
 title: "Broadcast Board, Work Queue, and Lock as Tuple-Space Templates"
 id: RDR-211
 type: Feature
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-09-15
-accepted_date:
+accepted_date: 2026-09-17
 related_issues: []
 related_rdrs: [RDR-205, RDR-206, RDR-208, RDR-184, RDR-110]
 ---
