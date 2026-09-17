@@ -3937,3 +3937,78 @@ class TestResidualBatchReviewPins:
         assert not any("off by" in v for v in idx.values()), (
             "two titles sharing every non-digit word must not resolve to either"
         )
+
+
+class TestPhaseReviewGateSubsetParses:
+    """The gate must never cross-walk a subset of the section it was handed
+    (intrastate review T2 intrastate/[26115] #1, #8, #9; plan N1). Each test
+    is a probe from nexus-redo-probes-2026-09-17/review-nexus-rdr/probe_rdr.py
+    (P5a, P5b, P5c) converted to a regression test before the fix landed."""
+
+    def test_fenced_comment_does_not_end_implementation_plan_section(self):
+        """P5b: a column-0 ``# comment`` inside a code fence is not a heading."""
+        from nexus.commands.rdr import (  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+            _prg_extract_implementation_plan_section,
+            _prg_parse_plan_phase_items,
+        )
+        text = (
+            "\n## Implementation Plan\n\n"
+            "### Phase 1: one\n\n#### Step 1: first\ntext\n\n"
+            "```bash\n# install\nmake\n```\n\n"
+            "#### Step 2: second\ntext\n\n"
+            "### Phase 2: two\n\n#### Step 3: third\ntext\n\n"
+            "## Consequences\n"
+        )
+        sec = _prg_extract_implementation_plan_section(text)
+        assert "Step 3: third" in sec
+        assert "## Consequences" not in sec
+        labels = [lbl for _, lbl, _ in _prg_parse_plan_phase_items(sec)]
+        assert labels == ["Phase 1: Step 1: first", "Phase 1: Step 2: second", "Phase 2: Step 3: third"]
+
+    def test_fenced_comment_does_not_end_approach_section(self):
+        """P5b, §Approach shape: items after a fenced ``# comment`` are kept."""
+        from nexus.commands.rdr import (  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+            _prg_extract_approach_section,
+            _prg_find_unparsed_item_starts,
+            _prg_parse_approach_items,
+        )
+        text = (
+            "\n## Approach\n\n1. **A**: first\n\n"
+            "```bash\n# build\nmake\n```\n\n"
+            "2. **B**: second\n3. **C**: third\n\n## Consequences\n"
+        )
+        sec = _prg_extract_approach_section(text)
+        assert [n for n, _, _ in _prg_parse_approach_items(sec)] == [1, 2, 3]
+        assert _prg_find_unparsed_item_starts(sec) == []
+
+    def test_decimal_phase_selects_its_own_block(self):
+        """P5a: ``--phase 1.5`` enumerates Phase 1.5, not Phase 1."""
+        from nexus.commands.rdr import _prg_parse_phase_block_items  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "**Phase 1: alpha**\n\n- do A\n- do B\n\n"
+            "**Phase 1.5: beta**\n\n- do C\n"
+        )
+        assert [s for _, _, s in _prg_parse_phase_block_items(text, phase="1.5")] == ["do C"]
+        assert [s for _, _, s in _prg_parse_phase_block_items(text, phase="1")] == ["do A", "do B"]
+
+    def test_two_lists_restarting_at_one_get_distinct_evidence_keys(self, rdr_env):
+        """P5c: two tracks numbered 1..2 each are four items needing four
+        pointers; ``Item1=..,Item2=..`` must not cover all four."""
+        _write_rdr(
+            rdr_env["rdr_dir"], "rdr-050-tracks.md",
+            {"title": "Tracks", "status": "accepted"},
+            "# Tracks\n\n### Approach (two tracks)\n\n#### Track A\n\n"
+            "1. **A1**: a one\n2. **A2**: a two\n\n#### Track B\n\n"
+            "1. **B1**: b one\n2. **B2**: b two\n\n## Consequences\n",
+        )
+        res = _runner().invoke(rdr, ["preamble", "phase-review-gate", "--", "50", "--phase", "1"])
+        assert res.exit_code == 0, res.output
+        keys = re.findall(r"^\| (Item\d+) \|", res.output, re.MULTILINE)
+        assert len(keys) == 4 and len(set(keys)) == 4, res.output
+        res = _runner().invoke(
+            rdr,
+            ["preamble", "phase-review-gate", "--", "50", "--phase", "1",
+             "--evidence", "Item1=nexus-a,Item2=nexus-b"],
+        )
+        assert "BLOCKED" in res.output, res.output
+        assert "2 of 4" in res.output, res.output

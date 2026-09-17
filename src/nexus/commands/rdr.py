@@ -4435,14 +4435,40 @@ def _prg_extract_approach_section(text: str) -> str:
     )
     if heading:
         start = heading.end()
-        heading_depth = len(heading.group(1))
-        end_pat = r"\n#{1," + str(heading_depth) + r"} "
-        nxt = re.search(end_pat, text[start:])
-        return text[start: start + nxt.start()] if nxt else text[start:]
+        return text[start: _prg_section_end(text, start, len(heading.group(1)))]
     return ""
 
 
 _PRG_ITEM_RE = re.compile(r"^(\d+)\.\s+\*\*([^*]+)\*\*[:\s]*(.*)")
+_PRG_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+
+
+def _prg_mask_fences(text: str) -> str:
+    """Return *text* with every character inside a fenced code block (fence
+    lines included) replaced by a space, newlines kept, so an offset into
+    the masked copy is an offset into the original. A column-0 ``# comment``
+    inside a ```` ```bash ```` block used to match the section-end pattern
+    and cut §Approach / §Implementation Plan at the first shell comment, so
+    the gate cross-walked a subset and reported PASSED ([26115] #1)."""
+    out: list[str] = []
+    in_fence = False
+    for line in text.split("\n"):
+        if _PRG_FENCE_RE.match(line):
+            in_fence = not in_fence
+            out.append(" " * len(line))
+        elif in_fence:
+            out.append(" " * len(line))
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _prg_section_end(text: str, start: int, heading_depth: int) -> int:
+    """Offset of the next heading at *heading_depth* or shallower after
+    *start*, fenced code ignored; ``len(text)`` when there is none."""
+    end_pat = r"\n#{1," + str(heading_depth) + r"} "
+    nxt = re.search(end_pat, _prg_mask_fences(text)[start:])
+    return start + nxt.start() if nxt else len(text)
 
 
 def _prg_parse_approach_items(
@@ -4453,12 +4479,26 @@ def _prg_parse_approach_items(
     Returns list of (item_num, label, summary).
     """
     items: list[tuple[int, str, str]] = []
+    # The heading each item sits under, so two lists that each restart at
+    # 1 (rdr-050-style tracks) can be told apart below.
+    headings: list[str] = []
     lines = approach_text.splitlines()
     current_num: int | None = None
     current_label = ""
     current_lines: list[str] = []
+    current_heading = ""
+    in_fence = False
 
     for line in lines:
+        if _PRG_FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        hm = re.match(r"^#{1,6}\s+(.*\S)", line)
+        if hm:
+            current_heading = hm.group(1).strip()
+            continue
         m = _PRG_ITEM_RE.match(line)
         if m:
             if current_num is not None:
@@ -4468,6 +4508,7 @@ def _prg_parse_approach_items(
             current_num = int(m.group(1))
             current_label = m.group(2).strip()
             current_lines = [m.group(3).strip()] if m.group(3).strip() else []
+            headings.append(current_heading)
         elif current_num is not None:
             stripped = line.strip()
             if stripped and not stripped.startswith("-"):
@@ -4477,14 +4518,30 @@ def _prg_parse_approach_items(
         items.append(
             (current_num, current_label, " ".join(current_lines).strip())
         )
-    return items
+
+    nums = [n for n, _, _ in items]
+    if len(set(nums)) == len(nums):
+        return items
+    # Two lists share item numbers. The evidence dict is keyed by number,
+    # so ``Item1=..,Item2=..`` covered four items with two pointers
+    # ([26115] #9). Renumber sequentially and qualify each label with its
+    # list's heading (or ordinal), so every item needs its own pointer.
+    qualified: list[tuple[int, str, str]] = []
+    list_ordinal = 0
+    prev_num: int | None = None
+    for (num, label, summary), heading in zip(items, headings, strict=True):
+        if prev_num is None or num <= prev_num:
+            list_ordinal += 1
+        prev_num = num
+        prefix = heading or f"List {list_ordinal}"
+        qualified.append((len(qualified) + 1, f"{prefix}: {label}", summary))
+    return qualified
 
 
 # Column 0, like _PRG_ITEM_RE: an INDENTED numbered line is a nested list or
 # a recipe inside a code fence, never a missed top-level item (review of
 # ad158133b: rdr-037 and rdr-063 both carry them and were refused).
 _PRG_ITEM_START_RE = re.compile(r"^(\d+(?:\.\d+)*[a-z]?)[.)](\s|$)")
-_PRG_FENCE_RE = re.compile(r"^\s*(```|~~~)")
 
 
 def _prg_find_unparsed_item_starts(approach_text: str) -> list[str]:
@@ -4579,10 +4636,12 @@ def _prg_parse_phase_block_items(
     block has no bullets"). Label is the bullet's leading bold span if
     present, else a truncated prefix of the bullet text.
     """
-    # Normalize the requested phase to its integer, if numeric.
+    # Normalize the requested phase; a decimal phase (``1.5``) keeps its
+    # fraction, as _prg_parse_plan_phase_items does — ``(\d+)`` alone
+    # selected Phase 1's bullets for ``--phase 1.5`` ([26115] #8).
     want_phase: str | None = None
     if phase:
-        pm = re.search(r"(\d+)", phase)
+        pm = re.search(r"(\d+(?:\.\d+)?)", phase)
         want_phase = pm.group(1) if pm else phase.strip()
 
     lines = approach_text.splitlines()
@@ -4662,10 +4721,7 @@ def _prg_extract_implementation_plan_section(text: str) -> str:
     if not heading:
         return ""
     start = heading.end()
-    heading_depth = len(heading.group(1))
-    end_pat = r"\n#{1," + str(heading_depth) + r"} "
-    nxt = re.search(end_pat, text[start:])
-    return text[start: start + nxt.start()] if nxt else text[start:]
+    return text[start: _prg_section_end(text, start, len(heading.group(1)))]
 
 
 _PRG_PHASE_HEADING_RE = re.compile(
@@ -4931,6 +4987,8 @@ def preamble_phase_review_gate(args: tuple[str, ...]) -> None:
     if not evidence_arg:
         print(f"### §Approach Cross-Walk — Phase {phase_arg or '?'}")
         print()
+        print(f"Items found: {len(items)}; item-start lines unparsed: {len(unparsed)}")
+        print()
         print(
             "Enumerate each numbered §Approach item below, then provide an evidence pointer "
             "for each item."
@@ -4981,6 +5039,7 @@ def preamble_phase_review_gate(args: tuple[str, ...]) -> None:
     # All items covered
     print(f"### APPROACH CROSS-WALK PASSED — Phase {phase_arg or '?'}")
     print()
+    print(f"Items found: {len(items)}; item-start lines unparsed: {len(unparsed)}")
     print(f"All {len(items)} §Approach items accounted for:")
     print()
     for num, label, val in covered:

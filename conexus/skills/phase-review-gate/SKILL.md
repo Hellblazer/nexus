@@ -56,7 +56,7 @@ The preamble validates that every enumerated item has a non-empty evidence point
 Item1=nexus-61x6,Item2=nexus-t3xx,Item3=nexus-7ejx,Item4=none,Item5=nexus-lint1
 ```
 
-- Keys are `ItemN` (case-insensitive, numeric suffix required)
+- Keys are `ItemN` (case-insensitive, numeric suffix required). `N` is the number Pass 1 printed, which is the RDR's own item number except when §Approach holds two lists that each restart at 1 (two tracks under `####` sub-headings): then Pass 1 renumbers sequentially and prefixes each label with its list's heading, so four items need four pointers. Always copy the keys from the Pass 1 table.
 - Values are bead IDs or `none`
 - Comma-separated, no spaces required around `=` or `,`
 
