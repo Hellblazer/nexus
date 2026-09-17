@@ -126,7 +126,8 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     # predate this gate and were invisible to the old fcntl-literal match,
     # not newly introduced. Neither is daemon-scope election.
     "indexer.py",                        # per-repo index PID lock
-    "tuple_watch.py",                    # per-address tuple-watch lock
+    # The former CLI mailbox-watch module's entry (its per-address flock)
+    # was removed — RDR-211 nexus-rplay.14 deleted that module outright.
 })
 
 

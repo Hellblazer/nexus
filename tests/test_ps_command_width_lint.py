@@ -63,14 +63,18 @@ def test_every_command_reading_ps_call_passes_ww() -> None:
 
 
 def test_the_scan_sees_the_calls_it_guards() -> None:
-    """Non-vacuity: a scan that found nothing would pass the check above."""
+    """Non-vacuity: a scan that found nothing would pass the check above.
+
+    RDR-211 nexus-rplay.14 deleted the former CLI mailbox-watch module's
+    ``ps`` call along with the module itself, and the mailbox drain hook's
+    own ``ps`` call along with the per-prompt re-arm it served -- neither
+    site exists any more, so neither is named below.
+    """
     locations = [loc for loc, _args in _command_reading_calls()]
-    assert len(locations) >= 8, locations
+    assert len(locations) >= 6, locations
     for expected in (
-        "src/nexus/tuple_watch.py",
         "src/nexus/install_census.py",
         "src/nexus/commands/doctor.py",
-        "conexus/hooks/scripts/mailbox_drain.py",
         "src/nexus/_install/census.sh",
     ):
         assert any(loc.startswith(expected + ":") for loc in locations), expected

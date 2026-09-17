@@ -329,7 +329,7 @@ tuple_in   subspace: mailbox/<b>5b354c36-…</b>   keys: {to: 5b354c36-…}   ti
 {
   "tuple": {
     "dims": {"from": "cdeb12b5-…", "kind": "<b>reply</b>", "correlation_id": "<b>r-41</b>", "address_kind": "session"},
-    "body": "Armed. The watcher is Monitor task b3g9s5nia running nx tuple watch --instance nexus-8c …"
+    "body": "Subscribed. My instance mailbox nexus-8c is on the channel now …"
   },
   "claim_id": "784e820d-…"
 }
@@ -363,7 +363,7 @@ tuple_ack  … → Acked</pre></details>
 {"total": 0, "available": 0, "claimed": 0, "dead": 0, "consumed": 1,
  "expired_unpurged": 0, "oldest_created_at": "…T15:54:21Z", "newest_created_at": "…T15:54:21Z"}</pre></details>
 
-<p>Four rows in <code>nx doctor</code> watch the space: the age of the oldest unclaimed tuple in each subspace, the health of the database table, the age of the last sweep, and whether your Claude Code permissions let the mailbox watcher run. The sweep is the job that ends leases nobody renewed, removes expired tuples, and removes old claim-log rows. A healthy space shows small numbers in the first three, and what those rows catch is a sweep that has stopped.</p>
+<p>Three rows in <code>nx doctor</code> watch the space: the age of the oldest unclaimed tuple in each subspace, the health of the database table, and the age of the last sweep. The sweep is the job that ends leases nobody renewed, removes expired tuples, and removes old claim-log rows. A healthy space shows small numbers in all three, and what those rows catch is a sweep that has stopped.</p>
 </section>
 
 <!-- ============ 6 ============ -->
@@ -374,10 +374,10 @@ tuple_ack  … → Acked</pre></details>
 <div class="tbl"><table>
 <tr><th>Surface</th><th>What it is</th></tr>
 <tr><td>Ten MCP tools</td><td><code>mailbox_send</code>, <code>tuple_out</code>, <code>tuple_rd</code>, <code>tuple_in</code>, <code>tuple_ack</code>, <code>tuple_nack</code>, <code>tuple_renew</code>, <code>tuple_registry</code>, <code>tuple_list</code>, <code>tuple_stats</code>. Claude calls these inside a session.</td></tr>
-<tr><td><code>nx tuple</code></td><td>The same operations from the terminal: <code>out</code>, <code>rd</code>, <code>in</code>, <code>ack</code>, <code>nack</code>, <code>renew</code>, <code>templates</code>, <code>list</code>, <code>stats</code>. Hooks and scripts call these. Two more: <code>directory</code>, which shows the session that holds a name, and <code>watch</code>, the mailbox watcher.</td></tr>
+<tr><td><code>nx tuple</code></td><td>The same operations from the terminal: <code>out</code>, <code>rd</code>, <code>in</code>, <code>ack</code>, <code>nack</code>, <code>renew</code>, <code>templates</code>, <code>list</code>, <code>stats</code>. Hooks and scripts call these. One more: <code>directory</code>, which shows the session that holds a name.</td></tr>
 <tr><td>Hooks</td><td>The agent-start hook gives each agent its id and mailbox address. The start and stop hooks write the ledger's start and report tuples without blocking the agent.</td></tr>
 <tr><td>Skills</td><td><code>/conexus:mailbox</code> holds the rules for sending and reading messages. <code>/conexus:orchestration</code> holds the rule for waiting on a report.</td></tr>
-<tr><td><code>nx doctor</code></td><td>The four rows described in <a href="#l5">lesson 5</a>.</td></tr>
+<tr><td><code>nx doctor</code></td><td>The three rows described in <a href="#l5">lesson 5</a>.</td></tr>
 </table></div>
 
 <div class="see">From the terminal</div>
@@ -390,7 +390,7 @@ nx tuple rd ledger/<span class="ph">&lt;SESSION-ID&gt;</span> -n 300</pre><butto
   subspace: mailbox/5b354c36-…
   keys: {'to': '5b354c36-…'}
   dims: {'from': 'cdeb12b5-…', 'kind': 'reply', 'address_kind': 'session', 'correlation_id': 'r-41'}
-  body: Armed. The watcher is Monitor task b3g9s5nia running nx tuple watch --instance nexus-8c …
+  body: Subscribed. My instance mailbox nexus-8c is on the channel now …
   claim_state: claimed
   created_at: 2026-09-15T13:49:27Z</pre></details>
 </section>

@@ -2,14 +2,14 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """The tuple-watch session-marker contract (RDR-211 nexus-rplay.24).
 
-Rehomed out of ``nexus.tuple_watch`` ahead of that module's deletion (the
-``nx tuple watch`` loop itself, a later RDR-211 bead): these five functions
-are the part of ``tuple_watch.py`` that OTHER modules import at runtime --
+Rehomed out of the former CLI mailbox-watch loop module ahead of its
+deletion (RDR-211 nexus-rplay.14, a later bead in the same RDR): these five
+functions are the part of that module OTHER modules import at runtime --
 ``nexus.tuple_directory.resolve_default_from`` (``_read_session_marker``,
 for ``mailbox_send``'s default ``from``) and ``nexus.hooks``'s ``/clear``/
 ``/resume`` SessionStart handoff (``record_clear_and_write_session_marker``,
-via ``_write_tuple_watch_session_marker``) -- so they cannot leave with the
-watcher loop.
+via ``_write_tuple_watch_session_marker``) -- so they did not leave with the
+watcher loop when it was deleted.
 
 **Why here, not ``nexus.session`` or ``nexus.db.t1``:** ``nexus.session``
 already owns CLI/session-id identity (``resolve_active_session_id``,
@@ -23,21 +23,21 @@ PG/HTTP-backed T1 session lease reached through the engine, not a flat
 file on disk. Neither is the right layer, so this module is a small,
 single-purpose home for exactly the marker/cleared-record pair.
 
-**On-disk paths are UNCHANGED (byte-identical)** from ``tuple_watch.py``:
-``conexus/hooks/scripts/mailbox_drain.py`` is a plugin script that cannot
-import this package, so it keeps its own literal copies of the
+**On-disk paths are UNCHANGED (byte-identical)** from the former watcher
+module: ``conexus/hooks/scripts/mailbox_drain.py`` is a plugin script that
+cannot import this package, so it keeps its own literal copies of the
 ``tuple-watch`` directory name and the ``session.<pid>`` /
 ``cleared.<session_id>`` file-name shapes, pinned against drift by
 ``tests/hooks/test_mailbox_drain_hook.py`` (which compares those literals
-against ``nexus.tuple_watch.session_marker_path`` /
-``.cleared_record_path`` directly) and by this module's own
+against this module's ``session_marker_path``/``cleared_record_path``
+directly) and by this module's own
 ``tests/test_session_marker.py::TestPathsMatchTheMailboxDrainHookLiterals``.
 Moving this contract must never move those strings.
 
-``nexus.tuple_watch`` re-exports these five names as thin pass-throughs, so
-its own remaining code (the watcher self-stop check in ``run_watch``) and
-every test importing them from there keep working unchanged until the
-watcher-deletion bead removes that module outright.
+The former watcher module re-exported these five names as thin
+pass-throughs while it still existed, so every importer kept working
+unchanged across the move; RDR-211 nexus-rplay.14 deleted that module (and
+its re-export) outright once nothing else needed it.
 """
 from __future__ import annotations
 
@@ -48,21 +48,21 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
-#: Matches ``nexus.tuple_watch``'s own ``_STATE_SUBDIR`` literal, kept here
-#: as a separate copy rather than a shared import: tuple_watch.py's other
-#: uses of that constant (the probe cursor, the per-address lock, the
-#: address-registration directory) are the WATCHER's own state and stay in
-#: that module; this module owns only the marker/cleared-record pair.
+#: Matches the former watcher module's own ``_STATE_SUBDIR`` literal, kept
+#: here as a separate copy rather than a shared import: that module's other
+#: uses of the constant (the probe cursor, the per-address lock, the
+#: address-registration directory) were the deleted WATCHER's own state;
+#: this module owns only the marker/cleared-record pair.
 _STATE_SUBDIR = "tuple-watch"
 
 
 def session_marker_path(state_dir: Path, claude_pid: int) -> Path:
-    """``<state_dir>/tuple-watch/session.<claude_pid>``: the stale-watcher
-    self-stop marker (nexus-6konb.12, MM-3.4 fix 1). Keyed on the CLAUDE
+    """``<state_dir>/tuple-watch/session.<claude_pid>``: the per-claude-pid
+    session marker (nexus-6konb.12, MM-3.4 fix 1). Keyed on the CLAUDE
     ancestor pid, never a session id -- the whole point is to tell a
-    watcher spawned under an OLDER session that a NEWER one now exists
-    for the same conversation, so the pid has to be the stable half of
-    the pair (see :func:`write_session_marker`).
+    reader that resolved an OLDER session id for this pid that a NEWER
+    one now exists for the same conversation, so the pid has to be the
+    stable half of the pair (see :func:`write_session_marker`).
     """
     return state_dir / _STATE_SUBDIR / f"session.{claude_pid}"
 
@@ -71,29 +71,30 @@ def write_session_marker(state_dir: Path, claude_pid: int, session_id: str) -> N
     """Best-effort, atomic marker naming the NEW session id for
     *claude_pid* (nexus-6konb.12, MM-3.4 fix 1).
 
-    Replaces the model-dependent TaskStop rule the SessionStart arm
-    instruction used to carry (:mod:`nexus.mailbox_arm`): that rule could
-    not work after ``/clear`` in the first place, because the fresh
-    conversation it would run in has no memory of the OLD Monitor's
-    harness task id -- there was never a way for a genuinely new context
-    to discover it. This marker sidesteps the discovery problem instead
-    of solving it: the watcher checks its OWN pid's marker, not a task
-    id nothing hands it.
+    Originally replaced the model-dependent TaskStop rule the deleted
+    Monitor-arm instruction used to carry: that rule could not work after
+    ``/clear`` in the first place, because the fresh conversation it would
+    run in has no memory of the OLD Monitor's harness task id -- there was
+    never a way for a genuinely new context to discover it. This marker
+    sidesteps the discovery problem instead of solving it: a reader checks
+    its OWN pid's marker, not a task id nothing hands it. RDR-211
+    nexus-rplay.14 deleted the watcher that read this marker for its own
+    self-stop; the marker's remaining readers are
+    ``nexus.tuple_directory.resolve_default_from`` (``mailbox_send``'s
+    default ``from``) and this module's own
+    :func:`record_clear_and_write_session_marker`.
 
     Reuses the nexus-d76vc T1-handoff pattern (:mod:`nexus.daemon.t1_handoff`):
-    the writer (``nexus.hooks.session_start``, on ``/clear``/``/resume``)
-    and the reader (``nexus.tuple_watch.run_watch``, from inside the
-    Monitor's own shell) each independently derive the SAME claude_pid
-    via :func:`nexus.session.find_immediate_claude_pid`, walking process
+    the writer (``nexus.hooks.session_start``, on every SessionStart source)
+    and a reader each independently derive the SAME claude_pid via
+    :func:`nexus.session.find_immediate_claude_pid`, walking process
     ancestry from wherever they happen to run up to the first ``claude*``
     process. The pid is never passed between them -- it is recomputed on
-    both sides, which is what lets a watcher spawned minutes earlier,
-    from a different shell, still find the right file.
+    both sides.
 
     Called only from a best-effort caller (see
-    ``nexus.hooks._write_tuple_watch_session_marker``): a failure here
-    only means a stale watcher keeps running and holding its lock a
-    little longer, never a reason to fail SessionStart over it.
+    ``nexus.hooks._write_tuple_watch_session_marker``): a failure here is
+    never a reason to fail SessionStart over it.
     """
     path = session_marker_path(state_dir, claude_pid)
     try:

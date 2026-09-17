@@ -15,8 +15,8 @@ advance:
   ``mailbox/<name>`` subspace. Subscribing it also takes over the
   per-session instance registration file the drain hook
   (``conexus/hooks/scripts/mailbox_drain.py``) reads and starts the
-  RDR-208 ``directory/<name>`` lease, both previously owned by ``nx tuple
-  watch --instance`` (:mod:`nexus.tuple_watch`).
+  RDR-208 ``directory/<name>`` lease, both previously owned by the now-
+  deleted CLI mailbox-watch loop's own ``--instance`` flag.
 - up to :data:`MAX_BOARD_TOPICS` ``board/<topic>`` subspaces.
 
 Persisted in T1 scratch keyed by session id (see :func:`load`/:func:`persist`),
@@ -31,20 +31,21 @@ registered listener with ``self`` (:meth:`SubscriptionSet.add_listener`),
 so the future waiter can cancel its parked ``wait`` and re-issue it with
 the new list (Approach item 6, Technical Design "Waiting").
 
-**Lifted, not imported, from** :mod:`nexus.tuple_watch` **(RDR-208 Phase 2
-Step 1 / bead nexus-6konb.9):** ``write_instance_registration``'s path and
-on-disk format are byte-identical to the original (the drain hook reads
+**Lifted, not imported, from the former CLI mailbox-watch loop** (RDR-208
+Phase 2 Step 1 / bead nexus-6konb.9): ``write_instance_registration``'s path
+and on-disk format are byte-identical to the original (the drain hook reads
 ``<config>/tuple-watch/addresses.d/<session id>``, one instance name per
-line) -- copied rather than imported because that module's session-marker
-contract (``_read_session_marker``/``write_session_marker``/
-``session_marker_path``/``record_clear_and_write_session_marker``/
-``cleared_record_path``) is being rehomed by a concurrent bead, and this
-module must not become one of its importers mid-move. ``_directory_heartbeat``'s
-due/rotate/nonce logic is the same shape as the original, adapted to log via
-structlog instead of the CLI watcher's budgeted stdout emitter -- there is
-no Monitor stream here to budget against. The originals stay in
-``tuple_watch.py`` untouched; a later deletion bead removes that module
-once the watcher itself is retired (RDR-211 Existing Infrastructure Audit).
+line) -- copied rather than imported because the session-marker contract
+(``_read_session_marker``/``write_session_marker``/``session_marker_path``/
+``record_clear_and_write_session_marker``/``cleared_record_path``) was being
+rehomed to :mod:`nexus.session_marker` by a concurrent bead at the time, and
+this module was not to become one of its importers mid-move.
+``_directory_heartbeat``'s due/rotate/nonce logic is the same shape as the
+original, adapted to log via structlog instead of the CLI watcher's budgeted
+stdout emitter -- there is no Monitor stream here to budget against. The
+originals lived in the now-deleted CLI watcher module until RDR-211
+nexus-rplay.14 removed it along with the watcher loop itself (RDR-211
+Existing Infrastructure Audit).
 """
 from __future__ import annotations
 
@@ -64,13 +65,14 @@ from nexus.db.t2.http_tuple_store import SchemaViolationError
 
 _log = structlog.get_logger(__name__)
 
-# ── Lifted from nexus.tuple_watch (byte-identical path/format) ─────────────
+# ── Lifted from the former CLI mailbox-watch module (byte-identical path/format) ─
 
 _STATE_SUBDIR = "tuple-watch"
 
-#: Mirrors ``nexus.tuple_watch._SAFE_SESSION_ID`` exactly -- a session id
-#: outside this charset becomes a stray path-hostile filename, so a bad
-#: value is a silent no-op here too, never trusted with a directory write.
+#: Mirrored the former CLI mailbox-watch module's own ``_SAFE_SESSION_ID``
+#: exactly -- a session id outside this charset becomes a stray
+#: path-hostile filename, so a bad value is a silent no-op here too, never
+#: trusted with a directory write.
 _SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 #: Matches ``directory.yaml``'s own ``retention_seconds`` -- a re-send can
@@ -115,9 +117,10 @@ def write_instance_registration(state_dir: Path, session_id: str, instance: str)
     mail has no drain floor until the next successful call.
 
     A *session_id* outside the safe charset (or an empty *instance*) is a
-    silent no-op, mirroring ``nexus.tuple_watch.write_instance_registration``
-    exactly (same path, same format, same guard) -- see this module's
-    docstring for why it is copied rather than imported.
+    silent no-op, mirroring the former CLI mailbox-watch module's own
+    ``write_instance_registration`` exactly (same path, same format, same
+    guard) -- see this module's docstring for why it is copied rather than
+    imported.
     """
     if not instance or not _SAFE_SESSION_ID.fullmatch(session_id):
         return
@@ -134,9 +137,10 @@ def write_instance_registration(state_dir: Path, session_id: str, instance: str)
 @dataclass
 class _DirectoryLease:
     """This subscription's own ``directory/<name>`` lease state, tracked
-    across heartbeat calls. Purely in-process, mirroring
-    ``nexus.tuple_watch._DirectoryLease``: a fresh process (a `/resume`,
-    or this session's next MCP server restart) re-arms from scratch."""
+    across heartbeat calls. Purely in-process, mirroring the former CLI
+    mailbox-watch module's own ``_DirectoryLease``: a fresh process (a
+    `/resume`, or this session's next MCP server restart) re-arms from
+    scratch."""
 
     armed: bool = False
     nonce: str = ""
@@ -147,10 +151,10 @@ class _DirectoryLease:
 
 
 def _directory_nonce(t: float, pid: int) -> str:
-    """Finer than one second and carries the pid, exactly mirroring
-    ``nexus.tuple_watch._directory_nonce`` -- two processes arming
-    ``directory/<name>`` for the same session in the same second must not
-    collide on one id."""
+    """Finer than one second and carries the pid, exactly mirroring the
+    former CLI mailbox-watch module's own ``_directory_nonce`` -- two
+    processes arming ``directory/<name>`` for the same session in the same
+    second must not collide on one id."""
     return f"{t:.6f}-{pid}"
 
 
@@ -170,10 +174,11 @@ def _directory_heartbeat(
     place. Never raises: a write failure is logged and the caller's loop
     continues untouched, so the very next cycle retries.
 
-    Adapted from ``nexus.tuple_watch._directory_heartbeat`` -- same
-    due/rotate/nonce decision, logged via structlog instead of the CLI
-    watcher's budgeted stdout emitter (this caller has no Monitor stream
-    to budget against). *store* is an ``HttpTupleStore``-shaped object
+    Adapted from the former CLI mailbox-watch module's own
+    ``_directory_heartbeat`` -- same due/rotate/nonce decision, logged via
+    structlog instead of that module's budgeted stdout emitter (this
+    caller has no Monitor stream to budget against). *store* is an
+    ``HttpTupleStore``-shaped object
     (anything exposing the same ``out`` signature).
     """
     due = not lease.armed or t - lease.last_send >= heartbeat_s

@@ -2,19 +2,28 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # RDR-208 local-mode MVV, the in-container journey (bead nexus-galkv.19).
 #
+# RETIRED FUNCTIONALLY, KEPT AS A RECORD (RDR-211 nexus-rplay.14, 2026-09-17):
+# this journey's `arm()` step exec'd the CLI ping-then-pull watcher that
+# nexus-rplay.14 deleted outright, so this script no longer runs end to end.
+# Its disposition, like nexus-6konb's other open beads (.15 live MVV, .16
+# close gate, .21 pre-resume instance mailbox), is Sam's per T2
+# nexus_rdr/211-decision-channel-delivery-2026-09-16. Left in place, still
+# parsing (`bash -n`, tests/test_rdr208_mvv_wiring.py), so the historical
+# shape is not lost before that disposition is made.
+#
 # A virgin local-mode box: `nx init` provisions the bundled engine and PG.
 # Stand-in claude processes (session_server.sh) play two or more Claude Code
 # sessions; under them run the REAL SessionStart hook, the REAL drain hook
 # (conexus/hooks/scripts/mailbox_drain.py from the version under test), the
-# REAL `nx tuple watch`, and the REAL mailbox_send tool function. Only Claude
-# Code itself is stood in for, replaying what was measured live on
-# 2026-09-14 (T2 nexus/rdr-208-mvv-2026-09-14): /clear fires SessionStart
+# (deleted) CLI mailbox watcher, and the REAL mailbox_send tool function.
+# Only Claude Code itself is stood in for, replaying what was measured live
+# on 2026-09-14 (T2 nexus/rdr-208-mvv-2026-09-14): /clear fires SessionStart
 # source=clear in the same process; /resume is a new process on the same
 # session id; /branch mints a new id in the same process and fires no
 # SessionStart.
 #
-# EXPECT_BRANCH_FIX=1 asserts step 6's fix (the parent's watcher stops and
-# releases after /branch); 0 asserts the 7.46.0 defect reproduces.
+# EXPECT_BRANCH_FIX=1 asserted step 6's fix (the parent's watcher stops and
+# releases after /branch); 0 asserted the 7.46.0 defect reproduces.
 set -uo pipefail
 
 EXPECT_BRANCH_FIX="${EXPECT_BRANCH_FIX:-1}"
@@ -104,10 +113,11 @@ drain() {  # SERVER -> the hook's stdout (the injected context)
     _send_cmd "$1" run "$(env_for "$sid")python3 $HOOKS/mailbox_drain.py < $f"
     cat "$RUN/$LAST_ID.out"
 }
-arm() {  # SERVER NAME -> WATCH_PID, WATCH_OUT
-    _send_cmd "$1" spawn "$(env_for "${SID_OF[$1]}")exec nx tuple watch --instance $2"
-    WATCH_PID="$(cat "$RUN/$LAST_ID.pid")"
-    WATCH_OUT="$RUN/$LAST_ID.out"
+arm() {  # SERVER NAME -> WATCH_PID, WATCH_OUT -- RETIRED (RDR-211
+    # nexus-rplay.14): this used to spawn the CLI mailbox watcher this MVV
+    # exercised; that command was deleted outright. See the file header.
+    WATCH_PID=""
+    WATCH_OUT="/dev/null"
 }
 send() {  # SERVER TO CORRELATION [FROM] -> result JSON
     _send_cmd "$1" run "$(env_for "${SID_OF[$1]}")$NXPY $HOME/send.py $2 $3 'rdr-208 local-mode mvv $3' ${4:-}"
@@ -242,7 +252,10 @@ if [ "$EXPECT_BRANCH_FIX" = 1 ]; then
     check "the parent's watcher self-stops" wait_for 15 exited "$WA3"
     check "  its STOP line names the fork" grep -q "STOP: this conversation is now session $SF" "$WA3_OUT"
     check "  its directory entry is released" wait_for 5 no_entries alpha-fc
-    check "the fork's first prompt re-arms (arm instruction printed)" grep -q "MAILBOX WATCH" <<<"$out"
+    # RETIRED (RDR-211 nexus-rplay.14): the arm instruction this checked for
+    # was deleted along with the CLI watcher; arm() above no longer spawns
+    # anything, so this check is dead weight kept only for historical shape.
+    check "the fork's first prompt re-arms (arm instruction printed)" grep -q "SUBSCRIBE" <<<"$out"
 else
     check "7.46.0 defect reproduces: the marker still names the parent" test "$(marker_of A2)" = "$SA_C"
     sleep 12

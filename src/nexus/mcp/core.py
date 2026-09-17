@@ -6871,12 +6871,11 @@ def _current_subscription_session_id() -> str:
     `tuple_subscriptions` scope the subscription set to.
 
     Deliberately `NX_T1_SESSION_ID` alone, NOT `resolve_default_from`
-    (mailbox_send's own resolution, which reads the tuple-watch session
-    marker first): that marker's contract is being rehomed out of
-    `nexus.tuple_watch` by a concurrent bead, and the subscription set
-    already IS the thing that owns this session's identity for T1 scoping
-    (the same env var the MCP lifespan's T1 mint sets) -- one lookup, not
-    two disagreeing ones.
+    (mailbox_send's own resolution, which reads the session marker first,
+    from `nexus.session_marker`): the subscription set already IS the
+    thing that owns this session's identity for T1 scoping (the same env
+    var the MCP lifespan's T1 mint sets) -- one lookup, not two disagreeing
+    ones.
     """
     return _os.environ.get("NX_T1_SESSION_ID", "").strip()
 
@@ -6908,10 +6907,10 @@ def tuple_subscribe(
     most one instance-name mailbox).
 
     Subscribing the session's own instance-name mailbox also takes over
-    what `nx tuple watch --instance NAME` used to do for it: it writes
-    the per-session registration file the `UserPromptSubmit` drain hook
-    reads, and starts the RDR-208 `directory/<name>` lease so the name
-    resolves to this session.
+    what the now-deleted CLI mailbox-watch loop's own `--instance NAME`
+    flag used to do for it: it writes the per-session registration file
+    the `UserPromptSubmit` drain hook reads, and starts the RDR-208
+    `directory/<name>` lease so the name resolves to this session.
 
     A `/resume` (same session id) restores this list; a `/clear` (a new
     session id) starts clean.

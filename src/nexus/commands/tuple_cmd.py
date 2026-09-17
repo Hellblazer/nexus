@@ -18,8 +18,11 @@ Subcommands:
   stats      -- the census for one subspace.
   directory  -- who holds a name in the RDR-208 session directory (bead
                 nexus-galkv.11; resolver in ``nexus.tuple_directory``).
-  watch      -- ping-then-pull mailbox watcher for a Claude Code Monitor
-                (bead nexus-6konb.2; loop in ``nexus.tuple_watch``).
+
+Mailbox push delivery is the RDR-211 MCP subscription tools
+(``tuple_subscribe``/``tuple_unsubscribe``/``tuple_subscriptions``) and the
+``UserPromptSubmit`` drain hook, not a CLI subcommand of this group -- the
+prior ping-then-pull watcher loop was deleted at RDR-211 nexus-rplay.14.
 
 Every subcommand calls through ``nexus.db.t2.http_tuple_store.HttpTupleStore``
 (RDR-205 Phase 2 Step 1, nexus-em75s.9) — none of them talks HTTP itself.
@@ -27,7 +30,6 @@ Every subcommand calls through ``nexus.db.t2.http_tuple_store.HttpTupleStore``
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 import click
@@ -62,7 +64,7 @@ def _print_tuple_error(e: Exception) -> None:
 
 @click.group(name="tuple")
 def tuple_group() -> None:
-    """RDR-205 Linda tuple space: out / rd / in / ack (with an optional reply) / nack / renew / release / templates / list / stats / directory / watch."""
+    """RDR-205 Linda tuple space: out / rd / in / ack (with an optional reply) / nack / renew / release / templates / list / stats / directory."""
 
 
 @tuple_group.command(name="out")
@@ -458,154 +460,6 @@ def tuple_directory_cmd(name: str, json_out: bool) -> None:
 
 
 # ── rendering helpers ────────────────────────────────────────────────────────
-
-
-@tuple_group.command(name="watch")
-@click.argument("addresses", nargs=-1)
-@click.option("--instance", "instance", default="", metavar="NAME",
-              help="This session's instance-name mailbox (the ListAgents row, e.g. nexus-19). "
-                   "It is in no environment variable, so it must be passed here.")
-@click.option("--interval", "interval_s", type=float, default=3.0, show_default=True,
-              help="Seconds between probes.")
-@click.option("--reemit-after", "reemit_after_s", type=float, default=600.0, show_default=True,
-              help="Seconds before a still-present tuple is pinged again.")
-@click.option("--max-emits", "max_emits", type=int, default=3, show_default=True,
-              help="Pings per tuple before it goes silent.")
-@click.option("--iterations", type=int, default=0, show_default=True,
-              help="Probe cycles to run; 0 runs until interrupted.")
-@click.option("--state-dir", "state_dir", type=click.Path(path_type=Path), default=None,
-              help="Where the seen-set lives (default: the nexus config dir).")
-def tuple_watch_cmd(
-    addresses: tuple[str, ...], instance: str, interval_s: float, reemit_after_s: float,
-    max_emits: int, iterations: int, state_dir: Path | None,
-) -> None:
-    """Watch mailbox/ADDRESS... and print one ping line per newly arrived tuple.
-
-    An explicit ADDRESS wins outright: it suppresses every default and watches
-    exactly what you named. With no ADDRESS, watches the session id, read from
-    this process's own environment, and adds the instance mailbox only when
-    --instance supplies that name, since it is in no environment variable. So the
-    no-flag default is ONE mailbox and it says so; omitting --instance warns
-    rather than silently halving the watch. When both are watched, this one
-    process probes them, never two Monitors.
-
-    Built to be a Claude Code Monitor source: prints nothing on an empty probe,
-    never claims, never prints a body. Re-pings a still-present tuple after
-    --reemit-after, at most --max-emits times. Every line saying mail is not being
-    delivered goes to stdout, the stream a Monitor watches: pings, a dead-lettered
-    row never seen alive, a probe failure and its recovery, the SKIP when the
-    engine cannot be read, the refusal when another watcher holds the address.
-    Only the death of a row already pinged while alive goes to stderr."""
-    from nexus import config as _config  # noqa: PLC0415 — deferred: CLI startup cost
-    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred
-    from nexus.tuple_watch import (  # noqa: PLC0415 — deferred: CLI startup cost
-        PING_PREFIX,
-        WatchConfig,
-        acquire_watch_locks,
-        preflight,
-        prune_stale_registrations,
-        resolve_watch_addresses,
-        run_watch,
-        write_instance_registration,
-    )
-
-    cfg = WatchConfig(interval_s=interval_s, reemit_after_s=reemit_after_s, max_emits=max_emits)
-    sd = state_dir or _config.nexus_config_dir()
-    report = lambda s: click.echo(s, err=True)  # noqa: E731 — one-liner, matches emit's shape
-
-    # Resolved ONCE, here, and reused below for the registry write: this is the
-    # session id `resolve_watch_addresses` itself resolves at spawn from the process
-    # environment (CLAUDE_CODE_SESSION_ID/NX_SESSION_ID), which is also the identity
-    # `mailbox_drain.py` reads off its own hook payload for the exact same session.
-    session_id_from_env = resolve_active_session_id()
-
-    # The ADDRESSES are resolved exactly once, here, and never re-resolved inside the
-    # loop: CLAUDE_CODE_SESSION_ID is spawn-time env a long-lived process cannot see
-    # change, and ~/.config/nexus/current_session is machine-wide and clobbered by every
-    # peer session's SessionStart, so a re-resolve is either a no-op or a spurious exit.
-    # A moved address is handled by this process dying with its session and the next
-    # SessionStart re-arming (MM-3.1/MM-3.2), backed by the lock below.
-    resolved = resolve_watch_addresses(
-        addresses, instance=instance, session_id=session_id_from_env,
-    )
-    if resolved.error:
-        click.echo(resolved.error)
-        return
-    for notice in resolved.notices:
-        click.echo(notice)
-    watched = resolved.addresses
-
-    # EVERY path out of this command says so on stdout before it goes. The shared
-    # one-shot-command error helper writes to stderr, which is right for `nx tuple rd`
-    # and wrong here: this command's whole contract is that a session watching stdout
-    # learns when mail is not being delivered, and the watcher dying is the most
-    # complete form of that. So the setup calls are inside the guard too -- a bug in
-    # preflight or the lock acquisition itself would otherwise reach Click's default
-    # handler as a bare traceback on stderr, with no stdout line at all.
-    locks = None
-    try:
-        store = _store()
-        checked = preflight(store, watched, config=cfg, emit=click.echo)
-        if not checked.ok:
-            return
-        # Partial, like the locks below: an address the engine cannot read was
-        # named and dropped, and the rest are still watched.
-        watched = list(checked.readable)
-        locks = acquire_watch_locks(watched, state_dir=sd, emit=click.echo)
-        if not locks.ok:
-            return
-        # PER-SESSION instance registry (nexus-6konb.9 defect fix): written only on
-        # the default resolution path -- an explicit positional ADDRESS suppresses
-        # `instance` entirely in `resolved.addresses` (resolve_watch_addresses'
-        # own contract above), so a positional invocation writes nothing here,
-        # matching what it actually watched. Never keyed by a positional literal:
-        # only by the session id this process resolved from its own environment,
-        # which is what `mailbox_drain.py` reads back per its own payload session id.
-        #
-        # Deliberately keyed on `watched` (what was RESOLVED and the engine could
-        # read, per the partial preflight above), not `locks.acquired` (what was
-        # actually LOCKED): nexus-6konb.10 (MM-3.2) decision 3 -- this
-        # registration is written whether or not the instance-name lock was
-        # acquired. The name belongs to the new session regardless of whether a
-        # stale watcher from a prior /clear still holds that address's lock, and
-        # the drain hook must drain it at this session's prompts either way.
-        # RDR-208 Phase 2 Step 1 (bead nexus-galkv.9): the directory lease write
-        # condition mirrors the registration's exactly -- it does NOT depend on
-        # whether the instance lock was acquired either. The name belongs to
-        # this session regardless; a clash is for mailbox_send to refuse, not
-        # for the watcher to hide.
-        session_owns_instance = bool(instance and session_id_from_env and instance in watched and not addresses)
-        directory_name = instance if session_owns_instance else None
-        if session_owns_instance:
-            write_instance_registration(sd, session_id_from_env, instance)
-        if session_id_from_env:
-            prune_stale_registrations(sd, session_id_from_env)
-        # Watch exactly what was LOCKED (nexus-6konb.10, MM-3.2): acquire_watch_locks
-        # is partial, so `locks.acquired` can be a strict subset of `watched` when
-        # another watcher already holds one of the requested addresses.
-        run_watch(
-            store, locks.acquired, config=cfg, state_dir=sd,
-            iterations=iterations, emit=click.echo, report=report,
-            # An explicit positional ADDRESS is a literal mailbox, not this session's
-            # own, so a /clear does not make it stale and it must not self-stop
-            # (nexus-6konb.13 docs critic). Only the default, session-resolved
-            # watch compares itself against the SessionStart marker.
-            spawn_session_id=None if addresses else session_id_from_env,
-            directory_name=directory_name,
-            directory_session_id=session_id_from_env if directory_name else None,
-        )
-    except KeyboardInterrupt:
-        return
-    except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
-        click.echo(
-            f"{PING_PREFIX} the watcher is exiting and no mailbox is being watched:"
-            f" {type(e).__name__}: {e}",
-        )
-        _print_tuple_error(e)
-        raise SystemExit(1) from e
-    finally:
-        if locks is not None:
-            locks.release()
 
 
 def _row_dict(row: Any) -> dict[str, Any]:

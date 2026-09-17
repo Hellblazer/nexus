@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """Unit tests for `nexus.session_marker` (RDR-211 nexus-rplay.24): the
-tuple-watch session-marker contract, rehomed out of `nexus.tuple_watch`
-ahead of that module's deletion.
+tuple-watch session-marker contract, rehomed out of the former CLI
+mailbox-watch module ahead of its deletion (RDR-211 nexus-rplay.14).
 
 Pure unit tests, no engine substrate: every function here is a flat-file
 read/write against a `tmp_path`. The on-disk path SHAPE is pinned twice --

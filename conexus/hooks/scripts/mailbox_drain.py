@@ -3,20 +3,19 @@
 """UserPromptSubmit hook: drain this session's RDR-205 mailboxes and inject
 what it finds (bead nexus-6konb.7, MM-2.2; design bead nexus-73vnw).
 
-THE CONSUMER OF RECORD. Epic nexus-6konb delivers mailbox push in two
-disjoint halves and this is the deterministic one. ``nx tuple watch``
-(Phase 1) PINGS: it probes with a zero-timeout ``rd``, emits one line
-naming the address, sender and tuple id, carries no body, and NEVER
-claims. This hook CLAIMS, ACKS and RENDERS. They are never two renderers
-of one row -- the watcher tells a session that mail exists, this hook is
-what delivers and consumes it.
-
-That split is what makes a lost ping harmless for live mail: the row sits
-in the mailbox for its full retention window and this hook drains it at
-the receiver's next prompt whether or not any watcher was ever armed.
-Arming a Monitor is a request a model can decline or forget; this hook
-fires on every prompt. So the watcher buys LATENCY and this hook is the
-FLOOR.
+THE CONSUMER OF RECORD, and now the ONLY push-adjacent mechanism this repo
+ships for mailbox delivery (RDR-211 nexus-rplay.14 deleted the CLI
+ping-then-pull watcher this hook used to pair with, its SessionStart arm
+instruction, and its 30-minute re-arm rule outright, not as a fallback --
+push delivery is now the session's own nexus MCP server, which parks a
+``wait`` over the session's subscriptions and pushes through the Claude
+Code channel; see :mod:`nexus.mcp.subscriptions` and
+``docs/tuple-space.md``). This hook CLAIMS, ACKS and RENDERS, on every
+``UserPromptSubmit``, whether or not a session ever subscribed anything or
+ever reached the channel. It is the unconditional FLOOR: the channel buys
+latency (mail arrives mid-turn), this hook guarantees mail is never lost --
+a row sits in the mailbox for its full retention window and this hook
+drains it at the receiver's next prompt regardless.
 
 WHERE THE FLOOR DOES NOT REACH, stated here because a reader of the
 paragraph above would otherwise assume it is universal:
@@ -24,24 +23,25 @@ paragraph above would otherwise assume it is universal:
 * A DEAD-LETTERED row is unclaimable by construction, so claim-and-ack
   cannot be its dedup and this hook cannot consume it. It is still
   surfaced ONCE, from a local seen-file, because the alternative is that
-  a session with no watcher armed never learns the message existed at
+  a session with no channel reached never learns the message existed at
   all. Purging it is a human act; this hook only says it is there.
 * An INSTANCE-NAME address (the ``ListAgents`` row, e.g. ``nexus-19``) is
   drained only once something has REGISTERED it, because it exists in no
   environment variable anywhere -- MM-1.3 established that, which is why
-  ``nx tuple watch`` takes it as an explicit ``--instance`` literal. The
-  registry is PER-SESSION (nexus-6konb.9 defect fix, corrected from an
-  earlier machine-wide design): ``nx tuple watch --instance NAME``
-  writes ``<config>/tuple-watch/addresses.d/<session id>`` -- one address
-  per line, keyed to the exact session that armed it, at spawn, from its
-  own environment. This hook reads ONLY the file named by ITS OWN payload
-  session id, never any other session's file and never a machine-wide
-  one: the earlier design read a single shared ``<config>/tuple-
-  watch/addresses`` file for every session, so on a box running more than
-  one session the first one to prompt after arming claimed every other
-  session's instance-addressed mail too. A missing per-session file is an
-  empty registry, never a failure. Until a session's own file exists,
-  mail sent to that instance name has no floor. The session id needs no
+  the SessionStart instruction asks the model to name it explicitly via
+  ``tuple_subscribe("mailbox/<name>")``. The registry is PER-SESSION
+  (nexus-6konb.9 defect fix, corrected from an earlier machine-wide
+  design): subscribing the instance mailbox writes
+  ``<config>/tuple-watch/addresses.d/<session id>`` -- one address per
+  line, keyed to the exact session that subscribed it. This hook reads
+  ONLY the file named by ITS OWN payload session id, never any other
+  session's file and never a machine-wide one: the earlier design read a
+  single shared ``<config>/tuple-watch/addresses`` file for every
+  session, so on a box running more than one session the first one to
+  prompt after subscribing claimed every other session's
+  instance-addressed mail too. A missing per-session file is an empty
+  registry, never a failure. Until a session's own file exists, mail
+  sent to that instance name has no floor. The session id needs no
   registration: it arrives in this hook's own payload.
 
 CONTRACT WITH THE PROMPT. stdout is injected context, so an empty mailbox
@@ -60,26 +60,6 @@ hazard RDR-206 Step 1 closed inside the engine, appearing here between
 two HTTP calls where no transaction can close it -- so the fix is to
 trust only what ``ack`` confirmed.
 
-RE-ARM (bead nexus-6konb.19). The SessionStart arm instruction can fail to
-reach a session (measured 2026-09-14: ``nx hook session-start`` ran at a
-resume and its output never reached the transcript), and nothing re-armed.
-So after draining, this hook checks whether a live ``nx tuple watch``
-process holds this session's own mailbox lock, by the pid the watcher writes
-into the lock and that pid's command line. It never takes the lock itself: a
-probe holding it even briefly could make a starting watcher refuse its own
-mailbox. It stays silent on the first prompt it sees for a session when a
-watcher self-stop marker names that session: SessionStart ran for it, and its
-instruction (if it arrived) is in front of the model. When no marker names
-the session, no SessionStart ran: ``/branch`` forks a session inside the same
-claude process without one (RDR-208 MVV, 2026-09-14), so the parent's watcher
-keeps running in the fork. The hook then arms on that first prompt, and
-``nx hook mailbox-arm`` moves the process's marker to the fork, which stops
-the parent's watcher. A marker can only make the hook speak, never silence
-it, because SessionStart output is what can be lost. From the second prompt
-on, with no live watcher, it prints the wheel's arm text from
-``nx hook mailbox-arm``: at most once per 10 minutes after a delivered
-instruction, once per minute after a failed attempt.
-
 Stdlib only, no ``nexus`` import, endpoint through the shared
 ``_endpoint_resolve`` sibling (nexus-aginu): the same constraints the
 ``tuple_ledger_project.py`` hook runs under, for the same reason -- a
@@ -91,10 +71,7 @@ import contextlib
 import hashlib
 import json
 import os
-import re
 import secrets
-import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -168,33 +145,6 @@ _CLAIMANT_PID_WIDTH = 10
 #: once instead of spending up to this ceiling regardless.
 _PENDING_LOCK_TIMEOUT_S = 2.0
 
-#: Per-turn re-arm (bead nexus-6konb.19). This script cannot import nexus, so
-#: it spells two wheel facts itself, each pinned against the wheel by
-#: tests/hooks/test_mailbox_drain_hook.py: the watcher's lock name
-#: (nexus.tuple_watch.lock_path) and the command a live watcher runs
-#: (nexus.tuple_watch.WATCH_COMMAND_MARK). Drift in either costs at most a
-#: wasted spawn, never a wrong instruction: ``nx hook mailbox-arm`` re-checks
-#: liveness through the wheel's own lock path before it prints anything.
-_LOCK_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
-_LOCK_PID = re.compile(r"\bpid=(\d+)")
-_WATCH_COMMAND_MARK = "tuple watch"
-
-#: This hook's own record per session, ``tuple-watch/rearm.<session id>``:
-#: when it last delivered an arm instruction and when it last tried.
-_REARM_STATE_PREFIX = "rearm."
-#: Spacing after a delivered instruction. Bounds a session that never arms
-#: to one reminder per interval.
-_REARM_INTERVAL_S = 600.0
-#: Spacing after a failed attempt (no nx, nx failed, nx timed out). Short,
-#: because the failure this path exists for is a transient one.
-_REARM_RETRY_S = 60.0
-
-#: The whole hook stays under the harness's 10 s kill. The re-arm spawns only
-#: into what the drain left of this ceiling, and not at all below the minimum.
-_HOOK_CEILING_S = 9.0
-_REARM_MIN_S = 1.5
-_REARM_SPAWN_CAP_S = 5.0
-
 _TENANT = _ep.DEFAULT_TENANT
 _SAFE_ADDRESS_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-."
@@ -266,9 +216,9 @@ def _seen_path(config_dir: Path, address: str) -> Path:
 
 
 def _read_session_registry(config_dir: Path, session_id: str) -> list[str]:
-    """The instance address(es) THIS session registered for itself via
-    ``nx tuple watch --instance NAME`` (nexus-6konb.9 defect fix), one per
-    line. Blank lines and ``#`` comments are ignored; anything unsafe is
+    """The instance address(es) THIS session subscribed for itself via
+    ``tuple_subscribe("mailbox/<name>")`` (nexus-6konb.9 defect fix), one
+    per line. Blank lines and ``#`` comments are ignored; anything unsafe is
     dropped. Keyed strictly to *session_id* -- never machine-wide -- so
     one session can never drain another session's instance-named mailbox.
     A missing or unreadable file is simply an empty registry -- never a
@@ -289,7 +239,7 @@ def _read_session_registry(config_dir: Path, session_id: str) -> list[str]:
 
 def _cleared_record_path(config_dir: Path, session_id: str) -> Path:
     """``<config>/tuple-watch/cleared.<session_id>``, matching
-    ``nexus.tuple_watch.cleared_record_path`` -- pinned against drift by
+    ``nexus.session_marker.cleared_record_path`` -- pinned against drift by
     :func:`test_rearm_naming_matches_the_wheel`'s sibling in the test module.
     *session_id* here is the reading session's OWN id: the record this hook
     reads was written FOR it, naming the mailbox(es) its own ``/clear``
@@ -300,7 +250,7 @@ def _cleared_record_path(config_dir: Path, session_id: str) -> Path:
 
 def _read_cleared_record(config_dir: Path, session_id: str) -> list[str]:
     """The mailbox(es) THIS session's ``/clear`` stranded, one per line, in
-    the order :func:`nexus.tuple_watch.record_clear_and_write_session_marker`
+    the order :func:`nexus.session_marker.record_clear_and_write_session_marker`
     wrote them (the immediately-previous session first, then any chained
     further back). Blank lines and ``#`` comments are ignored. A malformed
     entry is dropped AND logged -- unlike the silent drop in
@@ -341,7 +291,7 @@ def _prune_stale_cleared_records(config_dir: Path, *, now: float) -> None:
     over every record in the directory -- not scoped to the current
     session's own record -- since a record can outlive the session that
     would ever read it again (e.g. a chained clear's now-unreachable id;
-    see :func:`nexus.tuple_watch.record_clear_and_write_session_marker`).
+    see :func:`nexus.session_marker.record_clear_and_write_session_marker`).
     """
     watch_dir = config_dir / "tuple-watch"
     try:
@@ -1114,104 +1064,25 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
     return base_url, token, is_local
 
 
-def _watch_lock_path(config_dir: Path, session_id: str) -> Path:
-    return config_dir / "tuple-watch" / (_LOCK_UNSAFE.sub("_", session_id) + ".lock")
-
-
-def _rearm_state_path(config_dir: Path, session_id: str) -> Path:
-    return config_dir / "tuple-watch" / f"{_REARM_STATE_PREFIX}{session_id}"
-
-
-def _lock_pid(body: str) -> int | None:
-    match = _LOCK_PID.search(body)
-    return int(match.group(1)) if match else None
-
-
-def _pid_is_watcher(pid: int | None) -> bool:
-    """A live process running ``nx tuple watch``. The lock file outlives its
-    watcher, so a dead pid is no watcher, and a live pid running anything
-    else is a reused pid, also no watcher."""
-    if not pid:
-        return False
-    try:
-        os.kill(pid, 0)
-    except PermissionError:
-        pass
-    except OSError:
-        return False
-    try:
-        # -ww: procps (Linux) truncates a piped command column to COLUMNS, and
-        # the watcher's mark sits at the tail of its command line, so a narrow
-        # terminal would read a live watcher as none (the 5957a0055 class).
-        proc = subprocess.run(  # noqa: S603 S607 — fixed argv; ps resolved on PATH
-            ["ps", "-ww", "-p", str(pid), "-o", "command="],
-            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2.0,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return True  # cannot inspect it: trust the live pid rather than nag
-    return _WATCH_COMMAND_MARK in proc.stdout
-
-
-def _watcher_live(config_dir: Path, session_id: str) -> bool:
-    try:
-        body = _watch_lock_path(config_dir, session_id).read_text(encoding="utf-8")
-    except OSError:
-        return False
-    return _pid_is_watcher(_lock_pid(body))
-
-
-def _read_rearm_state(path: Path) -> dict[str, float] | None:
-    """``None`` when this hook has never run for the session. An unreadable
-    or malformed record reads as present and empty, so it can only make a
-    reminder due, never suppress one."""
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except OSError:
-        return {}
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    state: dict[str, float] = {}
-    for key in ("last_rearm", "last_attempt"):
-        try:
-            state[key] = float(data.get(key, 0.0))
-        except (TypeError, ValueError):
-            state[key] = 0.0
-    return state
-
-
-def _write_rearm_state(path: Path, state: dict[str, float]) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.parent / (path.name + ".tmp")
-        tmp.write_text(json.dumps(state), encoding="utf-8")
-        tmp.replace(path)
-    except OSError:
-        pass
-
-
-def _since(now: float, then: float) -> float:
-    """Seconds from *then* to *now*; a clock that went backwards reads as
-    long ago, so it can only make a reminder due."""
-    delta = now - then
-    return delta if delta >= 0 else float("inf")
-
-
-#: The watcher self-stop marker, ``tuple-watch/session.<claude pid>``
-#: (nexus.tuple_watch.session_marker_path), spelled here for the same reason
-#: as the lock name above and pinned by the same test file.
+#: The per-claude-pid session marker, ``tuple-watch/session.<claude pid>``
+#: (nexus.session_marker.session_marker_path). This script cannot import
+#: nexus, so it spells the literal itself, pinned against drift by
+#: tests/test_session_marker.py::TestPathsMatchTheMailboxDrainHookLiterals.
 _SESSION_MARKER_PREFIX = "session."
 
 
 def _session_marker_names(config_dir: Path, session_id: str) -> bool:
-    """True when some claude process's self-stop marker names *session_id*,
+    """True when some claude process's session marker names *session_id*,
     that is, a SessionStart ran for it. ``/branch`` forks a session without
-    one, so a fork's first prompt finds none."""
+    one, so a fork's first prompt finds none.
+
+    RDR-211 nexus-rplay.14 deleted this hook's own per-prompt re-arm, this
+    function's only caller in this file -- kept, unused here, only because
+    ``tests/e2e/rdr208-mvv/run.sh`` still greps for its name to derive
+    step 6's expectation; that MVV's disposition (like nexus-6konb's other
+    open beads) is Sam's per T2 nexus_rdr/211-decision-channel-delivery-
+    2026-09-16.
+    """
     try:
         markers = list((config_dir / "tuple-watch").glob(_SESSION_MARKER_PREFIX + "*"))
     except OSError:
@@ -1225,61 +1096,6 @@ def _session_marker_names(config_dir: Path, session_id: str) -> bool:
         except OSError:
             continue
     return False
-
-
-def _rearm_if_unwatched(config_dir: Path, session_id: str, *, started: float) -> None:
-    """Re-issue the arm instruction when this session has no live watcher.
-
-    Silent on the first prompt this hook sees for a session when a marker
-    names it, since SessionStart then ran; a fork has no such marker and
-    arms at once (module docstring, RE-ARM). The interval starts only once an
-    instruction was actually printed; a failed attempt backs off for the
-    short retry spacing instead.
-    """
-    if not _valid_address(session_id):
-        return
-    path = _rearm_state_path(config_dir, session_id)
-    state = _read_rearm_state(path)
-    if state is None:
-        state = {"last_rearm": 0.0, "last_attempt": 0.0}
-        _write_rearm_state(path, state)
-        if _session_marker_names(config_dir, session_id):
-            return
-    if _watcher_live(config_dir, session_id):
-        return
-    now = time.time()
-    if _since(now, state.get("last_rearm", 0.0)) < _REARM_INTERVAL_S:
-        return
-    if _since(now, state.get("last_attempt", 0.0)) < _REARM_RETRY_S:
-        return
-    remaining = _HOOK_CEILING_S - (time.monotonic() - started)
-    if remaining < _REARM_MIN_S:
-        return
-    state["last_attempt"] = now
-    _write_rearm_state(path, state)
-    nx = shutil.which("nx")
-    if nx is None:
-        _log_skip("no live mailbox watcher for this session, and no nx on PATH to re-arm it")
-        return
-    try:
-        proc = subprocess.run(  # noqa: S603 — nx resolved on PATH; argv built from a validated session id
-            [nx, "hook", "mailbox-arm", "--session-id", session_id],
-            stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            timeout=min(remaining, _REARM_SPAWN_CAP_S),
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        _log_skip(f"re-arm instruction unavailable: {type(exc).__name__}: {exc}")
-        return
-    text = proc.stdout.strip()
-    if proc.returncode != 0 or not text:
-        return
-    state["last_rearm"] = now
-    _write_rearm_state(path, state)
-    sys.stdout.write(
-        "No mailbox watch is running for this session; its SessionStart arm "
-        "instruction may not have arrived.\n" + text + "\n"
-    )
-    sys.stdout.flush()
 
 
 def main() -> int:
@@ -1301,7 +1117,6 @@ def main() -> int:
 
 
 def _drain_all() -> int:
-    started = time.monotonic()
     try:
         raw = sys.stdin.read()
     except (OSError, ValueError):
@@ -1381,10 +1196,6 @@ def _drain_all() -> int:
         except Exception as exc:  # noqa: BLE001 — never the prompt's problem; the record keeps for the next pass
             _log_skip(f"cleared record for {session_id}: unexpected {type(exc).__name__}: {exc}")
 
-    try:
-        _rearm_if_unwatched(config_dir, session_id, started=started)
-    except Exception as exc:  # noqa: BLE001 — the re-arm is advisory; a prompt never sees it fail
-        _log_skip(f"re-arm check: unexpected {type(exc).__name__}: {exc}")
     return 0
 
 

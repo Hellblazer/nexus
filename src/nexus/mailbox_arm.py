@@ -1,53 +1,61 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""SessionStart mailbox-watch arming instruction (bead nexus-6konb.9, MM-3.1).
+"""SessionStart mailbox-subscribe instruction (RDR-211 nexus-rplay.14,
+superseding the arm instruction bead nexus-6konb.9, MM-3.1 originally
+wrote this module for).
 
-RDR-205 / epic nexus-6konb: a Claude Code ``Monitor`` armed on ``nx tuple
-watch`` gives a session push delivery for its own RDR-205 mailboxes (see
-:mod:`nexus.tuple_watch` for the watcher itself). Arming is a request the
-model can decline or forget -- it is never the floor (``nexus-73vnw``'s
-``conexus/hooks/scripts/mailbox_drain.py`` is) -- so this module's only
-job is to put a correct, literal, copy-pasteable arm instruction in front
+RDR-211: the nexus MCP server is the session's own subscriber and delivery
+endpoint, waking the session through the Claude Code channel
+(``notifications/claude/channel``) for its RDR-205 mailboxes and any
+subscribed board topics (see :mod:`nexus.mcp.subscriptions`). Subscribing
+the session's own instance-name mailbox is a request the model can decline
+or forget -- it is never the floor (``nexus-73vnw``'s
+``conexus/hooks/scripts/mailbox_drain.py`` is) -- so this module's only job
+is to put a correct, literal, copy-pasteable subscribe instruction in front
 of the model at the start of every session, and to say nothing when that
 instruction could not possibly succeed.
 
+Sam's decision of 2026-09-16 (T2 nexus_rdr/211-decision-channel-delivery-
+2026-09-16): the prior Monitor-driven CLI watcher loop, the SessionStart
+injection that armed it, and its 30-minute re-arm rule are deleted outright,
+not kept as a fallback -- two mechanisms for one delivery was the seam that
+decision closed. What this module now renders in their place is one line
+asking for the ``tuple_subscribe`` MCP call, plus the setup sentence Sam's
+2026-09-17 decision (T2 nexus_rdr/211-decision-dev-channel-dialog-2026-09-17)
+requires: the channel is a Claude Code research preview, reached only with a
+launch flag and a per-launch confirmation dialog. The ``UserPromptSubmit``
+drain hook (``conexus/hooks/scripts/mailbox_drain.py``) remains the
+unconditional floor regardless of whether the channel was ever reached.
+
 Emitted from ``nx hook session-start`` (:func:`nexus.hooks.session_start`),
-not the plugin's ``session_start_hook.py``: the command being armed,
-``nx tuple watch``, is client-side, so the instruction that names it must
-version with the same wheel that ships the command. A plugin cut that told
-a session to run a flag the installed wheel does not have would be exactly
-the client/plugin drift ``PENDING_RELEASE.md`` exists to catch.
+not the plugin's ``session_start_hook.py``: the MCP tool named,
+``tuple_subscribe``, is client-side, so the instruction that names it must
+version with the same wheel that ships the tool.
 
 Never emitted when it cannot succeed
     :func:`tuple_surface_available` probes the tuple-space engine once
     (bounded to :data:`PROBE_TIMEOUT_S`, well under this hook's own 10s
     SessionStart budget) and caches the verdict for
     :data:`PROBE_CACHE_TTL_S` under ``<config>/tuple-watch/`` -- the same
-    directory :mod:`nexus.tuple_watch` and ``mailbox_drain.py`` already use
-    for their own state files. A below-floor or unreachable engine would
-    otherwise make every session run an arm instruction that 404s or hangs
-    forever, which is worse than saying nothing.
+    directory :mod:`nexus.session_marker` and ``mailbox_drain.py`` already
+    use for their own state files. A below-floor or unreachable engine
+    would otherwise make every session run a subscribe instruction that
+    404s or hangs forever, which is worse than saying nothing.
 
 The instance-name mailbox
     The ``ListAgents`` row name (e.g. ``nexus-19``) reaches no environment
-    variable anywhere -- :func:`nexus.tuple_watch.resolve_watch_addresses`
-    established that -- and it reaches no FILE this module could read
-    either: an earlier version of this module trusted the machine-wide
-    ``<config>/tuple-watch/addresses`` file when it named exactly one
-    candidate distinct from this session's own id, but nothing writes
-    that file, and on a box running several sessions a populated file
-    names several candidates with no way to tell whose instance any of
-    them is (nexus-6konb.9 defect fix, drained by
+    variable anywhere and it reaches no FILE this module could read either:
+    an earlier version of this module trusted a machine-wide registry file
+    that nothing wrote, and on a box running several sessions a populated
+    file would have named several candidates with no way to tell whose
+    instance any of them is (nexus-6konb.9 defect fix, drained by
     ``conexus/hooks/scripts/mailbox_drain.py``'s PER-SESSION registry
-    instead -- see that module's docstring). So this module reads
-    NOTHING to guess an instance name. The name exists only in the
-    model's own knowledge, from the ``ListAgents`` tool's "This session
-    is <name>" line, and the rendered instruction says so: pass it with
-    ``--instance NAME``, in the non-positional form (an explicit
-    positional address suppresses ``nx tuple watch``'s session-id
-    default outright -- :func:`nexus.tuple_watch.resolve_watch_addresses`
-    -- so the command this module renders never uses one), or omit
-    ``--instance`` entirely when the name is not known.
+    instead -- see that module's docstring). So this module reads NOTHING
+    to guess an instance name. The name exists only in the model's own
+    knowledge, from the ``ListAgents`` tool's "This session is <name>"
+    line, and the rendered instruction says so: pass it to
+    ``tuple_subscribe("mailbox/<name>")``, taken from a fresh
+    ``ListAgents`` call, never from memory.
 """
 from __future__ import annotations
 
@@ -62,10 +70,10 @@ _log = structlog.get_logger(__name__)
 #: Marker substring every rendered instruction carries, so a caller can
 #: grep for presence/absence without matching the full text (skills,
 #: tests, MM-3.3's future skill rule).
-ARM_MARKER = "MAILBOX WATCH"
+ARM_MARKER = "MAILBOX SUBSCRIBE"
 
-#: Shared with :mod:`nexus.tuple_watch` and ``mailbox_drain.py``: one
-#: subdirectory under the config dir for every tuple-watch state file.
+#: Shared with :mod:`nexus.session_marker` and ``mailbox_drain.py``: one
+#: subdirectory under the config dir for every mailbox-delivery state file.
 _STATE_SUBDIR = "tuple-watch"
 _PROBE_CACHE_NAME = "arm-probe-cache.json"
 
@@ -156,66 +164,44 @@ def tuple_surface_available(
 
 
 def mailbox_arm_instruction(session_id: str) -> str:
-    """The literal arm-instruction text for *session_id*. Pure text -- no
-    I/O, no probing -- so tests and MM-3.3's future skill rule can both
-    call it directly.
+    """The literal subscribe-instruction text for *session_id*. Pure text
+    -- no I/O, no probing -- so tests and the mailbox skill can both call
+    it directly.
 
-    Carries no instance-name literal (nexus-6konb.9 defect fix): that
-    name exists only in the model's own knowledge, from ``ListAgents``'s
-    "This session is <name>" line, never in this process's environment or
-    any file this module could read. The rendered command therefore never
-    uses a positional address either -- an explicit positional suppresses
-    ``nx tuple watch``'s session-id default outright
-    (:func:`nexus.tuple_watch.resolve_watch_addresses`) -- so it is always
-    ``--instance NAME`` or nothing, and the session-id mailbox resolves on
-    its own, from this session's own environment, the moment the watcher
-    spawns.
+    Carries no instance-name literal (nexus-6konb.9 defect fix, still true
+    under RDR-211): that name exists only in the model's own knowledge,
+    from ``ListAgents``'s "This session is <name>" line, never in this
+    process's environment or any file this module could read. The
+    rendered call therefore always names the placeholder ``<name>``, taken
+    from a FRESH ``ListAgents`` call rather than memory (nexus-6konb.20):
+    ListAgents renames a session on resume (measured nexus-58 to nexus-03,
+    2026-09-14), and reusing an old name from memory would subscribe the
+    wrong instance mailbox. The session's own ``mailbox/<session id>`` is
+    already subscribed from MCP-server startup and needs no call here
+    (:mod:`nexus.mcp.subscriptions`).
 
-    Carries the session id in the Monitor's own ``description`` (nexus-
-    6konb.10, MM-3.2): a Monitor SURVIVES ``/clear``, ``/compact`` and an
-    in-process ``/resume`` (T2 nexus/mm-3.2-clear-resume-monitor-survival-
-    measured-2026-09-13, nexus/mm-0.1-monitor-compact-survival-measured-
-    2026-09-12), so a session firing this instruction again may find one
-    already running from before. No TaskStop step is needed for that,
-    unlike an earlier version of this instruction: a watcher from before a
-    ``/clear``, ``/resume`` or ``/branch`` DISCOVERS the change itself
-    (nexus-6konb.12, MM-3.4 fix 1 -- :func:`nexus.tuple_watch.run_watch`'s
-    per-cycle check against the marker ``nexus.hooks`` writes, which
-    ``nx hook mailbox-arm`` moves after a ``/branch``) and stops on its own,
-    releasing its lock for the replacement Monitor this instruction arms.
-    The old TaskStop rule could never have worked after a genuine
-    ``/clear`` in the first place: the fresh conversation running this
-    instruction has no memory of the OLD Monitor's harness task id, so
-    there was no way for a model to discover what to stop.
-
-    Tells the model to take the name from a ListAgents call made now
-    (nexus-6konb.20): ListAgents renames a session on resume (measured
-    nexus-58 to nexus-03, 2026-09-14), and a re-arm that reused the old
-    name from memory watched the wrong instance mailbox.
-
-    Keeps ``persistent`` out of the literal call (nexus-galkv.19, 2026-09-15):
-    Claude Code builds since the 2026-09-12 MM-0.1 measurement removed that
-    Monitor parameter and reject unknown ones, capping a watch at 30 minutes.
-    The text says to add it only where the tool has it, and to re-arm on the
-    expiry notice where it does not. ``timeout_ms: 3600000`` is valid on both.
+    RDR-211 (Sam's decision of 2026-09-16): this replaces the deleted
+    Monitor-arm instruction outright, not as a fallback alongside it --
+    the channel is the only push path now, and the ``UserPromptSubmit``
+    drain hook is the unconditional floor beneath it regardless of whether
+    a session ever reaches the channel. Names the development-channel
+    launch flag and its per-launch confirmation dialog as setup (Sam's
+    decision of 2026-09-17, T2 nexus_rdr/211-decision-dev-channel-dialog-
+    2026-09-17): the channel is a Claude Code research preview, not yet
+    remembered between launches.
     """
     return (
-        f"{ARM_MARKER}: arm once, now.\n"
-        "Monitor({\n"
-        '  command: "nx tuple watch --instance <name>",\n'
-        f'  description: "mailbox watch {session_id}",\n'
-        "  timeout_ms: 3600000\n"
-        "})\n"
-        "Add persistent: true only if Monitor has it; else re-arm on its "
-        "30-minute expiry notice. "
-        "Take <name> from ListAgents now, not memory: it changes on resume; "
-        "without one, omit --instance. Arming twice is harmless; a watcher "
-        "from before a /clear, /resume or /branch stops itself. Each line is "
-        "a ping, never the message; the watcher never claims: call "
-        "mcp__plugin_conexus_nexus__tuple_in on the named mailbox, handle "
-        "it, then mcp__plugin_conexus_nexus__tuple_ack (with reply for a "
-        "request) or mcp__plugin_conexus_nexus__tuple_nack. An unacked "
-        "claim lapses; after three it is dead-lettered."
+        f"{ARM_MARKER}: call "
+        f'mcp__plugin_conexus_nexus__tuple_subscribe("mailbox/<name>") once, '
+        "with <name> from a fresh ListAgents call now, never from memory (it "
+        "changes on resume), so this session's instance-name mailbox is "
+        f"delivered over the channel; mailbox/{session_id} is already "
+        "subscribed. "
+        "The channel is a Claude Code research preview: launch with "
+        "--dangerously-load-development-channels server:nexus (a "
+        "one-keystroke confirmation dialog appears every launch, not "
+        "remembered between them); without it, mail still arrives at your "
+        "next prompt through the drain hook."
     )
 
 
