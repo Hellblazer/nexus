@@ -1136,6 +1136,56 @@ class TestPipelineIndexPdf:
                 f"for doc_id={tumbler!r}"
             )
 
+    def test_keyboard_interrupt_stops_stages_and_does_not_complete(self, db, mock_t3) -> None:
+        """nexus-6m9zy.3 (#4): a KeyboardInterrupt landing in the
+        orchestrator's wait() call never set cancel -- the three stage
+        loops ran to completion via ThreadPoolExecutor.__exit__'s
+        shutdown(wait=True), and the uploader's own resume-completion
+        check marked the pipeline row 'completed' out from under the
+        interrupted caller. Every later run of that file then hit
+        create_pipeline's 'completed' -> skip path and reported 0 chunks
+        until --force.
+
+        Injects the interrupt by making the orchestrator's own `wait()`
+        call raise KeyboardInterrupt directly, rather than firing a real
+        signal/`_thread.interrupt_main()` on a timer: this environment's
+        `_thread.interrupt_main()` does not preempt a thread blocked in
+        an indefinite `concurrent.futures.wait()` -- the pending
+        interrupt is only observed once that call returns on its own
+        (confirmed empirically: an `Event.wait()` with nothing ever
+        setting it is never interrupted by `_thread.interrupt_main()` on
+        a timer). Mocking `wait()` itself is deterministic and, since the
+        three stage futures are real and still running when it fires,
+        exercises exactly the code path a genuinely-preempted wait()
+        would take.
+        """
+        pages_done: list[int] = []
+
+        def slow_extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False):
+            for i in range(8):
+                time.sleep(0.05)
+                on_page(i, f"page {i} text.", {"page_number": i + 1, "text_length": 12})
+                pages_done.append(i)
+            return _er(8)
+
+        fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}))
+
+        with pytest.raises(KeyboardInterrupt):
+            with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
+                 patch("nexus.pipeline_stages.wait", side_effect=KeyboardInterrupt):
+                ME.return_value.extract.side_effect = slow_extract
+                MC.return_value.chunk.return_value = fc
+                pipeline_index_pdf(Path("/sigint.pdf"), "hK", "docs__test",
+                                   mock_t3, db=db, embed_fn=_embed, corpus="test")
+
+        assert len(pages_done) < 8, "extraction ran to completion despite the interrupt -- cancel was never set"
+        state = db.get_pipeline_state("hK")
+        assert state is not None
+        assert state["status"] != "completed", f"pipeline row wrongly marked completed: {state['status']!r}"
+        assert db.create_pipeline("hK", "/sigint.pdf", "docs__test") != "skip", (
+            "a later run must not silently skip the file"
+        )
+
 
 class TestPipelineIndexPdfDryRun:
     """nexus-uxg4u: dry_run must gate every catalog/T2 write this

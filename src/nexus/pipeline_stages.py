@@ -1126,15 +1126,37 @@ def pipeline_index_pdf(
 
         all_futures: set[Future] = {extract_future, chunk_future, upload_future}
 
-        done, not_done = wait(all_futures, return_when=FIRST_EXCEPTION)
-        for f in done:
-            exc = f.exception()
-            if exc is not None:
+        try:
+            done, not_done = wait(all_futures, return_when=FIRST_EXCEPTION)
+            for f in done:
+                exc = f.exception()
+                if exc is not None:
+                    first_exc = exc
+                    cancel.set()
+                    break
+            if not_done:
+                wait(not_done, return_when=ALL_COMPLETED)
+        except BaseException as exc:  # noqa: BLE001 — nexus-6m9zy.3 (#4): see below
+            # A KeyboardInterrupt (Ctrl-C) delivered to THIS thread lands
+            # here, inside the blocking wait() call, NOT inside any stage
+            # future -- the `for f in done` loop above never runs, so
+            # cancel was never set. Left uncaught, this exception would
+            # propagate straight out of the `with` block; ThreadPoolExecutor
+            # .__exit__ still calls shutdown(wait=True) first, which blocks
+            # until all three stages run to NATURAL completion (nothing
+            # ever told them to stop), and the uploader's own
+            # resume-completion check marks the row 'completed' out from
+            # under the interrupted caller -- every later run then hits
+            # create_pipeline's 'completed' -> skip path and reports 0
+            # chunks until --force. Setting cancel here makes the stages
+            # stop promptly (each polls cancel.is_set() at least once per
+            # poll interval / per page), and falling through to the SAME
+            # first_exc handling below as any other caught stage
+            # exception marks the row 'failed' + clears the orphan WAL,
+            # so a retry resumes instead of silently skipping.
+            cancel.set()
+            if first_exc is None:
                 first_exc = exc
-                cancel.set()
-                break
-        if not_done:
-            wait(not_done, return_when=ALL_COMPLETED)
 
     if first_exc is None:
         for f in all_futures:
