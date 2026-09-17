@@ -163,10 +163,16 @@ throwaway engine with real sessions).
   regardless.
 - **Documented**: Claude Code drops a notification sent before it registers
   the channel; no acknowledgement of a notification exists in the protocol.
-- **Verified**: a session that receives a reference and is told to claim with
-  `tuple_in` does so reliably: five of five messages claimed and acked by a
-  real session in the spike (T2 `nexus_rdr/213-spike-1-session-claims-2026-09-17`),
-  including two that arrived together, announced oldest first.
+- **Verified**: a session without the plugin's hooks that receives a
+  reference and is told to claim with `tuple_in` does so reliably: five of
+  five messages claimed and acked by a real session in the spike (T2
+  `nexus_rdr/213-spike-1-session-claims-2026-09-17`), including two that
+  arrived together, announced oldest first.
+- **Verified**: with the conexus plugin's hooks loaded and a live channel,
+  the channel notification itself fires `UserPromptSubmit`, so the drain
+  hook claims, acks and renders the body about 150 ms after the reference,
+  before the session's own turn; the session's `tuple_in` then returns
+  nothing (T2 `nexus_rdr/213-mvv-2026-09-17`, 2 of 2 messages).
 
 ### Critical Assumptions
 
@@ -178,7 +184,13 @@ throwaway engine with real sessions).
   sent together with no wait between: 5/5 claimed via `tuple_in` and acked,
   the concurrent pair correctly showing only the oldest announced until the
   first was gone, and the waiter itself never held a claim throughout (final
-  mailbox stats: consumed=5, claimed=0).
+  mailbox stats: consumed=5, claimed=0). The spike ran without the
+  plugin's hooks loaded, so it measured the hookless claim path only; the
+  MVV (T2 `nexus_rdr/213-mvv-2026-09-17`) separately found that with the
+  plugin's hooks loaded, the drain hook claims, acks and renders the body
+  at the wake, before the session's own `tuple_in` would run. The claim
+  path above is verified for a hookless session; it is not the primary
+  hook-delivers path.
 - [x] Re-announcing an unclaimed row at each wake, damped to the cadence in
   Technical Design, does not disturb an idle session more than RDR-211's
   re-send did (150 s and 5 are RDR-211's own `DEFAULT_RENEW_INTERVAL_S` and
@@ -204,14 +216,24 @@ throwaway engine with real sessions).
 
 1. **The waiter never claims mail.** It parks `wait` over every subscription
    including mailboxes (`n=1`, no cursor) and pushes a reference for the
-   oldest available row. The session claims with `tuple_in` on its mailbox,
-   then acks, nacks, releases or replies as today.
+   oldest available row. That reference is also the wake for the same
+   `UserPromptSubmit` hook that runs on every prompt: with the plugin's
+   hooks loaded, the drain hook claims, acks and renders the body in that
+   same prompt, before the session's turn, and the session acts on it,
+   claiming nothing. Only a session without those hooks claims with
+   `tuple_in` on its mailbox, then acks, nacks, releases or replies as
+   today.
 2. **One message in front of the session at a time, bounded.** The waiter
-   announces only the oldest unclaimed row of each mailbox. It re-announces
-   the same row at most once every 150 seconds and at most five times, then
-   stops announcing it and leaves it to the drain hook. A restart announces
-   it once more. This keeps RDR-211's back-pressure ruling in effect with no
-   claim.
+   announces only the oldest unclaimed row of each mailbox. Once a row is
+   announced, that mailbox leaves the wait and is checked once per tick
+   (about every 25 seconds) and at each re-announce point instead of
+   parking continuously; boards and every other mailbox keep parking (a
+   mailbox left parking with a pending row busy-loops, measured at over 160
+   wakes a second and enough to exhaust the test box's ephemeral ports).
+   It re-announces the same row at most once every 150 seconds and at most
+   five times, then stops announcing it and leaves it to the drain hook. A
+   restart announces it once more. This keeps RDR-211's back-pressure
+   ruling in effect with no claim.
 3. **No proof, no probe, no flag table.** The waiter starts parking at
    lifespan start and pushes whenever a row appears. A session that cannot
    hear the channel loses nothing: its rows stay available and the drain hook
@@ -222,8 +244,10 @@ throwaway engine with real sessions).
    announced and not yet gone, 0 or 1 per mailbox), `oldest_pending_age_s`.
    The `proof`, `unacked` and `released` facts go.
 5. **Skills and docs say claim, not read.** The mailbox skill's push rule
-   becomes: on a reference, `tuple_in` your mailbox, act, then ack or nack;
-   a row you are not going to act on now is given back with `tuple_release`,
+   becomes: if the notification's body is rendered with that same prompt,
+   act on it, claiming nothing, since the drain hook already claimed and
+   acked it; otherwise `tuple_in` your mailbox, act, then ack or nack. A
+   row you are not going to act on now is given back with `tuple_release`,
    never `tuple_nack`, because each announce is a fresh claim decision and
    the mailbox template dead-letters after three nacks. The launch flag
    remains the only opt-in and both forms stay documented.
@@ -231,26 +255,43 @@ throwaway engine with real sessions).
 ### Technical Design
 
 **Delivery.** `tick()` builds one spec per subscription: boards with their
-cursor as today, mailboxes with `n=1` and no cursor. On wake, board results
-are handled as today. For each mailbox result the waiter looks at the oldest
-row it returned. If that row's id is not in the announce table, it sends the
-reference and records `(id, first_announced, count=1)`. If it is, and
-`now - last_announced >= 150 s` and `count < 5`, it re-sends and increments.
-Otherwise it does nothing. A row that stops appearing (claimed, consumed,
-expired) is dropped from the table at the next wake it is absent. The table is
-in memory; a restart starts empty, so the oldest row is announced once more.
+cursor as today, and mailboxes with `n=1` and no cursor, except a mailbox
+already holding an announced, still-pending row: that mailbox leaves the
+wait and is checked directly, once per tick, instead of through `wait`.
+On wake, board results are handled as today. For each mailbox checked, the
+waiter looks at its oldest row. If that row's id is not in the announce
+table, it sends the reference and records `(id, first_announced, count=1)`.
+If it is, and `now - last_announced >= 150 s` and `count < 5`, it re-sends
+and increments. Otherwise it does nothing. A row that stops appearing
+(claimed, consumed, expired) is dropped from the table at the next check it
+is absent. The table is in memory; a restart starts empty, so the oldest
+row is announced once more.
 
 **Notification content**, unchanged in shape from RDR-211's reference:
-subspace, tuple id, the instruction to claim with `tuple_in` on that subspace
-and then act. No body, no `from`, no `kind`.
+subspace, tuple id, and one line telling the session how to get the body:
+if it is rendered with this same prompt, the mailbox hook already claimed
+and acked it and the session acts on it, claiming nothing; otherwise the
+session claims it with `tuple_in` on that subspace and then acts. No body,
+no `from`, no `kind`. The exact template (verified live, T2
+`nexus_rdr/213-mvv-2026-09-17`):
+
+```text
+nexus mailbox message: subspace {subspace}, tuple {tuple_id}. If its body is rendered with this message, the mailbox hook already claimed and acked it: act on it, claim nothing. If not, claim it yourself with tuple_in("{subspace}", {"to": "{to_address}"}), then act: tuple_ack (with a reply for a request), tuple_nack, or tuple_release with the claim id. The waiter holds no claim.
+```
 
 **Back pressure.** A mailbox with two available rows announces the oldest
-only; `wait` with `n=1` returns exactly that row. Once the session claims and
-acks it, the next wake returns the next row and the waiter announces it.
+only. While that row stays pending, the mailbox is checked once per tick
+(about every 25 seconds) rather than through `wait`; once it is claimed and
+acked, the mailbox re-enters the wait spec and the next tick returns the
+next row, which the waiter announces.
 
-**Empty spec.** With every subscription in the spec on every tick, the spec
-list is never empty; the 7.51.1 sleep branch becomes dead code and is removed
-with a test that proves a mailbox-only session parks on its mailbox.
+**Empty spec.** The spec is empty when every subscription is a mailbox with
+a pending, already-announced row; the waiter then sleeps to the next tick
+or re-announce point instead of calling `wait`, rather than looping the
+call with nothing new to ask for (the reason: the MVV measured the earlier
+design at over 160 wakes a second and ephemeral-port exhaustion on the test
+box). A session subscribed to any idle mailbox or a board still has a
+non-empty spec on every tick and parks on `wait` as before.
 
 **Errors.** The 7.51.1 rule stays: a bare 404 from `wait` stops the waiter
 (engine without the route); any other failure is logged and retried after a
@@ -267,10 +308,13 @@ backoff.
 ```text
 // Illustrative; the announce table and its cadence
 announce: dict[tuple_id, (first_announced: float, last_announced: float, count: int)]
-on wake, for the oldest available row r of mailbox m:
+on tick, for each mailbox m:
+  if m has an announced, still-pending row: check it directly, once, skip the wait for m
+  else: include m in this tick's wait spec
+for the row r seen for m (from wait, or the direct check):
   if r.id not in announce: send(ref(m, r.id)); announce[r.id] = (now, now, 1)
   elif now - last >= 150 and count < 5: send(ref(m, r.id)); update
-drop ids absent from this wake's results
+drop ids absent from this tick's result for m
 ```
 
 ### Existing Infrastructure Audit
@@ -337,12 +381,16 @@ the drain hook or a restart mid-work; every lapse counts an attempt against
   waiter holds no lease and cannot strand a message.
 - Positive: the mailbox path and the board path become one shape.
 - Negative: a message can be referenced by the channel and then rendered in
-  full by the drain hook at the next prompt if the session did not claim it
-  in between. That is a duplicate pointer, never a duplicate body.
-- Negative: the session's two calls change shape: `tuple_in` (which returns
-  the body with the claim) replaces `tuple_rd`, then ack, nack or release as
-  today; the skill text changes and every installed plugin re-learns it at the
-  next release.
+  full by the drain hook at the next prompt if nothing claimed it in
+  between. With the plugin's hooks loaded this is rare: the same
+  notification usually wakes the drain hook and it wins the race, so the
+  case is the normal one only for a session without those hooks. That is a
+  duplicate pointer, never a duplicate body.
+- Negative: a hookless session's two calls change shape: `tuple_in` (which
+  returns the body with the claim) replaces `tuple_rd`, then ack, nack or
+  release as today; a session with the plugin's hooks calls neither, since
+  the drain hook claims, acks and renders the body for it. The skill text
+  changes and every installed plugin re-learns it at the next release.
 
 ### Risks and Mitigations
 
@@ -359,8 +407,10 @@ the drain hook or a restart mid-work; every lapse counts an attempt against
   **Mitigation**: Approach item 5's rule (release, never nack, when deferring)
   in the skill text; the Test Plan scenario below.
 - **Risk**: the drain hook and a session's `tuple_in` race for the same row.
-  **Mitigation**: `in` is atomic; the loser gets nothing and does nothing,
-  as the drain hook already handles today.
+  **Mitigation**: the hook fires from the same notification and normally
+  wins the race, at the wake, before the session's own turn starts; `in` is
+  atomic regardless, so the rare loser gets nothing and does nothing, as
+  the drain hook already handles today.
 
 ### Failure Modes
 
@@ -387,9 +437,13 @@ the drain hook or a restart mid-work; every lapse counts an attempt against
 ### Minimum Viable Validation
 
 Two real Claude Code sessions on a throwaway engine, the RDR-211 harness
-(`scratchpad rdr211-mvv`): (1) mail to an idle session with the channel:
-reference arrives, the session claims with `tuple_in`, reads, acks; a second
-message follows the same way on the same waiter. (2) Mail to a session
+(`scratchpad rdr211-mvv`): (1) mail to an idle session with the plugin's
+hooks and the channel: reference arrives, the drain hook claims, acks and
+renders the body at the wake, before the session's turn; the session acts
+on it, claiming nothing. Control, same mail to a session with the channel
+but without the plugin's hooks: reference arrives, the session claims with
+`tuple_in`, reads, acks. A second message follows the same way on the same
+waiter. (2) Mail to a session
 launched without the flag: no notification; the drain hook renders it at the
 next prompt. (3) Kill the MCP server between announce and claim, restart it:
 the row is announced once more and claimed. (4) Leave one message unclaimed
@@ -443,8 +497,11 @@ None.
 ## Test Plan
 
 - **Scenario**: mailbox-only session, one message arrives while idle.
-  **Verify**: one reference pushed within one wait tick; the session's
-  `tuple_in` claims it; no waiter claim ever recorded.
+  **Verify**: one reference pushed within one wait tick; with the plugin's
+  hooks loaded, the drain hook claims, acks and renders the body at the
+  wake and the session acts on it, claiming nothing; without those hooks,
+  the session's `tuple_in` claims it; no waiter claim ever recorded either
+  way.
 - **Scenario**: two messages arrive together. **Verify**: only the oldest is
   announced; the second is announced after the first is acked.
 - **Scenario**: the session ignores a reference. **Verify**: re-announced at
@@ -484,8 +541,11 @@ None.
 
 ### Performance Expectations
 
-No new load: one `wait` per tick as today; announcements are bounded per
-row. Measured, not estimated, in the MVV.
+No new load: a mailbox with no pending row waits as today; one with an
+already-announced, still-pending row is checked once per tick instead of
+looping the wait call, closing the busy-loop the earlier design ran there
+(the MVV measured at least 160 wakes a second before the fix).
+Announcements are bounded per row. Measured, not estimated, in the MVV.
 
 ## Finalization Gate
 
@@ -575,3 +635,18 @@ The MVV is Phase 1's exit, not deferred.
   of three commits, not the branch's first; RDR-211's Technical Design
   (Delivery, Subscriptions) and Approach item 7 each gained a pointer note
   to this RDR.
+- 2026-09-17: Amended from the live MVV (T2 `nexus_rdr/213-mvv-2026-09-17`)
+  and Sam's decision (T2
+  `nexus_rdr/213-decision-hook-delivers-on-channel-wake-2026-09-17`). Two
+  facts changed throughout: with the plugin's hooks loaded, the channel
+  notification wakes the same prompt's drain hook, which usually claims,
+  acks and renders the body before the session's turn, and the session
+  claims with `tuple_in` only when no plugin hooks ran (Approach 1 and 5;
+  Technical Design Notification content; Trade-offs; Risks; Critical
+  Assumption 1; Key Discoveries; the MVV and Test Plan scenario 1); and
+  the waiter does not park on a mailbox that already holds an announced,
+  pending row, checking it once per tick and at each re-announce point
+  instead, which closes a busy-loop the MVV measured at over 160 wakes a
+  second and ephemeral-port exhaustion (Approach 2; Technical Design
+  Delivery, Back pressure, Empty spec, the pseudocode; Performance
+  Expectations).

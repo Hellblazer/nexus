@@ -655,7 +655,7 @@ JSON</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Run nx doctor and tell me what the channel row says.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>The <code>tuples.channel_delivery</code> row names whether the waiter is alive, when it last woke, how many messages it has announced in total, and how many are still waiting for you to claim. A launch with no flag at all, or a session whose waiter has not run yet, reports an informational line with no record at all.</p>
+<p>The <code>tuples.channel_delivery</code> row names whether the waiter is alive, when it last woke, how many messages it has announced in total, and how many are still pending. A launch with no flag at all, or a session whose waiter has not run yet, reports an informational line with no record at all.</p>
 
 <h3>Without the flag</h3>
 <p>Nothing breaks. A message still arrives, at your next prompt, through the hook that runs on every prompt whether or not the channel is on. Push delivery only removes the wait, and it needs the flag on every launch to do that. Channels are a Claude Code research preview, and are not available on Amazon Bedrock, Google Cloud Agent Platform, or Microsoft Foundry.</p>
