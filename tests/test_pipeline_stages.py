@@ -560,6 +560,60 @@ class TestUploaderLoop:
         assert s["chunks_uploaded"] == 6, f"expected 4 already-uploaded + 2 this run, got {s['chunks_uploaded']}"
         assert s["status"] == "completed"
 
+    def test_second_stage_failure_after_upload_progress_does_not_inflate_chunks_uploaded(self, db) -> None:
+        """nexus-6m9zy.1 (#3) ship-blocker fix (substantive-critic T2
+        nexus/critique-59c07fe5b-uploader-chunks-uploaded-inflation-
+        nexus-6m9zy [26147]): the first cut of this fix seeded
+        total_uploaded from the persisted chunks_uploaded unconditionally.
+        clear_orphan_wal wipes every pdf_chunks row -- uploaded=true rows
+        included -- but never resets that counter (same class as
+        pages_extracted, nexus-gl99l). When upload had already made real
+        progress before a LATER pipeline stage's failure triggered
+        mark_failed + clear_orphan_wal, the stale counter got added ON
+        TOP of the resumed run's genuine re-upload count: reproduced as a
+        persisted chunks_uploaded of 20 for a true 10-chunk document.
+
+        This replays pipeline_index_pdf's first_exc handler verbatim
+        (mark_failed + clear_orphan_wal + the fix's chunks_uploaded=0
+        reset), the same technique test_resume_from_partial uses for the
+        mark_failed-without-clear_orphan_wal case, since driving the real
+        three-stage concurrent orchestrator to fail deterministically
+        AFTER genuine upload progress is not reproducible without a race.
+        """
+        h = "hFail"
+        db.create_pipeline(h, "/fail.pdf", "docs__test")
+        for i in range(4):
+            db.write_chunk(h, i, f"chunk {i} text", f"{h}_{i}",
+                           metadata={"page": 1}, embedding=_fake_embedding(i))
+        db.update_progress(h, chunks_created=4, chunks_embedded=4)
+        uploader_loop(h, db, MagicMock(), "docs__test", threading.Event())
+        assert db.get_pipeline_state(h)["chunks_uploaded"] == 4
+
+        # A later stage now fails -- pipeline_index_pdf's first_exc
+        # handler, replayed verbatim (including the fix's reset line).
+        db.mark_failed(h, error="boom")
+        db.clear_orphan_wal(h)
+        db.update_progress(h, chunks_uploaded=0)
+
+        assert db.get_pipeline_state(h)["chunks_uploaded"] == 0, "the fix must reset the stale counter"
+        assert db.read_uploadable_chunks(h) == []
+
+        # Retry: the document re-chunks and re-embeds from scratch (WAL
+        # was wiped), this time producing 10 chunks in full.
+        assert db.create_pipeline(h, "/fail.pdf", "docs__test") == "resuming"
+        for i in range(10):
+            db.write_chunk(h, i, f"chunk {i} text v2", f"{h}_{i}",
+                           metadata={"page": 1}, embedding=_fake_embedding(i))
+        db.update_progress(h, chunks_created=10, chunks_embedded=10)
+        uploader_loop(h, db, MagicMock(), "docs__test", threading.Event())
+
+        final = db.get_pipeline_state(h)
+        assert final["chunks_uploaded"] == 10, (
+            f"expected the true chunk count (10), got {final['chunks_uploaded']} "
+            f"-- the stale pre-clear counter must not be double-counted"
+        )
+        assert final["status"] == "completed"
+
     def test_uploader_injects_global_chunk_index_into_hook_payload(self, db) -> None:
         """RDR-108 Phase 3 (nexus-bdag): the streaming uploader populates
         the per-batch hook chain with a metadata blob that carries the
@@ -1081,7 +1135,6 @@ class TestPipelineIndexPdf:
                 f"manifest_write_batch_hook must populate document_chunks "
                 f"for doc_id={tumbler!r}"
             )
-
 
 
 class TestPipelineIndexPdfDryRun:
