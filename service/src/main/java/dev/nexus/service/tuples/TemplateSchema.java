@@ -64,6 +64,29 @@ import java.util.Objects;
  *                           claim. Scoped entirely to templates carrying this flag: every
  *                           other template's {@code out}/{@code claim}/{@code renew}/
  *                           {@code ack} behaviour is byte-identical to before this bead.
+ * @param maxLiveRows       optional per-subspace ceiling on LIVE rows (RDR-211 Scale and
+ *                           Limits item 2, "a runaway writer"). {@code null} means
+ *                           unbounded, the behaviour every template had before this field
+ *                           existed. When present it must be a positive integer; {@link
+ *                           TemplateSchemaParser} refuses a zero, negative, or non-integer
+ *                           value. "Live" is exactly the predicate the read path already
+ *                           uses ({@code consumed_at IS NULL AND expires_at > now()} —
+ *                           {@code TupleRepository#queryOnce}, {@code #computeCensus}):
+ *                           an acked row (body cleared, but the row itself survives until
+ *                           retention purges it) and an expired row are both excluded, so
+ *                           neither counts against the cap. {@code TupleRepository#writeOut}
+ *                           checks this INSIDE the same transaction as the insert, before
+ *                           it runs, and only against a genuinely NEW row: an idempotent
+ *                           re-{@code out} of an EXISTING identity ({@code id_from: keys})
+ *                           is a refire that touches only {@code expires_at} and adds no
+ *                           row, so it bypasses the cap entirely rather than being refused
+ *                           by it (decided here, since the RDR leaves the choice open — the
+ *                           alternative, refusing a refire, would make a lock or any other
+ *                           {@code id_from: keys} template's steady-state "make sure it
+ *                           exists" {@code out} fail once the subspace is merely AT its
+ *                           cap, which defeats the point of idempotent identity). Past the
+ *                           cap, {@code out} raises {@code MaxLiveRowsExceededException}
+ *                           ({@code "MaxLiveRowsExceeded"}, HTTP 429) and writes nothing.
  */
 public record TemplateSchema(
         String name,
@@ -76,7 +99,8 @@ public record TemplateSchema(
         Take take,
         long retentionSeconds,
         Long maxBodyBytes,
-        boolean lock) {
+        boolean lock,
+        Long maxLiveRows) {
 
     public TemplateSchema {
         Objects.requireNonNull(name, "name");

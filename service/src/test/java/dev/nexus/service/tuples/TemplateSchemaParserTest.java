@@ -299,4 +299,47 @@ class TemplateSchemaParserTest {
                 () -> TemplateSchemaParser.parse("broken.yaml", doc));
         assertTrue(ex.getMessage().contains("lock"), ex.getMessage());
     }
+
+    // ── max_live_rows (RDR-211 Phase 1 Step 1, bead nexus-rplay.5) ───────────
+
+    @Test
+    void maxLiveRowsAbsent_leavesFieldNull() {
+        TemplateSchema t = TemplateSchemaParser.parse("mailbox.yaml", validDoc());
+        assertEquals(null, t.maxLiveRows());
+    }
+
+    @Test
+    void maxLiveRowsPositive_parsesVerbatim() {
+        Map<String, Object> doc = validDoc();
+        doc.put("max_live_rows", 500L);
+        TemplateSchema t = TemplateSchemaParser.parse("board.yaml", doc);
+        assertEquals(500L, t.maxLiveRows());
+    }
+
+    @Test
+    void maxLiveRowsZero_isABreach() {
+        Map<String, Object> doc = validDoc();
+        doc.put("max_live_rows", 0L);
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("max_live_rows"), ex.getMessage());
+    }
+
+    @Test
+    void maxLiveRowsNegative_isABreach() {
+        Map<String, Object> doc = validDoc();
+        doc.put("max_live_rows", -1L);
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("max_live_rows"), ex.getMessage());
+    }
+
+    @Test
+    void maxLiveRowsWrongType_isABreach() {
+        Map<String, Object> doc = validDoc();
+        doc.put("max_live_rows", "not-a-number");
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("max_live_rows"), ex.getMessage());
+    }
 }

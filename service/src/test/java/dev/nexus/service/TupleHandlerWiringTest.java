@@ -13,11 +13,15 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.io.TempDir;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.util.Map;
 
@@ -64,11 +68,12 @@ class TupleHandlerWiringTest {
     com.zaxxer.hikari.HikariDataSource svcDs;
     NexusService withRegistry;
     NexusService withoutRegistry;
+    NexusService withMaxLiveRowsCap;
     HttpClient http;
     ObjectMapper mapper;
 
     @BeforeAll
-    void startAll() throws Exception {
+    void startAll(@TempDir Path extraTemplateDir) throws Exception {
         mapper = new ObjectMapper();
         pg = PgContainerHelper.start();
 
@@ -98,6 +103,26 @@ class TupleHandlerWiringTest {
         withoutRegistry = new NexusService(0, TOKEN, svcDs);
         withoutRegistry.start();
 
+        // RDR-211 Phase 1 Step 1 (bead nexus-rplay.5): a test-only template
+        // carrying max_live_rows, layered on the bundled resources the same
+        // way TupleRepositoryTest's probe/<id> is -- none of the v1 resource
+        // templates declares this field yet (Step 2's job), so the route-level
+        // typed-error test needs its own registry to exercise it over HTTP.
+        Files.writeString(extraTemplateDir.resolve("probe-maxrows.yaml"), """
+                name: probe-maxrows/<room>
+                keys:
+                  - id
+                id_from: keys
+                take:
+                  enabled: false
+                retention_seconds: 3600
+                max_live_rows: 1
+                """, StandardCharsets.UTF_8);
+        TemplateRegistry maxLiveRowsRegistry = TemplateRegistry.loadAtBoot(extraTemplateDir.toString(), null,
+                NexusService.SWEEP_INTERVAL_HOURS * 3600L);
+        withMaxLiveRowsCap = new NexusService(0, TOKEN, svcDs, null, null, null, null, maxLiveRowsRegistry);
+        withMaxLiveRowsCap.start();
+
         http = TestHttp.client();
     }
 
@@ -108,6 +133,9 @@ class TupleHandlerWiringTest {
         }
         if (withoutRegistry != null) {
             withoutRegistry.stop();
+        }
+        if (withMaxLiveRowsCap != null) {
+            withMaxLiveRowsCap.stop();
         }
         if (svcDs != null) {
             svcDs.close();
@@ -626,6 +654,22 @@ class TupleHandlerWiringTest {
                 "subspaces", java.util.List.of(Map.of("subspace", "not-a-real-template/x"))));
         assertThat(resp.statusCode()).isEqualTo(404);
         assertThat(resp.body()).contains("UnknownSubspace");
+    }
+
+    // ── RDR-211 Phase 1 Step 1 (bead nexus-rplay.5): max_live_rows over HTTP ──
+
+    @Test
+    void out_pastMaxLiveRows_rendersTheTypedErrorCodeAndStatus() throws Exception {
+        var first = post(withMaxLiveRowsCap, "/v1/tuples/out", Map.of(
+                "subspace", "probe-maxrows/room-1", "keys", Map.of("id", "row-1")));
+        assertThat(first.statusCode()).isEqualTo(200);
+
+        var second = post(withMaxLiveRowsCap, "/v1/tuples/out", Map.of(
+                "subspace", "probe-maxrows/room-1", "keys", Map.of("id", "row-2")));
+        assertThat(second.statusCode()).isEqualTo(429);
+        var body = mapper.readValue(second.body(), MAP_T);
+        assertThat(body.get("error")).isEqualTo("MaxLiveRowsExceeded");
+        assertThat((String) body.get("detail")).contains("probe-maxrows/room-1").contains("1");
     }
 
     private HttpResponse<String> post(NexusService svc, String path, Object body) throws Exception {

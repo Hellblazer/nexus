@@ -457,8 +457,38 @@ public final class TupleRepository {
      * share a transaction with {@code consumeClaim}. Takes no responsibility for
      * signalling: {@code signalAll} must run AFTER the transaction commits, so it stays
      * with the callers.
+     *
+     * <p>RDR-211 Scale and Limits item 2 ("a runaway writer"): when the template
+     * declares {@code max_live_rows}, the check below runs INSIDE this same
+     * transaction, under the tenant, before the insert below — so a refusal and the
+     * insert it guards can never race apart. It is skipped entirely for a row whose
+     * {@code id} already exists (an idempotent refire of an existing identity, {@link
+     * TemplateSchema.IdFrom#KEYS}): the {@code onConflict} below only refreshes that
+     * row's {@code expires_at}, adding no new row, so it cannot be what pushes a
+     * subspace over its cap and must not be refused by this check ({@link
+     * TemplateSchema#maxLiveRows()}'s javadoc records this decision). The live-row
+     * count and the existence check are each one query, not serialized against
+     * concurrent writers with a lock — same best-effort posture the rest of this
+     * design uses for a capacity guard (RDR-211 names this a guard against a runaway
+     * writer, not a hard exclusion primitive like the claim CAS below); a burst of
+     * concurrent {@code out} calls to one subspace can overshoot the cap by the
+     * width of the race, and the next call after the burst settles is refused as
+     * usual.
      */
     private byte[] writeOut(DSLContext ctx, String tenant, PreparedOut p, String body, byte[] id) {
+        Long maxLiveRows = p.template().maxLiveRows();
+        if (maxLiveRows != null) {
+            boolean rowAlreadyExists = ctx.fetchExists(ctx.selectOne().from(TUPLES).where(TUPLES.ID.eq(id)));
+            if (!rowAlreadyExists) {
+                Condition live = TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.gt(DSL.currentOffsetDateTime()));
+                Integer liveCount = ctx.selectCount().from(TUPLES)
+                        .where(TUPLES.TENANT_ID.eq(tenant).and(TUPLES.SUBSPACE.eq(p.subspace())).and(live))
+                        .fetchOne(0, Integer.class);
+                if (liveCount != null && liveCount >= maxLiveRows) {
+                    throw new MaxLiveRowsExceededException(p.subspace(), maxLiveRows);
+                }
+            }
+        }
         Field<OffsetDateTime> candidateExpiry = DSL.currentOffsetDateTime().add(p.ttlInterval());
         // Refire clamp (RDR-205 §Technical Design "out"): never past the ORIGINAL
         // row's created_at plus the template's retention -- TUPLES.CREATED_AT here

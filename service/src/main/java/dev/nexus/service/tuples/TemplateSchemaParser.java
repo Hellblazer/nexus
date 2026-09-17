@@ -23,7 +23,7 @@ final class TemplateSchemaParser {
 
     private static final Set<String> TOP_LEVEL_FIELDS = Set.of(
             "name", "keys", "dimensions", "id_from", "id_dims", "take", "retention_seconds",
-            "max_body_bytes", "lock");
+            "max_body_bytes", "lock", "max_live_rows");
 
     private static final Set<String> DIMENSION_FIELDS = Set.of("type", "values", "required");
 
@@ -76,9 +76,10 @@ final class TemplateSchemaParser {
         long retentionSeconds = requirePositiveLong(source, doc, "retention_seconds");
         Long maxBodyBytes = parseMaxBodyBytes(source, doc);
         boolean lock = parseLock(source, doc);
+        Long maxLiveRows = parseMaxLiveRows(source, doc);
 
         return new TemplateSchema(name, nameSegments, keys, keyValues, dimensions, idFrom, idDims, take,
-                retentionSeconds, maxBodyBytes, lock);
+                retentionSeconds, maxBodyBytes, lock, maxLiveRows);
     }
 
     /**
@@ -94,6 +95,24 @@ final class TemplateSchemaParser {
             throw breach(source, "lock", "must be a boolean");
         }
         return b;
+    }
+
+    /**
+     * {@code max_live_rows} (RDR-211 Scale and Limits item 2): optional, a positive
+     * integer, no upper ceiling of its own — unlike {@code max_body_bytes} this field
+     * has no global cap to stay under, since it bounds row COUNT in a subspace, not a
+     * byte size {@link TupleLimits} already governs elsewhere. Absent means unbounded,
+     * matching {@link TemplateSchema#maxLiveRows()}'s existing-behaviour default.
+     */
+    private static Long parseMaxLiveRows(String source, Map<String, Object> doc) {
+        if (!doc.containsKey("max_live_rows") || doc.get("max_live_rows") == null) {
+            return null;
+        }
+        Object raw = doc.get("max_live_rows");
+        if (!(raw instanceof Long l) || l <= 0) {
+            throw breach(source, "max_live_rows", "must be a positive integer");
+        }
+        return l;
     }
 
     /**

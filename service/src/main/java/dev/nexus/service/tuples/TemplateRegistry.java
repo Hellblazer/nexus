@@ -375,6 +375,9 @@ public final class TemplateRegistry {
         if (t.maxBodyBytes() != null) {
             m.put("max_body_bytes", t.maxBodyBytes());
         }
+        if (t.maxLiveRows() != null) {
+            m.put("max_live_rows", t.maxLiveRows());
+        }
         return m;
     }
 }
