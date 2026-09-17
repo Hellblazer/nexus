@@ -4952,19 +4952,14 @@ _TUPLE_ROUTE_FIRST_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 114)
 # RDR-211 Phase 1 Step 3 (bead nexus-rplay.12): GET /v1/tuples/park_stats'
 # own first-serving-engine anchor, kept SEPARATE from
 # _TUPLE_ROUTE_FIRST_ENGINE_VERSION above because it names a different
-# route that shipped later. Its Java source is merged to develop (the
-# route exists at this bead's pinned preflight sha) but has not yet been
-# cut as an engine-service-v* tag as of this commit -- the newest
-# published tag is v0.1.126, and this constant deliberately names the
-# NEXT one, v0.1.127. Unlike the sibling constant above,
-# whose own pin test (test_tuple_route_first_engine_version_pin) asserts
-# it never sits above the newest published tag because that route already
-# shipped, this constant is written intentionally ahead: it must be
-# corrected to match the real cut's version number in the SAME commit
-# that bumps REQUIRED_ENGINE_VERSION to that tag, per AGENTS.md's
-# paired-release choreography. Until that lands, REQUIRED_ENGINE_VERSION
-# (0.1.126) sits below it, so the doctor row below reports the
-# route as expected-absent (informational), never a defect.
+# route that shipped later: engine-service-v0.1.127 (tagged 2026-09-17 on
+# 51097d1b2, deployed before the 7.51.0 client tag). This constant was
+# written one tag ahead while that cut was still pending; the 7.51.0
+# release commit bumped REQUIRED_ENGINE_VERSION to the same value, so
+# every reachable engine now carries the route and the doctor row's
+# expected-absent branch below is dead by construction, exactly as the
+# sibling constant's is. test_tuple_park_stats_first_engine_version_pin
+# holds it at or below the newest published engine-service-v* tag.
 _TUPLE_PARK_STATS_FIRST_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 127)
 
 #: Doctor heuristic, not derived from any per-template TTL: an unclaimed

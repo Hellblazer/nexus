@@ -766,17 +766,35 @@ def test_tuple_route_first_engine_version_pin() -> None:
 # ── RDR-211 Phase 1 Step 3 (bead nexus-rplay.12): park-slot use and queue ────
 # depth ───────────────────────────────────────────────────────────────────────
 #
-# _TUPLE_PARK_STATS_FIRST_ENGINE_VERSION is DELIBERATELY ahead of the newest
-# published engine-service-v* tag at the time this lands (v0.1.126): the
-# engine's GET /v1/tuples/park_stats route ships in the NEXT tag, predicted
-# as v0.1.127 (its Java source already merged to develop per the preflight
-# sha this bead pins to, but not yet cut/tagged). Unlike
-# _TUPLE_ROUTE_FIRST_ENGINE_VERSION -- whose own pin test asserts it never
-# sits above the newest published tag, because that route already shipped --
-# this constant intentionally fails that same assertion today, so no
-# analogous pin test is added here; it belongs at the same commit that bumps
-# REQUIRED_ENGINE_VERSION to the real cut, per AGENTS.md's paired-release
-# choreography.
+# _TUPLE_PARK_STATS_FIRST_ENGINE_VERSION names engine-service-v0.1.127, the
+# first tag serving GET /v1/tuples/park_stats. It was written one tag ahead
+# while that cut was pending; the 7.51.0 release commit bumped
+# REQUIRED_ENGINE_VERSION to the same value, and the pin test below now
+# holds it to the same rule as _TUPLE_ROUTE_FIRST_ENGINE_VERSION: never
+# above the newest published tag this checkout knows about.
+
+
+def test_tuple_park_stats_first_engine_version_pin() -> None:
+    """``_TUPLE_PARK_STATS_FIRST_ENGINE_VERSION`` must never sit ABOVE the
+    newest published ``engine-service-v*`` tag this repo's git history knows
+    about, and must equal the tag that first served the route (v0.1.127).
+    """
+    import check_engine_release_floor as gate
+
+    assert h._TUPLE_PARK_STATS_FIRST_ENGINE_VERSION == (0, 1, 127), (
+        "park_stats first shipped in engine-service-v0.1.127; the anchor is a fact about "
+        "history, not a knob"
+    )
+    newest = gate.newest_published_engine()
+    if newest is gate._TAGS_UNAVAILABLE:
+        pytest.skip("git tags unavailable in this checkout (shallow clone with no tags fetched)")
+    if newest is None:
+        pytest.skip("no engine-service-v* tags found in this checkout's git history")
+    assert h._TUPLE_PARK_STATS_FIRST_ENGINE_VERSION <= newest, (
+        f"_TUPLE_PARK_STATS_FIRST_ENGINE_VERSION {h._TUPLE_PARK_STATS_FIRST_ENGINE_VERSION} "
+        f"names a tag NEWER than any published engine-service-v* tag this repo knows about "
+        f"({newest})."
+    )
 
 
 class TestCheckTupleParkSlots:
