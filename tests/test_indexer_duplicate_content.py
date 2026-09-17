@@ -759,7 +759,9 @@ def test_single_file_index_of_a_byte_identical_copy_gets_its_own_manifest(
     # it takes the metadata-only refresh path, which needs the store's
     # "missing" report. The production client returns that list; this fake
     # facade returns None. The rows are genuinely present, so report none
-    # missing, which is what the engine would say.
+    # missing, which is what the engine would say. This simulates
+    # HttpVectorClient.update_chunks' contract (the only implementation a
+    # real install reaches), not T3Database's own, which never reports.
     orig_update_chunks = local_t3.update_chunks
 
     def _reporting_update_chunks(collection, ids, metadatas):

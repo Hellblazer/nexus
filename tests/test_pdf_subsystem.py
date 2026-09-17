@@ -235,6 +235,12 @@ class TestIndexPdfPipeline:
     def test_skip_when_already_indexed(self, simple_pdf: Path, monkeypatch) -> None:
         """AC-S4: Same hash + model already stored → staleness guard returns 0."""
         set_credentials(monkeypatch)
+        # The catalog has to agree with a T3 double that says "already
+        # indexed": a Document the call itself mints is never skipped
+        # (nexus-o19i0), so register it first, as an earlier run would have.
+        from nexus.doc_indexer import _register_or_lookup_doc_id  # noqa: PLC0415 — deferred: only this test pre-registers
+
+        _register_or_lookup_doc_id(simple_pdf, "test", content_type="paper", physical_collection="")
         content_hash = _sha256(simple_pdf)
         model = index_model_for_collection("docs__test")
 

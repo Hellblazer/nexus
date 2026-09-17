@@ -1219,6 +1219,12 @@ def check_staleness(
             return False
         return stored == (content_hash, embedding_model)
 
+    # UNCACHED BRANCH, keep it unreachable from ``nx index repo``. It matches on
+    # content_hash collection-wide and ignores doc_id, the shape nexus-o19i0
+    # fixed in doc_indexer: a byte-identical file at a second path would read
+    # as fresh and register with no chunks. Every repo-index call site passes
+    # a StalenessCache (build_staleness_cache), whose lookup above is keyed on
+    # doc_id and treats a miss as stale. Do not drop that cache in a refactor.
     # RDR-108 Phase 3 (nexus-bdag): chunks no longer carry ``doc_id`` —
     # the catalog ``document_chunks`` manifest is authoritative. Query
     # by ``content_hash`` (a file-level fingerprint that all chunks of
