@@ -797,8 +797,8 @@ idempotency, and it loses history.
   and stops, the doctor row reports it, and the drain hook carries mail at the
   next prompt; the ledger pairs `wait` as it pairs `release`.
 - A session without the channel: no notification is ever delivered; the drain
-  hook carries mail at the next prompt, the doctor row shows an empty client
-  capability set from the handshake, and `tuple_subscriptions` still answers.
+  hook carries mail at the next prompt, the doctor row reports the gate's
+  proof as neither argv nor probe, and `tuple_subscriptions` still answers.
 - A notification is dropped: the waiter still holds the claim and re-sends it
   at its next renew, 150 s; nothing in the claim log changes. If the server
   itself dies and no successor for the session starts within the 300 s lease,
@@ -931,7 +931,7 @@ choreography in AGENTS.md.
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
 | board, queue, and lock subspaces | In scope (`nx tuple list --prefix`) | In scope (`nx tuple stats`) | N/A: retention and the sweep | In scope (the existing `nx doctor` tuple rows) | N/A: coordination state, not archived |
-| a session's subscriptions | In scope (`tuple_subscriptions`) | In scope (each cursor) | In scope (`tuple_unsubscribe`; a `/clear` drops the list) | In scope (a new `nx doctor` row: capability declared; waiter alive, last wake, unacked and released counts; client handshake capabilities) | N/A: session state in T1 |
+| a session's subscriptions | In scope (`tuple_subscriptions`) | In scope (each cursor) | In scope (`tuple_unsubscribe`; a `/clear` drops the list) | In scope (a new `nx doctor` row: capability declared; waiter alive, last wake, unacked and released counts; which leg proved the channel live: argv, probe, or neither) | N/A: session state in T1 |
 
 ### New Dependencies
 
@@ -968,7 +968,7 @@ None.
   never shows two slots for the session.
 - **Scenario**: the session is launched without the channel. **Verify**: the
   waiter claims nothing, the drain hook delivers the mail at the next prompt,
-  and the doctor row shows an empty client capability set.
+  and the doctor row reports the proof as neither argv nor probe.
 - **Scenario**: three messages arrive at once. **Verify**: one notification;
   the second is sent only after the first is acked; the third after the
   second.
@@ -1217,3 +1217,7 @@ enumerate every one with its test.
   a subscription change is picked up at the next `wait` tick (at most 25 s)
   rather than by cancelling the parked call; the doctor row's "unacked" is a
   live 0-or-1 gauge under back pressure, "released" a cumulative count.
+- 2026-09-17: Step 3 client stacked review (nexus-rplay.18) found three
+  sentences (Failure Modes, Day 2 Operations, one Test Plan scenario) still
+  describing the superseded handshake capability set; swept to the gate's
+  proof wording (T2 `nexus_rdr/211-critique-phase1-step3-client-2026-09-17`).
