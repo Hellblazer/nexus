@@ -451,13 +451,22 @@ sits in the mailbox as available rows, ordered, and arrives one message per
 credit; this is a coordination channel, not a stream, and the design
 optimises the handling of one message for correctness over throughput.
 
-The waiter claims only when the initialize handshake carried the channel.
-`ServerSession.client_params` exposes the client's declared capabilities,
-and a Claude Code launched without the flag leaves the experimental set
-empty; what Claude Code declares there when the flag is present is not in
-the channels reference, so Phase 1 Step 0 records the observed shape and the
-guard is written against it. Without the channel the waiter claims nothing
-and the floor delivers.
+The waiter claims only when it has proof the channel is live, and the
+proof is not in the handshake: Phase 1 Step 0 measured that Claude Code
+2.1.274 sends an identical initialize (no experimental capability), identical
+post-initialize traffic and an identical server environment with and without
+the channel flag (T2 `nexus_rdr/211-spike-4-channel-2026-09-17`). The gate
+Sam chose (T2 `nexus_rdr/211-decision-waiter-gate-2026-09-17`) has two legs.
+First, the server reads its parent process's command line (the parent of
+every `nx-mcp` is the `claude` process that spawned it, and `ps -o command=`
+returns its argv): `--channels server:nexus` or
+`--dangerously-load-development-channels server:nexus` on that line is
+proof. Second, when the argv shows neither, the waiter sends one probe
+notification at startup asking the session to call a small tool,
+`tuple_channel_probe`, and treats that call as proof; a session that never
+calls it is a session without the channel, and the waiter claims nothing for
+the life of that process. Without proof the floor delivers. The argv leg
+depends on preview flag syntax, which is why the probe leg exists.
 
 To claim, the waiter reads both mailboxes with a non-claiming `rd` to find
 the oldest available row, then calls `in` on that row's subspace (`in` takes
@@ -517,11 +526,10 @@ launched without the channel still gets its mail, at its next prompt rather
 than at once, and no path depends on the model arming anything. A new
 `nx doctor` row reports three observable facts: the capability is declared
 by the server, the waiter is alive with its last wake time and its counts of
-unacked and released claims, and the client's experimental capabilities as received in
-the initialize handshake (`ServerSession.client_params`), which is what a
-Claude Code launched without the flag leaves empty; the channels reference
-does not document what Claude Code declares there, so that last fact is an
-observation the row reports as seen, not a contract. Queues and locks
+unacked and released claims, and which leg proved the channel live (`argv`,
+`probe`, or neither; Step 0 measured that the initialize handshake carries no
+channel marker either way, so the row reports the gate's proof, not a
+handshake field). Queues and locks
 are not delivered: a worker or a would-be holder waits with `in`, which
 already wakes on `out` and `release`.
 
@@ -1193,3 +1201,11 @@ enumerate every one with its test.
   environment are identical with and without the channel flag, so the
   waiter's claim gate cannot be written against the handshake; the choice of
   signal goes to Sam before the Step 3 waiter bead. Prerequisite ticked.
+- 2026-09-17: Sam's decisions on the Step 0 findings (T2
+  `nexus_rdr/211-decision-waiter-gate-2026-09-17`,
+  `211-decision-dev-channel-dialog-2026-09-17`,
+  `211-decision-lock-from-optional-2026-09-17`): the Delivery guard becomes
+  parent-argv proof with a probe fallback, replacing the handshake guard, and
+  the doctor row's third fact reports which leg proved it; the per-launch
+  development-channel dialog is documented as setup; the lock template's
+  `from` stays optional as the template table writes it.
