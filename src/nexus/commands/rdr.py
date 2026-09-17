@@ -215,17 +215,52 @@ def _preamble_parse_frontmatter(filepath: Path) -> tuple[dict, str]:
     return meta, text
 
 
+def _rdr_meta_is_companion(meta: dict) -> bool:
+    """A companion note: ``kind: companion`` or, in older notes,
+    ``id: companion-note`` with no ``kind``. It carries no lifecycle status."""
+    return (
+        meta.get("kind") == "companion"
+        or str(meta.get("id", "")).strip().lower() == "companion-note"
+    )
+
+
 def _preamble_find_rdr_file(rdr_path: Path, id_str: str) -> Path | None:
-    """Find an RDR .md by numeric ID; return None if not found."""
+    """Find an RDR .md by numeric ID; return None if not found.
+
+    Several files can share a number: the RDR and its ``kind: companion``
+    notes. The first match by name used to win, so a companion that sorts
+    first (``rdr-049-consolidation-plan.md``) was taken for the RDR by
+    ``set-status`` and every preamble (nexus-u1jxt.1). A token that names a
+    file exactly resolves that file. Otherwise the file whose frontmatter
+    ``id`` is this RDR's own (``RDR-049``) wins, then the first match that is
+    not a companion, and a companion is returned only when nothing else
+    matched. A companion is marked ``kind: companion`` or, in older notes,
+    ``id: companion-note`` with no ``kind`` (rdr-079-calibration.md,
+    rdr-152-fts-parity-contract.md)."""
     m = re.search(r"\d+", id_str)
     if not m:
         return None
     num_int = int(m.group(0))
+    matches: list[Path] = []
     for f in sorted(rdr_path.glob("*.md")):
         nums = re.findall(r"\d+", f.stem)
         if nums and int(nums[0]) == num_int:
+            matches.append(f)
+    if not matches:
+        return None
+    named = id_str.strip().lower().removesuffix(".md")
+    for f in matches:
+        if f.stem.lower() == named:
             return f
-    return None
+    metas = [(f, _preamble_parse_frontmatter(f)[0]) for f in matches]
+    for f, meta in metas:
+        own = re.fullmatch(r"rdr-0*(\d+)", str(meta.get("id", "")).strip().lower())
+        if own and int(own.group(1)) == num_int:
+            return f
+    for f, meta in metas:
+        if not _rdr_meta_is_companion(meta):
+            return f
+    return matches[0]
 
 
 def _preamble_get_all_rdrs(rdr_path: Path) -> list[dict]:
@@ -1325,6 +1360,17 @@ def set_status(
         sys.exit(1)
 
     meta, _ = _preamble_parse_frontmatter(rdr_file)
+    # A companion note has no lifecycle. The resolver returns one only when
+    # nothing else carries the number, or when the caller named the file; a
+    # bare number must not flip it (nexus-u1jxt.1).
+    named = rdr_id.strip().lower().removesuffix(".md") == rdr_file.stem.lower()
+    if _rdr_meta_is_companion(meta) and not named:
+        click.echo(
+            f"No RDR found for ID: {rdr_id}. The only match is a companion note, "
+            f"{rdr_file.name}, which carries no lifecycle status. Name the file to change it.",
+            err=True,
+        )
+        sys.exit(1)
     current_status = str(meta.get("status") or "").strip().lower()
 
     # `open` is retired from the table's domain but still a live pre-accept
@@ -5174,21 +5220,26 @@ def preamble_phase_review_gate(args: tuple[str, ...]) -> None:
     tokens = _preamble_tokens(args)
     phase_arg: str | None = None
     evidence_arg: str | None = None
+    evidence_continuation: set[int] = set()
     for k, tok in enumerate(tokens):
         nxt = tokens[k + 1] if k + 1 < len(tokens) else None
         if tok == "--phase" and nxt is not None:
             phase_arg = nxt
         elif tok == "--evidence" and nxt is not None:
             parts = [nxt]
-            for more in tokens[k + 2:]:
+            for offset, more in enumerate(tokens[k + 2:], start=k + 2):
                 if not re.match(r"^Item\d+=", more, re.IGNORECASE):
                     break
                 parts.append(more)  # an unquoted "Item1=a, Item2=b" arrives as two tokens
+                evidence_continuation.add(offset)
             evidence_arg = ",".join(p.strip().strip(",") for p in parts)
 
-    evidence_tokens = set(evidence_arg.split(",")) if evidence_arg else set()
+    # Drop only the CONTINUATION tokens, by position. The flag's own value
+    # stays so value_flags can skip it: filtering by text also removed a
+    # one-pair value, --evidence then swallowed its neighbour, and the phase
+    # number became the RDR id (nexus-u1jxt.5).
     rdr_id_token = _preamble_id_token(
-        tuple(t for t in tokens if t.strip(",") not in evidence_tokens),
+        tuple(t for k, t in enumerate(tokens) if k not in evidence_continuation),
         value_flags=("--phase", "--evidence"),
     )
     id_match = re.match(r"(\d+)", rdr_id_token) if rdr_id_token else None

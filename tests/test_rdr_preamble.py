@@ -4201,6 +4201,21 @@ class TestPreambleArgvSiblings:
         assert "rdr-112-real.md" in res.output, res.output
         assert "APPROACH CROSS-WALK PASSED" in res.output, res.output
 
+    def test_a_single_evidence_pair_with_the_id_last_does_not_pick_the_phase(self, rdr_env):
+        """nexus-u1jxt.5, a regression in the sweep above: a one-pair evidence
+        value equals its own token, so filtering "evidence tokens" out of the
+        argv also removed the flag's VALUE. ``--evidence`` then swallowed
+        ``--phase``'s neighbour and the phase number became the RDR id."""
+        body = "### Approach\n\n1. **A**: one\n\n## Consequences\n"
+        _write_rdr(rdr_env["rdr_dir"], "rdr-002-other.md", {"title": "Other", "status": "accepted"}, body)
+        _write_rdr(rdr_env["rdr_dir"], "rdr-205-real.md", {"title": "Real", "status": "accepted"}, body)
+        res = _runner().invoke(rdr, [
+            "preamble", "phase-review-gate", "--",
+            "--evidence", "Item1=nexus-a", "--phase", "2", "205",
+        ])
+        assert "rdr-205-real.md" in res.output, res.output
+        assert "rdr-002-other.md" not in res.output, res.output
+
     def test_phase_number_never_selects_the_rdr(self, rdr_env):
         body = "### Approach\n\n1. **A**: one\n\n## Consequences\n"
         _write_rdr(rdr_env["rdr_dir"], "rdr-003-other.md", {"title": "Other", "status": "accepted"}, body)
@@ -4216,3 +4231,88 @@ class TestPreambleArgvSiblings:
         assert _preamble_id_token(("--phase", "3", "112"), value_flags=("--phase",)) == "112"
         assert _preamble_id_token(("rdr-097-foo.md",)) == "097"  # no id-shaped token: digits as before
         assert _preamble_id_token(()) is None
+
+
+
+class TestResolverSkipsCompanions:
+    """nexus-u1jxt.1: the resolver returned the alphabetically first file whose
+    number matched. A ``kind: companion`` file that sorts first (on the real
+    tree: rdr-049-consolidation-plan.md, rdr-105-shakeout.md) was taken for
+    the RDR, so ``set-status`` and every preamble acted on the wrong file."""
+
+    def test_a_companion_that_sorts_first_is_not_the_rdr(self, rdr_env):
+        from nexus.commands.rdr import _preamble_find_rdr_file  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        d = rdr_env["rdr_dir"]
+        _write_rdr(d, "rdr-049-aaa-plan.md", {"title": "Plan", "kind": "companion", "status": "abandoned"}, "x\n")
+        _write_rdr(d, "rdr-049-real.md", {"title": "Real", "status": "accepted"}, "x\n")
+        assert _preamble_find_rdr_file(d, "49").name == "rdr-049-real.md"
+        assert _preamble_find_rdr_file(d, "RDR-049").name == "rdr-049-real.md"
+
+    def test_naming_the_companion_file_still_resolves_it(self, rdr_env):
+        from nexus.commands.rdr import _preamble_find_rdr_file  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        d = rdr_env["rdr_dir"]
+        # The companion sorts AFTER the RDR, so first-match-by-name cannot
+        # return it: only the named-file branch can.
+        _write_rdr(d, "rdr-049-real.md", {"title": "Real", "status": "accepted"}, "x\n")
+        _write_rdr(d, "rdr-049-zzz-plan.md", {"title": "Plan", "kind": "companion"}, "x\n")
+        assert _preamble_find_rdr_file(d, "rdr-049-zzz-plan.md").name == "rdr-049-zzz-plan.md"
+        assert _preamble_find_rdr_file(d, "rdr-049-zzz-plan").name == "rdr-049-zzz-plan.md"
+
+    def test_an_older_companion_note_without_kind_is_not_the_rdr(self, rdr_env):
+        """rdr-079-calibration.md and rdr-152-fts-parity-contract.md carry
+        ``id: companion-note`` and no ``kind``."""
+        from nexus.commands.rdr import _preamble_find_rdr_file  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        d = rdr_env["rdr_dir"]
+        _write_rdr(d, "rdr-079-aaa-calibration.md", {"title": "Cal", "id": "companion-note", "status": "closed"}, "x\n")
+        _write_rdr(d, "rdr-079-real.md", {"title": "Real", "status": "abandoned"}, "x\n")
+        assert _preamble_find_rdr_file(d, "79").name == "rdr-079-real.md"
+
+    def test_the_file_carrying_the_rdrs_own_id_wins(self, rdr_env):
+        from nexus.commands.rdr import _preamble_find_rdr_file  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        d = rdr_env["rdr_dir"]
+        _write_rdr(d, "rdr-152-aaa-untagged-note.md", {"title": "Note", "status": "closed"}, "x\n")
+        _write_rdr(d, "rdr-152-real.md", {"title": "Real", "id": "RDR-152", "status": "closed"}, "x\n")
+        assert _preamble_find_rdr_file(d, "152").name == "rdr-152-real.md"
+
+    def test_a_lone_companion_is_still_found(self, rdr_env):
+        from nexus.commands.rdr import _preamble_find_rdr_file  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        d = rdr_env["rdr_dir"]
+        _write_rdr(d, "rdr-077-notes.md", {"title": "Notes", "kind": "companion"}, "x\n")
+        assert _preamble_find_rdr_file(d, "77").name == "rdr-077-notes.md"
+
+    def test_set_status_flips_the_rdr_and_not_the_companion(self, rdr_env):
+        d = rdr_env["rdr_dir"]
+        _write_rdr(d, "rdr-049-aaa-plan.md", {"title": "Plan", "kind": "companion", "status": "abandoned"}, "x\n")
+        _write_rdr(d, "rdr-049-real.md", {"title": "Real", "status": "draft"}, "x\n")
+        res = _runner().invoke(rdr, ["set-status", "49", "abandoned", "--reason", "test"])
+        assert "status: abandoned" in (d / "rdr-049-real.md").read_text(), res.output
+
+    def test_set_status_refuses_a_bare_number_whose_only_match_is_a_companion(self, rdr_env):
+        d = rdr_env["rdr_dir"]
+        _write_rdr(d, "rdr-077-notes.md", {"title": "Notes", "kind": "companion", "status": "draft"}, "x\n")
+        res = _runner().invoke(rdr, ["set-status", "77", "abandoned", "--reason", "test"])
+        assert res.exit_code == 1, res.output
+        assert "status: draft" in (d / "rdr-077-notes.md").read_text()
+
+    def test_on_the_real_tree_a_shared_number_never_resolves_to_a_companion(self):
+        """The fixtures above cannot see a marker nobody thought of: the first
+        version of this fix passed them and still resolved 79 and 152 to
+        companions. This walks docs/rdr itself."""
+        from nexus.commands.rdr import (  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+            _PREAMBLE_EXCLUDED, _preamble_find_rdr_file, _preamble_parse_frontmatter, _rdr_meta_is_companion,
+        )
+        tree = Path(__file__).resolve().parents[1] / "docs" / "rdr"
+        by_number: dict[int, list[Path]] = {}
+        for f in sorted(tree.glob("*.md")):
+            nums = re.findall(r"\d+", f.stem)
+            if nums and f.name.lower() not in _PREAMBLE_EXCLUDED:
+                by_number.setdefault(int(nums[0]), []).append(f)
+        shared = {n: fs for n, fs in by_number.items() if len(fs) > 1}
+        assert len(shared) >= 5, f"non-vacuity: expected several shared numbers, found {sorted(shared)}"
+        for n, files in shared.items():
+            real = [f for f in files if not _rdr_meta_is_companion(_preamble_parse_frontmatter(f)[0])]
+            if not real:
+                continue
+            got = _preamble_find_rdr_file(tree, str(n))
+            assert got in real, f"{n} resolved to {got.name}, a companion; real: {[f.name for f in real]}"
+
