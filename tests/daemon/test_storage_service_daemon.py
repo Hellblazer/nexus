@@ -3008,6 +3008,107 @@ class TestStopDoesNotWaitOnAnAlreadyDeadSupervisor:
         )
 
 
+class TestStopServiceReapsOwnChild:
+    """nexus-cd1k0.1: ``_stop_service`` waits on ``_pid_is_alive`` for the
+    supervisor's OWN un-reaped child. A zombie answers ``os.kill(pid, 0)``
+    forever, so the previous implementation burned the whole grace window
+    before a pointless SIGKILL (reproduced against the probe of record:
+    ~5.1s, exit -9). ``Popen.wait(timeout=...)`` is a real ``waitpid`` —
+    it reaps and detects death in the SAME syscall, so a child that dies
+    promptly on SIGTERM is noticed almost immediately.
+
+    Real child process throughout (no mocks of liveness): the whole
+    defect is that a poll-based probe cannot tell a zombie from a genuine
+    survivor, so a faked probe would assert nothing.
+    """
+
+    def test_child_that_exits_promptly_is_stopped_well_under_grace(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        sup = _make_supervisor(config_dir, clock)
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        sup._proc = proc
+
+        t0 = time.monotonic()
+        sup._stop_service()
+        elapsed = time.monotonic() - t0
+
+        assert elapsed < 2.0, (
+            "a child that dies promptly on SIGTERM must not burn the "
+            f"whole grace window; took {elapsed:.2f}s"
+        )
+        assert sup._proc is None
+        assert process_state(proc.pid) is None, (
+            "the child must be fully REAPED after _stop_service, not left "
+            "as an unreaped zombie"
+        )
+
+    def test_child_that_ignores_sigterm_is_killed_and_reaped_within_bound(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        """The SIGKILL escalation path still works, and still reaps —
+        this is not a regression test for the escalation itself, only
+        confirmation the reap-based rewrite didn't drop it."""
+        from nexus.daemon.storage_service_daemon import (
+            _GRACEFUL_STOP_TIMEOUT,
+            _POST_KILL_REAP_TIMEOUT,
+        )
+
+        sup = _make_supervisor(config_dir, clock)
+        proc = subprocess.Popen(  # noqa: S603
+            [
+                sys.executable, "-c",
+                "import signal, time\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "time.sleep(60)\n",
+            ],
+            start_new_session=True,
+        )
+        sup._proc = proc
+
+        t0 = time.monotonic()
+        sup._stop_service()
+        elapsed = time.monotonic() - t0
+
+        assert elapsed < _GRACEFUL_STOP_TIMEOUT + _POST_KILL_REAP_TIMEOUT + 2.0, (
+            f"escalation + reap took {elapsed:.2f}s, past the bounded total"
+        )
+        assert sup._proc is None
+        assert process_state(proc.pid) is None
+
+
+class TestKillAfterReadinessFailureReapsOwnChild:
+    """nexus-cd1k0.1 sibling: ``_kill_after_readiness_failure`` held the
+    SAME zombie-blind ``_pid_is_alive`` poll on a Popen it (indirectly,
+    via the caller) owns and holds directly."""
+
+    def test_child_that_exits_promptly_is_killed_well_under_grace(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        sup = _make_supervisor(config_dir, clock)
+        proc = subprocess.Popen(  # noqa: S603
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+
+        t0 = time.monotonic()
+        sup._kill_after_readiness_failure(proc)
+        elapsed = time.monotonic() - t0
+
+        assert elapsed < 2.0, (
+            "a child that dies promptly on SIGTERM must not burn the "
+            f"whole grace window; took {elapsed:.2f}s"
+        )
+        assert process_state(proc.pid) is None, (
+            "the child must be fully REAPED, not left as an unreaped zombie"
+        )
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=1)
+
+
 # ---------------------------------------------------------------------------
 # nexus-8vp0i / GH #1486: migration-aware readiness wiring
 # ---------------------------------------------------------------------------

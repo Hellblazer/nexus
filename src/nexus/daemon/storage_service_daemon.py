@@ -170,8 +170,34 @@ _READY_POLL_INTERVAL: float = 0.5
 #: 20+ minute migration.
 _MIGRATION_PROGRESS_LOG_INTERVAL: float = 30.0
 
-#: After SIGTERM, wait this long before escalating to SIGKILL.
+#: After SIGTERM, wait this long before escalating to SIGKILL. Applies to
+#: a supervisor stopping ITS OWN child (``_stop_service``,
+#: ``_kill_after_readiness_failure``) — see ``_SUPERVISOR_STOP_GRACE``
+#: below for the OUTER wait on the supervisor PROCESS itself, which must
+#: strictly exceed this tier's own inner total.
 _GRACEFUL_STOP_TIMEOUT: float = 5.0
+
+#: Bound on reaping a child after a SIGKILL escalation. SIGKILL is
+#: unblockable, so this is near-instant in the overwhelming case; kept
+#: bounded (rather than an unbounded ``wait()``) so a pathological
+#: uninterruptible-sleep (D-state) child cannot hang the stopper forever.
+_POST_KILL_REAP_TIMEOUT: float = 2.0
+
+#: nexus-cd1k0.1: the OUTER stopper (``stop_storage_service``) waits for
+#: the SUPERVISOR PROCESS itself to exit after SIGTERM. A CLEAN stop
+#: needs the supervisor to first stop ITS OWN engine child — up to
+#: ``_GRACEFUL_STOP_TIMEOUT`` (SIGTERM grace) plus
+#: ``_POST_KILL_REAP_TIMEOUT`` (post-SIGKILL reap) — before the
+#: supervisor process itself can exit. Reusing ``_GRACEFUL_STOP_TIMEOUT``
+#: for BOTH the inner (engine) and outer (supervisor) wait made the two
+#: windows race: a supervisor that legitimately needed its own full
+#: inner grace to shut down cleanly could still get SIGKILLed by the
+#: OUTER caller for "taking too long", even though nothing was wrong —
+#: the outer window simply lost the race it was never given enough
+#: margin to win. This is strictly longer than that inner worst case,
+#: plus a small margin for the supervisor's own log-flush + exit-path
+#: overhead, so a genuinely clean stop always has room to finish.
+_SUPERVISOR_STOP_GRACE: float = _GRACEFUL_STOP_TIMEOUT + _POST_KILL_REAP_TIMEOUT + 1.0
 
 #: HTTP timeout for /health probes.
 #:
@@ -1318,15 +1344,26 @@ class StorageServiceSupervisor:
         """SIGTERM + grace window + SIGKILL, matching ``_stop_service`` (not
         a bare SIGKILL) so the service can flush before it dies. Best-effort
         — a signal failure (process already gone) must never mask the
-        ``StorageServiceStartError`` this precedes."""
+        ``StorageServiceStartError`` this precedes.
+
+        nexus-cd1k0.1: *proc* is OUR OWN child (spawned by ``start()``,
+        never reaped yet), so waiting on it is a REAP (``Popen.wait``),
+        not a poll — the previous ``_pid_is_alive`` poll answers
+        ``os.kill(pid, 0)``, which stays True for a ZOMBIE (dead,
+        awaiting our own ``wait()``) for as long as we never call it,
+        burning the whole grace window on every readiness failure before
+        a pointless SIGKILL. ``wait(timeout=...)`` returns the moment the
+        child actually exits, zombie ambiguity included.
+        """
         with contextlib.suppress(Exception):
             from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
             safe_killpg(proc.pid, signal.SIGTERM)
-            kill_deadline = time.monotonic() + _GRACEFUL_STOP_TIMEOUT
-            while time.monotonic() < kill_deadline and _pid_is_alive(proc.pid):
-                time.sleep(0.1)
-            if _pid_is_alive(proc.pid):
+            try:
+                proc.wait(timeout=_GRACEFUL_STOP_TIMEOUT)
+            except subprocess.TimeoutExpired:
                 safe_killpg(proc.pid, signal.SIGKILL)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=_POST_KILL_REAP_TIMEOUT)
 
     def _wait_for_service_ready(
         self,
@@ -1503,23 +1540,38 @@ class StorageServiceSupervisor:
         )
 
     def _stop_service(self) -> None:
-        """Send SIGTERM (escalating to SIGKILL) to the service process group.
+        """Send SIGTERM (escalating to SIGKILL) to the service process group,
+        then REAP our own child.
 
         Postgres is intentionally NOT stopped here — PG is independently
         managed and may serve other clients (see module docstring).
+
+        nexus-cd1k0.1: ``self._proc`` is OUR OWN un-reaped child (this
+        supervisor's ``start()`` spawned it and nothing has ``wait()``ed
+        on it since). The previous wait loop polled ``_pid_is_alive``
+        (``os.kill(pid, 0)``), which stays True for a ZOMBIE — dead,
+        awaiting OUR OWN reap, which only WE can perform — for as long
+        as we never call ``wait()``. That burned the FULL grace window
+        on every clean stop and then sent a pointless SIGKILL to a
+        corpse (reproduced: stop took ~5.1s, supervisor exit -9).
+        ``Popen.wait(timeout=...)`` is a real ``waitpid``: it returns the
+        moment the child actually exits, with no zombie ambiguity,
+        because reaping and detecting death are the SAME syscall here.
         """
         if self._proc is None:
             return
         from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
-        pid = self._proc.pid
+        proc = self._proc
+        pid = proc.pid
         if _pid_is_alive(pid):
             safe_killpg(pid, signal.SIGTERM)
-            deadline = time.monotonic() + _GRACEFUL_STOP_TIMEOUT
-            while time.monotonic() < deadline and _pid_is_alive(pid):
-                time.sleep(0.1)
-            if _pid_is_alive(pid):
+            try:
+                proc.wait(timeout=_GRACEFUL_STOP_TIMEOUT)
+            except subprocess.TimeoutExpired:
                 safe_killpg(pid, signal.SIGKILL)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=_POST_KILL_REAP_TIMEOUT)
         self._proc = None
 
     # RDR-175: the in-process respawn mechanism (``_respawn`` + the windowed
@@ -2392,7 +2444,16 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
             # burns the whole grace window and then sends a pointless
             # SIGKILL on every double-stop. Whether we ENTER this branch
             # still keys off ``_pid_is_alive`` above, unchanged.
-            deadline = time.monotonic() + _GRACEFUL_STOP_TIMEOUT
+            #
+            # nexus-cd1k0.1: this OUTER wait is for the SUPERVISOR PROCESS
+            # itself, which — on a clean stop — first has to stop ITS OWN
+            # engine child (up to _GRACEFUL_STOP_TIMEOUT +
+            # _POST_KILL_REAP_TIMEOUT inside _stop_service) before it can
+            # exit. Waiting only _GRACEFUL_STOP_TIMEOUT here raced that
+            # inner window and could SIGKILL a supervisor that was midway
+            # through a perfectly clean shutdown. _SUPERVISOR_STOP_GRACE
+            # is strictly longer than that inner worst case.
+            deadline = time.monotonic() + _SUPERVISOR_STOP_GRACE
             while time.monotonic() < deadline:
                 if not _pid_is_running(supervisor_pid):
                     break

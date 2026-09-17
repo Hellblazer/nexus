@@ -411,3 +411,52 @@ class TestNoBackgroundProcessType:
                 "the storage service the same way ProcessType=Background did "
                 "on macOS (nexus-rlp0v)"
             )
+
+
+class TestUnitRestartPolicyMatchesFencedExitContract:
+    """nexus-cd1k0.1 / nexus-cd1k0.2: the storage-service supervisor's fix
+    for a clean stop (reap-not-poll, exit 0) and for a fenced stand-down
+    (fenced_exit_code() -> 0) both rely on a SPECIFIC fact about the two
+    shipped units — that a SUCCESSFUL exit does not restart the stack.
+    ``TestServicePlistRespawnPosture.test_keepalive_is_successful_exit_false``
+    already pins the launchd half of this; this class pins BOTH units
+    together as the single fact the supervisor code depends on, so a
+    future edit to either unit's restart policy fails a test that names
+    WHY, rather than silently reopening the "stopped stack comes back"
+    defect this bead fixed."""
+
+    def test_launchd_unit_does_not_restart_on_a_successful_exit(self) -> None:
+        import plistlib
+        import re
+
+        template = (
+            Path(__file__).resolve().parents[2]
+            / "conexus" / "daemon" / "com.nexus.service.plist"
+        )
+        raw = re.sub(rb"<!--.*?-->", b"", template.read_bytes(), flags=re.S)
+        data = plistlib.loads(raw)
+        assert data["KeepAlive"] == {"SuccessfulExit": False}, (
+            "the storage supervisor's stop (nexus-cd1k0.1) and fenced "
+            "stand-down (nexus-cd1k0.2) fixes both rely on exit 0 meaning "
+            "'stay stopped' under launchd — KeepAlive must stay the "
+            "SuccessfulExit=false dict form"
+        )
+
+    def test_systemd_unit_restarts_on_failure_only(self) -> None:
+        template = (
+            Path(__file__).resolve().parents[2]
+            / "conexus" / "daemon" / "nexus-service.service"
+        )
+        active = [
+            ln.strip() for ln in template.read_text().splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")
+        ]
+        assert "Restart=on-failure" in active, (
+            "the storage supervisor's stop (nexus-cd1k0.1) and fenced "
+            "stand-down (nexus-cd1k0.2) fixes both rely on exit 0 NOT "
+            "restarting under systemd — must stay Restart=on-failure, "
+            f"never Restart=always; active directives: {active}"
+        )
+        assert not any(ln.startswith("Restart=") and ln != "Restart=on-failure" for ln in active), (
+            f"exactly one Restart= directive, and it must be on-failure; got {active}"
+        )
