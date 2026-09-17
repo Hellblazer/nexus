@@ -104,19 +104,19 @@ DEFAULT_MAX_RESENDS = 5
 # `nx-mcp` process. The waiter publishes its `status()` dict to a small
 # per-session JSON file so the CLI process can read it for THIS session
 # with no network round trip and no dependency on the MCP process still
-# being reachable. Byte-for-byte the same on-disk SHAPE `nexus.tuple_watch.
-# registration_path` uses for the drain hook's per-session instance
+# being reachable. Byte-for-byte the same on-disk SHAPE
+# `nexus.mcp.subscriptions.registration_path` uses for the drain hook's per-session instance
 # registration (`<state_dir>/tuple-watch/addresses.d/<session id>`) --
 # same parent directory, same session-id-keyed leaf, same atomic
 # temp-file-then-rename write -- copied rather than imported for the same
-# reason `nexus.mcp.subscriptions` copies `write_instance_registration`
-# instead of importing it (see that module's docstring): `tuple_watch.py`
-# is mid-retirement and must not gain a new importer.
+# reason `nexus.mcp.subscriptions` carries its own copy of
+# `write_instance_registration` (see that module's docstring): the retired
+# CLI watcher module that first wrote these files is gone (nexus-rplay.14).
 #
 # A missing, unreadable, or malformed file all read as "no status
 # recorded for this session" -- never a crash, never a stale guess.
 
-#: Mirrors `nexus.tuple_watch._SAFE_SESSION_ID` -- the value becomes a bare
+#: Mirrors `nexus.mcp.subscriptions._SAFE_SESSION_ID` -- the value becomes a bare
 #: directory-entry name, so anything outside a safe, boring charset is
 #: refused rather than sanitised.
 _SAFE_CHANNEL_SESSION_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
@@ -133,8 +133,8 @@ def _channel_status_path(state_dir: Path, session_id: str) -> Path:
 def write_channel_status(state_dir: Path, session_id: str, status: dict[str, Any]) -> None:
     """Best-effort atomic write of *status* (a :meth:`ChannelWaiter.status`
     dict) for *session_id* under *state_dir*. A *session_id* outside the
-    safe charset is a silent no-op, mirroring `nexus.tuple_watch.
-    write_instance_registration`. Never raises: a write failure (a
+    safe charset is a silent no-op, mirroring
+    `nexus.mcp.subscriptions.write_instance_registration`. Never raises: a write failure (a
     read-only filesystem, a missing parent that cannot be created) only
     means the doctor row sees a stale or absent record, never that the
     waiter itself is affected.
