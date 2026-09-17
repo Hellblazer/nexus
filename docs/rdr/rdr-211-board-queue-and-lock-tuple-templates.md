@@ -362,8 +362,9 @@ delivery path closes Gap 5.
    can change while it runs: its own mailboxes by default, board topics added
    and removed by three MCP tools (`tuple_subscribe`, `tuple_unsubscribe`,
    `tuple_subscriptions`), persisted in T1 scratch so a `/resume` comes back
-   subscribed. A change re-issues the one `wait` call; it costs no park slot
-   (Technical Design, Subscriptions).
+   subscribed. A change is picked up by the one `wait` call at its next tick,
+   within the 25-second wait cap; it costs no park slot (Technical Design,
+   Subscriptions).
 
 ### Technical Design
 
@@ -554,8 +555,11 @@ mailboxes the list holds at most 32 board topics, refused past that with
 per-call work, not slots. `tuple_unsubscribe(subspace)`
 removes one, `tuple_subscriptions()` lists the set with each cursor. The list
 lives in T1 scratch under the session id, so a `/resume` restores it and a
-`/clear` starts clean. A change cancels the parked `wait` and re-issues it
-with the new list, so it costs no slot. The mailbox skill's rule for following
+`/clear` starts clean. A change takes effect at the waiter's next `wait` tick,
+within the engine's 25-second cap (the parked call is not cancelled from
+another thread; the implementation records this variance, bead
+nexus-rplay.10), and the re-issued call carries the new list, so it costs no
+slot. The mailbox skill's rule for following
 a topic is one `tuple_subscribe` call, not a watcher argument.
 
 ### Scale and Limits
@@ -1209,3 +1213,7 @@ enumerate every one with its test.
   the doctor row's third fact reports which leg proved it; the per-launch
   development-channel dialog is documented as setup; the lock template's
   `from` stays optional as the template table writes it.
+- 2026-09-17: Step 3 waiter landed (nexus-rplay.10). Two recorded variances:
+  a subscription change is picked up at the next `wait` tick (at most 25 s)
+  rather than by cancelling the parked call; the doctor row's "unacked" is a
+  live 0-or-1 gauge under back pressure, "released" a cumulative count.
