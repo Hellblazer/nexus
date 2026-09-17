@@ -41,7 +41,12 @@ class TemplateRegistryTest {
         TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
         assertEquals(List.of(TemplateRegistry.SOURCE_RESOURCES), registry.sources());
         List<String> names = registry.templates().stream().map(TemplateSchema::name).toList();
-        assertEquals(List.of("directory/<name>", "ledger/<session_id>", "mailbox/<address>"), names);
+        // Sorted by name (load() sorts the final list): board, directory, ledger,
+        // lock, mailbox, queue -- RDR-211 Phase 1 Step 2 (bead nexus-rplay.8) added
+        // board/<topic>, lock/<resource>, queue/<name> beside the three RDR-205/208
+        // templates.
+        assertEquals(List.of("board/<topic>", "directory/<name>", "ledger/<session_id>",
+                "lock/<resource>", "mailbox/<address>", "queue/<name>"), names);
     }
 
     @Test
@@ -243,8 +248,12 @@ class TemplateRegistryTest {
     void defaultClaimLogTtlPassesBootCheckForAllV1Templates() {
         // Exercised implicitly by allV1ResourceTemplatesLoadAtBoot (default TTL, no
         // NX_TUPLE_CLAIM_LOG_TTL_DAYS override), stated explicitly here for the record.
+        // 6, not 3, since RDR-211 Phase 1 Step 2 (bead nexus-rplay.8) added
+        // board/<topic>, lock/<resource>, queue/<name>; queue and lock declare their
+        // own (shorter) claim_log_ttl_seconds, board declares none, and every one of
+        // the six passes this same boot check.
         TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
-        assertEquals(3, registry.templates().size());
+        assertEquals(6, registry.templates().size());
     }
 
     @Test
@@ -421,7 +430,9 @@ class TemplateRegistryTest {
         assertEquals(2, registry.sources().size());
         assertEquals(TemplateRegistry.SOURCE_RESOURCES, registry.sources().get(0));
         assertTrue(registry.sources().get(1).startsWith("directory:"), registry.sources().get(1));
-        assertEquals(4, registry.templates().size());
+        // 7, not 4: RDR-211 Phase 1 Step 2 (bead nexus-rplay.8) added board/<topic>,
+        // lock/<resource>, queue/<name> beside the three bundled resource templates.
+        assertEquals(7, registry.templates().size());
         assertTrue(registry.templates().stream().anyMatch(t -> t.name().equals("test/<id>")));
     }
 

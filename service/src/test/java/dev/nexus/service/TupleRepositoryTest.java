@@ -978,10 +978,11 @@ class TupleRepositoryTest {
     @Test
     void registry_returnsDigestAndTemplates() {
         var snap = repo.registry();
-        // directory, ledger, mailbox (bundled resources) + probe (this class's extra
-        // template directory, bead nexus-em75s.39's multi-pinned-key fixture) +
+        // board, directory, ledger, lock, mailbox, queue (bundled resources, six
+        // since RDR-211 Phase 1 Step 2, bead nexus-rplay.8) + probe (this class's
+        // extra template directory, bead nexus-em75s.39's multi-pinned-key fixture) +
         // probe-lease (nexus-xapt8's default_lease_seconds fixture) -- see startAll.
-        assertThat(snap.templates()).hasSize(5);
+        assertThat(snap.templates()).hasSize(8);
         assertThat(snap.digest()).isNotBlank();
     }
 

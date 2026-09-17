@@ -151,7 +151,9 @@ class TupleHandlerWiringTest {
         assertThat(resp.statusCode()).isEqualTo(200);
         var body = mapper.readValue(resp.body(), MAP_T);
         assertThat(body).containsKey("digest");
-        assertThat((java.util.List<?>) body.get("templates")).hasSize(3);
+        // 6, not 3: RDR-211 Phase 1 Step 2 (bead nexus-rplay.8) added board/<topic>,
+        // lock/<resource>, queue/<name> beside directory/ledger/mailbox.
+        assertThat((java.util.List<?>) body.get("templates")).hasSize(6);
     }
 
     /**
