@@ -43,3 +43,5 @@ mechanize, it matters enough to ship.
 - `conexus/skills/rdr-research/SKILL.md`: `add` takes `--classification` and `--method` from closed sets; the gate's Layer 2 reads them (bead nexus-5r0ho).
 - `conexus/skills/rdr-fix-checklist/SKILL.md`: the fix-check record opens with `dispatches: 3` and one `FIX CHECK:` line per run; the gate preamble counts them (bead nexus-5r0ho).
 - `conexus/hooks/scripts/auto-approve-nx-mcp.sh`: `tuple_channel_probe` dropped from the auto-approval allowlist, RDR-213's deleted proof-gate tool (bead nexus-gomuo.1).
+- `conexus/skills/mailbox/SKILL.md`: the push-delivery rule now says claim with `tuple_in`, act, then ack, nack, or release when only deferring, never nack, matching RDR-213's waiter, which pushes a reference and never claims (bead nexus-gomuo.2).
+- `conexus/skills/peer-messaging/SKILL.md`: a claimed mailbox row that is only being deferred, not answered, is given back with `tuple_release`, never `tuple_nack`, matching RDR-213 (bead nexus-gomuo.2).

@@ -457,8 +457,11 @@ None.
 - **Scenario**: notification dropped by Claude Code (fake sender returns
   false). **Verify**: no claim exists; the row is announced again at the next
   cadence point.
-- **Scenario**: session launched without the flag. **Verify**: nothing
-  pushed; drain hook renders at the next prompt; doctor row informational.
+- **Scenario**: session launched without the flag. **Verify** (fake-store
+  unit test): nothing pushed; doctor row informational. **Verify** (MVV,
+  host-only, Scenario 2 of the MVV above): the drain hook renders it at the
+  next prompt -- the fake-store harness has no plugin hooks, so only the MVV
+  can exercise that half.
 - **Scenario**: waiter restart with one pending row. **Verify**: announced
   once more, count restarts at one.
 - **Scenario**: engine without `wait`. **Verify**: waiter stops, doctor row
@@ -470,7 +473,10 @@ None.
 
 ### Testing Strategy
 
-1. **Scenario**: the Test Plan above as unit tests against the fake store.
+1. **Scenario**: the Test Plan above as unit tests against the fake store,
+   except the no-flag scenario's drain-hook-renders-at-next-prompt half,
+   which the fake-store harness carries no plugin hooks to exercise and
+   which Testing Strategy 2's MVV covers instead.
    **Expected**: every scenario green; the deletion census names every
    removed symbol.
 2. **Scenario**: the MVV above on real sessions.
@@ -543,8 +549,10 @@ The MVV is Phase 1's exit, not deferred.
 - 2026-09-17: Sam confirmed the design as his original intent for channel
   delivery (T2 `nexus_rdr/213-decision-notify-then-claim-2026-09-17`); the
   Provenance paragraph records it.
-- 2026-09-17: prototype implemented on branch `rdr-213-spikes` (its first
-  commit, unpushed, lifted by the Phase 1 beads) and both Critical Assumptions verified live against a
+- 2026-09-17: prototype implemented on branch `rdr-213-spikes` (the middle
+  of three commits on that branch, not the first -- unpushed, lifted by
+  the Phase 1 beads) and both
+  Critical Assumptions verified live against a
   throwaway engine (T2 `nexus_rdr/213-spike-1-session-claims-2026-09-17`,
   `nexus_rdr/213-spike-2-reannounce-cadence-2026-09-17`); checkboxes above
   updated accordingly.
@@ -560,3 +568,10 @@ The MVV is Phase 1's exit, not deferred.
   the reference, which carries no body; the skill text is its only carrier.
 - 2026-09-17: Gate round 2 — PASSED (0 Critical, 0 Significant, 0 ship-blocker(s)); commit `7d3d14fe9`; critique `nexus_rdr/213-gate-critique-2026-09-17b`.
 - 2026-09-17: Accepted by Sam (gate round 2 PASSED on 7d3d14fe9, fix check nexus_rdr/213-fix-check-7d3d14fe9, no residuals).
+- 2026-09-17: nexus-gomuo.2 (Phase 1 Step 3, skills and docs): the Test
+  Plan's no-flag scenario and Testing Strategy 1 reconciled to state once
+  that the drain-hook-render half is the MVV's territory, not a fake-store
+  unit test; the prototype-commit clause above corrected to say the middle
+  of three commits, not the branch's first; RDR-211's Technical Design
+  (Delivery, Subscriptions) and Approach item 7 each gained a pointer note
+  to this RDR.

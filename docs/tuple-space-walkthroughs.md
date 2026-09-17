@@ -222,19 +222,19 @@ sequenceDiagram
     Note over M,S: mailbox/<name> subscribed earlier via tuple_subscribe, per the SessionStart instruction
     S->>E: wait over subscribed mailboxes/topics, timeout_s=25
     Sn->>E: out mailbox/[session] keys to dims from kind nonce msg-9 body
-    E-->>S: the new row (claimed at delivery)
-    S->>H: notifications/claude/channel: subspace, tuple_id, claim_id, claimant -- no body
+    E-->>S: the new row, available -- the waiter never claims it
+    S->>H: notifications/claude/channel: subspace, tuple_id -- no body, no claim
     H-->>M: channel notification, a fresh turn with no user input
-    M->>E: tuple_rd mailbox/[session], the reference the notification named
-    E-->>M: the tuple, body included
-    M->>E: ack claim_id (mcp tuple_ack), or nack to release it
-    E-->>M: consumed
-    Note over M: nothing left for the next UserPromptSubmit's drain hook -- the row was already consumed
+    M->>E: tuple_in mailbox/[session], claiming the reference the notification named
+    E-->>M: the tuple and a claim, body included
+    M->>E: ack the claim (mcp tuple_ack), or nack if it failed, or release if only deferring
+    E-->>M: consumed (ack/nack), or available again (release)
+    Note over M: nothing left for the next UserPromptSubmit's drain hook -- the row was already claimed and resolved
 ```
 
-The notification itself carries no content, only the reference (Sam, T2 `nexus_rdr/211-decision-push-reference-2026-09-17`): the subspace, the tuple id and, for mail, the claim id and the waiter's own claimant, plus the instruction to read it. The session decides to read the body with `tuple_rd`, the same deliberate step a pull-based read always required, so a peer's or a board poster's content never lands inside a session unread.
+The notification itself carries no content, only the reference (Sam, T2 `nexus_rdr/211-decision-push-reference-2026-09-17`; RDR-213): the subspace and the tuple id, plus the instruction to claim it. The waiter holds no claim. The session claims the tuple itself with `tuple_in`, the same deliberate step a pull-based read always required, so a peer's or a board poster's content never lands inside a session unclaimed. A row the session only means to defer, not fail, goes back with `tuple_release`, never `tuple_nack`: each announcement is a fresh claim decision, and the mailbox template dead-letters a message after three nacks.
 
-When the channel is unreached (the session was not launched with the development-channel flag, or the model never acked) the row is still delivered: the next prompt fires `mailbox_drain.py`, which probes independently, claims, acks and renders the same row inline in that prompt's context. The drain hook is the unconditional floor and never depends on whether the channel delivered anything first.
+When the channel is unreached (the session was not launched with the development-channel flag, or nobody claims the referenced row) the row is still delivered: the next prompt fires `mailbox_drain.py`, which probes independently, claims, acks and renders the same row inline in that prompt's context. The drain hook is the unconditional floor and never depends on whether the channel delivered anything first.
 
 A `/clear` or `/resume` puts the conversation on a new session id; the new session's own MCP server loads a fresh subscription set for that id (T1-scoped) and re-subscribes its instance mailbox once the model calls `tuple_subscribe` per the new SessionStart instruction. See [Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel) for that handoff.
 
