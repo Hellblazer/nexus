@@ -30,8 +30,4 @@ mechanize, it matters enough to ship.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.51.0)
-
-- `conexus/skills/mailbox/SKILL.md`: the board-topic rule and its checklist line no longer mention a watcher argument; `tuple_subscribe` is the whole call (RDR-211 follow-up, bead nexus-rplay.22, sibling sweep of the coordination-page fix).
-- `conexus/skills/peer-messaging/SKILL.md`: the waiting checklist names the channel notification and the drain hook at the next prompt in place of the deleted watcher (RDR-211 follow-up, bead nexus-rplay.22).
-- `conexus/skills/mailbox/SKILL.md`: the push-delivery rule names the dialog-free launch form `--channels plugin:conexus@nexus-plugins` with the `allowedChannelPlugins` managed setting beside the development-channels flag (bead nexus-tk2cz).
+## Awaiting the next release or plugin cut (pinned: v7.51.1)
