@@ -279,8 +279,8 @@ above.
   either case (`capabilities.experimental` is absent, the post-initialize
   traffic is `initialized`, `tools/list`, `prompts/list`, `resources/list`),
   so the Delivery guard "claims only when the handshake carried the channel"
-  has nothing to read: how the waiter learns the channel is on is a decision
-  for Sam before the Step 3 waiter bead (options in the spike record). The
+  has nothing to read; Sam's decision of 2026-09-17 replaced it with the
+  parent-argv proof and probe fallback described under Delivery. The
   development-channel flag shows a confirmation dialog on every launch. T2
   `nexus_rdr/211-spike-4-channel-2026-09-17`.
 - [x] The wait registry can register one waiter in several subspace groups and
