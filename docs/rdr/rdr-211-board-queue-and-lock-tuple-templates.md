@@ -264,14 +264,25 @@ above.
   stale claim or a wrong claimant there (909-912) before its update; the row's
   template name is already used at 1031. The placement is the one those two
   refusals use, so no spike (T2 `nexus_rdr/211-research-2`).
-- [ ] A `notifications/claude/channel` notification sent by the nexus MCP
+- [x] A `notifications/claude/channel` notification sent by the nexus MCP
   server wakes a fully idle Claude Code session into a turn, and one sent
-  mid-turn is delivered at the next turn. **Status**: Documented (Claude Code
-  channels reference, "Events queue into the session and are processed in
-  order"; T2 `nexus_rdr/211-research-3`). **Method**: Spike, Phase 1 Step 0,
-  three observations on a real idle session; if it fails, the floor (the
-  drain hook) stays the only delivery and Step 3 reduces to the subscription
-  tools and the doctor row.
+  mid-turn is delivered at the next turn. **Status**: Verified 2026-09-17.
+  **Method**: Spike, Phase 1 Step 0, on a real Claude Code 2.1.274 session
+  launched with `--dangerously-load-development-channels server:nexus`.
+  Idle wakes 4/4 (after 60, 90, 120 and 60 s idle), the ACK visible 1.6 s
+  after the send (1575 to 1619 ms, four samples). Mid-turn 3/3 not lost: the
+  notification is injected into the running turn as soon as the in-flight
+  tool call returns, not held for the next user turn; the model answered one
+  in-turn and, asked at the next turn, listed all six messages received. The
+  control launch without the flag: same handshake, same environment, the
+  notification produced nothing. The handshake carries NO channel marker in
+  either case (`capabilities.experimental` is absent, the post-initialize
+  traffic is `initialized`, `tools/list`, `prompts/list`, `resources/list`),
+  so the Delivery guard "claims only when the handshake carried the channel"
+  has nothing to read: how the waiter learns the channel is on is a decision
+  for Sam before the Step 3 waiter bead (options in the spike record). The
+  development-channel flag shows a confirmation dialog on every launch. T2
+  `nexus_rdr/211-spike-4-channel-2026-09-17`.
 - [x] The wait registry can register one waiter in several subspace groups and
   wake it from any of them, without losing a write that lands between the first
   query and the park. `rd` gets that guarantee by registering before it queries
@@ -793,7 +804,8 @@ idempotency, and it loses history.
 
 - [x] All engine-side Critical Assumptions verified (the three spikes ran
   2026-09-16; the lock attempts question is answered by the engine as built).
-- [ ] The channel assumption spiked (Phase 1 Step 0).
+- [x] The channel assumption spiked (Phase 1 Step 0, 2026-09-17, verified;
+  T2 `nexus_rdr/211-spike-4-channel-2026-09-17`).
 - [x] Sam decides the Open Questions below (all seven answered by 2026-09-16).
 
 ### Minimum Viable Validation
@@ -1174,3 +1186,10 @@ enumerate every one with its test.
   `nexus_rdr/211-fix-check-<tip>`, `<tip>` the RDR file's commit after this
   disposition);
   residual 4 by `0b42e5019`, confirmed closed by the round-3 critique.
+- 2026-09-17: Phase 1 Step 0 ran (bead nexus-rplay.1): the channel assumption
+  is verified on a real idle session, 4 idle wakes, 3 mid-turn deliveries, a
+  no-flag control (T2 `nexus_rdr/211-spike-4-channel-2026-09-17`). One
+  finding the Delivery design did not anticipate: Claude Code's handshake and
+  environment are identical with and without the channel flag, so the
+  waiter's claim gate cannot be written against the handshake; the choice of
+  signal goes to Sam before the Step 3 waiter bead. Prerequisite ticked.
