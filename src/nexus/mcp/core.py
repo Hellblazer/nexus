@@ -750,12 +750,15 @@ def _start_channel_waiter() -> None:
     if not session_id or _channel.active_waiter(session_id) is not None:
         return
     try:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
         t1, _ = _get_t1()
         subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
         channel_live = _channel.detect_channel_argv()
         waiter = _channel.ChannelWaiter(
             session_id, _t2_ctx, subs, channel_live=channel_live,
             persist=lambda: _subscriptions.persist(t1, subs),
+            state_dir=nexus_config_dir(),
         )
         _channel.register_active_waiter(waiter)
         waiter.start()

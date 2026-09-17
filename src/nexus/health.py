@@ -4996,6 +4996,13 @@ _TUPLE_PARK_SLOTS_WARN_RATIO: float = 0.75
 #: available or at any dead task".
 _TUPLE_QUEUE_DEPTH_WARN_AVAILABLE: int = 1000
 
+#: RDR-211 Technical Design "Delivery" / bead nexus-rplay.13: "last wake
+#: older than a bound ... (e.g. more than 3 x 25 s ago while alive)". 3x
+#: `nexus.mcp.channel.DEFAULT_WAIT_TIMEOUT_S` (25s) -- a healthy waiter
+#: completes a `wait()` round trip at least that often even with nothing
+#: to deliver, since the engine caps each parked call at that timeout.
+_TUPLE_CHANNEL_DELIVERY_STALE_S: float = 3 * 25.0
+
 
 def _tuple_route_predates_floor() -> bool:
     from nexus.engine_version import REQUIRED_ENGINE_VERSION  # noqa: PLC0415 — deferred; stdlib-only leaf, cheap either way
@@ -5809,6 +5816,141 @@ def _check_tuple_queue_depth() -> list[HealthResult]:
         )]
     detail = "; ".join(f"{c.subspace}: available={c.available} dead={c.dead}" for c in queues)
     return [HealthResult(label=label, ok=True, detail=detail)]
+
+
+_TUPLE_CHANNEL_DELIVERY_LABEL = "tuples.channel_delivery"
+
+
+def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[HealthResult]:
+    """RDR-211 Phase 1 Step 3 doctor row 3 (bead nexus-rplay.13): the
+    `claude/channel` push-delivery waiter's own status for THIS session.
+
+    `nx doctor` runs in the CLI process; the waiter runs in the session's
+    `nx-mcp` process. The two never share memory, so this row reads the
+    on-disk record `nexus.mcp.channel.ChannelWaiter` publishes for its own
+    session id (`nexus.mcp.channel.write_channel_status`) via
+    `nexus.mcp.channel.read_channel_status` -- no engine call, no network
+    round trip, purely local files. A record's mere presence is how this
+    row infers "the capability is declared": only the waiter that ran
+    `run_stdio_with_channel`'s declaration ever writes one, so a session
+    with no record never declared the capability at all, as far as this
+    row can observe -- it makes no independent claim about the handshake,
+    which Phase 1 Step 0 found carries no channel marker either way (T2
+    `nexus_rdr/211-spike-4-channel-2026-09-17`).
+
+    Not applicable (informational, ok=True, never a WARN, never
+    allowlisted in the fresh-install MVV -- the nexus-7zhag doctrine) in
+    two cases: no session id is resolvable at all
+    (:func:`nexus.session.resolve_active_session_id`), or one is, but no
+    status record exists for it (a CLI-only invocation, a virgin box, or
+    a session whose MCP server predates this feature or has not
+    completed its first tick yet).
+
+    Declared but never proven live (`proof == "none"`) is ALSO
+    informational, ok=True, never a WARN -- Sam's decision makes the
+    channel opt-in, so a session launched without `--channels
+    server:nexus` and never calling `tuple_channel_probe` is the ordinary
+    case, not a defect; the drain hook is the floor either way.
+
+    Proof `"argv"` or `"probe"` and the waiter alive with a fresh
+    `last_wake` (within :data:`_TUPLE_CHANNEL_DELIVERY_STALE_S` of now) is
+    OK, reporting proof, wake age, `unacked` (the live back-pressure
+    gauge, 0 or 1) and `released` (the cumulative count of claims
+    returned to the floor after exhausting resends -- mentioned plainly
+    whenever it is nonzero, in every branch, never itself a reason to
+    warn: whether it GREW since the last `nx doctor` run is not something
+    a stateless row can know).
+
+    Proof present but the waiter is not alive, or its last wake is
+    stale, is a WARN: push delivery for this session is not actually
+    happening even though the gate once proved it live, and the fix is
+    to restart the MCP server. The drain hook still delivers at the next
+    prompt either way, so this is a soft warning, never fatal.
+
+    *now* is a test-only seam (defaults to `datetime.now(UTC)`) so the
+    staleness boundary can be pinned exactly rather than raced against
+    wall-clock drift between writing a fixture's `last_wake` and this
+    function reading it.
+    """
+    label = _TUPLE_CHANNEL_DELIVERY_LABEL
+    now = now if now is not None else datetime.now(UTC)
+
+    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred: CLI startup cost
+
+    session_id = resolve_active_session_id()
+    if not session_id:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=(
+                "informational — no active session resolvable; nothing to check "
+                "for the RDR-211 channel-delivery waiter"
+            ),
+        )]
+
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred: CLI startup cost, function-scoped (safe -- see tests/test_nexus_config_dir_setattr_lint.py)
+    from nexus.mcp.channel import read_channel_status  # noqa: PLC0415 — deferred: CLI startup cost
+
+    status = read_channel_status(nexus_config_dir(), session_id)
+    if status is None:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=(
+                "informational — no channel-waiter status recorded for this "
+                "session; the nexus MCP server has not run the RDR-211 waiter "
+                "here (a CLI-only session, a virgin box, or an MCP server that "
+                "predates this feature or has not completed its first wait "
+                "yet). Mail still arrives via the drain hook at the next prompt."
+            ),
+        )]
+
+    proof = status.get("proof", "none")
+    alive = bool(status.get("alive", False))
+    last_wake = status.get("last_wake")
+    unacked = status.get("unacked", 0)
+    released = status.get("released", 0)
+
+    if proof == "none":
+        detail = (
+            "capability declared; channel not proven live for this session "
+            "(no `--channels server:nexus` on the claude command line and no "
+            "probe reply); mail arrives at the next prompt through the drain "
+            "hook"
+        )
+        if released:
+            detail += f"; {released} message(s) previously released to the floor after exhausting resends"
+        return [HealthResult(label=label, ok=True, detail=detail)]
+
+    # proof is "argv" or "probe" past this point.
+    age_s: float | None = None
+    if isinstance(last_wake, str) and last_wake:
+        try:
+            age_s = (now - datetime.fromisoformat(last_wake)).total_seconds()
+        except ValueError:
+            age_s = None
+
+    stale = age_s is not None and age_s > _TUPLE_CHANNEL_DELIVERY_STALE_S
+    wake_desc = f"{age_s:.0f}s ago" if age_s is not None else "not recorded yet"
+
+    if not alive or stale:
+        reason = "the waiter is not alive" if not alive else (
+            f"the last wake was {wake_desc}, stale beyond {_TUPLE_CHANNEL_DELIVERY_STALE_S:.0f}s"
+        )
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"proof={proof}; {reason} for this session; last wake "
+                f"{wake_desc}; unacked={unacked}, released={released}"
+            ),
+            fix_suggestions=["Restart the MCP server: /mcp"],
+        )]
+
+    return [HealthResult(
+        label=label, ok=True,
+        detail=(
+            f"channel live (proof={proof}); waiter alive; last wake {wake_desc}; "
+            f"unacked={unacked}, released={released}"
+        ),
+    )]
 
 
 _TUPLE_WATCH_COMMAND = "nx tuple watch"
@@ -8235,6 +8377,11 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     # the tenant has no queue subspace.
     results.extend(_check_tuple_park_slots())
     results.extend(_check_tuple_queue_depth())
+    # bead nexus-rplay.13: the channel-delivery waiter's own status for
+    # this session, read from the per-session on-disk record the waiter
+    # publishes (no engine call). Degrades internally to informational
+    # whenever no session, or no record, is resolvable.
+    results.extend(_check_tuple_channel_delivery())
     # bead nexus-rml7o (MM-3.4 critic finding S5): read-only, always
     # informational -- never gated by route_predates_floor, since it reads
     # local Claude Code settings, not the engine.

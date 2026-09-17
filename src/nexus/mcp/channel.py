@@ -29,7 +29,11 @@ Two independent halves live here:
   mail under pure back pressure (one live claim at a time, held, renewed
   and re-notified until the session's own ``tuple_ack``/``tuple_nack``
   supplies the credit for the next -- Sam, T2 ``nexus_rdr/211-decision-
-  channel-delivery-2026-09-16`` item 6).
+  channel-delivery-2026-09-16`` item 6). It also publishes its
+  :meth:`ChannelWaiter.status` to a per-session on-disk record
+  (:func:`write_channel_status`) at every wake/renew/release, since the
+  `nx doctor` row (bead nexus-rplay.13) runs in the separate CLI process
+  and has no other way to see this process's live state.
 
 Neither half needs ``mcp.server.session.ServerSession`` at all: sending a
 notification is a raw ``JSONRPCNotification`` on the write stream (the
@@ -52,11 +56,14 @@ completes.
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import subprocess
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -90,6 +97,77 @@ DEFAULT_LEASE_S = 300
 DEFAULT_RENEW_INTERVAL_S = 150.0
 DEFAULT_WAIT_TIMEOUT_S = 25
 DEFAULT_MAX_RESENDS = 5
+
+# ── Cross-process status (RDR-211 Phase 1 Step 3, bead nexus-rplay.13) ─────
+#
+# `nx doctor` runs in the CLI process; the waiter runs in the session's
+# `nx-mcp` process. The waiter publishes its `status()` dict to a small
+# per-session JSON file so the CLI process can read it for THIS session
+# with no network round trip and no dependency on the MCP process still
+# being reachable. Byte-for-byte the same on-disk SHAPE `nexus.tuple_watch.
+# registration_path` uses for the drain hook's per-session instance
+# registration (`<state_dir>/tuple-watch/addresses.d/<session id>`) --
+# same parent directory, same session-id-keyed leaf, same atomic
+# temp-file-then-rename write -- copied rather than imported for the same
+# reason `nexus.mcp.subscriptions` copies `write_instance_registration`
+# instead of importing it (see that module's docstring): `tuple_watch.py`
+# is mid-retirement and must not gain a new importer.
+#
+# A missing, unreadable, or malformed file all read as "no status
+# recorded for this session" -- never a crash, never a stale guess.
+
+#: Mirrors `nexus.tuple_watch._SAFE_SESSION_ID` -- the value becomes a bare
+#: directory-entry name, so anything outside a safe, boring charset is
+#: refused rather than sanitised.
+_SAFE_CHANNEL_SESSION_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+def _channel_status_dir(state_dir: Path) -> Path:
+    return state_dir / "tuple-watch" / "channel-status.d"
+
+
+def _channel_status_path(state_dir: Path, session_id: str) -> Path:
+    return _channel_status_dir(state_dir) / session_id
+
+
+def write_channel_status(state_dir: Path, session_id: str, status: dict[str, Any]) -> None:
+    """Best-effort atomic write of *status* (a :meth:`ChannelWaiter.status`
+    dict) for *session_id* under *state_dir*. A *session_id* outside the
+    safe charset is a silent no-op, mirroring `nexus.tuple_watch.
+    write_instance_registration`. Never raises: a write failure (a
+    read-only filesystem, a missing parent that cannot be created) only
+    means the doctor row sees a stale or absent record, never that the
+    waiter itself is affected.
+    """
+    if not _SAFE_CHANNEL_SESSION_ID.fullmatch(session_id):
+        return
+    path = _channel_status_path(state_dir, session_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.parent / (path.name + ".tmp")
+        tmp.write_text(json.dumps(status), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as e:  # pragma: no cover — best-effort, disk-failure path
+        _log.debug("channel_status_write_failed", session_id=session_id, error=str(e))
+
+
+def read_channel_status(state_dir: Path, session_id: str) -> dict[str, Any] | None:
+    """Read the record :func:`write_channel_status` last wrote for
+    *session_id*, or ``None`` on a missing file, an unreadable one, or
+    malformed JSON -- all three mean "no status recorded for this
+    session" to a caller (the `nx doctor` row), never a crash.
+    """
+    path = _channel_status_path(state_dir, session_id)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
 
 # ── Capability declaration + the write stream (design choice (b)) ──────────
 
@@ -286,6 +364,7 @@ class ChannelWaiter:
         channel_live: bool,
         sender: Callable[[str, dict[str, str]], Awaitable[bool]] = send_channel_notification,
         persist: Callable[[], None] = lambda: None,
+        state_dir: Path | None = None,
         lease_s: int = DEFAULT_LEASE_S,
         renew_interval_s: float = DEFAULT_RENEW_INTERVAL_S,
         wait_timeout_s: int = DEFAULT_WAIT_TIMEOUT_S,
@@ -301,6 +380,12 @@ class ChannelWaiter:
         #: session. Defaults to a no-op (tests; a caller managing
         #: persistence itself).
         self.persist = persist
+        #: `None` (the default; tests that do not care about the on-disk
+        #: status record) means :meth:`_publish_status` is a no-op. A real
+        #: caller (`nexus.mcp.core._start_channel_waiter`) passes
+        #: `nexus_config_dir()` so the `nx doctor` row (bead nexus-rplay.13)
+        #: can read this waiter's status cross-process.
+        self.state_dir = state_dir
         self.lease_s = lease_s
         self.renew_interval_s = renew_interval_s
         self.wait_timeout_s = wait_timeout_s
@@ -335,6 +420,7 @@ class ChannelWaiter:
     def _clear_outstanding(self, claim_id: str) -> None:
         if self._outstanding is not None and self._outstanding.claim_id == claim_id:
             self._outstanding = None
+            self._publish_status()
 
     def note_probe_ack(self) -> None:
         """`tuple_channel_probe()` calls this: the gate's probe fallback
@@ -344,6 +430,7 @@ class ChannelWaiter:
     def _mark_probed(self) -> None:
         self._proof = "probe"
         self.channel_live.set()
+        self._publish_status()
 
     def _call_soon(self, fn: Callable[..., None], *args: Any) -> None:
         loop = self._loop
@@ -383,11 +470,23 @@ class ChannelWaiter:
             "released": self._released_count,
         }
 
+    def _publish_status(self) -> None:
+        """Best-effort refresh of the on-disk record (bead nexus-rplay.13)
+        -- a no-op when this waiter was constructed with no `state_dir`.
+        Called at every wake (:meth:`tick`'s end), every renew and release
+        (:meth:`_renew_or_release`'s exit points), every proof change
+        (:meth:`_mark_probed`), and this loop's own start/stop, so a
+        cross-process reader never sees a record older than the waiter's
+        current state by more than one in-flight operation."""
+        if self.state_dir is not None:
+            write_channel_status(self.state_dir, self.session_id, self.status())
+
     # ── the loop ─────────────────────────────────────────────────────────
 
     async def run(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._alive = True
+        self._publish_status()
         try:
             if not self.channel_live.is_set():
                 await self._send_probe_once()
@@ -396,6 +495,7 @@ class ChannelWaiter:
                 await self.tick()
         finally:
             self._alive = False
+            self._publish_status()
 
     async def _send_probe_once(self) -> None:
         if self._probe_sent:
@@ -436,6 +536,7 @@ class ChannelWaiter:
         await self._process_results(results)
         if self._outstanding is None:
             await self._maybe_claim_mail()
+        self._publish_status()
 
     def _stop_no_wait_support(self) -> None:
         self._stopped = True
@@ -522,6 +623,7 @@ class ChannelWaiter:
                 _log.warning("channel_waiter_release_failed", claim_id=outstanding.claim_id, error=str(exc))
             self._released_count += 1
             self._outstanding = None
+            self._publish_status()
             return
         try:
             await asyncio.to_thread(
@@ -531,10 +633,12 @@ class ChannelWaiter:
             # Lapsed already -- a successor's `in_` (or the sweep) already
             # reclaimed it; nothing left here to renew or re-notify.
             self._outstanding = None
+            self._publish_status()
             return
         outstanding.resend_count += 1
         outstanding.next_renew_at = now + self.renew_interval_s
         await self.sender(outstanding.content, outstanding.meta)
+        self._publish_status()
 
     def start(self) -> None:
         self._task = asyncio.create_task(self.run())

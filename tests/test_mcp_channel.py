@@ -491,3 +491,89 @@ class TestCreditHookWiring:
 
     def test_note_credit_on_an_unregistered_session_is_a_silent_no_op(self) -> None:
         channel.note_credit(str(uuid.uuid4()), "some-claim-id")  # must not raise
+
+
+class TestChannelStatusPublish:
+    """RDR-211 Phase 1 Step 3 (bead nexus-rplay.13): the on-disk status
+    record the `nx doctor` row reads cross-process
+    (`nexus.health._check_tuple_channel_delivery`)."""
+
+    def test_no_state_dir_is_a_silent_no_op(self) -> None:
+        """The default (`state_dir=None`, every other test in this file)
+        must never raise just because nothing was ever wired to publish."""
+        session_id = str(uuid.uuid4())
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(_FakeTupleStore()), _subs(session_id), channel_live=True,
+        )
+        waiter._publish_status()  # noqa: SLF001 — must not raise
+
+    @pytest.mark.asyncio
+    async def test_a_tick_publishes_the_status_record(self, tmp_path) -> None:
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=True,
+            state_dir=tmp_path,
+        )
+        assert channel.read_channel_status(tmp_path, session_id) is None
+
+        await waiter.tick()
+
+        recorded = channel.read_channel_status(tmp_path, session_id)
+        assert recorded == waiter.status()
+        assert recorded["proof"] == "argv"
+        assert recorded["last_wake"] is not None
+
+    @pytest.mark.asyncio
+    async def test_probe_ack_publishes_the_updated_proof(self, tmp_path) -> None:
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=False, sender=sender,
+            state_dir=tmp_path,
+        )
+        run_task = asyncio.create_task(waiter.run())
+        await asyncio.sleep(0.05)
+        assert channel.read_channel_status(tmp_path, session_id)["proof"] == "none"
+        waiter.note_probe_ack()
+        await asyncio.sleep(0.05)
+        assert channel.read_channel_status(tmp_path, session_id)["proof"] == "probe"
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+        # run()'s finally publishes alive=False on the way out.
+        assert channel.read_channel_status(tmp_path, session_id)["alive"] is False
+
+    @pytest.mark.asyncio
+    async def test_release_publishes_the_incremented_count(self, tmp_path) -> None:
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        row = _row("t1", addr, "unacked-forever")
+        fake.rd_results[addr] = [row]
+        fake.in_results[addr] = (row, "claim-1")
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=True, sender=_FakeSender(),
+            state_dir=tmp_path, renew_interval_s=0.0, max_resends=0,
+        )
+        await waiter.tick()  # claims row1 into `_outstanding`
+        assert channel.read_channel_status(tmp_path, session_id)["unacked"] == 1
+        fake.in_results[addr] = None  # nothing else to claim on the next tick
+        await waiter.tick()  # next_renew_at already due (renew_interval_s=0.0) -> release
+        recorded = channel.read_channel_status(tmp_path, session_id)
+        assert recorded["released"] == 1
+        assert recorded["unacked"] == 0
+
+    def test_write_channel_status_rejects_a_path_hostile_session_id(self, tmp_path) -> None:
+        channel.write_channel_status(tmp_path, "../escape", {"proof": "none"})
+        assert list(tmp_path.rglob("*")) == []
+
+    def test_read_channel_status_missing_file_is_none(self, tmp_path) -> None:
+        assert channel.read_channel_status(tmp_path, "no-such-session") is None
+
+    def test_read_channel_status_malformed_json_is_none(self, tmp_path) -> None:
+        path = channel._channel_status_path(tmp_path, "sess-1")  # noqa: SLF001
+        path.parent.mkdir(parents=True)
+        path.write_text("not json", encoding="utf-8")
+        assert channel.read_channel_status(tmp_path, "sess-1") is None

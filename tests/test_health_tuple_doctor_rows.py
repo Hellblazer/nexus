@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1403,3 +1404,147 @@ def test_new_doctor_rows_absent_from_fresh_install_mvv_allowlist() -> None:
     assert "queue_depth" not in allowlist_regex
     assert "tuples.park_slots" not in source
     assert "tuples.queue_depth" not in source
+
+
+# ── row 3: _check_tuple_channel_delivery (bead nexus-rplay.13) ──────────────
+
+
+def _write_status(config_dir: Path, session_id: str, **fields) -> None:
+    from nexus.mcp.channel import write_channel_status
+
+    base = {"proof": "none", "alive": False, "last_wake": None, "unacked": 0, "released": 0}
+    base.update(fields)
+    write_channel_status(config_dir, session_id, base)
+
+
+class TestCheckTupleChannelDelivery:
+    def test_no_active_session_is_not_applicable(self, monkeypatch) -> None:
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: None)
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is True
+        assert "informational" in r.detail
+        assert "no active session" in r.detail
+
+    def test_no_status_record_is_not_applicable(self, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is True
+        assert "informational" in r.detail
+        assert "no channel-waiter status recorded" in r.detail
+
+    def test_proof_none_is_informational_never_a_warn(self, monkeypatch, tmp_path: Path) -> None:
+        """Mutation-check target: flipping this branch's `ok=True` to
+        `ok=False` (or adding `warn=True`) must fail this test -- Sam's
+        decision makes the channel opt-in, so an un-proven channel is the
+        ordinary case, never a defect."""
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        _write_status(tmp_path, "sess-1", proof="none", alive=True)
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is True
+        assert r.warn is False
+        assert "capability declared" in r.detail
+        assert "not proven live" in r.detail
+        assert "drain hook" in r.detail
+
+    def test_proof_none_mentions_released_count(self, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        _write_status(tmp_path, "sess-1", proof="none", released=3)
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is True
+        assert "3 message(s)" in r.detail
+
+    def test_argv_proof_alive_fresh_wake_is_ok(self, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        now = datetime.now(UTC).isoformat()
+        _write_status(tmp_path, "sess-1", proof="argv", alive=True, last_wake=now, unacked=1, released=0)
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is True
+        assert r.warn is False
+        assert "proof=argv" in r.detail
+        assert "unacked=1" in r.detail
+
+    def test_probe_proof_alive_fresh_wake_is_ok_and_names_probe(self, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        now = datetime.now(UTC).isoformat()
+        _write_status(tmp_path, "sess-1", proof="probe", alive=True, last_wake=now)
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is True
+        assert "proof=probe" in r.detail
+
+    def test_not_alive_is_warn(self, monkeypatch, tmp_path: Path) -> None:
+        """Mutation-check target: dropping the `not alive` half of the
+        WARN condition must fail this test."""
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        now = datetime.now(UTC).isoformat()
+        _write_status(tmp_path, "sess-1", proof="argv", alive=False, last_wake=now)
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is False and r.warn is True
+        assert "not alive" in r.detail
+        assert r.fix_suggestions
+
+    def test_stale_wake_exactly_at_bound_is_not_warn(self, monkeypatch, tmp_path: Path) -> None:
+        """Mutation-check target: the boundary is `>`, not `>=` -- exactly
+        at the bound (3 x 25s = 75s) must still be OK. Uses the `now=`
+        test seam so the comparison is pinned exactly rather than raced
+        against wall-clock drift between writing the fixture and reading
+        it back."""
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        fixed_now = datetime(2026, 1, 1, tzinfo=UTC)
+        old = (fixed_now - timedelta(seconds=h._TUPLE_CHANNEL_DELIVERY_STALE_S)).isoformat()
+        _write_status(tmp_path, "sess-1", proof="argv", alive=True, last_wake=old)
+        r = h._check_tuple_channel_delivery(now=fixed_now)[0]
+        assert r.ok is True, r.detail
+
+    def test_stale_wake_past_bound_is_warn(self, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        fixed_now = datetime(2026, 1, 1, tzinfo=UTC)
+        old = (fixed_now - timedelta(seconds=h._TUPLE_CHANNEL_DELIVERY_STALE_S + 1)).isoformat()
+        _write_status(tmp_path, "sess-1", proof="argv", alive=True, last_wake=old)
+        r = h._check_tuple_channel_delivery(now=fixed_now)[0]
+        assert r.ok is False and r.warn is True
+        assert "stale" in r.detail
+        assert r.fix_suggestions
+
+    def test_released_count_stated_plainly_never_its_own_warn(self, monkeypatch, tmp_path: Path) -> None:
+        """RDR-211: whether `released` GREW since the last `nx doctor` run
+        is not something a stateless row can know, so a nonzero count is
+        stated plainly and never itself a reason to warn."""
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        now = datetime.now(UTC).isoformat()
+        _write_status(tmp_path, "sess-1", proof="argv", alive=True, last_wake=now, released=5)
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is True
+        assert "released=5" in r.detail
+
+
+def test_rdr211_channel_delivery_row_is_registered_in_run_health_checks() -> None:
+    import inspect
+
+    source = inspect.getsource(h.run_health_checks)
+    assert "_check_tuple_channel_delivery()" in source, "nx doctor must invoke _check_tuple_channel_delivery()"
+
+
+def test_new_channel_delivery_row_absent_from_fresh_install_mvv_allowlist() -> None:
+    """Same nexus-7zhag doctrine as the park_slots/queue_depth rows above:
+    a virgin box resolves not-applicable (no active session under the
+    MVV's scrubbed env, or no status record), never a warning to
+    allowlist."""
+    import re as _re
+    from pathlib import Path as _Path
+
+    mvv_path = _Path(__file__).resolve().parent.parent / "tests" / "e2e" / "fresh-install-mvv.sh"
+    source = mvv_path.read_text(encoding="utf-8")
+    match = _re.search(r"ALLOWLIST_REGEX='([^']*)'", source)
+    assert match is not None, "fresh-install-mvv.sh must still define ALLOWLIST_REGEX"
+    allowlist_regex = match.group(1)
+    assert "channel_delivery" not in allowlist_regex
+    assert "tuples.channel_delivery" not in source
