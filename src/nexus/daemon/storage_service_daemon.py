@@ -98,6 +98,7 @@ from nexus.daemon.service_registry import (
     fenced_exit_code,
     pid_alive,
     pid_running,
+    reclaim_lease_if_dead_owner,
     ttl_for_tier,
 )
 
@@ -1618,6 +1619,22 @@ class StorageServiceSupervisor:
             clock=self._lease_clock,
         )
         existing = registry.discover(self._scope)
+        if existing is not None and reclaim_lease_if_dead_owner(
+            registry, existing, log=_log, event="storage_service_dead_lease_reclaim",
+        ):
+            # nexus-cd1k0.17: a TTL-fresh lease held by a DEAD supervisor
+            # (hard crash — OOM-kill / SIGKILL with no relinquish) must
+            # never be honored as live. The foreground unit path lacked
+            # this check entirely (the CLI client-spawn path,
+            # commands/daemon.py.ensure_storage_supervisor, already had
+            # it) — without it, a unit-launched supervisor discovering
+            # exactly this shape short-circuited via owns_process=False
+            # and exited 0, and a successful exit never restarts under
+            # either shipped unit's policy: the stack stayed down until
+            # the 15s TTL aged the dead lease out on its own. Relinquished
+            # above; fall through to spawn fresh below, same as no lease
+            # at all.
+            existing = None
         if existing is not None:
             # nexus-hzhgl round 3 review Significant-2: this is the ONLY path
             # through _start_locked that skips _ensure_pg_running (and, with

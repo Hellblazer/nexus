@@ -1923,6 +1923,72 @@ class TestEnsurePgRunningCalledOnFreshStart:
         ensure_pg.assert_called_once()
 
 
+class TestDeadOwnerLeaseHealedOnForegroundStart:
+    """nexus-cd1k0.17: ``_start_locked`` (the FOREGROUND unit path — what a
+    launchd/systemd-launched supervisor actually runs) lacked the
+    dead-owner heal ``commands/daemon.ensure_storage_supervisor`` (the CLI
+    client-spawn path) already had. A TTL-fresh lease whose
+    ``supervisor_pid`` points at a genuinely dead process (a hard crash —
+    OOM-kill, SIGKILL with no relinquish) must be reclaimed and fallen
+    through to a fresh spawn, not honored as live: honoring it makes
+    ``start()`` return without ever assigning ``self._proc``, so
+    ``owns_process`` is False, ``exit_if_process_unowned`` exits the run
+    loop with 0, and neither shipped unit's restart policy retries a
+    successful exit — the stack stays down until the 15s TTL ages the
+    dead lease out on its own.
+
+    Real dead pid throughout (spawn + reap), not a patched probe: the
+    zombie-vs-dead distinction is exactly what the shared primitive's
+    ``pid_running`` (not ``pid_alive``) gets right, per nexus-o8dil.21.
+    """
+
+    def test_dead_owner_lease_is_reclaimed_and_start_falls_through(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        from nexus.daemon.service_registry import ServiceRegistry, ServiceSupervisor
+
+        scope = str(os.getuid())
+
+        # A genuinely dead pid: spawn + reap.
+        dead = subprocess.Popen(["true"])  # noqa: S603, S607 — fixed argv
+        dead.wait()
+        dead_pid = dead.pid
+
+        # Publish a fresh, supervised lease whose payload names the dead pid
+        # as supervisor_pid (mirrors a hard-crashed supervisor's last-known
+        # lease — nothing ever relinquished it).
+        stale_registry = ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock)
+        stale_sup = ServiceSupervisor(
+            stale_registry, scope, version="1.0.0",
+            endpoint_provider=lambda: {"host": "127.0.0.1", "port": 1, "pid": dead_pid, "token": "t"},
+            payload={"supervisor_pid": dead_pid},
+        )
+        stale_sup.publish_once()
+        stale_bytes = (config_dir / f"storage_service_addr.{scope}").read_bytes()
+
+        sup = _make_supervisor(config_dir, clock)
+        proc = _FakeProc(pid=51400)
+        with patch.object(sup, "_ensure_pg_running") as ensure_pg, \
+             patch.object(sup, "_spawn_service", return_value=(proc, 19801)), \
+             patch.object(sup, "_wait_for_service_ready"):
+            sup.start()
+
+        ensure_pg.assert_called_once(), (
+            "a dead-owner lease must fall through to a fresh spawn, not "
+            "short-circuit past _ensure_pg_running"
+        )
+        # A genuinely NEW lease was published (this supervisor's own), not
+        # the stale dead-owner record left untouched.
+        fresh_bytes = (config_dir / f"storage_service_addr.{scope}").read_bytes()
+        assert fresh_bytes != stale_bytes, (
+            "the stale dead-owner lease must have been relinquished and "
+            "replaced by a fresh publish, not left in place"
+        )
+        fresh_record = ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock).discover(scope)
+        assert fresh_record is not None
+        assert fresh_record.owner_token == sup._supervisor.owner_token
+
+
 class TestNativeStartHasNoSchemaSkewGate:
     """RDR-161: the JVM-only schema-skew gate (nexus-pebfx.4) is expunged with
     the legacy launch path. A native start goes PG -> spawn with no skew probe;
@@ -2275,13 +2341,12 @@ class TestEnsureStorageSupervisor:
         ``supervisor_pid`` points at a dead process. The discover path must
         detect the dead pid, relinquish the stale lease, and re-spawn — rather
         than returning a dead endpoint for up to the lease TTL window."""
-        import nexus.daemon.storage_service_daemon as ssd_mod
         from nexus.commands import daemon as daemon_mod
         from nexus.daemon.service_registry import ServiceRegistry
 
         # A fresh, supervised lease (payload carries supervisor_pid). Patch
         # the guard's probe False so it treats that supervisor as dead.
-        # The probe is ``_pid_is_running``, not ``_pid_is_alive``, since
+        # The probe is ``pid_running``, not ``pid_alive``, since
         # nexus-o8dil.21 — see the zombie sibling test below for why.
         self._publish_fresh_lease(config_dir, port=18093)
         scope = str(os.getuid())
@@ -2291,7 +2356,12 @@ class TestEnsureStorageSupervisor:
             self._publish_fresh_lease(config_dir, port=18094)
             return MagicMock()
 
-        with patch.object(ssd_mod, "_pid_is_running", return_value=False), \
+        # nexus-cd1k0.17: the dead-owner check moved into the shared primitive
+        # (service_registry.reclaim_lease_if_dead_owner), which calls
+        # service_registry.pid_running directly -- patching the storage-tier
+        # re-export (ssd_mod._pid_is_running) no longer intercepts it.
+        from nexus.daemon import service_registry as sr_mod
+        with patch.object(sr_mod, "pid_running", return_value=False), \
              patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
              patch.object(daemon_mod, "_popen", side_effect=_popen_publishes) as popen:
             rec = daemon_mod.ensure_storage_supervisor(config_dir)

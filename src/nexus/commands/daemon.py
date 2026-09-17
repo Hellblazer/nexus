@@ -594,7 +594,10 @@ def ensure_storage_supervisor(config_dir: Path):
 
     Raises :class:`StorageServiceStartError` on a spawn that never becomes ready.
     """
-    from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+        ServiceRegistry,
+        reclaim_lease_if_dead_owner,
+    )
     from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     from nexus.db import service_endpoint as _service_endpoint  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     StorageServiceStartError = _ssd.StorageServiceStartError
@@ -603,48 +606,23 @@ def ensure_storage_supervisor(config_dir: Path):
     scope = str(os.getuid())
     existing = _service_endpoint.discover_storage_service_lease(registry, scope)
     if existing is not None:
-        # RDR-175 heal-on-next-use hardening: a fresh (TTL-live) lease whose
-        # ``supervisor_pid`` points at a DEAD process is a hard-crashed
-        # supervisor (OOM-kill / SIGKILL with no relinquish). Without the OS
-        # watchdog (no-autostart mode) nothing restarts it, and the lease would
-        # otherwise be returned as a live endpoint for up to the TTL window.
-        # Relinquish it and fall through to re-spawn. Reuses the exact guard from
-        # ``stop_storage_service`` — an ABSENT ``supervisor_pid`` (legacy /
-        # non-supervised lease) is left to the existing TTL-freshness
-        # short-circuit, never re-spawned spuriously. (RDR-149-gate-safe: this is
-        # in the storage-specific caller, not service_registry.discover.)
-        supervisor_pid = existing.payload.get("supervisor_pid")
-        # ``_pid_is_running``, not ``_pid_is_alive`` (nexus-o8dil.21): a
-        # ZOMBIE supervisor — hard-killed, and its parent has not reaped it
-        # (routine when PID 1 is a shell script rather than a real init, as
-        # in containers and CI runners) — answers ``os.kill(pid, 0)``
-        # indefinitely. Under the alive-only probe this heal never fired for
-        # exactly the crashed-supervisor case it exists to catch: the fresh
-        # lease stayed, ``start`` short-circuited onto it, and the box kept
-        # serving a dead supervisor's endpoint until the TTL expired.
-        if (
-            isinstance(supervisor_pid, int)
-            and supervisor_pid > 0
-            and not _ssd._pid_is_running(supervisor_pid)
+        # RDR-175 heal-on-next-use hardening, generalized into the shared
+        # primitive at nexus-cd1k0.17 (was a copy of this exact check
+        # duplicated in _start_locked; now the ONE place both callers
+        # share): a fresh (TTL-live) lease whose ``supervisor_pid`` points
+        # at a DEAD process is a hard-crashed supervisor (OOM-kill /
+        # SIGKILL with no relinquish). Without the OS watchdog
+        # (no-autostart mode) nothing restarts it, and the lease would
+        # otherwise be returned as a live endpoint for up to the TTL
+        # window. reclaim_lease_if_dead_owner relinquishes it and returns
+        # True so this falls through to re-spawn. An ABSENT
+        # ``supervisor_pid`` (legacy / non-supervised lease) is left to
+        # the existing TTL-freshness short-circuit below, never
+        # re-spawned spuriously. (RDR-149-gate-safe: this IS the shared
+        # primitive now, not a storage-specific copy.)
+        if not reclaim_lease_if_dead_owner(
+            registry, existing, log=_log, event="storage_service_dead_lease_reclaim",
         ):
-            _log.warning(
-                "storage_service_dead_lease_reclaim",
-                supervisor_pid=supervisor_pid,
-                msg="fresh lease held by a dead supervisor; relinquishing + re-spawning",
-            )
-            try:
-                registry.relinquish(existing)
-            except Exception as exc:  # noqa: BLE001 — best-effort reclaim; generation fencing still protects ownership
-                # Don't fail the spawn: the new supervisor's publish bumps the
-                # generation (fencing prevents double-ownership) and the 60s
-                # discover-wait resolves once it lands. But log it — a silent
-                # reclaim failure leaves no evidence for an operator.
-                _log.warning(
-                    "storage_service_dead_lease_relinquish_failed",
-                    supervisor_pid=supervisor_pid,
-                    error=str(exc),
-                )
-        else:
             # nexus-4e96a: THE load-bearing short-circuit (this is the branch
             # that returns without ever spawning a subprocess, let alone
             # reaching _start_locked's own copy of this check). Raises loud

@@ -832,6 +832,74 @@ def fenced_exit_code(fenced: bool) -> int | None:
     return 0 if fenced else None
 
 
+def reclaim_lease_if_dead_owner(
+    registry: "ServiceRegistry",
+    record: "LeaseRecord",
+    *,
+    log: Any = None,
+    event: str = "service_registry_dead_owner_reclaimed",
+) -> bool:
+    """True when *record* was held by a DEAD supervisor and has just been
+    relinquished — the caller must proceed to (re)spawn rather than
+    short-circuit onto it. False when the record's owner is genuinely
+    alive, or the record carries no ``supervisor_pid`` at all (legacy /
+    non-supervised — left untouched, never reclaimed spuriously), and
+    should be honored as the live owner.
+
+    Shared primitive (RDR-149 §shared primitive, nexus-cd1k0.17): a
+    hard-crashed supervisor (OOM-kill, SIGKILL with no relinquish) leaves
+    a lease that is still TTL-FRESH — ``ServiceRegistry.discover()``'s
+    pure lease-freshness contract (this module's "liveness is lease
+    freshness, not pid" invariant) correctly returns it as live, and that
+    invariant is UNCHANGED here. This answers a narrower, DIFFERENT
+    question on top of a lease HIT (never a miss): is the fresh lease's
+    OWNER actually still running, so a self-healing spawner can decide
+    whether to honor it or reclaim and respawn. Previously implemented
+    ONCE, in the CLI client-spawn path
+    (``commands/daemon.py.ensure_storage_supervisor``) only — the
+    foreground unit path (``storage_service_daemon._start_locked``) had
+    no equivalent, so a unit-launched supervisor discovering a
+    dead-owner's fresh lease exited 0 (via ``exit_if_process_unowned``)
+    and the OS unit's restart-on-success-exit=never policy left the
+    stack down until the lease aged out on its own.
+
+    ``_pid_is_running`` (not ``_pid_is_alive``, nexus-o8dil.21): a ZOMBIE
+    supervisor — hard-killed, parent not yet reaped it (routine under a
+    non-init PID 1, e.g. a container or CI runner) — answers
+    ``os.kill(pid, 0)`` indefinitely; the alive-only probe would never
+    fire for exactly the crashed-supervisor case this exists to catch.
+
+    Relinquish is best-effort: a failure is logged (when *log* is given)
+    but never raised — the caller's own spawn attempt will publish a
+    higher generation regardless (CA-4 fencing prevents double-ownership
+    even if the stale record briefly lingers), so a relinquish failure
+    must not block the respawn it exists to enable.
+    """
+    supervisor_pid = record.payload.get("supervisor_pid")
+    if not (isinstance(supervisor_pid, int) and supervisor_pid > 0):
+        return False
+    if pid_running(supervisor_pid):
+        return False
+    if log is not None:
+        log.warning(
+            event,
+            supervisor_pid=supervisor_pid,
+            scope=record.scope_key,
+            msg="fresh lease held by a dead supervisor; relinquishing + re-spawning",
+        )
+    try:
+        registry.relinquish(record)
+    except Exception as exc:  # noqa: BLE001 — best-effort reclaim; generation fencing still protects ownership
+        if log is not None:
+            log.warning(
+                f"{event}_relinquish_failed",
+                supervisor_pid=supervisor_pid,
+                scope=record.scope_key,
+                error=str(exc),
+            )
+    return True
+
+
 # ── Process-table fallback (nexus-oyo2g) ────────────────────────────────────
 #
 # ``ServiceRegistry.discover()``'s liveness contract is "lease freshness, not

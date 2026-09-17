@@ -20,6 +20,7 @@ Core semantics under test (RDR-149 Decision):
 from __future__ import annotations
 
 import contextlib
+import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +36,7 @@ from nexus.daemon.service_registry import (
     ProcessSweepResult,
     pid_running,
     process_state,
+    reclaim_lease_if_dead_owner,
     storage_service_stack_matcher,
     sweep_matching_processes,
 )
@@ -408,6 +410,72 @@ class TestSupervisor:
             start_owner=lambda: calls.append("start"),
         )
         assert calls == ["stop", "start"]
+
+
+class TestReclaimLeaseIfDeadOwner:
+    """nexus-cd1k0.17: the shared dead-owner heal, generalized from a copy
+    that used to live only in commands/daemon.py.ensure_storage_supervisor
+    (the CLI client-spawn path). storage_service_daemon._start_locked (the
+    foreground unit path) had no equivalent -- this is now the ONE place
+    both callers share."""
+
+    def test_no_supervisor_pid_in_payload_is_left_alone(
+        self, registry: ServiceRegistry,
+    ) -> None:
+        """A legacy / non-supervised lease (no supervisor_pid at all) must
+        never be reclaimed spuriously."""
+        sup = ServiceSupervisor(
+            registry, "42", version="1", endpoint_provider=lambda: _endpoint(),
+        )
+        record = sup.publish_once()
+        assert reclaim_lease_if_dead_owner(registry, record) is False
+        assert registry.discover("42") is not None
+
+    def test_live_owner_pid_is_left_alone(
+        self, registry: ServiceRegistry,
+    ) -> None:
+        sup = ServiceSupervisor(
+            registry, "42", version="1", endpoint_provider=lambda: _endpoint(),
+            payload={"supervisor_pid": os.getpid()},  # this test process: genuinely alive
+        )
+        record = sup.publish_once()
+        assert reclaim_lease_if_dead_owner(registry, record) is False
+        assert registry.discover("42") is not None
+
+    def test_dead_owner_pid_is_reclaimed(
+        self, registry: ServiceRegistry,
+    ) -> None:
+        import subprocess
+
+        dead = subprocess.Popen(["true"])  # noqa: S603, S607 — fixed argv
+        dead.wait()
+        sup = ServiceSupervisor(
+            registry, "42", version="1", endpoint_provider=lambda: _endpoint(),
+            payload={"supervisor_pid": dead.pid},
+        )
+        record = sup.publish_once()
+        assert reclaim_lease_if_dead_owner(registry, record) is True
+        assert registry.discover("42") is None, (
+            "a dead owner's lease must be relinquished, not left resolvable"
+        )
+
+    def test_relinquish_failure_still_reports_reclaimed(
+        self, registry: ServiceRegistry,
+    ) -> None:
+        """Best-effort: a relinquish failure must never block the caller
+        from proceeding to respawn -- the caller's own publish bumps the
+        generation regardless (CA-4)."""
+        import subprocess
+
+        dead = subprocess.Popen(["true"])  # noqa: S603, S607
+        dead.wait()
+        sup = ServiceSupervisor(
+            registry, "42", version="1", endpoint_provider=lambda: _endpoint(),
+            payload={"supervisor_pid": dead.pid},
+        )
+        record = sup.publish_once()
+        with patch.object(registry, "relinquish", side_effect=RuntimeError("disk full")):
+            assert reclaim_lease_if_dead_owner(registry, record) is True
 
 
 # ---------------------------------------------------------------------------
