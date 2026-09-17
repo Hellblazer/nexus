@@ -437,6 +437,28 @@ class SubscriptionSet:
             del self._board[subspace]
             self._bump()
 
+    # ── Cursor bookkeeping (RDR-211 Phase 1 Step 3, bead nexus-rplay.10) ────
+
+    def advance_cursor(self, subspace: str, cursor: tuple[str, str]) -> None:
+        """Move *subspace*'s delivery cursor forward -- the lifespan
+        waiter's own bookkeeping as it delivers board posts past their
+        prior cursor.
+
+        Deliberately does NOT call :meth:`_bump` / notify listeners: a
+        cursor advance is not a subscription-LIST mutation, and
+        re-issuing the parked ``wait`` on every delivered tuple would be
+        wasteful and wrong (Technical Design "Waiting" -- only a
+        subscribe/unsubscribe re-issues it). A silent no-op for a
+        *subspace* this set does not hold (e.g. one unsubscribed between
+        the waiter reading its list and advancing this cursor).
+        """
+        if subspace == self.session_mailbox:
+            self._session_cursor = cursor
+        elif self.instance_mailbox and subspace == self.instance_mailbox:
+            self._instance_cursor = cursor
+        elif subspace in self._board:
+            self._board[subspace] = cursor
+
     def entries(self) -> list[dict[str, Any]]:
         """This set's subspaces with their cursors, in the order
         ``tuple_subscriptions`` renders them: the session mailbox first,

@@ -34,3 +34,4 @@ mechanize, it matters enough to ship.
 
 - `conexus/hooks/scripts/auto-approve-nx-mcp.sh`: `mcp__plugin_conexus_nexus__tuple_release` joins the auto-approve allow-list (RDR-211 Step 3, nexus-rplay.9). Until the pin advances, a session on the installed plugin is prompted for permission on the new tool.
 - `conexus/hooks/scripts/auto-approve-nx-mcp.sh`: added `tuple_release`, `tuple_subscribe`, `tuple_unsubscribe`, and `tuple_subscriptions` to the auto-approve case list (RDR-211, bead nexus-rplay.11; `tuple_release` was a pre-existing gap from bead nexus-rplay.9, closed in the same edit).
+- `conexus/hooks/scripts/auto-approve-nx-mcp.sh`: added `tuple_channel_probe` to the auto-approve case list (RDR-211 Phase 1 Step 3, bead nexus-rplay.10 — the channel gate's probe fallback).

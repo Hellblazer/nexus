@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-52 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
+53 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
 RDR-182 consent-gated ``forensics``/``remediate`` pair (nexus-ykzbj.10/.11)
 was deleted at nexus-lgdel — the chash-rekey upgrade rung it steered
 operators toward no longer exists.
@@ -97,6 +97,11 @@ from nexus.tuple_directory import (
 # names, so the tools below read as `_subscriptions.<fn>` next to their
 # `_t2_ctx`/`_get_t1` sibling helpers.
 from nexus.mcp import subscriptions as _subscriptions
+# RDR-211 Phase 1 Step 3 (bead nexus-rplay.10): the channel capability
+# declaration and the lifespan waiter (tuple_channel_probe below, and the
+# tuple_ack/tuple_nack credit hooks) -- imported as a module for the same
+# reason as `_subscriptions` just above.
+from nexus.mcp import channel as _channel
 
 #: Module logger for MCP tool handlers (nexus-yttqr). Read-path handlers return a
 #: string to the agent rather than raising; before returning an error they must
@@ -716,6 +721,62 @@ async def _cancel_t1_handoff_watch_task() -> None:
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await task
+
+
+# ── RDR-211 channel waiter (Phase 1 Step 3, bead nexus-rplay.10) ───────────
+#
+# Started at the SAME points `_start_t1_handoff_watch_task` is (right
+# before each of `_t1_lifespan`'s yield points, once a session id is
+# resolvable there) and cancelled alongside `_cancel_t1_handoff_watch_task`
+# at every corresponding teardown. One waiter per process (one session per
+# nx-mcp process); `nexus.mcp.channel`'s own `_ACTIVE` registry is the
+# source of truth for "is one already running", so this pair is naturally
+# idempotent across the lifespan's several yield sites.
+
+
+def _start_channel_waiter() -> None:
+    """Start this session's channel waiter if a session id is resolvable
+    and none is already running. Best-effort: the waiter is a delivery
+    convenience (the `UserPromptSubmit` drain hook is the floor either
+    way), so a startup failure here is logged and swallowed rather than
+    breaking T1 or the rest of the server.
+
+    Proactively loads the subscription set (bead nexus-rplay.11 left this
+    lazy -- loaded only on the first `tuple_subscribe`/
+    `tuple_unsubscribe`/`tuple_subscriptions` call): the waiter needs the
+    list at server start, not on first tool call.
+    """
+    session_id = _current_subscription_session_id()
+    if not session_id or _channel.active_waiter(session_id) is not None:
+        return
+    try:
+        t1, _ = _get_t1()
+        subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
+        channel_live = _channel.detect_channel_argv()
+        waiter = _channel.ChannelWaiter(
+            session_id, _t2_ctx, subs, channel_live=channel_live,
+            persist=lambda: _subscriptions.persist(t1, subs),
+        )
+        _channel.register_active_waiter(waiter)
+        waiter.start()
+    except Exception as e:  # noqa: BLE001 — best-effort; see docstring
+        import structlog as _sl  # noqa: PLC0415 — rare/branch-local path; stdlib-adjacent import deferred to call site
+
+        _sl.get_logger(__name__).warning(
+            "channel_waiter_start_failed", session_id=session_id, error=str(e),
+        )
+
+
+async def _cancel_channel_waiter_task() -> None:
+    """Cancel and await this session's channel waiter if one is running. Idempotent."""
+    session_id = _current_subscription_session_id()
+    if not session_id:
+        return
+    waiter = _channel.active_waiter(session_id)
+    if waiter is None:
+        return
+    _channel.unregister_active_waiter(session_id)
+    await waiter.cancel()
 
 
 async def _t1_handoff_watch_loop() -> None:
@@ -1365,7 +1426,9 @@ async def _t1_lifespan(_app: Any):
             "t1_session_inherited_no_mint",
             session_id=_os.environ.get("NX_T1_SESSION_ID", "").strip(),
         )
+        _start_channel_waiter()
         yield
+        await _cancel_channel_waiter_task()
         await _cancel_t1_handoff_watch_task()
         return
 
@@ -1373,7 +1436,9 @@ async def _t1_lifespan(_app: Any):
         _os.environ["NX_T1_SESSION"] = _decision.session_token
         _os.environ["NX_T1_SESSION_ID"] = _decision.session_id
         _svc_log.info("t1_session_leased_no_mint", session_id=_decision.session_id)
+        _start_channel_waiter()
         yield
+        await _cancel_channel_waiter_task()
         await _cancel_t1_handoff_watch_task()
         return
 
@@ -1527,7 +1592,9 @@ async def _t1_lifespan(_app: Any):
             _svc_log.info(
                 "t1_session_leased_after_mint_race", session_id=_t1_session_id
             )
+            _start_channel_waiter()
             yield
+            await _cancel_channel_waiter_task()
             await _cancel_t1_handoff_watch_task()
             return
 
@@ -1577,9 +1644,15 @@ async def _t1_lifespan(_app: Any):
                 _t1_session_refresh_loop(_t1_session_id, _refresh_interval)
             )
 
+    _start_channel_waiter()
     try:
         yield
     finally:
+        # RDR-211 (bead nexus-rplay.10): cancel the channel waiter before
+        # anything else in this teardown — it holds no lock this teardown
+        # needs, but it does hold a live mailbox claim that should stop
+        # renewing promptly rather than racing the session-close below.
+        await _cancel_channel_waiter_task()
         # nexus-brw1s: clear any startup-deferred mint state + unregister
         # the retry hook so nothing dangles past this lifespan. No-op when
         # the deferred mint completed mid-session (the hook cleared both)
@@ -6267,6 +6340,10 @@ def plan_delete(
 # deliberately get NO tool here (Sam's decision, RDR-211 Open Question 6):
 # the session MCP server's own lifespan waiter and a later doctor-row bead
 # are their only intended callers.
+# RDR-211 Phase 1 Step 3 (bead nexus-rplay.10) added ``tuple_channel_probe``,
+# the gate's probe fallback (``nexus.mcp.channel``) -- unlike every other
+# tool in this section it names no HttpTupleStore method: calling it is
+# itself the signal the waiter's gate is checking for.
 # The real rule is the nexus-r90ao registration census
 # (``tests/test_mcp_wire_shapes.py``): every ``@mcp.tool()`` must declare
 # ``structured_output=`` explicitly, so a future signature edit to a
@@ -6523,6 +6600,11 @@ def tuple_ack(
         reply_id = _t2_index_write(
             lambda db: db.tuples.ack(claim_id, claimant, reply=spec), op="tuple_ack",
         )
+        # RDR-211 decision item 6 (bead nexus-rplay.10): the credit for
+        # the waiter's next mailbox claim. A no-op when this session has
+        # no active waiter (channel off) or the acked claim was not the
+        # waiter's own outstanding one (an ordinary tuple_ack call).
+        _channel.note_credit(_current_subscription_session_id(), claim_id)
         msg = f"Acked claim {claim_id}"
         if reply_id:
             msg += f" with reply {reply_id}"
@@ -6550,6 +6632,10 @@ def tuple_nack(
         _t2_index_write(
             lambda db: db.tuples.nack(claim_id, claimant), op="tuple_nack",
         )
+        # RDR-211 decision item 6 (bead nexus-rplay.10): a nack is also
+        # credit -- the session decided it was done with this claim, so
+        # the waiter is free to claim its next mailbox row.
+        _channel.note_credit(_current_subscription_session_id(), claim_id)
         return f"Nacked claim {claim_id}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("tuple_nack", e)
@@ -6882,8 +6968,8 @@ def tuple_subscriptions() -> list[dict]:
 
     Always the session's own mailbox first, then the instance-name
     mailbox if one was subscribed, then subscribed board topics. A
-    `cursor` of `null` means the delivery waiter (a later bead) has not
-    advanced past that subspace's start.
+    `cursor` of `null` means the delivery waiter has not advanced past
+    that subspace's start.
     """
     try:
         session_id = _current_subscription_session_id()
@@ -6894,6 +6980,28 @@ def tuple_subscriptions() -> list[dict]:
         return subs.entries()
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return [{"error": _mcp_tool_error("tuple_subscriptions", e)}]
+
+
+@mcp.tool(
+    title="Confirm Tuple Channel",
+    annotations={"readOnlyHint": True},
+    structured_output=False,
+)
+def tuple_channel_probe() -> str:
+    """Confirm the Claude Code channel is live for this session (RDR-211).
+
+    The lifespan waiter's gate (T2 `nexus_rdr/211-decision-waiter-gate-
+    2026-09-17`) first checks whether this session's launch command line
+    named the channel flag for `server:nexus`; when it cannot tell, the
+    waiter sends one `notifications/claude/channel` notification asking
+    the session to call this tool. Calling it is what proves the channel
+    live in that case -- the waiter claims no mail until either this is
+    called or the launch-flag check already passed. Always returns
+    `"ok"`; a session that calls it without ever having received the
+    probe notification does no harm.
+    """
+    _channel.note_probe_ack(_current_subscription_session_id())
+    return "ok"
 
 
 # ── Demoted tools (plain functions, no @mcp.tool()) ──────────────────────────
@@ -11976,7 +12084,21 @@ def main():
     signal.signal(signal.SIGINT, _sigterm_handler)
     try:
         check_version_compatibility()
-        mcp.run(transport="stdio")
+        # RDR-211 Phase 1 Step 3 (bead nexus-rplay.10): mcp.run(transport=
+        # "stdio") -- anyio.run(mcp.run_stdio_async) -- declares no
+        # experimental capabilities (FastMCP calls
+        # create_initialization_options() bare). channel.
+        # run_stdio_with_channel drives the exact same low-level
+        # Server.run() call FastMCP would have, plus the
+        # "claude/channel" capability that makes Claude Code register a
+        # channel listener (Phase 1 Step 0 spike). Every other transport
+        # (SSE, streamable-http) is untouched -- this substitution is
+        # stdio-only, matching where nx-mcp actually runs.
+        import anyio  # noqa: PLC0415 — rare/branch-local path; stdlib-adjacent import deferred to call site
+
+        from nexus.mcp import channel as _channel  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
+
+        anyio.run(_channel.run_stdio_with_channel, mcp)
     except (KeyboardInterrupt, SystemExit):
         log.info("mcp_server_stopping", server="nx-mcp", reason="signal")
         raise

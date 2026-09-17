@@ -60,6 +60,10 @@ def test_core_registered_tools():
         "tuple_out", "tuple_rd", "tuple_in", "tuple_ack", "tuple_nack",
         "tuple_renew", "tuple_release", "tuple_registry", "tuple_list", "tuple_stats",
         "tuple_subscribe", "tuple_unsubscribe", "tuple_subscriptions",
+        # RDR-211 Phase 1 Step 3 (bead nexus-rplay.10): the channel gate's
+        # probe fallback -- calling it is itself the signal the waiter's
+        # gate is checking for.
+        "tuple_channel_probe",
         # RDR-208 Phase 2 Step 2 (bead nexus-galkv.10): send-time name
         # resolution over the RDR-208 session directory.
         "mailbox_send",
