@@ -346,7 +346,14 @@ def detect_channel_argv(
 
     pid = ppid if ppid is not None else os.getppid()
     argv = argv_reader(pid)
-    return any(flag in argv for flag in _CHANNEL_ARGV_FLAGS)
+    # A whole-token match: `server:nexus` must end at whitespace or the end
+    # of the command line, so a server named `nexusdev` (measured 2026-09-17,
+    # bead nexus-tk2cz) is not read as ours; the plugin form ends at the `@`
+    # because the marketplace segment varies.
+    return any(
+        re.search(re.escape(flag) + (r"(?=\s|$)" if not flag.endswith("@") else ""), argv) is not None
+        for flag in _CHANNEL_ARGV_FLAGS
+    )
 
 
 # ── The waiter ───────────────────────────────────────────────────────────

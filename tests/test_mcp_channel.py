@@ -145,6 +145,13 @@ class TestChannelArgvGate:
         ):
             assert channel.detect_channel_argv(123, argv_reader=lambda _pid, a=argv: a), argv
 
+    def test_a_server_whose_name_merely_starts_with_nexus_is_not_ours(self) -> None:
+        for argv in (
+            "claude --dangerously-load-development-channels server:nexusdev",
+            "claude --channels server:nexus-catalog",
+        ):
+            assert not channel.detect_channel_argv(123, argv_reader=lambda _pid, a=argv: a), argv
+
     def test_another_plugins_channel_is_not_ours(self) -> None:
         assert not channel.detect_channel_argv(
             123, argv_reader=lambda _pid: "claude --channels plugin:telegram@claude-plugins-official",
