@@ -170,14 +170,32 @@ throwaway engine with real sessions).
 
 ### Critical Assumptions
 
-- [ ] A session acts on a reference by calling `tuple_in` on its mailbox at
+- [x] A session acts on a reference by calling `tuple_in` on its mailbox at
   least as reliably as it called `tuple_rd` and `tuple_ack` under RDR-211.
-  **Status**: Unverified. **Method**: Spike (two real sessions, the Step 0
-  harness of RDR-211).
-- [ ] Re-announcing an unclaimed row at each wake, damped to the cadence in
+  **Status**: Verified. **Method**: Spike, live (T2
+  `nexus_rdr/213-spike-1-session-claims-2026-09-17`). Five messages sent to
+  one real Claude Code session against a throwaway engine, including two
+  sent together with no wait between: 5/5 claimed via `tuple_in` and acked,
+  the concurrent pair correctly showing only the oldest announced until the
+  first was gone, and the waiter itself never held a claim throughout (final
+  mailbox stats: consumed=5, claimed=0).
+- [x] Re-announcing an unclaimed row at each wake, damped to the cadence in
   Technical Design, does not disturb an idle session more than RDR-211's
-  re-send did. **Status**: Unverified. **Method**: Spike (count wakes over ten
-  minutes with one unclaimed row).
+  re-send did. **Status**: Verified, cadence and cap confirmed exactly as
+  designed. **Method**: Spike, live, with the re-announce interval
+  temporarily shortened to 60s for the spike (T2
+  `nexus_rdr/213-spike-2-reannounce-cadence-2026-09-17`). A row left
+  genuinely unclaimed was announced 5 times total (1 initial + 4 re-sends)
+  at the 60s cadence, then fell silent while remaining pending; a killed
+  and reconnected MCP server re-announced the same still-available row once
+  more with its count restarting at one, exactly as Technical Design
+  states. Two caveats recorded in the T2 entry: a session told not to touch
+  a reference still claims it once, since the channel push carries no body
+  and reading the instruction requires a claim (the design already treats
+  the session's own `tuple_release` as ordinary credit-freeing); and the
+  MVV harness carries no conexus plugin, so "the drain hook renders it at
+  the next prompt" could not be exercised live in this harness (unchanged
+  RDR-205/211 territory, covered by those RDRs' own tests).
 
 ## Proposed Solution
 
@@ -490,3 +508,8 @@ The MVV is Phase 1's exit, not deferred.
 - 2026-09-17: Sam confirmed the design as his original intent for channel
   delivery (T2 `nexus_rdr/213-decision-notify-then-claim-2026-09-17`); the
   Provenance paragraph records it.
+- 2026-09-17: prototype implemented on branch `rdr-213-spikes` (commit
+  `40ce38aa2`) and both Critical Assumptions verified live against a
+  throwaway engine (T2 `nexus_rdr/213-spike-1-session-claims-2026-09-17`,
+  `nexus_rdr/213-spike-2-reannounce-cadence-2026-09-17`); checkboxes above
+  updated accordingly.
