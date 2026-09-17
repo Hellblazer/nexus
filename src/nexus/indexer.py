@@ -203,8 +203,15 @@ def _git_changed_since(
     """
     try:
         proc = subprocess.run(
+            # nexus-6m9zy.4 (#5): -z switches git to NUL-delimited,
+            # UNQUOTED output. Without it, any path containing a
+            # non-ASCII byte comes back C-quoted (e.g.
+            # '"docs/caf\303\251.md"'), which never equals
+            # str(path.relative_to(repo)) anywhere this delta is
+            # consumed — the file is silently treated as outside the
+            # delta forever (owners.head_hash still advances past it).
             ["git", "-C", str(repo), "diff", "--name-status",
-             "--find-renames", "--no-color", base],
+             "--find-renames", "--no-color", "-z", base],
             capture_output=True, text=True, timeout=60,
         )
     except Exception:  # noqa: BLE001 — git unavailable/hung: full-index fallback
@@ -217,26 +224,49 @@ def _git_changed_since(
             fallback="full index",
         )
         return None
+    # With -z, each record's fields are individually NUL-terminated
+    # instead of the line being TAB-separated with a newline terminator:
+    # "<status>\0<path>\0" for A/M/T/D, "<status>\0<src>\0<dst>\0" for
+    # R/C. Splitting the whole stream on NUL and walking it token-by-
+    # token (rather than splitting on newlines first) is required
+    # because a renamed/copied record's own separator IS a NUL, not a
+    # newline.
     changed: list[str] = []
     deleted: list[str] = []
-    for line in proc.stdout.splitlines():
-        if not line.strip():
+    tokens = proc.stdout.split("\0")
+    i = 0
+    n = len(tokens)
+    while i < n:
+        status = tokens[i]
+        if not status:  # trailing NUL produces one empty token at the end
+            i += 1
             continue
-        parts = line.split("\t")
-        status = parts[0]
-        if status.startswith(("R", "C")) and len(parts) == 3:
+        if status.startswith(("R", "C")):
+            if i + 2 >= n:
+                _log.info("since_head_unparsed_status", line=status[:120])
+                return None
+            src, dst = tokens[i + 1], tokens[i + 2]
             if status.startswith("R"):
-                deleted.append(parts[1])
-            changed.append(parts[2])
-        elif status[:1] in ("A", "M", "T") and len(parts) == 2:
-            changed.append(parts[1])
-        elif status[:1] == "D" and len(parts) == 2:
-            deleted.append(parts[1])
+                deleted.append(src)
+            changed.append(dst)
+            i += 3
+        elif status[:1] in ("A", "M", "T"):
+            if i + 1 >= n:
+                _log.info("since_head_unparsed_status", line=status[:120])
+                return None
+            changed.append(tokens[i + 1])
+            i += 2
+        elif status[:1] == "D":
+            if i + 1 >= n:
+                _log.info("since_head_unparsed_status", line=status[:120])
+                return None
+            deleted.append(tokens[i + 1])
+            i += 2
         elif status[:1] == "U":
             # merge conflict in progress — indexing mid-merge is undefined
             return None
         else:
-            _log.info("since_head_unparsed_status", line=line[:120])
+            _log.info("since_head_unparsed_status", line=status[:120])
             return None
     return changed, deleted
 
