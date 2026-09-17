@@ -529,3 +529,4 @@ The MVV is Phase 1's exit, not deferred.
   throwaway engine (T2 `nexus_rdr/213-spike-1-session-claims-2026-09-17`,
   `nexus_rdr/213-spike-2-reannounce-cadence-2026-09-17`); checkboxes above
   updated accordingly.
+- 2026-09-17: Gate round 1 — PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `bb9e7193b`; critique `nexus_rdr/213-gate-critique-2026-09-17`.
