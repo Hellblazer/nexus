@@ -1161,3 +1161,4 @@ The document is sized to those changes and the three template decisions; Phase
   second fact counts releases, and the cross-mailbox claim names its
   mechanism (`rd` both, `in` the oldest's subspace). No new design; recorded
   as a reconciliation, not a fourth check.
+- 2026-09-17: Gate round 3 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `0b42e5019`; critique `nexus_rdr/211-gate-critique-2026-09-16c`.
