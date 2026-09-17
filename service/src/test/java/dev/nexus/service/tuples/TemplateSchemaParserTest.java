@@ -266,4 +266,128 @@ class TemplateSchemaParserTest {
                 () -> TemplateSchemaParser.parse("broken.yaml", doc));
         assertTrue(ex.getMessage().contains("max_body_bytes"), ex.getMessage());
     }
+
+    // ── lock (RDR-211 Phase 1 Step 1, bead nexus-rplay.3) ─────────────────────
+
+    @Test
+    void lockAbsent_defaultsFalse() {
+        TemplateSchema t = TemplateSchemaParser.parse("mailbox.yaml", validDoc());
+        assertFalse(t.lock());
+    }
+
+    @Test
+    void lockTrue_parsesVerbatim() {
+        Map<String, Object> doc = validDoc();
+        doc.put("lock", Boolean.TRUE);
+        TemplateSchema t = TemplateSchemaParser.parse("lock.yaml", doc);
+        assertTrue(t.lock());
+    }
+
+    @Test
+    void lockFalse_parsesVerbatim() {
+        Map<String, Object> doc = validDoc();
+        doc.put("lock", Boolean.FALSE);
+        TemplateSchema t = TemplateSchemaParser.parse("lock.yaml", doc);
+        assertFalse(t.lock());
+    }
+
+    @Test
+    void lockWrongType_isABreach() {
+        Map<String, Object> doc = validDoc();
+        doc.put("lock", "not-a-boolean");
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("lock"), ex.getMessage());
+    }
+
+    // ── max_live_rows (RDR-211 Phase 1 Step 1, bead nexus-rplay.5) ───────────
+
+    @Test
+    void maxLiveRowsAbsent_leavesFieldNull() {
+        TemplateSchema t = TemplateSchemaParser.parse("mailbox.yaml", validDoc());
+        assertEquals(null, t.maxLiveRows());
+    }
+
+    @Test
+    void maxLiveRowsPositive_parsesVerbatim() {
+        Map<String, Object> doc = validDoc();
+        doc.put("max_live_rows", 500L);
+        TemplateSchema t = TemplateSchemaParser.parse("board.yaml", doc);
+        assertEquals(500L, t.maxLiveRows());
+    }
+
+    @Test
+    void maxLiveRowsZero_isABreach() {
+        Map<String, Object> doc = validDoc();
+        doc.put("max_live_rows", 0L);
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("max_live_rows"), ex.getMessage());
+    }
+
+    @Test
+    void maxLiveRowsNegative_isABreach() {
+        Map<String, Object> doc = validDoc();
+        doc.put("max_live_rows", -1L);
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("max_live_rows"), ex.getMessage());
+    }
+
+    @Test
+    void maxLiveRowsWrongType_isABreach() {
+        Map<String, Object> doc = validDoc();
+        doc.put("max_live_rows", "not-a-number");
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("max_live_rows"), ex.getMessage());
+    }
+
+    // ── claim_log_ttl_seconds (RDR-211 Phase 1 Step 1, bead nexus-rplay.6) ───
+    //
+    // Only the syntactic "positive integer" shape lives here. "May only shorten
+    // the engine default" and "must exceed this template's own retention_seconds
+    // by more than one sweep interval" both need the registry's resolved default,
+    // which this parser never sees -- TemplateRegistryTest owns those.
+
+    @Test
+    void claimLogTtlSecondsAbsent_leavesFieldNull() {
+        TemplateSchema t = TemplateSchemaParser.parse("mailbox.yaml", validDoc());
+        assertEquals(null, t.claimLogTtlSeconds());
+    }
+
+    @Test
+    void claimLogTtlSecondsPositive_parsesVerbatim() {
+        Map<String, Object> doc = validDoc();
+        doc.put("claim_log_ttl_seconds", 3600L);
+        TemplateSchema t = TemplateSchemaParser.parse("queue.yaml", doc);
+        assertEquals(3600L, t.claimLogTtlSeconds());
+    }
+
+    @Test
+    void claimLogTtlSecondsZero_isABreach() {
+        Map<String, Object> doc = validDoc();
+        doc.put("claim_log_ttl_seconds", 0L);
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("claim_log_ttl_seconds"), ex.getMessage());
+    }
+
+    @Test
+    void claimLogTtlSecondsNegative_isABreach() {
+        Map<String, Object> doc = validDoc();
+        doc.put("claim_log_ttl_seconds", -1L);
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("claim_log_ttl_seconds"), ex.getMessage());
+    }
+
+    @Test
+    void claimLogTtlSecondsWrongType_isABreach() {
+        Map<String, Object> doc = validDoc();
+        doc.put("claim_log_ttl_seconds", "not-a-number");
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("claim_log_ttl_seconds"), ex.getMessage());
+    }
 }

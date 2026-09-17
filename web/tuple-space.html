@@ -323,18 +323,18 @@ tuple_ack  claim_id: ede42f56-…   claimant: a3f7c2e1d09b4c551
 <h3>The exchange</h3>
 <p>Behind the instruction in lesson 1, Claude sends a request to the peer's name with kind "request" and a new correlation id, then waits on its own mailbox. The peer receives the request, opens what it names, does the work, and answers with a reply that carries the same correlation id. The request names its subject with a pointer, whether a bead id, a memory title, or a document address, and if the work produced something, the reply names where it was written.</p>
 <details class="gloss out"><summary>What you see, on your side</summary><pre class="out">mailbox_send  to: <b>nexus-8c</b>   kind: request   correlation_id: r-41
-              body: Confirm your mailbox watcher is armed. Ack when done.
+              body: Confirm you're subscribed to the channel. Ack when done.
 → {"to": "<b>cdeb12b5-…</b>", "address_kind": "<b>session</b>", "from": "5b354c36-…"}
 tuple_in   subspace: mailbox/<b>5b354c36-…</b>   keys: {to: 5b354c36-…}   timeout_s: 25
 {
   "tuple": {
     "dims": {"from": "cdeb12b5-…", "kind": "<b>reply</b>", "correlation_id": "<b>r-41</b>", "address_kind": "session"},
-    "body": "Armed. The watcher is Monitor task b3g9s5nia running nx tuple watch --instance nexus-8c …"
+    "body": "Subscribed. My instance mailbox nexus-8c is on the channel now …"
   },
   "claim_id": "784e820d-…"
 }
 tuple_ack  … → Acked</pre></details>
-<p>The peer receives the request in one of two ways. Its mailbox watcher, a background command, prints a line when a message arrives. The peer then takes the request with <code>tuple_in</code>, does the work, and calls <code>tuple_ack</code> with the reply. The reply and the ack are then one call, so a crash cannot deliver the reply and leave the request to run again. When a hook shows the request at the peer's next prompt, the hook has already consumed it. The peer then sends the reply as a new message with the same correlation id, as in the output above. An unanswered request is a tuple with an age that the census in lesson 5 shows, not a line in a chat window that nobody reads.</p>
+<p>The peer receives the request in one of two ways. If its Claude Code session has the channel enabled, its own nexus MCP server takes the request. It pushes a notification naming where the request is and a claim id, never the body, so the peer reads the request on purpose with <code>tuple_rd</code>. Otherwise, a hook shows the request at the peer's next prompt. The peer then does the work and calls <code>tuple_ack</code> with the reply. The reply and the ack are then one call, so a crash cannot deliver the reply and leave the request to run again. When a hook shows the request at the peer's next prompt, the hook has already consumed it. The peer then sends the reply as a new message with the same correlation id, as in the output above. An unanswered request is a tuple with an age that the census in lesson 5 shows, not a line in a chat window that nobody reads.</p>
 <p class="note">To find a peer's name, ask Claude to list the sessions on the machine. Send to the name it shows, such as <code>nexus-8c</code>. The send resolves the name in the session directory and delivers to that session's mailbox.</p>
 </section>
 
@@ -363,7 +363,7 @@ tuple_ack  … → Acked</pre></details>
 {"total": 0, "available": 0, "claimed": 0, "dead": 0, "consumed": 1,
  "expired_unpurged": 0, "oldest_created_at": "…T15:54:21Z", "newest_created_at": "…T15:54:21Z"}</pre></details>
 
-<p>Four rows in <code>nx doctor</code> watch the space: the age of the oldest unclaimed tuple in each subspace, the health of the database table, the age of the last sweep, and whether your Claude Code permissions let the mailbox watcher run. The sweep is the job that ends leases nobody renewed, removes expired tuples, and removes old claim-log rows. A healthy space shows small numbers in the first three, and what those rows catch is a sweep that has stopped.</p>
+<p>Six rows in <code>nx doctor</code> watch the space: the age of the oldest unclaimed tuple in each subspace, the health of the database table, the age of the last sweep, how full the engine's wait slots are, how deep a work queue has grown, and whether this session's push-delivery channel is alive. The sweep is the job that ends leases nobody renewed, removes expired tuples, and removes old claim-log rows. A healthy space shows small numbers across all six. What these rows catch is a sweep that has stopped, a subspace filling faster than it drains, or a session whose channel push has gone quiet.</p>
 </section>
 
 <!-- ============ 6 ============ -->
@@ -373,11 +373,11 @@ tuple_ack  … → Acked</pre></details>
 
 <div class="tbl"><table>
 <tr><th>Surface</th><th>What it is</th></tr>
-<tr><td>Ten MCP tools</td><td><code>mailbox_send</code>, <code>tuple_out</code>, <code>tuple_rd</code>, <code>tuple_in</code>, <code>tuple_ack</code>, <code>tuple_nack</code>, <code>tuple_renew</code>, <code>tuple_registry</code>, <code>tuple_list</code>, <code>tuple_stats</code>. Claude calls these inside a session.</td></tr>
-<tr><td><code>nx tuple</code></td><td>The same operations from the terminal: <code>out</code>, <code>rd</code>, <code>in</code>, <code>ack</code>, <code>nack</code>, <code>renew</code>, <code>templates</code>, <code>list</code>, <code>stats</code>. Hooks and scripts call these. Two more: <code>directory</code>, which shows the session that holds a name, and <code>watch</code>, the mailbox watcher.</td></tr>
+<tr><td>MCP tools</td><td><code>mailbox_send</code>, <code>tuple_out</code>, <code>tuple_rd</code>, <code>tuple_in</code>, <code>tuple_ack</code>, <code>tuple_nack</code>, <code>tuple_renew</code>, <code>tuple_release</code>, <code>tuple_registry</code>, <code>tuple_list</code>, <code>tuple_stats</code>, plus four that manage what a session's own channel delivers (<a href="coordination.html">Coordination</a> covers those). Claude calls these inside a session.</td></tr>
+<tr><td><code>nx tuple</code></td><td>The same operations from the terminal: <code>out</code>, <code>rd</code>, <code>in</code>, <code>ack</code>, <code>nack</code>, <code>renew</code>, <code>release</code>, <code>templates</code>, <code>list</code>, <code>stats</code>. Hooks and scripts call these. One more: <code>directory</code>, which shows the session that holds a name. <code>release</code> ends a claim without counting it as a failed attempt, unlike <code>nack</code> — the right call for a task or a lock handed back in good order.</td></tr>
 <tr><td>Hooks</td><td>The agent-start hook gives each agent its id and mailbox address. The start and stop hooks write the ledger's start and report tuples without blocking the agent.</td></tr>
 <tr><td>Skills</td><td><code>/conexus:mailbox</code> holds the rules for sending and reading messages. <code>/conexus:orchestration</code> holds the rule for waiting on a report.</td></tr>
-<tr><td><code>nx doctor</code></td><td>The four rows described in <a href="#l5">lesson 5</a>.</td></tr>
+<tr><td><code>nx doctor</code></td><td>The six rows described in <a href="#l5">lesson 5</a>.</td></tr>
 </table></div>
 
 <div class="see">From the terminal</div>
@@ -390,7 +390,7 @@ nx tuple rd ledger/<span class="ph">&lt;SESSION-ID&gt;</span> -n 300</pre><butto
   subspace: mailbox/5b354c36-…
   keys: {'to': '5b354c36-…'}
   dims: {'from': 'cdeb12b5-…', 'kind': 'reply', 'address_kind': 'session', 'correlation_id': 'r-41'}
-  body: Armed. The watcher is Monitor task b3g9s5nia running nx tuple watch --instance nexus-8c …
+  body: Subscribed. My instance mailbox nexus-8c is on the channel now …
   claim_state: claimed
   created_at: 2026-09-15T13:49:27Z</pre></details>
 </section>
@@ -404,10 +404,11 @@ nx tuple rd ledger/<span class="ph">&lt;SESSION-ID&gt;</span> -n 300</pre><butto
 <div class="ops">
 <div class="op"><small>add</small><b>out</b><p>Add a tuple. The tuple's identity comes from fields that the caller supplies, so sending the same tuple twice stores it once.</p></div>
 <div class="op"><small>read</small><b>rd</b><p>Read matching tuples. The tuples stay in the space. Any number of readers can read, and with a timeout the read waits until a tuple arrives.</p></div>
-<div class="op take"><small>take</small><b>in</b><p>Claim one matching tuple. Exactly one caller wins. The winner holds a lease and ends it with <code>ack</code>, or returns the tuple with <code>nack</code>.</p></div>
+<div class="op take"><small>take</small><b>in</b><p>Claim one matching tuple. Exactly one caller wins. The winner holds a lease and ends it with <code>ack</code>, returns the tuple as a failed attempt with <code>nack</code>, or, if the work was not a failure, hands it back clean with <code>release</code>.</p></div>
 </div>
 <p>A tuple has keys, dimensions, and a body. The keys are what a take operation matches on, and the dimensions describe the tuple without being part of that match. Subspaces divide the space into named parts, and the engine registers a template for each kind of subspace: which keys are required, which dimensions are allowed, how long a tuple lives, and whether take operations are allowed. The engine checks every <code>out</code> against its template and refuses one that does not fit. Only the engine holds the templates, so every client sees the same shapes.</p>
-<p>Three operations with exact meanings are easier to build correctly, easier to analyze, and easier to combine than a larger interface. Each is one short database transaction, so the space scales as the database scales, and a busy subspace does not slow a quiet one. A take operation matches on keys alone and always ends in an ack or a nack, so you can say exactly what happens to any tuple under any sequence of calls, including a crash between a take operation and its ack.</p>
+<p>Three operations with exact meanings are easier to build correctly, easier to analyze, and easier to combine than a larger interface. Each is one short database transaction, so the space scales as the database scales, and a busy subspace does not slow a quiet one. A take operation matches on keys alone and always ends in an ack, a nack, or a release, so you can say exactly what happens to any tuple under any sequence of calls, including a crash between a take operation and its ack.</p>
+<p>Two more operations exist beneath these three, for the session's own delivery rather than for you to call directly. <code>wait</code> parks one call across several subspaces at once, so a session watching many mailboxes and topics spends one slot, not one per thing it watches. <code>park_stats</code> reports how full those wait slots are. Neither has an MCP tool or a CLI verb.</p>
 </div></details>
 
 <details class="gloss"><summary>Uses of the same operations</summary><div style="padding:0 14px 12px">
@@ -417,10 +418,11 @@ nx tuple rd ledger/<span class="ph">&lt;SESSION-ID&gt;</span> -n 300</pre><butto
 <tr><td>mailbox</td><td>one tuple per message, keyed on the recipient</td><td>A sender calls <code>out</code> to the address. The recipient calls <code>in</code> before it acts.</td><td>built</td></tr>
 <tr><td>request and reply</td><td>a request in the peer's mailbox and a reply in yours, sharing an id</td><td>You call <code>out</code> for the request, then <code>in</code> on your own mailbox for the reply.</td><td>built, on the mailbox</td></tr>
 <tr><td>rendezvous</td><td>a tuple that means "I am here" or "I am done"</td><td>One process calls <code>out</code> when it arrives. The other calls <code>rd</code> with a timeout and wakes.</td><td>built, on the ledger and the mailbox</td></tr>
-<tr><td>work queue</td><td>one tuple per task</td><td>A producer calls <code>out</code> for each task, and workers call <code>in</code> and <code>ack</code>.</td><td>not built</td></tr>
-<tr><td>lock</td><td>one tuple per resource</td><td>A process calls <code>in</code> to hold the lock and <code>out</code> to release it.</td><td>not built</td></tr>
+<tr><td>work queue</td><td>one tuple per task</td><td>A producer calls <code>out</code> for each task. A worker calls <code>in</code>, then <code>ack</code> when the task is done or <code>release</code> to hand it back for another worker without a failed attempt.</td><td>built</td></tr>
+<tr><td>lock</td><td>one tuple per resource</td><td>A process calls <code>out</code> once to make sure the lock exists, <code>in</code> to hold it, and <code>release</code> to hand it to the next holder. <code>ack</code> is refused on a lock, since an acked tuple could not be taken again.</td><td>built</td></tr>
+<tr><td>announcement</td><td>many tuples in one topic, none of them taken</td><td>Any session calls <code>out</code> to post. Readers call <code>rd</code> with a timeout to wake on the next post, or with a cursor to see what they missed.</td><td>built</td></tr>
 </table></div>
-<p>Three subspace kinds exist: the ledger, the mailbox, and the directory, which maps a session's name to its session id. The four built uses run on the ledger and the mailbox. A new use is a new composition of the three operations rather than new code in the engine, and any use beyond these needs a design record of its own, as RDR-205 says.</p>
+<p>Six subspace kinds exist: the ledger, the mailbox, and the directory, which maps a session's name to its session id, plus a board for announcements, a work queue, and a lock, added under <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr/rdr-211-board-queue-and-lock-tuple-templates.md">RDR-211</a>. Every use in this table is now built. A new use is a new composition of the three operations rather than new code in the engine, and any use beyond these needs a design record of its own, as RDR-205 says.</p>
 </div></details>
 
 <details class="gloss"><summary>The tuple space and the three stores</summary><div style="padding:0 14px 12px">

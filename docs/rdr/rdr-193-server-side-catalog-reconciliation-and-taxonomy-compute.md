@@ -2,7 +2,7 @@
 title: "Server-Side Catalog Reconciliation and Taxonomy Compute: Move the Index-Time Catalog Diff/Housekeeping/Linking and the Taxonomy Discover Pipeline onto the Engine as Transactional SQL and Java Jobs"
 id: RDR-193
 type: Architecture
-status: draft
+status: deferred
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
@@ -635,3 +635,14 @@ Measured baselines to compare against: T2 [21715] (7.4.0 flush-tail),
 [21723] (round-trip floor + lock convoy), nexus-ap8l0 (production-scale
 taxonomy leg 90 s / 3 flushes; prune-deleted-files 547 s — the latter already
 addressed server-side by RDR-191 Phase 6).
+
+## Revision History
+
+- 2026-08-15 — created (draft); gate passed at run 2.
+- 2026-09-16 — deferred. The client-side reconcile loop and taxonomy compute
+  are unchanged, but every motivating bead (nexus-ap8l0, nexus-ejo6k,
+  nexus-w5xgy, nexus-7lw6a) closed without a user complaint, two by
+  grooming. The reserved changeset ids catalog-032 and taxonomy-008 have
+  since been taken (changelogs run to catalog-037 and taxonomy-017);
+  renumber at reopen. Reopen trigger: an index wall-time or catalog-phase
+  cost regression.

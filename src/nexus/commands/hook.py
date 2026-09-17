@@ -99,32 +99,31 @@ def session_start_cmd() -> None:
     help="The session whose mailbox watch is being armed.",
 )
 def mailbox_arm_cmd(session_id: str) -> None:
-    """Print the mailbox-watch arm instruction for a session, or nothing.
+    """Print the mailbox-subscribe instruction for a session, or nothing.
 
-    nexus-6konb.19: the UserPromptSubmit drain hook runs this when its own
-    check finds no live watcher on the session's mailbox lock. It checks
-    again through the wheel's lock path, so a drift in the hook's copy of
-    that naming can cost a spawn but never a wrong instruction, then prints
-    the same text SessionStart emits (``nexus.mailbox_arm.arm_block``), so the
-    instruction versions with the wheel that ships ``nx tuple watch``. It
-    prints nothing when a watcher is live or an arm could not succeed, and
-    never exits non-zero.
+    Prints the same text SessionStart emits (``nexus.mailbox_arm.arm_block``),
+    so the instruction always versions with the wheel it names. Prints
+    nothing when a subscribe instruction could not succeed (the tuple
+    surface is not answering), and never exits non-zero.
 
-    First it points this claude process's watcher self-stop marker at
-    *session_id* (:func:`nexus.hooks.adopt_session_marker`). ``/branch``
-    forks a session with no SessionStart, so the marker still names the
-    parent and the parent's watcher keeps running in the fork, pinging the
-    parent's mail there (RDR-208 MVV, 2026-09-14). The drain hook runs this
-    with the current session id, so the write stops that watcher, which
-    releases its directory entry as after a ``/clear``.
+    First it points this claude process's self-stop marker at *session_id*
+    (:func:`nexus.hooks.adopt_session_marker`). ``/branch`` forks a session
+    with no SessionStart, so the marker still names the parent; recording
+    the fork's id here keeps the marker/cleared-record contract
+    (:mod:`nexus.session_marker`) consistent for whichever session next
+    reads it.
+
+    RDR-211 nexus-rplay.14: the per-prompt re-arm this command served (a
+    live watcher-lock liveness check gating whether to print) was deleted
+    with the CLI watcher loop itself; nothing calls this command
+    automatically any more (the ``UserPromptSubmit`` drain hook is now the
+    unconditional floor), but it stays as a standalone command for manual
+    use.
     """
-    from nexus import config as _config  # noqa: PLC0415 — deferred: hook startup cost
-    from nexus import mailbox_arm, tuple_watch  # noqa: PLC0415 — deferred: hook startup cost
+    from nexus import mailbox_arm  # noqa: PLC0415 — deferred: hook startup cost
 
     try:
         hooks.adopt_session_marker(session_id)
-        if tuple_watch.watcher_alive(_config.nexus_config_dir(), session_id):
-            return
         text = mailbox_arm.arm_block(session_id)
     except Exception as exc:  # noqa: BLE001 — a hook helper must never fail the prompt it serves
         _log.debug("mailbox_arm_cmd_failed", error=str(exc))

@@ -39,9 +39,13 @@ from nexus.mcp.core import (  # noqa: F401
     tuple_ack,
     tuple_nack,
     tuple_renew,
+    tuple_release,
     tuple_registry,
     tuple_list,
     tuple_stats,
+    tuple_subscribe,
+    tuple_unsubscribe,
+    tuple_subscriptions,
     mailbox_send,
     # Demoted (plain functions)
     store_delete,

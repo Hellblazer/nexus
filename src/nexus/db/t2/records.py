@@ -226,6 +226,61 @@ class SubspaceCensus:
     newest_created_at: str | None
 
 
+@dataclass(frozen=True)
+class WaitSpec:
+    """One subspace entry in a ``HttpTupleStore.wait`` call (RDR-211 Phase 1
+    Step 3, bead nexus-rplay.9), mirroring the engine's
+    ``TupleRepository.WaitSpec`` field for field.
+
+    ``since`` is the plain ``(created_at, id)`` cursor pair ``rd`` already
+    takes, not the wire's ``{"created_at": ..., "id": ...}`` object --
+    :func:`~nexus.db.t2.http_tuple_store._since_payload` does that
+    translation for both callers.
+
+    ``wait`` is an internal transport method: the session's own MCP server
+    lifespan waiter (a later bead) is its only caller (RDR-211 Open
+    Question 6, Sam's decision). There is no MCP tool or CLI verb for it,
+    so nothing outside that waiter constructs a ``WaitSpec`` today.
+    """
+
+    subspace: str
+    keys_pattern: dict[str, str] | None = None
+    n: int = 1
+    since: tuple[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class WaitResult:
+    """One subspace's matches from a ``HttpTupleStore.wait`` call.
+
+    A subspace with no match is simply ABSENT from the list ``wait``
+    returns -- never present with an empty ``tuples`` (the engine's own
+    ``TupleRepository.waitAny`` contract).
+    """
+
+    subspace: str
+    tuples: list["TupleRow"]
+
+
+@dataclass(frozen=True)
+class ParkStats:
+    """Engine-wide (never per-tenant) parked-call gauges, as rendered by
+    ``TupleHandler.handleParkStats`` (RDR-211 Phase 1 Step 1, bead
+    nexus-rplay.7).
+
+    Internal transport, same as :class:`WaitSpec`: a later ``nx doctor``
+    row bead is the one intended consumer of ``HttpTupleStore.park_stats``;
+    there is no MCP tool or CLI verb for it.
+    """
+
+    max_global: int
+    max_per_claimant: int
+    global_in_use: int
+    refused_global: int
+    refused_claimant: int
+    per_claimant: dict[str, int]
+
+
 #: The relevance_log retention horizon — THE single source for the sweep's
 #: default. Rehomed from the deleted SQLite ``telemetry.py`` (nexus-i711w
 #: Stage 2 sub-stage A); surviving consumers are ``T2Database.trim_telemetry``

@@ -2,7 +2,8 @@
 title: "Docuverse Storage: Reference-Only Chunks — Retention Enum, Nullable Content, Reference-Only Search DTO, and the URI-Resolver / Embed-Without-Store Surface"
 id: RDR-169
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-09-16
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
@@ -140,7 +141,7 @@ deployment, the copy-not-move T2/T3 ETL, and the RDR lifecycle. nexus's read on 
   embeddings verbatim, dim-validated, no embedder). The embed path is text→vector, decoupled
   from storage. Remaining work is only a nullable-content upsert branch under
   `retention='reference-only'` + the schema slice — not a blocker.
-- [ ] **RLS is unconditional** — `tenant_id` stays `NOT NULL` on reference-only rows; content
+- [x] **RLS is unconditional** — `tenant_id` stays `NOT NULL` on reference-only rows; content
   nullability is orthogonal to tenancy — **Status**: Confirmed mutual (relay) — **Method**:
   schema invariant + RLS behavioral test.
 
@@ -235,3 +236,9 @@ size cost) and cannot represent "indexed but not stored."
 Store `''` for reference-only. **Rejected**: loses the explicit retention distinction,
 pollutes FTS with empty docs, and gives no honest signal that content lives elsewhere — a
 silent-degradation trap.
+
+## Revision History
+
+- 2026-06-25 — created; gate PASSED (0 Critical, 3 Significant folded); accepted by Hal the same day. Phase A (non-schema track, Gaps 3 to 6) landed on develop the same day.
+- 2026-09-11 — Phase B (schema track, Gaps 1 and 2) landed on develop `747838841..ba15032ef` against the RDR-191 unified `nexus.chunks`, not the per-dimension tables this text names; the conexus ETL pairing became moot and the track shipped engine-only. Record T2 `nexus/rdr-169-phase-b-landing-2026-09-11`. Follow-ups the same evening: `POST /v1/vectors/resolve` wired the Gap 3 registry onto a read path (nexus-aphki) and `vectors-016` gave the twelve combined-query functions the retention column (nexus-4k1vz). Shipped in engine-service-v0.1.116 with client 7.43.0.
+- 2026-09-16 — closed. Close critique `nexus/critique-rdr169-problem-statement-scope-audit-2026-09-16` (partial, 0 Critical, 1 Significant): Gap 6 is partial. The staleness signal is real and tested for `file://`, `obsidian://`, `x-devonthink-item://` and `nx-scratch://`; for `https://` it always reports fresh, and the engine-side resolver carries no staleness at all. The code cited a closed bead for that follow-up; nexus-oqenh now owns it, and the citations point there. Disclosed here rather than left behind the epic's all-closed count. Post-mortem `post-mortem/169-docuverse-storage-reference-only-chunks.md`.

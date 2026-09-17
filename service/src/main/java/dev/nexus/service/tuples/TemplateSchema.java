@@ -48,6 +48,65 @@ import java.util.Objects;
  *                           range, and a template can only LOWER the ceiling, never raise
  *                           it. {@code 0} means every {@code out}/reply against this
  *                           template must carry a null or empty body.
+ * @param lock              RDR-211 Phase 1 Step 1 (bead nexus-rplay.3), Approach item 5.
+ *                           {@code false} for every template shipped before this bead.
+ *                           When {@code true}: {@code out} against an already-EXPIRED row
+ *                           of this template resets it to available instead of leaving it
+ *                           dead until the sweep purges it; {@code claim} and {@code renew}
+ *                           move the tuple's own {@link #retentionSeconds expires_at}
+ *                           forward to now plus {@code retentionSeconds}, ahead of the
+ *                           lease clamp, so a long-held lock's lease is never capped
+ *                           against a stale ceiling ("a lock lives as long as it is
+ *                           used"); and {@code ack} on a claim against this template is
+ *                           refused ({@link dev.nexus.service.db.TupleRepository#ack}),
+ *                           because a consumed lock row is unobtainable until the sweep
+ *                           purges it — {@code release} is the only way to end a lock
+ *                           claim. Scoped entirely to templates carrying this flag: every
+ *                           other template's {@code out}/{@code claim}/{@code renew}/
+ *                           {@code ack} behaviour is byte-identical to before this bead.
+ * @param maxLiveRows       optional per-subspace ceiling on LIVE rows (RDR-211 Scale and
+ *                           Limits item 2, "a runaway writer"). {@code null} means
+ *                           unbounded, the behaviour every template had before this field
+ *                           existed. When present it must be a positive integer; {@link
+ *                           TemplateSchemaParser} refuses a zero, negative, or non-integer
+ *                           value. "Live" is exactly the predicate the read path already
+ *                           uses ({@code consumed_at IS NULL AND expires_at > now()} —
+ *                           {@code TupleRepository#queryOnce}, {@code #computeCensus}):
+ *                           an acked row (body cleared, but the row itself survives until
+ *                           retention purges it) and an expired row are both excluded, so
+ *                           neither counts against the cap. {@code TupleRepository#writeOut}
+ *                           checks this INSIDE the same transaction as the insert, before
+ *                           it runs, and only against a genuinely NEW row: an idempotent
+ *                           re-{@code out} of an EXISTING identity ({@code id_from: keys})
+ *                           is a refire that touches only {@code expires_at} and adds no
+ *                           row, so it bypasses the cap entirely rather than being refused
+ *                           by it (decided here, since the RDR leaves the choice open — the
+ *                           alternative, refusing a refire, would make a lock or any other
+ *                           {@code id_from: keys} template's steady-state "make sure it
+ *                           exists" {@code out} fail once the subspace is merely AT its
+ *                           cap, which defeats the point of idempotent identity). Past the
+ *                           cap, {@code out} raises {@code MaxLiveRowsExceededException}
+ *                           ({@code "MaxLiveRowsExceeded"}, HTTP 429) and writes nothing.
+ * @param claimLogTtlSeconds optional per-template claim-log retention (RDR-211 Scale and
+ *                           Limits item 6, "claim-log volume"), SHORTER than the engine's
+ *                           own {@code NX_TUPLE_CLAIM_LOG_TTL_DAYS} default ({@link
+ *                           TemplateRegistry#claimLogTtlSeconds()}). {@code null} means the
+ *                           engine default applies unchanged, the behaviour every template
+ *                           had before this field existed. {@link TemplateSchemaParser}
+ *                           only checks "positive integer" here — unlike {@code
+ *                           maxBodyBytes}, whose ceiling ({@code TupleLimits.MAX_BODY_BYTES})
+ *                           is a compile-time constant the parser can see on its own, the
+ *                           engine's claim-log-TTL default is resolved from an environment
+ *                           variable only once {@code TemplateRegistry.loadAtBoot} runs, so
+ *                           the "may only shorten, never lengthen" comparison and the
+ *                           "exceeds this template's own retention_seconds by more than one
+ *                           sweep interval" boot check (existing, previously registry-wide)
+ *                           both live in {@code TemplateRegistry#load}, alongside each
+ *                           other, where that default is actually known — a boot-time
+ *                           refusal, not a parse-time one (decided here; the RDR leaves the
+ *                           choice open). {@code TupleRepository#insertClaimLog} reads the
+ *                           effective value through {@code
+ *                           TemplateRegistry#effectiveClaimLogTtlSeconds(String)}.
  */
 public record TemplateSchema(
         String name,
@@ -59,7 +118,10 @@ public record TemplateSchema(
         List<String> idDims,
         Take take,
         long retentionSeconds,
-        Long maxBodyBytes) {
+        Long maxBodyBytes,
+        boolean lock,
+        Long maxLiveRows,
+        Long claimLogTtlSeconds) {
 
     public TemplateSchema {
         Objects.requireNonNull(name, "name");

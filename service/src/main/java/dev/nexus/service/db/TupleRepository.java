@@ -46,9 +46,11 @@ import static dev.nexus.service.jooq.nexus.Tables.TUPLE_TENANTS;
  * RDR-205 Phase 1 Step 4 (bead nexus-em75s.4): the Linda tuple space's jOOQ
  * repository — {@code out}, {@code rd}/{@code rdp}, {@code in}/{@code inp},
  * {@code ack}/{@code nack}, {@code registry}, {@code subspace_list}/{@code
- * subspace_stats}. See {@code docs/rdr/rdr-205-linda-tuple-space-over-
- * postgres.md} §Technical Design — this class, not the RDR's illustrative
- * jOOQ block, is the authority on the claim statement's exact shape.
+ * subspace_stats}. RDR-206 added {@code renew}; RDR-211 Phase 1 Step 1 (bead
+ * nexus-rplay.2) added {@code release}, a hand-back that is not a failure. See
+ * {@code docs/rdr/rdr-205-linda-tuple-space-over-postgres.md} §Technical Design
+ * — this class, not the RDR's illustrative jOOQ block, is the authority on the
+ * claim statement's exact shape.
  *
  * <p>Reuses {@link TenantScope} (forced-RLS tenant-scoped transactions) and
  * mirrors {@link AspectRepository#claimNext}'s {@code FOR ... SKIP LOCKED}
@@ -95,6 +97,18 @@ public final class TupleRepository {
     public static final String SUBSPACE_LIST_TIMEOUT_SECONDS_ENV = "NX_TUPLE_SUBSPACE_LIST_TIMEOUT_SECONDS";
     public static final int DEFAULT_SUBSPACE_LIST_TIMEOUT_SECONDS = 10;
 
+    /**
+     * RDR-211 Phase 1 Step 1 (bead nexus-rplay.4), a value the RDR leaves open: the
+     * RDR bounds one session's subscriptions at 32 board topics plus two mailboxes
+     * (§Scale and Limits), so 34 is the natural ceiling on how many subspaces one
+     * {@link #waitAny} call may name. A fixed constant, not an env-configurable
+     * setting like {@link #TIMEOUT_CAP_SECONDS_ENV} and its siblings above -- the
+     * RDR's own subscription bound is the reason for the number, not a per-deploy
+     * tuning knob. Refused with {@link SchemaViolationException}, never silently
+     * truncated.
+     */
+    public static final int MAX_WAIT_SUBSPACES = 34;
+
     private static final String CLAIM_STATE_CLAIMED = "claimed";
     private static final String CLAIM_STATE_DEAD = "dead";
     private static final String TRANSITION_CLAIM = "claim";
@@ -103,6 +117,11 @@ public final class TupleRepository {
     private static final String TRANSITION_RENEW = "renew";
     private static final String TRANSITION_EXPIRE = "expire";
     private static final String TRANSITION_DEAD = "dead";
+    /**
+     * RDR-211 Phase 1 Step 1 (bead nexus-rplay.2): a hand-back that is NOT a
+     * failure -- see {@link #release}.
+     */
+    private static final String TRANSITION_RELEASE = "release";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TypeReference<Map<String, String>> STRING_MAP = new TypeReference<>() {
@@ -123,8 +142,9 @@ public final class TupleRepository {
 
     /**
      * TEST-ONLY seam (RDR-206 Phase 1 Step 1, bead nexus-h61dl.2): invoked inside
-     * every claim-MUTATING transaction — {@link #ack}, {@link #nack} and {@link
-     * #renew} — between {@link #liveClaimRow}'s unlocked read and the
+     * every claim-MUTATING transaction — {@link #ack}, {@link #nack}, {@link
+     * #renew} and, since RDR-211 Phase 1 Step 1 (bead nexus-rplay.2), {@link
+     * #release} — between {@link #liveClaimRow}'s unlocked read and the
      * compare-and-swap {@code UPDATE}, so a test can release the row in that window
      * (lapse the lease, run the sweep's release arm) and assert the stale update
      * matches zero rows and raises {@link ClaimNotFoundException} with no claim-log
@@ -206,6 +226,38 @@ public final class TupleRepository {
         this.waitRegistry = new TupleWaitRegistry(parkCapPerClaimant, parkCapGlobal);
     }
 
+    /**
+     * TEST-ONLY (nexus-rplay, the register/release leak fix): injects a caller-built
+     * {@link TupleWaitRegistry} directly, instead of constructing one from park-cap
+     * ints -- the only way a test can drive {@code rd}/{@code in}/{@code waitAny}
+     * through a registry built with the injectable {@link
+     * TupleWaitRegistry#TupleWaitRegistry(int, int, java.util.function.LongSupplier)}
+     * clock, so a test can advance idle time deterministically and then call this
+     * repository's own {@code groupCount()}-visible package-private registry to
+     * assert eviction. Package-private, matching {@link TupleWaitRegistry}'s own
+     * package-private visibility (a public overload could not even name the type
+     * outside this package). Never call this outside test code.
+     */
+    TupleRepository(TenantScope tenantScope, TemplateRegistry registry,
+                     int readMax, int claimPasses, int timeoutCapSeconds, int subspaceListTimeoutSeconds,
+                     TupleWaitRegistry waitRegistry) {
+        this.tenantScope = tenantScope;
+        this.registry = registry;
+        this.readMax = readMax;
+        this.claimPasses = claimPasses;
+        this.timeoutCapSeconds = timeoutCapSeconds;
+        this.subspaceListTimeoutSeconds = subspaceListTimeoutSeconds;
+        this.waitRegistry = waitRegistry;
+    }
+
+    /** TEST-ONLY (nexus-rplay): exposes this repository's own {@link
+     *  TupleWaitRegistry} so a same-package test can call its package-private
+     *  {@code groupCount()} without keeping a second, disconnected registry
+     *  instance of its own. Never call this outside test code. */
+    TupleWaitRegistry testOnlyWaitRegistry() {
+        return waitRegistry;
+    }
+
     /** Production boot call: reads every setting via {@code System.getenv} directly. */
     public static TupleRepository fromEnv(TenantScope tenantScope, TemplateRegistry registry) {
         return new TupleRepository(tenantScope, registry,
@@ -229,6 +281,45 @@ public final class TupleRepository {
      *  the engine finishes stopping. Call from {@code NexusService.stop()}. */
     public void shutdown() {
         waitRegistry.shutdown();
+    }
+
+    // ── park stats (RDR-211 Phase 1 Step 1, bead nexus-rplay.7) ─────────────
+
+    /**
+     * {@code park_stats() -> {max_global, max_per_claimant, global_in_use,
+     * refused_global, refused_claimant, per_claimant}}: read access to {@link
+     * #waitRegistry}'s park-slot bookkeeping, otherwise invisible outside
+     * {@link TupleWaitRegistry}'s own package-private fields. RDR-211 §Scale
+     * and Limits item 1 named this gap directly -- the park cap has existed
+     * since RDR-205 (bead nexus-em75s.4), but nothing reported parked or
+     * refused calls before this bead.
+     *
+     * <p>Counters are held on THIS JVM process, not per-tenant and not
+     * aggregated across a cluster -- a caller behind a load balancer sees
+     * only the instance it happens to land on. {@code GET /v1/tuples/
+     * park_stats} still requires the usual {@code Authorization: Bearer}
+     * and {@code X-Nexus-Tenant} headers (auth is enforced ahead of every
+     * {@code /v1/tuples} route, this one included), even though the numbers
+     * themselves carry no tenant dimension.
+     */
+    public ParkStats parkStats() {
+        return new ParkStats(
+                waitRegistry.maxGlobal(), waitRegistry.maxPerClaimant(),
+                waitRegistry.globalInUse(), waitRegistry.globalRefusedCount(),
+                waitRegistry.claimantRefusedCount(), waitRegistry.perClaimantSnapshot());
+    }
+
+    /**
+     * RDR-211 Phase 1 Step 1: a snapshot of {@link #parkStats}. {@code
+     * perClaimant} carries only claimants CURRENTLY parked -- an entry
+     * disappears the instant its count reaches zero, same as {@link
+     * TupleWaitRegistry#perClaimantSnapshot}. A null-claimant park ({@code
+     * rd}, and RDR-211 Phase 1 Step 1's {@code wait}) is never a key here; it
+     * counts toward {@code globalInUse} only.
+     */
+    public record ParkStats(int maxGlobal, int maxPerClaimant, int globalInUse,
+                             long refusedGlobal, long refusedClaimant,
+                             Map<String, Integer> perClaimant) {
     }
 
     // ── records ──────────────────────────────────────────────────────────────
@@ -385,9 +476,9 @@ public final class TupleRepository {
         }
     }
 
-    /** {@code claim_id}/{@code claimant} on {@code ack}/{@code nack}/{@code renew} (and
-     *  {@code ackWithReply}, which does not otherwise call {@code ack}'s own checks on
-     *  its reply-carrying path). */
+    /** {@code claim_id}/{@code claimant} on {@code ack}/{@code nack}/{@code renew}/
+     *  {@code release} (and {@code ackWithReply}, which does not otherwise call
+     *  {@code ack}'s own checks on its reply-carrying path). */
     private static void checkClaimIdentifiers(String claimId, String claimant) {
         checkFieldSize("claim_id", claimId, TupleLimits.MAX_CLAIM_ID_BYTES);
         checkFieldSize("claimant", claimant, TupleLimits.MAX_CLAIMANT_BYTES);
@@ -398,8 +489,46 @@ public final class TupleRepository {
      * share a transaction with {@code consumeClaim}. Takes no responsibility for
      * signalling: {@code signalAll} must run AFTER the transaction commits, so it stays
      * with the callers.
+     *
+     * <p>RDR-211 Scale and Limits item 2 ("a runaway writer"): when the template
+     * declares {@code max_live_rows}, the check below runs INSIDE this same
+     * transaction, under the tenant, before the insert below — so a refusal and the
+     * insert it guards can never race apart. It is skipped entirely for a row whose
+     * {@code id} already exists (an idempotent refire of an existing identity, {@link
+     * TemplateSchema.IdFrom#KEYS}): the {@code onConflict} below only refreshes that
+     * row's {@code expires_at}, adding no new row, so it cannot be what pushes a
+     * subspace over its cap and must not be refused by this check ({@link
+     * TemplateSchema#maxLiveRows()}'s javadoc records this decision). The live-row
+     * count and the existence check are each one query, not serialized against
+     * concurrent writers with a lock — same best-effort posture the rest of this
+     * design uses for a capacity guard (RDR-211 names this a guard against a runaway
+     * writer, not a hard exclusion primitive like the claim CAS below); a burst of
+     * concurrent {@code out} calls to one subspace can overshoot the cap by the
+     * width of the race, and the next call after the burst settles is refused as
+     * usual.
      */
     private byte[] writeOut(DSLContext ctx, String tenant, PreparedOut p, String body, byte[] id) {
+        Long maxLiveRows = p.template().maxLiveRows();
+        if (maxLiveRows != null) {
+            // nexus-rplay.17 (code-review-expert finding 4): every other query in
+            // this file pairs TUPLES.ID/SUBSPACE conditions with an explicit
+            // TENANT_ID equality as defense in depth beside RLS -- this existence
+            // check was the one exception. id is already a tenant-scoped digest
+            // (computeId mixes tenant into its input), so this was never reachable
+            // as a cross-tenant read; the fix brings it into line with every
+            // sibling query regardless.
+            boolean rowAlreadyExists = ctx.fetchExists(
+                    ctx.selectOne().from(TUPLES).where(TUPLES.ID.eq(id).and(TUPLES.TENANT_ID.eq(tenant))));
+            if (!rowAlreadyExists) {
+                Condition live = TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.gt(DSL.currentOffsetDateTime()));
+                Integer liveCount = ctx.selectCount().from(TUPLES)
+                        .where(TUPLES.TENANT_ID.eq(tenant).and(TUPLES.SUBSPACE.eq(p.subspace())).and(live))
+                        .fetchOne(0, Integer.class);
+                if (liveCount != null && liveCount >= maxLiveRows) {
+                    throw new MaxLiveRowsExceededException(p.subspace(), maxLiveRows);
+                }
+            }
+        }
         Field<OffsetDateTime> candidateExpiry = DSL.currentOffsetDateTime().add(p.ttlInterval());
         // Refire clamp (RDR-205 §Technical Design "out"): never past the ORIGINAL
         // row's created_at plus the template's retention -- TUPLES.CREATED_AT here
@@ -410,7 +539,7 @@ public final class TupleRepository {
         Field<JSONB> dimsField = p.dimsJsonb() == null
                 ? DSL.castNull(org.jooq.impl.SQLDataType.JSONB)
                 : DSL.val(p.dimsJsonb());
-        ctx.insertInto(TUPLES,
+        var insertStep = ctx.insertInto(TUPLES,
                         TUPLES.ID, TUPLES.TENANT_ID, TUPLES.SUBSPACE, TUPLES.TEMPLATE,
                         TUPLES.KEYS, TUPLES.DIMS, TUPLES.BODY,
                         TUPLES.ATTEMPTS, TUPLES.EXPIRES_AT, TUPLES.CREATED_AT)
@@ -419,12 +548,42 @@ public final class TupleRepository {
                         DSL.val(0), DSL.currentOffsetDateTime().add(p.ttlInterval()),
                         DSL.currentOffsetDateTime())
                 .onConflict(TUPLES.ID)
-                .doUpdate()
-                // A refire touches expires_at ONLY -- never body, claim state or
-                // consumed state (every other column is simply absent from this
-                // DO UPDATE's .set() list, so Postgres leaves it untouched).
-                .set(TUPLES.EXPIRES_AT, DSL.least(candidateExpiry, ceiling))
-                .execute();
+                .doUpdate();
+        if (p.template().lock()) {
+            // RDR-211 Phase 1 Step 1 (bead nexus-rplay.3), Approach item 5: scoped to
+            // lock-flagged templates ONLY -- the `if` branch here, not a WHEN clause
+            // every template's SQL shares, is what keeps a non-flagged template's
+            // generated statement byte-identical to before this bead (regression-
+            // pinned by outOnANonFlaggedTemplateWithAnExistingIdIsUnchanged). An `out`
+            // that finds the existing row already EXPIRED resets it to available -- a
+            // fresh created_at/expires_at ceiling and a cleared claim -- instead of
+            // leaving it dead under a ceiling a refire can never move today (the "lock
+            // expiry cliff", Scale and Limits item 5). A still-live lock row is
+            // untouched beyond the ordinary refire clamp, so `out` stays the safe
+            // "make sure the lock exists" idempotent no-op Approach item 3 promises.
+            Condition expired = TUPLES.EXPIRES_AT.le(DSL.currentOffsetDateTime());
+            insertStep
+                    .set(TUPLES.CREATED_AT,
+                            DSL.when(expired, DSL.currentOffsetDateTime()).otherwise(TUPLES.CREATED_AT))
+                    .set(TUPLES.EXPIRES_AT,
+                            DSL.when(expired, candidateExpiry).otherwise(DSL.least(candidateExpiry, ceiling)))
+                    .set(TUPLES.CLAIM_STATE,
+                            DSL.when(expired, DSL.val((String) null, TUPLES.CLAIM_STATE)).otherwise(TUPLES.CLAIM_STATE))
+                    .set(TUPLES.CLAIMANT,
+                            DSL.when(expired, DSL.val((String) null, TUPLES.CLAIMANT)).otherwise(TUPLES.CLAIMANT))
+                    .set(TUPLES.CLAIM_ID,
+                            DSL.when(expired, DSL.val((String) null, TUPLES.CLAIM_ID)).otherwise(TUPLES.CLAIM_ID))
+                    .set(TUPLES.LEASE_UNTIL,
+                            DSL.when(expired, DSL.val((OffsetDateTime) null, TUPLES.LEASE_UNTIL))
+                                    .otherwise(TUPLES.LEASE_UNTIL))
+                    .execute();
+        } else {
+            // A refire touches expires_at ONLY -- never body, claim state or
+            // consumed state (every other column is simply absent from this
+            // DO UPDATE's .set() list, so Postgres leaves it untouched). Unchanged
+            // from before RDR-211 Phase 1 Step 1's lock flag above.
+            insertStep.set(TUPLES.EXPIRES_AT, DSL.least(candidateExpiry, ceiling)).execute();
+        }
         maintainTenant(ctx, tenant);
         return id;
     }
@@ -580,7 +739,12 @@ public final class TupleRepository {
         return queryOnce(tenant, subspace, pattern, n, since);
     }
 
-    /** {@code rd(subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0) -> [Tuple]} — blocks up to {@code timeoutSeconds}. */
+    /** {@code rd(subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0) -> [Tuple]} — blocks up to {@code timeoutSeconds}.
+     *  The {@link TupleWaitRegistry#register} call this makes is released ({@link
+     *  TupleWaitRegistry.Waiter#release}) on EVERY exit -- an immediate hit and an
+     *  exception from the first query included, not only the park-loop path -- so a
+     *  subspace that never actually parks is still eligible for {@link
+     *  TupleWaitRegistry#evictIdleGroups} (nexus-rplay). */
     public List<TupleRow> rd(String tenant, String subspace, Map<String, String> pattern, int n,
                               ReadCursor since, long timeoutSeconds) {
         validateTimeout(timeoutSeconds);
@@ -590,30 +754,33 @@ public final class TupleRepository {
         // Registered BEFORE the first query, so a write landing between that query and
         // the first park is not lost (RDR-205 §Technical Design "Wake").
         TupleWaitRegistry.Waiter waiter = waitRegistry.register(tenant, subspace);
-        List<TupleRow> found = queryOnce(tenant, subspace, pattern, n, since);
-        if (!found.isEmpty()) {
-            return found;
-        }
-        waitRegistry.tryAcquireParkSlot(null);
         try {
-            long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
-            while (true) {
-                if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
-                    return queryOnce(tenant, subspace, pattern, n, since);
+            List<TupleRow> found = queryOnce(tenant, subspace, pattern, n, since);
+            if (!found.isEmpty()) {
+                return found;
+            }
+            waitRegistry.tryAcquireParkSlot(null);
+            try {
+                long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+                while (true) {
+                    if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
+                        return queryOnce(tenant, subspace, pattern, n, since);
+                    }
+                    try {
+                        waiter.awaitSignalOrTimer();
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return queryOnce(tenant, subspace, pattern, n, since);
+                    }
+                    List<TupleRow> again = queryOnce(tenant, subspace, pattern, n, since);
+                    if (!again.isEmpty()) {
+                        return again;
+                    }
                 }
-                try {
-                    waiter.awaitSignalOrTimer();
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    return queryOnce(tenant, subspace, pattern, n, since);
-                }
-                List<TupleRow> again = queryOnce(tenant, subspace, pattern, n, since);
-                if (!again.isEmpty()) {
-                    return again;
-                }
+            } finally {
+                waitRegistry.releaseParkSlot(null);
             }
         } finally {
-            waitRegistry.releaseParkSlot(null);
             waiter.release();
         }
     }
@@ -655,6 +822,129 @@ public final class TupleRepository {
         });
     }
 
+    // ── wait (multiplexed rd, RDR-211 Phase 1 Step 1, bead nexus-rplay.4) ──────
+
+    /** One subspace subscription within a {@link #waitAny} call: {@code n}/{@code
+     *  since} carry the same meaning and defaults as {@link #rd}'s own parameters --
+     *  {@code n <= 0} clamps to 1, {@code since == null} reads from the start. */
+    public record WaitSpec(String subspace, Map<String, String> pattern, int n, ReadCursor since) {
+    }
+
+    /** One subspace's matched tuples from a {@link #waitAny} call. Only subspaces
+     *  that actually matched appear in {@link #waitAny}'s result list -- a subspace
+     *  with nothing to report is simply absent, never present with an empty {@code
+     *  tuples} list, so a client iterating results always has cursor-advancing work
+     *  to do for every entry it sees. */
+    public record WaitResult(String subspace, List<TupleRow> tuples) {
+    }
+
+    /**
+     * {@code wait(subspaces: [{subspace, keys_pattern?, n?, since?}], timeout_s=0) ->
+     * [{subspace, tuples}]} (RDR-211 Phase 1 Step 1 / §Approach item 6, bead
+     * nexus-rplay.4): a multi-subspace {@code rd} that parks ONE call across several
+     * subspaces, each with its own key pattern and cursor, and returns as soon as ANY
+     * of them holds a matching tuple past its cursor.
+     *
+     * <p>Mirrors {@link #rd} exactly -- validate, register before the first query,
+     * probe, park with no claimant, re-query on every wake, release in a finally.
+     * Every subspace and pattern is validated BEFORE anything registers or parks (a
+     * bad request never consumes a slot or a group registration); {@link
+     * #queryEachOnce} then runs each subspace's own {@link #queryOnce} in a loop,
+     * reusing that method's already-tested SQL rather than inventing a combined OR
+     * query, per the bead's own design note. {@code wait} parks with NO claimant,
+     * exactly as {@code rd} does, so it takes ONE global park slot and nothing
+     * against the per-claimant cap, regardless of how many subspaces {@code
+     * subspaces} names.
+     *
+     * <p>{@link TupleWaitRegistry#registerMulti} folds registration across every
+     * named subspace into a single {@link TupleWaitRegistry.MultiWaiter}; {@link
+     * TupleWaitRegistry#tryAcquireParkSlot}/{@link TupleWaitRegistry#releaseParkSlot}
+     * are still called exactly once for the whole call -- the same one-slot-per-call
+     * contract {@code rd}/{@code in} already have.
+     *
+     * <p>Same every-exit release contract as {@link #rd} and {@link #in}
+     * (nexus-rplay): {@link TupleWaitRegistry.MultiWaiter#release} runs on EVERY
+     * exit -- an immediate hit and an exception from the first per-subspace query
+     * included, not only the park-loop path.
+     */
+    public List<WaitResult> waitAny(String tenant, List<WaitSpec> specs, long timeoutSeconds) {
+        validateTimeout(timeoutSeconds);
+        if (specs == null || specs.isEmpty()) {
+            throw new SchemaViolationException("subspaces", "must name at least one subspace");
+        }
+        if (specs.size() > MAX_WAIT_SUBSPACES) {
+            throw new SchemaViolationException("subspaces",
+                    "at most " + MAX_WAIT_SUBSPACES + " subspaces per wait");
+        }
+        // Validate EVERY subspace and pattern BEFORE anything registers or parks
+        // (RDR-211 Phase 1 Step 1) -- a bad request must never consume a park slot or
+        // a group registration. queryOnce (via queryEachOnce below) re-validates on
+        // every call, same as rd's own queryOnce does on every re-query; this pass is
+        // what makes that guarantee hold for the FIRST subspace in the list too,
+        // before registerMulti ever runs.
+        List<String> subspaces = new ArrayList<>(specs.size());
+        for (WaitSpec spec : specs) {
+            checkFieldSize("subspace", spec.subspace(), TupleLimits.MAX_SUBSPACE_BYTES);
+            resolveOrThrow(spec.subspace());
+            checkPatternSizes(spec.pattern() == null ? Map.of() : spec.pattern());
+            subspaces.add(spec.subspace());
+        }
+
+        if (timeoutSeconds <= 0) {
+            return queryEachOnce(tenant, specs);
+        }
+        // Registered BEFORE the first query, so a write landing between that query and
+        // the first park is not lost (RDR-205 §Technical Design "Wake", the same
+        // contract rd/in already honour).
+        TupleWaitRegistry.MultiWaiter waiter = waitRegistry.registerMulti(tenant, subspaces);
+        try {
+            List<WaitResult> found = queryEachOnce(tenant, specs);
+            if (!found.isEmpty()) {
+                return found;
+            }
+            // wait parks with NO claimant, exactly as rd does -- one global slot, nothing
+            // against the per-claimant cap of four.
+            waitRegistry.tryAcquireParkSlot(null);
+            try {
+                long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+                while (true) {
+                    if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
+                        return queryEachOnce(tenant, specs);
+                    }
+                    try {
+                        waiter.awaitSignalOrTimer();
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return queryEachOnce(tenant, specs);
+                    }
+                    List<WaitResult> again = queryEachOnce(tenant, specs);
+                    if (!again.isEmpty()) {
+                        return again;
+                    }
+                }
+            } finally {
+                waitRegistry.releaseParkSlot(null);
+            }
+        } finally {
+            waiter.release();
+        }
+    }
+
+    /** Runs {@link #queryOnce} once per {@link WaitSpec} in {@code specs}, in list
+     *  order -- the per-subspace re-query {@link #waitAny}'s javadoc describes,
+     *  never a combined OR query. Only subspaces with at least one matching tuple
+     *  appear in the returned list. */
+    private List<WaitResult> queryEachOnce(String tenant, List<WaitSpec> specs) {
+        List<WaitResult> out = new ArrayList<>();
+        for (WaitSpec spec : specs) {
+            List<TupleRow> rows = queryOnce(tenant, spec.subspace(), spec.pattern(), spec.n(), spec.since());
+            if (!rows.isEmpty()) {
+                out.add(new WaitResult(spec.subspace(), rows));
+            }
+        }
+        return out;
+    }
+
     // ── in / inp ─────────────────────────────────────────────────────────────
 
     /** {@code inp(subspace, keys_pattern, *, claimant, lease_s) -> (Tuple, claim_id) | None} — probe, never blocks.
@@ -689,7 +979,10 @@ public final class TupleRepository {
 
     /** {@code in(subspace, keys_pattern, *, claimant, lease_s?, timeout_s=0) -> (Tuple, claim_id) | None} —
      *  blocks up to {@code timeoutSeconds}. {@code leaseSecondsOrNull} nullable
-     *  (nexus-xapt8): see {@link #inp}. */
+     *  (nexus-xapt8): see {@link #inp}. The {@link TupleWaitRegistry#register} call
+     *  this makes is released ({@link TupleWaitRegistry.Waiter#release}) on EVERY
+     *  exit -- an immediate hit and an exception from the first claim attempt
+     *  included, not only the park-loop path (nexus-rplay). */
     public Optional<ClaimedTuple> in(String tenant, String subspace, Map<String, String> pattern,
                                       String claimant, Long leaseSecondsOrNull, long timeoutSeconds) {
         validateTimeout(timeoutSeconds);
@@ -697,30 +990,33 @@ public final class TupleRepository {
             return claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
         }
         TupleWaitRegistry.Waiter waiter = waitRegistry.register(tenant, subspace);
-        Optional<ClaimedTuple> found = claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
-        if (found.isPresent()) {
-            return found;
-        }
-        waitRegistry.tryAcquireParkSlot(claimant);
         try {
-            long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
-            while (true) {
-                if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
-                    return claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
+            Optional<ClaimedTuple> found = claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
+            if (found.isPresent()) {
+                return found;
+            }
+            waitRegistry.tryAcquireParkSlot(claimant);
+            try {
+                long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+                while (true) {
+                    if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
+                        return claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
+                    }
+                    try {
+                        waiter.awaitSignalOrTimer();
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
+                    }
+                    Optional<ClaimedTuple> again = claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
+                    if (again.isPresent()) {
+                        return again;
+                    }
                 }
-                try {
-                    waiter.awaitSignalOrTimer();
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    return claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
-                }
-                Optional<ClaimedTuple> again = claimOnce(tenant, subspace, pattern, claimant, leaseSecondsOrNull);
-                if (again.isPresent()) {
-                    return again;
-                }
+            } finally {
+                waitRegistry.releaseParkSlot(claimant);
             }
         } finally {
-            waitRegistry.releaseParkSlot(claimant);
             waiter.release();
         }
     }
@@ -851,22 +1147,33 @@ public final class TupleRepository {
                 // in the clamp branch already came from a DB fetch, so it is already at
                 // this precision; truncating it too is a no-op, not a second source of
                 // truth.
-                OffsetDateTime leaseUntil = clampedLeaseUntil(now, leaseSeconds, row.getExpiresAt());
-                ctx.update(TUPLES)
+                // RDR-211 Phase 1 Step 1 (bead nexus-rplay.3), Approach item 5: a
+                // lock-flagged template's claim moves the tuple's OWN expiry forward to
+                // now + retention, ahead of computing the lease clamp -- otherwise the
+                // lease would still be capped by the OLD (about-to-be-stale) expires_at,
+                // defeating "a lock lives as long as it is used". Every other template
+                // keeps row.getExpiresAt() unchanged, exactly as before this bead.
+                OffsetDateTime expiresAtForClaim = t.lock()
+                        ? now.plusSeconds(t.retentionSeconds()).truncatedTo(java.time.temporal.ChronoUnit.MICROS)
+                        : row.getExpiresAt();
+                OffsetDateTime leaseUntil = clampedLeaseUntil(now, leaseSeconds, expiresAtForClaim);
+                var claimUpdate = ctx.update(TUPLES)
                         .set(TUPLES.CLAIM_STATE, CLAIM_STATE_CLAIMED)
                         .set(TUPLES.CLAIMANT, claimant)
                         .set(TUPLES.CLAIM_ID, newClaimId)
                         .set(TUPLES.LEASE_UNTIL, leaseUntil)
-                        .set(TUPLES.ATTEMPTS, attempts)
-                        .where(TUPLES.ID.eq(row.getId()))
-                        .execute();
+                        .set(TUPLES.ATTEMPTS, attempts);
+                if (t.lock()) {
+                    claimUpdate.set(TUPLES.EXPIRES_AT, expiresAtForClaim);
+                }
+                claimUpdate.where(TUPLES.ID.eq(row.getId())).execute();
                 insertClaimLog(ctx, tenant, subspace, t.name(), row.getId(),
                         newClaimId, claimant, TRANSITION_CLAIM, now);
 
                 TupleRow claimed = new TupleRow(row.getId(), subspace, t.name(),
                         fromJsonb(row.getKeys()), fromJsonb(row.getDims()), row.getBody(),
                         CLAIM_STATE_CLAIMED, claimant, newClaimId, leaseUntil, attempts,
-                        null, null, row.getExpiresAt(), row.getCreatedAt());
+                        null, null, expiresAtForClaim, row.getCreatedAt());
                 return Optional.of(new ClaimedTuple(claimed, newClaimId));
             }
             return Optional.empty(); // NX_TUPLE_CLAIM_PASSES exhausted: the probe result
@@ -911,6 +1218,24 @@ public final class TupleRepository {
         }
         if (!row.getClaimant().equals(claimant)) {
             throw new ClaimOwnershipException(claimId, claimant);
+        }
+        // RDR-211 Phase 1 Step 1 (bead nexus-rplay.3): a lock claim refuses ack.
+        // Placed here, inside the transaction, after liveClaimRow's read and before
+        // any column is written -- beside the stale-claim and wrong-claimant refusals
+        // just above -- because the template name lives on the ROW this method just
+        // read, and nothing about a bare claim_id encodes it, so the check cannot
+        // precede this method's own liveClaimRow lookup. Ack'ing a lock would clear
+        // the claim columns but never consumed_at (see writeOut's lock-reset branch),
+        // and claimOnce requires consumed_at IS NULL, so an acked lock would stay
+        // dead until the sweep purged it -- exactly the failure Alternative 1 was
+        // rejected for, reached here by an ordinary ack call instead. The claim stays
+        // live because nothing is written before this throw.
+        TemplateSchema template = resolveOrThrow(row.getSubspace());
+        if (template.lock()) {
+            throw new SchemaViolationException("claim_id",
+                    "template '" + template.name() + "' is a lock template; ack is refused because a "
+                    + "consumed lock row would be unobtainable until the sweep purges it -- call release "
+                    + "instead to return the lock without consuming it");
         }
         // TEST-ONLY (nexus-h61dl.2): widens the read-to-update race window under
         // test; a no-op Runnable on every production path.
@@ -1040,6 +1365,59 @@ public final class TupleRepository {
     }
 
     /**
+     * RDR-211 Phase 1 Step 1 (bead nexus-rplay.2): {@code release(claim_id, claimant)}
+     * — a hand-back that is NOT a failure. Closes RDR-211 Gap 4: until this operation,
+     * ending a live claim meant either consuming the tuple ({@link #ack}) or counting a
+     * failed attempt ({@link #nack}); nothing let a holder return a task, or a lock, to
+     * available without spending either.
+     *
+     * <p>Ends a live claim, returns the tuple to available WITHOUT counting an attempt
+     * (unlike {@link #nack}, which always does), logs a {@value #TRANSITION_RELEASE}
+     * transition (no schema change needed — {@code tuple_claim_log.transition} is a
+     * plain {@code TEXT NOT NULL} column with no {@code CHECK} constraint, per {@code
+     * tuples-001-baseline.xml}), and signals the subspace's waiters AFTER the commit,
+     * the same placement {@link #out} and {@link #ackWithReply} use — a parked reader
+     * must not be woken by a transaction that rolled back. A claim that is no longer
+     * live raises {@link ClaimNotFoundException}, exactly as {@link #ack}, {@link
+     * #nack} and {@link #renew} do; a claim held by someone else raises {@link
+     * ClaimOwnershipException}.
+     *
+     * <p>Reuses {@link #releaseOrDeadLetter} with {@code attempts} passed UNCHANGED
+     * (never incremented, unlike {@code nack}'s {@code attempts + 1}) and {@code
+     * maxAttempts} passed as {@link Long#MAX_VALUE} so a release can never itself
+     * dead-letter the tuple — a hand-back is not a failure, so it must never spend the
+     * template's failure budget or trip its dead-letter ceiling, regardless of how many
+     * attempts the row already carries.
+     */
+    public void release(String tenant, String claimId, String claimant) {
+        checkClaimIdentifiers(claimId, claimant);
+        String subspace = tenantScope.withTenant(tenant, ctx -> {
+            TuplesRecord row = liveClaimRow(ctx, tenant, claimId);
+            if (row == null) {
+                throw new ClaimNotFoundException(claimId);
+            }
+            if (!row.getClaimant().equals(claimant)) {
+                throw new ClaimOwnershipException(claimId, claimant);
+            }
+            // TEST-ONLY (nexus-h61dl.2): see ack.
+            TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY.run();
+            OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+
+            ReleaseOutcome outcome = releaseOrDeadLetter(ctx, tenant, row.getSubspace(), row.getTemplate(),
+                    row.getId(), claimId, claimant, TRANSITION_RELEASE, now, row.getAttempts(), Long.MAX_VALUE);
+            if (outcome == ReleaseOutcome.NOT_LIVE) {
+                // The compare-and-swap matched nothing: the sweep or a re-take moved the
+                // row between liveClaimRow's read and this update (RDR-206 Step 1).
+                throw new ClaimNotFoundException(claimId);
+            }
+            return row.getSubspace();
+        });
+        // Signal AFTER the commit, exactly as out and ackWithReply do -- a parked
+        // reader must not be woken by a transaction that rolled back.
+        waitRegistry.signalAll(tenant, subspace);
+    }
+
+    /**
      * {@code renew(claim_id, claimant, lease_s) -> lease_until} — extend a LIVE claim's
      * lease without consuming the tuple and without spending an attempt.
      *
@@ -1119,8 +1497,28 @@ public final class TupleRepository {
             // racing; renew is the first caller to want this clamp against an UNLOCKED
             // read, which is why the two express one rule in two places. See
             // clampedLeaseUntil.
-            var stored = ctx.update(TUPLES)
-                    .set(TUPLES.LEASE_UNTIL, DSL.least(DSL.val(candidate), TUPLES.EXPIRES_AT))
+            //
+            // RDR-211 Phase 1 Step 1 (bead nexus-rplay.3), Approach item 5: a
+            // lock-flagged template's renew ALSO moves the tuple's own expiry forward
+            // to now + retention -- "a lock lives as long as it is used" requires
+            // EXPIRES_AT itself to move, not merely LEASE_UNTIL's clamp against a
+            // ceiling that otherwise never advances. Every other template computes
+            // ceilingField from the OLD row (TUPLES.EXPIRES_AT, unchanged from before
+            // this bead); newExpiresAtOrNull is a plain Java value substituted as a SQL
+            // literal, so there is no ordering ambiguity between the two .set() calls.
+            Field<OffsetDateTime> ceilingField = TUPLES.EXPIRES_AT;
+            OffsetDateTime newExpiresAtOrNull = null;
+            if (t.lock()) {
+                newExpiresAtOrNull = now.plusSeconds(t.retentionSeconds())
+                        .truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+                ceilingField = DSL.val(newExpiresAtOrNull);
+            }
+            var renewUpdate = ctx.update(TUPLES)
+                    .set(TUPLES.LEASE_UNTIL, DSL.least(DSL.val(candidate), ceilingField));
+            if (t.lock()) {
+                renewUpdate.set(TUPLES.EXPIRES_AT, newExpiresAtOrNull);
+            }
+            var stored = renewUpdate
                     .where(liveClaimCondition(row.getId(), claimId))
                     .returningResult(TUPLES.LEASE_UNTIL)
                     .fetchOne();
@@ -1387,13 +1785,17 @@ public final class TupleRepository {
      * One BATCH, one transaction, of the scheduled sweep's log-retention arm:
      * deletes up to {@code batchSize} {@code nexus.tuple_claim_log} rows whose OWN
      * {@code expires_at} has passed. {@link #insertClaimLog} stamps that column at
-     * write time as {@code at + }{@link TemplateRegistry#claimLogTtlSeconds()} — the
-     * SAME value the registry's own boot check validated against every template's
+     * write time as {@code at + }{@link TemplateRegistry#effectiveClaimLogTtlSeconds(String)}
+     * — a template's own {@code claim_log_ttl_seconds} when it declares a shorter one
+     * (RDR-211 Scale and Limits item 6, bead nexus-rplay.6), else the engine-wide
+     * default the registry's own boot check validated against every template's
      * {@code retention_seconds} (never a second, independently-parsed copy of {@code
      * NX_TUPLE_CLAIM_LOG_TTL_DAYS}) — so this arm reads the stored column directly
-     * rather than recomputing the cutoff from {@code at} a second time (RDR-205 P1
-     * follow-on, nexus-em75s.37, review M6 / critique S2): the two computations can
-     * only drift if this arm keeps its own copy of the TTL math.
+     * rather than recomputing a cutoff from {@code at} a second time (RDR-205 P1
+     * follow-on, nexus-em75s.37, review M6 / critique S2), and needs no per-template
+     * awareness of its own: two rows with different templates simply carry different
+     * {@code expires_at} values, purged (or not) uniformly by the same comparison
+     * against "now".
      *
      * @return {@code examined} is the candidate SELECT's own row count (RDR-205
      *         Phase 1 follow-on, bead nexus-em75s.38), independent of {@code
@@ -1443,14 +1845,20 @@ public final class TupleRepository {
      * §Technical Design line ~602: {@code at + NX_TUPLE_CLAIM_LOG_TTL_DAYS}), not the
      * tuple's expiry — a claim log row for a short-lived tuple must still survive the
      * full audit retention window. Computed here, once, from {@link
-     * TemplateRegistry#claimLogTtlSeconds()} rather than accepted as a caller-supplied
-     * parameter, so no call site can (again) pass the tuple's own {@code expires_at}
-     * by mistake.
+     * TemplateRegistry#effectiveClaimLogTtlSeconds(String)} — {@code template}'s OWN
+     * TTL when it declares a shorter one (RDR-211 Scale and Limits item 6, bead
+     * nexus-rplay.6), else the engine-wide default — rather than accepted as a
+     * caller-supplied parameter, so no call site can (again) pass the tuple's own
+     * {@code expires_at} by mistake. This is the ONLY site that stamps this column;
+     * {@code purgeOldClaimLogBatch} purges purely by comparing the stored value against
+     * "now", so it needs no per-template awareness of its own — every row already
+     * carries the deadline the template in force at WRITE time computed for it, jOOQ
+     * DSL throughout, no join and no per-template loop added to the purge arm.
      */
     private void insertClaimLog(DSLContext ctx, String tenant, String subspace, String template,
                                  byte[] tupleId, String claimId, String claimant,
                                  String transition, OffsetDateTime at) {
-        OffsetDateTime logExpiresAt = at.plusSeconds(registry.claimLogTtlSeconds());
+        OffsetDateTime logExpiresAt = at.plusSeconds(registry.effectiveClaimLogTtlSeconds(template));
         ctx.insertInto(TUPLE_CLAIM_LOG,
                         TUPLE_CLAIM_LOG.TENANT_ID, TUPLE_CLAIM_LOG.SUBSPACE, TUPLE_CLAIM_LOG.TEMPLATE,
                         TUPLE_CLAIM_LOG.TUPLE_ID, TUPLE_CLAIM_LOG.CLAIM_ID, TUPLE_CLAIM_LOG.CLAIMANT,

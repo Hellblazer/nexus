@@ -2,7 +2,8 @@
 title: "Surface Rendering: Palinex is Downstream (nexus has no integration story to ship)"
 id: RDR-127
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-09-16
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
@@ -134,3 +135,9 @@ surface-rendering code; palinex (a downstream project) owns the integration
 via its own Claude Code plugin and HTTP sidecar, with nexus as a `[nexus]`
 extra dependency. Implementation files removed; supersession of RDR-123/124
 preserved._
+
+_2026-09-16 — closed. The decision has been in force since 2026-05-22 and
+nothing was ever to be built on the nexus side; the palinex plugin exists
+and is installed. Close critique `nexus_rdr/127-scope-critique-2026-09-16`
+(justified, 0 findings). Post-mortem
+`post-mortem/127-substrate-decoupled-surface-rendering.md`._

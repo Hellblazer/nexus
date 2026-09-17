@@ -251,4 +251,78 @@ class TupleWaitRegistryTest {
             .as("every acquisition was paired with a release -- the tracked entry must be gone")
             .isZero();
     }
+
+    // ── park report (RDR-211 Phase 1 Step 1, bead nexus-rplay.7) ────────────
+
+    /**
+     * Pure-unit, synchronous counterpart to {@code TupleRepositoryTest
+     * #rd_globalParkCapExceeded}: a global-cap refusal must be COUNTED, not
+     * merely thrown, and must never skew {@link TupleWaitRegistry#globalInUse}
+     * -- the existing rollback ({@code globalParked.decrementAndGet()}) runs
+     * before the new counter increment, so a refused call leaves the gauge
+     * exactly where it was before the refused attempt.
+     */
+    @Test
+    void tryAcquireParkSlot_globalCapExceeded_countsTheRefusalWithoutSkewingInUse() {
+        TupleWaitRegistry registry = new TupleWaitRegistry(4, 1);
+        registry.tryAcquireParkSlot(null); // occupies the single global slot
+        assertThat(registry.globalInUse()).isEqualTo(1);
+        assertThat(registry.globalRefusedCount()).isZero();
+
+        org.junit.jupiter.api.Assertions.assertThrows(ParkCapExceededException.class,
+                () -> registry.tryAcquireParkSlot(null));
+
+        assertThat(registry.globalRefusedCount())
+                .as("a 429 refusal must be counted in the park report")
+                .isEqualTo(1);
+        assertThat(registry.globalInUse())
+                .as("a refused attempt must not skew the in-use gauge")
+                .isEqualTo(1);
+
+        registry.releaseParkSlot(null);
+        assertThat(registry.globalInUse()).isZero();
+    }
+
+    /**
+     * The per-claimant counterpart: a claimant-cap refusal is counted
+     * separately from the global counter, and {@link TupleWaitRegistry
+     * #perClaimantSnapshot} distinguishes slots BY CLAIMANT -- the shape the
+     * Step 1 wait tests and Step 3 subscription tests need to see "one slot
+     * per session" and "never two slots for one session."
+     */
+    @Test
+    void tryAcquireParkSlot_claimantCapExceeded_countsTheRefusalAndTracksByClaimant() {
+        TupleWaitRegistry registry = new TupleWaitRegistry(1, 16);
+        registry.tryAcquireParkSlot("claimant-a");
+        assertThat(registry.perClaimantSnapshot()).containsEntry("claimant-a", 1);
+        assertThat(registry.claimantRefusedCount()).isZero();
+
+        org.junit.jupiter.api.Assertions.assertThrows(ParkCapExceededException.class,
+                () -> registry.tryAcquireParkSlot("claimant-a"));
+
+        assertThat(registry.claimantRefusedCount())
+                .as("a claimant-cap refusal must be counted separately from the global counter")
+                .isEqualTo(1);
+        assertThat(registry.globalRefusedCount())
+                .as("a claimant refusal must not also count as a global refusal")
+                .isZero();
+        assertThat(registry.perClaimantSnapshot())
+                .as("the refused attempt must not add a second slot for the same claimant")
+                .containsEntry("claimant-a", 1);
+
+        registry.releaseParkSlot("claimant-a");
+        assertThat(registry.perClaimantSnapshot())
+                .as("a claimant with no currently-parked call is not a key at all")
+                .doesNotContainKey("claimant-a");
+    }
+
+    /** {@link TupleWaitRegistry#maxGlobal}/{@link TupleWaitRegistry#maxPerClaimant}
+     *  report exactly the caps this registry was constructed with, so {@code
+     *  TupleRepository#parkStats} needs no separate copy of them. */
+    @Test
+    void parkReportAccessors_reportTheConfiguredCaps() {
+        TupleWaitRegistry registry = new TupleWaitRegistry(4, 16);
+        assertThat(registry.maxPerClaimant()).isEqualTo(4);
+        assertThat(registry.maxGlobal()).isEqualTo(16);
+    }
 }

@@ -4949,6 +4949,19 @@ def _check_stranded_install() -> list[HealthResult]:
 # carries the route and the skip branch below is dead by construction.
 _TUPLE_ROUTE_FIRST_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 114)
 
+# RDR-211 Phase 1 Step 3 (bead nexus-rplay.12): GET /v1/tuples/park_stats'
+# own first-serving-engine anchor, kept SEPARATE from
+# _TUPLE_ROUTE_FIRST_ENGINE_VERSION above because it names a different
+# route that shipped later: engine-service-v0.1.127 (tagged 2026-09-17 on
+# 51097d1b2, deployed before the 7.51.0 client tag). This constant was
+# written one tag ahead while that cut was still pending; the 7.51.0
+# release commit bumped REQUIRED_ENGINE_VERSION to the same value, so
+# every reachable engine now carries the route and the doctor row's
+# expected-absent branch below is dead by construction, exactly as the
+# sibling constant's is. test_tuple_park_stats_first_engine_version_pin
+# holds it at or below the newest published engine-service-v* tag.
+_TUPLE_PARK_STATS_FIRST_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 127)
+
 #: Doctor heuristic, not derived from any per-template TTL: an unclaimed
 #: tuple sitting in a claimable subspace for longer than this is reported
 #: as an actionable finding (a stuck producer/consumer), not routine
@@ -4969,6 +4982,22 @@ _TUPLE_DEAD_RATIO_WARN: float = 0.20
 #: a separate number.
 _TUPLE_SWEEP_STALE_AGE_S: int = 18 * 3600
 
+#: RDR-211 Scale and Limits item 1: "a doctor row that warns above 75% of
+#: the cap". The cap itself (``max_global``) is always read from the
+#: engine's own ``park_stats()`` response, never hard-coded here.
+_TUPLE_PARK_SLOTS_WARN_RATIO: float = 0.75
+
+#: RDR-211 Scale and Limits item 3: "a doctor row ... warning above 1,000
+#: available or at any dead task".
+_TUPLE_QUEUE_DEPTH_WARN_AVAILABLE: int = 1000
+
+#: RDR-211 Technical Design "Delivery" / bead nexus-rplay.13: "last wake
+#: older than a bound ... (e.g. more than 3 x 25 s ago while alive)". 3x
+#: `nexus.mcp.channel.DEFAULT_WAIT_TIMEOUT_S` (25s) -- a healthy waiter
+#: completes a `wait()` round trip at least that often even with nothing
+#: to deliver, since the engine caps each parked call at that timeout.
+_TUPLE_CHANNEL_DELIVERY_STALE_S: float = 3 * 25.0
+
 
 def _tuple_route_predates_floor() -> bool:
     from nexus.engine_version import REQUIRED_ENGINE_VERSION  # noqa: PLC0415 — deferred; stdlib-only leaf, cheap either way
@@ -4978,6 +5007,16 @@ def _tuple_route_predates_floor() -> bool:
     # real first-serving tag, equality means served. Docs-chain review
     # 2026-09-11.)
     return REQUIRED_ENGINE_VERSION < _TUPLE_ROUTE_FIRST_ENGINE_VERSION
+
+
+def _park_stats_route_predates_floor() -> bool:
+    """Same gate as :func:`_tuple_route_predates_floor`, against
+    :data:`_TUPLE_PARK_STATS_FIRST_ENGINE_VERSION` -- ``GET
+    /v1/tuples/park_stats`` is a separate route from ``subspace_list``/
+    ``rd`` with its own first-serving engine.
+    """
+    from nexus.engine_version import REQUIRED_ENGINE_VERSION  # noqa: PLC0415 — deferred; stdlib-only leaf, cheap either way
+    return REQUIRED_ENGINE_VERSION < _TUPLE_PARK_STATS_FIRST_ENGINE_VERSION
 
 
 def _parse_tuple_timestamp(value: str | None) -> datetime | None:
@@ -5004,16 +5043,19 @@ def _fmt_age(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
-def _template_take_enabled(templates: list[dict], subspace: str) -> bool:
+def _resolve_tuple_template(templates: list[dict], subspace: str) -> dict | None:
     """Resolve *subspace* against the ``registry()`` wire's ``templates``
-    list and return the matching template's ``take.enabled`` (nexus-em75s.12
-    review fix). Mirrors ``TemplateRegistry.resolve()``'s literal-before-
+    list and return the matching template dict, or ``None`` when nothing
+    resolves. Mirrors ``TemplateRegistry.resolve()``'s literal-before-
     pattern rule (``service/src/main/java/dev/nexus/service/tuples/
     TemplateRegistry.java``): a literal template name is checked before
     any parameterised one, and a ``<param>`` segment matches anything in
-    the corresponding position. Defaults to ``True`` (assume claimable,
-    keep checking) when nothing resolves or a template carries no ``take``
-    block -- an unmatched subspace must never be silently skipped.
+    the corresponding position.
+
+    Factored out of :func:`_template_take_enabled` (RDR-211 Phase 1 Step 3,
+    bead nexus-rplay.12) so the queue-depth doctor row can ask "which
+    template does this subspace belong to", not just "is it claimable" --
+    the same matching logic answers both questions.
     """
     segments = subspace.split("/")
 
@@ -5030,11 +5072,24 @@ def _template_take_enabled(templates: list[dict], subspace: str) -> bool:
     patterned = [t for t in templates if "<" in t.get("name", "")]
     for t in literal:
         if t.get("name", "") == subspace:
-            return bool(t.get("take", {}).get("enabled", True))
+            return t
     for t in patterned:
         if _matches(t.get("name", "")):
-            return bool(t.get("take", {}).get("enabled", True))
-    return True
+            return t
+    return None
+
+
+def _template_take_enabled(templates: list[dict], subspace: str) -> bool:
+    """The matching template's ``take.enabled`` (nexus-em75s.12 review
+    fix), via :func:`_resolve_tuple_template`. Defaults to ``True``
+    (assume claimable, keep checking) when nothing resolves or a template
+    carries no ``take`` block -- an unmatched subspace must never be
+    silently skipped.
+    """
+    template = _resolve_tuple_template(templates, subspace)
+    if template is None:
+        return True
+    return bool(template.get("take", {}).get("enabled", True))
 
 
 _TUPLE_UNCLAIMED_LABEL = "tuples.oldest_unclaimed"
@@ -5537,240 +5592,358 @@ def _check_tuple_sweep_freshness(
     return [HealthResult(label=label, ok=True, detail=detail)]
 
 
-_TUPLE_WATCH_COMMAND = "nx tuple watch"
-_TUPLE_WATCH_PERMISSION_LABEL = "tuples.watch_permission"
-_TUPLE_WATCH_DOCUMENTED_RULE = "Bash(nx tuple watch:*)"
-# Prefixes that, in Claude Code's `Bash(<prefix>:*)` permission grammar,
-# genuinely cover every `nx tuple watch` invocation: the documented entry
-# itself plus its two whitespace-delimited ancestors. `Bash(nx:*)` is not a
-# hypothetical -- it is the shape actually seen in a real operator's
-# settings.json, so it must be recognised, not just the exact entry.
-_TUPLE_WATCH_COVERING_PREFIXES = ("nx tuple watch", "nx tuple", "nx")
+_TUPLE_PARK_SLOTS_LABEL = "tuples.park_slots"
 
 
-def _bash_rule_covers_tuple_watch(rule: object) -> bool:
-    """True when *rule* is a permission pattern that covers ``nx tuple
-    watch`` -- either a ``Bash(<prefix>:*)`` pattern whose prefix is one of
-    :data:`_TUPLE_WATCH_COVERING_PREFIXES`, or the bare ``"Bash"`` rule
-    (nexus-rml7o, MM-3.4 critic finding S5; bare-``Bash`` recognition added
-    in the nexus-rml7o review pass). Used for BOTH ``permissions.allow`` and
-    ``permissions.deny`` matching -- whether a rule covers the command is
-    the same question regardless of which list it sits in.
+def _check_tuple_park_slots() -> list[HealthResult]:
+    """RDR-211 Phase 1 Step 3 doctor row 1 (bead nexus-rplay.12): park-slot
+    use against ``HttpTupleStore.park_stats()`` (RDR-211 Scale and Limits
+    item 1 -- "the engine also reports park slots in use and refused
+    calls, with a doctor row that warns above 75% of the cap").
 
-    Conservative by design, per the bead's own instruction: only the exact
-    documented entry, a genuinely broader ancestor prefix in the SAME
-    ``:*``-suffixed form, or the bare rule counts. A rule that merely
-    CONTAINS the command as a substring (``Bash(echo nx tuple watch:*)``),
-    a string-prefix that is not a whitespace boundary (``Bash(nx t:*)``),
-    or a rule with no trailing ``:*`` at all (other than the bare form),
-    does not -- this exists to confirm a named gap, not to guess at
-    coverage from an unfamiliar pattern shape.
+    WARN at or above :data:`_TUPLE_PARK_SLOTS_WARN_RATIO` of the engine's
+    OWN reported ``max_global`` cap -- never a client-side hard-coded 16,
+    since the cap is a config knob the engine may set differently.
+
+    Not applicable -- reported as ``ok=True`` with an explicit "predates"
+    detail, never a numeric "0% used" claim -- when the engine predates
+    ``GET /v1/tuples/park_stats`` (:func:`_park_stats_route_predates_floor`),
+    mirroring the other tuple rows' ``route_predates_floor`` gate.
     """
-    if not isinstance(rule, str):
-        return False
-    if rule == "Bash":
-        return True
-    if not (rule.startswith("Bash(") and rule.endswith(":*)")):
-        return False
-    prefix = rule[len("Bash("):-len(":*)")]
-    return prefix in _TUPLE_WATCH_COVERING_PREFIXES
+    label = _TUPLE_PARK_SLOTS_LABEL
+    route_predates_floor = _park_stats_route_predates_floor()
 
+    import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-def _claude_settings_path() -> Path:
-    """Resolve the USER ``~/.claude/settings.json``, honouring
-    ``CLAUDE_CONFIG_DIR``.
-
-    Nothing else in this codebase resolves the Claude settings path via
-    that variable today, but Claude Code itself honours it to relocate the
-    whole ``~/.claude`` tree, so a doctor row reading ``settings.json``
-    must follow it too rather than hardcoding the default location.
-    """
-    override = os.environ.get("CLAUDE_CONFIG_DIR")
-    base = Path(override).expanduser() if override else Path.home() / ".claude"
-    return base / "settings.json"
-
-
-def _claude_settings_paths(cwd: Path | None = None) -> list[tuple[str, Path]]:
-    """Every settings file Claude Code consults for permissions, in the
-    order this row checks them (nexus-rml7o review pass, T2
-    nexus/cleanup-batch-cre-pass-2026-09-13): USER
-    (``~/.claude/settings.json``, honouring ``CLAUDE_CONFIG_DIR``),
-    PROJECT (``<root>/.claude/settings.json``), and PROJECT-LOCAL
-    (``<root>/.claude/settings.local.json``) -- ``root`` being the git
-    top-level of *cwd* (default: the current working directory), falling
-    back to *cwd* itself outside a git repository.
-
-    Only the user check existed before this pass; project settings can
-    carry their own ``permissions.allow``/``.deny`` and this row was blind
-    to them.
-    """
-    from nexus.indexer_utils import find_repo_root  # noqa: PLC0415 — deferred: rare/branch-local path
-    base = cwd if cwd is not None else Path.cwd()
-    root = find_repo_root(base) or base
-    return [
-        ("user", _claude_settings_path()),
-        ("project", root / ".claude" / "settings.json"),
-        ("project-local", root / ".claude" / "settings.local.json"),
-    ]
-
-
-def _read_permission_rules(path: Path) -> tuple[list, list] | None:
-    """*(allow, deny)* lists from *path*'s ``permissions`` block, or
-    ``None`` when *path* cannot be read as a JSON object at all (missing, a
-    directory, unreadable bytes, malformed JSON, or not a JSON object) --
-    the caller treats that exactly like a file with no matching rules,
-    never a crash.
-    """
     try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
+        from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred: CLI startup cost
+        store = HttpTupleStore()
+    except Exception as exc:  # noqa: BLE001 — best-effort: engine/config unreachable, must not crash `nx doctor`
+        _log.debug("doctor_tuple_park_slots_connect_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable ({type(exc).__name__}: {exc})",
+        )]
+
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    permissions = data.get("permissions")
-    if not isinstance(permissions, dict):
-        return [], []
-    allow = permissions.get("allow")
-    deny = permissions.get("deny")
-    return (
-        allow if isinstance(allow, list) else [],
-        deny if isinstance(deny, list) else [],
+        stats = store.park_stats()
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            if route_predates_floor:
+                return [HealthResult(
+                    label=label, ok=True,
+                    detail=(
+                        "engine predates the park report — this engine "
+                        "predates GET /v1/tuples/park_stats "
+                        f"(REQUIRED_ENGINE_VERSION pins a floor at or below "
+                        f"{_TUPLE_PARK_STATS_FIRST_ENGINE_VERSION}, before the "
+                        "route shipped on any released engine-service tag). "
+                        "This is EXPECTED, not a defect."
+                    ),
+                )]
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail=(
+                    "UNKNOWN — the engine floor should carry GET "
+                    "/v1/tuples/park_stats but the route 404s. Investigate "
+                    "the engine install; this is no longer the expected "
+                    "pre-route-floor gap."
+                ),
+            )]
+        _log.debug("doctor_tuple_park_slots_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable ({type(exc).__name__}: {exc})",
+        )]
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_tuple_park_slots_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable ({type(exc).__name__}: {exc})",
+        )]
+
+    if stats.max_global <= 0:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine reports max_global={stats.max_global}; cannot compute park-slot usage",
+        )]
+
+    ratio = stats.global_in_use / stats.max_global
+    detail = (
+        f"{stats.global_in_use}/{stats.max_global} global park slots in use "
+        f"({ratio:.0%}); refused_global={stats.refused_global} "
+        f"refused_claimant={stats.refused_claimant}"
     )
+    if ratio >= _TUPLE_PARK_SLOTS_WARN_RATIO:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"{detail} — at or above the {_TUPLE_PARK_SLOTS_WARN_RATIO:.0%} warn threshold",
+            fix_suggestions=[
+                "Investigate what is parking so many rd/wait calls; consolidate "
+                "per-session waiters (RDR-211 Scale and Limits item 1).",
+            ],
+        )]
+    return [HealthResult(label=label, ok=True, detail=detail)]
 
 
-def _check_tuple_watch_permission(
-    settings_paths: list[tuple[str, Path]] | None = None,
-) -> list[HealthResult]:
-    """Informational doctor row (bead nexus-rml7o, MM-3.4 critic finding S5,
-    revised in the nexus-rml7o review pass -- T2
-    nexus/cleanup-batch-cre-pass-2026-09-13 and
-    nexus/cleanup-batch-critic-pass-2026-09-13): does a ``permissions.allow``
-    rule across every settings file Claude Code consults
-    (:func:`_claude_settings_paths`) cover ``nx tuple watch``, and does a
-    ``permissions.deny`` rule anywhere override it?
+_TUPLE_QUEUE_DEPTH_LABEL = "tuples.queue_depth"
 
-    This row makes NO claim about whether arming raises a permission prompt,
-    in either direction. An earlier version claimed an auto-mode session
-    raised no prompt during the RDR-206 live verification as evidence that
-    an absent rule is harmless -- that claim was FALSE (T2
-    nexus/rdr-206-live-verification-correction-2026-09-13): that session's
-    own ``~/.claude/settings.json`` carries ``Bash(nx:*)``, which covers
-    ``nx tuple watch``, so the absence of a prompt that session observed
-    proved nothing about the no-rule case. The row now reports only
-    whether a covering rule is present, which file supplied it, and (the
-    dangerous direction: reporting covered while actually blocked) whether
-    a ``permissions.deny`` rule anywhere wins over it.
 
-    Read-only: this NEVER writes any settings file. A file that cannot be
-    read (missing, a directory, unreadable bytes, malformed JSON) is
-    treated as carrying no rules at all -- never a crash, never a reason
-    to fail ``nx doctor``.
+def _check_tuple_queue_depth() -> list[HealthResult]:
+    """RDR-211 Phase 1 Step 3 doctor row 2 (bead nexus-rplay.12): the
+    census ``available``/``dead`` counts (``SubspaceCensus``, via
+    ``HttpTupleStore.subspace_list``/``registry``) for subspaces that
+    resolve to the take-enabled ``queue/<name>`` template ONLY -- board
+    (take disabled), mailbox, lock, ledger, and directory subspaces never
+    count here regardless of row counts (RDR-211 Scale and Limits item 3:
+    "a doctor row over the census available and dead counts for QUEUE
+    subspaces").
 
-    Precedence: a matching ``permissions.deny`` rule in ANY of the three
-    files wins over a matching ``permissions.allow`` rule in any of them
-    (Claude Code's own deny-always-wins semantics), reported as "denied"
-    naming the denying file. Absent a deny, the FIRST file in
-    :func:`_claude_settings_paths`'s order (user, then project, then
-    project-local) that carries a covering allow rule is reported, named.
-    Absent both, the row reports "not configured", naming the entry to add.
+    WARN above :data:`_TUPLE_QUEUE_DEPTH_WARN_AVAILABLE` available tuples
+    on any queue, or at any dead-lettered task on any queue.
 
-    Not applicable ONLY within the "not configured" outcome above -- no
-    covering allow anywhere and no deny anywhere either (bead nexus-7zhag,
-    found by the 7.45.0 release battery's fresh-install MVV leg 8/10, fixed
-    in two passes after the first pass's own ship-blocker, T2
-    nexus/7zhag-cre-2026-09-14): when the USER-level Claude config directory
-    -- the parent of the "user" entry in :func:`_claude_settings_paths`
-    (``CLAUDE_CONFIG_DIR``, or ``~/.claude``) -- does not exist, there is no
-    permission surface for this row to check yet, so it reports ``ok=True``
-    with no warning, naming why, INSTEAD OF the soft "not configured" warn.
-    This check runs LAST, after the full allow/deny scan across all three
-    files: a project or project-local ``permissions.deny``/``.allow`` is
-    read by Claude Code regardless of whether ``~/.claude`` exists, so a
-    covering rule anywhere -- deny or allow -- still wins exactly as before,
-    even with the user directory absent. It is keyed ONLY on the user-level
-    directory, never the project one: the project ``.claude`` directory
-    exists in this very checkout regardless of whether Claude Code has ever
-    run for the user, and a virgin box's real HOME carries no ``.claude`` at
-    all. The directory-existence check itself never raises: an unreadable
-    parent (e.g. permission-denied on stat) is treated as PRESENT, falling
-    through to the ordinary soft "not configured" warn -- conservative,
-    since "cannot tell" must never read as "nothing to check here" the way
-    "does not exist" does. Severity is per branch, never uniform and never
-    fatal: ``ok=True`` when a covering allow rule stands unchallenged by any
-    deny, or when the user directory is absent (not-applicable, no
-    override survives it); ``ok=False, warn=True`` (soft, never fatal) for
-    a deny override or a "not configured" outcome with the user directory
-    present (or unreadable).
-
-    Caveat: this row reads ``CLAUDE_CONFIG_DIR`` from ``nx doctor``'s OWN
-    process environment (:func:`_claude_settings_path`), which need not
-    match the environment of the Claude Code process actually running the
-    Monitor -- a Claude Code launched with a different ``CLAUDE_CONFIG_DIR``
-    than the shell invoking ``nx doctor`` makes this row look at the wrong
-    directory.
+    Not applicable -- ``ok=True`` with an explicit "informational" detail,
+    never a plain OK -- when the tenant carries no ``queue/<name>``
+    subspace at all (the nexus-7zhag doctrine: a new doctor row is
+    not-applicable, never green-by-default, when its subject is simply
+    absent -- a virgin or ordinary box that has never used a queue
+    template).
     """
-    label = _TUPLE_WATCH_PERMISSION_LABEL
-    paths = settings_paths if settings_paths is not None else _claude_settings_paths()
-    hint_path = paths[0][1] if paths else _claude_settings_path()
-    hint = f"add {_TUPLE_WATCH_DOCUMENTED_RULE!r} to permissions.allow in {hint_path}"
-    all_paths_str = ", ".join(str(p) for _, p in paths)
+    label = _TUPLE_QUEUE_DEPTH_LABEL
+    route_predates_floor = _tuple_route_predates_floor()
 
-    covering: tuple[str, Path] | None = None
-    denying: tuple[str, Path] | None = None
-    for name, path in paths:
-        rules = _read_permission_rules(path)
-        if rules is None:
-            continue
-        allow, deny = rules
-        if denying is None and any(_bash_rule_covers_tuple_watch(r) for r in deny):
-            denying = (name, path)
-        if covering is None and any(_bash_rule_covers_tuple_watch(r) for r in allow):
-            covering = (name, path)
+    import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-    if denying is not None:
-        name, path = denying
+    try:
+        from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred: CLI startup cost
+        store = HttpTupleStore()
+    except Exception as exc:  # noqa: BLE001 — best-effort: engine/config unreachable, must not crash `nx doctor`
+        _log.debug("doctor_tuple_queue_depth_connect_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable ({type(exc).__name__}: {exc})",
+        )]
+
+    try:
+        subspaces = store.subspace_list()
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            if route_predates_floor:
+                return [HealthResult(
+                    label=label, ok=True,
+                    detail=(
+                        "informational — this engine predates GET "
+                        "/v1/tuples/subspace_list "
+                        f"(REQUIRED_ENGINE_VERSION pins a floor at or below "
+                        f"{_TUPLE_ROUTE_FIRST_ENGINE_VERSION}, before the "
+                        "route shipped on any released engine-service tag). "
+                        "This is EXPECTED, not a defect."
+                    ),
+                )]
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail=(
+                    "UNKNOWN — the engine floor should carry GET "
+                    "/v1/tuples/subspace_list but the route 404s. "
+                    "Investigate the engine install; this is no longer the "
+                    "expected pre-route-floor gap."
+                ),
+            )]
+        _log.debug("doctor_tuple_queue_depth_list_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable ({type(exc).__name__}: {exc})",
+        )]
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_tuple_queue_depth_list_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable ({type(exc).__name__}: {exc})",
+        )]
+
+    try:
+        templates = store.registry().get("templates") or []
+    except Exception as exc:  # noqa: BLE001 — best-effort: a registry fetch failure must not crash `nx doctor`
+        _log.debug("doctor_tuple_queue_depth_registry_failed", error=str(exc))
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=(
-                f"denied -- {path} ({name}) carries a permissions.deny rule covering "
-                f"'{_TUPLE_WATCH_COMMAND}', which wins over any permissions.allow rule. "
-                f"Arming it as a Monitor will be refused by this rule."
+                f"templates could not be resolved ({type(exc).__name__}: "
+                f"{exc}); skipping the queue-depth check for this run"
             ),
         )]
 
-    if covering is not None:
-        name, path = covering
+    queues = []
+    for census in subspaces:
+        template = _resolve_tuple_template(templates, census.subspace)
+        if template is None:
+            continue
+        name = template.get("name", "")
+        if not name.startswith("queue/"):
+            continue
+        if not bool(template.get("take", {}).get("enabled", True)):
+            continue
+        queues.append(census)
+
+    if not queues:
         return [HealthResult(
             label=label, ok=True,
-            detail=f"{path} ({name}) permissions.allow covers '{_TUPLE_WATCH_COMMAND}'",
+            detail="informational — no queue/<name> subspaces exist on this tenant",
         )]
 
-    user_config_dir = hint_path.parent
-    try:
-        user_config_dir_exists = user_config_dir.is_dir()
-    except OSError:
-        user_config_dir_exists = True  # unreadable is not the same as absent -- stay conservative
+    over_available = [c for c in queues if c.available > _TUPLE_QUEUE_DEPTH_WARN_AVAILABLE]
+    with_dead = [c for c in queues if c.dead > 0]
 
-    if not user_config_dir_exists:
+    if over_available or with_dead:
+        parts = [f"{c.subspace} (available={c.available})" for c in over_available]
+        parts += [f"{c.subspace} (dead={c.dead})" for c in with_dead]
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"{len(over_available)} queue(s) above "
+                f"{_TUPLE_QUEUE_DEPTH_WARN_AVAILABLE} available and "
+                f"{len(with_dead)} queue(s) with a dead task: " + "; ".join(parts)
+            ),
+            fix_suggestions=[
+                "Check for a stuck or absent consumer on the named queue(s): "
+                "nx tuple stats <subspace>",
+            ],
+        )]
+    detail = "; ".join(f"{c.subspace}: available={c.available} dead={c.dead}" for c in queues)
+    return [HealthResult(label=label, ok=True, detail=detail)]
+
+
+_TUPLE_CHANNEL_DELIVERY_LABEL = "tuples.channel_delivery"
+
+
+def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[HealthResult]:
+    """RDR-211 Phase 1 Step 3 doctor row 3 (bead nexus-rplay.13): the
+    `claude/channel` push-delivery waiter's own status for THIS session.
+
+    `nx doctor` runs in the CLI process; the waiter runs in the session's
+    `nx-mcp` process. The two never share memory, so this row reads the
+    on-disk record `nexus.mcp.channel.ChannelWaiter` publishes for its own
+    session id (`nexus.mcp.channel.write_channel_status`) via
+    `nexus.mcp.channel.read_channel_status` -- no engine call, no network
+    round trip, purely local files. A record's mere presence is how this
+    row infers "the capability is declared": only the waiter that ran
+    `run_stdio_with_channel`'s declaration ever writes one, so a session
+    with no record never declared the capability at all, as far as this
+    row can observe -- it makes no independent claim about the handshake,
+    which Phase 1 Step 0 found carries no channel marker either way (T2
+    `nexus_rdr/211-spike-4-channel-2026-09-17`).
+
+    Not applicable (informational, ok=True, never a WARN, never
+    allowlisted in the fresh-install MVV -- the nexus-7zhag doctrine) in
+    two cases: no session id is resolvable at all
+    (:func:`nexus.session.resolve_active_session_id`), or one is, but no
+    status record exists for it (a CLI-only invocation, a virgin box, or
+    a session whose MCP server predates this feature or has not
+    completed its first tick yet).
+
+    Declared but never proven live (`proof == "none"`) is ALSO
+    informational, ok=True, never a WARN -- Sam's decision makes the
+    channel opt-in, so a session launched without `--channels
+    server:nexus` and never calling `tuple_channel_probe` is the ordinary
+    case, not a defect; the drain hook is the floor either way.
+
+    Proof `"argv"` or `"probe"` and the waiter alive with a fresh
+    `last_wake` (within :data:`_TUPLE_CHANNEL_DELIVERY_STALE_S` of now) is
+    OK, reporting proof, wake age, `unacked` (the live back-pressure
+    gauge, 0 or 1) and `released` (the cumulative count of claims
+    returned to the floor after exhausting resends -- mentioned plainly
+    whenever it is nonzero, in every branch, never itself a reason to
+    warn: whether it GREW since the last `nx doctor` run is not something
+    a stateless row can know).
+
+    Proof present but the waiter is not alive, or its last wake is
+    stale, is a WARN: push delivery for this session is not actually
+    happening even though the gate once proved it live, and the fix is
+    to restart the MCP server. The drain hook still delivers at the next
+    prompt either way, so this is a soft warning, never fatal.
+
+    *now* is a test-only seam (defaults to `datetime.now(UTC)`) so the
+    staleness boundary can be pinned exactly rather than raced against
+    wall-clock drift between writing a fixture's `last_wake` and this
+    function reading it.
+    """
+    label = _TUPLE_CHANNEL_DELIVERY_LABEL
+    now = now if now is not None else datetime.now(UTC)
+
+    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred: CLI startup cost
+
+    session_id = resolve_active_session_id()
+    if not session_id:
         return [HealthResult(
             label=label, ok=True,
             detail=(
-                f"not applicable -- {user_config_dir} does not exist, so Claude Code has "
-                "never run on this machine; there is no permissions.allow/.deny surface for "
-                f"'{_TUPLE_WATCH_COMMAND}' to check yet."
+                "informational — no active session resolvable; nothing to check "
+                "for the RDR-211 channel-delivery waiter"
             ),
         )]
 
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred: CLI startup cost, function-scoped (safe -- see tests/test_nexus_config_dir_setattr_lint.py)
+    from nexus.mcp.channel import read_channel_status  # noqa: PLC0415 — deferred: CLI startup cost
+
+    status = read_channel_status(nexus_config_dir(), session_id)
+    if status is None:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=(
+                "informational — no channel-waiter status recorded for this "
+                "session; the nexus MCP server has not run the RDR-211 waiter "
+                "here (a CLI-only session, a virgin box, or an MCP server that "
+                "predates this feature or has not completed its first wait "
+                "yet). Mail still arrives via the drain hook at the next prompt."
+            ),
+        )]
+
+    proof = status.get("proof", "none")
+    alive = bool(status.get("alive", False))
+    last_wake = status.get("last_wake")
+    unacked = status.get("unacked", 0)
+    released = status.get("released", 0)
+
+    if proof == "none":
+        detail = (
+            "capability declared; channel not proven live for this session "
+            "(no `--channels server:nexus` on the claude command line and no "
+            "probe reply); mail arrives at the next prompt through the drain "
+            "hook"
+        )
+        if released:
+            detail += f"; {released} message(s) previously released to the floor after exhausting resends"
+        return [HealthResult(label=label, ok=True, detail=detail)]
+
+    # proof is "argv" or "probe" past this point.
+    age_s: float | None = None
+    if isinstance(last_wake, str) and last_wake:
+        try:
+            age_s = (now - datetime.fromisoformat(last_wake)).total_seconds()
+        except ValueError:
+            age_s = None
+
+    stale = age_s is not None and age_s > _TUPLE_CHANNEL_DELIVERY_STALE_S
+    wake_desc = f"{age_s:.0f}s ago" if age_s is not None else "not recorded yet"
+
+    if not alive or stale:
+        reason = "the waiter is not alive" if not alive else (
+            f"the last wake was {wake_desc}, stale beyond {_TUPLE_CHANNEL_DELIVERY_STALE_S:.0f}s"
+        )
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"proof={proof}; {reason} for this session; last wake "
+                f"{wake_desc}; unacked={unacked}, released={released}"
+            ),
+            fix_suggestions=["Restart the MCP server: /mcp"],
+        )]
+
     return [HealthResult(
-        label=label, ok=False, warn=True,
+        label=label, ok=True,
         detail=(
-            f"not configured -- no permissions.allow rule across {all_paths_str} covers "
-            f"'{_TUPLE_WATCH_COMMAND}'. Arming it as a Monitor goes through the same "
-            f"permission machinery as Bash; {hint}."
+            f"channel live (proof={proof}); waiter alive; last wake {wake_desc}; "
+            f"unacked={unacked}, released={released}"
         ),
     )]
 
@@ -7954,10 +8127,18 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     results.extend(_check_tuple_unclaimed_age())
     results.extend(_check_tuple_table_bloat())
     results.extend(_check_tuple_sweep_freshness())
-    # bead nexus-rml7o (MM-3.4 critic finding S5): read-only, always
-    # informational -- never gated by route_predates_floor, since it reads
-    # local Claude Code settings, not the engine.
-    results.extend(_check_tuple_watch_permission())
+    # RDR-211 Phase 1 Step 3 (bead nexus-rplay.12): park-slot use and queue
+    # depth. Both degrade internally: park_slots via the route's own
+    # first-serving-engine gate (informational until that engine is cut and
+    # pinned); queue_depth via the nexus-7zhag not-applicable doctrine when
+    # the tenant has no queue subspace.
+    results.extend(_check_tuple_park_slots())
+    results.extend(_check_tuple_queue_depth())
+    # bead nexus-rplay.13: the channel-delivery waiter's own status for
+    # this session, read from the per-session on-disk record the waiter
+    # publishes (no engine call). Degrades internally to informational
+    # whenever no session, or no record, is resolvable.
+    results.extend(_check_tuple_channel_delivery())
     # nexus-cnzei.8: read-only informational row; [] when beads is not
     # detected on this machine at all.
     results.extend(_check_beads_prime())

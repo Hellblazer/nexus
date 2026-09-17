@@ -98,7 +98,7 @@ The single source of truth is `src/nexus/db/limits.py` (`QUOTAS: ServiceLimits`)
 | `where` predicates | ≤ 8 top-level | `QUOTAS.MAX_WHERE_PREDICATES` |
 | Embedding dims | ≤ 4096 | `QUOTAS.MAX_EMBEDDING_DIMENSIONS` |
 
-Voyage AI: `voyage-3` / `voyage-code-3` / `voyage-context-3` = 1024 dims, 32k tokens, 128 inputs/batch. Use `nexus.retry._voyage_with_retry` for transient failures.
+Voyage AI: `voyage-3` / `voyage-code-3` / `voyage-context-3` = 1024 dims, 32k tokens, 1,000 inputs per request (the engine plans batches under a token budget; `VoyageEmbedder.MAX_BATCH_TEXTS`). The old "128 inputs/batch" figure described the retired client-embed path. Use `nexus.retry._voyage_with_retry` for transient failures.
 
 Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in a loop.
 

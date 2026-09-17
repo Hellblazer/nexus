@@ -108,6 +108,18 @@ separate bge router (its own header, lines 50-59, says so) and writes the Voyage
 one through a fake; the production Voyage router would refuse that read.
 `tests/e2e/rdr195-voyage-mvv.sh` runs a keyed local engine by hand, Voyage only.
 
+#### Gap 7: Nothing moves an existing collection onto the new default
+
+Once a key arrives, every collection the install already holds stays bge-768.
+`nx collection reembed` is in-place and refuses a cross-model target in service
+mode, because the collection name encodes the model, so it cannot move a bge
+collection to Voyage at all. The only cross-model path is a re-index from source
+(`embed_migrate.migrate_collection_safe`), which drops every chunk that has no
+source file (MCP-stored notes, DEVONthink content) unless the caller accepts the
+loss, runs as a client loop that dies with the terminal, keeps no cursor, and
+reports nothing while it runs. A user who says "I have Voyage now, re-embed
+everything" has no command that does that safely.
+
 ## Relationship to Prior RDRs
 
 | Prior RDR | Relationship | What it means for this one |
@@ -153,6 +165,38 @@ Source reading at a9551ee21, recorded in T2 [25872]; the engine and supervisor
 lines cited above were re-read for this draft.
 
 ### Key Discoveries
+
+Re-embed section, 2026-09-16 (T2 `nexus_rdr/210-research-1` to `-4`):
+
+- **✅ Verified** (source search) — The engine embeds server-side on
+  `upsert-chunks` when no vectors are sent (`VectorHandler.java:368`), and with
+  `force_re_embed` unset a chash that already carries a vector gets a
+  metadata-only update (`PgVectorRepository.java:641`), so skipping present
+  chashes falls out of the ordinary write.
+  *Source: T2 210-research-1*
+- **✅ Verified** (source search) — Cutover reuses existing branches: the
+  cross-model rename repoints `catalog_documents` and `catalog_document_chunks`
+  and needs a live target (`CatalogHandler.java:1963, 2049`); the manifest-to-
+  chunk foreign key has no pre-check, so a chash absent from the target aborts
+  the repoint rather than skipping; `supersedeCollection`
+  (`CatalogRepository.java:6884`) and the resolver's superseded-row exclusion
+  (`:6954`) exist; the profile is one row per tenant and content type
+  (catalog-036-3).
+  *Source: T2 210-research-2*
+- **✅ Verified, draft corrected** (source search) — Voyage batches are planned
+  under a token budget up to 1,000 inputs (`VoyageEmbedder.MAX_BATCH_TEXTS`),
+  not 128, and the 300-row write cap is a client convention
+  (`limits.py:60`) the engine does not enforce on `upsert-chunks`.
+  *Source: T2 210-research-3*
+- **✅ Verified, draft corrected** (source search) — `nexus.live_chunks` is the
+  tombstone-filtered view; chash-ordered enumeration exists in the repository
+  (`PgVectorRepository.list`, `getWhere`, the 200,000-row-capped
+  `getAllMetadata`) but every form returns ids and metadata without chunk
+  text, so the copy needs one new keyset query; the engine has a
+  boot-registered periodic scheduler (the tuple sweep) but no persisted,
+  resumable job, so the `reembed_jobs` row and cursor are new. The client's
+  `_voyage_with_retry` has no production callers; retry is engine-side.
+  *Source: T2 210-research-4*
 
 - **Documented**: the posture is chosen once, from key presence (`Main.java:150,
   163`).
@@ -223,6 +267,83 @@ a corpus.
 8. **Docs.** The Java comments the investigation listed as stale (T2 [25872]
    items 1-13 and 22) are corrected here, since they describe the router this RDR
    changes. The non-engine sweep lands ahead of this RDR.
+9. **Re-embed to the profile default.** One engine job moves a collection from
+   the model it was embedded with to the model the profile names for its content
+   type, and `nx collection reembed --all` runs that job over every collection
+   that differs. See the next section for the contract.
+
+### Re-embed to the profile default
+
+`reembed` answers one question, "does every live collection carry the vectors
+the profile now asks for", and makes the answer yes. The profile is the input:
+a collection is stale when its row's `embedding_model` differs from the profile's
+model for its `content_type`. Quarantine, dormant and disputed rows are never
+candidates; they drain through their own lifecycle.
+
+**The move is a copy into the model sibling, never an in-place rewrite.** The
+target is the sibling named for the profile model
+(`code__1-1__voyage-code-3__v1` beside `code__1-1__bge-base-en-v15-768__v1`),
+registered live if absent. The job walks the source's live chunks (`nexus.live_chunks`) in chash
+order through a new repository query, keyset-paged on chash and returning
+chash, text and metadata together: every existing enumeration
+(`PgVectorRepository.list`, `getWhere`, the 200,000-row-capped
+`getAllMetadata`) returns ids and metadata without the text the copy needs.
+It upserts each batch's text and metadata into the target with no vectors, so
+the engine embeds them with the target's model exactly as an index write would.
+Chunks are content-addressed, so a chash already present in the target is done
+and is skipped; a batch that was written and not acknowledged is rewritten to
+the same rows. That is what makes the job idempotent: re-running it after a
+crash, a restart, or completion converges on the same target and writes nothing
+new the second time. Nothing is re-indexed from source, so sourceless chunks
+(notes, DEVONthink content) move with everything else, which the reindex path
+could not do.
+
+**Cutover is the existing catalog branch.** When the target's live chash set
+equals the source's, the job repoints manifests through the cross-model rename
+branch (`renameCollectionTxn`, which requires the target chunks to exist first:
+the manifest-to-chunk foreign key aborts a repoint onto an empty target), then
+supersedes the source row. The source's chunks are then unreferenced and drain
+through the ordinary quarantine sweep; the job never deletes them itself. Client
+reads already span both siblings during the window (design item 6), so search is
+whole throughout.
+
+**Batched.** One bounded transaction per batch, each with its own statement
+bound, so the job never holds a lock across a Voyage round trip and a cancelled
+batch is one batch. The batch size is the job's own bound (300, the client
+write convention in `limits.py`; the engine enforces no row count on
+`upsert-chunks`). The engine's embed path already plans Voyage batches under a
+token budget of up to 1,000 inputs per request and retries 429s with the
+server's `Retry-After` budget.
+
+**Managed.** The job is a row in a new engine table, `reembed_jobs` (tenant,
+source, target, state, chash cursor, batches done, chunks done, chunks skipped,
+tokens billed, started, updated, finished, last error), created through
+Liquibase. States: `planned`, `running`, `paused`, `cutover`, `done`, `failed`.
+A job runner registered at construction, the shape the tuple sweep already
+uses, picks up `running` rows at boot, so a job survives a service restart and
+a closed lid, and a client is not needed once the job is started. The persisted
+row and the cursor are new: the engine's existing sweeps are stateless per run
+or hold their memory in-process. `nx collection reembed --all` plans (lists every stale collection with
+its chunk count and an estimated Voyage token spend, and exits with a plan under
+`--dry-run`), starts, and then reports; `reembed status`, `pause`, `resume` and
+`abort` act on the row. Abort leaves the target in place and unreferenced, so a
+later run resumes from what was copied. Two jobs never run against one source.
+
+**Monitored.** `GET /v1/vectors/reembed/status` returns every job row for the
+tenant. `nx doctor` gains two rows: collections whose model differs from the
+profile (the drift the command exists to close) and running or failed jobs.
+Each of those is not-applicable on an install with one model.
+
+**Logged.** The engine logs one event per batch (`reembed_batch`: job, source,
+target, cursor, chunks written, chunks skipped, elapsed, tokens) and one per
+state change; the client logs the plan it submitted and each status poll. A
+failed batch is logged with the engine's error text and leaves the job `failed`
+with the cursor at the last good batch.
+
+**Cost.** The plan states the token estimate before anything runs, from the
+source's live chunk text lengths, and a spend cap on the command refuses a plan
+above it. On-device bge re-embeds cost time, not money, and the estimate says
+so.
 
 ### Existing Infrastructure Audit
 
@@ -233,6 +354,10 @@ a corpus.
 | Key plumbing | `storage_service_daemon.py:922-951` | Replace the r5f3c branch |
 | Sibling reads | `corpus.py` collection resolution | Extend from one collection to every sibling |
 | Egress guard | none | New test |
+| Re-embed copy | `nx collection reembed` (in-place, nexus-bw65), `embed_migrate.migrate_collection_safe` (reindex) | Replace both cross-model paths with the engine job; keep the in-place verb for same-model refreshes |
+| Live-chunk keyset read with text | `PgVectorRepository.list` / `getWhere` / `getAllMetadata` (metadata only) | New repository query: chash-keyset page of `live_chunks` returning chash, text, metadata |
+| Cutover | `renameCollectionTxn` cross-model branch, `supersedeCollection` | Reuse unchanged |
+| Job table | none | New Liquibase changeset `reembed_jobs` |
 
 ### Decision Rationale
 
@@ -285,6 +410,9 @@ guided re-embed of existing collections into the new family.
   over any Voyage collections they already have.
 - The engine holds the bge model in memory even on installs that only use
   Voyage, when the model is on disk.
+- A re-embed doubles a collection's storage until cutover and the quarantine
+  drain complete, and spends Voyage tokens once per chunk moved; the plan says
+  how much before the job starts.
 
 ### Risks and Mitigations
 
@@ -330,11 +458,23 @@ Sibling resolution and merged search.
 
 A local-service gate leg with a key, and the MVV above.
 
+### Phase 5: Re-embed
+
+The `reembed_jobs` changeset and job runner, the status route, the
+`nx collection reembed --all` plan/start/status/pause/resume/abort verbs, the
+two doctor rows, and the cost estimate. Ships in its own engine tag with the
+client half paired. The MVV for this phase: a keyed local engine with two bge
+collections, one of them sourceless, `reembed --all` moves both to Voyage
+siblings, search returns the same documents before and after, a restart mid-job
+resumes from the cursor, and a second `reembed --all` writes nothing.
+
 ### Day 2 Operations
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
 | Embedding profile rows | N/A (existing) | `nx doctor` profile row | N/A | `nx doctor` | N/A |
+| Re-embed jobs | `nx collection reembed status` | same, per job | `abort` (row stays for the record) | second `reembed --all` is a no-op; `nx doctor` drift row | N/A |
+| Superseded source collections | `nx collection list` | `nx collection info` | quarantine sweep | `nx catalog verify` | N/A |
 
 ### New Dependencies
 
@@ -348,6 +488,14 @@ None.
    the cross-encoder otherwise), or one per engine?
 3. Does the keyed local gate leg run in the nightly (it spends Voyage tokens and
    needs a secret) or only in the release battery?
+4. Does a profile change offer the re-embed (a doctor row and a printed hint),
+   or start it? Sam's framing is a command the user runs; the draft keeps it
+   explicit.
+5. What is the default spend cap for `reembed --all`, and is it per run or per
+   collection?
+6. Does cutover wait for a human `--cutover` confirmation, or follow parity
+   automatically inside the job? The draft follows parity automatically, since
+   client reads cover both siblings either way.
 
 ## Test Plan
 
@@ -362,6 +510,19 @@ None.
   both.
 - **Scenario**: engine source adds a new outbound HTTP client — **Verify**: the
   egress guard fails.
+- **Scenario**: `reembed --all` on two stale collections, one sourceless —
+  **Verify**: both Voyage siblings hold the source's live chash set, manifests
+  point at the siblings, the sources are superseded, search results are the
+  same documents.
+- **Scenario**: engine restart mid-job — **Verify**: the job resumes from its
+  cursor and the target holds no duplicate or missing chash.
+- **Scenario**: `reembed --all` twice — **Verify**: the second run plans zero
+  chunks and writes nothing.
+- **Scenario**: a batch fails at Voyage — **Verify**: the job is `failed` with
+  the cursor at the last good batch and the error text in the row; `resume`
+  continues.
+- **Scenario**: plan above the spend cap — **Verify**: refused before any write,
+  naming the estimate and the cap.
 
 ## Finalization Gate
 
@@ -381,3 +542,14 @@ To be completed at gate time.
 ## Revision History
 
 - 2026-09-15: created from Sam's requirement and the investigation above.
+- 2026-09-16: Gap 7 and the re-embed contract added on Sam's requirement ("if we
+  have Voyage and re-embed, everything gets re-embedded to the new defaults;
+  idempotent; batched, managed, monitored, logged"): an engine job that copies
+  live chunks into the profile-model sibling with server-side embedding, skips
+  chashes already present, cuts over through the existing cross-model rename
+  and supersede, with a job table, status route, doctor rows, per-batch events
+  and a cost estimate. Phase 5, Open Questions 4 to 6, and six test scenarios.
+- 2026-09-16: research pass on the re-embed section (T2 210-research-1 to -4):
+  four claims verified against source, two numbers corrected (Voyage batch cap
+  1,000 under a token budget; the 300-row cap is the client's convention), the
+  enumeration and job-runner sentences rewritten to what the engine has.

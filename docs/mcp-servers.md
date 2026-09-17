@@ -8,14 +8,14 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 | Server | Entry point | Tools | Purpose |
 |---|---|---|---|
-| `nexus` | `nx-mcp` | 48 | Storage tiers, retrieval, operators, orchestration, diagnostics |
+| `nexus` | `nx-mcp` | 53 | Storage tiers, retrieval, operators, orchestration, diagnostics |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`) or the `.mcpb` extension. No separate install.
 
 **Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started § Install](getting-started.md#install) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
-## `nexus` — retrieval + storage (48 tools)
+## `nexus` — retrieval + storage (53 tools)
 
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
@@ -73,14 +73,19 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 | `tuple_ack` | Consume a claimed tuple (`ack`), optionally writing a reply in the same transaction through `reply`, an object with `subspace` and `keys` (required), `dims`, `body` and `ttl_seconds` (RDR-206). Without a reply, unchanged. The reply target must resolve to a `keys+nonce` template (a `keys`-only target is refused); a `nonce` or any unknown key in `reply` is refused, since the engine sets the nonce |
 | `tuple_nack` | Release a claim back to available (`nack`); counts an attempt toward the template's `max_attempts` |
 | `tuple_renew` | Extend a live claim's lease before it lapses (`renew`, RDR-206). Returns `{lease_until}`, the engine's own value, never recomputed locally. A `lease_s` above the template cap is refused (`LeaseTooLong`); inside the cap it is clipped to the tuple's expiry. Does not count as an attempt; refused on a lapsed claim rather than resurrecting it |
+| `tuple_release` | End a live claim without counting an attempt (`release`, RDR-211) -- a hand-back that is not a failure, unlike `tuple_nack`. Refused on a lapsed claim (`ClaimNotFound`) or a claim held by another claimant (`ClaimOwnership`) |
 | `tuple_registry` | The boot-loaded template set: `{digest, sources, templates}` |
 | `tuple_list` | Concrete subspaces that exist, optionally filtered by prefix. Pages 100 subspaces by default (bead nexus-xapt8); a truncated page appends `{"_pagination": {"next_cursor": "..."}}`, which you pass back as `after`. `limit=0` or a negative limit clamps to 1 |
 | `tuple_stats` | The census for one subspace |
+| `tuple_subscribe` | Add a board topic or the session's own instance-name mailbox to this session's MCP server subscription list (RDR-211). A queue or a lock is refused naming `in`; any mailbox other than the session's own instance name is refused; at most 32 board topics beyond the two mailboxes. Subscribing the instance mailbox writes the drain hook's registration file and starts the RDR-208 directory lease |
+| `tuple_unsubscribe` | Remove a subspace from the subscription list; unsubscribing the instance mailbox stops its directory lease. The session's own mailbox can never be removed |
+| `tuple_subscriptions` | List the subscription set with each entry's delivery cursor: the session mailbox, then the instance mailbox if any, then board topics |
+| `tuple_channel_probe` | Confirm the Claude Code channel is live for this session (RDR-211). The waiter's gate checks the launch command line first; when it cannot tell, it sends one notification asking the session to call this tool, and calling it is what proves the channel live. Always returns `"ok"` |
 | `mailbox_send` | Send to a session, an agent, or a NAME, resolved at send time (RDR-208). A session or agent id writes directly; a name reads every live `directory/<name>` row and refuses (writing nothing) on zero or more than one distinct holding session. Returns `{tuple_id, to, address_kind, from}` |
 
 **Routing rule of thumb**: `tuple_rd`/`tuple_in` with `timeout_s=0` (the default) are the probe forms — never block. Pass `timeout_s>0` only when the caller intends to wait; a wait of minutes is a loop of parked calls (each capped at 25 s by default), never one long park. There are no separate probe-named tools (`tuple_rdp`/`tuple_inp`) — `timeout_s=0` covers that case on the same tool.
 
-**Failure modes**: the engine renders eleven typed errors as `{"error": "<code>", "detail": "..."}`; the four most likely to surface from a tool call are `ParkCapExceeded` (429 — the per-claimant or global park cap is at capacity; back off and retry), `TimeoutTooLong` (400 — `timeout_s` above the engine's cap), `TooLarge` (413 — a `tuple_out`/`tuple_ack` field, e.g. `body`, over the engine's size limit), and `CensusTimeout` (503 — `tuple_list`'s own census query exceeded its statement_timeout; the engine is reachable, retry narrower or later). A 502/503/504 during an engine deploy is retried by the client transparently (`rd`/`out` freely, `in` with the same claimant); the deploy gap is a retry, not an error surfaced to the caller — a genuine `CensusTimeout` 503 is distinguishable by its `error` code, not conflated with a deploy-gap retry. See [Tuple Space § Errors](tuple-space.md#errors) for the full eleven.
+**Failure modes**: the engine renders twelve typed errors as `{"error": "<code>", "detail": "..."}`; the four most likely to surface from a tool call are `ParkCapExceeded` (429 — the per-claimant or global park cap is at capacity; back off and retry), `TimeoutTooLong` (400 — `timeout_s` above the engine's cap), `TooLarge` (413 — a `tuple_out`/`tuple_ack` field, e.g. `body`, over the engine's size limit), and `CensusTimeout` (503 — `tuple_list`'s own census query exceeded its statement_timeout; the engine is reachable, retry narrower or later). A 502/503/504 during an engine deploy is retried by the client transparently (`rd`/`out` freely, `in` with the same claimant); the deploy gap is a retry, not an error surfaced to the caller — a genuine `CensusTimeout` 503 is distinguishable by its `error` code, not conflated with a deploy-gap retry. See [Tuple Space § Errors](tuple-space.md#errors) for the full twelve.
 
 ### Operators (LLM-backed, RDR-079)
 

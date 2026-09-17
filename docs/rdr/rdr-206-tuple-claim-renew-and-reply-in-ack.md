@@ -2,7 +2,8 @@
 title: "Tuple Space Claim Renewal and Reply-in-Ack: Close the Two Limits RDR-205 Accepted for v1"
 id: RDR-206
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-09-16
 priority: medium
 author: Sam
 reviewed-by: self
@@ -210,20 +211,20 @@ mailbox template, `HttpTupleStore`, the mailbox skill, and RDR-205 §Prior art.
 
 ### Critical Assumptions
 
-- [ ] A renew inside the holder's live lease is the only renew that succeeds;
+- [x] A renew inside the holder's live lease is the only renew that succeeds;
   a lapsed claim is not resurrected — **Status**: Verified by reading
   `liveClaimRow` — **Method**: Source Search
-- [ ] Writing a reply tuple and consuming the request in one
+- [x] Writing a reply tuple and consuming the request in one
   `withTenant` transaction is expressible with the existing `out` and `ack`
   bodies — **Status**: Documented by reading (research-1 §1: the bodies
   compose once `out`'s is factored onto a caller `DSLContext`); execution
   not yet run, which is Phase 1 Step 2 — **Method**: Source Search, then Spike
-- [ ] The compare-and-swap conditions on `ack`, `nack`, and `renew` change
+- [x] The compare-and-swap conditions on `ack`, `nack`, and `renew` change
   no successful path, only the stale-update race — **Status**: Documented by
   reading the update statements and the sweep's locked select (research-4);
   the race tests in Phase 1 Steps 1 and 3 execute it — **Method**: Source Search,
   then Spike
-- [ ] Adding optional fields to the `/ack` body and one new `/renew` route
+- [x] Adding optional fields to the `/ack` body and one new `/renew` route
   is `[additive]` in both directions (old client ignores them, new client
   against an old engine gets 404 on `/renew` and a plain ack on `/ack`) —
   **Status**: Verified by reading `TupleHandler`'s route switch and
@@ -459,8 +460,9 @@ may have abandoned.
 
 ### Prerequisites
 
-- [ ] All Critical Assumptions verified (the transaction-composition spike is
-  Phase 1 Step 2).
+- [x] All Critical Assumptions verified (the transaction-composition spike is
+  Phase 1 Step 2; executed there, `TupleAckWithReplyTest`, and the race tests
+  of Steps 1 and 3 ran the compare-and-swap assumption; closed 2026-09-16).
 
 ### Minimum Viable Validation
 
@@ -704,3 +706,6 @@ with execution still owed to Phase 1 Step 2.
 - 2026-09-12: Post-accept amendment (commit `b1b1e3913`) — the Technical Design pseudocode for `ackWithReply` amended to the order that SHIPPED: `prepareOut` and the `id_from` check run BEFORE `withTenant` opens, not inside it after `consumeClaim`. The document moved rather than the code, because the shipped order is the stronger of the two — every way the reply can be refused runs before anything is consumed, so the request is still claimed because the ack never STARTED rather than because a rollback restored it. The difference is observable on exactly one input, a stale claim together with an invalid reply, where the shipped code raises `SchemaViolation` and the documented order would have raised `ClaimNotFound`; pinned by `TupleAckWithReplyTest#whenBothTheClaimIsStaleAndTheReplyIsInvalid_theReplyIsRefusedFirst`. Reverting to the documented order fails that test AND `aRefusedReplyNeverOpensTheTransaction`, which is what settled which of the two should move. Entry added at the Phase 1 review (nexus-h61dl.6), which found the amendment had landed without one.
 - 2026-09-12: Post-accept amendment (Phase 1 close gate, bead nexus-h61dl.7) — two precision fixes surfaced BY the gate rather than by review. §Approach's two items were labelled with code spans where the cross-walk requires `N. **Label**: description`, so the gate refused to enumerate them at all; it declines to cross-walk a subset, which is the correct behaviour and is why the formatting was worth fixing rather than working around. And §Approach item 1 said the new lease is "capped at the template's `max_lease_seconds`", which reads as clamping, while the same item's own error list gives `LeaseTooLong` for exceeding that cap. The implementation REFUSES, and refusing is the decided behaviour: capping would hand a caller who asked for too long a shorter lease instead of the error it has coming. Reworded to say so. Found while manually reviewing the cross-walk's evidence pointers, which the gate explicitly asks for rather than treating a green as verification.
 - 2026-09-12: Post-accept amendment (Phase 1 review, bead nexus-h61dl.6) — no RDR text change; recorded because the review found a defect the RDR's own mitigation depends on. `renew` computed its lease ceiling in Java from an `expires_at` read by the UNLOCKED `liveClaimRow`, while the compare-and-swap never re-checked that column, so an `out` refire landing in the read-to-update window could leave `lease_until` past the tuple's new expiry. Since `purgeExpiredTuplesBatch` deletes on `expires_at` alone with no claim-state filter, the row could then be hard deleted under a holder just told its lease was extended — defeating "a claim never outlives its tuple", which §Risks names as the mitigation for a holder renewing forever. The ceiling is now applied in SQL against the live row at UPDATE time. Reachable only from the whole-phase view: Step 1 replaced locking with compare-and-swap, Step 3 reused a clamp helper written for `claimOnce`, which reads under `forNoKeyUpdate` + `skipLocked` and so cannot race a refire.
+- 2026-09-13: Phase 2 closed at `963877345` (bead nexus-h61dl.17): `HttpTupleStore.renew` and `ack(reply=)`, the `tuple_renew` MCP tool and `tuple_ack`'s reply object, `nx tuple renew` and the `--reply-*` flags, the two mailbox-skill rules, docs across every surface, the client MVV and the scenario journey with one reply under a forced crash. Record T2 `nexus/rdr-206-phase2-close-2026-09-13`.
+- 2026-09-13: Phase 3 shipped: `engine-service-v0.1.117` cut on `2a56d164f` (bead nexus-h61dl.18) and deployed before the client tag on the all-additive ledger; conexus 7.44.0 (bead nexus-h61dl.19) bumped `REQUIRED_ENGINE_VERSION` to that tag and moved the wire-ledger entry to Shipped. The client tag waited on nexus-6konb's arming phase, because the plugin pin it advanced made that epic's drain hook live.
+- 2026-09-16: Closed. Close critique `nexus_rdr/206-critique-scope-and-closure-2026-09-16` (partial, 0 Critical, 2 Significant: this Revision History stopped at Phase 1, and `docs/tuple-space.md`'s banner still said unshipped; both fixed at the close). Critical Assumptions ticked as verified by Phase 1. Post-mortem `post-mortem/206-tuple-claim-renew-and-reply-in-ack.md`.

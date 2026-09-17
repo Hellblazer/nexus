@@ -2,7 +2,8 @@
 title: "LLM-JSON Repair Pass: Port a2ui PayloadFixer Pattern to nx Structured-Output Parsers"
 id: RDR-122
 type: Technical
-status: draft
+status: closed
+closed_date: 2026-09-16
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
@@ -135,3 +136,16 @@ Current behavior. Quantified retry cost is the rejection reason — see Success 
 - a2ui architecture analysis — T3 doc `architecture-a2ui-overview` (2026-05-19)
 - a2ui `PayloadFixer` source — `agent_sdks/python/src/a2ui/parser/payload_fixer.py` in `/Users/hal.hildebrand/git/a2ui`
 - RDR-119 — adopts a2ui as cockpit wire-level descriptor (precedent for borrowing from a2ui)
+
+## Revision History
+
+- 2026-05-19 — created (draft).
+- 2026-09-16 — closed from draft by Sam's override. The operator leg, this
+  RDR's main cost driver, runs under schema-constrained output
+  (`src/nexus/operators/dispatch.py` passes `--json-schema`), which is the
+  Alternative 3 this RDR rejected as unavailable. Fence stripping exists as
+  a one-parser helper in `aspect_extractor.py` (`_strip_code_fence`).
+  `plan_save` still refuses malformed JSON outright rather than repairing
+  it; that residual is bead-sized, not RDR-sized. Two cited call sites no
+  longer exist (`nexus/db/plan_library.py`, `tools/build_catalog`).
+  Post-mortem: `post-mortem/122-llm-json-repair-pass.md`.

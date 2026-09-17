@@ -192,17 +192,23 @@ def _write_t1_handoff_markers(new_session_id: str) -> None:
 
 
 def _write_tuple_watch_session_marker(new_session_id: str, source: str | None) -> None:
-    """nexus-6konb.12 (MM-3.4 fix 1): tell a live ``nx tuple watch`` Monitor
-    from before this ``/clear``/``/resume`` that the conversation is now a
-    different session, so it can stop itself rather than keep holding its
-    per-address lock on a mailbox nobody watches for any more.
+    """nexus-6konb.12 (MM-3.4 fix 1): record this conversation's current
+    session id under this claude process's own marker file, so a reader
+    that resolved an OLDER session id for the same conversation can tell
+    it changed. Originally written for a live CLI watcher Monitor to check
+    against its own spawn-time session id and self-stop on a mismatch
+    rather than keep holding its per-address lock on a mailbox nobody
+    watched any more; RDR-211 nexus-rplay.14 deleted that watcher, and the
+    marker's remaining readers are ``nexus.tuple_directory.resolve_default_from``
+    and this function's own ``record_clear_and_write_session_marker`` call
+    below.
 
-    Replaces the SessionStart arm instruction's old TaskStop rule, which
-    could not work in the first place: the fresh conversation it would run
-    in has no memory of the OLD Monitor's harness task id, so there was
-    never a way for it to discover what to stop. This writes a marker the
-    watcher checks ITSELF instead (see :func:`nexus.tuple_watch.run_watch`),
-    reusing the nexus-d76vc T1-handoff pattern immediately above: writer and
+    Originally also replaced the deleted Monitor-arm instruction's old
+    TaskStop rule, which could not work in the first place: the fresh
+    conversation it would run in has no memory of the OLD Monitor's
+    harness task id, so there was never a way for it to discover what to
+    stop. This writes a marker a reader checks ITSELF instead, reusing the
+    nexus-d76vc T1-handoff pattern immediately above: writer and
     reader independently derive the SAME claude ancestor pid via
     :func:`nexus.session.find_immediate_claude_pid`, from different vantage
     points, rather than passing it between them.
@@ -220,7 +226,7 @@ def _write_tuple_watch_session_marker(new_session_id: str, source: str | None) -
     RDR-208 Phase 2 Step 3: on ``source == "clear"`` this also records the
     session a ``/clear`` just stranded, so
     ``conexus/hooks/scripts/mailbox_drain.py`` can empty that mailbox once
-    (:func:`nexus.tuple_watch.record_clear_and_write_session_marker`). Never
+    (:func:`nexus.session_marker.record_clear_and_write_session_marker`). Never
     on an INHERITED session id (``NX_SESSION_ID`` set): that names a nested
     subprocess reusing its parent's session, not a real ``/clear`` boundary
     a mailbox was stranded at, and recording one there would name a
@@ -236,7 +242,7 @@ def _write_tuple_watch_session_marker(new_session_id: str, source: str | None) -
     try:
         from nexus import config as _nx_config  # noqa: PLC0415 — deferred import; module attribute so a patched nexus.config reaches it (nexus-78blw)
         from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — deferred import; rare/branch-local path
-        from nexus.tuple_watch import (  # noqa: PLC0415 — deferred import; rare/branch-local path
+        from nexus.session_marker import (  # noqa: PLC0415 — deferred import; rare/branch-local path
             record_clear_and_write_session_marker,
         )
 
@@ -276,9 +282,9 @@ def render_session_start(session_id: str, *, mailbox_arm_text: str = "") -> str:
     hoc script (outside pytest's ``_isolate_config_dir`` autouse fence,
     HOME unset) to hand-measure byte budgets, and its unconditional
     :func:`_write_tuple_watch_session_marker` call wrote a marker under
-    the REAL ``~/.config/nexus`` naming a stale fixture session id,
-    which is exactly what :func:`nexus.tuple_watch.run_watch` watches
-    for, and it stopped the live mailbox watcher on the next poll. Two
+    the REAL ``~/.config/nexus`` naming a stale fixture session id, which
+    is exactly what the (since-deleted) CLI mailbox watcher's self-stop
+    check watched for, and it stopped the live watcher on the next poll. Two
     sessions hit this same trap the same day.
 
     This function performs NO writes: no ``current_session`` file, no T1
@@ -437,13 +443,14 @@ def _stale_mcp_host_warning() -> str:
 
 
 def _mailbox_arm_block(session_id: str) -> str:
-    """nexus-6konb.9 (MM-3.1): the RDR-205 mailbox-watch arm instruction.
+    """nexus-6konb.9 (MM-3.1), superseded by RDR-211 nexus-rplay.14: the
+    RDR-205 mailbox subscribe instruction.
 
     Emitted on every SessionStart source (startup/resume/clear/compact --
     unlike :func:`_write_t1_handoff_markers`, there is no reason to gate
-    this on ``source``: a fresh watcher is worth re-arming after a
-    ``/compact`` exactly as much as after ``/clear``, and the underlying
-    ``nx tuple watch`` lock makes a redundant arm harmless). See
+    this on ``source``: subscribing again is worth repeating after a
+    ``/compact`` exactly as much as after ``/clear``, and re-subscribing an
+    already-subscribed instance mailbox is a harmless no-op). See
     :mod:`nexus.mailbox_arm` for the instruction text, the bounded+cached
     tuple-surface availability probe, and why it is silent when that probe
     fails.

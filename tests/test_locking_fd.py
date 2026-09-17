@@ -150,7 +150,7 @@ def test_non_blocking_raises_blocking_io_error_not_os_error(lock_path: Path) -> 
 
 def test_lock_file_still_delegates(tmp_path: Path) -> None:
     """The pre-existing file-object API keeps working after the refactor —
-    ``indexer.py`` and ``tuple_watch.py`` are unchanged consumers."""
+    ``indexer.py`` is an unchanged consumer."""
     from nexus._locking import lock_file, unlock_file
 
     path = tmp_path / "repo.pid"

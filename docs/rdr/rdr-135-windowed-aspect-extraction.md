@@ -2,7 +2,7 @@
 title: "Windowed Aspect Extraction with Cross-Window Merge: Stop Whole-Paper Single-Shot Extraction from Degrading on Long Inputs"
 id: RDR-135
 type: Architecture
-status: draft
+status: deferred
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
@@ -130,3 +130,13 @@ test plan, finalization gate: to be completed during research.]
 - T3 synthesis: `research-memforest-nexus-leverage-2026-05-27` (idea #4)
 - RDR-089 (Structured Aspect Extraction at Ingest) — the extractor this extends
 - Bead `nexus-u4qxk` (superseded by this RDR)
+
+## Revision History
+
+- 2026-05-27 — created (draft).
+- 2026-09-16 — deferred. The design still matches the code
+  (`extract_aspects` builds one unbounded prompt per document and the batch
+  path appends full content), but every critical assumption is unverified by
+  spike and no degradation on long inputs has been measured. Answers RDR-179
+  OQ-4. Reopen trigger: a measured extraction-quality drop on long inputs,
+  or an aspect-extractor cost regression.

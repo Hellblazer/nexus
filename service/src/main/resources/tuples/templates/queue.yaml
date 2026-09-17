@@ -1,0 +1,74 @@
+# RDR-211 Phase 1 Step 2 (bead nexus-rplay.8), Approach item 2: shared
+# work, closing Gap 2 (no shared work queue). Take enabled: a producer
+# posts one tuple per task (id_from: keys+nonce, so the work itself is
+# addressed, not the worker) and any free worker claims the oldest
+# available one with in(); a worker that cannot finish calls nack (a
+# failure, counts toward max_attempts) or release (a hand-back that is
+# not a failure, RDR-211 Gap 4).
+#
+# keys: [queue] -- literally "queue", not "name", even though the path
+# parameter is <name>: RDR-211's Technical Design table spells this
+# template's keys as "keys [queue]", the same convention board.yaml and
+# lock.yaml follow of a key field that mirrors the address segment's
+# value (board's "topic", lock's "resource").
+#
+# from (required): the producer's session or agent id. kind: an optional
+# free-text label for the task's shape (no fixed values -- a queue's task
+# shapes are not enumerable up front). correlation_id: lets a worker's
+# ack carry a reply back to the producer's mailbox via reply-in-ack
+# (RDR-206), and lets the producer match a reply to its own request.
+#
+# id_dims: [from] mirrors mailbox.yaml: "from" also enters the tuple id
+# alongside the minted nonce, so it must be declared required: true.
+#
+# take.max_attempts: 3, max_lease_seconds: 900 -- the same claim policy as
+# mailbox.yaml's (RDR-211 Existing Infrastructure Audit: "reuse its claim
+# semantics ... with the work, not the worker, as the key").
+#
+# retention_seconds: 172800 (2 days), not the board's 7: an acked task
+# keeps its row (body cleared) until retention ends (RDR-211 Scale and
+# Limits item 4, "acked tasks"), so a short retention bounds that
+# residue.
+#
+# max_live_rows: 10000 (RDR-211 Scale and Limits item 2, "a runaway
+# writer"): the assumed load is up to 1,000 tasks a day per queue,
+# settling near 2,000 live rows at the 2-day retention; 10,000 gives
+# headroom without leaving the subspace unbounded.
+#
+# claim_log_ttl_seconds: 2592000 (30 days; RDR-211 Scale and Limits item
+# 6, "claim-log volume", leaves the exact value to implementation). At
+# the assumed load of about 3,000 claim-log rows a day, the engine's own
+# 180-day default (NX_TUPLE_CLAIM_LOG_TTL_DAYS) would settle near 540,000
+# rows; 30 days cuts that to about 90,000. 2,592,000s clears
+# TemplateRegistry's boot check with wide margin -- this template's own
+# 172,800s retention plus one 21,600s (6h, NexusService.SWEEP_INTERVAL_HOURS)
+# sweep interval is a 194,400s floor the effective TTL must strictly
+# exceed.
+name: queue/<name>
+
+keys:
+  - queue
+
+dimensions:
+  from:
+    type: string
+    required: true
+  kind:
+    type: string
+  correlation_id:
+    type: string
+
+id_from: keys+nonce
+id_dims:
+  - from
+
+take:
+  enabled: true
+  max_attempts: 3
+  max_lease_seconds: 900
+
+retention_seconds: 172800
+
+max_live_rows: 10000
+
+claim_log_ttl_seconds: 2592000

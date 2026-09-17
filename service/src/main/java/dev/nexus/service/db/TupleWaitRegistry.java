@@ -2,9 +2,16 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
@@ -29,7 +36,13 @@ import java.util.function.LongSupplier;
  * whose OWN first (non-blocking) query already found a match never touches
  * the cap at all. {@code rd} has no claimant (its signature carries none)
  * and only ever consumes the global slot; {@code in}/{@code inp} consume
- * both the global slot and their claimant's own slot.
+ * both the global slot and their claimant's own slot. {@code rd}/{@code in}/
+ * {@code waitAny} each release their {@link #register}/{@link #registerMulti}
+ * registration on EVERY exit -- an immediate first-query hit and an exception
+ * thrown by that first query included, not only the park-loop path -- because
+ * an un-released registration leaves {@link Group#waiters} permanently
+ * non-zero and its group permanently ineligible for {@link #evictIdleGroups}
+ * (nexus-rplay, the register/release leak fix).
  *
  * <p><b>Lost-wakeup closure (RDR-205 Phase 1 review, bead nexus-em75s.7).</b>
  * {@link #register} alone records nothing a signal can observe — a {@code
@@ -67,6 +80,21 @@ import java.util.function.LongSupplier;
  * {@link #isShuttingDown()} so a parked call's next wake runs one final
  * query and returns instead of re-parking, riding out its budget past
  * process exit.
+ *
+ * <p><b>Multiplexed wait (RDR-211 Phase 1 Step 1, bead nexus-rplay.4).</b>
+ * {@link #registerMulti} parks ONE {@link MultiWaiter} across SEVERAL
+ * {@code (tenant, subspace)} groups at once — {@code TupleRepository.waitAny}'s
+ * mechanism for a multi-subspace {@code rd} that returns as soon as ANY
+ * registered subspace has a matching write, without one {@link Waiter}/{@link
+ * #tryAcquireParkSlot} pair per subspace. Each {@link Group} notifies every
+ * {@link MultiWaiter} registered on it from inside {@link #signalAll}'s own
+ * lock, alongside the existing generation bump — the same lost-wakeup closure
+ * {@link Waiter} gets, but via a pending-subspace set rather than a generation
+ * counter (see {@link MultiWaiter}'s own javadoc for why). {@code
+ * registerMulti} deliberately never touches {@link #tryAcquireParkSlot}/{@link
+ * #globalParked}/{@link #perClaimantParked} — a caller wraps N subspaces in
+ * one {@code registerMulti} call and spends exactly one park slot, via its own
+ * single {@link #tryAcquireParkSlot} call, not N.
  */
 final class TupleWaitRegistry {
 
@@ -110,6 +138,12 @@ final class TupleWaitRegistry {
     private final ConcurrentHashMap<WaitKey, Group> groups = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicInteger> perClaimantParked = new ConcurrentHashMap<>();
     private final AtomicInteger globalParked = new AtomicInteger();
+    /** Cumulative {@code ParkCapExceededException("global")} refusal count (RDR-211
+     *  Phase 1 Step 1, bead nexus-rplay.7) -- see {@link #globalRefusedCount}. */
+    private final AtomicLong globalRefused = new AtomicLong();
+    /** Cumulative {@code ParkCapExceededException("claimant")} refusal count
+     *  (RDR-211 Phase 1 Step 1) -- see {@link #claimantRefusedCount}. */
+    private final AtomicLong claimantRefused = new AtomicLong();
     private volatile boolean shuttingDown = false;
 
     TupleWaitRegistry(int maxPerClaimant, int maxGlobal) {
@@ -144,6 +178,18 @@ final class TupleWaitRegistry {
         /** Nanotime of the last registration, release, or signal on this group,
          *  guarded by {@link #lock}. The other eviction precondition. */
         long lastActivityNanos;
+        /**
+         * RDR-211 Phase 1 Step 1 (bead nexus-rplay.4): {@link MultiWaiter}s parked
+         * across THIS group alongside others -- notified by {@link #signalAll} in
+         * addition to this group's own {@link #condition}. A {@link
+         * CopyOnWriteArraySet} because membership changes (register/release) are
+         * rare relative to signals, and iteration under {@link #lock} must never
+         * itself contend with a concurrent mutation. Identity-keyed (no {@code
+         * equals}/{@code hashCode} override on {@link MultiWaiter}), which is
+         * exactly right: two distinct waiters registered for the same subspace are
+         * two distinct listeners.
+         */
+        final Set<MultiWaiter> multiListeners = new CopyOnWriteArraySet<>();
 
         Group(long nowNanos) {
             this.lastActivityNanos = nowNanos;
@@ -168,6 +214,14 @@ final class TupleWaitRegistry {
             // nexus-em75s.40: invoked UNDER the lock, right after the generation
             // bump/signal -- see the field's own javadoc for why.
             TEST_ONLY_SIGNAL_HOOK.accept(tenant, subspace);
+            // RDR-211 Phase 1 Step 1 (bead nexus-rplay.4): also wake every
+            // MultiWaiter parked across this group ALONGSIDE others -- under the
+            // SAME lock, same placement as the signal hook above, so a
+            // MultiWaiter's registerMulti (which also takes g.lock to add itself
+            // to this set) can never race a signal into a lost update.
+            for (MultiWaiter mw : g.multiListeners) {
+                mw.notifyWake(subspace);
+            }
         } finally {
             g.lock.unlock();
         }
@@ -202,6 +256,144 @@ final class TupleWaitRegistry {
             }
             evictIdleGroups(key);
             return new Waiter(g, seenGeneration);
+        }
+    }
+
+    /**
+     * RDR-211 Phase 1 Step 1 (bead nexus-rplay.4): registers ONE {@link MultiWaiter}
+     * across SEVERAL {@code (tenant, subspace)} groups at once, so {@code
+     * TupleRepository.waitAny} can park on many subspaces with a single thread and a
+     * single park-slot acquisition, instead of one {@link Waiter} (and one {@link
+     * #tryAcquireParkSlot} call) per subspace. MUST be called BEFORE the caller's
+     * first query against every one of {@code subspaces}, same contract as {@link
+     * #register} -- a write landing between that query and the first {@link
+     * MultiWaiter#awaitSignalOrTimer} call reaches {@link MultiWaiter#notifyWake}
+     * (via {@link #signalAll}) regardless of whether the caller has parked yet, so it
+     * is never lost.
+     *
+     * <p>Deliberately does NOT touch {@link #tryAcquireParkSlot}/{@link
+     * #globalParked}/{@link #perClaimantParked} -- park-slot accounting is already
+     * fully decoupled from group registration in this design ({@code in}'s own loop
+     * calls {@link #tryAcquireParkSlot} separately, once, after registering), so a
+     * caller wrapping N subspaces in one {@code registerMulti} call and ONE {@link
+     * #tryAcquireParkSlot} call spends exactly one slot, not N.
+     */
+    MultiWaiter registerMulti(String tenant, List<String> subspaces) {
+        MultiWaiter mw = new MultiWaiter(tenant, List.copyOf(subspaces));
+        for (String subspace : subspaces) {
+            WaitKey key = new WaitKey(tenant, subspace);
+            while (true) {
+                Group g = groups.computeIfAbsent(key, k -> new Group(now()));
+                g.lock.lock();
+                try {
+                    if (groups.get(key) != g) {
+                        // Evicted between computeIfAbsent and this lock acquisition --
+                        // retry against whatever's there now, same as register().
+                        continue;
+                    }
+                    g.waiters++;
+                    g.multiListeners.add(mw);
+                    g.lastActivityNanos = now();
+                } finally {
+                    g.lock.unlock();
+                }
+                break;
+            }
+            evictIdleGroups(key);
+        }
+        return mw;
+    }
+
+    /**
+     * RDR-211 Phase 1 Step 1 (bead nexus-rplay.4): a single waiter registered across
+     * several {@code (tenant, subspace)} groups via {@link #registerMulti}, woken by
+     * a {@link #signalAll} against ANY of them. Owns its own lock/condition, separate
+     * from any {@link Group}'s -- each registered {@link Group} notifies THIS object
+     * (via {@link #notifyWake}) rather than this object parking directly on N
+     * different {@link Condition}s, which Java's lock API has no way to do in one
+     * blocking call.
+     */
+    final class MultiWaiter {
+        private final String tenant;
+        private final List<String> subspaces;
+        private final ReentrantLock lock = new ReentrantLock();
+        private final Condition condition = lock.newCondition();
+        /** Subspaces that signalled since the last {@link #awaitSignalOrTimer} drained
+         *  this set, guarded by {@link #lock}. A signal landing before the first await
+         *  call simply accumulates here rather than being lost -- there is no
+         *  generation counter to race the way {@link Waiter} needs one, because {@link
+         *  #notifyWake} pushes directly into this set instead of merely bumping a
+         *  counter a not-yet-parked reader would still need to notice. */
+        private final Set<String> pendingSubspaces = new HashSet<>();
+        private volatile boolean released;
+
+        private MultiWaiter(String tenant, List<String> subspaces) {
+            this.tenant = tenant;
+            this.subspaces = subspaces;
+        }
+
+        /** Called by {@link #signalAll}, under the signalling group's OWN lock (never
+         *  this waiter's) -- see {@link #signalAll}'s own comment for why that
+         *  placement is safe (fixed lock order: a group's lock is always acquired
+         *  before this method takes this waiter's lock, never the reverse, so there is
+         *  no deadlock cycle). */
+        private void notifyWake(String subspace) {
+            lock.lock();
+            try {
+                pendingSubspaces.add(subspace);
+                condition.signal();
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        /**
+         * Parks until ANY registered subspace has signalled, or one second elapses --
+         * the multi-group counterpart to {@link Waiter#awaitSignalOrTimer}. Returns the
+         * (possibly empty, on a timeout) set of subspaces that signalled since the
+         * last call, draining {@link #pendingSubspaces}. A signal already pending on
+         * entry (the lost-wakeup window this closes, same as {@link Waiter}'s
+         * generation check) returns immediately without parking.
+         */
+        Set<String> awaitSignalOrTimer() throws InterruptedException {
+            lock.lock();
+            try {
+                if (pendingSubspaces.isEmpty()) {
+                    condition.await(1, TimeUnit.SECONDS);
+                }
+                Set<String> drained = Set.copyOf(pendingSubspaces);
+                pendingSubspaces.clear();
+                return drained;
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        /**
+         * Marks this waiter done across EVERY subspace group it registered in
+         * (decrementing occupancy and removing this listener from each) -- the
+         * multi-group counterpart to {@link Waiter#release}. Idempotent; call exactly
+         * once.
+         */
+        void release() {
+            if (released) {
+                return;
+            }
+            released = true;
+            for (String subspace : subspaces) {
+                Group g = groups.get(new WaitKey(tenant, subspace));
+                if (g == null) {
+                    continue; // already evicted -- nothing left to release against
+                }
+                g.lock.lock();
+                try {
+                    g.waiters--;
+                    g.multiListeners.remove(this);
+                    g.lastActivityNanos = now();
+                } finally {
+                    g.lock.unlock();
+                }
+            }
         }
     }
 
@@ -321,6 +513,10 @@ final class TupleWaitRegistry {
         int newGlobal = globalParked.incrementAndGet();
         if (newGlobal > maxGlobal) {
             globalParked.decrementAndGet();
+            // RDR-211 Phase 1 Step 1 (bead nexus-rplay.7): counted AFTER the rollback,
+            // same ordering as the per-claimant branch below -- a refusal must never
+            // skew globalInUse(), only the separate refusal counter.
+            globalRefused.incrementAndGet();
             throw new ParkCapExceededException("global");
         }
         if (claimantOrNull != null) {
@@ -339,6 +535,9 @@ final class TupleWaitRegistry {
             });
             if (exceeded[0]) {
                 globalParked.decrementAndGet();
+                // RDR-211 Phase 1 Step 1 (bead nexus-rplay.7): see the global branch's
+                // matching comment above.
+                claimantRefused.incrementAndGet();
                 throw new ParkCapExceededException("claimant");
             }
         }
@@ -367,6 +566,64 @@ final class TupleWaitRegistry {
      *  returns to empty once every parked call releases. */
     int perClaimantTrackedCount() {
         return perClaimantParked.size();
+    }
+
+    // ── park report (RDR-211 Phase 1 Step 1, bead nexus-rplay.7) ────────────
+
+    /** This registry's configured global park cap -- exposed so {@link
+     *  TupleRepository#parkStats} can report it without keeping its own copy
+     *  of the constructor argument it already handed to this registry. */
+    int maxGlobal() {
+        return maxGlobal;
+    }
+
+    /** This registry's configured per-claimant park cap. See {@link #maxGlobal}. */
+    int maxPerClaimant() {
+        return maxPerClaimant;
+    }
+
+    /** Current global in-use gauge -- the same value {@link #tryAcquireParkSlot}
+     *  compares against {@link #maxGlobal}. A null-claimant park ({@code rd}, and
+     *  RDR-211 Phase 1 Step 1's {@code wait}) is counted here and ONLY here --
+     *  it never appears in {@link #perClaimantSnapshot}. */
+    int globalInUse() {
+        return globalParked.get();
+    }
+
+    /** Cumulative count of {@code ParkCapExceededException("global")} refusals
+     *  since this registry was constructed. Never reset; a fresh count starts
+     *  only with a fresh registry (one per JVM process in production, so this
+     *  is a process lifetime total, not a point-in-time gauge like {@link
+     *  #globalInUse}). */
+    long globalRefusedCount() {
+        return globalRefused.get();
+    }
+
+    /** Cumulative count of {@code ParkCapExceededException("claimant")}
+     *  refusals. See {@link #globalRefusedCount}. */
+    long claimantRefusedCount() {
+        return claimantRefused.get();
+    }
+
+    /**
+     * Point-in-time snapshot of {@link #perClaimantParked} as a plain
+     * claimant-to-count map: unlike {@link #perClaimantTrackedCount} (a bare
+     * size, kept for the existing map-shrinks-back-to-empty test), the park
+     * report distinguishes slots BY CLAIMANT so a caller can observe "one slot
+     * per session" and "never two slots for one session" directly, rather than
+     * inferring it from a total. A claimant with no currently-parked call is
+     * never a key here (its entry is removed the instant {@link
+     * #releaseParkSlot} brings its count to zero) -- an empty map means no
+     * claimant-scoped park is in flight, not that none was ever counted. A
+     * plain copy, not a live view: the caller gets one moment's numbers, never
+     * a reference that mutates under it.
+     */
+    Map<String, Integer> perClaimantSnapshot() {
+        Map<String, Integer> out = new LinkedHashMap<>();
+        for (var e : perClaimantParked.entrySet()) {
+            out.put(e.getKey(), e.getValue().get());
+        }
+        return out;
     }
 
     boolean isShuttingDown() {

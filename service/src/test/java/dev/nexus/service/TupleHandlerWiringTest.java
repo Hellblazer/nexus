@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.TenantConstants;
+import dev.nexus.service.db.TupleRepository;
 import dev.nexus.service.tuples.TemplateRegistry;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -12,11 +13,15 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.io.TempDir;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.util.Map;
 
@@ -63,11 +68,12 @@ class TupleHandlerWiringTest {
     com.zaxxer.hikari.HikariDataSource svcDs;
     NexusService withRegistry;
     NexusService withoutRegistry;
+    NexusService withMaxLiveRowsCap;
     HttpClient http;
     ObjectMapper mapper;
 
     @BeforeAll
-    void startAll() throws Exception {
+    void startAll(@TempDir Path extraTemplateDir) throws Exception {
         mapper = new ObjectMapper();
         pg = PgContainerHelper.start();
 
@@ -97,6 +103,26 @@ class TupleHandlerWiringTest {
         withoutRegistry = new NexusService(0, TOKEN, svcDs);
         withoutRegistry.start();
 
+        // RDR-211 Phase 1 Step 1 (bead nexus-rplay.5): a test-only template
+        // carrying max_live_rows, layered on the bundled resources the same
+        // way TupleRepositoryTest's probe/<id> is -- none of the v1 resource
+        // templates declares this field yet (Step 2's job), so the route-level
+        // typed-error test needs its own registry to exercise it over HTTP.
+        Files.writeString(extraTemplateDir.resolve("probe-maxrows.yaml"), """
+                name: probe-maxrows/<room>
+                keys:
+                  - id
+                id_from: keys
+                take:
+                  enabled: false
+                retention_seconds: 3600
+                max_live_rows: 1
+                """, StandardCharsets.UTF_8);
+        TemplateRegistry maxLiveRowsRegistry = TemplateRegistry.loadAtBoot(extraTemplateDir.toString(), null,
+                NexusService.SWEEP_INTERVAL_HOURS * 3600L);
+        withMaxLiveRowsCap = new NexusService(0, TOKEN, svcDs, null, null, null, null, maxLiveRowsRegistry);
+        withMaxLiveRowsCap.start();
+
         http = TestHttp.client();
     }
 
@@ -107,6 +133,9 @@ class TupleHandlerWiringTest {
         }
         if (withoutRegistry != null) {
             withoutRegistry.stop();
+        }
+        if (withMaxLiveRowsCap != null) {
+            withMaxLiveRowsCap.stop();
         }
         if (svcDs != null) {
             svcDs.close();
@@ -122,7 +151,9 @@ class TupleHandlerWiringTest {
         assertThat(resp.statusCode()).isEqualTo(200);
         var body = mapper.readValue(resp.body(), MAP_T);
         assertThat(body).containsKey("digest");
-        assertThat((java.util.List<?>) body.get("templates")).hasSize(3);
+        // 6, not 3: RDR-211 Phase 1 Step 2 (bead nexus-rplay.8) added board/<topic>,
+        // lock/<resource>, queue/<name> beside directory/ledger/mailbox.
+        assertThat((java.util.List<?>) body.get("templates")).hasSize(6);
     }
 
     /**
@@ -177,6 +208,53 @@ class TupleHandlerWiringTest {
     void registryAbsent_tuplesRouteNotRegistered() throws Exception {
         var resp = get(withoutRegistry, "/v1/tuples/registry");
         assertThat(resp.statusCode()).isEqualTo(404);
+    }
+
+    /**
+     * nexus-rplay.17 (code-review-expert finding 1): {@code renderTemplate}'s own
+     * javadoc says a client learns a template's shape SOLELY from this response --
+     * before this fix it omitted {@code lock}, {@code max_live_rows}, and {@code
+     * claim_log_ttl_seconds} entirely, so a Phase 2 client could never learn a
+     * template carries the lock flag or either scale-limit ceiling. {@code lock} is
+     * ALWAYS present (a boolean, never omitted, since {@code false} is a real
+     * answer, not an absence); {@code max_live_rows}/{@code claim_log_ttl_seconds}
+     * mirror {@code max_body_bytes}'s existing conditional -- present only when the
+     * template declares one.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void registryPresent_lockAndScaleLimitFieldsRendered() throws Exception {
+        var resp = get(withRegistry, "/v1/tuples/registry");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        var templates = (java.util.List<Map<String, Object>>) body.get("templates");
+
+        Map<String, Object> lock = templates.stream()
+                .filter(t -> "lock/<resource>".equals(t.get("name")))
+                .findFirst().orElseThrow();
+        assertThat(lock.get("lock")).as("lock/<resource> declares lock: true").isEqualTo(true);
+        assertThat(lock.get("claim_log_ttl_seconds")).as("lock.yaml's own 30-day override")
+                .isEqualTo(2_592_000);
+
+        Map<String, Object> board = templates.stream()
+                .filter(t -> "board/<topic>".equals(t.get("name")))
+                .findFirst().orElseThrow();
+        assertThat(board.get("max_live_rows")).as("board.yaml's own ceiling").isEqualTo(500);
+        assertThat(board.get("lock")).as("board never sets lock -- must render false, not be omitted "
+                + "or a stale true").isEqualTo(false);
+
+        Map<String, Object> queue = templates.stream()
+                .filter(t -> "queue/<name>".equals(t.get("name")))
+                .findFirst().orElseThrow();
+        assertThat(queue.get("claim_log_ttl_seconds")).as("queue.yaml's own 30-day override")
+                .isEqualTo(2_592_000);
+
+        Map<String, Object> mailbox = templates.stream()
+                .filter(t -> "mailbox/<address>".equals(t.get("name")))
+                .findFirst().orElseThrow();
+        assertThat(mailbox.get("lock")).as("mailbox declares no lock -- must render false").isEqualTo(false);
+        assertThat(mailbox).as("mailbox declares neither optional scale-limit field")
+                .doesNotContainKeys("max_live_rows", "claim_log_ttl_seconds");
     }
 
     /**
@@ -499,6 +577,148 @@ class TupleHandlerWiringTest {
     @Test
     void renew_requiresPost() throws Exception {
         assertThat(get(withRegistry, "/v1/tuples/renew").statusCode()).isEqualTo(405);
+    }
+
+    // ── RDR-211 Phase 1 Step 1 (bead nexus-rplay.2): the release route ───────
+
+    @Test
+    void release_endsTheClaimWithoutCountingAnAttempt_andReturnsReleasedTrue() throws Exception {
+        String to = "release-ok-addr";
+        String claimId = outAndClaim(to, "release-ok-claimant");
+
+        var resp = post(withRegistry, "/v1/tuples/release", Map.of(
+                "claim_id", claimId, "claimant", "release-ok-claimant"));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(mapper.readValue(resp.body(), MAP_T)).containsEntry("released", Boolean.TRUE);
+
+        // The tuple is available again -- a fresh claimant can take it.
+        var reclaim = post(withRegistry, "/v1/tuples/in", Map.of(
+                "subspace", "mailbox/" + to,
+                "keys_pattern", Map.of("to", to),
+                "claimant", "release-ok-claimant-2",
+                "lease_s", 60));
+        assertThat(reclaim.statusCode()).isEqualTo(200);
+        assertThat(mapper.readValue(reclaim.body(), MAP_T).get("claim_id")).isNotNull();
+    }
+
+    @Test
+    void release_onANotLiveClaim_is404() throws Exception {
+        String to = "release-notlive-addr";
+        String claimId = outAndClaim(to, "release-notlive-claimant");
+        // Consume the claim first, via ack, so it is no longer live.
+        assertThat(post(withRegistry, "/v1/tuples/ack", Map.of(
+                "claim_id", claimId, "claimant", "release-notlive-claimant")).statusCode())
+                .isEqualTo(200);
+
+        var resp = post(withRegistry, "/v1/tuples/release", Map.of(
+                "claim_id", claimId, "claimant", "release-notlive-claimant"));
+        assertThat(resp.body()).contains("ClaimNotFound");
+    }
+
+    @Test
+    void release_byAnotherClaimant_isRefused() throws Exception {
+        String to = "release-wrongowner-addr";
+        String claimId = outAndClaim(to, "release-owner-claimant");
+
+        var resp = post(withRegistry, "/v1/tuples/release", Map.of(
+                "claim_id", claimId, "claimant", "release-someone-else"));
+        assertThat(resp.body()).contains("ClaimOwnership");
+    }
+
+    @Test
+    void release_requiresPost() throws Exception {
+        assertThat(get(withRegistry, "/v1/tuples/release").statusCode()).isEqualTo(405);
+    }
+
+    // ── RDR-211 Phase 1 Step 1: the park-slot report route ───────────────────
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void parkStats_returnsCapsAndGaugesShape() throws Exception {
+        var resp = get(withRegistry, "/v1/tuples/park_stats");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat(body).containsKeys("max_global", "max_per_claimant", "global_in_use",
+                "refused_global", "refused_claimant", "per_claimant");
+        assertThat(((Number) body.get("max_global")).intValue())
+                .isEqualTo(TupleRepository.DEFAULT_PARK_CAP_GLOBAL);
+        assertThat(((Number) body.get("max_per_claimant")).intValue())
+                .isEqualTo(TupleRepository.DEFAULT_PARK_CAP_PER_CLAIMANT);
+        assertThat((Map<String, Object>) body.get("per_claimant")).isEmpty();
+    }
+
+    @Test
+    void parkStats_requiresGet() throws Exception {
+        assertThat(post(withRegistry, "/v1/tuples/park_stats", Map.of()).statusCode()).isEqualTo(405);
+    }
+
+    @Test
+    void parkStats_registryAbsent_notRegistered() throws Exception {
+        assertThat(get(withoutRegistry, "/v1/tuples/park_stats").statusCode()).isEqualTo(404);
+    }
+
+    // ── RDR-211 Phase 1 Step 1: the multiplexed wait route ───────────────────
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void wait_probeAcrossTwoSubspaces_returnsOnlyTheMatchingOne() throws Exception {
+        String to = "wait-wire-mailbox-addr";
+        assertThat(post(withRegistry, "/v1/tuples/out", Map.of(
+                "subspace", "mailbox/" + to,
+                "keys", Map.of("to", to),
+                "dims", Map.of("from", "wait-wire-sender"),
+                "body", "hello",
+                "nonce", "wait-wire-nonce")).statusCode()).isEqualTo(200);
+
+        var resp = post(withRegistry, "/v1/tuples/wait", Map.of(
+                "subspaces", java.util.List.of(
+                        Map.of("subspace", "mailbox/" + to, "keys_pattern", Map.of("to", to)),
+                        Map.of("subspace", "mailbox/wait-wire-empty-addr",
+                                "keys_pattern", Map.of("to", "wait-wire-empty-addr")))));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        var results = (java.util.List<Map<String, Object>>) body.get("results");
+        assertThat(results)
+                .as("only the subspace that actually matched appears -- never an empty-tuples entry")
+                .hasSize(1);
+        assertThat(results.get(0).get("subspace")).isEqualTo("mailbox/" + to);
+        var tuples = (java.util.List<Map<String, Object>>) results.get(0).get("tuples");
+        assertThat(tuples).hasSize(1);
+        assertThat(tuples.get(0).get("body")).isEqualTo("hello");
+    }
+
+    @Test
+    void wait_requiresPost() throws Exception {
+        assertThat(get(withRegistry, "/v1/tuples/wait").statusCode()).isEqualTo(405);
+    }
+
+    @Test
+    void wait_missingSubspaces_is400() throws Exception {
+        assertThat(post(withRegistry, "/v1/tuples/wait", Map.of()).statusCode()).isEqualTo(400);
+    }
+
+    @Test
+    void wait_unknownSubspace_is404() throws Exception {
+        var resp = post(withRegistry, "/v1/tuples/wait", Map.of(
+                "subspaces", java.util.List.of(Map.of("subspace", "not-a-real-template/x"))));
+        assertThat(resp.statusCode()).isEqualTo(404);
+        assertThat(resp.body()).contains("UnknownSubspace");
+    }
+
+    // ── RDR-211 Phase 1 Step 1 (bead nexus-rplay.5): max_live_rows over HTTP ──
+
+    @Test
+    void out_pastMaxLiveRows_rendersTheTypedErrorCodeAndStatus() throws Exception {
+        var first = post(withMaxLiveRowsCap, "/v1/tuples/out", Map.of(
+                "subspace", "probe-maxrows/room-1", "keys", Map.of("id", "row-1")));
+        assertThat(first.statusCode()).isEqualTo(200);
+
+        var second = post(withMaxLiveRowsCap, "/v1/tuples/out", Map.of(
+                "subspace", "probe-maxrows/room-1", "keys", Map.of("id", "row-2")));
+        assertThat(second.statusCode()).isEqualTo(429);
+        var body = mapper.readValue(second.body(), MAP_T);
+        assertThat(body.get("error")).isEqualTo("MaxLiveRowsExceeded");
+        assertThat((String) body.get("detail")).contains("probe-maxrows/room-1").contains("1");
     }
 
     private HttpResponse<String> post(NexusService svc, String path, Object body) throws Exception {

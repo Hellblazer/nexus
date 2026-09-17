@@ -6,6 +6,53 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.51.0] - 2026-09-17
+
+Paired engine: engine-service-v0.1.127 (`REQUIRED_ENGINE_VERSION` (0, 1, 127);
+was engine-service-v0.1.126), tagged 2026-09-17 12:11Z on 51097d1b2 (release
+run 35219690479 promoted 12:40:25Z, 21 assets), deployed 12:46:32Z before this
+client tag on the additive branch of the paired-release choreography, edge
+live from 12:47:07Z (STEP-6 gate report gate-report-20260917T124809Z-v011.json
+green, recall 12/12, parity pass).
+
+### Added
+- **RDR-211: broadcast board, work queue and mutual-exclusion lock as tuple-
+  space templates, plus a release claim operation and push delivery over the
+  Claude Code channel (epic nexus-rplay).** Three new named templates
+  (`board/<topic>`, `queue/<name>`, `lock/<resource>`) join the mailbox and
+  the RDR-184 dispatch ledger as the tuple space's only consumers. A new
+  `POST /v1/tuples/release` route ends a live claim without counting an
+  attempt and signals the subspace's waiters after commit (`HttpTupleStore
+  .release`, the `tuple_release` MCP tool, `nx tuple release`); a lock claim
+  refuses `ack` with `SchemaViolation`, release being the only way off a
+  lock. `GET /v1/tuples/park_stats` and a new multiplexed `POST /v1/tuples
+  /wait` route (up to 34 subspaces per call, one global park slot, 25s cap)
+  round out the engine surface — fourteen tuple routes total, twelve typed
+  errors. A new `MaxLiveRowsExceeded` 429 caps board and queue subspaces at
+  500 and 10,000 live rows respectively; the three pre-existing templates
+  stay unbounded.
+- **Managed subscriptions and channel-based delivery replace the Monitor
+  watcher.** `tuple_subscribe`, `tuple_unsubscribe` and `tuple_subscriptions`
+  (T1-persisted, instance-mailbox-leased) and `tuple_channel_probe` join the
+  MCP surface (53 tools total on the `nexus` server). A lifespan waiter
+  parks on the subscribed subspaces and pushes a notification carrying a
+  tuple reference only (subspace, tuple id, claim id) — never the body,
+  which is read on purpose with `tuple_rd` — over the Claude Code channel
+  capability, gated on the parent process's own argv (with a probe
+  fallback). The Monitor-based watcher, its SessionStart arming and `nx
+  tuple watch` are deleted outright; `conexus/hooks/scripts/mailbox_drain.py`
+  drops the per-prompt re-arm entirely. The `--dangerously-load-development
+  -channels` `server:nexus` launch flag is documented as one-time session
+  setup for a channel-capable client.
+- **Doctor rows `tuples.park_slots`, `tuples.queue_depth` and `tuples
+  .channel_delivery`** report process-wide park-slot use, queue backlog
+  depth, and channel-delivery health; `tuples.watch_permission` is removed
+  along with the watcher it checked.
+
+### Changed
+- **`nx tuple release` is a new CLI verb** alongside the existing `nx tuple`
+  subcommands, mirroring the MCP tool.
+
 ## [7.50.0] - 2026-09-16
 
 Paired engine: engine-service-v0.1.126 (`REQUIRED_ENGINE_VERSION` (0, 1, 126);

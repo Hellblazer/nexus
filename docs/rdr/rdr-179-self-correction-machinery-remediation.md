@@ -2,7 +2,8 @@
 title: "Self-Correction Machinery Remediation: Relight Plan-Reuse, Retrieval Benchmarking, Plan-Library Hygiene, and Taxonomy-Aware Recall"
 id: RDR-179
 type: Architecture
-status: draft
+status: closed
+closed_date: 2026-09-16
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
@@ -725,3 +726,22 @@ one-time prune
 **Confidence**: Medium — the keep/retag/delete boundary for the 33
 "other"-bucket rows not individually inspected is a reasonable
 extrapolation from the inspected samples, not row-by-row verified.
+
+## Revision History
+
+- 2026-07-04 — created (draft).
+- 2026-09-16 — closed from draft by Sam's override. The lifecycle table has
+  no draft-to-closed edge; this RDR was never gated because its phases
+  shipped as beads. Delivered: Phase 1 (nexus-o02xe, the plan-surface seam
+  collapsed onto `HttpPlanLibrary`), Phase 2 as
+  `tests/benchmarks/test_retrieval_drift_gate.py` on the nightly
+  local-service gate rather than the drafted weekly workflow (nexus-9kq3h),
+  Phase 3 (nexus-vtp8h: save-time DAG validation, always-failing decay,
+  `nx plan hygiene`). Phase 3.4, the `use_count` reconciliation, went to
+  RDR-203 Gap 3. Not delivered: Phase 2.1's 10/10/10 query set, Phase 5.1's
+  provenance corpus, Phase 5.3 (nexus-r300v closed on its own). Phase 4
+  remains RDR-134, kept as draft; its 4.1 refresh is still owed. Phase 5.2
+  dispositions recorded today: RDR-122 closed (delivered by other means),
+  RDR-127 accepted 2026-05-24, RDR-136 deferred, RDR-150 abandoned. OQ-4
+  answered: RDR-135 deferred. Post-mortem:
+  `post-mortem/179-self-correction-machinery-remediation.md`.

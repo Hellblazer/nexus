@@ -317,15 +317,17 @@ class TestSessionStartCmdGuidanceImperative:
         assert GUIDANCE_IMPERATIVE not in result.output
 
 
-# ── nx hook mailbox-arm (nexus-6konb.19) ────────────────────────────────────
+# ── nx hook mailbox-arm ──────────────────────────────────────────────────────
+#
+# RDR-211 nexus-rplay.14: the per-prompt re-arm this command served (a live
+# watcher-lock liveness check gating whether to print) was deleted with the
+# CLI watcher loop itself; nothing calls this command automatically any
+# more. It stays as a standalone command that always prints the wheel's
+# subscribe instruction, unconditionally.
 
 
 class TestMailboxArmCmd:
-    """The drain hook's per-turn re-arm asks the wheel for the arm text, so
-    the text versions with the wheel that ships ``nx tuple watch``. The
-    command re-checks liveness through the wheel's own lock path first."""
-
-    def _invoke(self, *, alive: bool, arm: object):
+    def _invoke(self, *, arm: object):
         from unittest.mock import patch
 
         from click.testing import CliRunner
@@ -334,44 +336,34 @@ class TestMailboxArmCmd:
 
         with (
             patch("nexus.hooks.adopt_session_marker") as adopt,
-            patch("nexus.tuple_watch.watcher_alive", return_value=alive) as live,
             patch("nexus.mailbox_arm.arm_block", **arm) as arm_block,
         ):
             result = CliRunner().invoke(
                 hook_group, ["mailbox-arm", "--session-id", "s1"],
             )
         self.adopt = adopt
-        return result, live, arm_block
+        return result, arm_block
 
     def test_prints_the_arm_block(self):
-        result, live, arm_block = self._invoke(alive=False, arm={"return_value": "ARM-TEXT"})
+        result, arm_block = self._invoke(arm={"return_value": "ARM-TEXT"})
         assert result.exit_code == 0, result.output
         assert "ARM-TEXT" in result.output
         arm_block.assert_called_once_with("s1")
-        assert live.call_args.args[1] == "s1"
-        self.adopt.assert_called_once_with("s1")
-
-    def test_prints_nothing_when_a_watcher_is_alive(self):
-        result, _live, arm_block = self._invoke(alive=True, arm={"return_value": "ARM-TEXT"})
-        assert result.exit_code == 0
-        assert result.output == ""
-        arm_block.assert_not_called()
         self.adopt.assert_called_once_with("s1")
 
     def test_moves_this_process_marker_to_the_session_and_records_no_clear(
         self, tmp_path, monkeypatch,
     ):
         """RDR-208 MVV 2026-09-14: /branch runs no SessionStart, so this
-        process's marker still names the parent and the parent's watcher
-        keeps running in the fork. mailbox-arm moves the marker, which stops
-        that watcher, and writes no cleared record: the parent's mailbox
-        stays with the parent."""
+        process's marker still names the parent. mailbox-arm moves the
+        marker and writes no cleared record: the parent's mailbox stays
+        with the parent."""
         from unittest.mock import patch
 
         from click.testing import CliRunner
 
         from nexus.commands.hook import hook_group
-        from nexus.tuple_watch import session_marker_path
+        from nexus.session_marker import session_marker_path
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
@@ -380,7 +372,6 @@ class TestMailboxArmCmd:
         marker.write_text("parent-sess")
         with (
             patch("nexus.session.find_immediate_claude_pid", return_value=777),
-            patch("nexus.tuple_watch.watcher_alive", return_value=False),
             patch("nexus.mailbox_arm.arm_block", return_value="ARM-TEXT"),
         ):
             result = CliRunner().invoke(
@@ -392,13 +383,11 @@ class TestMailboxArmCmd:
         assert sorted(p.name for p in marker.parent.glob("cleared.*")) == []
 
     def test_prints_nothing_when_no_arm_is_possible(self):
-        result, _live, _arm = self._invoke(alive=False, arm={"return_value": ""})
+        result, _arm = self._invoke(arm={"return_value": ""})
         assert result.exit_code == 0
         assert result.output == ""
 
     def test_a_failure_prints_nothing_and_exits_zero(self):
-        result, _live, _arm = self._invoke(
-            alive=False, arm={"side_effect": RuntimeError("boom")},
-        )
+        result, _arm = self._invoke(arm={"side_effect": RuntimeError("boom")})
         assert result.exit_code == 0
         assert result.output == ""

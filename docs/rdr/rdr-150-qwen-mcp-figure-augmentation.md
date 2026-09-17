@@ -2,7 +2,7 @@
 title: "Qwen-MCP Figure Augmentation Hook — Single-Path VL via MCP-Client Integration"
 id: RDR-150
 type: Feature
-status: draft
+status: abandoned
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
@@ -717,3 +717,10 @@ constraint "qwen-MCP-or-nothing": MCP-client integration with the qwen
 supervisor; pre-flight availability check; per-figure synchronous
 augmentation; idempotent via figure chash; explicit no-op when qwen
 unavailable. Reactivates bead `nexus-6h0e`._
+
+_2026-09-16 — abandoned. The bead this RDR reactivates, `nexus-6h0e`, was
+closed wontfix on 2026-08-07 (vision work runs through MinerU; a VL backend
+is not a nexus dependency). The MCP-client half shipped separately as
+`nexus.mcp_client` for DEVONthink. Figures are still dropped at
+`pdf_extractor`'s image placeholder; a revisit needs a fresh RDR against the
+MinerU path and the existing client._

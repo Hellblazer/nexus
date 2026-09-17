@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-0miq7.7: one source for the nine RDR-205 typed tuple-space errors.
+"""nexus-0miq7.7: one source for the twelve RDR-205-family typed tuple-space errors.
 
-Three places name the nine ``TupleException`` subtypes and their HTTP
+Three places name the twelve ``TupleException`` subtypes and their HTTP
 status, and all three must agree:
 
 1. The engine — ``service/src/main/java/dev/nexus/service/db/*Exception.java``
    files that ``extends TupleException``, each calling
    ``super("<Code>", <status>, ...)`` in its constructor.
-2. The client — ``nexus.db.t2.http_tuple_store``'s nine ``TupleError``
+2. The client — ``nexus.db.t2.http_tuple_store``'s twelve ``TupleError``
    subclasses, each carrying a ``code = "<Code>"`` class attribute
    (:data:`_ERROR_CLASSES_BY_CODE`'s keys).
 3. The doc — docs/tuple-space.md's ``## Errors`` section, one
@@ -15,7 +15,7 @@ status, and all three must agree:
 
 The engine is the source of truth (it is what actually renders the wire
 shape); this test reads it directly from the Java source rather than
-hand-maintaining a fourth copy of the nine names here, so a tenth error
+hand-maintaining a fourth copy of the names here, so a new error
 added to the engine and forgotten in the client or the doc reds this test
 instead of shipping silently mismatched.
 """

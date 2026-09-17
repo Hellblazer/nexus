@@ -1,0 +1,61 @@
+# RDR-211 Phase 1 Step 2 (bead nexus-rplay.8), Approach item 3: one
+# holder at a time, closing Gap 3 (no cross-session lock). id_from: keys
+# (not keys+nonce), so there is exactly one tuple per resource and out()
+# is a safe "make sure the lock exists" call for anyone -- RDR-205's
+# idempotency rule means a second out() of the same identity only
+# refreshes expires_at, and the lock flag below (Approach item 5) makes
+# an out() that meets an EXPIRED lock row reset it to available instead
+# of leaving it dead until the sweep purges it.
+#
+# To hold the lock: take it with in(); renew the lease while working;
+# end with release (RDR-211 Gap 4), which returns the tuple for the next
+# holder without consuming it and without counting an attempt. ack on a
+# lock claim is refused (SchemaViolationException naming release) by the
+# lock flag at consumeClaim (Technical Design "The lock flag"), because a
+# consumed lock row would be unobtainable until the sweep purges it; nack
+# stays allowed and counts an attempt, which this template never
+# dead-letters on.
+#
+# dims.from is OPTIONAL, unlike board's and queue's required from:
+# RDR-211's Technical Design table spells board and queue as "from
+# (required)" but lock only as "dims from", with no "(required)"
+# qualifier -- a caller may name the holder for diagnostics, but nothing
+# in this design depends on it being present.
+#
+# max_attempts intentionally OMITTED (RDR-211 Open Question 1, Approach
+# item 3): the engine treats an absent max_attempts as unbounded, so a
+# lock never dead-letters on a crashed holder's repeated lease lapses.
+#
+# lock: true (Approach item 5, "a lock lives as long as it is used"):
+# claim and renew move the tuple's own expiry to now plus
+# retention_seconds, ahead of the lease clamp, so a long-held lock's
+# lease is never capped against the stale out()-time ceiling.
+#
+# claim_log_ttl_seconds: 2592000 (30 days; RDR-211 Scale and Limits item
+# 6, "claim-log volume", leaves the exact value to implementation). At
+# the assumed load of about 3,600 claim-log rows a day, the engine's own
+# 180-day default would settle near 650,000 rows; 30 days cuts that to
+# about 108,000. 2,592,000s clears TemplateRegistry's boot check with
+# wide margin -- this template's own 604,800s (7-day) retention plus one
+# 21,600s (6h, NexusService.SWEEP_INTERVAL_HOURS) sweep interval is a
+# 626,400s floor the effective TTL must strictly exceed.
+name: lock/<resource>
+
+keys:
+  - resource
+
+dimensions:
+  from:
+    type: string
+
+id_from: keys
+
+take:
+  enabled: true
+  max_lease_seconds: 900
+
+retention_seconds: 604800
+
+lock: true
+
+claim_log_ttl_seconds: 2592000

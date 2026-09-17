@@ -2179,7 +2179,7 @@ Hooks run `nx index repo` in the background after each qualifying git operation,
 
 ### nx hook routing-stats
 
-The `nx hook` group (hidden from `nx --help`) hosts Claude Code lifecycle plumbing: `session-start`, `session-end`, `session-end-flush`, and `session-end-detach` are invoked by the conexus plugin's SessionStart/SessionEnd hooks with a JSON payload on stdin and are not intended for manual use. `mailbox-arm --session-id ID` prints the mailbox-watch arm instruction, or nothing when an arm could not succeed; the UserPromptSubmit mailbox drain hook runs it when no live watcher holds the session's own mailbox. `routing-stats` is the group's one operator-facing verb.
+The `nx hook` group (hidden from `nx --help`) hosts Claude Code lifecycle plumbing: `session-start`, `session-end`, `session-end-flush`, and `session-end-detach` are invoked by the conexus plugin's SessionStart/SessionEnd hooks with a JSON payload on stdin and are not intended for manual use. `mailbox-arm --session-id ID` prints the same `tuple_subscribe` instruction `session-start` emits, or nothing when it could not succeed; nothing calls it automatically any more (RDR-211 nexus-rplay.14 deleted the per-prompt re-arm it used to serve), so it stays only for manual use — the `UserPromptSubmit` drain hook is the unconditional floor regardless of whether a session ever subscribes. `routing-stats` is the group's one operator-facing verb.
 
 ```
 nx hook routing-stats [--log-path PATH] [--json] [--escapes] [--from-store] [--since ISO_DATE]
@@ -3792,6 +3792,18 @@ Extend a live claim held by `--claimant` before its lease lapses (RDR-206). Prin
 | `--claimant ID` | Must match the identity that made the claim (required) |
 | `--lease-s N` | New lease length from now, refused above the template's `max_lease_seconds` and silently clipped to the tuple's own expiry (required) |
 
+### nx tuple release
+
+```
+nx tuple release CLAIM_ID --claimant ID
+```
+
+End a live claim WITHOUT counting an attempt (`release`, RDR-211): a hand-back that is not a failure. Use `nx tuple nack` instead when the work genuinely failed and should count toward the template's `max_attempts`. Refused on a lapsed claim as `ClaimNotFound` rather than resurrecting it, and on a claim held by another claimant as `ClaimOwnership` — the same two refusals `renew` raises.
+
+| Flag | Description |
+|------|-------------|
+| `--claimant ID` | Must match the identity that made the claim (required) |
+
 ### nx tuple templates
 
 ```
@@ -3843,58 +3855,11 @@ Who holds NAME in the RDR-208 session directory (`directory/<name>`). Prints eac
 |------|-------------|
 | `--json` | Output as JSON: `{name, entries, holders, ambiguous, resolved_session_id}` |
 
-### nx tuple watch
-
-```
-nx tuple watch [ADDRESS...] [--instance NAME] [--interval SECONDS] [--reemit-after SECONDS] [--max-emits N] [--iterations N] [--state-dir PATH]
-```
-
-A ping-then-pull mailbox watcher, built to be the source of a Claude Code Monitor: every stdout line it prints is one notification that wakes the watching session. It probes `mailbox/ADDRESS` once per `--interval` with a zero-timeout `rd` (no park slot held), fetching many rows and filtering on `claim_state`, so a dead-lettered row at the head of the address cannot hide newer mail. It never claims, never acks, and never prints a body.
-
-An empty probe prints nothing. A newly seen tuple prints one line carrying the address, sender, kind, correlation id and tuple id, plus the drain instruction — `mcp__plugin_conexus_nexus__tuple_in` on the address, then `tuple_ack` (with `reply` for a request) or `tuple_nack`, the same MCP tools the SessionStart arm instruction and the mailbox skill already use, never the `nx tuple in` CLI form (nexus-dyfg8: the CLI form named no ack step at all); the tuple id is for correlation only, because a mailbox claim is address-wide. At most five such lines per cycle, then one coalesced line naming the rest. Beyond that, a rolling budget of eight stdout lines per twenty-second window, shared across every cycle and every watched address, caps a sustained flood: once the window is spent, a whole cycle's new mail collapses to a single line naming the count, so a burst costs at most one line per cycle no matter how many rows arrived, comfortably under the harness's own auto-stop threshold. A tuple still present after `--reemit-after` is pinged again, up to `--max-emits` times, then it goes silent and is counted. A dead-lettered row the watcher never saw alive is announced on stdout and re-announced on the same window as a live row, because it is mail that will never be delivered and you have heard nothing about it; a row that was pinged while alive and later died reports its death on stderr, since that is a status update on a message you already know about. The seen-set is a JSON file per address under `<state-dir>/tuple-watch/`; losing it re-pings and never loses a message.
-
-Each probe reads up to 300 rows, ordered `(created_at, id)` ascending, the same paging cap every other `rd` call in this reference is capped at. An address that never holds more than that is scanned from the top every cycle. The first time a probe comes back full (300 rows, meaning there may be more beyond it), that address permanently switches to a persisted cursor: every following probe resumes strictly after the last row safe to advance past, rather than re-reading the same head every cycle. "Safe to advance past" holds back the newest ten seconds of rows on every advance, because the engine stamps `created_at` before commit and two concurrent `out` calls to the same address can commit slightly out of the order their timestamps suggest, so a handful of the most recent rows are re-probed each cycle rather than risked. A row that ages out of that ten-second margin without ever becoming safe to cursor past is never pinged by this watcher; it is not lost mail, only a missed ping, because `conexus/hooks/scripts/mailbox_drain.py`'s own floor probes the address independently of this cursor on every prompt.
-
-`--instance NAME` also registers NAME as this session's own instance-name mailbox, for `conexus/hooks/scripts/mailbox_drain.py` to read back: it writes `<state-dir>/tuple-watch/addresses.d/<session id>` (one address per line, atomically), keyed to the session id resolved from this process's own environment — never a machine-wide file, so one session can never register (and so drain) another session's instance mailbox. The write is skipped when an explicit ADDRESS is given, since an explicit address suppresses the session-id/instance default outright and `--instance` is not part of what is actually watched.
-
-| Flag | Description |
-|------|-------------|
-| `--interval SECONDS` | Seconds between probes (default 3) |
-| `--reemit-after SECONDS` | Seconds before a still-present tuple is pinged again (default 600) |
-| `--max-emits N` | Pings per tuple before it goes silent (default 3) |
-| `--iterations N` | Probe cycles to run; 0 (default) runs until interrupted |
-| `--instance NAME` | This session's instance-name mailbox (the `ListAgents` row, e.g. `nexus-19`) |
-| `--state-dir PATH` | Where the seen-set lives (default: the nexus config dir) |
-
-An explicit `ADDRESS` wins outright: it suppresses every default, watches exactly what you named, and takes no other lock.
-
-With no `ADDRESS`, it watches the session id, which it reads from this process's own environment. It watches the instance mailbox as well only when `--instance` supplies the name, because that name exists in no environment variable at all and can only be passed at arm time. So the no-flag default is one mailbox, not two, and omitting `--instance` prints one warning saying the instance mailbox is unwatched, rather than silently halving the watch. If the session id does not resolve but `--instance` does, it watches that one alone and warns about the other. If neither resolves there is nothing to watch, which is a `SKIP` and no watch at all, not a warning. An `--instance` name outside the address charset (letters, digits, `.`, `_` and `-`, at most 128 characters) is not watched and prints one warning naming it; a session forked with `/branch` gets such a name from `ListAgents` (`<title> (Branch)`).
-
-When it does watch both, one process probes them and they share a single emit budget, because a second Monitor for the second address would double the ping rate against a throttle counted per monitor.
-
-Before the loop starts it preflights the engine with one registry call and one census per address. If the tuple space is unreachable it prints one `SKIP` line on stdout and exits without watching, because an engine below the floor that answers every call with a 404 is otherwise indistinguishable from an empty mailbox. A mailbox it cannot read prints its own `SKIP` line and is dropped; the other addresses are still watched, and it exits only when none is readable. A dead-lettered backlog approaching the probe cap warns, since past the cap dead rows hide fresh mail again.
-
-While the loop runs, a failed probe prints one line on stdout rather than going quiet: silence and an empty mailbox look identical. That line repeats at most once per five minutes for the same error, so a sustained outage cannot trip the Monitor's auto-stop, and a changed error (a transport blip becoming an auth failure) reports immediately.
-
-One watcher per address, machine-wide, enforced by a lock file next to the seen-set, scoped to the address, never the session, since `/clear` mints a new session id and a per-session lock would let the very re-arm it exists to catch straight through. Acquisition is per address and partial: when several addresses are requested and one is already held, that address alone is skipped (one line names the holder's process and session), while any address that is free is still watched; only when every requested address is already held does the command exit watching nothing. The lock is an advisory `flock`, so a holder that dies releases it and the next watcher acquires rather than refusing. Addresses are resolved once at startup and never re-resolved.
-
-A watcher does not need to be told to stop. `nx hook session-start` writes a marker naming the conversation's current session id for its Claude process on every SessionStart (startup, `/compact`, `/clear` and `/resume` alike, so a marker left by a dead process that owned the same pid never survives); each probe cycle checks that marker against the session id this watcher itself resolved at spawn, and the moment they differ, it prints one `STOP` line, releases its locks and exits, leaving the address free for the replacement the next SessionStart arm instruction starts. This replaces asking the model to `TaskStop` the old Monitor by hand, which cannot work after a real `/clear`: the fresh conversation running the new arm instruction has no memory of the old Monitor's harness task id to stop. A watcher armed with no session id to compare against (an explicit positional `ADDRESS`, or a session id that failed to resolve at spawn) never self-stops this way.
-
-**Arming via a Claude Code `Monitor` needs a permission allowlist entry** (nexus-6konb.9, MM-3.1): a `Monitor`'s `command` runs under the same permission machinery as `Bash`, so without one, arming raises a permission prompt in exactly the session nobody is present to approve. Add to `~/.claude/settings.json` (never `settings.local.json`):
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(nx tuple watch:*)"
-    ]
-  }
-}
-```
-
-This is user-global operator config, not something a hook or the plugin writes on your behalf — `nx hook session-start` (see `nexus.mailbox_arm`) emits the arm instruction itself but never touches `settings.json`.
-
-`nx doctor`'s `tuples.watch_permission` row (bead nexus-rml7o, MM-3.4 critic finding S5) checks this for you: it reads every settings file Claude Code consults for permissions — user `~/.claude/settings.json` (honouring `CLAUDE_CONFIG_DIR`), project `<root>/.claude/settings.json`, and project-local `<root>/.claude/settings.local.json` (`root` is the git top-level of the cwd, falling back to the cwd itself outside a repo) — never writing any of them. A file that cannot be read is treated as carrying no rules, never a crash. The order of the verdict, evaluated in this sequence, never fatal: first, a matching `permissions.deny` rule in ANY of the three files wins over a covering allow anywhere else, reported as denied, naming the denying file — the dangerous direction, since reporting covered while actually blocked would be worse than staying silent; second, absent a deny, a covering `permissions.allow` rule — the exact entry above, a genuinely broader `Bash(<prefix>:*)` ancestor such as `Bash(nx tuple:*)` or `Bash(nx:*)`, or a bare `Bash` rule — is reported ok, naming which file supplied it; third, absent both anywhere across all three files, the row reports "not configured" (a soft warning) — UNLESS the user-level Claude config directory (`CLAUDE_CONFIG_DIR`, or `~/.claude`) does not exist at all, in which case it reports "not applicable" instead, with no warning: Claude Code has never run on this machine, so there is no permission surface to be missing a rule from yet (bead nexus-7zhag). That not-applicable check runs LAST and only within the "not configured" outcome — a covering project or project-local rule still wins even when the user directory is absent, since Claude Code reads those regardless of `~/.claude`. Caveat: the row reads `CLAUDE_CONFIG_DIR` from `nx doctor`'s own process environment, so a Claude Code process running with a different `CLAUDE_CONFIG_DIR` than the shell invoking `nx doctor` can make the row look at the wrong directory. The row makes no claim about whether arming raises a permission prompt, in either direction — only whether a covering rule is present, which file supplied it, and what the rule is for.
+Mailbox push delivery has no CLI verb (RDR-211 nexus-rplay.14 deleted the
+prior CLI ping-then-pull watcher outright): a session subscribes its own
+instance mailbox via the `tuple_subscribe` MCP tool, and its own nexus MCP
+server pushes over the Claude Code channel. See
+[Tuple space § Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel).
 
 ## nx service
 

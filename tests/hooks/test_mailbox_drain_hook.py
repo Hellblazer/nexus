@@ -2,10 +2,12 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """The UserPromptSubmit mailbox drain hook (bead nexus-6konb.7, MM-2.2).
 
-The deterministic CONSUMER OF RECORD for RDR-205 mailbox delivery. The
-Phase 1 watcher (``nx tuple watch``) pings and never claims; this hook
-claims, acks and renders. They are never two renderers of one row --
-see bead nexus-73vnw's DISJOINTNESS paragraph.
+The deterministic CONSUMER OF RECORD for RDR-205 mailbox delivery, and
+(since RDR-211 nexus-rplay.14 deleted the CLI ping-then-pull watcher this
+hook used to pair with) the unconditional floor beneath the nexus MCP
+server's channel-based push delivery: this hook claims, acks and renders
+on every prompt, whether or not a session ever subscribed anything or
+reached the channel.
 
 These tests drive the real script as a subprocess against a mock engine,
 the same shape ``test_tuple_ledger_project.py`` uses for the sibling
@@ -16,7 +18,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import sys
 import threading
@@ -59,8 +60,6 @@ def _run(
     env = {k: v for k, v in os.environ.items() if not k.startswith("NX_SERVICE_")}
     env["NEXUS_CONFIG_DIR"] = str(config_dir)
     env["XDG_STATE_HOME"] = str(state_dir)
-    # nexus-6konb.19: the hook may spawn `nx hook mailbox-arm`. A PATH with no
-    # nx keeps every test off the live install; re-arm tests pass a fake nx.
     env["PATH"] = "/usr/bin:/bin"
     env.update(env_overrides or {})
     return subprocess.run(
@@ -1652,299 +1651,14 @@ def test_a_long_address_pending_file_round_trips(tmp_path, engine, capsys) -> No
     assert not pending_path.exists(), "the recovered entry must be cleared, not left behind"
 
 
-# ── Per-turn re-arm (bead nexus-6konb.19) ────────────────────────────────────
-#
-# The SessionStart arm instruction can fail to reach the session (measured
-# 2026-09-14: nx hook session-start ran at a resume, its output never reached
-# the transcript), and nothing re-armed. This hook runs on every prompt: from
-# the second prompt it sees for a session, it re-issues the wheel's arm text
-# when no live watcher holds the session's own mailbox lock.
-
-_FAKE_ARM = "MAILBOX WATCH: FAKE-ARM-BLOCK"
-
-
-def _fake_nx(
-    tmp_path: Path, *, text: str = _FAKE_ARM, rc: int = 0, delay_s: int = 0,
-) -> tuple[Path, Path]:
-    bin_dir = tmp_path / "fake-bin"
-    bin_dir.mkdir(exist_ok=True)
-    log = tmp_path / "nx-calls.log"
-    script = bin_dir / "nx"
-    script.write_text(
-        "#!/bin/sh\n"
-        f'echo "$@" >> {shlex.quote(str(log))}\n'
-        + (f"sleep {delay_s}\n" if delay_s else "")
-        + f"printf '%s\\n' {shlex.quote(text)}\n"
-        f"exit {rc}\n"
-    )
-    script.chmod(0o755)
-    return bin_dir, log
-
-
-def _with_nx(bin_dir: Path) -> dict[str, str]:
-    return {"PATH": f"{bin_dir}:/usr/bin:/bin"}
-
-
-def _nx_calls(log: Path) -> list[str]:
-    return log.read_text().splitlines() if log.exists() else []
-
-
-def _watch_dir(tmp_path: Path) -> Path:
-    d = tmp_path / "config" / "tuple-watch"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _write_lock(tmp_path: Path, pid: int) -> None:
-    (_watch_dir(tmp_path) / f"{SESSION_ID}.lock").write_text(
-        f"pid={pid} session={SESSION_ID} address={SESSION_ID}"
-        " started_at=2026-09-14T00:00:00Z"
-    )
-
-
-def _state_path(tmp_path: Path) -> Path:
-    return _watch_dir(tmp_path) / f"rearm.{SESSION_ID}"
-
-
-def _seen(tmp_path: Path, *, last_rearm: float = 0.0, last_attempt: float = 0.0) -> None:
-    """The hook has already seen a prompt for this session."""
-    _state_path(tmp_path).write_text(
-        json.dumps({"last_rearm": last_rearm, "last_attempt": last_attempt})
-    )
-
-
-def _state(tmp_path: Path) -> dict:
-    return json.loads(_state_path(tmp_path).read_text())
-
-
-def _dead_pid() -> int:
-    proc = subprocess.Popen([sys.executable, "-c", "pass"])
-    proc.wait()
-    return proc.pid
-
-
-@pytest.fixture
-def fake_watcher():
-    """A live process whose command line carries the watcher's mark."""
-    proc = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(300)", "tuple", "watch"],
-    )
-    try:
-        yield proc.pid
-    finally:
-        proc.kill()
-        proc.wait()
-
-
-def _marker(tmp_path: Path, session_id: str, *, claude_pid: int = 4242) -> None:
-    """The watcher self-stop marker SessionStart writes for a claude process."""
-    (_watch_dir(tmp_path) / f"session.{claude_pid}").write_text(session_id)
-
-
-class TestPerTurnRearm:
-    def test_the_first_prompt_after_a_sessionstart_stays_silent(self, tmp_path, engine) -> None:
-        """A marker names this session, so SessionStart ran and its arm
-        instruction (if it arrived) is in front of the model."""
-        _wired(tmp_path, engine())
-        bin_dir, log = _fake_nx(tmp_path)
-        _marker(tmp_path, SESSION_ID)
-        res = _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
-        assert res.returncode == 0, res.stderr
-        assert res.stdout.strip() == ""
-        assert _nx_calls(log) == []
-        assert _state_path(tmp_path).is_file()
-
-    def test_the_first_prompt_of_a_branched_session_arms_at_once(self, tmp_path, engine) -> None:
-        """/branch forks a session with no SessionStart, so this process's
-        marker still names the parent and the parent's watcher keeps running
-        in the fork (RDR-208 MVV, 2026-09-14). No marker names the fork, so
-        its first prompt re-arms, and the spawned ``nx hook mailbox-arm``
-        moves the marker, which stops the parent's watcher."""
-        _wired(tmp_path, engine())
-        bin_dir, log = _fake_nx(tmp_path)
-        _marker(tmp_path, "parent-session-of-the-fork")
-        res = _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
-        assert res.returncode == 0, res.stderr
-        assert _FAKE_ARM in res.stdout
-        assert _nx_calls(log) == [f"hook mailbox-arm --session-id {SESSION_ID}"]
-
-    def test_the_second_prompt_with_no_watcher_reissues_the_wheel_instruction(
-        self, tmp_path, engine,
-    ) -> None:
-        _wired(tmp_path, engine())
-        bin_dir, log = _fake_nx(tmp_path)
-        _marker(tmp_path, SESSION_ID)
-        _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
-        res = _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
-        assert res.returncode == 0, res.stderr
-        assert _FAKE_ARM in res.stdout
-        assert "No mailbox watch is running for this session" in res.stdout
-        assert _nx_calls(log) == [f"hook mailbox-arm --session-id {SESSION_ID}"]
-
-    def test_nothing_sessionstart_writes_can_suppress_it(self, tmp_path, engine) -> None:
-        """SessionStart output is the thing that can be lost, so no file it
-        writes may stand in for delivery: a fresh tuple-watch session marker
-        must not silence the reminder."""
-        _wired(tmp_path, engine())
-        bin_dir, _log = _fake_nx(tmp_path)
-        _seen(tmp_path)
-        (_watch_dir(tmp_path) / f"session.{os.getpid()}").write_text(SESSION_ID)
-        res = _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
-        assert _FAKE_ARM in res.stdout
-
-    def test_a_delivered_instruction_is_not_repeated_inside_the_interval(
-        self, tmp_path, engine,
-    ) -> None:
-        _wired(tmp_path, engine())
-        bin_dir, log = _fake_nx(tmp_path)
-        _seen(tmp_path)
-        _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
-        second = _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
-        assert _FAKE_ARM not in second.stdout
-        assert len(_nx_calls(log)) == 1
-
-    def test_a_live_watcher_suppresses_it(self, tmp_path, engine, fake_watcher) -> None:
-        _wired(tmp_path, engine())
-        bin_dir, log = _fake_nx(tmp_path)
-        _seen(tmp_path)
-        _write_lock(tmp_path, fake_watcher)
-        res = _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
-        assert res.stdout.strip() == ""
-        assert _nx_calls(log) == []
-
-    def test_a_reused_pid_that_is_not_a_watcher_counts_as_no_watcher(
-        self, tmp_path, engine,
-    ) -> None:
-        _wired(tmp_path, engine())
-        bin_dir, log = _fake_nx(tmp_path)
-        _seen(tmp_path)
-        _write_lock(tmp_path, os.getpid())
-        res = _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
-        assert _FAKE_ARM in res.stdout
-        assert len(_nx_calls(log)) == 1
-
-    def test_a_lock_left_by_a_dead_watcher_counts_as_no_watcher(
-        self, tmp_path, engine,
-    ) -> None:
-        _wired(tmp_path, engine())
-        bin_dir, log = _fake_nx(tmp_path)
-        _seen(tmp_path)
-        _write_lock(tmp_path, _dead_pid())
-        res = _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
-        assert _FAKE_ARM in res.stdout
-        assert len(_nx_calls(log)) == 1
-
-    def test_a_failed_attempt_backs_off_briefly_not_for_the_interval(
-        self, tmp_path, engine,
-    ) -> None:
-        _wired(tmp_path, engine())
-        bin_dir, log = _fake_nx(tmp_path, rc=1)
-        _seen(tmp_path)
-        first = _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
-        assert first.stdout.strip() == ""
-        assert len(_nx_calls(log)) == 1
-        _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
-        assert len(_nx_calls(log)) == 1, "a retry inside the backoff"
-        assert _state(tmp_path)["last_rearm"] == 0.0, "a failure started the interval"
-        _seen(tmp_path, last_attempt=time.time() - 61.0)
-        _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
-        assert len(_nx_calls(log)) == 2, "no retry once the backoff passed"
-
-    def test_a_hung_nx_is_cut_off_and_injects_nothing(self, tmp_path, engine) -> None:
-        """Without the spawn cap the hook would wait out the fake's sleep and
-        then print its text, so the empty stdout is the proof of the cap."""
-        _wired(tmp_path, engine())
-        bin_dir, log = _fake_nx(tmp_path, delay_s=30)
-        _seen(tmp_path)
-        res = _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
-        assert res.returncode == 0, res.stderr
-        assert res.stdout.strip() == ""
-        assert "TimeoutExpired" in res.stderr
-        assert len(_nx_calls(log)) == 1
-
-    def test_no_nx_on_path_injects_nothing(self, tmp_path, engine) -> None:
-        _wired(tmp_path, engine())
-        _seen(tmp_path)
-        res = _run(tmp_path=tmp_path)
-        assert res.returncode == 0, res.stderr
-        assert res.stdout.strip() == ""
-
-    def test_an_unreachable_engine_never_spawns_nx(self, tmp_path) -> None:
-        bin_dir, log = _fake_nx(tmp_path)
-        _seen(tmp_path)
-        res = _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
-        assert res.returncode == 0, res.stderr
-        assert _nx_calls(log) == []
-
-    def test_mail_is_still_delivered_alongside_the_rearm(self, tmp_path, engine) -> None:
-        eng = engine()
-        eng.rows = [_row("rr01", sender="nexus-47", body="rearm with mail")]
-        _wired(tmp_path, eng)
-        bin_dir, _log = _fake_nx(tmp_path)
-        _seen(tmp_path)
-        res = _run(tmp_path=tmp_path, env_overrides=_with_nx(bin_dir))
-        assert "rearm with mail" in res.stdout
-        assert _FAKE_ARM in res.stdout
-
-
-def test_rearm_naming_matches_the_wheel() -> None:
-    """This script cannot import nexus, so it spells the watcher's lock name
-    and command mark itself. They must agree with the wheel."""
-    from nexus import tuple_watch
-
-    module = _load_module()
-    cfg = Path("/cfg")
-    for sid in (SESSION_ID, "odd id/with:chars"):
-        assert module._watch_lock_path(cfg, sid) == tuple_watch.lock_path(cfg, sid)
-    assert module._WATCH_COMMAND_MARK == tuple_watch.WATCH_COMMAND_MARK
-
-
-def test_session_marker_naming_matches_the_wheel() -> None:
-    """The first-prompt check looks for SessionStart's self-stop marker by
-    name; the hook spells that name itself."""
-    from nexus import tuple_watch
-
-    module = _load_module()
-    cfg = Path("/cfg")
-    wheel = tuple_watch.session_marker_path(cfg, 4242)
-    assert wheel.parent == cfg / "tuple-watch"
-    assert wheel.name == f"{module._SESSION_MARKER_PREFIX}4242"
-
-
-def test_a_live_watcher_is_seen_under_a_narrow_terminal(tmp_path, engine, fake_watcher) -> None:
-    """procps (Linux) truncates a piped ``ps -o command=`` to COLUMNS unless
-    ``-ww`` is given, and the watcher's mark sits at the tail of its command
-    line, so a narrow terminal made a live watcher read as none and the hook
-    nagged. macOS ps does not truncate, so only a Linux run can fail this."""
-    _wired(tmp_path, engine())
-    bin_dir, log = _fake_nx(tmp_path)
-    _seen(tmp_path)
-    _write_lock(tmp_path, fake_watcher)
-    res = _run(tmp_path=tmp_path, env_overrides={**_with_nx(bin_dir), "COLUMNS": "20"})
-    assert res.stdout.strip() == ""
-    assert _nx_calls(log) == []
-
-
 def test_cleared_record_naming_matches_the_wheel() -> None:
     """RDR-208 Phase 2 Step 3: this script cannot import nexus, so it spells
     the cleared-record filename itself
-    (``nexus.tuple_watch.record_clear_and_write_session_marker`` writes it,
-    naming a previous session's mailbox). It must agree with the wheel."""
-    from nexus import tuple_watch
+    (``nexus.session_marker.record_clear_and_write_session_marker`` writes
+    it, naming a previous session's mailbox). It must agree with the wheel."""
+    from nexus import session_marker
 
     module = _load_module()
     cfg = Path("/cfg")
     for sid in (SESSION_ID, "odd-id-with-dashes.and.dots"):
-        assert module._cleared_record_path(cfg, sid) == tuple_watch.cleared_record_path(cfg, sid)
-
-
-def test_the_lock_body_the_watcher_writes_parses_to_its_pid(tmp_path) -> None:
-    from nexus.tuple_watch import acquire_watch_locks, lock_path
-
-    module = _load_module()
-    locks = acquire_watch_locks([SESSION_ID], state_dir=tmp_path, emit=lambda _s: None)
-    try:
-        assert locks.ok
-        assert module._lock_pid(lock_path(tmp_path, SESSION_ID).read_text()) == os.getpid()
-    finally:
-        locks.release()
+        assert module._cleared_record_path(cfg, sid) == session_marker.cleared_record_path(cfg, sid)

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import nexus.mailbox_arm as mailbox_arm
 from nexus.hooks import render_session_start, session_end, session_end_flush, session_start
 from nexus.mailbox_arm import mailbox_arm_instruction
 
@@ -231,11 +232,12 @@ class TestT1HandoffMarkerWriter:
 
 # ── tuple-watch session marker writer (nexus-6konb.12, MM-3.4 fix 1) ────────
 #
-# On every SessionStart source, session_start() ALSO writes the tuple-watch
-# stale-self-stop marker (nexus.tuple_watch.write_session_marker) for the
-# hook's own claude ancestor pid, alongside (not instead of) the T1 handoff
-# marker above -- on every source (pid reuse), same claude-pid derivation, different
-# consumer (a live ``nx tuple watch`` Monitor rather than the MCP lifespan).
+# On every SessionStart source, session_start() ALSO writes the session
+# marker (nexus.session_marker.write_session_marker) for the hook's own
+# claude ancestor pid, alongside (not instead of) the T1 handoff marker
+# above -- on every source (pid reuse), same claude-pid derivation, different
+# consumers (nexus.tuple_directory.resolve_default_from and the
+# record_clear_and_write_session_marker call immediately below it).
 
 
 class TestTupleWatchSessionMarkerWriter:
@@ -250,7 +252,7 @@ class TestTupleWatchSessionMarkerWriter:
             return session_start(claude_session_id="new-sess-id", source=source)
 
     def test_clear_writes_the_session_marker(self, tmp_path, monkeypatch) -> None:
-        from nexus.tuple_watch import session_marker_path
+        from nexus.session_marker import session_marker_path
 
         self._session_start(monkeypatch, tmp_path, source="clear", claude_pid=4242)
         marker = session_marker_path(tmp_path, 4242)
@@ -258,7 +260,7 @@ class TestTupleWatchSessionMarkerWriter:
         assert marker.read_text(encoding="utf-8").strip() == "new-sess-id"
 
     def test_resume_writes_the_session_marker(self, tmp_path, monkeypatch) -> None:
-        from nexus.tuple_watch import session_marker_path
+        from nexus.session_marker import session_marker_path
 
         self._session_start(monkeypatch, tmp_path, source="resume", claude_pid=4242)
         marker = session_marker_path(tmp_path, 4242)
@@ -274,7 +276,7 @@ class TestTupleWatchSessionMarkerWriter:
         session id and stops itself on its first cycle (pid reuse; MM-3.4
         round-2 critic). compact and a missing source write the same id,
         which the watcher treats as no change."""
-        from nexus.tuple_watch import session_marker_path, write_session_marker
+        from nexus.session_marker import session_marker_path, write_session_marker
 
         write_session_marker(tmp_path, 4242, "dead-process-session")
         self._session_start(monkeypatch, tmp_path, source=source, claude_pid=4242)
@@ -284,7 +286,7 @@ class TestTupleWatchSessionMarkerWriter:
     def test_unresolvable_claude_pid_writes_no_session_marker(
         self, tmp_path, monkeypatch,
     ) -> None:
-        from nexus.tuple_watch import session_marker_path
+        from nexus.session_marker import session_marker_path
 
         self._session_start(monkeypatch, tmp_path, source="clear", claude_pid=0)
         assert not session_marker_path(tmp_path, 0).exists()
@@ -321,7 +323,7 @@ class TestClearRecordsThePreviousSession:
     def test_clear_with_a_prior_marker_writes_the_cleared_record(
         self, tmp_path, monkeypatch,
     ) -> None:
-        from nexus.tuple_watch import (
+        from nexus.session_marker import (
             cleared_record_path,
             session_marker_path,
             write_session_marker,
@@ -340,7 +342,7 @@ class TestClearRecordsThePreviousSession:
     def test_every_other_source_writes_no_record(
         self, tmp_path, monkeypatch, source,
     ) -> None:
-        from nexus.tuple_watch import cleared_record_path, write_session_marker
+        from nexus.session_marker import cleared_record_path, write_session_marker
 
         write_session_marker(tmp_path, 4242, "old-sess-id")
         self._session_start(monkeypatch, tmp_path, source=source)
@@ -348,7 +350,7 @@ class TestClearRecordsThePreviousSession:
         assert not cleared_record_path(tmp_path, "new-sess-id").exists()
 
     def test_clear_to_the_same_id_writes_no_record(self, tmp_path, monkeypatch) -> None:
-        from nexus.tuple_watch import cleared_record_path, write_session_marker
+        from nexus.session_marker import cleared_record_path, write_session_marker
 
         write_session_marker(tmp_path, 4242, "new-sess-id")
         self._session_start(monkeypatch, tmp_path, source="clear")
@@ -358,7 +360,7 @@ class TestClearRecordsThePreviousSession:
     def test_clear_with_no_prior_marker_writes_no_record(
         self, tmp_path, monkeypatch,
     ) -> None:
-        from nexus.tuple_watch import cleared_record_path
+        from nexus.session_marker import cleared_record_path
 
         self._session_start(monkeypatch, tmp_path, source="clear")
 
@@ -369,7 +371,7 @@ class TestClearRecordsThePreviousSession:
         for S3 names both S2 and S1, and S2's own now-unreachable record is
         removed rather than left to strand S1's id.
         """
-        from nexus.tuple_watch import cleared_record_path, write_session_marker
+        from nexus.session_marker import cleared_record_path, write_session_marker
 
         write_session_marker(tmp_path, 4242, "s1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
@@ -387,7 +389,7 @@ class TestClearRecordsThePreviousSession:
         assert not cleared_record_path(tmp_path, "s2").exists()
 
     def test_inherited_session_id_writes_no_record(self, tmp_path, monkeypatch) -> None:
-        from nexus.tuple_watch import cleared_record_path, write_session_marker
+        from nexus.session_marker import cleared_record_path, write_session_marker
 
         write_session_marker(tmp_path, 4242, "old-sess-id")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
@@ -404,7 +406,7 @@ class TestClearRecordsThePreviousSession:
     def test_cleared_record_write_failure_does_not_crash_session_start(
         self, tmp_path, monkeypatch,
     ) -> None:
-        from nexus.tuple_watch import write_session_marker
+        from nexus.session_marker import write_session_marker
 
         write_session_marker(tmp_path, 4242, "old-sess-id")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
@@ -414,7 +416,7 @@ class TestClearRecordsThePreviousSession:
             patch("nexus.session.find_immediate_claude_pid", return_value=4242),
             patch("nexus.session.find_mcp_sibling_pids", return_value=[]),
             patch(
-                "nexus.tuple_watch.record_clear_and_write_session_marker",
+                "nexus.session_marker.record_clear_and_write_session_marker",
                 side_effect=RuntimeError("boom"),
             ),
         ):
@@ -919,7 +921,7 @@ class TestRenderSessionStartIsPure:
 
         output = render_session_start(
             "61710488-41ff-491f-b656-183042eb1f1b",
-            mailbox_arm_text="\n\nMAILBOX WATCH: arm once, now.",
+            mailbox_arm_text=f"\n\n{mailbox_arm.ARM_MARKER}: subscribe now.",
         )
 
         assert "Nexus ready" in output
@@ -940,13 +942,15 @@ class TestRenderSessionStartIsPure:
         mock_write.assert_called_once_with("wrapper-still-writes")
 
 
-# ── nexus-6konb.9 (MM-3.1): SessionStart mailbox-watch arm instruction ──────
+# ── nexus-6konb.9 (MM-3.1), superseded by RDR-211 nexus-rplay.14: ───────────
+# SessionStart mailbox-subscribe instruction.
 #
 # The instruction text and probe/registry logic are unit-tested directly in
 # tests/test_mailbox_arm.py. These pin the INTEGRATION into session_start():
 # it fires on every SessionStart source, it is silent when the mailbox_arm
-# module says no arm is possible, a probe failure never breaks the hook, and
-# the hook stays inside its 10s budget with the engine genuinely absent.
+# module says no subscribe instruction is possible, a probe failure never
+# breaks the hook, and the hook stays inside its 10s budget with the engine
+# genuinely absent.
 
 
 class TestMailboxArmIntegration:
@@ -972,7 +976,7 @@ class TestMailboxArmIntegration:
         ):
             output = session_start(claude_session_id="s-6konb9-absent")
         assert "Nexus ready" in output
-        assert "MAILBOX WATCH" not in output
+        assert mailbox_arm.ARM_MARKER not in output
 
     def test_arm_probe_failure_never_breaks_session_start(self, monkeypatch) -> None:
         from unittest.mock import patch as _patch
@@ -986,17 +990,17 @@ class TestMailboxArmIntegration:
         ):
             output = session_start(claude_session_id="s-6konb9-boom")
         assert "Nexus ready" in output
-        assert "MAILBOX WATCH" not in output
+        assert mailbox_arm.ARM_MARKER not in output
 
     @pytest.mark.parametrize("source", ["startup", "resume", "clear", "compact"])
     def test_arm_text_appears_on_every_session_start_source(
         self, source: str, monkeypatch,
     ) -> None:
         """Unlike the T1 handoff marker (gated to clear/resume only), the
-        mailbox arm instruction is worth repeating on every source -- a
-        fresh watcher after /compact is exactly as useful as after /clear,
-        and the underlying `nx tuple watch` lock makes a redundant arm
-        harmless (nexus-6konb.9 dev note)."""
+        mailbox subscribe instruction is worth repeating on every source --
+        it is worth restating after /compact exactly as much as after
+        /clear, and re-subscribing an already-subscribed instance mailbox
+        is a harmless no-op (nexus-6konb.9 dev note)."""
         from unittest.mock import patch as _patch
 
         with (
@@ -1019,7 +1023,7 @@ class TestMailboxArmIntegration:
         network probe is mocked): nexus-6konb.9's defect fix removed the
         machine-wide registry guess entirely, so a populated
         <config>/tuple-watch/addresses file must not change anything --
-        the instruction always tells the model to supply --instance
+        the instruction always tells the model to supply the instance name
         itself, from its own ListAgents knowledge."""
         from unittest.mock import patch as _patch
 
@@ -1034,11 +1038,14 @@ class TestMailboxArmIntegration:
         ):
             output = session_start(claude_session_id="s-6konb9-instance-known")
         assert "nexus-registered-instance" not in output
-        assert '"nx tuple watch --instance' in output
+        assert 'tuple_subscribe("mailbox/<name>")' in output
 
-    def test_command_never_carries_a_bare_positional_session_id(
+    def test_names_the_development_channel_launch_flag(
         self, tmp_path: Path,
     ) -> None:
+        """Sam's decision of 2026-09-17 (T2 nexus_rdr/211-decision-dev-
+        channel-dialog-2026-09-17): the setup wording names the flag and
+        the per-launch confirmation dialog plainly."""
         from unittest.mock import patch as _patch
 
         with (
@@ -1046,31 +1053,16 @@ class TestMailboxArmIntegration:
             _patch("nexus.config.nexus_config_dir", return_value=tmp_path),
             _patch("nexus.mailbox_arm.tuple_surface_available", return_value=True),
         ):
-            output = session_start(claude_session_id="s-6konb9-instance-unknown")
-        assert 'command: "nx tuple watch s-6konb9-instance-unknown"' not in output
-        assert "omit --instance" in output
-
-    def test_emitted_text_includes_timeout_ms_and_persistent_only_where_offered(
-        self, tmp_path: Path,
-    ) -> None:
-        from unittest.mock import patch as _patch
-
-        with (
-            _patch("nexus.hooks.write_claude_session_id"),
-            _patch("nexus.config.nexus_config_dir", return_value=tmp_path),
-            _patch("nexus.mailbox_arm.tuple_surface_available", return_value=True),
-        ):
-            output = session_start(claude_session_id="s-6konb9-timeout-ms")
-        assert "timeout_ms: 3600000" in output
-        call = output[output.index("Monitor({"):output.index("})")]
-        assert "persistent" not in call
-        assert "persistent: true only if Monitor has it" in output
+            output = session_start(claude_session_id="s-6konb9-flag")
+        assert "--dangerously-load-development-channels server:nexus" in output
+        assert "one-keystroke confirmation dialog" in output
+        assert "drain hook" in output
 
     def test_absent_when_tuple_surface_unavailable_end_to_end(
         self, tmp_path: Path,
     ) -> None:
         """Real nexus.mailbox_arm.arm_block, only the HTTP probe mocked to
-        fail -- never an arm request that cannot succeed."""
+        fail -- never a subscribe request that cannot succeed."""
         from unittest.mock import patch as _patch
 
         with (
@@ -1080,7 +1072,7 @@ class TestMailboxArmIntegration:
         ):
             output = session_start(claude_session_id="s-6konb9-unavailable")
         assert "Nexus ready" in output
-        assert "MAILBOX WATCH" not in output
+        assert mailbox_arm.ARM_MARKER not in output
 
     def test_hook_stays_within_budget_with_engine_genuinely_absent(
         self, tmp_path: Path, monkeypatch,
@@ -1107,7 +1099,7 @@ class TestMailboxArmIntegration:
         elapsed = time.monotonic() - start
 
         assert "Nexus ready" in output
-        assert "MAILBOX WATCH" not in output
+        assert mailbox_arm.ARM_MARKER not in output
         # nexus-scc9t: loose hang guard anchored to a REAL external
         # constraint (hooks.json's own 10s SessionStart timeout), not an
         # arbitrary multiplier -- the 1s margin below that hard ceiling

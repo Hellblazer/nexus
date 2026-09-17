@@ -7,8 +7,9 @@ timeout-ordering arithmetic, the parked-502 gateway retry) that do not need
 a live tuple row and are cheaper and more deterministic as mock-transport /
 monkeypatch tests than as engine round trips.
 
-Three v1 templates are loaded at engine boot (``service/src/main/resources/
-tuples/templates/{directory,ledger,mailbox}.yaml``):
+Six templates are loaded at engine boot (``service/src/main/resources/
+tuples/templates/{board,directory,ledger,lock,mailbox,queue}.yaml``; the
+tests below exercise the original three):
 
   - ``ledger/<session_id>``: keys ``[agent_id, kind]``, ``id_from=keys``,
     ``take.enabled=false`` (never claimable).
@@ -63,12 +64,13 @@ from nexus.db.t2.http_tuple_store import (
     _MAX_NONCE_BYTES,
     _MAX_REQUEST_BODY_BYTES,
     _MAX_SUBSPACE_BYTES,
+    _MAX_WAIT_SPECS,
     _PARK_TIMEOUT_MARGIN_S,
     _check_field_size,
     _check_request_size,
     _raise_typed,
 )
-from nexus.db.t2.records import TupleRow
+from nexus.db.t2.records import ParkStats, TupleRow, WaitResult, WaitSpec
 
 
 def _uniq(label: str) -> str:
@@ -291,6 +293,115 @@ class TestNack:
         with pytest.raises(ClaimOwnershipError) as exc_info:
             store.nack(claim_id, "not-c1")
         assert exc_info.value.code == "ClaimOwnership"
+
+
+# ── release (RDR-211 Phase 1 Step 1, bead nexus-rplay.2) ────────────────────
+
+
+class TestRelease:
+    def test_release_ends_the_claim_without_counting_an_attempt(self, t2_service_env) -> None:
+        store = HttpTupleStore()
+        addr = _uniq("addr")
+        store.out(
+            f"mailbox/{addr}", {"to": addr}, {"from": "sender-a"}, "hi",
+            nonce=_uniq("nonce"),
+        )
+        row, claim_id = store.in_(f"mailbox/{addr}", {"to": addr}, claimant="c1", lease_s=30)
+        assert row.attempts == 0
+
+        store.release(claim_id, "c1")
+
+        rows = store.rd(f"mailbox/{addr}", {"to": addr}, n=2)
+        assert len(rows) == 1, f"expected one row, got {len(rows)}"
+        assert rows[0].claim_state is None
+        assert rows[0].claimant is None
+        assert rows[0].attempts == 0, "release must not count an attempt (unlike nack)"
+
+        # the released row is re-claimable by a different claimant
+        row2, claim_id2 = store.in_(f"mailbox/{addr}", {"to": addr}, claimant="c2", lease_s=30)
+        assert row2.body == "hi"
+        assert claim_id2 != claim_id
+
+    def test_release_wakes_a_parked_in(self, t2_service_env) -> None:
+        store = HttpTupleStore()
+        addr = _uniq("addr")
+        store.out(
+            f"mailbox/{addr}", {"to": addr}, {"from": "sender-a"}, "wake-me",
+            nonce=_uniq("nonce"),
+        )
+        _row, claim_id = store.in_(f"mailbox/{addr}", {"to": addr}, claimant="holder", lease_s=30)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                store.in_, f"mailbox/{addr}", {"to": addr}, claimant="waiter", lease_s=30, timeout_s=8,
+            )
+            time.sleep(1.0)  # let the background call reach its actual park
+            store.release(claim_id, "holder")
+            result = future.result(timeout=10)
+        assert result is not None, "release must signal the parked in after commit"
+        woken_row, woken_claim_id = result
+        assert woken_row.body == "wake-me"
+        assert woken_claim_id != claim_id
+
+    def test_release_of_an_unknown_claim_is_claim_not_found(self, t2_service_env) -> None:
+        store = HttpTupleStore()
+        with pytest.raises(ClaimNotFoundError) as exc_info:
+            store.release(uuid.uuid4().hex, "c1")
+        assert exc_info.value.code == "ClaimNotFound"
+
+    def test_release_by_the_wrong_claimant_is_claim_ownership(self, t2_service_env) -> None:
+        store = HttpTupleStore()
+        addr = _uniq("addr")
+        store.out(
+            f"mailbox/{addr}", {"to": addr}, {"from": "sender-a"}, "hi",
+            nonce=_uniq("nonce"),
+        )
+        _row, claim_id = store.in_(f"mailbox/{addr}", {"to": addr}, claimant="c1", lease_s=30)
+        with pytest.raises(ClaimOwnershipError) as exc_info:
+            store.release(claim_id, "not-c1")
+        assert exc_info.value.code == "ClaimOwnership"
+
+    def test_release_rejects_empty_arguments_before_sending(self, t2_service_env) -> None:
+        store = HttpTupleStore()
+        for bad in ({"claim_id": "", "claimant": "c1"}, {"claim_id": "x", "claimant": ""}):
+            with pytest.raises(ValueError):
+                store.release(bad["claim_id"], bad["claimant"])
+
+
+class TestReleaseAgainstAnOldEngine:
+    """Mirrors ``TestRenewAgainstAnOldEngine``: an engine predating
+    ``/release`` must fail loud, never silently no-op."""
+
+    @staticmethod
+    def _engine_404(monkeypatch, **response_kw) -> None:
+        def _404(*_a, **_k):
+            request = httpx.Request("POST", "http://engine/v1/tuples/release")
+            response = httpx.Response(404, request=request, **response_kw)
+            raise httpx.HTTPStatusError("404", request=request, response=response)
+
+        monkeypatch.setattr(refreshable.RefreshableHttpStoreMixin, "_post", _404)
+
+    def test_the_real_old_engine_body_stays_a_bare_http_error(self, monkeypatch) -> None:
+        self._engine_404(monkeypatch, json={"error": "unknown tuples op: /release"})
+        store = HttpTupleStore()
+        with pytest.raises(httpx.HTTPStatusError):
+            store.release("claim-1", "c1")
+
+    def test_an_unparseable_404_body_also_stays_a_bare_http_error(
+        self, monkeypatch,
+    ) -> None:
+        self._engine_404(monkeypatch, text="Not Found")
+        store = HttpTupleStore()
+        with pytest.raises(httpx.HTTPStatusError):
+            store.release("claim-1", "c1")
+
+    def test_a_recognised_code_in_a_404_still_maps_to_its_typed_error(
+        self, monkeypatch,
+    ) -> None:
+        self._engine_404(monkeypatch, json={"error": "ClaimNotFound", "detail": "gone"})
+        store = HttpTupleStore()
+        with pytest.raises(ClaimNotFoundError):
+            store.release("claim-1", "c1")
 
 
 # ── registry / census ────────────────────────────────────────────────────
@@ -781,7 +892,7 @@ class TestTypedErrorMapping:
         assert exc_info.value.__cause__ is exc
 
     def test_unrecognised_error_code_falls_through_unchanged(self) -> None:
-        exc = _status_error(404, "SomeFutureCode", "not one of the eleven")
+        exc = _status_error(404, "SomeFutureCode", "not one of the twelve")
         with pytest.raises(httpx.HTTPStatusError) as exc_info:
             _raise_typed(exc)
         assert exc_info.value is exc
@@ -967,6 +1078,200 @@ class TestRenewAgainstAnOldEngine:
         store = HttpTupleStore()
         with pytest.raises(ClaimNotFoundError):
             store.renew("claim-1", "c1", 60)
+
+
+# ── wait (RDR-211 Phase 1 Step 1, bead nexus-rplay.4) ────────────────────────
+#
+# Internal transport only (RDR-211 Open Question 6, Sam's decision): the
+# session MCP server's own lifespan waiter is the sole intended caller, so
+# these tests exercise ``HttpTupleStore.wait`` directly rather than through
+# any tool or CLI verb -- neither exists for it.
+
+
+class TestWait:
+    def test_wait_on_three_subspaces_returns_only_the_matching_one(
+        self, t2_service_env,
+    ) -> None:
+        store = HttpTupleStore()
+        addr_a, addr_b, addr_c = _uniq("a"), _uniq("b"), _uniq("c")
+        store.out(
+            f"mailbox/{addr_b}", {"to": addr_b}, {"from": "sender"}, "for-b",
+            nonce=_uniq("nonce"),
+        )
+
+        specs = [
+            WaitSpec(f"mailbox/{addr_a}", {"to": addr_a}),
+            WaitSpec(f"mailbox/{addr_b}", {"to": addr_b}),
+            WaitSpec(f"mailbox/{addr_c}", {"to": addr_c}),
+        ]
+        results = store.wait(specs, timeout_s=0)
+
+        assert len(results) == 1, (
+            f"expected only the matching subspace present, got "
+            f"{[r.subspace for r in results]}"
+        )
+        assert isinstance(results[0], WaitResult)
+        assert results[0].subspace == f"mailbox/{addr_b}"
+        assert len(results[0].tuples) == 1
+        assert results[0].tuples[0].body == "for-b"
+
+    def test_wait_wakes_on_a_write_to_any_of_its_subspaces(self, t2_service_env) -> None:
+        store = HttpTupleStore()
+        addr_a, addr_b = _uniq("a"), _uniq("b")
+        specs = [
+            WaitSpec(f"mailbox/{addr_a}", {"to": addr_a}),
+            WaitSpec(f"mailbox/{addr_b}", {"to": addr_b}),
+        ]
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(store.wait, specs, 8)
+            time.sleep(1.0)  # let the background call reach its actual park
+            store.out(
+                f"mailbox/{addr_b}", {"to": addr_b}, {"from": "sender"}, "arrived",
+                nonce=_uniq("nonce"),
+            )
+            results = future.result(timeout=10)
+
+        assert len(results) == 1
+        assert results[0].subspace == f"mailbox/{addr_b}"
+        assert results[0].tuples[0].body == "arrived"
+
+    def test_wait_cursor_round_trip_sees_nothing_new_on_a_second_call(
+        self, t2_service_env,
+    ) -> None:
+        store = HttpTupleStore()
+        addr = _uniq("addr")
+        store.out(
+            f"mailbox/{addr}", {"to": addr}, {"from": "sender"}, "first",
+            nonce=_uniq("nonce"),
+        )
+        first = store.wait([WaitSpec(f"mailbox/{addr}", {"to": addr})], timeout_s=0)
+        assert len(first) == 1 and len(first[0].tuples) == 1
+        row = first[0].tuples[0]
+        cursor = (row.created_at, row.id)
+
+        second = store.wait(
+            [WaitSpec(f"mailbox/{addr}", {"to": addr}, since=cursor)], timeout_s=0,
+        )
+        assert second == [], "a subspace with nothing new must be absent, not empty"
+
+    def test_wait_with_35_specs_is_refused_client_side_before_any_request(
+        self, monkeypatch,
+    ) -> None:
+        """The client-side mirror of the engine's own
+        ``MAX_WAIT_SUBSPACES`` refusal (mutation-checked: deleting the
+        client-side guard turns this into a live HTTP call this spy
+        would catch)."""
+        assert _MAX_WAIT_SPECS == 34
+
+        def _must_not_be_called(*_a, **_k):  # pragma: no cover - only fires on failure
+            raise AssertionError("_post was called -- the client-side cap did not fire")
+
+        monkeypatch.setattr(refreshable.RefreshableHttpStoreMixin, "_post", _must_not_be_called)
+        store = HttpTupleStore.__new__(HttpTupleStore)
+        specs = [WaitSpec(f"mailbox/{_uniq('x')}") for _ in range(_MAX_WAIT_SPECS + 1)]
+
+        with pytest.raises(SchemaViolationError) as exc_info:
+            store.wait(specs, timeout_s=0)
+        assert exc_info.value.code == "SchemaViolation"
+
+    def test_exactly_the_cap_is_accepted_client_side(self, t2_service_env) -> None:
+        """The boundary companion to the refusal above: exactly
+        ``_MAX_WAIT_SPECS`` subspaces must reach the engine, not be
+        refused client-side."""
+        store = HttpTupleStore()
+        specs = [WaitSpec(f"mailbox/{_uniq('x')}") for _ in range(_MAX_WAIT_SPECS)]
+        results = store.wait(specs, timeout_s=0)
+        assert results == []  # none of these addresses were ever written to
+
+
+class TestWaitAgainstAnOldEngine:
+    """Mirrors ``TestRenewAgainstAnOldEngine``."""
+
+    @staticmethod
+    def _engine_404(monkeypatch, **response_kw) -> None:
+        def _404(*_a, **_k):
+            request = httpx.Request("POST", "http://engine/v1/tuples/wait")
+            response = httpx.Response(404, request=request, **response_kw)
+            raise httpx.HTTPStatusError("404", request=request, response=response)
+
+        monkeypatch.setattr(refreshable.RefreshableHttpStoreMixin, "_post", _404)
+
+    def test_the_real_old_engine_body_stays_a_bare_http_error(self, monkeypatch) -> None:
+        self._engine_404(monkeypatch, json={"error": "unknown tuples op: /wait"})
+        store = HttpTupleStore()
+        with pytest.raises(httpx.HTTPStatusError):
+            store.wait([WaitSpec("mailbox/x", {"to": "x"})], timeout_s=0)
+
+    def test_an_unparseable_404_body_also_stays_a_bare_http_error(self, monkeypatch) -> None:
+        self._engine_404(monkeypatch, text="Not Found")
+        store = HttpTupleStore()
+        with pytest.raises(httpx.HTTPStatusError):
+            store.wait([WaitSpec("mailbox/x", {"to": "x"})], timeout_s=0)
+
+
+# ── park_stats (RDR-211 Phase 1 Step 1, bead nexus-rplay.7) ──────────────────
+#
+# Internal transport only, same reasoning as ``wait`` above: a later
+# ``nx doctor`` row bead is the intended consumer, so there is no tool or
+# CLI verb here either.
+
+
+class TestParkStats:
+    def test_park_stats_reports_the_six_fields(self, t2_service_env) -> None:
+        store = HttpTupleStore()
+        stats = store.park_stats()
+        assert isinstance(stats, ParkStats)
+        assert stats.max_global > 0
+        assert stats.max_per_claimant > 0
+        assert stats.global_in_use >= 0
+        assert stats.refused_global >= 0
+        assert stats.refused_claimant >= 0
+        assert isinstance(stats.per_claimant, dict)
+
+    def test_global_in_use_moves_while_a_parked_call_is_in_flight(
+        self, t2_service_env,
+    ) -> None:
+        store = HttpTupleStore()
+        addr = _uniq("addr")
+        before = store.park_stats().global_in_use
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(store.rd, f"mailbox/{addr}", {"to": addr}, timeout_s=6)
+            time.sleep(1.5)  # let the background call reach its actual park
+            during = store.park_stats().global_in_use
+            assert during > before, (
+                f"expected global_in_use to rise while a call is parked, "
+                f"before={before} during={during}"
+            )
+            rows = future.result(timeout=10)
+        assert rows == []  # nothing was ever written for this address
+
+
+class TestParkStatsAgainstAnOldEngine:
+    """Mirrors ``TestRenewAgainstAnOldEngine``; ``park_stats`` is a GET,
+    unlike ``renew``/``release``/``wait``."""
+
+    @staticmethod
+    def _engine_404(monkeypatch, **response_kw) -> None:
+        def _404(*_a, **_k):
+            request = httpx.Request("GET", "http://engine/v1/tuples/park_stats")
+            response = httpx.Response(404, request=request, **response_kw)
+            raise httpx.HTTPStatusError("404", request=request, response=response)
+
+        monkeypatch.setattr(refreshable.RefreshableHttpStoreMixin, "_get", _404)
+
+    def test_the_real_old_engine_body_stays_a_bare_http_error(self, monkeypatch) -> None:
+        self._engine_404(monkeypatch, json={"error": "unknown tuples op: /park_stats"})
+        store = HttpTupleStore()
+        with pytest.raises(httpx.HTTPStatusError):
+            store.park_stats()
+
+    def test_an_unparseable_404_body_also_stays_a_bare_http_error(self, monkeypatch) -> None:
+        self._engine_404(monkeypatch, text="Not Found")
+        store = HttpTupleStore()
+        with pytest.raises(httpx.HTTPStatusError):
+            store.park_stats()
 
 
 # ── ack with a reply (nexus-h61dl.8) ─────────────────────────────────────

@@ -23,6 +23,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -42,15 +43,26 @@ import java.util.Optional;
  *   POST /v1/tuples/out             {subspace, keys, dims?, body?, nonce?, ttl_seconds?} -&gt; {"id": "&lt;hex&gt;"}
  *   POST /v1/tuples/rd              {subspace, keys_pattern?, n?, since?, timeout_s?} -&gt; {"tuples": [...]}
  *   POST /v1/tuples/rdp             {subspace, keys_pattern?, n?, since?} -&gt; {"tuples": [...]}
+ *   POST /v1/tuples/wait            {subspaces: [{subspace, keys_pattern?, n?, since?}, ...], timeout_s?}
+ *                                    -&gt; {"results": [{"subspace", "tuples": [...]}, ...]}
+ *                                    (RDR-211 Phase 1 Step 1, bead nexus-rplay.4 -- a multi-subspace {@code rd};
+ *                                    parks with NO claimant, one global slot regardless of subspace count; a
+ *                                    subspace with no match is simply absent from "results", never present
+ *                                    with an empty "tuples" list; see {@link TupleRepository#waitAny})
  *   POST /v1/tuples/in              {subspace, keys_pattern, claimant, lease_s?, timeout_s?} -&gt; {"tuple": ..|null, "claim_id": ..|null}
  *   POST /v1/tuples/inp             {subspace, keys_pattern, claimant, lease_s?} -&gt; same shape as /in
  *   POST /v1/tuples/ack             {claim_id, claimant, reply?{subspace, keys, dims?, body?, ttl_seconds?}}
  *                                   -&gt; {"acked": true, "reply_id": "&lt;hex&gt;"|null}
  *   POST /v1/tuples/nack            {claim_id, claimant} -&gt; {"nacked": true}
  *   POST /v1/tuples/renew           {claim_id, claimant, lease_s} -&gt; {"lease_until": "&lt;ISO-8601&gt;"}
+ *   POST /v1/tuples/release         {claim_id, claimant} -&gt; {"released": true}
  *   GET  /v1/tuples/registry        -&gt; {"digest", "sources", "templates": [...]}
  *   GET  /v1/tuples/subspace_list   ?prefix=&amp;limit=&amp;after= -&gt; {"subspaces": [...], "next_cursor"?: "&lt;subspace&gt;"}
  *   GET  /v1/tuples/subspace_stats  ?subspace= -&gt; {subspace, total, available, claimed, dead, consumed, expired_unpurged, oldest_created_at, newest_created_at}
+ *   GET  /v1/tuples/park_stats      -&gt; {max_global, max_per_claimant, global_in_use, refused_global,
+ *                                        refused_claimant, per_claimant: {claimant: slots}}
+ *                                       (RDR-211 Phase 1 Step 1, bead nexus-rplay.7 -- process-wide counters,
+ *                                       never per-tenant; see {@link TupleRepository#parkStats})
  * </pre>
  *
  * <p>{@code lease_s} on {@code /in}/{@code /inp} is OPTIONAL (nexus-xapt8,
@@ -71,7 +83,7 @@ import java.util.Optional;
  * uses at every other bytea-identity boundary); {@code keys}/{@code dims}
  * are plain JSON objects of string values.
  *
- * <p>Errors: the eleven RDR-205-family typed errors ({@link TupleException} and its
+ * <p>Errors: the twelve RDR-205/RDR-211-family typed errors ({@link TupleException} and its
  * subtypes) are caught ahead of the generic ladder and rendered as {@code
  * {"error": "<code>", "detail": "<message>"}} at each exception's own
  * {@link TupleException#httpStatus()} — {@code ParkCapExceeded} additionally
@@ -121,14 +133,17 @@ public final class TupleHandler implements HttpHandler {
                 case "/out" -> handleOut(exchange, tenant, method);
                 case "/rd" -> handleRd(exchange, tenant, method);
                 case "/rdp" -> handleRdp(exchange, tenant, method);
+                case "/wait" -> handleWait(exchange, tenant, method);
                 case "/in" -> handleIn(exchange, tenant, method);
                 case "/inp" -> handleInp(exchange, tenant, method);
                 case "/ack" -> handleAck(exchange, tenant, method);
                 case "/nack" -> handleNack(exchange, tenant, method);
                 case "/renew" -> handleRenew(exchange, tenant, method);
+                case "/release" -> handleRelease(exchange, tenant, method);
                 case "/registry" -> handleRegistry(exchange, method);
                 case "/subspace_list" -> handleSubspaceList(exchange, tenant, method);
                 case "/subspace_stats" -> handleSubspaceStats(exchange, tenant, method);
+                case "/park_stats" -> handleParkStats(exchange, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"unknown tuples op: " + op + "\"}");
             }
         } catch (TupleException e) {
@@ -199,6 +214,56 @@ public final class TupleHandler implements HttpHandler {
 
         List<TupleRepository.TupleRow> rows = repo.rdp(tenant, subspace, pattern, n, since);
         HttpUtil.send(ex, 200, renderTuples(rows));
+    }
+
+    // ── wait (multiplexed rd, RDR-211 Phase 1 Step 1, bead nexus-rplay.4) ──────
+
+    /**
+     * {@code POST /v1/tuples/wait}: see this class's own route-table javadoc above
+     * and {@link TupleRepository#waitAny} for the full contract. {@code subspaces}
+     * is required and non-empty (refused as a plain 400 {@code IllegalArgumentException}
+     * before the request ever reaches {@link TupleRepository#waitAny}, same mapping
+     * every other missing-required-field case in this handler uses); the per-entry
+     * cap ({@link TupleRepository#MAX_WAIT_SUBSPACES}) and per-subspace/pattern
+     * validation are {@code waitAny}'s own {@code SchemaViolation}/{@code
+     * UnknownSubspace} refusals, not re-checked here.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleWait(HttpExchange ex, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) {
+            HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}");
+            return;
+        }
+        Map<String, Object> body = readBody(ex);
+        Object rawSpecs = body.get("subspaces");
+        if (!(rawSpecs instanceof List<?> rawList) || rawList.isEmpty()) {
+            throw new IllegalArgumentException("subspaces required");
+        }
+        List<TupleRepository.WaitSpec> specs = new ArrayList<>(rawList.size());
+        for (Object rawSpec : rawList) {
+            if (!(rawSpec instanceof Map)) {
+                throw new SchemaViolationException("subspaces", "each entry must be an object");
+            }
+            Map<String, Object> spec = (Map<String, Object>) rawSpec;
+            String subspace = requireString(spec, "subspace");
+            Map<String, String> pattern = stringMap((Map<String, Object>) spec.get("keys_pattern"));
+            int n = intOrDefault(spec.get("n"), 1);
+            TupleRepository.ReadCursor since = readCursor(spec.get("since"));
+            specs.add(new TupleRepository.WaitSpec(subspace, pattern, n, since));
+        }
+        long timeoutS = longOrDefault(body.get("timeout_s"), 0);
+
+        List<TupleRepository.WaitResult> results = repo.waitAny(tenant, specs, timeoutS);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("results", results.stream().map(this::renderWaitResult).toList());
+        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(out));
+    }
+
+    private Map<String, Object> renderWaitResult(TupleRepository.WaitResult r) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("subspace", r.subspace());
+        m.put("tuples", r.tuples().stream().map(this::renderTuple).toList());
+        return m;
     }
 
     // ── in / inp ─────────────────────────────────────────────────────────────
@@ -325,6 +390,24 @@ public final class TupleHandler implements HttpHandler {
         HttpUtil.send(ex, 200, MAPPER.writeValueAsString(Map.of("lease_until", leaseUntil)));
     }
 
+    /**
+     * {@code POST /v1/tuples/release} (RDR-211 Phase 1 Step 1, bead nexus-rplay.2). A
+     * hand-back that is NOT a failure: ends a live claim without counting an attempt.
+     *
+     * <p>No new typed error: the two this can raise -- ClaimNotFound, ClaimOwnership --
+     * already exist with their statuses, the same reasoning {@link #handleRenew}'s own
+     * javadoc gives.
+     */
+    private void handleRelease(HttpExchange ex, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) {
+            HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}");
+            return;
+        }
+        Map<String, Object> body = readBody(ex);
+        repo.release(tenant, requireString(body, "claim_id"), requireString(body, "claimant"));
+        HttpUtil.send(ex, 200, "{\"released\":true}");
+    }
+
     // ── registry / census ────────────────────────────────────────────────────
 
     private void handleRegistry(HttpExchange ex, String method) throws IOException {
@@ -378,6 +461,21 @@ public final class TupleHandler implements HttpHandler {
         if (t.maxBodyBytes() != null) {
             m.put("max_body_bytes", t.maxBodyBytes());
         }
+        // nexus-rplay.17 (code-review-expert finding 1): lock/max_live_rows/
+        // claim_log_ttl_seconds were entirely absent from this response, so a
+        // Phase 2 client could never learn a template carries the lock flag or
+        // either RDR-211 scale-limit ceiling -- this method's own javadoc says a
+        // client learns a template's shape SOLELY from here. lock is a boolean
+        // that is ALWAYS rendered (false is a real answer, not an absence);
+        // max_live_rows/claim_log_ttl_seconds mirror max_body_bytes's existing
+        // conditional above -- present only when the template declares one.
+        m.put("lock", t.lock());
+        if (t.maxLiveRows() != null) {
+            m.put("max_live_rows", t.maxLiveRows());
+        }
+        if (t.claimLogTtlSeconds() != null) {
+            m.put("claim_log_ttl_seconds", t.claimLogTtlSeconds());
+        }
         return m;
     }
 
@@ -424,6 +522,30 @@ public final class TupleHandler implements HttpHandler {
         }
         TupleRepository.SubspaceCensus census = repo.subspaceStats(tenant, subspace);
         HttpUtil.send(ex, 200, MAPPER.writeValueAsString(renderCensus(census)));
+    }
+
+    /**
+     * {@code GET /v1/tuples/park_stats} (RDR-211 Phase 1 Step 1, bead
+     * nexus-rplay.7). No tenant scoping -- mirrors {@link #handleRegistry}: the
+     * counters {@link TupleRepository#parkStats} reports live on the JVM
+     * process, not per-tenant, so there is nothing here to filter by {@code
+     * X-Nexus-Tenant} even though the header is still required to reach this
+     * handler at all (see {@link #handle}'s tenant resolution above).
+     */
+    private void handleParkStats(HttpExchange ex, String method) throws IOException {
+        if (!"GET".equals(method)) {
+            HttpUtil.send(ex, 405, "{\"error\":\"GET required\"}");
+            return;
+        }
+        TupleRepository.ParkStats stats = repo.parkStats();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("max_global", stats.maxGlobal());
+        out.put("max_per_claimant", stats.maxPerClaimant());
+        out.put("global_in_use", stats.globalInUse());
+        out.put("refused_global", stats.refusedGlobal());
+        out.put("refused_claimant", stats.refusedClaimant());
+        out.put("per_claimant", stats.perClaimant());
+        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(out));
     }
 
     private Map<String, Object> renderCensus(TupleRepository.SubspaceCensus c) {

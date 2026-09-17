@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""nexus-6konb.9 (MM-3.1): the SessionStart mailbox-watch arm instruction.
+"""nexus-6konb.9 (MM-3.1), superseded by RDR-211 nexus-rplay.14: the
+SessionStart mailbox-subscribe instruction.
 
 Unit-tests :mod:`nexus.mailbox_arm` directly, with no network and no
 engine substrate -- every probe call is monkeypatched. The
@@ -10,10 +11,10 @@ engine genuinely absent) live in ``tests/test_hooks.py``.
 
 Defect fix (nexus-6konb.9.1): the instance name exists only in the
 model's own knowledge, never in this module's environment or any file it
-could read, so ``mailbox_arm_instruction`` no longer takes an *instance*
-parameter and this module no longer reads any registry to guess one --
-see ``TestNoRegistryGuessing`` below, and the module docstring's
-"The instance-name mailbox" section.
+could read, so ``mailbox_arm_instruction`` takes no *instance* parameter
+and this module reads no registry to guess one -- see
+``TestNoRegistryGuessing`` below, and the module docstring's "The
+instance-name mailbox" section.
 """
 from __future__ import annotations
 
@@ -33,102 +34,50 @@ from nexus.mailbox_arm import (
 
 
 class TestMailboxArmInstructionText:
-    def test_contains_the_monitor_call_shape(self) -> None:
+    def test_contains_the_tuple_subscribe_call_shape(self) -> None:
         text = mailbox_arm_instruction("sess-abc")
-        assert "Monitor({" in text
-        assert "timeout_ms: 3600000" in text
-        assert '"nx tuple watch --instance' in text
-
-    def test_persistent_is_conditional_never_in_the_literal_call(self) -> None:
-        """Current Claude Code builds removed Monitor's ``persistent`` parameter
-        and reject unknown ones, so a literal copy of the call must not carry
-        it. The text still says to add it where the tool has it, and to re-arm
-        on the expiry notice where it does not (nexus-galkv.19)."""
-        text = mailbox_arm_instruction("sess-abc")
-        call = text[text.index("Monitor({"):text.index("})")]
-        assert "persistent" not in call
-        assert "persistent: true only if Monitor has it" in text
-        assert "re-arm on its 30-minute expiry notice" in text
+        assert 'mcp__plugin_conexus_nexus__tuple_subscribe("mailbox/<name>")' in text
+        assert "ListAgents" in text
 
     def test_never_uses_a_bare_positional_address(self) -> None:
-        """The old design embedded the session id (and instance, when
-        guessed) as a bare positional in the command. That form suppresses
-        `nx tuple watch`'s own session-id default outright, so it must
-        never appear -- the rendered command is always `--instance NAME`
-        or no arguments at all."""
+        """RDR-211: subscribing is an MCP tool call, never a CLI command
+        line, so no positional-address CLI shape can appear at all."""
         text = mailbox_arm_instruction("sess-abc")
-        assert 'command: "nx tuple watch sess-abc"' not in text
-        assert 'command: "nx tuple watch sess-abc nexus-19"' not in text
-        assert '"nx tuple watch --instance' in text
+        assert "command:" not in text
+        assert "Monitor(" not in text
 
-    def test_states_omit_instance_when_name_not_known(self) -> None:
+    def test_states_take_the_name_fresh_never_from_memory(self) -> None:
         text = mailbox_arm_instruction("sess-abc")
-        assert "omit --instance" in text
+        assert "fresh ListAgents call" in text
+        assert "never from memory" in text
 
-    def test_states_armed_once(self) -> None:
+    def test_states_the_session_mailbox_is_already_subscribed(self) -> None:
         text = mailbox_arm_instruction("sess-abc")
-        assert "ONCE" in text or "once" in text
-        assert "twice" in text  # the redundant-arm-is-harmless sentence
-
-    def test_states_ping_carries_no_body_and_watcher_never_claims(self) -> None:
-        text = mailbox_arm_instruction("sess-abc")
-        assert "never the message" in text
-        assert "never claims" in text
-
-    def test_states_redundant_arm_is_harmless(self) -> None:
-        text = mailbox_arm_instruction("sess-abc")
-        assert "harmless" in text
+        assert "already subscribed" in text
 
     def test_carries_the_arm_marker(self) -> None:
         assert ARM_MARKER in mailbox_arm_instruction("sess-abc")
 
-    def test_names_full_mcp_tool_names_for_the_drain(self) -> None:
-        """nexus-6konb.9 defect fix: the drain instruction must name the
-        full MCP tools, including the ack (and nack), not just a bare
-        `nx tuple in` CLI fragment with no mention of ack at all -- an
-        unacked claim lapses and is eventually dead-lettered."""
+    def test_names_the_development_channel_launch_flag_and_dialog(self) -> None:
+        """Sam's decision of 2026-09-17 (T2 nexus_rdr/211-decision-dev-
+        channel-dialog-2026-09-17): the channel is a research preview,
+        named plainly as setup, with its per-launch confirmation dialog."""
         text = mailbox_arm_instruction("sess-abc")
-        assert "mcp__plugin_conexus_nexus__tuple_in" in text
-        assert "mcp__plugin_conexus_nexus__tuple_ack" in text
-        assert "mcp__plugin_conexus_nexus__tuple_nack" in text
+        assert "--dangerously-load-development-channels server:nexus" in text
+        assert "one-keystroke confirmation dialog" in text
+        assert "research preview" in text
 
-    def test_states_reply_argument_for_a_request(self) -> None:
+    def test_states_the_drain_hook_is_the_floor_without_the_channel(self) -> None:
         text = mailbox_arm_instruction("sess-abc")
-        assert "reply" in text
-
-    def test_states_unacked_claims_lapse_and_dead_letter(self) -> None:
-        text = mailbox_arm_instruction("sess-abc")
-        assert "lapses" in text
-        assert "dead-lettered" in text
-
-    def test_monitor_description_embeds_the_session_id(self) -> None:
-        """nexus-6konb.10 (MM-3.2): the Monitor description must carry the
-        session id exactly, so a model can tell a stale watcher (a
-        different session id, surviving a prior /clear -- T2
-        nexus/mm-3.2-clear-resume-monitor-survival-measured-2026-09-13)
-        apart from its own, current one (same session id, surviving a
-        /compact or /resume)."""
-        text = mailbox_arm_instruction("sess-abc")
-        assert 'description: "mailbox watch sess-abc"' in text
-
-    def test_states_a_stale_watcher_stops_itself_rather_than_taskstop(self) -> None:
-        """nexus-6konb.12 (MM-3.4 fix 1): the model-dependent TaskStop rule
-        cannot work after a genuine /clear -- the fresh conversation
-        running this instruction has no memory of the old Monitor's
-        harness task id. A stale watcher discovers the change itself
-        (the session marker :func:`nexus.tuple_watch.run_watch` checks)
-        and exits; the instruction never asks the model to stop anything."""
-        text = mailbox_arm_instruction("sess-abc")
-        assert "TaskStop" not in text
-        assert "stops itself" in text
+        assert "drain hook" in text
+        assert "next prompt" in text
 
     def test_no_repeated_session_id_literal(self) -> None:
-        """The session id must appear at most once in the rendered text
-        (in the Monitor's own description) -- code-review-expert's
-        Critical on the byte-budget stack found the old text repeating it
-        three times, costing 3x the id-length delta over a short test
-        fixture and blowing the 2000-byte per-emitter budget with a real
-        36-char UUID session id."""
+        """The session id must appear at most once in the rendered text --
+        code-review-expert's Critical on the byte-budget stack found the
+        old Monitor-arm text repeating it three times, costing 3x the
+        id-length delta over a short test fixture and blowing the
+        2000-byte per-emitter budget with a real 36-char UUID session id."""
         text = mailbox_arm_instruction("sess-abc")
         assert text.count("sess-abc") == 1
 
@@ -151,7 +100,7 @@ class TestArmBlock:
             text = arm_block("sess-1", config_dir=tmp_path)
         assert ARM_MARKER in text
         assert "sess-1" in text
-        assert '"nx tuple watch --instance' in text
+        assert 'tuple_subscribe("mailbox/<name>")' in text
 
 
 class TestNoRegistryGuessing:
@@ -229,5 +178,5 @@ class TestInstanceNameIsTakenFresh:
 
     def test_states_the_name_comes_from_a_fresh_listagents_call(self) -> None:
         text = mailbox_arm_instruction("sess-abc")
-        assert "ListAgents now" in text
+        assert "fresh ListAgents call" in text
         assert "changes on resume" in text

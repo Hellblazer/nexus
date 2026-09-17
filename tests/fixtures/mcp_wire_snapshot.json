@@ -1527,6 +1527,15 @@
       },
       "qualname": "tuple_ack"
     },
+    "tuple_channel_probe": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {},
+        "type": "object"
+      },
+      "qualname": "tuple_channel_probe"
+    },
     "tuple_in": {
       "is_async": false,
       "module": "nexus.mcp.core",
@@ -1729,6 +1738,26 @@
       },
       "qualname": "tuple_registry"
     },
+    "tuple_release": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "claim_id": {
+            "type": "string"
+          },
+          "claimant": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "claim_id",
+          "claimant"
+        ],
+        "type": "object"
+      },
+      "qualname": "tuple_release"
+    },
     "tuple_renew": {
       "is_async": false,
       "module": "nexus.mcp.core",
@@ -1768,6 +1797,47 @@
         "type": "object"
       },
       "qualname": "tuple_stats"
+    },
+    "tuple_subscribe": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "subspace": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subspace"
+        ],
+        "type": "object"
+      },
+      "qualname": "tuple_subscribe"
+    },
+    "tuple_subscriptions": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {},
+        "type": "object"
+      },
+      "qualname": "tuple_subscriptions"
+    },
+    "tuple_unsubscribe": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "subspace": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subspace"
+        ],
+        "type": "object"
+      },
+      "qualname": "tuple_unsubscribe"
     }
   },
   "nexus-catalog": {

@@ -1,0 +1,58 @@
+# RDR-211 Phase 1 Step 2 (bead nexus-rplay.8), Approach item 1: broadcast
+# announcements, closing Gap 1 (no one-to-many announcement). Take
+# disabled: rd already serves any number of readers from one tuple, and
+# the engine wakes every reader parked on the subspace when a post lands
+# (RDR-205's signalAll). Each post is a NEW tuple (id_from: keys+nonce),
+# so the board is an append-only log; a reader pages with rd's
+# (created_at, id) cursor to read what it missed since it last looked.
+#
+# from (required): the poster's session or agent id, recorded but not
+# checked -- any session of the tenant may post (RDR-211 Open Question 4,
+# Sam: row-level security is tenant-only and nothing below the tenant has
+# an identity the engine could enforce). kind: an optional free-text label
+# for the post's shape (e.g. "release", "outage"); no fixed values, since
+# a board's topics and their post shapes are not enumerable up front the
+# way ledger's {start, report} is.
+#
+# id_dims: [from] mirrors mailbox.yaml: "from" also enters the tuple id
+# alongside the minted nonce, so it must be declared required: true.
+#
+# retention_seconds: 604800 (7 days) is a CEILING, not a fixed lifetime
+# (RDR-211 Open Question 2, Sam 2026-09-16): a poster may pass a shorter
+# ttl_seconds to out(), clamped by the engine's existing generic
+# ttl-vs-retention check (TupleRepository#prepareOut); nothing here is
+# configured per topic. A reader away longer than the ceiling misses what
+# expired by then (RDR-211 Failure Modes).
+#
+# max_body_bytes: 1024 (RDR-211 Technical Design "Templates"): an
+# announcement is a short message, well under the global 4096-byte cap
+# (TupleLimits.MAX_BODY_BYTES).
+#
+# max_live_rows: 500 (RDR-211 Scale and Limits item 2, "a runaway
+# writer"): the assumed load is 50 posts a day per topic, settling near
+# 350 live rows at the 7-day retention ceiling; 500 gives headroom
+# without leaving the subspace unbounded.
+name: board/<topic>
+
+keys:
+  - topic
+
+dimensions:
+  from:
+    type: string
+    required: true
+  kind:
+    type: string
+
+id_from: keys+nonce
+id_dims:
+  - from
+
+take:
+  enabled: false
+
+retention_seconds: 604800
+
+max_body_bytes: 1024
+
+max_live_rows: 500

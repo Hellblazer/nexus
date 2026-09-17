@@ -41,7 +41,12 @@ class TemplateRegistryTest {
         TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
         assertEquals(List.of(TemplateRegistry.SOURCE_RESOURCES), registry.sources());
         List<String> names = registry.templates().stream().map(TemplateSchema::name).toList();
-        assertEquals(List.of("directory/<name>", "ledger/<session_id>", "mailbox/<address>"), names);
+        // Sorted by name (load() sorts the final list): board, directory, ledger,
+        // lock, mailbox, queue -- RDR-211 Phase 1 Step 2 (bead nexus-rplay.8) added
+        // board/<topic>, lock/<resource>, queue/<name> beside the three RDR-205/208
+        // templates.
+        assertEquals(List.of("board/<topic>", "directory/<name>", "ledger/<session_id>",
+                "lock/<resource>", "mailbox/<address>", "queue/<name>"), names);
     }
 
     @Test
@@ -145,6 +150,31 @@ class TemplateRegistryTest {
         assertNotEquals(r1.digest(), r2.digest());
     }
 
+    /**
+     * nexus-rplay.17 (code-review-expert finding 2): {@code toCanonicalMap} omitted
+     * {@code lock} entirely, so two registries differing ONLY in one template's
+     * {@code lock} value produced the SAME digest -- a client could never detect
+     * that a template flipped from an ordinary out()/claim lifecycle to the
+     * lock-flagged one (reset-on-expiry, ack refused) by comparing digests, the
+     * whole point of the digest existing.
+     */
+    @Test
+    void registryDigestChangesWhenLockFlagChanges() {
+        String unlocked = minimalTemplateYaml("ledger/<session_id>", 100L);
+        String locked = unlocked + "lock: true\n";
+
+        TemplateRegistry r1 = TemplateRegistry.load(
+                List.of(new TemplateRegistry.SourceGroup("test",
+                        List.of(new TemplateRegistry.TemplateSource("a.yaml", unlocked)))),
+                DAYS(180), SWEEP_INTERVAL_SECONDS);
+        TemplateRegistry r2 = TemplateRegistry.load(
+                List.of(new TemplateRegistry.SourceGroup("test",
+                        List.of(new TemplateRegistry.TemplateSource("a.yaml", locked)))),
+                DAYS(180), SWEEP_INTERVAL_SECONDS);
+
+        assertNotEquals(r1.digest(), r2.digest());
+    }
+
     @Test
     void registrySnapshotCarriesDigestSourcesAndTemplates() {
         TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
@@ -243,8 +273,12 @@ class TemplateRegistryTest {
     void defaultClaimLogTtlPassesBootCheckForAllV1Templates() {
         // Exercised implicitly by allV1ResourceTemplatesLoadAtBoot (default TTL, no
         // NX_TUPLE_CLAIM_LOG_TTL_DAYS override), stated explicitly here for the record.
+        // 6, not 3, since RDR-211 Phase 1 Step 2 (bead nexus-rplay.8) added
+        // board/<topic>, lock/<resource>, queue/<name>; queue and lock declare their
+        // own (shorter) claim_log_ttl_seconds, board declares none, and every one of
+        // the six passes this same boot check.
         TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
-        assertEquals(3, registry.templates().size());
+        assertEquals(6, registry.templates().size());
     }
 
     @Test
@@ -257,6 +291,153 @@ class TemplateRegistryTest {
     void claimLogTtlDaysEnvNonPositiveIsRejected() {
         assertThrows(TemplateRegistryException.class,
                 () -> TemplateRegistry.loadAtBoot(null, "0", SWEEP_INTERVAL_SECONDS));
+    }
+
+    // ── per-template claim_log_ttl_seconds boot check (RDR-211 Phase 1 Step 1,
+    //    bead nexus-rplay.6) ──────────────────────────────────────────────
+
+    @Test
+    void templateOwnClaimLogTtl_shorterThanEngineDefault_butAboveOwnRetentionPlusSweep_boots() {
+        long retentionSeconds = 100L;
+        long registryDefault = DAYS(180);
+        long ownTtl = retentionSeconds + SWEEP_INTERVAL_SECONDS + 1; // strictly greater than the ceiling
+        String yaml = minimalTemplateYamlWithClaimLogTtl("queue/<name>", retentionSeconds, ownTtl);
+        var groups = List.of(new TemplateRegistry.SourceGroup("test",
+                List.of(new TemplateRegistry.TemplateSource("t.yaml", yaml))));
+
+        TemplateRegistry registry = TemplateRegistry.load(groups, registryDefault, SWEEP_INTERVAL_SECONDS);
+
+        assertEquals(1, registry.templates().size());
+        assertEquals(ownTtl, registry.effectiveClaimLogTtlSeconds("queue/<name>"));
+    }
+
+    @Test
+    void templateWithNoClaimLogTtlOverride_usesTheEngineDefaultForBootCheckAndAtRuntime() {
+        long retentionSeconds = 100L;
+        long registryDefault = retentionSeconds + SWEEP_INTERVAL_SECONDS + 1;
+        String yaml = minimalTemplateYaml("ledger/<session_id>", retentionSeconds);
+        var groups = List.of(new TemplateRegistry.SourceGroup("test",
+                List.of(new TemplateRegistry.TemplateSource("t.yaml", yaml))));
+
+        TemplateRegistry registry = TemplateRegistry.load(groups, registryDefault, SWEEP_INTERVAL_SECONDS);
+
+        assertEquals(registryDefault, registry.effectiveClaimLogTtlSeconds("ledger/<session_id>"));
+    }
+
+    @Test
+    void templateOwnClaimLogTtl_equalToOwnRetentionPlusSweep_refusesOnEquality_namesTemplate() {
+        long retentionSeconds = 100L;
+        long ownTtl = retentionSeconds + SWEEP_INTERVAL_SECONDS; // equality -- must refuse
+        String yaml = minimalTemplateYamlWithClaimLogTtl("queue/<name>", retentionSeconds, ownTtl);
+        var groups = List.of(new TemplateRegistry.SourceGroup("test",
+                List.of(new TemplateRegistry.TemplateSource("t.yaml", yaml))));
+
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateRegistry.load(groups, DAYS(180), SWEEP_INTERVAL_SECONDS));
+        assertTrue(ex.getMessage().contains("queue/<name>"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("refuses to boot"), ex.getMessage());
+    }
+
+    @Test
+    void templateOwnClaimLogTtl_belowOwnRetentionPlusSweep_refusesNamingTemplate() {
+        long retentionSeconds = 100L;
+        long ownTtl = retentionSeconds; // far short of retention + sweep
+        String yaml = minimalTemplateYamlWithClaimLogTtl("queue/<name>", retentionSeconds, ownTtl);
+        var groups = List.of(new TemplateRegistry.SourceGroup("test",
+                List.of(new TemplateRegistry.TemplateSource("t.yaml", yaml))));
+
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateRegistry.load(groups, DAYS(180), SWEEP_INTERVAL_SECONDS));
+        assertTrue(ex.getMessage().contains("queue/<name>"), ex.getMessage());
+    }
+
+    /**
+     * A template may only SHORTEN the engine's claim-log TTL, never lengthen it
+     * (RDR-211 Scale and Limits item 6's own wording, and the Test Plan's "must
+     * not exceed the engine default"). Refused even though this template's own
+     * value would otherwise pass the retention-vs-TTL relation easily.
+     */
+    @Test
+    void templateOwnClaimLogTtl_aboveEngineDefault_refused_mayOnlyShorten() {
+        long retentionSeconds = 100L;
+        long registryDefault = DAYS(1);
+        long ownTtl = registryDefault + 1; // one second longer than the engine default
+        String yaml = minimalTemplateYamlWithClaimLogTtl("queue/<name>", retentionSeconds, ownTtl);
+        var groups = List.of(new TemplateRegistry.SourceGroup("test",
+                List.of(new TemplateRegistry.TemplateSource("t.yaml", yaml))));
+
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateRegistry.load(groups, registryDefault, SWEEP_INTERVAL_SECONDS));
+        assertTrue(ex.getMessage().contains("queue/<name>"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("claim_log_ttl_seconds"), ex.getMessage());
+    }
+
+    @Test
+    void templateOwnClaimLogTtl_equalToEngineDefault_boots_shorteningIsNotRequiredToBeStrict() {
+        long retentionSeconds = 100L;
+        long registryDefault = DAYS(1);
+        String yaml = minimalTemplateYamlWithClaimLogTtl("queue/<name>", retentionSeconds, registryDefault);
+        var groups = List.of(new TemplateRegistry.SourceGroup("test",
+                List.of(new TemplateRegistry.TemplateSource("t.yaml", yaml))));
+
+        TemplateRegistry registry = TemplateRegistry.load(groups, registryDefault, SWEEP_INTERVAL_SECONDS);
+
+        assertEquals(registryDefault, registry.effectiveClaimLogTtlSeconds("queue/<name>"));
+    }
+
+    // ── lock + max_attempts is a boot-time refusal (RDR-211 Approach item 5: a
+    //    lock must never dead-letter) ────────────────────────────────────────
+
+    /**
+     * nexus-rplay.17 (code-review-expert finding 3): nothing refused a template
+     * declaring BOTH {@code lock: true} and {@code take.max_attempts} -- a
+     * combination that is a contradiction by the RDR's own words (lock.yaml's own
+     * comment: "max_attempts intentionally OMITTED ... the engine treats an absent
+     * max_attempts as unbounded, so a lock never dead-letters on a crashed
+     * holder's repeated lease lapses"). A template shipping both would dead-letter
+     * a lock holder's crashed lease after N lapses, then refuse {@code ack} on it
+     * forever (the lock flag's own {@code ack}-refusal invariant), stranding the
+     * resource with no way back to available until the sweep purges it.
+     */
+    @Test
+    void lockTemplateWithMaxAttemptsRefusesBootNamingTemplateAndBothFields() {
+        String yaml = """
+                name: lock/<resource>
+                keys:
+                  - resource
+                id_from: keys
+                take:
+                  enabled: true
+                  max_attempts: 3
+                  max_lease_seconds: 900
+                retention_seconds: 604800
+                lock: true
+                """;
+        var groups = List.of(new TemplateRegistry.SourceGroup("test",
+                List.of(new TemplateRegistry.TemplateSource("bad-lock.yaml", yaml))));
+
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateRegistry.load(groups, DAYS(180), SWEEP_INTERVAL_SECONDS));
+        assertTrue(ex.getMessage().contains("lock/<resource>"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("lock"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("max_attempts"), ex.getMessage());
+    }
+
+    /** The shipped {@code lock.yaml} declares {@code lock: true} and no {@code
+     *  max_attempts} at all -- must boot cleanly under the new cross-field check. */
+    @Test
+    void shippedLockTemplateDeclaresNoMaxAttemptsAndBoots() {
+        TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
+        TemplateSchema lock = registry.byName("lock/<resource>");
+        assertNotNull(lock);
+        assertTrue(lock.lock());
+        assertNull(lock.take().maxAttempts());
+    }
+
+    @Test
+    void byName_unknownTemplate_returnsNull() {
+        TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
+        assertNull(registry.byName("bogus/<name>"));
     }
 
     // ── literal-before-template resolution (May load rule) ─────────────
@@ -323,7 +504,9 @@ class TemplateRegistryTest {
         assertEquals(2, registry.sources().size());
         assertEquals(TemplateRegistry.SOURCE_RESOURCES, registry.sources().get(0));
         assertTrue(registry.sources().get(1).startsWith("directory:"), registry.sources().get(1));
-        assertEquals(4, registry.templates().size());
+        // 7, not 4: RDR-211 Phase 1 Step 2 (bead nexus-rplay.8) added board/<topic>,
+        // lock/<resource>, queue/<name> beside the three bundled resource templates.
+        assertEquals(7, registry.templates().size());
         assertTrue(registry.templates().stream().anyMatch(t -> t.name().equals("test/<id>")));
     }
 
@@ -358,5 +541,12 @@ class TemplateRegistryTest {
                 + "take:\n"
                 + "  enabled: false\n"
                 + "retention_seconds: " + retentionSeconds + "\n";
+    }
+
+    /** RDR-211 Phase 1 Step 1 (bead nexus-rplay.6): {@link #minimalTemplateYaml} plus a
+     *  {@code claim_log_ttl_seconds} override. */
+    private static String minimalTemplateYamlWithClaimLogTtl(String name, long retentionSeconds,
+                                                               long claimLogTtlSeconds) {
+        return minimalTemplateYaml(name, retentionSeconds) + "claim_log_ttl_seconds: " + claimLogTtlSeconds + "\n";
     }
 }

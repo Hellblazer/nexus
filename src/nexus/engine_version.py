@@ -537,7 +537,18 @@ from __future__ import annotations
 #: lifecycle_state filter, default unchanged (nexus-bc7ps engine half). No
 #: changeset, no /version field change. The one both-halves commit is
 #: [additive], so the engine deployed BEFORE this client tag again.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 126)
+#:
+#: 7.51.0 pairs with engine-service-v0.1.127 (tagged 2026-09-17 12:11Z on
+#: 51097d1b2, release run 35219690479 promoted 12:40:25Z with 21 assets):
+#: RDR-211 tuple templates (board/queue/lock), the release claim operation
+#: (POST /v1/tuples/release), park-slot stats (GET /v1/tuples/park_stats),
+#: multiplexed wait (POST /v1/tuples/wait), and the MaxLiveRowsExceeded 429
+#: typed error on POST /v1/tuples/out (epic nexus-rplay, beads
+#: nexus-rplay.2/.3/.4/.5/.6/.7). All four wire-ledger entries lead with
+#: [additive], so the engine deployed 12:46:32Z BEFORE this client tag, edge
+#: live from 12:47:07Z (STEP-6 gate report
+#: gate-report-20260917T124809Z-v011.json green, recall 12/12, parity pass).
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 127)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
