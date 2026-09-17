@@ -4949,6 +4949,24 @@ def _check_stranded_install() -> list[HealthResult]:
 # carries the route and the skip branch below is dead by construction.
 _TUPLE_ROUTE_FIRST_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 114)
 
+# RDR-211 Phase 1 Step 3 (bead nexus-rplay.12): GET /v1/tuples/park_stats'
+# own first-serving-engine anchor, kept SEPARATE from
+# _TUPLE_ROUTE_FIRST_ENGINE_VERSION above because it names a different
+# route that shipped later. Its Java source is merged to develop (the
+# route exists at this bead's pinned preflight sha) but has not yet been
+# cut as an engine-service-v* tag as of this commit -- the newest
+# published tag is v0.1.126, and this constant deliberately names the
+# NEXT one, v0.1.127. Unlike the sibling constant above,
+# whose own pin test (test_tuple_route_first_engine_version_pin) asserts
+# it never sits above the newest published tag because that route already
+# shipped, this constant is written intentionally ahead: it must be
+# corrected to match the real cut's version number in the SAME commit
+# that bumps REQUIRED_ENGINE_VERSION to that tag, per AGENTS.md's
+# paired-release choreography. Until that lands, REQUIRED_ENGINE_VERSION
+# (0.1.126) sits below it, so the doctor row below reports the
+# route as expected-absent (informational), never a defect.
+_TUPLE_PARK_STATS_FIRST_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 127)
+
 #: Doctor heuristic, not derived from any per-template TTL: an unclaimed
 #: tuple sitting in a claimable subspace for longer than this is reported
 #: as an actionable finding (a stuck producer/consumer), not routine
@@ -4969,6 +4987,15 @@ _TUPLE_DEAD_RATIO_WARN: float = 0.20
 #: a separate number.
 _TUPLE_SWEEP_STALE_AGE_S: int = 18 * 3600
 
+#: RDR-211 Scale and Limits item 1: "a doctor row that warns above 75% of
+#: the cap". The cap itself (``max_global``) is always read from the
+#: engine's own ``park_stats()`` response, never hard-coded here.
+_TUPLE_PARK_SLOTS_WARN_RATIO: float = 0.75
+
+#: RDR-211 Scale and Limits item 3: "a doctor row ... warning above 1,000
+#: available or at any dead task".
+_TUPLE_QUEUE_DEPTH_WARN_AVAILABLE: int = 1000
+
 
 def _tuple_route_predates_floor() -> bool:
     from nexus.engine_version import REQUIRED_ENGINE_VERSION  # noqa: PLC0415 — deferred; stdlib-only leaf, cheap either way
@@ -4978,6 +5005,16 @@ def _tuple_route_predates_floor() -> bool:
     # real first-serving tag, equality means served. Docs-chain review
     # 2026-09-11.)
     return REQUIRED_ENGINE_VERSION < _TUPLE_ROUTE_FIRST_ENGINE_VERSION
+
+
+def _park_stats_route_predates_floor() -> bool:
+    """Same gate as :func:`_tuple_route_predates_floor`, against
+    :data:`_TUPLE_PARK_STATS_FIRST_ENGINE_VERSION` -- ``GET
+    /v1/tuples/park_stats`` is a separate route from ``subspace_list``/
+    ``rd`` with its own first-serving engine.
+    """
+    from nexus.engine_version import REQUIRED_ENGINE_VERSION  # noqa: PLC0415 — deferred; stdlib-only leaf, cheap either way
+    return REQUIRED_ENGINE_VERSION < _TUPLE_PARK_STATS_FIRST_ENGINE_VERSION
 
 
 def _parse_tuple_timestamp(value: str | None) -> datetime | None:
@@ -5004,16 +5041,19 @@ def _fmt_age(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
-def _template_take_enabled(templates: list[dict], subspace: str) -> bool:
+def _resolve_tuple_template(templates: list[dict], subspace: str) -> dict | None:
     """Resolve *subspace* against the ``registry()`` wire's ``templates``
-    list and return the matching template's ``take.enabled`` (nexus-em75s.12
-    review fix). Mirrors ``TemplateRegistry.resolve()``'s literal-before-
+    list and return the matching template dict, or ``None`` when nothing
+    resolves. Mirrors ``TemplateRegistry.resolve()``'s literal-before-
     pattern rule (``service/src/main/java/dev/nexus/service/tuples/
     TemplateRegistry.java``): a literal template name is checked before
     any parameterised one, and a ``<param>`` segment matches anything in
-    the corresponding position. Defaults to ``True`` (assume claimable,
-    keep checking) when nothing resolves or a template carries no ``take``
-    block -- an unmatched subspace must never be silently skipped.
+    the corresponding position.
+
+    Factored out of :func:`_template_take_enabled` (RDR-211 Phase 1 Step 3,
+    bead nexus-rplay.12) so the queue-depth doctor row can ask "which
+    template does this subspace belong to", not just "is it claimable" --
+    the same matching logic answers both questions.
     """
     segments = subspace.split("/")
 
@@ -5030,11 +5070,24 @@ def _template_take_enabled(templates: list[dict], subspace: str) -> bool:
     patterned = [t for t in templates if "<" in t.get("name", "")]
     for t in literal:
         if t.get("name", "") == subspace:
-            return bool(t.get("take", {}).get("enabled", True))
+            return t
     for t in patterned:
         if _matches(t.get("name", "")):
-            return bool(t.get("take", {}).get("enabled", True))
-    return True
+            return t
+    return None
+
+
+def _template_take_enabled(templates: list[dict], subspace: str) -> bool:
+    """The matching template's ``take.enabled`` (nexus-em75s.12 review
+    fix), via :func:`_resolve_tuple_template`. Defaults to ``True``
+    (assume claimable, keep checking) when nothing resolves or a template
+    carries no ``take`` block -- an unmatched subspace must never be
+    silently skipped.
+    """
+    template = _resolve_tuple_template(templates, subspace)
+    if template is None:
+        return True
+    return bool(template.get("take", {}).get("enabled", True))
 
 
 _TUPLE_UNCLAIMED_LABEL = "tuples.oldest_unclaimed"
@@ -5534,6 +5587,227 @@ def _check_tuple_sweep_freshness(
             ),
             fix_suggestions=["Check the engine process is up and its sweep scheduler is running."],
         )]
+    return [HealthResult(label=label, ok=True, detail=detail)]
+
+
+_TUPLE_PARK_SLOTS_LABEL = "tuples.park_slots"
+
+
+def _check_tuple_park_slots() -> list[HealthResult]:
+    """RDR-211 Phase 1 Step 3 doctor row 1 (bead nexus-rplay.12): park-slot
+    use against ``HttpTupleStore.park_stats()`` (RDR-211 Scale and Limits
+    item 1 -- "the engine also reports park slots in use and refused
+    calls, with a doctor row that warns above 75% of the cap").
+
+    WARN at or above :data:`_TUPLE_PARK_SLOTS_WARN_RATIO` of the engine's
+    OWN reported ``max_global`` cap -- never a client-side hard-coded 16,
+    since the cap is a config knob the engine may set differently.
+
+    Not applicable -- reported as ``ok=True`` with an explicit "predates"
+    detail, never a numeric "0% used" claim -- when the engine predates
+    ``GET /v1/tuples/park_stats`` (:func:`_park_stats_route_predates_floor`),
+    mirroring the other tuple rows' ``route_predates_floor`` gate.
+    """
+    label = _TUPLE_PARK_SLOTS_LABEL
+    route_predates_floor = _park_stats_route_predates_floor()
+
+    import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    try:
+        from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred: CLI startup cost
+        store = HttpTupleStore()
+    except Exception as exc:  # noqa: BLE001 — best-effort: engine/config unreachable, must not crash `nx doctor`
+        _log.debug("doctor_tuple_park_slots_connect_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable ({type(exc).__name__}: {exc})",
+        )]
+
+    try:
+        stats = store.park_stats()
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            if route_predates_floor:
+                return [HealthResult(
+                    label=label, ok=True,
+                    detail=(
+                        "engine predates the park report — this engine "
+                        "predates GET /v1/tuples/park_stats "
+                        f"(REQUIRED_ENGINE_VERSION pins a floor at or below "
+                        f"{_TUPLE_PARK_STATS_FIRST_ENGINE_VERSION}, before the "
+                        "route shipped on any released engine-service tag). "
+                        "This is EXPECTED, not a defect."
+                    ),
+                )]
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail=(
+                    "UNKNOWN — the engine floor should carry GET "
+                    "/v1/tuples/park_stats but the route 404s. Investigate "
+                    "the engine install; this is no longer the expected "
+                    "pre-route-floor gap."
+                ),
+            )]
+        _log.debug("doctor_tuple_park_slots_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable ({type(exc).__name__}: {exc})",
+        )]
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_tuple_park_slots_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable ({type(exc).__name__}: {exc})",
+        )]
+
+    if stats.max_global <= 0:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine reports max_global={stats.max_global}; cannot compute park-slot usage",
+        )]
+
+    ratio = stats.global_in_use / stats.max_global
+    detail = (
+        f"{stats.global_in_use}/{stats.max_global} global park slots in use "
+        f"({ratio:.0%}); refused_global={stats.refused_global} "
+        f"refused_claimant={stats.refused_claimant}"
+    )
+    if ratio >= _TUPLE_PARK_SLOTS_WARN_RATIO:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"{detail} — at or above the {_TUPLE_PARK_SLOTS_WARN_RATIO:.0%} warn threshold",
+            fix_suggestions=[
+                "Investigate what is parking so many rd/wait calls; consolidate "
+                "per-session waiters (RDR-211 Scale and Limits item 1).",
+            ],
+        )]
+    return [HealthResult(label=label, ok=True, detail=detail)]
+
+
+_TUPLE_QUEUE_DEPTH_LABEL = "tuples.queue_depth"
+
+
+def _check_tuple_queue_depth() -> list[HealthResult]:
+    """RDR-211 Phase 1 Step 3 doctor row 2 (bead nexus-rplay.12): the
+    census ``available``/``dead`` counts (``SubspaceCensus``, via
+    ``HttpTupleStore.subspace_list``/``registry``) for subspaces that
+    resolve to the take-enabled ``queue/<name>`` template ONLY -- board
+    (take disabled), mailbox, lock, ledger, and directory subspaces never
+    count here regardless of row counts (RDR-211 Scale and Limits item 3:
+    "a doctor row over the census available and dead counts for QUEUE
+    subspaces").
+
+    WARN above :data:`_TUPLE_QUEUE_DEPTH_WARN_AVAILABLE` available tuples
+    on any queue, or at any dead-lettered task on any queue.
+
+    Not applicable -- ``ok=True`` with an explicit "informational" detail,
+    never a plain OK -- when the tenant carries no ``queue/<name>``
+    subspace at all (the nexus-7zhag doctrine: a new doctor row is
+    not-applicable, never green-by-default, when its subject is simply
+    absent -- a virgin or ordinary box that has never used a queue
+    template).
+    """
+    label = _TUPLE_QUEUE_DEPTH_LABEL
+    route_predates_floor = _tuple_route_predates_floor()
+
+    import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    try:
+        from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred: CLI startup cost
+        store = HttpTupleStore()
+    except Exception as exc:  # noqa: BLE001 — best-effort: engine/config unreachable, must not crash `nx doctor`
+        _log.debug("doctor_tuple_queue_depth_connect_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable ({type(exc).__name__}: {exc})",
+        )]
+
+    try:
+        subspaces = store.subspace_list()
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            if route_predates_floor:
+                return [HealthResult(
+                    label=label, ok=True,
+                    detail=(
+                        "informational — this engine predates GET "
+                        "/v1/tuples/subspace_list "
+                        f"(REQUIRED_ENGINE_VERSION pins a floor at or below "
+                        f"{_TUPLE_ROUTE_FIRST_ENGINE_VERSION}, before the "
+                        "route shipped on any released engine-service tag). "
+                        "This is EXPECTED, not a defect."
+                    ),
+                )]
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail=(
+                    "UNKNOWN — the engine floor should carry GET "
+                    "/v1/tuples/subspace_list but the route 404s. "
+                    "Investigate the engine install; this is no longer the "
+                    "expected pre-route-floor gap."
+                ),
+            )]
+        _log.debug("doctor_tuple_queue_depth_list_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable ({type(exc).__name__}: {exc})",
+        )]
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_tuple_queue_depth_list_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable ({type(exc).__name__}: {exc})",
+        )]
+
+    try:
+        templates = store.registry().get("templates") or []
+    except Exception as exc:  # noqa: BLE001 — best-effort: a registry fetch failure must not crash `nx doctor`
+        _log.debug("doctor_tuple_queue_depth_registry_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"templates could not be resolved ({type(exc).__name__}: "
+                f"{exc}); skipping the queue-depth check for this run"
+            ),
+        )]
+
+    queues = []
+    for census in subspaces:
+        template = _resolve_tuple_template(templates, census.subspace)
+        if template is None:
+            continue
+        name = template.get("name", "")
+        if not name.startswith("queue/"):
+            continue
+        if not bool(template.get("take", {}).get("enabled", True)):
+            continue
+        queues.append(census)
+
+    if not queues:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="informational — no queue/<name> subspaces exist on this tenant",
+        )]
+
+    over_available = [c for c in queues if c.available > _TUPLE_QUEUE_DEPTH_WARN_AVAILABLE]
+    with_dead = [c for c in queues if c.dead > 0]
+
+    if over_available or with_dead:
+        parts = [f"{c.subspace} (available={c.available})" for c in over_available]
+        parts += [f"{c.subspace} (dead={c.dead})" for c in with_dead]
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"{len(over_available)} queue(s) above "
+                f"{_TUPLE_QUEUE_DEPTH_WARN_AVAILABLE} available and "
+                f"{len(with_dead)} queue(s) with a dead task: " + "; ".join(parts)
+            ),
+            fix_suggestions=[
+                "Check for a stuck or absent consumer on the named queue(s): "
+                "nx tuple stats <subspace>",
+            ],
+        )]
+    detail = "; ".join(f"{c.subspace}: available={c.available} dead={c.dead}" for c in queues)
     return [HealthResult(label=label, ok=True, detail=detail)]
 
 
@@ -7954,6 +8228,13 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     results.extend(_check_tuple_unclaimed_age())
     results.extend(_check_tuple_table_bloat())
     results.extend(_check_tuple_sweep_freshness())
+    # RDR-211 Phase 1 Step 3 (bead nexus-rplay.12): park-slot use and queue
+    # depth. Both degrade internally: park_slots via the route's own
+    # first-serving-engine gate (informational until that engine is cut and
+    # pinned); queue_depth via the nexus-7zhag not-applicable doctrine when
+    # the tenant has no queue subspace.
+    results.extend(_check_tuple_park_slots())
+    results.extend(_check_tuple_queue_depth())
     # bead nexus-rml7o (MM-3.4 critic finding S5): read-only, always
     # informational -- never gated by route_predates_floor, since it reads
     # local Claude Code settings, not the engine.

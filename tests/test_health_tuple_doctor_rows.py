@@ -33,10 +33,14 @@ import nexus.health as h
 
 
 class _FakeSubspace:
-    def __init__(self, subspace: str, available: int, oldest_created_at: str | None = None) -> None:
+    def __init__(
+        self, subspace: str, available: int, oldest_created_at: str | None = None,
+        dead: int = 0,
+    ) -> None:
         self.subspace = subspace
         self.available = available
         self.oldest_created_at = oldest_created_at
+        self.dead = dead
 
 
 class _FakeTupleRow:
@@ -50,12 +54,26 @@ def _fake_template(name: str, *, take_enabled: bool = True) -> dict:
     return {"name": name, "take": {"enabled": take_enabled}}
 
 
+class _FakeParkStats:
+    def __init__(
+        self, max_global: int, max_per_claimant: int, global_in_use: int,
+        refused_global: int = 0, refused_claimant: int = 0, per_claimant: dict | None = None,
+    ) -> None:
+        self.max_global = max_global
+        self.max_per_claimant = max_per_claimant
+        self.global_in_use = global_in_use
+        self.refused_global = refused_global
+        self.refused_claimant = refused_claimant
+        self.per_claimant = per_claimant or {}
+
+
 class _FakeTupleStore:
     closed = False
 
     def __init__(
         self, subspaces=None, rd_by_subspace=None, list_exc=None,
         templates=None, rd_calls: list[str] | None = None, registry_exc=None,
+        park_stats_result=None, park_stats_exc=None,
     ) -> None:
         self._subspaces = subspaces or []
         self._rd_by_subspace = rd_by_subspace or {}
@@ -63,6 +81,8 @@ class _FakeTupleStore:
         self._templates = templates if templates is not None else []
         self._rd_calls = rd_calls
         self._registry_exc = registry_exc
+        self._park_stats_result = park_stats_result
+        self._park_stats_exc = park_stats_exc
 
     def subspace_list(self, prefix=None):
         if self._list_exc is not None:
@@ -79,6 +99,11 @@ class _FakeTupleStore:
             self._rd_calls.append(subspace)
         return self._rd_by_subspace.get(subspace, [])
 
+    def park_stats(self):
+        if self._park_stats_exc is not None:
+            raise self._park_stats_exc
+        return self._park_stats_result
+
 
 def _run_unclaimed(monkeypatch, store) -> h.HealthResult:
     monkeypatch.setattr(
@@ -86,6 +111,22 @@ def _run_unclaimed(monkeypatch, store) -> h.HealthResult:
         lambda *a, **k: store, raising=False,
     )
     return h._check_tuple_unclaimed_age()[0]
+
+
+def _run_park_slots(monkeypatch, store) -> h.HealthResult:
+    monkeypatch.setattr(
+        "nexus.db.t2.http_tuple_store.HttpTupleStore",
+        lambda *a, **k: store, raising=False,
+    )
+    return h._check_tuple_park_slots()[0]
+
+
+def _run_queue_depth(monkeypatch, store) -> h.HealthResult:
+    monkeypatch.setattr(
+        "nexus.db.t2.http_tuple_store.HttpTupleStore",
+        lambda *a, **k: store, raising=False,
+    )
+    return h._check_tuple_queue_depth()[0]
 
 
 class TestCheckTupleUnclaimedAgeFloorGate:
@@ -1122,3 +1163,243 @@ def test_tuple_route_first_engine_version_pin() -> None:
         f"({newest}) -- update it only once that tag actually exists and actually carries "
         "/v1/tuples."
     )
+
+
+# ── RDR-211 Phase 1 Step 3 (bead nexus-rplay.12): park-slot use and queue ────
+# depth ───────────────────────────────────────────────────────────────────────
+#
+# _TUPLE_PARK_STATS_FIRST_ENGINE_VERSION is DELIBERATELY ahead of the newest
+# published engine-service-v* tag at the time this lands (v0.1.126): the
+# engine's GET /v1/tuples/park_stats route ships in the NEXT tag, predicted
+# as v0.1.127 (its Java source already merged to develop per the preflight
+# sha this bead pins to, but not yet cut/tagged). Unlike
+# _TUPLE_ROUTE_FIRST_ENGINE_VERSION -- whose own pin test asserts it never
+# sits above the newest published tag, because that route already shipped --
+# this constant intentionally fails that same assertion today, so no
+# analogous pin test is added here; it belongs at the same commit that bumps
+# REQUIRED_ENGINE_VERSION to the real cut, per AGENTS.md's paired-release
+# choreography.
+
+
+class TestCheckTupleParkSlots:
+    def test_route_missing_below_floor_is_informational(self, monkeypatch) -> None:
+        below = tuple(
+            list(h._TUPLE_PARK_STATS_FIRST_ENGINE_VERSION[:-1])
+            + [h._TUPLE_PARK_STATS_FIRST_ENGINE_VERSION[-1] - 1],
+        )
+        monkeypatch.setattr(ev, "REQUIRED_ENGINE_VERSION", below)
+        exc = httpx.HTTPStatusError(
+            "404", request=httpx.Request("GET", "http://x"),
+            response=httpx.Response(404, request=httpx.Request("GET", "http://x")),
+        )
+        r = _run_park_slots(monkeypatch, _FakeTupleStore(park_stats_exc=exc))
+        assert r.ok is True
+        assert "predates the park report" in r.detail
+
+    def test_route_missing_at_floor_is_loud_warn(self, monkeypatch) -> None:
+        monkeypatch.setattr(ev, "REQUIRED_ENGINE_VERSION", h._TUPLE_PARK_STATS_FIRST_ENGINE_VERSION)
+        exc = httpx.HTTPStatusError(
+            "404", request=httpx.Request("GET", "http://x"),
+            response=httpx.Response(404, request=httpx.Request("GET", "http://x")),
+        )
+        r = _run_park_slots(monkeypatch, _FakeTupleStore(park_stats_exc=exc))
+        assert r.ok is False and r.warn is True
+        assert "UNKNOWN" in r.detail
+
+    def test_route_missing_above_floor_is_loud_warn(self, monkeypatch) -> None:
+        above = tuple(
+            list(h._TUPLE_PARK_STATS_FIRST_ENGINE_VERSION[:-1])
+            + [h._TUPLE_PARK_STATS_FIRST_ENGINE_VERSION[-1] + 1],
+        )
+        monkeypatch.setattr(ev, "REQUIRED_ENGINE_VERSION", above)
+        exc = httpx.HTTPStatusError(
+            "404", request=httpx.Request("GET", "http://x"),
+            response=httpx.Response(404, request=httpx.Request("GET", "http://x")),
+        )
+        r = _run_park_slots(monkeypatch, _FakeTupleStore(park_stats_exc=exc))
+        assert r.ok is False and r.warn is True
+        assert "UNKNOWN" in r.detail
+
+    def test_engine_unreachable_at_construction(self, monkeypatch) -> None:
+        def _raise(*a, **k):
+            raise RuntimeError("no service registered")
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_tuple_store.HttpTupleStore", _raise, raising=False,
+        )
+        r = h._check_tuple_park_slots()[0]
+        assert r.ok is False and r.warn is True
+        assert "engine unreachable" in r.detail
+
+    def test_engine_unreachable_on_park_stats_call(self, monkeypatch) -> None:
+        r = _run_park_slots(monkeypatch, _FakeTupleStore(park_stats_exc=ConnectionError("refused")))
+        assert r.ok is False and r.warn is True
+        assert "engine unreachable" in r.detail
+
+    def test_below_75_percent_is_ok(self, monkeypatch) -> None:
+        stats = _FakeParkStats(max_global=16, max_per_claimant=4, global_in_use=11)
+        r = _run_park_slots(monkeypatch, _FakeTupleStore(park_stats_result=stats))
+        assert r.ok is True
+        assert "11/16" in r.detail
+
+    def test_at_75_percent_is_warn(self, monkeypatch) -> None:
+        stats = _FakeParkStats(max_global=16, max_per_claimant=4, global_in_use=12)
+        r = _run_park_slots(monkeypatch, _FakeTupleStore(park_stats_result=stats))
+        assert r.ok is False and r.warn is True
+        assert "12/16" in r.detail
+
+    def test_above_75_percent_is_warn(self, monkeypatch) -> None:
+        stats = _FakeParkStats(max_global=16, max_per_claimant=4, global_in_use=15)
+        r = _run_park_slots(monkeypatch, _FakeTupleStore(park_stats_result=stats))
+        assert r.ok is False and r.warn is True
+        assert "15/16" in r.detail
+
+    def test_never_hardcodes_16_as_the_cap(self, monkeypatch) -> None:
+        """The cap is whatever the engine reports (max_global), never a
+        client-side literal -- a differently-configured engine (e.g.
+        max_global=32) must be judged against ITS OWN cap."""
+        stats = _FakeParkStats(max_global=32, max_per_claimant=4, global_in_use=23)
+        r = _run_park_slots(monkeypatch, _FakeTupleStore(park_stats_result=stats))
+        assert r.ok is True  # 23/32 == 71.875%, below 75% of ITS OWN cap
+        stats2 = _FakeParkStats(max_global=32, max_per_claimant=4, global_in_use=24)
+        r2 = _run_park_slots(monkeypatch, _FakeTupleStore(park_stats_result=stats2))
+        assert r2.ok is False and r2.warn is True  # 24/32 == 75%
+
+
+def _queue_template(name: str, *, take_enabled: bool = True) -> dict:
+    return {"name": name, "take": {"enabled": take_enabled}}
+
+
+_ALL_TEMPLATE_KINDS = [
+    _queue_template("board/<topic>", take_enabled=False),
+    _queue_template("queue/<name>", take_enabled=True),
+    _queue_template("lock/<resource>", take_enabled=True),
+    _queue_template("mailbox/<address>", take_enabled=True),
+    _queue_template("ledger/<session_id>", take_enabled=False),
+    _queue_template("directory/<name>", take_enabled=False),
+]
+
+
+class TestCheckTupleQueueDepth:
+    def test_no_queue_subspaces_is_not_applicable(self, monkeypatch) -> None:
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("mailbox/a", available=5)],
+            templates=_ALL_TEMPLATE_KINDS,
+        )
+        r = _run_queue_depth(monkeypatch, store)
+        assert r.ok is True
+        assert "informational" in r.detail
+        assert r.ok is not False
+
+    def test_healthy_queue_is_ok(self, monkeypatch) -> None:
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("queue/work", available=999, dead=0)],
+            templates=_ALL_TEMPLATE_KINDS,
+        )
+        r = _run_queue_depth(monkeypatch, store)
+        assert r.ok is True
+        assert "queue/work" in r.detail
+
+    def test_over_1000_available_is_warn(self, monkeypatch) -> None:
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("queue/work", available=1001, dead=0)],
+            templates=_ALL_TEMPLATE_KINDS,
+        )
+        r = _run_queue_depth(monkeypatch, store)
+        assert r.ok is False and r.warn is True
+        assert "queue/work" in r.detail
+
+    def test_one_dead_task_is_warn_even_with_low_available(self, monkeypatch) -> None:
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("queue/work", available=999, dead=1)],
+            templates=_ALL_TEMPLATE_KINDS,
+        )
+        r = _run_queue_depth(monkeypatch, store)
+        assert r.ok is False and r.warn is True
+        assert "queue/work" in r.detail
+
+    def test_zero_dead_and_999_available_is_ok(self, monkeypatch) -> None:
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("queue/work", available=999, dead=0)],
+            templates=_ALL_TEMPLATE_KINDS,
+        )
+        r = _run_queue_depth(monkeypatch, store)
+        assert r.ok is True
+
+    def test_board_and_lock_subspaces_never_count(self, monkeypatch) -> None:
+        """A board or lock subspace with a huge row count must never trip
+        this row -- it answers a different question (RDR-211 Scale and
+        Limits item 3 is about QUEUES specifically)."""
+        store = _FakeTupleStore(
+            subspaces=[
+                _FakeSubspace("board/announcements", available=99999, dead=99999),
+                _FakeSubspace("lock/resource-a", available=99999, dead=99999),
+            ],
+            templates=_ALL_TEMPLATE_KINDS,
+        )
+        r = _run_queue_depth(monkeypatch, store)
+        assert r.ok is True
+        assert "informational" in r.detail
+
+    def test_mixed_subspaces_only_queue_counts(self, monkeypatch) -> None:
+        store = _FakeTupleStore(
+            subspaces=[
+                _FakeSubspace("board/announcements", available=99999, dead=99999),
+                _FakeSubspace("queue/work", available=1500, dead=0),
+            ],
+            templates=_ALL_TEMPLATE_KINDS,
+        )
+        r = _run_queue_depth(monkeypatch, store)
+        assert r.ok is False and r.warn is True
+        assert "queue/work" in r.detail
+        assert "board/announcements" not in r.detail
+
+    def test_engine_unreachable_at_construction(self, monkeypatch) -> None:
+        def _raise(*a, **k):
+            raise RuntimeError("no service registered")
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_tuple_store.HttpTupleStore", _raise, raising=False,
+        )
+        r = h._check_tuple_queue_depth()[0]
+        assert r.ok is False and r.warn is True
+        assert "engine unreachable" in r.detail
+
+    def test_registry_failure_is_soft_warn(self, monkeypatch) -> None:
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("queue/work", available=5)],
+            registry_exc=RuntimeError("registry blip"),
+        )
+        r = _run_queue_depth(monkeypatch, store)
+        assert r.ok is False and r.warn is True
+
+
+def test_rdr211_park_slots_and_queue_depth_rows_are_registered_in_run_health_checks() -> None:
+    import inspect
+
+    source = inspect.getsource(h.run_health_checks)
+    for fn_name in ("_check_tuple_park_slots", "_check_tuple_queue_depth"):
+        assert f"{fn_name}()" in source, f"nx doctor must invoke {fn_name}()"
+
+
+def test_new_doctor_rows_absent_from_fresh_install_mvv_allowlist() -> None:
+    """RDR-211 Phase 1 Step 3: these are new doctor rows, so per the
+    nexus-7zhag doctrine (see the standing rule in the project's memory),
+    they resolve not-applicable on a virgin box and must NEVER be added to
+    ``tests/e2e/fresh-install-mvv.sh``'s doctor warnings allowlist -- a
+    virgin box has no queue subspace and (today) an engine below the
+    park-stats floor, so both rows are informational there already, with
+    nothing to allowlist.
+    """
+    import re as _re
+    from pathlib import Path as _Path
+
+    mvv_path = _Path(__file__).resolve().parent.parent / "tests" / "e2e" / "fresh-install-mvv.sh"
+    source = mvv_path.read_text(encoding="utf-8")
+    match = _re.search(r"ALLOWLIST_REGEX='([^']*)'", source)
+    assert match is not None, "fresh-install-mvv.sh must still define ALLOWLIST_REGEX"
+    allowlist_regex = match.group(1)
+    assert "park_slots" not in allowlist_regex
+    assert "queue_depth" not in allowlist_regex
+    assert "tuples.park_slots" not in source
+    assert "tuples.queue_depth" not in source
