@@ -40,12 +40,16 @@ import java.util.regex.Pattern;
  * {@link #registry()} so the cloud client-path gate can assert a deployed
  * engine reports {@value #SOURCE_RESOURCES} alone.
  *
- * <p><b>Boot check.</b> The claim log's TTL setting ({@value
- * #CLAIM_LOG_TTL_DAYS_ENV}, default {@value #DEFAULT_CLAIM_LOG_TTL_DAYS}
- * days) must exceed every loaded template's {@code retention_seconds} by
+ * <p><b>Boot check.</b> Every loaded template's EFFECTIVE claim-log TTL — its own
+ * {@link TemplateSchema#claimLogTtlSeconds()} when it declares one (RDR-211 Scale
+ * and Limits item 6, bead nexus-rplay.6), else the engine-wide {@value
+ * #CLAIM_LOG_TTL_DAYS_ENV} default (default {@value #DEFAULT_CLAIM_LOG_TTL_DAYS}
+ * days) — must exceed that SAME template's own {@code retention_seconds} by
  * strictly more than one sweep interval — equality refuses to boot, naming
  * the template, so the purge order in the RDR's §Indexes and hygiene is
- * checked for every row rather than assumed.
+ * checked for every row rather than assumed. A template's own override may only
+ * SHORTEN the engine default, never lengthen it; a longer one also refuses to
+ * boot, naming the template.
  *
  * <p><b>YAML, no new dependency (design call).</b> {@code service/pom.xml}
  * carries no YAML parser; adding {@code jackson-dataformat-yaml} would pull
@@ -85,6 +89,7 @@ public final class TemplateRegistry {
     private static final ObjectMapper DIGEST_MAPPER = new ObjectMapper();
 
     private final List<TemplateSchema> templates;
+    private final Map<String, TemplateSchema> byName;
     private final List<String> sources;
     private final String digest;
     private final long claimLogTtlSeconds;
@@ -92,6 +97,13 @@ public final class TemplateRegistry {
     private TemplateRegistry(List<TemplateSchema> templates, List<String> sources, String digest,
                               long claimLogTtlSeconds) {
         this.templates = templates;
+        // Safe unqualified lookup: load() already refused a duplicate name before this
+        // constructor ever runs, so every template's own name is a unique map key here.
+        Map<String, TemplateSchema> names = new LinkedHashMap<>();
+        for (TemplateSchema t : templates) {
+            names.put(t.name(), t);
+        }
+        this.byName = Map.copyOf(names);
         this.sources = sources;
         this.digest = digest;
         this.claimLogTtlSeconds = claimLogTtlSeconds;
@@ -99,6 +111,37 @@ public final class TemplateRegistry {
 
     public List<TemplateSchema> templates() {
         return templates;
+    }
+
+    /** The template whose declared {@link TemplateSchema#name()} is exactly {@code name},
+     *  or {@code null} if none loaded under that name. Unlike {@link #resolve}, this is an
+     *  exact key lookup against the registry's OWN name strings, never pattern-matched
+     *  against a concrete subspace address -- what {@code nexus.tuples.template} already
+     *  stores verbatim (RDR-211, bead nexus-rplay.6: {@code TupleRepository#insertClaimLog}
+     *  uses this to find a row's per-template claim-log TTL, if any). */
+    public TemplateSchema byName(String name) {
+        return byName.get(name);
+    }
+
+    /**
+     * RDR-211 Scale and Limits item 6 ("claim-log volume"): the claim-log TTL that
+     * actually governs a specific template's log rows -- its own {@link
+     * TemplateSchema#claimLogTtlSeconds()} when it declares one, else this registry's
+     * engine-wide {@link #claimLogTtlSeconds()}. {@code templateName} not found (a row
+     * from a template the registry no longer carries) falls back to the engine default,
+     * the same posture {@link #resolve} takes for an unmatched subspace elsewhere in this
+     * class -- never a thrown exception from what is, at this call site, a write already
+     * past every other validation.
+     */
+    public long effectiveClaimLogTtlSeconds(String templateName) {
+        TemplateSchema t = byName.get(templateName);
+        return t == null ? claimLogTtlSeconds : effectiveClaimLogTtlSeconds(t, claimLogTtlSeconds);
+    }
+
+    /** The pure form of {@link #effectiveClaimLogTtlSeconds(String)}, usable in {@link
+     *  #load} before a {@link TemplateRegistry} instance exists to call it on. */
+    private static long effectiveClaimLogTtlSeconds(TemplateSchema t, long registryDefaultSeconds) {
+        return t.claimLogTtlSeconds() != null ? t.claimLogTtlSeconds() : registryDefaultSeconds;
     }
 
     /** Every source this registry was loaded from, in load order (e.g. {@code ["resources"]}). */
@@ -309,13 +352,35 @@ public final class TemplateRegistry {
                 .sorted(Comparator.comparing(TemplateSchema::name))
                 .toList();
 
+        // RDR-211 Scale and Limits item 6 (bead nexus-rplay.6): a template's own
+        // claim_log_ttl_seconds, when present, may only SHORTEN the engine default,
+        // never lengthen it -- checked here, not in TemplateSchemaParser, because the
+        // engine default is only known once this method's own caller has resolved
+        // CLAIM_LOG_TTL_DAYS_ENV (TemplateSchema#claimLogTtlSeconds()'s javadoc records
+        // this as a deliberate choice). The retention-vs-TTL boot check below is now
+        // PER TEMPLATE too, against each template's own EFFECTIVE TTL (its override, or
+        // this registry-wide default) rather than uniformly against the registry-wide
+        // default alone -- so a template that shortens its own claim-log TTL is held to
+        // the same "strictly more than one sweep interval past its own retention" rule
+        // every other template already was.
         for (TemplateSchema t : templates) {
+            if (t.claimLogTtlSeconds() != null && t.claimLogTtlSeconds() > claimLogTtlSeconds) {
+                throw new TemplateRegistryException(t.name(), "claim_log_ttl_seconds",
+                        "refuses to boot: template '" + t.name() + "' declares claim_log_ttl_seconds "
+                                + t.claimLogTtlSeconds() + "s, above the engine's own claim log TTL "
+                                + claimLogTtlSeconds + "s (" + CLAIM_LOG_TTL_DAYS_ENV
+                                + ") -- a template may only SHORTEN it, never lengthen it");
+            }
+            long effectiveTtl = effectiveClaimLogTtlSeconds(t, claimLogTtlSeconds);
             long ceiling = t.retentionSeconds() + sweepIntervalSeconds;
-            if (claimLogTtlSeconds <= ceiling) {
+            if (effectiveTtl <= ceiling) {
+                String source = t.claimLogTtlSeconds() != null
+                        ? "its own claim_log_ttl_seconds"
+                        : CLAIM_LOG_TTL_DAYS_ENV + " (the engine default)";
                 throw new TemplateRegistryException(t.name(), "retention_seconds",
-                        "refuses to boot: claim log TTL " + claimLogTtlSeconds + "s ("
-                                + CLAIM_LOG_TTL_DAYS_ENV + ") does not exceed template '" + t.name()
-                                + "' retention_seconds " + t.retentionSeconds()
+                        "refuses to boot: template '" + t.name() + "' effective claim log TTL "
+                                + effectiveTtl + "s (from " + source + ") does not exceed its own"
+                                + " retention_seconds " + t.retentionSeconds()
                                 + "s by strictly more than one sweep interval " + sweepIntervalSeconds + "s");
             }
         }
@@ -377,6 +442,9 @@ public final class TemplateRegistry {
         }
         if (t.maxLiveRows() != null) {
             m.put("max_live_rows", t.maxLiveRows());
+        }
+        if (t.claimLogTtlSeconds() != null) {
+            m.put("claim_log_ttl_seconds", t.claimLogTtlSeconds());
         }
         return m;
     }

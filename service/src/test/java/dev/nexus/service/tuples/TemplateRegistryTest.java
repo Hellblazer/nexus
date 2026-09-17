@@ -259,6 +259,104 @@ class TemplateRegistryTest {
                 () -> TemplateRegistry.loadAtBoot(null, "0", SWEEP_INTERVAL_SECONDS));
     }
 
+    // ── per-template claim_log_ttl_seconds boot check (RDR-211 Phase 1 Step 1,
+    //    bead nexus-rplay.6) ──────────────────────────────────────────────
+
+    @Test
+    void templateOwnClaimLogTtl_shorterThanEngineDefault_butAboveOwnRetentionPlusSweep_boots() {
+        long retentionSeconds = 100L;
+        long registryDefault = DAYS(180);
+        long ownTtl = retentionSeconds + SWEEP_INTERVAL_SECONDS + 1; // strictly greater than the ceiling
+        String yaml = minimalTemplateYamlWithClaimLogTtl("queue/<name>", retentionSeconds, ownTtl);
+        var groups = List.of(new TemplateRegistry.SourceGroup("test",
+                List.of(new TemplateRegistry.TemplateSource("t.yaml", yaml))));
+
+        TemplateRegistry registry = TemplateRegistry.load(groups, registryDefault, SWEEP_INTERVAL_SECONDS);
+
+        assertEquals(1, registry.templates().size());
+        assertEquals(ownTtl, registry.effectiveClaimLogTtlSeconds("queue/<name>"));
+    }
+
+    @Test
+    void templateWithNoClaimLogTtlOverride_usesTheEngineDefaultForBootCheckAndAtRuntime() {
+        long retentionSeconds = 100L;
+        long registryDefault = retentionSeconds + SWEEP_INTERVAL_SECONDS + 1;
+        String yaml = minimalTemplateYaml("ledger/<session_id>", retentionSeconds);
+        var groups = List.of(new TemplateRegistry.SourceGroup("test",
+                List.of(new TemplateRegistry.TemplateSource("t.yaml", yaml))));
+
+        TemplateRegistry registry = TemplateRegistry.load(groups, registryDefault, SWEEP_INTERVAL_SECONDS);
+
+        assertEquals(registryDefault, registry.effectiveClaimLogTtlSeconds("ledger/<session_id>"));
+    }
+
+    @Test
+    void templateOwnClaimLogTtl_equalToOwnRetentionPlusSweep_refusesOnEquality_namesTemplate() {
+        long retentionSeconds = 100L;
+        long ownTtl = retentionSeconds + SWEEP_INTERVAL_SECONDS; // equality -- must refuse
+        String yaml = minimalTemplateYamlWithClaimLogTtl("queue/<name>", retentionSeconds, ownTtl);
+        var groups = List.of(new TemplateRegistry.SourceGroup("test",
+                List.of(new TemplateRegistry.TemplateSource("t.yaml", yaml))));
+
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateRegistry.load(groups, DAYS(180), SWEEP_INTERVAL_SECONDS));
+        assertTrue(ex.getMessage().contains("queue/<name>"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("refuses to boot"), ex.getMessage());
+    }
+
+    @Test
+    void templateOwnClaimLogTtl_belowOwnRetentionPlusSweep_refusesNamingTemplate() {
+        long retentionSeconds = 100L;
+        long ownTtl = retentionSeconds; // far short of retention + sweep
+        String yaml = minimalTemplateYamlWithClaimLogTtl("queue/<name>", retentionSeconds, ownTtl);
+        var groups = List.of(new TemplateRegistry.SourceGroup("test",
+                List.of(new TemplateRegistry.TemplateSource("t.yaml", yaml))));
+
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateRegistry.load(groups, DAYS(180), SWEEP_INTERVAL_SECONDS));
+        assertTrue(ex.getMessage().contains("queue/<name>"), ex.getMessage());
+    }
+
+    /**
+     * A template may only SHORTEN the engine's claim-log TTL, never lengthen it
+     * (RDR-211 Scale and Limits item 6's own wording, and the Test Plan's "must
+     * not exceed the engine default"). Refused even though this template's own
+     * value would otherwise pass the retention-vs-TTL relation easily.
+     */
+    @Test
+    void templateOwnClaimLogTtl_aboveEngineDefault_refused_mayOnlyShorten() {
+        long retentionSeconds = 100L;
+        long registryDefault = DAYS(1);
+        long ownTtl = registryDefault + 1; // one second longer than the engine default
+        String yaml = minimalTemplateYamlWithClaimLogTtl("queue/<name>", retentionSeconds, ownTtl);
+        var groups = List.of(new TemplateRegistry.SourceGroup("test",
+                List.of(new TemplateRegistry.TemplateSource("t.yaml", yaml))));
+
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateRegistry.load(groups, registryDefault, SWEEP_INTERVAL_SECONDS));
+        assertTrue(ex.getMessage().contains("queue/<name>"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("claim_log_ttl_seconds"), ex.getMessage());
+    }
+
+    @Test
+    void templateOwnClaimLogTtl_equalToEngineDefault_boots_shorteningIsNotRequiredToBeStrict() {
+        long retentionSeconds = 100L;
+        long registryDefault = DAYS(1);
+        String yaml = minimalTemplateYamlWithClaimLogTtl("queue/<name>", retentionSeconds, registryDefault);
+        var groups = List.of(new TemplateRegistry.SourceGroup("test",
+                List.of(new TemplateRegistry.TemplateSource("t.yaml", yaml))));
+
+        TemplateRegistry registry = TemplateRegistry.load(groups, registryDefault, SWEEP_INTERVAL_SECONDS);
+
+        assertEquals(registryDefault, registry.effectiveClaimLogTtlSeconds("queue/<name>"));
+    }
+
+    @Test
+    void byName_unknownTemplate_returnsNull() {
+        TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
+        assertNull(registry.byName("bogus/<name>"));
+    }
+
     // ── literal-before-template resolution (May load rule) ─────────────
 
     @Test
@@ -358,5 +456,12 @@ class TemplateRegistryTest {
                 + "take:\n"
                 + "  enabled: false\n"
                 + "retention_seconds: " + retentionSeconds + "\n";
+    }
+
+    /** RDR-211 Phase 1 Step 1 (bead nexus-rplay.6): {@link #minimalTemplateYaml} plus a
+     *  {@code claim_log_ttl_seconds} override. */
+    private static String minimalTemplateYamlWithClaimLogTtl(String name, long retentionSeconds,
+                                                               long claimLogTtlSeconds) {
+        return minimalTemplateYaml(name, retentionSeconds) + "claim_log_ttl_seconds: " + claimLogTtlSeconds + "\n";
     }
 }

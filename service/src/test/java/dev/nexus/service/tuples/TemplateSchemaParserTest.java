@@ -342,4 +342,52 @@ class TemplateSchemaParserTest {
                 () -> TemplateSchemaParser.parse("broken.yaml", doc));
         assertTrue(ex.getMessage().contains("max_live_rows"), ex.getMessage());
     }
+
+    // ── claim_log_ttl_seconds (RDR-211 Phase 1 Step 1, bead nexus-rplay.6) ───
+    //
+    // Only the syntactic "positive integer" shape lives here. "May only shorten
+    // the engine default" and "must exceed this template's own retention_seconds
+    // by more than one sweep interval" both need the registry's resolved default,
+    // which this parser never sees -- TemplateRegistryTest owns those.
+
+    @Test
+    void claimLogTtlSecondsAbsent_leavesFieldNull() {
+        TemplateSchema t = TemplateSchemaParser.parse("mailbox.yaml", validDoc());
+        assertEquals(null, t.claimLogTtlSeconds());
+    }
+
+    @Test
+    void claimLogTtlSecondsPositive_parsesVerbatim() {
+        Map<String, Object> doc = validDoc();
+        doc.put("claim_log_ttl_seconds", 3600L);
+        TemplateSchema t = TemplateSchemaParser.parse("queue.yaml", doc);
+        assertEquals(3600L, t.claimLogTtlSeconds());
+    }
+
+    @Test
+    void claimLogTtlSecondsZero_isABreach() {
+        Map<String, Object> doc = validDoc();
+        doc.put("claim_log_ttl_seconds", 0L);
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("claim_log_ttl_seconds"), ex.getMessage());
+    }
+
+    @Test
+    void claimLogTtlSecondsNegative_isABreach() {
+        Map<String, Object> doc = validDoc();
+        doc.put("claim_log_ttl_seconds", -1L);
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("claim_log_ttl_seconds"), ex.getMessage());
+    }
+
+    @Test
+    void claimLogTtlSecondsWrongType_isABreach() {
+        Map<String, Object> doc = validDoc();
+        doc.put("claim_log_ttl_seconds", "not-a-number");
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateSchemaParser.parse("broken.yaml", doc));
+        assertTrue(ex.getMessage().contains("claim_log_ttl_seconds"), ex.getMessage());
+    }
 }

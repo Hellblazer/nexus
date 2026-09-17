@@ -1723,13 +1723,17 @@ public final class TupleRepository {
      * One BATCH, one transaction, of the scheduled sweep's log-retention arm:
      * deletes up to {@code batchSize} {@code nexus.tuple_claim_log} rows whose OWN
      * {@code expires_at} has passed. {@link #insertClaimLog} stamps that column at
-     * write time as {@code at + }{@link TemplateRegistry#claimLogTtlSeconds()} — the
-     * SAME value the registry's own boot check validated against every template's
+     * write time as {@code at + }{@link TemplateRegistry#effectiveClaimLogTtlSeconds(String)}
+     * — a template's own {@code claim_log_ttl_seconds} when it declares a shorter one
+     * (RDR-211 Scale and Limits item 6, bead nexus-rplay.6), else the engine-wide
+     * default the registry's own boot check validated against every template's
      * {@code retention_seconds} (never a second, independently-parsed copy of {@code
      * NX_TUPLE_CLAIM_LOG_TTL_DAYS}) — so this arm reads the stored column directly
-     * rather than recomputing the cutoff from {@code at} a second time (RDR-205 P1
-     * follow-on, nexus-em75s.37, review M6 / critique S2): the two computations can
-     * only drift if this arm keeps its own copy of the TTL math.
+     * rather than recomputing a cutoff from {@code at} a second time (RDR-205 P1
+     * follow-on, nexus-em75s.37, review M6 / critique S2), and needs no per-template
+     * awareness of its own: two rows with different templates simply carry different
+     * {@code expires_at} values, purged (or not) uniformly by the same comparison
+     * against "now".
      *
      * @return {@code examined} is the candidate SELECT's own row count (RDR-205
      *         Phase 1 follow-on, bead nexus-em75s.38), independent of {@code
@@ -1779,14 +1783,20 @@ public final class TupleRepository {
      * §Technical Design line ~602: {@code at + NX_TUPLE_CLAIM_LOG_TTL_DAYS}), not the
      * tuple's expiry — a claim log row for a short-lived tuple must still survive the
      * full audit retention window. Computed here, once, from {@link
-     * TemplateRegistry#claimLogTtlSeconds()} rather than accepted as a caller-supplied
-     * parameter, so no call site can (again) pass the tuple's own {@code expires_at}
-     * by mistake.
+     * TemplateRegistry#effectiveClaimLogTtlSeconds(String)} — {@code template}'s OWN
+     * TTL when it declares a shorter one (RDR-211 Scale and Limits item 6, bead
+     * nexus-rplay.6), else the engine-wide default — rather than accepted as a
+     * caller-supplied parameter, so no call site can (again) pass the tuple's own
+     * {@code expires_at} by mistake. This is the ONLY site that stamps this column;
+     * {@code purgeOldClaimLogBatch} purges purely by comparing the stored value against
+     * "now", so it needs no per-template awareness of its own — every row already
+     * carries the deadline the template in force at WRITE time computed for it, jOOQ
+     * DSL throughout, no join and no per-template loop added to the purge arm.
      */
     private void insertClaimLog(DSLContext ctx, String tenant, String subspace, String template,
                                  byte[] tupleId, String claimId, String claimant,
                                  String transition, OffsetDateTime at) {
-        OffsetDateTime logExpiresAt = at.plusSeconds(registry.claimLogTtlSeconds());
+        OffsetDateTime logExpiresAt = at.plusSeconds(registry.effectiveClaimLogTtlSeconds(template));
         ctx.insertInto(TUPLE_CLAIM_LOG,
                         TUPLE_CLAIM_LOG.TENANT_ID, TUPLE_CLAIM_LOG.SUBSPACE, TUPLE_CLAIM_LOG.TEMPLATE,
                         TUPLE_CLAIM_LOG.TUPLE_ID, TUPLE_CLAIM_LOG.CLAIM_ID, TUPLE_CLAIM_LOG.CLAIMANT,

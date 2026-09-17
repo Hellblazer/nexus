@@ -23,7 +23,7 @@ final class TemplateSchemaParser {
 
     private static final Set<String> TOP_LEVEL_FIELDS = Set.of(
             "name", "keys", "dimensions", "id_from", "id_dims", "take", "retention_seconds",
-            "max_body_bytes", "lock", "max_live_rows");
+            "max_body_bytes", "lock", "max_live_rows", "claim_log_ttl_seconds");
 
     private static final Set<String> DIMENSION_FIELDS = Set.of("type", "values", "required");
 
@@ -77,9 +77,10 @@ final class TemplateSchemaParser {
         Long maxBodyBytes = parseMaxBodyBytes(source, doc);
         boolean lock = parseLock(source, doc);
         Long maxLiveRows = parseMaxLiveRows(source, doc);
+        Long claimLogTtlSeconds = parseClaimLogTtlSeconds(source, doc);
 
         return new TemplateSchema(name, nameSegments, keys, keyValues, dimensions, idFrom, idDims, take,
-                retentionSeconds, maxBodyBytes, lock, maxLiveRows);
+                retentionSeconds, maxBodyBytes, lock, maxLiveRows, claimLogTtlSeconds);
     }
 
     /**
@@ -95,6 +96,27 @@ final class TemplateSchemaParser {
             throw breach(source, "lock", "must be a boolean");
         }
         return b;
+    }
+
+    /**
+     * {@code claim_log_ttl_seconds} (RDR-211 Scale and Limits item 6): optional, a
+     * positive integer. This is ONLY the syntactic check — "must not exceed the
+     * engine's own claim-log TTL default" and "must exceed this template's own
+     * retention_seconds by more than one sweep interval" both need the registry's
+     * resolved default, which does not exist yet at parse time ({@link
+     * TemplateRegistry#load} runs both checks once every template is parsed; see
+     * {@link TemplateSchema#claimLogTtlSeconds()}'s javadoc for why that split is
+     * deliberate here and not, say, {@link #parseMaxBodyBytes}'s shape).
+     */
+    private static Long parseClaimLogTtlSeconds(String source, Map<String, Object> doc) {
+        if (!doc.containsKey("claim_log_ttl_seconds") || doc.get("claim_log_ttl_seconds") == null) {
+            return null;
+        }
+        Object raw = doc.get("claim_log_ttl_seconds");
+        if (!(raw instanceof Long l) || l <= 0) {
+            throw breach(source, "claim_log_ttl_seconds", "must be a positive integer");
+        }
+        return l;
     }
 
     /**

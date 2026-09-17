@@ -87,6 +87,26 @@ import java.util.Objects;
  *                           cap, which defeats the point of idempotent identity). Past the
  *                           cap, {@code out} raises {@code MaxLiveRowsExceededException}
  *                           ({@code "MaxLiveRowsExceeded"}, HTTP 429) and writes nothing.
+ * @param claimLogTtlSeconds optional per-template claim-log retention (RDR-211 Scale and
+ *                           Limits item 6, "claim-log volume"), SHORTER than the engine's
+ *                           own {@code NX_TUPLE_CLAIM_LOG_TTL_DAYS} default ({@link
+ *                           TemplateRegistry#claimLogTtlSeconds()}). {@code null} means the
+ *                           engine default applies unchanged, the behaviour every template
+ *                           had before this field existed. {@link TemplateSchemaParser}
+ *                           only checks "positive integer" here — unlike {@code
+ *                           maxBodyBytes}, whose ceiling ({@code TupleLimits.MAX_BODY_BYTES})
+ *                           is a compile-time constant the parser can see on its own, the
+ *                           engine's claim-log-TTL default is resolved from an environment
+ *                           variable only once {@code TemplateRegistry.loadAtBoot} runs, so
+ *                           the "may only shorten, never lengthen" comparison and the
+ *                           "exceeds this template's own retention_seconds by more than one
+ *                           sweep interval" boot check (existing, previously registry-wide)
+ *                           both live in {@code TemplateRegistry#load}, alongside each
+ *                           other, where that default is actually known — a boot-time
+ *                           refusal, not a parse-time one (decided here; the RDR leaves the
+ *                           choice open). {@code TupleRepository#insertClaimLog} reads the
+ *                           effective value through {@code
+ *                           TemplateRegistry#effectiveClaimLogTtlSeconds(String)}.
  */
 public record TemplateSchema(
         String name,
@@ -100,7 +120,8 @@ public record TemplateSchema(
         long retentionSeconds,
         Long maxBodyBytes,
         boolean lock,
-        Long maxLiveRows) {
+        Long maxLiveRows,
+        Long claimLogTtlSeconds) {
 
     public TemplateSchema {
         Objects.requireNonNull(name, "name");
