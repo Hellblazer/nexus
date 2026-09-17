@@ -15,7 +15,7 @@ status, and all three must agree:
 
 The engine is the source of truth (it is what actually renders the wire
 shape); this test reads it directly from the Java source rather than
-hand-maintaining a fourth copy of the nine names here, so a tenth error
+hand-maintaining a fourth copy of the names here, so a new error
 added to the engine and forgotten in the client or the doc reds this test
 instead of shipping silently mismatched.
 """
