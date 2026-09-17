@@ -306,6 +306,57 @@ def test_head_hash_not_updated_on_other_error(tmp_path: Path, registry, lock_hom
     mock_set.assert_not_called()
 
 
+def test_head_hash_not_updated_when_files_transient_upsert_deferred(
+    tmp_path: Path, registry, lock_home: Path,
+) -> None:
+    """nexus-6m9zy.6 (#12): owners.head_hash is the base the NEXT
+    --since-head run diffs from. Advancing it past a commit that changed
+    a file this run deferred via _contain_transient_upsert (a transient
+    5xx/timeout) means the next --since-head git diff never offers that
+    file again -- it stays unindexed until a full index, since the
+    deferred file's own staleness cache was never populated either (it
+    was never seen as part of this run's delta)."""
+    with patch("nexus.indexer._run_index",
+               return_value={"transient_upsert_deferred_files": 1}):
+        with patch("nexus.indexer._current_head", return_value="abc"):
+            with patch("nexus.indexer._set_owner_head_hash") as mock_set:
+                index_repository(tmp_path, registry)
+
+    mock_set.assert_not_called()
+
+
+def test_head_hash_not_updated_when_files_permanently_failed(
+    tmp_path: Path, registry, lock_home: Path,
+) -> None:
+    """Same bug, the sibling source the bead names: a file in the
+    ChunkBatcher's failed_files (permanent chunk-flush failure, post
+    bisect-retry) must also hold the base back."""
+    with patch("nexus.indexer._run_index",
+               return_value={"chunk_flush_failed_files": 1}):
+        with patch("nexus.indexer._current_head", return_value="abc"):
+            with patch("nexus.indexer._set_owner_head_hash") as mock_set:
+                index_repository(tmp_path, registry)
+
+    mock_set.assert_not_called()
+
+
+def test_head_hash_updated_when_no_files_deferred_or_failed(
+    tmp_path: Path, registry, lock_home: Path,
+) -> None:
+    """Regression guard: a clean run (both counts present and zero) must
+    still advance the base -- the gate above must not become a permanent
+    freeze."""
+    with patch("nexus.indexer._run_index",
+               return_value={"chunk_flush_failed_files": 0,
+                             "transient_upsert_deferred_files": 0}):
+        with patch("nexus.indexer._current_head", return_value="deadbeef") as mock_head:
+            with patch("nexus.indexer._set_owner_head_hash") as mock_set:
+                index_repository(tmp_path, registry)
+
+    mock_head.assert_called_once_with(tmp_path)
+    mock_set.assert_called_once_with(tmp_path, "deadbeef")
+
+
 # ── lock released after indexing ─────────────────────────────────────────────
 
 
