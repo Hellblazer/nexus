@@ -372,3 +372,25 @@ def test_preamble_rdr_audit_t2_unreachable_reported_never_fails(
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_t2_census_normalises_zero_padded_titles_to_the_bare_number(monkeypatch: pytest.MonkeyPatch):
+    """Intrastate [26115] #5 (nexus-nc08w.1): ``042`` and ``RDR-42`` are one
+    RDR. Keyed on the raw digit string, the census kept them apart, so the
+    file side (``str(int())``) never intersected ``042`` and its drift was
+    invisible."""
+    fake = _FakeT2CensusClient(
+        entries=[
+            {"title": "042", "content": "status: accepted\n"},
+            {"title": "RDR-42", "content": "status: draft\n"},
+            {"title": "014", "content": "status: closed\n"},
+        ]
+    )
+    monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+    counts, ambiguous, error, by_number = _t2_rdr_status_census("nexus")
+    assert error is None
+    assert set(by_number) == {"14"}, by_number  # 42 is ambiguous, 14 normalised
+    assert ambiguous == ["42 (042=accepted, RDR-42=draft)"]
+    assert counts == {"closed": 1}
+    drift = rdr_mod._file_vs_t2_status_drift({"14": "draft", "42": "draft"}, by_number)
+    assert drift == [("14", "draft", "closed")]

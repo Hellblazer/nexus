@@ -493,3 +493,23 @@ def test_subprocess_run_leaks_no_structlog_debug_lines_to_stdout(tmp_path) -> No
         assert ln.strip().startswith(("(resolution failed:", "Run:", "RDR-")), (
             f"unexpected stdout line, possible leak: {ln!r}"
         )
+
+
+def test_status_loader_keeps_rdr_prefixed_titles_and_counts_each_rdr_once(rdr_hook_module, monkeypatch) -> None:
+    """Intrastate [26115] #4 (nexus-nc08w.1): ``if "-" in title: continue``
+    dropped every ``RDR-NNN``-titled status record, undercounting and
+    mis-flagging an accepted RDR as draft for the rdr-fix line. Keeping
+    them naively double-counts an RDR recorded under both shapes, so the
+    loader keys on the bare number and counts each RDR once."""
+    mod = rdr_hook_module
+    rows = [
+        {"title": "RDR-105", "content": "status: accepted\n"},
+        {"title": "097", "content": "status: draft\n"},
+        {"title": "97", "content": "status: draft\n"},
+        {"title": "RDR-105-gate-latest", "content": "commit: abc1234\n"},
+        {"title": "204-research-1", "content": "status: draft\n"},
+    ]
+    monkeypatch.setattr(mod, "_fetch_rdr_rows", lambda repo: rows)
+    statuses = mod._load_all_t2_statuses("nexus")
+    assert statuses == {"105": "accepted", "97": "draft"}
+    assert mod._rdr_status_counts("nexus", statuses) == {"accepted": 1, "draft": 1}

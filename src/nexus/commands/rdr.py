@@ -4102,7 +4102,10 @@ def _t2_rdr_status_census(
         m = re.match(r"^(?:RDR-)?(\d+)$", title)
         if not m:
             continue
-        number = m.group(1)
+        # Bare int, the file side's key shape (_rdr_file_statuses): a
+        # zero-padded title ("042") kept apart from "42" never intersected
+        # its file, so its drift was invisible ([26115] #5, nexus-nc08w.1).
+        number = str(int(m.group(1)))
         content = entry.get("content", "") if isinstance(entry, dict) else ""
         status = _preamble_parse_t2_field(content, "status") or "<no status>"
         by_number.setdefault(number, {})[title] = status

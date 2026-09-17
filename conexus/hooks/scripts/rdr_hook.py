@@ -244,23 +244,38 @@ def _fetch_rdr_rows(repo_name: str) -> list[dict]:
 
 
 def _load_all_t2_statuses(repo_name: str) -> dict[str, str]:
-    """Batch-load all T2 RDR statuses. Returns {rdr_id: status}."""
+    """Batch-load all T2 RDR statuses. Returns ``{bare_number: status}``.
+
+    A status record is titled either the bare number (``"42"``, ``"042"``)
+    or ``"RDR-42"``; gate-latest and research records carry a suffix and
+    are not statuses. Keyed on the bare number so an RDR recorded under
+    two title shapes counts once (a naive keep of the ``RDR-`` shape
+    double-counted), with the bare-number shape winning a disagreement
+    (``_t2_rdr_status_census`` in ``nx rdr preamble rdr-audit`` is where a
+    disagreement is reported). ``if "-" in title: continue`` used to drop
+    every ``RDR-NNN``-titled record ([26115] #4, nexus-nc08w.1)."""
     statuses: dict[str, str] = {}
+    from_bare_title: set[str] = set()
     try:
-        if True:
-            entries = _fetch_rdr_rows(repo_name)
-            for entry in entries:
-                title = entry.get("title", "")
-                if "-" in title:
-                    continue  # skip gate-latest, research, etc.
-                content = entry.get("content", "")
-                for line in content.splitlines():
-                    stripped = line.strip()
-                    if stripped.startswith("status:"):
-                        val = stripped.split(":", 1)[1].strip().strip('"').strip("'")
-                        if val:
-                            statuses[title] = val.lower()
-                        break
+        for entry in _fetch_rdr_rows(repo_name):
+            title = entry.get("title", "")
+            m = re.match(r"^(?:RDR-)?(\d+)$", title)
+            if not m:
+                continue  # gate-latest, research, etc.
+            key = str(int(m.group(1)))
+            bare = not title.startswith("RDR-")
+            if key in from_bare_title and not bare:
+                continue
+            content = entry.get("content", "")
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("status:"):
+                    val = stripped.split(":", 1)[1].strip().strip('"').strip("'")
+                    if val:
+                        statuses[key] = val.lower()
+                        if bare:
+                            from_bare_title.add(key)
+                    break
     except Exception:
         pass
     return statuses
