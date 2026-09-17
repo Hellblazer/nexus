@@ -4,6 +4,36 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.51.0] - 2026-09-17
+
+Paired engine: engine-service-v0.1.127 (`REQUIRED_ENGINE_VERSION` (0, 1, 127)),
+epic nexus-rplay (RDR-211). Plugin version aligned with conexus 7.51.0. This
+pin advance makes live the plugin changes `PENDING_RELEASE.md` held:
+
+- `hooks/scripts/auto-approve-nx-mcp.sh`: `tuple_release`, `tuple_subscribe`,
+  `tuple_unsubscribe`, `tuple_subscriptions` and `tuple_channel_probe` join
+  the auto-approve allow-list (RDR-211, beads nexus-rplay.9/.10/.11). Until
+  this pin, a session on the installed plugin was prompted for permission on
+  each new tool.
+- `hooks/scripts/mailbox_drain.py`: the per-prompt re-arm (the watcher-lock
+  liveness check and its `nx hook mailbox-arm` re-spawn) is deleted; drain,
+  claim, render and dead-letter surfacing stay unchanged (nexus-rplay.14).
+- `skills/mailbox/SKILL.md`: the Monitor-arm instructions and the 30-minute
+  re-arm rule are replaced with the `tuple_subscribe` call and the
+  development-channel launch flag/dialog; added the board-topic
+  `tuple_subscribe` rule, the once-a-minute board posting convention, and
+  the queue/lock claim lifecycle (`in`, `renew`, `ack`/`nack`/`release`,
+  `ack` refused on a lock); the push-delivery rule now documents a pushed
+  notification as a reference only (subspace, tuple id, claim id) — the
+  body is read on purpose with `tuple_rd`, never carried in the
+  notification (nexus-rplay.14, .15).
+- `skills/peer-messaging/SKILL.md`: the watcher-ping delivery description is
+  replaced with the channel + drain-hook floor description; "the armed
+  mailbox watcher" becomes "the channel push"; the tuple space's lock
+  template (`in`/`renew`/`release`; `ack` refused) is documented alongside
+  the local file-based capacity locks that stay out of scope
+  (nexus-rplay.14, .15, .19).
+
 ## [7.50.0] - 2026-09-16
 
 Paired engine: engine-service-v0.1.126 (`REQUIRED_ENGINE_VERSION` (0, 1, 126)),
