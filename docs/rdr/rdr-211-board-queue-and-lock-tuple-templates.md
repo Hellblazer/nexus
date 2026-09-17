@@ -448,8 +448,11 @@ the channels reference, so Phase 1 Step 0 records the observed shape and the
 guard is written against it. Without the channel the waiter claims nothing
 and the floor delivers.
 
-To claim, the waiter takes the oldest available row across the session's
-mailboxes with `in` under a claimant that is stable per session,
+To claim, the waiter reads both mailboxes with a non-claiming `rd` to find
+the oldest available row, then calls `in` on that row's subspace (`in` takes
+one subspace; the oldest row there is what it returns, and a race with the
+drain hook only means the other one got it), under a claimant that is stable
+per session,
 `waiter:<session id>`, minted once at server start from the session id the
 server already leases. It is not the drain hook's claimant, which is random
 per call so that two concurrent drainers of one address never share one; a
@@ -502,8 +505,8 @@ claiming and rendering anything unclaimed at the next prompt, so a session
 launched without the channel still gets its mail, at its next prompt rather
 than at once, and no path depends on the model arming anything. A new
 `nx doctor` row reports three observable facts: the capability is declared
-by the server, the waiter is alive with its last wake time and its count of
-unacked claims, and the client's experimental capabilities as received in
+by the server, the waiter is alive with its last wake time and its counts of
+unacked and released claims, and the client's experimental capabilities as received in
 the initialize handshake (`ServerSession.client_params`), which is what a
 Claude Code launched without the flag leaves empty; the channels reference
 does not document what Claude Code declares there, so that last fact is an
@@ -743,7 +746,8 @@ idempotency, and it loses history.
 - **Risk**: a channel notification is dropped; Claude Code does not acknowledge
   them.
   **Mitigation**: the waiter holds and renews the claim and re-sends the
-  notification until the session's ack passes through it, spending no
+  notification until the session's ack passes through it, at most five
+  times before it releases the message to the floor, spending no
   attempt; a lease lapsing before a retake, or the session's own nack, spends
   one, and any three of those on one message is the dead letter the drain
   hook surfaces once. A dropped board post is not re-sent; the post stays
@@ -865,15 +869,16 @@ the deletion of `nx tuple watch`, `tuple_watch.py`, `mailbox_arm.py`'s
 SessionStart injection and the skill's arming rule. Tests: a notification per
 new tuple with the documented shape, `claimant` included; a suppressed
 notification is re-sent at the next renew with the same claim id and no expiry
-in the claim log, and stops after five re-sends while the renew continues; a
+in the claim log, and after the fifth re-send the message is released; a
 restarted server for the same session retakes its live claims with no expiry
 logged; a killed server with no successor inside the lease lapses and the next
 server's `in` reclaims with one expiry logged; a session's `tuple_nack` on
-delivered mail counts one attempt; `tuple_subscribe` on a queue, a lock or a
-mailbox subspace is refused, and so is the thirty-third subscription; a subscription change re-issues `wait` and the old parked
+delivered mail counts one attempt; `tuple_subscribe` on a queue, a lock or
+another session's mailbox is refused, and so is the thirty-third board topic;
+a subscription change re-issues `wait` and the old parked
 call is gone from the park report; the list survives a resume and not a clear;
 a second message is not claimed until the first is acked, nacked or
-released; the sixth unacked renew releases the message and the floor
+released; after the fifth re-send the message is released and the floor
 delivers it; a server whose handshake carried no client capability claims
 nothing; `tuple_subscribe` of the session's own instance mailbox writes the
 registration file, sends the directory lease, and is refused for any other
@@ -1148,3 +1153,11 @@ The document is sized to those changes and the three template decisions; Phase
   registration file and directory lease the watcher wrote; the doctor row's
   three facts propagated to Step 3, Day 2 and the Test Plan; the sweep named
   as a reclaimer; the bound is 32 board topics beyond the two mailboxes.
+- 2026-09-16: Reconciliation after the second fix-check failure
+  (`nexus_rdr/211-fix-check-1c4ca2c6d`, loop closed): the four Step 3 test
+  sentences left from earlier rounds now match Technical Design (another
+  session's mailbox refused, the thirty-third board topic, release after the
+  fifth re-send), the Risks bullet states the re-send bound, the doctor row's
+  second fact counts releases, and the cross-mailbox claim names its
+  mechanism (`rd` both, `in` the oldest's subspace). No new design; recorded
+  as a reconciliation, not a fourth check.
