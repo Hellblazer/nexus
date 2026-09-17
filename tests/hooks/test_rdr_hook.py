@@ -513,3 +513,20 @@ def test_status_loader_keeps_rdr_prefixed_titles_and_counts_each_rdr_once(rdr_ho
     statuses = mod._load_all_t2_statuses("nexus")
     assert statuses == {"105": "accepted", "97": "draft"}
     assert mod._rdr_status_counts("nexus", statuses) == {"accepted": 1, "draft": 1}
+
+
+@pytest.mark.parametrize("order", ["bare-first", "prefixed-first"])
+def test_status_loader_leaves_out_an_rdr_whose_title_shapes_disagree(rdr_hook_module, monkeypatch, order) -> None:
+    """Two shapes with two statuses are the census's `ambiguous` case; the
+    loader picks neither, in either row order (critique of nexus-nc08w.1:
+    a bare-wins rule was a silent choice between ledgers, nexus-e19sa)."""
+    mod = rdr_hook_module
+    rows = [
+        {"title": "42", "content": "status: accepted\n"},
+        {"title": "RDR-42", "content": "status: draft\n"},
+        {"title": "7", "content": "status: closed\n"},
+    ]
+    if order == "prefixed-first":
+        rows[0], rows[1] = rows[1], rows[0]
+    monkeypatch.setattr(mod, "_fetch_rdr_rows", lambda repo: rows)
+    assert mod._load_all_t2_statuses("nexus") == {"7": "closed"}

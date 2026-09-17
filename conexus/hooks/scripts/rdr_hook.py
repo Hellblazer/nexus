@@ -250,12 +250,14 @@ def _load_all_t2_statuses(repo_name: str) -> dict[str, str]:
     or ``"RDR-42"``; gate-latest and research records carry a suffix and
     are not statuses. Keyed on the bare number so an RDR recorded under
     two title shapes counts once (a naive keep of the ``RDR-`` shape
-    double-counted), with the bare-number shape winning a disagreement
-    (``_t2_rdr_status_census`` in ``nx rdr preamble rdr-audit`` is where a
-    disagreement is reported). ``if "-" in title: continue`` used to drop
-    every ``RDR-NNN``-titled record ([26115] #4, nexus-nc08w.1)."""
-    statuses: dict[str, str] = {}
-    from_bare_title: set[str] = set()
+    double-counted). Two shapes that DISAGREE are left out entirely, the
+    same rule ``_t2_rdr_status_census`` applies in ``nx rdr preamble
+    rdr-audit``, which reports them as ambiguous: which shape is
+    authoritative is not this loader's call to make (nexus-e19sa: no
+    ranking rule between ledgers, and none between title shapes either).
+    ``if "-" in title: continue`` used to drop every ``RDR-NNN``-titled
+    record ([26115] #4, nexus-nc08w.1)."""
+    seen: dict[str, set[str]] = {}
     try:
         for entry in _fetch_rdr_rows(repo_name):
             title = entry.get("title", "")
@@ -263,22 +265,17 @@ def _load_all_t2_statuses(repo_name: str) -> dict[str, str]:
             if not m:
                 continue  # gate-latest, research, etc.
             key = str(int(m.group(1)))
-            bare = not title.startswith("RDR-")
-            if key in from_bare_title and not bare:
-                continue
             content = entry.get("content", "")
             for line in content.splitlines():
                 stripped = line.strip()
                 if stripped.startswith("status:"):
                     val = stripped.split(":", 1)[1].strip().strip('"').strip("'")
                     if val:
-                        statuses[key] = val.lower()
-                        if bare:
-                            from_bare_title.add(key)
+                        seen.setdefault(key, set()).add(val.lower())
                     break
     except Exception:
         pass
-    return statuses
+    return {key: next(iter(vals)) for key, vals in seen.items() if len(vals) == 1}
 
 
 def _load_gated_commits(repo_name: str) -> dict[str, str]:

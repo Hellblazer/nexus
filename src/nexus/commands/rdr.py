@@ -580,6 +580,10 @@ def _update_readme_status_row(
     status_col: int | None = None
     for idx, line in enumerate(lines):
         if "|" not in line:
+            # A blank or prose line ends the table; the next table names
+            # its own Status column or has none (review of 983f0a0d6: a
+            # stale index from an earlier table wrote into the wrong cell).
+            status_col = None
             continue
         cells = line.split("|")
         # A header row names the Status column; the row's cell at that
@@ -587,8 +591,12 @@ def _update_readme_status_row(
         # is a status ("Deferred indexing of large trees") was the first
         # cell to match under the leading-word scan and was destroyed
         # ([26115] #10); that scan is now only the fallback for a table
-        # with no Status header.
-        header_cols = [i for i, c in enumerate(cells) if c.strip().lower() == "status"]
+        # with no Status header. Header decoration (``**Status**``) is
+        # stripped before the match.
+        header_cols = [
+            i for i, c in enumerate(cells)
+            if c.strip().strip("*_`").strip().lower() == "status"
+        ]
         if header_cols:
             status_col = header_cols[0]
             continue
@@ -775,7 +783,7 @@ def _t2_rdr_titles(number: int) -> tuple[str, ...]:
     order: bare (``"42"``), zero-padded (``"042"`` -- the early records,
     e.g. RDR-014), and ``RDR-``-prefixed in both widths. The census
     matches ``^(?:RDR-)?\\d+$`` and so already counts every shape."""
-    return (str(number), f"{number:03d}", f"RDR-{number}", f"RDR-{number:03d}")
+    return tuple(dict.fromkeys((str(number), f"{number:03d}", f"RDR-{number}", f"RDR-{number:03d}")))
 
 
 def _append_marker_to_t2(client: object, project: str, number: int, marker: str) -> str | None:
@@ -817,11 +825,16 @@ def _append_marker_to_t2(client: object, project: str, number: int, marker: str)
 _STATUS_DATE_KEY: dict[str, str] = {"accepted": "accepted_date", "closed": "closed_date"}
 
 
-def _t2_status_for(repo_name: str, rdr_num: int) -> str | None:
-    """The ``status:`` a record's own T2 entry carries (first title shape
-    found, see :func:`_t2_rdr_titles`), lower-cased; ``None`` when there is
-    no entry, no status line, or T2 is unreachable. Read-only; never raises."""
+def _t2_statuses_for(repo_name: str, rdr_num: int) -> dict[str, str]:
+    """``{title: status}`` for every title shape the record's T2 entry
+    exists under (see :func:`_t2_rdr_titles`), statuses lower-cased, an
+    entry with no status line mapped to ``""``. Empty when there is no
+    entry or T2 is unreachable. Read-only; never raises. Every shape is
+    read because the census counts a record under two shapes with two
+    statuses as ambiguous, and a mirror that fixes one shape leaves that
+    ambiguity standing (RDR-122, 2026-09-17)."""
     project = f"{repo_name}_rdr"
+    found: dict[str, str] = {}
     try:
         with _t2_client_factory() as client:
             for title in _t2_rdr_titles(rdr_num):
@@ -829,10 +842,10 @@ def _t2_status_for(repo_name: str, rdr_num: int) -> str | None:
                 if not entry:
                     continue
                 status = _preamble_parse_t2_field(str(entry.get("content", "")), "status")
-                return status.strip().lower() if status else None
+                found[title] = (status or "").strip().lower()
     except Exception:  # noqa: BLE001 — a read failure means "unknown", which the caller treats as nothing to complete
-        return None
-    return None
+        return {}
+    return found
 
 
 def _write_t2_status(repo_name: str, rdr_num: int, new_status: str, date: str) -> tuple[str | None, str | None]:
@@ -845,8 +858,12 @@ def _write_t2_status(repo_name: str, rdr_num: int, new_status: str, date: str) -
     the lifecycle skills were the only T2 status writer, in prose; the
     nine drift rows in nexus-nxn5g are what that produced. Same
     preservation rules as :func:`_append_marker_to_t2` (tags, agent,
-    session, ttl=None). Returns ``(title written, note)``; never raises."""
+    session, ttl=None). Every title shape the entry exists under is
+    rewritten (a record held under ``"122"`` and ``"RDR-122"`` is one
+    record; leaving one shape behind is what the census reports as
+    ambiguous). Returns ``(titles written, note)``; never raises."""
     project = f"{repo_name}_rdr"
+    written: list[str] = []
     try:
         with _t2_client_factory() as client:
             for title in _t2_rdr_titles(rdr_num):
@@ -876,7 +893,9 @@ def _write_t2_status(repo_name: str, rdr_num: int, new_status: str, date: str) -
                     tags = ",".join(str(t) for t in tags)
                 keep = {k: entry[k] for k in ("agent", "session") if isinstance(entry.get(k), str) and entry[k]}
                 client.put(project=project, title=title, content="\n".join(out) + "\n", tags=str(tags or ""), ttl=None, **keep)
-                return title, None
+                written.append(title)
+        if written:
+            return ", ".join(written), None
         return None, f"no T2 entry for RDR {rdr_num} in {project} -- status not mirrored"
     except Exception as exc:  # noqa: BLE001 — the file flip already happened; a T2 failure is named, never allowed to fail the command
         return None, f"T2 status not mirrored: {type(exc).__name__}: {exc}"
@@ -1330,25 +1349,31 @@ def set_status(
         num_match = re.search(r"\d+", rdr_file.stem)
         if num_match:
             repo_name = _gate_repo_name(repo_root)
-            t2_status = _t2_status_for(repo_name, int(num_match.group(0)))
-            if t2_status is not None and t2_status != new_status:
+            t2_statuses = _t2_statuses_for(repo_name, int(num_match.group(0)))
+            behind = sorted({s for s in t2_statuses.values() if s and s != new_status})
+            if behind:
                 # The record advances only along an edge the table admits
                 # (from what T2 holds to what the file holds): a hand-edited
                 # file is not a decision this command made, so an edge the
                 # table lacks is refused here exactly as it is on the flip
-                # path (RDR-201: no bypass).
-                t2_current = "draft" if t2_status == _OPEN_STATUS_ALIAS else t2_status
-                _resolve_transition_or_exit(
-                    table, rdr_file, repo_root, t2_current, new_status,
-                    superseded_by=str(meta.get("superseded_by") or "").strip(), reason=reason,
-                )
+                # path (RDR-201: no bypass). Every shape's status is checked.
+                for t2_status in behind:
+                    t2_current = "draft" if t2_status == _OPEN_STATUS_ALIAS else t2_status
+                    _resolve_transition_or_exit(
+                        table, rdr_file, repo_root, t2_current, new_status,
+                        superseded_by=str(meta.get("superseded_by") or "").strip(), reason=reason,
+                    )
                 click.echo(
-                    f"{rdr_file.name} is already {new_status}; T2 holds {t2_status}, "
-                    "completing the mirror"
+                    f"{rdr_file.name} is already {new_status}; T2 holds "
+                    f"{', '.join(behind)}, completing the mirror"
                 )
+                # The file's own recorded date is the one to mirror; "today"
+                # would diverge T2 from the file it is mirroring (review of
+                # 983f0a0d6). Only a status with no date key falls to today.
+                file_date = str(meta.get(_STATUS_DATE_KEY.get(new_status, ""), "") or "").strip()
                 t2_title, t2_note = _write_t2_status(
                     repo_name, int(num_match.group(0)), new_status,
-                    date or datetime.now(timezone.utc).date().isoformat(),
+                    date or file_date or datetime.now(timezone.utc).date().isoformat(),
                 )
                 if t2_title:
                     click.echo(f"updated T2 {repo_name}_rdr/{t2_title} status -> {new_status}")
@@ -4668,8 +4693,14 @@ def _prg_parse_approach_items(
         return items
     # Two lists share item numbers. The evidence dict is keyed by number,
     # so ``Item1=..,Item2=..`` covered four items with two pointers
-    # ([26115] #9). Renumber sequentially and qualify each label with its
-    # list's heading (or ordinal), so every item needs its own pointer.
+    # ([26115] #9). Renumber the colliding items sequentially and qualify
+    # each such label with its list's heading (or ordinal), so every item
+    # needs its own pointer. An item whose number is unique in the section
+    # keeps it (review of 55b38cd25: renumbering everything moved the keys
+    # of a third list that never collided). Renumbered items take numbers
+    # above every number in use, so nothing lands on a kept key.
+    counts = Counter(nums)
+    next_num = max(nums) + 1
     qualified: list[tuple[int, str, str]] = []
     list_ordinal = 0
     prev_num: int | None = None
@@ -4677,8 +4708,12 @@ def _prg_parse_approach_items(
         if prev_num is None or num <= prev_num:
             list_ordinal += 1
         prev_num = num
+        if counts[num] == 1:
+            qualified.append((num, label, summary))
+            continue
         prefix = heading or f"List {list_ordinal}"
-        qualified.append((len(qualified) + 1, f"{prefix}: {label}", summary))
+        qualified.append((next_num, f"{prefix}: {label}", summary))
+        next_num += 1
     return qualified
 
 

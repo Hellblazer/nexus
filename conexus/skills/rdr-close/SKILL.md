@@ -175,7 +175,7 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
 
 ### Step 4: Update State
 
-1. Update T2 record: mcp__plugin_conexus_nexus__memory_put(content="... (same fields, status: Implemented, closed: YYYY-MM-DD, close_reason: Implemented, archived: true)", project="{repo}_rdr", title="NNN", tags="rdr,{type},closed"  # omit ttl (memory_put's ttl is int|None; permanent by omission)
+1. Update T2 record: mcp__plugin_conexus_nexus__memory_put(content="... (same fields, status: closed, closed: YYYY-MM-DD, close_reason: Implemented, archived: true)", project="{repo}_rdr", title="NNN", tags="rdr,{type},closed"  # omit ttl (memory_put's ttl is int|None; permanent by omission)
    If T3 archive fails, set `archived: false` — retryable by re-running `/conexus:rdr-close`
 
 2. **Flip the file frontmatter + README via the CLI (do NOT hand-edit):**

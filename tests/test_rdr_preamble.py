@@ -3991,6 +3991,24 @@ class TestPhaseReviewGateSubsetParses:
         assert [s for _, _, s in _prg_parse_phase_block_items(text, phase="1.5")] == ["do C"]
         assert [s for _, _, s in _prg_parse_phase_block_items(text, phase="1")] == ["do A", "do B"]
 
+    def test_only_colliding_lists_are_renumbered(self):
+        """Review of 55b38cd25: a third list with unique numbers kept its
+        keys under the old code only when nothing collided anywhere; now it
+        keeps them regardless, and the renumbered items land above every
+        number in use."""
+        from nexus.commands.rdr import _prg_parse_approach_items  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+        text = (
+            "#### Track A\n\n1. **A1**: a\n2. **A2**: b\n\n"
+            "#### Track B\n\n1. **B1**: c\n2. **B2**: d\n\n"
+            "#### Track C\n\n3. **C1**: e\n4. **C2**: f\n"
+        )
+        items = _prg_parse_approach_items(text)
+        assert [(n, lbl) for n, lbl, _ in items] == [
+            (5, "Track A: A1"), (6, "Track A: A2"),
+            (7, "Track B: B1"), (8, "Track B: B2"),
+            (3, "C1"), (4, "C2"),
+        ]
+
     def test_two_lists_restarting_at_one_get_distinct_evidence_keys(self, rdr_env):
         """P5c: two tracks numbered 1..2 each are four items needing four
         pointers; ``Item1=..,Item2=..`` must not cover all four."""
@@ -4010,8 +4028,10 @@ class TestPhaseReviewGateSubsetParses:
             ["preamble", "phase-review-gate", "--", "50", "--phase", "1",
              "--evidence", "Item1=nexus-a,Item2=nexus-b"],
         )
+        # All four collide, so all four take fresh keys (Item3..Item6); the
+        # RDR's own Item1/Item2 name nothing and cover nothing.
         assert "BLOCKED" in res.output, res.output
-        assert "2 of 4" in res.output, res.output
+        assert "4 of 4" in res.output, res.output
 
 
 class TestRdrResearchKeyShapes:

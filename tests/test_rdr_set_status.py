@@ -1198,3 +1198,78 @@ def test_rerun_mirror_refuses_an_edge_the_table_lacks(tmp_path, monkeypatch):
     assert res.exit_code != 0, res.output
     assert "illegal-transition" in res.output
     assert entries[(project, "49")]["content"].startswith("status: abandoned")
+
+
+def test_mirror_rewrites_every_t2_title_shape(tmp_path, monkeypatch):
+    """A record held under "122" and "RDR-122" is one record; mirroring
+    only the first shape found left the census reporting it ambiguous
+    (live RDR-122, 2026-09-17)."""
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 122, "closed")
+    project = f"{tmp_path.name}_rdr"
+    entries = {
+        (project, "122"): {"title": "122", "content": "status: closed\n"},
+        (project, "RDR-122"): {"title": "RDR-122", "content": "status: draft\n"},
+    }
+    fake = _FakeT2ReadWriteClient(entries)
+    monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+    res = _invoke(rdr_dir, "122", "closed", "--reason", "shipped without acceptance")
+    assert res.exit_code == 0, res.output
+    assert entries[(project, "RDR-122")]["content"].startswith("status: closed"), res.output
+
+
+def test_flip_rewrites_every_t2_title_shape(tmp_path, monkeypatch):
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 210, "accepted")
+    project = f"{tmp_path.name}_rdr"
+    entries = {
+        (project, "210"): {"title": "210", "content": "status: accepted\n"},
+        (project, "RDR-210"): {"title": "RDR-210", "content": "status: accepted\n"},
+    }
+    fake = _FakeT2ReadWriteClient(entries)
+    monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+    res = _invoke(rdr_dir, "210", "closed", "--date", "2026-09-17")
+    assert res.exit_code == 0, res.output
+    for title in ("210", "RDR-210"):
+        assert entries[(project, title)]["content"].startswith("status: closed"), (title, res.output)
+
+
+def test_t2_title_shapes_are_distinct():
+    """%03d of a three-digit number is the bare number; a duplicated shape
+    made the mirror write and report the same title twice (live RDR-122)."""
+    assert rdr_mod._t2_rdr_titles(122) == ("122", "RDR-122")
+    assert rdr_mod._t2_rdr_titles(42) == ("42", "042", "RDR-42", "RDR-042")
+
+
+def test_readme_rewrite_scopes_the_status_column_per_table_and_strips_header_decoration(tmp_path):
+    """Review of 983f0a0d6: a Status index from an earlier table leaked into
+    the next table, whose own header was bold, and the Title cell was
+    overwritten while the real Status cell kept Draft."""
+    from nexus.commands.rdr import _update_readme_status_row
+
+    readme = tmp_path / "README.md"
+    readme.write_text(
+        "| Note | Status | Owner |\n|---|---|---|\n| foo | Open | bar |\n\n"
+        "| ID | Title | Priority | **Status** |\n|---|---|---|---|\n"
+        "| [RDR-002](rdr-002-x.md) | Some Title | High | Draft |\n"
+    )
+    dom = frozenset(["draft", "accepted", "deferred", "closed", "superseded", "abandoned"])
+    assert _update_readme_status_row(readme, "rdr-002-x.md", "Accepted", dom) is True
+    assert readme.read_text().splitlines()[-1] == "| [RDR-002](rdr-002-x.md) | Some Title | High | Accepted |"
+    assert "| foo | Open | bar |" in readme.read_text()
+
+
+def test_rerun_mirror_writes_the_files_own_date_not_today(tmp_path, monkeypatch):
+    """Review of 983f0a0d6: without --date the completion wrote today's
+    date to T2 while the file carried closed_date 2026-06-01."""
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 999, "closed", extra_fm="closed_date: 2026-06-01\n")
+    project = f"{tmp_path.name}_rdr"
+    entries = {(project, "999"): {"title": "999", "content": "status: accepted\naccepted_date: 2026-05-01\n"}}
+    fake = _FakeT2ReadWriteClient(entries)
+    monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+    res = _invoke(rdr_dir, "999", "closed")
+    assert res.exit_code == 0, res.output
+    content = entries[(project, "999")]["content"]
+    assert "status: closed" in content
+    assert "closed_date: 2026-06-01" in content, content

@@ -537,7 +537,7 @@ def test_t2_title_shapes_include_the_zero_padded_early_records():
     """RDR-014's T2 entry is titled "014" (RDR-090's "090"); the first live
     set-status flip after the T2 mirror landed missed it."""
     assert rdr_mod._t2_rdr_titles(14) == ("14", "014", "RDR-14", "RDR-014")
-    assert rdr_mod._t2_rdr_titles(201) == ("201", "201", "RDR-201", "RDR-201")
+    assert rdr_mod._t2_rdr_titles(201) == ("201", "RDR-201")  # %03d of a 3-digit number is the bare number: no duplicate shapes (nexus-nc08w.4)
 
 
 def test_set_status_finds_a_zero_padded_t2_title(tmp_path, monkeypatch):
