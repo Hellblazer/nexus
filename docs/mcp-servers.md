@@ -8,7 +8,7 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 | Server | Entry point | Tools | Purpose |
 |---|---|---|---|
-| `nexus` | `nx-mcp` | 48 | Storage tiers, retrieval, operators, orchestration, diagnostics |
+| `nexus` | `nx-mcp` | 49 | Storage tiers, retrieval, operators, orchestration, diagnostics |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`) or the `.mcpb` extension. No separate install.

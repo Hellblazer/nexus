@@ -69,6 +69,7 @@ case "$TOOL_NAME" in
   mcp__plugin_conexus_nexus__tuple_ack|\
   mcp__plugin_conexus_nexus__tuple_nack|\
   mcp__plugin_conexus_nexus__tuple_renew|\
+  mcp__plugin_conexus_nexus__tuple_release|\
   mcp__plugin_conexus_nexus__tuple_registry|\
   mcp__plugin_conexus_nexus__tuple_list|\
   mcp__plugin_conexus_nexus__tuple_stats|\

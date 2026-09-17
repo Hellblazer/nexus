@@ -32,3 +32,5 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.50.0)
 
+- `conexus/hooks/scripts/auto-approve-nx-mcp.sh`: `mcp__plugin_conexus_nexus__tuple_release` joins the auto-approve allow-list (RDR-211 Step 3, nexus-rplay.9). Until the pin advances, a session on the installed plugin is prompted for permission on the new tool.
+
