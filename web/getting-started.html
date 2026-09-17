@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Nexus getting started, inside Claude Code. Eleven lessons: the session, the handoff between sessions, indexing and search, memory, scratch, knowledge and the catalog, exploration, rendering, large questions, RDRs, and maintenance.">
+<meta name="description" content="Nexus getting started, inside Claude Code. Twelve lessons: the session, the handoff between sessions, indexing and search, memory, scratch, knowledge and the catalog, exploration, rendering, large questions, RDRs, maintenance, and push delivery.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
 <title>Nexus Getting Started</title>
@@ -155,6 +155,7 @@ ul.plain li{margin:3px 0}
     <li><a href="#l9">9. Questions that need many documents</a></li>
     <li><a href="#l10">10. Record a decision</a></li>
     <li><a href="#l11">11. Maintenance</a></li>
+    <li><a href="#push-delivery">12. Turn on push delivery</a></li>
   </ol>
   <div class="meta"><a href="rdr.html">Working with RDRs →</a><br><a href="research.html">Research with Nexus →</a><br><a href="research-in-nexus.html">Research in Nexus →</a><br><a href="tuple-space.html">The tuple space →</a><br><a href="coordination.html">Coordination →</a><br><a href="./">← Install guide</a></div>
 </nav>
@@ -162,7 +163,7 @@ ul.plain li{margin:3px 0}
 <main>
 <div class="topnav"><span class="eyebrow" style="margin:0">Nexus · getting started</span><a href="./">← Install guide</a></div>
 <h1>Nexus Getting Started</h1>
-<p class="lede">Everything on this page happens inside Claude Code. You describe what you want, and Claude chooses the Nexus tools and skills for you. Each lesson gives an instruction to type, says what Claude does with it, and says what you will see. There are eleven lessons, and they take about ninety minutes together.</p>
+<p class="lede">Everything on this page happens inside Claude Code. You describe what you want, and Claude chooses the Nexus tools and skills for you. Each lesson gives an instruction to type, says what Claude does with it, and says what you will see. There are twelve lessons, and they take about ninety minutes together.</p>
 <p class="note">Words in <span class="ph">&lt;ORANGE CAPITALS IN ANGLE BRACKETS&gt;</span> are placeholders. Replace them with something from your own project before you send the instruction.</p>
 <p class="note">Before you start, install Nexus and the plugin with the <a href="./">install guide</a>. Then open a terminal in one of your projects and run <code>claude</code>. Every lesson happens in that session.</p>
 
@@ -622,9 +623,52 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 </ul></div>
 </section>
 
+<!-- ============ 12 ============ -->
+<section class="lesson" id="push-delivery">
+<div class="lhead"><span class="lnum">12</span><h2>Turn on push delivery</h2><span class="ltime">5 min</span></div>
+<p class="why">By default, a message that arrives while you are away from the keyboard waits until your next message to Claude, when a hook delivers it. Claude Code can instead push it into the session the moment it arrives. That needs a channel flag on every launch, and nothing Nexus installs can set that flag for you, so this lesson is the one manual step.</p>
+
+<h3>Add the launch flag</h3>
+<p>Two forms exist. Use the first if you can; it needs one more step, below, but shows no dialog once that step is done.</p>
+<div class="see">Run this</div>
+<div class="cmd"><pre>claude --channels plugin:conexus@nexus-plugins</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">Or this, with no setup</div>
+<div class="cmd"><pre>claude --dangerously-load-development-channels server:nexus</pre><button class="copy" type="button">Copy</button></div>
+<p class="note">The second form works everywhere the first does. It asks for a one-keystroke confirmation at every single launch, and Claude Code does not remember your answer between launches.</p>
+
+<h3>Skip the confirmation dialog</h3>
+<p>The first form shows no dialog once the plugin is on Claude Code's channel allowlist. That allowlist is Anthropic's own list, or your own <code>allowedChannelPlugins</code> setting. On macOS, an administrator writes the setting once:</p>
+<div class="see">Run this once, as an administrator</div>
+<div class="cmd"><pre>sudo tee "/Library/Application Support/ClaudeCode/managed-settings.json" >/dev/null &lt;&lt;'JSON'
+{"channelsEnabled": true, "allowedChannelPlugins": [{"marketplace": "nexus-plugins", "plugin": "conexus"}]}
+JSON</pre><button class="copy" type="button">Copy</button></div>
+<p class="note">This setting applies to the whole machine, not one project. Ask whoever manages your machine if you cannot write to <code>/Library/Application Support/ClaudeCode/</code> yourself.</p>
+
+<h3>Make it stick</h3>
+<p>A flag applies to one launch only, so add it to how you already start Claude Code.</p>
+<div class="see">Add this to your shell's startup file</div>
+<div class="cmd"><pre>alias claude='claude --channels plugin:conexus@nexus-plugins'</pre><button class="copy" type="button">Copy</button></div>
+<p class="note">Add this line to <code>~/.zshrc</code>, or the equivalent file for the shell or launcher you use, then open a new terminal. Every later <code>claude</code> then carries the flag without you typing it.</p>
+
+<h3>Check it worked</h3>
+<p>At startup, Claude Code shows a line reading "Channels (experimental) messages from plugin:conexus@nexus-plugins inject directly in this session · restart without --channels to stop." A warning line under it names anything wrong with the allowlist.</p>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Run nx doctor and tell me what the channel row says.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What you see</div>
+<p>The <code>tuples.channel_delivery</code> row names how the channel proved itself live: from the launch flag, or from a confirmation Claude sent itself. A launch with no flag at all reports "not proven".</p>
+
+<h3>Without the flag</h3>
+<p>Nothing breaks. A message still arrives, at your next prompt, through the hook that runs on every prompt whether or not the channel is on. Push delivery only removes the wait, and it needs the flag on every launch to do that. Channels are a Claude Code research preview, and are not available on Amazon Bedrock, Google Cloud Agent Platform, or Microsoft Foundry.</p>
+
+<div class="further"><h4>Investigate further</h4><ul>
+<li><a href="coordination.html">Coordination</a> and <a href="tuple-space.html">The Nexus Tuple Space</a>: what arrives this way, and how the hook and the channel divide the work.</li>
+<li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/tuple-space.md#push-delivery-rdr-211-the-channel">Tuple space: push delivery</a>: the full setup steps and the engine mechanics underneath.</li>
+</ul></div>
+</section>
+
 <div class="finish">
 <h2>Complete</h2>
-<p>You know the three stores and how to choose one. You can ask Claude to index a repository and search it. You know what Claude keeps in memory and scratch, and how to look inside. You can store notes and documents in knowledge, research a subject, follow and add links, and shape the topic map. You can ask for a rendering of a subject, change it, and have the stores follow. You know the commands for large questions, for RDRs, and for maintenance. Search results and session context improve as you index and record more.</p>
+<p>You know the three stores and how to choose one. You can ask Claude to index a repository and search it. You know what Claude keeps in memory and scratch, and how to look inside. You can store notes and documents in knowledge, research a subject, follow and add links, and shape the topic map. You can ask for a rendering of a subject, change it, and have the stores follow. You know the commands for large questions, for RDRs, and for maintenance, and how to turn on push delivery between sessions. Search results and session context improve as you index and record more.</p>
 <p>Reference: <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/README.md">Plugin README</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md">CLI reference</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md">Querying guide</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/rdr.md">RDR</a> · <a href="https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md">Storage tiers</a></p>
 </div>
 
