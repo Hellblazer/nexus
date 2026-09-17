@@ -138,6 +138,8 @@ YOU (the orchestrator running this skill) drive the gate on every completion,
 regardless of what the developer's output says. Do not stop at the
 developer's return; do not let the developer self-commit.
 
+**A new check, gate, census or lint pastes its first live run into its bead before close**, with the counts it examined and skipped, so a pass over input it never examined is visible at the moment it ships.
+
 **State the acceptance bar before dispatching either reviewer** — see
 `/conexus:code-review` § Acceptance Bar. "Ship when &lt;X&gt;," never "no
 criticals."
