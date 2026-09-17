@@ -2179,7 +2179,7 @@ Hooks run `nx index repo` in the background after each qualifying git operation,
 
 ### nx hook routing-stats
 
-The `nx hook` group (hidden from `nx --help`) hosts Claude Code lifecycle plumbing: `session-start`, `session-end`, `session-end-flush`, and `session-end-detach` are invoked by the conexus plugin's SessionStart/SessionEnd hooks with a JSON payload on stdin and are not intended for manual use. `mailbox-arm --session-id ID` prints the mailbox-watch arm instruction, or nothing when an arm could not succeed; the UserPromptSubmit mailbox drain hook runs it when no live watcher holds the session's own mailbox. `routing-stats` is the group's one operator-facing verb.
+The `nx hook` group (hidden from `nx --help`) hosts Claude Code lifecycle plumbing: `session-start`, `session-end`, `session-end-flush`, and `session-end-detach` are invoked by the conexus plugin's SessionStart/SessionEnd hooks with a JSON payload on stdin and are not intended for manual use. `mailbox-arm --session-id ID` prints the same `tuple_subscribe` instruction `session-start` emits, or nothing when it could not succeed; nothing calls it automatically any more (RDR-211 nexus-rplay.14 deleted the per-prompt re-arm it used to serve), so it stays only for manual use — the `UserPromptSubmit` drain hook is the unconditional floor regardless of whether a session ever subscribes. `routing-stats` is the group's one operator-facing verb.
 
 ```
 nx hook routing-stats [--log-path PATH] [--json] [--escapes] [--from-store] [--since ISO_DATE]

@@ -474,9 +474,10 @@ Full rationale and evidence citations: `docs/contributing.md` § Schema/data-mig
 ### 6. Relay deploy + post-deploy cloud validation to conexus
 
 Deploy and cloud-validation are **conexus-side operations**. Send the relay to
-the conexus instance DIRECTLY — the RDR-205 tuple mailbox (`nx tuple watch`,
-`tuple_out` to `mailbox/<instance>`) and cross-session `SendMessage` both reach
-it; the older wording here ("the bus is passive, so surface an explicit relay to
+the conexus instance DIRECTLY — the RDR-205 tuple mailbox (`tuple_out` to
+`mailbox/<instance>`, delivered by the recipient's channel push or, failing
+that, its drain hook at the next prompt) and cross-session `SendMessage` both
+reach it; the older wording here ("the bus is passive, so surface an explicit relay to
 Hal") predates both and read, on 2026-09-16, as "you cannot talk to conexus, hand
 the relay to a human", which is false and cost a round trip. What has NOT changed
 is the substance: never frame the cross-instance deploy as autonomous. A relay

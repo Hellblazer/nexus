@@ -60,7 +60,7 @@ Never type into another session's terminal with `tmux send-keys`. Text typed int
 - A mailbox request: an `ack` consumes the request and carries its only reply, so never ack to say "received". Claim it with `tuple_in`. The ack's `reply` always carries `dims` `kind="ack"` and the request's `correlation_id`; unanswered-request checks look for exactly that row. Finish now: renew at half the lease while working, then `tuple_ack` with a `reply` carrying the result. Defer it: `tuple_ack` with a `reply` saying it is tracked and when to expect the answer, then send the result later as a new mailbox message with `kind="reply"` and the same `correlation_id`.
 - A request that asks for real work you are not doing right now becomes a bead quoting the requester and the correlation id. `bd search` first: two sessions on one tracker file the same defect.
 - Answering late: if `ListAgents` no longer shows the requester, send the answer to its mailbox instead of `SendMessage`.
-- Wait without polling: a `notify_when_idle` notice for a local peer's turn, the armed mailbox watcher for new mail, a loop of parked `tuple_in` calls on your own mailbox for one expected reply (each park caps at 25 s). No `sleep` loops, no "are you done?" messages.
+- Wait without polling: a `notify_when_idle` notice for a local peer's turn, the channel push for new mail once subscribed, or a loop of parked `tuple_in` calls on your own mailbox for one expected reply (each park caps at 25 s). No `sleep` loops, no "are you done?" messages.
 
 ## Trust Boundary
 

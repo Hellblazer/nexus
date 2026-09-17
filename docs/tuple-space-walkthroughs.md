@@ -1,6 +1,6 @@
 # Tuple Space Walkthroughs
 
-> Status: design of record from RDR-205 (accepted) and RDR-206 (accepted), which adds `renew` and reply-in-ack. RDR-205's engine (Phase 1) and client surface (Phase 2 — `nx tuple`, the nine `tuple_*` MCP tools, the doctor rows) have both shipped: `/v1/tuples` on `engine-service-v0.1.114` (Phase 3, deployed to the managed cloud since 2026-09-11), and the client in conexus 7.41.0, which also bumps the pinned local-mode engine floor to the same tag. A local install on 7.41.0 or later has the route live; an install on an older release stays pinned below the floor and a local-mode call 404s until it upgrades. RDR-206's `renew` and reply-in-ack are implemented on both halves as of this writing but not yet in a tagged engine release or a client release; see `docs/wire-contract-pending.md`'s `## Unshipped` entry.
+> Status: design of record from RDR-205 (accepted), RDR-206 (accepted, adds `renew` and reply-in-ack), and RDR-211 (accepted, adds `release`, the board, queue and lock templates, and push delivery over the Claude Code channel). RDR-205's engine and client surface (`nx tuple`, the `tuple_*` MCP tools, the doctor rows) have both shipped: `/v1/tuples` on `engine-service-v0.1.114` (Phase 3, deployed to the managed cloud since 2026-09-11), and the client in conexus 7.41.0, which also bumps the pinned local-mode engine floor to the same tag. RDR-206's `renew` and reply-in-ack shipped on `engine-service-v0.1.117` and in conexus 7.44.0. RDR-211 is implemented on both halves as of this writing but not yet in a tagged engine release or a client release; see `docs/wire-contract-pending.md`'s `## Unshipped` entry. An install below a given piece's floor stays pinned there and a local-mode call for it 404s until it upgrades.
 
 Scenario walkthroughs for the [Tuple Space reference](tuple-space.md). Each section follows one use of the space from the caller's side, drawn as a sequence between the processes involved.
 
@@ -113,6 +113,67 @@ sequenceDiagram
 
 Every claim reaches a terminal transition: ack, nack, expire or dead. `lease_until` is clamped to the row's `expires_at`, so a claim cannot outlive its tuple. The re-run after a dead-letter is bounded by `NX_TUPLE_READ_MAX` passes; each pass either claims or dead-letters one row. The sweep does the same expire-and-count for lapsed claims nobody re-took.
 
+## Queue: producer, worker, hand-back
+
+RDR-211's third consumer type. A producer posts one tuple per task with `out`; any free worker claims the oldest available one with `in`. A worker that cannot finish calls `release` (this RDR's Gap 4 operation) instead of `nack`, so the hand-back costs no attempt against the template's `max_attempts` of 3 — the task goes to the next worker exactly as fresh as it arrived. See [RDR-211 § Approach, item 2](rdr/rdr-211-board-queue-and-lock-tuple-templates.md#approach) and [`release`](tuple-space.md#operations).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as Producer
+    participant E as Engine
+    participant PG as Postgres nexus.tuples
+    participant W1 as Worker 1 (claimant w1)
+    participant W2 as Worker 2 (claimant w2)
+
+    P->>E: out queue/[name] keys queue dims from kind nonce task-9 body
+    E->>PG: INSERT id = sha256(tenant, subspace, keys, from, nonce)
+    W1->>E: in queue/[name] claimant=w1 lease_s=300
+    E->>PG: claim by w1, attempts 0, log claim
+    E-->>W1: tuple and claim c1
+    W1->>W1: starts the task, decides it cannot finish it
+    W1->>E: release c1 claimant=w1
+    E->>PG: row available again, attempts UNCHANGED, log release
+    W2->>E: in queue/[name] claimant=w2 lease_s=300
+    E->>PG: claim by w2, attempts still 0, log claim
+    E-->>W2: same tuple, claim c2
+    W2->>W2: finishes the task
+    W2->>E: ack c2 claimant=w2
+    E->>PG: consumed_at=now, body cleared, log ack
+```
+
+`release` and `nack` both return a claimed row to available; only `nack` counts toward `max_attempts`. A task handed back three times by `nack` dead-letters; the same task can be `release`d any number of times, because a hand-back that is not a failure never approaches that ceiling. `MaxLiveRowsExceeded` (429) refuses a producer's `out` once a queue already holds its `max_live_rows` ceiling of live tasks (10,000, Scale and Limits item 2); the ceiling clears as tasks are consumed or expire.
+
+## Lock: idempotent creation, hold, renew, release
+
+RDR-211's fourth consumer type. `out` on a lock is idempotent by the template's `id_from: keys` — every caller's `out` for the same resource lands on the same tuple, so any process may safely ensure a lock exists without knowing whether another process already created it. Holding the lock is an ordinary `in`; giving it up is `release`, never `ack` — an acked lock row would be unobtainable until the sweep purged it, so the lock flag ([RDR-211 § Technical Design, "The lock flag"](rdr/rdr-211-board-queue-and-lock-tuple-templates.md#technical-design)) refuses `ack` on a lock claim outright. See [RDR-211 § Approach, items 3 and 5](rdr/rdr-211-board-queue-and-lock-tuple-templates.md#approach) for the expiry-refresh rule this walkthrough relies on.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Process A
+    participant E as Engine
+    participant PG as Postgres nexus.tuples
+    participant B as Process B
+
+    A->>E: out lock/[resource] keys resource dims from=A
+    E->>PG: INSERT id = sha256(tenant, subspace, keys) -- idempotent, no nonce
+    A->>E: in lock/[resource] claimant=A lease_s=300
+    E->>PG: claim by A, lock flag moves expires_at to now + retention
+    E-->>A: tuple and claim c1
+    A->>A: works under the lock
+    A->>E: renew c1 claimant=A lease_s=300
+    E->>PG: lease_until extended, expires_at unmoved this time, log renew, attempts unchanged
+    Note over A,E: an ack here would be refused: SchemaViolation naming release
+    A->>E: release c1 claimant=A
+    E->>PG: row available again, attempts UNCHANGED, log release
+    B->>E: in lock/[resource] claimant=B lease_s=300
+    E->>PG: claim by B, lock flag moves expires_at again
+    E-->>B: same tuple, claim c2
+```
+
+An idle lock still expires at its `out` time plus the template's 7-day retention; a second `out` after that point resets it to available rather than leaving it dead until the sweep purges it (Scale and Limits item 5). A held lock never hits that ceiling, because both `in` and `renew` move `expires_at` forward before the lease clamp applies — retention bounds only how long an unused lock can sit idle, never a lock actually in use.
+
 ## Cross-instance request and ack
 
 A request from one instance to another is the same mailbox with an instance name as the address. Both instances on the box mint against one tenant, so `mailbox/conexus-58` is reachable from the nexus session and vice versa. The requester parks an `in` on its own mailbox for the ack. The peer answers with `ack(reply=...)` (RDR-206): the reply lands in the requester's mailbox and the request is consumed, in one transaction, so there is no longer a separate `out` call that a crash could land between. See [What it is not for](tuple-space.md#what-it-is-not-for) for the scope this stays inside.
@@ -162,13 +223,16 @@ sequenceDiagram
     S->>E: wait over subscribed mailboxes/topics, timeout_s=25
     Sn->>E: out mailbox/[session] keys to dims from kind nonce msg-9 body
     E-->>S: the new row (claimed at delivery)
-    S->>H: notifications/claude/channel
+    S->>H: notifications/claude/channel: subspace, tuple_id, claim_id, claimant -- no body
     H-->>M: channel notification, a fresh turn with no user input
-    M->>M: reads the pushed content: address, sender, kind, correlation id, tuple id, body
+    M->>E: tuple_rd mailbox/[session], the reference the notification named
+    E-->>M: the tuple, body included
     M->>E: ack claim_id (mcp tuple_ack), or nack to release it
     E-->>M: consumed
     Note over M: nothing left for the next UserPromptSubmit's drain hook -- the row was already consumed
 ```
+
+The notification itself carries no content, only the reference (Sam, T2 `nexus_rdr/211-decision-push-reference-2026-09-17`): the subspace, the tuple id and, for mail, the claim id and the waiter's own claimant, plus the instruction to read it. The session decides to read the body with `tuple_rd`, the same deliberate step a pull-based read always required, so a peer's or a board poster's content never lands inside a session unread.
 
 When the channel is unreached (the session was not launched with the development-channel flag, or the model never acked) the row is still delivered: the next prompt fires `mailbox_drain.py`, which probes independently, claims, acks and renders the same row inline in that prompt's context. The drain hook is the unconditional floor and never depends on whether the channel delivered anything first.
 
