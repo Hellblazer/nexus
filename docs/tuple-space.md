@@ -251,7 +251,7 @@ Two access paths sit on top of `HttpTupleStore`:
 
 `wait` is an internal `HttpTupleStore` method only — for the session's own MCP server lifespan waiter — with deliberately no MCP tool or CLI verb (Sam's decision, RDR-211 Open Question 6): nothing outside that future consumer calls it directly. The park-slot report (RDR-211 Phase 1 Step 1) has the same internal-transport status, but its `nx doctor` consumer (`tuples.park_slots`, below) now exists.
 
-**Five `nx doctor` rows**, most gated the same way against the engine floor that first serves the route they read — an install below that floor reports the check as informational, not a defect, and an install at or above the floor that still 404s reports UNKNOWN and asks you to investigate the engine install:
+**Six `nx doctor` rows**, most gated the same way against the engine floor that first serves the route they read — an install below that floor reports the check as informational, not a defect, and an install at or above the floor that still 404s reports UNKNOWN and asks you to investigate the engine install:
 
 | Label | What it reports |
 | --- | --- |
