@@ -468,6 +468,55 @@ class TestChannelWaiterFakeStore:
         assert sender.calls[-1] == (expected, waiter._outstanding.meta)  # noqa: SLF001
         assert "second" not in expected
 
+    @pytest.mark.asyncio
+    async def test_late_subscription_is_picked_up_at_the_next_tick(self) -> None:
+        """RDR-211 Phase 1 close gate cross-walk (Test Plan scenario with
+        no named unit test): the session subscribes to a topic while the
+        waiter is parked. Recorded design variance (RDR Revision History
+        2026-09-17): a subscription change is picked up at the waiter's
+        NEXT `wait` tick, within the 25s cap -- the parked call itself is
+        never cancelled. The fake store proves the list-content half of
+        that: the first tick's specs carry no board subspace at all, and
+        only the following tick -- issued AFTER `subscribe()` -- sees
+        `board/late` and delivers its post."""
+        session_id = str(uuid.uuid4())
+        subs = _subs(session_id)
+        fake = _FakeTupleStore()
+        post = _row("p1", "board/late", "hi", dims={"from": "author-a", "kind": "note"})
+        fake.wait_results = [[], [WaitResult(subspace="board/late", tuples=[post])]]
+        sender = _FakeSender()
+        persisted = []
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), subs, channel_live=True, sender=sender,
+            persist=lambda: persisted.append(True),
+        )
+
+        await waiter.tick()  # first tick: only the session mailbox exists yet
+        first_specs, _timeout = fake.wait_calls[-1]
+        assert not any(spec.subspace.startswith("board/") for spec in first_specs), (
+            "the waiter must not park on a topic it has not subscribed yet"
+        )
+
+        subs.subscribe(
+            "board/late", templates=[],
+            store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
+            state_dir=None,
+        )
+
+        await waiter.tick()  # the NEXT tick -- picks up the new subscription
+        assert len(fake.wait_calls) == 2, "the park report must never show two slots for one session"
+        second_specs, _timeout2 = fake.wait_calls[-1]
+        assert any(spec.subspace == "board/late" for spec in second_specs)
+
+        expected_content = channel._board_notification_content("board/late", "p1")  # noqa: SLF001
+        assert sender.calls[-1] == (
+            expected_content,
+            {"subspace": "board/late", "tuple_id": "p1", "from": "author-a", "kind": "note"},
+        )
+        assert "hi" not in expected_content, "the notification must never carry the post body"
+        assert subs.entries()[-1]["cursor"] == {"created_at": post.created_at, "id": "p1"}
+        assert persisted == [True]
+
 
 class TestChannelWaiterRealEngine:
     """Properties a fake store cannot prove: the engine's OWN same-
@@ -683,6 +732,62 @@ class TestChannelWaiterRealEngine:
         )
         asyncio.run(waiter._adopt_persisted_outstanding())  # noqa: SLF001
         assert waiter._outstanding is None  # noqa: SLF001
+
+    def test_subscribing_mid_park_never_opens_a_second_global_slot(self, t2_service_env) -> None:
+        """RDR-211 Phase 1 close gate cross-walk (Test Plan scenario with
+        no named unit test), the property a fake store cannot prove: the
+        engine counts ONE global park slot per parked `wait()` call
+        (`HttpTupleStore.wait`'s own docstring -- "parks with NO
+        claimant, so it takes one GLOBAL park slot regardless of how many
+        subspaces specs names"), so a subscription added while this
+        session's waiter sits parked must never raise `park_stats().
+        global_in_use` -- the new subspace is only picked up at the NEXT
+        `tick()`'s fresh `wait()` call (RDR Revision History
+        2026-09-17), never by cancelling and re-issuing the in-flight
+        one. Read before/during/after, mirroring `tests/db/
+        test_http_tuple_store.py::TestParkStats::
+        test_global_in_use_moves_while_a_parked_call_is_in_flight`."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        from nexus.db.t2.http_tuple_store import HttpTupleStore
+        from nexus.mcp_infra import t2_ctx
+
+        session_id = str(uuid.uuid4())
+        subs = _subs(session_id)
+        waiter = channel.ChannelWaiter(
+            session_id, t2_ctx, subs, channel_live=True, sender=_FakeSender(), wait_timeout_s=6,
+        )
+        probe = HttpTupleStore()
+        before = probe.park_stats().global_in_use
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, waiter.tick())
+            during = before
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                during = probe.park_stats().global_in_use
+                if during > before:
+                    break
+                time.sleep(0.2)
+            assert during == before + 1, (
+                f"expected exactly one new global park slot for the parked tick, "
+                f"before={before} during={during}"
+            )
+
+            subs.subscribe(
+                "board/late", templates=[],
+                store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
+                state_dir=None,
+            )
+
+            after_subscribe = probe.park_stats().global_in_use
+            assert after_subscribe == during, (
+                "subscribing mid-park must never open a second global slot for this session"
+            )
+            future.result(timeout=10)
+
+        after = probe.park_stats().global_in_use
+        assert after == before
 
 
 class TestCreditHookWiring:
