@@ -368,6 +368,28 @@ public final class TemplateRegistry {
         // default alone -- so a template that shortens its own claim-log TTL is held to
         // the same "strictly more than one sweep interval past its own retention" rule
         // every other template already was.
+        // RDR-211 Approach item 5 (bead nexus-rplay.17, code-review-expert finding
+        // 3): lock: true and take.max_attempts are a contradiction -- lock.yaml's
+        // own comment records the design intent directly ("max_attempts
+        // intentionally OMITTED ... the engine treats an absent max_attempts as
+        // unbounded, so a lock never dead-letters on a crashed holder's repeated
+        // lease lapses"). A template shipping both would dead-letter a lock
+        // holder's crashed lease after N lapses, then refuse ack on it forever
+        // (the lock flag's own ack-refusal invariant at consumeClaim), stranding
+        // the resource with no way back to available short of the sweep purging
+        // it. Checked here, alongside the claim-log-TTL checks, rather than in
+        // TemplateSchemaParser: both are cross-field checks entirely within
+        // TemplateSchema's own fields, so either placement would work, and this
+        // keeps every boot-time cross-field refusal in one place.
+        for (TemplateSchema t : templates) {
+            if (t.lock() && t.take().maxAttempts() != null) {
+                throw new TemplateRegistryException(t.name(), "lock",
+                        "refuses to boot: template '" + t.name() + "' declares both lock: true and "
+                                + "take.max_attempts " + t.take().maxAttempts() + " -- a lock must never "
+                                + "dead-letter, so the two are a contradiction");
+            }
+        }
+
         for (TemplateSchema t : templates) {
             if (t.claimLogTtlSeconds() != null && t.claimLogTtlSeconds() > claimLogTtlSeconds) {
                 throw new TemplateRegistryException(t.name(), "claim_log_ttl_seconds",
@@ -445,6 +467,14 @@ public final class TemplateRegistry {
         if (t.maxBodyBytes() != null) {
             m.put("max_body_bytes", t.maxBodyBytes());
         }
+        // nexus-rplay.17 (code-review-expert finding 2): lock was omitted from the
+        // digest's canonical map entirely -- two registries differing ONLY in one
+        // template's lock value produced the SAME digest, so a client comparing
+        // digests could never detect a template flipping into (or out of) the
+        // lock lifecycle. Unconditional, unlike max_live_rows/claim_log_ttl_seconds
+        // below: lock is a boolean with a real false default, not an optional
+        // field whose absence is itself meaningful.
+        m.put("lock", t.lock());
         if (t.maxLiveRows() != null) {
             m.put("max_live_rows", t.maxLiveRows());
         }

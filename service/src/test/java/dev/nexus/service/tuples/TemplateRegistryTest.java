@@ -150,6 +150,31 @@ class TemplateRegistryTest {
         assertNotEquals(r1.digest(), r2.digest());
     }
 
+    /**
+     * nexus-rplay.17 (code-review-expert finding 2): {@code toCanonicalMap} omitted
+     * {@code lock} entirely, so two registries differing ONLY in one template's
+     * {@code lock} value produced the SAME digest -- a client could never detect
+     * that a template flipped from an ordinary out()/claim lifecycle to the
+     * lock-flagged one (reset-on-expiry, ack refused) by comparing digests, the
+     * whole point of the digest existing.
+     */
+    @Test
+    void registryDigestChangesWhenLockFlagChanges() {
+        String unlocked = minimalTemplateYaml("ledger/<session_id>", 100L);
+        String locked = unlocked + "lock: true\n";
+
+        TemplateRegistry r1 = TemplateRegistry.load(
+                List.of(new TemplateRegistry.SourceGroup("test",
+                        List.of(new TemplateRegistry.TemplateSource("a.yaml", unlocked)))),
+                DAYS(180), SWEEP_INTERVAL_SECONDS);
+        TemplateRegistry r2 = TemplateRegistry.load(
+                List.of(new TemplateRegistry.SourceGroup("test",
+                        List.of(new TemplateRegistry.TemplateSource("a.yaml", locked)))),
+                DAYS(180), SWEEP_INTERVAL_SECONDS);
+
+        assertNotEquals(r1.digest(), r2.digest());
+    }
+
     @Test
     void registrySnapshotCarriesDigestSourcesAndTemplates() {
         TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
@@ -358,6 +383,55 @@ class TemplateRegistryTest {
         TemplateRegistry registry = TemplateRegistry.load(groups, registryDefault, SWEEP_INTERVAL_SECONDS);
 
         assertEquals(registryDefault, registry.effectiveClaimLogTtlSeconds("queue/<name>"));
+    }
+
+    // ── lock + max_attempts is a boot-time refusal (RDR-211 Approach item 5: a
+    //    lock must never dead-letter) ────────────────────────────────────────
+
+    /**
+     * nexus-rplay.17 (code-review-expert finding 3): nothing refused a template
+     * declaring BOTH {@code lock: true} and {@code take.max_attempts} -- a
+     * combination that is a contradiction by the RDR's own words (lock.yaml's own
+     * comment: "max_attempts intentionally OMITTED ... the engine treats an absent
+     * max_attempts as unbounded, so a lock never dead-letters on a crashed
+     * holder's repeated lease lapses"). A template shipping both would dead-letter
+     * a lock holder's crashed lease after N lapses, then refuse {@code ack} on it
+     * forever (the lock flag's own {@code ack}-refusal invariant), stranding the
+     * resource with no way back to available until the sweep purges it.
+     */
+    @Test
+    void lockTemplateWithMaxAttemptsRefusesBootNamingTemplateAndBothFields() {
+        String yaml = """
+                name: lock/<resource>
+                keys:
+                  - resource
+                id_from: keys
+                take:
+                  enabled: true
+                  max_attempts: 3
+                  max_lease_seconds: 900
+                retention_seconds: 604800
+                lock: true
+                """;
+        var groups = List.of(new TemplateRegistry.SourceGroup("test",
+                List.of(new TemplateRegistry.TemplateSource("bad-lock.yaml", yaml))));
+
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateRegistry.load(groups, DAYS(180), SWEEP_INTERVAL_SECONDS));
+        assertTrue(ex.getMessage().contains("lock/<resource>"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("lock"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("max_attempts"), ex.getMessage());
+    }
+
+    /** The shipped {@code lock.yaml} declares {@code lock: true} and no {@code
+     *  max_attempts} at all -- must boot cleanly under the new cross-field check. */
+    @Test
+    void shippedLockTemplateDeclaresNoMaxAttemptsAndBoots() {
+        TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
+        TemplateSchema lock = registry.byName("lock/<resource>");
+        assertNotNull(lock);
+        assertTrue(lock.lock());
+        assertNull(lock.take().maxAttempts());
     }
 
     @Test

@@ -211,6 +211,53 @@ class TupleHandlerWiringTest {
     }
 
     /**
+     * nexus-rplay.17 (code-review-expert finding 1): {@code renderTemplate}'s own
+     * javadoc says a client learns a template's shape SOLELY from this response --
+     * before this fix it omitted {@code lock}, {@code max_live_rows}, and {@code
+     * claim_log_ttl_seconds} entirely, so a Phase 2 client could never learn a
+     * template carries the lock flag or either scale-limit ceiling. {@code lock} is
+     * ALWAYS present (a boolean, never omitted, since {@code false} is a real
+     * answer, not an absence); {@code max_live_rows}/{@code claim_log_ttl_seconds}
+     * mirror {@code max_body_bytes}'s existing conditional -- present only when the
+     * template declares one.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void registryPresent_lockAndScaleLimitFieldsRendered() throws Exception {
+        var resp = get(withRegistry, "/v1/tuples/registry");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        var templates = (java.util.List<Map<String, Object>>) body.get("templates");
+
+        Map<String, Object> lock = templates.stream()
+                .filter(t -> "lock/<resource>".equals(t.get("name")))
+                .findFirst().orElseThrow();
+        assertThat(lock.get("lock")).as("lock/<resource> declares lock: true").isEqualTo(true);
+        assertThat(lock.get("claim_log_ttl_seconds")).as("lock.yaml's own 30-day override")
+                .isEqualTo(2_592_000);
+
+        Map<String, Object> board = templates.stream()
+                .filter(t -> "board/<topic>".equals(t.get("name")))
+                .findFirst().orElseThrow();
+        assertThat(board.get("max_live_rows")).as("board.yaml's own ceiling").isEqualTo(500);
+        assertThat(board.get("lock")).as("board never sets lock -- must render false, not be omitted "
+                + "or a stale true").isEqualTo(false);
+
+        Map<String, Object> queue = templates.stream()
+                .filter(t -> "queue/<name>".equals(t.get("name")))
+                .findFirst().orElseThrow();
+        assertThat(queue.get("claim_log_ttl_seconds")).as("queue.yaml's own 30-day override")
+                .isEqualTo(2_592_000);
+
+        Map<String, Object> mailbox = templates.stream()
+                .filter(t -> "mailbox/<address>".equals(t.get("name")))
+                .findFirst().orElseThrow();
+        assertThat(mailbox.get("lock")).as("mailbox declares no lock -- must render false").isEqualTo(false);
+        assertThat(mailbox).as("mailbox declares neither optional scale-limit field")
+                .doesNotContainKeys("max_live_rows", "claim_log_ttl_seconds");
+    }
+
+    /**
      * nexus-em75s.35 (RDR-205 review finding M5): {@code claim_id} is the ack/nack
      * credential — a reader that never won the claim must never be able to read it
      * off a probe/read response. Round-trips a real claim through {@code /out} then

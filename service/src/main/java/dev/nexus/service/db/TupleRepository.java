@@ -510,7 +510,15 @@ public final class TupleRepository {
     private byte[] writeOut(DSLContext ctx, String tenant, PreparedOut p, String body, byte[] id) {
         Long maxLiveRows = p.template().maxLiveRows();
         if (maxLiveRows != null) {
-            boolean rowAlreadyExists = ctx.fetchExists(ctx.selectOne().from(TUPLES).where(TUPLES.ID.eq(id)));
+            // nexus-rplay.17 (code-review-expert finding 4): every other query in
+            // this file pairs TUPLES.ID/SUBSPACE conditions with an explicit
+            // TENANT_ID equality as defense in depth beside RLS -- this existence
+            // check was the one exception. id is already a tenant-scoped digest
+            // (computeId mixes tenant into its input), so this was never reachable
+            // as a cross-tenant read; the fix brings it into line with every
+            // sibling query regardless.
+            boolean rowAlreadyExists = ctx.fetchExists(
+                    ctx.selectOne().from(TUPLES).where(TUPLES.ID.eq(id).and(TUPLES.TENANT_ID.eq(tenant))));
             if (!rowAlreadyExists) {
                 Condition live = TUPLES.CONSUMED_AT.isNull().and(TUPLES.EXPIRES_AT.gt(DSL.currentOffsetDateTime()));
                 Integer liveCount = ctx.selectCount().from(TUPLES)

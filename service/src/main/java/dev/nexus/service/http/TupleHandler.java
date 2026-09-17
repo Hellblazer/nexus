@@ -461,6 +461,21 @@ public final class TupleHandler implements HttpHandler {
         if (t.maxBodyBytes() != null) {
             m.put("max_body_bytes", t.maxBodyBytes());
         }
+        // nexus-rplay.17 (code-review-expert finding 1): lock/max_live_rows/
+        // claim_log_ttl_seconds were entirely absent from this response, so a
+        // Phase 2 client could never learn a template carries the lock flag or
+        // either RDR-211 scale-limit ceiling -- this method's own javadoc says a
+        // client learns a template's shape SOLELY from here. lock is a boolean
+        // that is ALWAYS rendered (false is a real answer, not an absence);
+        // max_live_rows/claim_log_ttl_seconds mirror max_body_bytes's existing
+        // conditional above -- present only when the template declares one.
+        m.put("lock", t.lock());
+        if (t.maxLiveRows() != null) {
+            m.put("max_live_rows", t.maxLiveRows());
+        }
+        if (t.claimLogTtlSeconds() != null) {
+            m.put("claim_log_ttl_seconds", t.claimLogTtlSeconds());
+        }
         return m;
     }
 

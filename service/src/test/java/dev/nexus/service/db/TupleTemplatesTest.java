@@ -22,7 +22,10 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
+import static dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
@@ -327,6 +330,91 @@ class TupleTemplatesTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    // ── a worker releases a task on the real queue template ──────────────────
+
+    private org.jooq.Record1<Integer> rawAttempts(byte[] id) {
+        try (Connection su = pg.createConnection("")) {
+            return org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .select(TUPLES.ATTEMPTS)
+                    .from(TUPLES)
+                    .where(TUPLES.ID.eq(id))
+                    .fetchOne();
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private List<String> transitionsFor(String tenant, byte[] id) {
+        try (Connection su = pg.createConnection("")) {
+            return org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .select(TUPLE_CLAIM_LOG.TRANSITION)
+                    .from(TUPLE_CLAIM_LOG)
+                    .where(TUPLE_CLAIM_LOG.TENANT_ID.eq(tenant).and(TUPLE_CLAIM_LOG.TUPLE_ID.eq(id)))
+                    .orderBy(TUPLE_CLAIM_LOG.LOG_ID.asc())
+                    .fetch(TUPLE_CLAIM_LOG.TRANSITION);
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * RDR-211 Test Plan: "a worker releases a task: attempts unchanged, the task
+     * is available, a waiting worker wakes" -- {@link TupleReleaseTest} already
+     * proves this scenario against {@code mailbox/<address>}, and {@link
+     * TupleLockFlagTest} proves release's lock-specific interaction, but nothing
+     * before this bead drove it against the real, SHIPPED {@code queue/<name>}
+     * template the scenario is actually about (a shared work queue, not a
+     * mailbox). Producer posts one task; worker A claims it, releases it
+     * (attempts unchanged); a second worker B parked on {@code in} wakes with it;
+     * the claim log shows exactly {@code [claim, release, claim]}.
+     */
+    @Test
+    void queueWorkerReleasesTask_attemptsUnchanged_parkedWorkerWakesWithIt() throws Exception {
+        String tenant = freshTenant("queue-release-wake");
+        String queue = "queue-" + UUID.randomUUID();
+        String subspace = "queue/" + queue;
+        byte[] id = repo.out(tenant, subspace, Map.of("queue", queue), Map.of("from", "producer-1"),
+                "task-1", "nonce-" + UUID.randomUUID(), null);
+
+        var claimedA = repo.inp(tenant, subspace, Map.of("queue", queue), "worker-a", 60L);
+        assertThat(claimedA).as("worker-a must claim the single task").isPresent();
+        int attemptsBeforeRelease = rawAttempts(id).value1();
+
+        var signals = new AtomicInteger();
+        TupleRepository.setTestOnlySignalHook((sigTenant, sigSubspace) -> {
+            if (tenant.equals(sigTenant) && subspace.equals(sigSubspace)) {
+                signals.incrementAndGet();
+            }
+        });
+
+        ExecutorService pool = Executors.newFixedThreadPool(1);
+        try {
+            CompletableFuture<Optional<TupleRepository.ClaimedTuple>> parkedB = CompletableFuture.supplyAsync(
+                    () -> repo.in(tenant, subspace, Map.of("queue", queue), "worker-b", 60L, 20L), pool);
+
+            // Give worker-b's background thread time to register + park before releasing.
+            Thread.sleep(500);
+
+            repo.release(tenant, claimedA.get().claimId(), "worker-a");
+
+            var resultB = parkedB.get(20, TimeUnit.SECONDS);
+            assertThat(resultB).as("worker-b's parked in() must claim the released task").isPresent();
+            assertThat(signals.get())
+                    .as("release must call signalAll on this (tenant, subspace) at least once")
+                    .isGreaterThanOrEqualTo(1);
+        } finally {
+            TupleRepository.setTestOnlySignalHook(null);
+            pool.shutdownNow();
+        }
+
+        int attemptsAfterRelease = rawAttempts(id).value1();
+        assertThat(attemptsAfterRelease).as("release must not count an attempt")
+                .isEqualTo(attemptsBeforeRelease);
+        assertThat(transitionsFor(tenant, id))
+                .as("exactly claim (worker-a), release, claim (worker-b) -- no expire/nack in between")
+                .containsExactly("claim", "release", "claim");
     }
 
     // ── board ttl_seconds: refused above 7 days, accepted below ──────────────
