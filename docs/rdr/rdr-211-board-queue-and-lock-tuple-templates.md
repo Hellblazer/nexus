@@ -339,11 +339,14 @@ delivery path closes Gap 5.
    which wakes an idle session into a turn and queues behind a busy one. Mail
    is claimed at delivery on the session's own claimant identity and handed
    over with its claim id, so the session acks or nacks what it was given; a
-   board post is handed over without a claim. The server holds the claim,
-   renews it, and re-sends the notification until the session's ack or nack
-   passes through it, so a dropped notification costs nothing. The
-   Monitor-driven watcher and its arming are deleted; the `UserPromptSubmit`
-   drain hook stays as the floor (Technical Design, Delivery).
+   board post is handed over without a claim. Delivery is pure back pressure:
+   one mailbox message is outstanding at a time, and the session's ack or
+   nack is the credit for the next; the server holds that one claim, renews
+   it, and re-sends its notification until the credit arrives, so a dropped
+   notification costs nothing, and after a bounded number of re-sends it
+   releases the message to the floor. The Monitor-driven watcher and its
+   arming are deleted; the `UserPromptSubmit` drain hook stays as the floor
+   (Technical Design, Delivery).
 8. **Subscriptions.** What the waiter covers is a per-session list the session
    can change while it runs: its own mailboxes by default, board topics added
    and removed by three MCP tools (`tuple_subscribe`, `tuple_unsubscribe`,
@@ -427,15 +430,36 @@ lifespan beside the T1 lease refresher. The waiter loops on `wait` over the
 subscriptions with per-subspace cursors. The declaration itself goes through
 the low-level server's initialization options
 (`create_initialization_options(experimental_capabilities={"claude/channel":
-{}})`), since FastMCP exposes no experimental capabilities of its own. For
-each new mailbox tuple the waiter claims the row with `in` under a claimant
-that is stable per session, `waiter:<session id>`, minted once at server
-start from the session id the server already leases. It is not the drain
-hook's claimant, which is random per call so that two concurrent drainers of
-one address never share one; a session has one MCP server, so the waiter has
-no concurrent twin, and a stable claimant is what lets a restarted server for
-the same session take back its own live claims at once through the engine's
-same-claimant retake (TupleRepository.java:777-793), spending no attempt.
+{}})`), since FastMCP exposes no experimental capabilities of its own.
+
+Mail is delivered under pure back pressure (Sam, 2026-09-16, decision record
+item 6): the waiter holds at most one live mailbox claim per session, and the
+session's `tuple_ack` or `tuple_nack` for that claim is the credit that lets
+it claim the next. Nothing is claimed ahead of demand, so a burst of mail
+sits in the mailbox as available rows, ordered, and arrives one message per
+credit; this is a coordination channel, not a stream, and the design
+optimises the handling of one message for correctness over throughput.
+
+The waiter claims only when the initialize handshake carried the channel.
+`ServerSession.client_params` exposes the client's declared capabilities,
+and a Claude Code launched without the flag leaves the experimental set
+empty; what Claude Code declares there when the flag is present is not in
+the channels reference, so Phase 1 Step 0 records the observed shape and the
+guard is written against it. Without the channel the waiter claims nothing
+and the floor delivers.
+
+To claim, the waiter takes the oldest available row across the session's
+mailboxes with `in` under a claimant that is stable per session,
+`waiter:<session id>`, minted once at server start from the session id the
+server already leases. It is not the drain hook's claimant, which is random
+per call so that two concurrent drainers of one address never share one; a
+session has one MCP server, so the waiter has no concurrent twin. Because
+only one claim is ever live, the engine's same-claimant retake
+(TupleRepository.java:777-793, `in` returns the caller's own live claim
+before taking a new row) is exactly the restart path: a restarted server for
+the same session calls `in` and receives its one outstanding claim, spending
+no attempt, and continues.
+
 The waiter then sends `notifications/claude/channel` as a raw
 `JSONRPCNotification` on the session's write stream (the SDK's typed
 notification union has no member for it) with the body as `content` and
@@ -445,16 +469,19 @@ reply when the mail was a request) or `tuple_nack`, passing the claim id and
 claimant back. Claude Code does not acknowledge notifications, so the waiter
 does not rely on delivery: it claims with a 300 s lease, renews at 150 s (a
 renew counts no attempt), and, because the session's ack and nack run in this
-same process, it knows whether the ack for its claim id has arrived. At each
-renew while unacked it re-sends the same notification, at most five times,
-then keeps renewing silently and the doctor row counts the row as unacked.
-Redelivery is a re-notification by the holder and spends no attempt. An
-attempt is spent in two cases: the lease lapses before any retake, which is
-a server death with no successor inside 300 s, after which the next server's
-`in` reclaims the row; or the session nacks the message. Any three of those on
+same process, it knows whether the credit for its claim id has arrived. At
+each renew while unacked it re-sends the same notification, at most five
+times. After the fifth it calls `release`, this RDR's Gap 4 operation, which
+returns the row to available with no attempt spent, so the message reaches
+the drain-hook floor at the session's next prompt and the waiter moves to
+the next row; the doctor row counts the release. Redelivery is a
+re-notification by the holder and spends no attempt. An attempt is spent in
+two cases: the lease lapses before any retake, which is a server death with
+no successor inside 300 s, after which the sweep's
+`releaseLapsedClaimsBatch` (TupleRepository.java:1280) or the next `in`
+reclaims the row; or the session nacks the message. Any three of those on
 one message reach the mailbox template's cap of three, and that row is a
-dead letter the drain hook surfaces once, as
-today. For each new board post the waiter sends the post as `content` with
+dead letter the drain hook surfaces once, as today. For each new board post the waiter sends the post as `content` with
 `subspace`, `from`, `kind` and `tuple_id`, no claim, and advances that
 topic's cursor; a dropped post notification is not re-sent, the post stays
 readable by `rd` for its retention, and `tuple_subscriptions` shows the
@@ -487,12 +514,21 @@ already wakes on `out` and `release`.
 **Subscriptions.** The waiter's list is per session. Defaults: `mailbox/<session
 id>` and, once registered, `mailbox/<instance name>`. `tuple_subscribe(subspace)`
 adds a board topic; it refuses a take-enabled template's subspace (a queue or
-a lock) with `SchemaViolation` naming `in`, since those are never delivered,
-and refuses any mailbox, since a session subscribing to another session's
-mailbox would claim that session's mail; the two default mailboxes are the
-session's own and fixed. The list holds at most 32 subscriptions, refused
-past that with `SchemaViolation`; spike 3 tested three, and the bound guards
-the engine's per-call work, not slots. `tuple_unsubscribe(subspace)`
+a lock) with `SchemaViolation` naming `in`, since those are never delivered.
+It accepts exactly one mailbox, the session's own instance-name mailbox: the
+instance name exists only in the harness (the `ListAgents` row), so the
+session says it once, `tuple_subscribe("mailbox/<name>")`, and the server
+does what `nx tuple watch --instance` did: writes the per-session
+registration file the drain hook reads, starts the RDR-208 directory lease
+(`directory/<name>`, 300 s, re-sent every 60 s from the lifespan) so the
+name resolves, and adds the mailbox to the waiter. The SessionStart
+injection that armed the Monitor becomes one line asking for that call; a
+`/resume` under a new name repeats it, and the old name's mail strands, as
+RDR-208 accepted. Any other mailbox is refused, since a session subscribing
+to another session's mailbox would claim that session's mail. Beyond the two
+mailboxes the list holds at most 32 board topics, refused past that with
+`SchemaViolation`; spike 3 tested three, and the bound guards the engine's
+per-call work, not slots. `tuple_unsubscribe(subspace)`
 removes one, `tuple_subscriptions()` lists the set with each cursor. The list
 lives in T1 scratch under the session id, so a `/resume` restores it and a
 `/clear` starts clean. A change cancels the parked `wait` and re-issues it
@@ -578,7 +614,7 @@ no longer competes with the park cap, which stays first.
 | Template loading | `TemplateRegistry.RESOURCE_TEMPLATE_PATHS` | Extend: add three paths. |
 | Client tuple tools | src/nexus/mcp/core.py, src/nexus/commands/tuple_cmd.py | Reuse for the templates; add `release`. |
 | Delivery to the session | src/nexus/mcp/core.py (the FastMCP server and its lifespan tasks) | Add the channel capability, the `wait` waiter, claim-at-delivery and the subscription tools here. |
-| Mailbox watcher | src/nexus/tuple_watch.py, src/nexus/mailbox_arm.py, the `nx tuple watch` verb, the mailbox skill's arming rule | Delete. The drain hook (conexus/hooks/scripts/mailbox_drain.py) stays as the floor. |
+| Mailbox watcher | src/nexus/tuple_watch.py, src/nexus/mailbox_arm.py, the `nx tuple watch` verb, the mailbox skill's arming rule | Delete, after moving two pieces into the MCP server: the per-session instance registration file (`write_instance_registration`) and the directory lease heartbeat (`_directory_heartbeat`). The drain hook (conexus/hooks/scripts/mailbox_drain.py) stays as the floor. |
 | Health checks | src/nexus/health.py tuple rows | Extend: two rows, park-slot use and queue depth (Scale and Limits). |
 | Machine-local locks | `scripts/lib/build-lease.sh` and `tests/e2e/lib/lock.sh`, both mkdir-based | Keep. They are out of scope; RDR-205 excluded the build lease from the tuple space by name. |
 
@@ -738,9 +774,13 @@ idempotency, and it loses history.
 - A notification is dropped: the waiter still holds the claim and re-sends it
   at its next renew, 150 s; nothing in the claim log changes. If the server
   itself dies and no successor for the session starts within the 300 s lease,
-  the lease lapses, the next server's `in` reclaims the row, and the claim log
-  shows one expiry; a successor inside the lease retakes the claim with no
-  expiry logged.
+  the lease lapses, the sweep or the next server's `in` reclaims the row, and
+  the claim log shows one expiry; a successor inside the lease retakes the
+  claim with no expiry logged.
+- The session never acks (it is busy for longer than five renews, or the
+  channel is loaded but nothing handles the event): the waiter releases the
+  message after the fifth re-send, the floor delivers it at the next prompt,
+  and the doctor row counts one release.
 
 ## Implementation Plan
 
@@ -816,7 +856,11 @@ tool, the `nx tuple release` CLI verb, and two doctor rows (park-slot use and
 queue depth), each with tests. Then delivery: the channel capability and the
 lifespan waiter in the nexus MCP server, claim-at-delivery for mail and
 cursor delivery for posts, the three subscription tools with their T1
-persistence, the doctor row (channel declared, waiter alive, last wake), and
+persistence, the instance-name registration and directory lease behind
+`tuple_subscribe` of the session's own instance mailbox, the one-line
+SessionStart request for that call, the doctor row (capability declared by
+the server; waiter alive, last wake, unacked and released counts; the
+client's handshake capabilities), and
 the deletion of `nx tuple watch`, `tuple_watch.py`, `mailbox_arm.py`'s
 SessionStart injection and the skill's arming rule. Tests: a notification per
 new tuple with the documented shape, `claimant` included; a suppressed
@@ -828,8 +872,14 @@ server's `in` reclaims with one expiry logged; a session's `tuple_nack` on
 delivered mail counts one attempt; `tuple_subscribe` on a queue, a lock or a
 mailbox subspace is refused, and so is the thirty-third subscription; a subscription change re-issues `wait` and the old parked
 call is gone from the park report; the list survives a resume and not a clear;
-the doctor row reads not-declared for a server started without the
-capability; the SessionStart hook no longer emits the arm text.
+a second message is not claimed until the first is acked, nacked or
+released; the sixth unacked renew releases the message and the floor
+delivers it; a server whose handshake carried no client capability claims
+nothing; `tuple_subscribe` of the session's own instance mailbox writes the
+registration file, sends the directory lease, and is refused for any other
+name; the doctor row reads not-declared for a server started without the
+capability and shows the three facts otherwise; the SessionStart hook emits
+the one-line subscribe request and no arm text.
 
 #### Step 4: Documentation
 
@@ -851,7 +901,7 @@ choreography in AGENTS.md.
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
 | board, queue, and lock subspaces | In scope (`nx tuple list --prefix`) | In scope (`nx tuple stats`) | N/A: retention and the sweep | In scope (the existing `nx doctor` tuple rows) | N/A: coordination state, not archived |
-| a session's subscriptions | In scope (`tuple_subscriptions`) | In scope (each cursor) | In scope (`tuple_unsubscribe`; a `/clear` drops the list) | In scope (a new `nx doctor` row: channel declared, waiter alive, last wake) | N/A: session state in T1 |
+| a session's subscriptions | In scope (`tuple_subscriptions`) | In scope (each cursor) | In scope (`tuple_unsubscribe`; a `/clear` drops the list) | In scope (a new `nx doctor` row: capability declared; waiter alive, last wake, unacked and released counts; client handshake capabilities) | N/A: session state in T1 |
 
 ### New Dependencies
 
@@ -886,9 +936,15 @@ None.
 - **Scenario**: the session subscribes to a topic while the waiter is parked.
   **Verify**: the next post on that topic is delivered, and the park report
   never shows two slots for the session.
-- **Scenario**: the session is launched without the channel. **Verify**: no
-  notification, the drain hook delivers the mail at the next prompt, and the
-  doctor row reads not-declared.
+- **Scenario**: the session is launched without the channel. **Verify**: the
+  waiter claims nothing, the drain hook delivers the mail at the next prompt,
+  and the doctor row shows an empty client capability set.
+- **Scenario**: three messages arrive at once. **Verify**: one notification;
+  the second is sent only after the first is acked; the third after the
+  second.
+- **Scenario**: a message is never acked. **Verify**: five re-sends 150 s
+  apart, then a `release` transition in the claim log, no attempt spent, and
+  the drain hook delivers it at the next prompt.
 - **Scenario**: `tuple_subscribe("queue/builds")`. **Verify**:
   `SchemaViolationException` naming `in`; the subscription list is unchanged.
 - **Scenario**: a lock holder's lease lapses. **Verify**: the next `in` reclaims
@@ -938,7 +994,10 @@ the number.
    verb; engine-side SSE or WebSocket is a later decision. The author's choice
    inside that ruling, open for Sam to reverse: mail is claimed at delivery and
    the claim is held and re-notified until the session acks, rather than
-   pinged and claimed by the session.
+   pinged and claimed by the session. Sam's further ruling the same day
+   (decision record item 6): delivery is pure back pressure, one message
+   outstanding, the ack as the credit for the next; correctness of handling
+   one message over throughput.
 7. **Subscriptions.** Answered (Sam, 2026-09-16, the same decision record,
    item 4): the set is managed, not fixed at startup: three tools, per session,
    persisted in T1 across a resume, boards and mailboxes only.
@@ -1079,3 +1138,13 @@ The document is sized to those changes and the three template decisions; Phase
   handshake capabilities as an observation; subscriptions are board topics
   only beyond the session's own mailboxes, at most 32; the Open Question
   count and Gap 5's address count corrected.
+- 2026-09-16: Follow-up to fix check `nexus_rdr/211-fix-check-c9ba5ebc3`
+  (research `nexus_rdr/211-research-6`) and Sam's ruling that delivery is
+  pure back pressure, one message outstanding and the ack as the credit for
+  the next: the waiter claims only when the handshake carried the channel
+  and releases a message after the fifth re-send, so the floor is never
+  starved; one live claim makes the stable claimant's restart retake exact;
+  `tuple_subscribe` of the session's own instance mailbox takes over the
+  registration file and directory lease the watcher wrote; the doctor row's
+  three facts propagated to Step 3, Day 2 and the Test Plan; the sweep named
+  as a reclaimer; the bound is 32 board topics beyond the two mailboxes.
