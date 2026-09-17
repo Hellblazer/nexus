@@ -2817,8 +2817,16 @@ def _close_override_lines(rows: list[dict], today: str) -> list[str]:
         except ValueError:
             return False
 
+    def _parses(s: str) -> bool:
+        try:
+            date.fromisoformat(s[:10])
+            return True
+        except ValueError:
+            return False
+
     closes = 0
     overrides = 0
+    undated: list[str] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -2828,22 +2836,32 @@ def _close_override_lines(rows: list[dict], today: str) -> list[str]:
             if _in_window(title.rsplit("-close-override-", 1)[-1]):
                 overrides += 1
             continue
-        if _rdr_number_of_title(title) is None:
+        num = _rdr_number_of_title(title)
+        if num is None:
             continue
         if (_preamble_parse_t2_field(content, "status") or "").strip().lower() != "closed":
             continue
         closed_on = (_preamble_parse_t2_field(content, "closed_date") or _preamble_parse_t2_field(content, "closed") or "").strip()
-        if _in_window(closed_on):
+        if not _parses(closed_on):
+            undated.append(f"RDR-{num}")
+        elif _in_window(closed_on):
             closes += 1
     pct = (100 * overrides / closes) if closes else 0.0
     verdict = "above the 20% trigger" if closes and pct > 20 else "under the 20% trigger"
     if not closes and overrides:
         verdict = "overrides with no dated closes in the window; check `closed_date` fields"
-    return [
+    lines = [
         f"**Close overrides (last 30 days to {today})**: {overrides} override{'s' if overrides != 1 else ''} "
         f"against {closes} close{'s' if closes != 1 else ''} ({pct:.0f}%), {verdict}.",
-        "",
     ]
+    if undated:
+        lines.append(
+            f"{len(undated)} closed record{'s' if len(undated) != 1 else ''} could not be dated "
+            f"(no ISO `closed_date`) and sit outside the count: {', '.join(undated[:12])}"
+            + (", ..." if len(undated) > 12 else "") + "."
+        )
+    lines.append("")
+    return lines
 
 
 def _post_mortem_coverage_lines(rows: list[dict], postmortem_dir: Path) -> list[str]:
@@ -2978,7 +2996,10 @@ def _fix_check_pointer_lines(
         # ``dispatches:`` field or carries one ``FIX CHECK:`` line per run.
         declared = (_preamble_parse_t2_field(record_content, "dispatches") or "").strip()
         verdict_lines = len(re.findall(r"^\s*FIX CHECK:\s*(?:PASS|FAIL)", record_content, re.MULTILINE))
-        n = int(declared) if declared.isdigit() else verdict_lines
+        # The field is self-reported; the lines are the evidence. The
+        # smaller of the two is what the record shows (review of 637b8149b,
+        # finding 3: `dispatches: 3` over one verdict line passed).
+        n = min(int(declared), verdict_lines) if declared.isdigit() else verdict_lines
         if n < 3:
             return [
                 f"**Fix check under-dispatched:** the record `*-fix-check-{sha}` shows {n} dispatch"
@@ -3395,13 +3416,28 @@ def _revision_history_after_accept_lines(text: str, fm: dict) -> list[str]:
     if not m:
         return ["> **Revision History stops at accept**: the RDR has no `## Revision History` section.", ""]
     section = m.group(1)
-    dated = [(d.group(1), ln) for ln in section.splitlines() if (d := re.search(r"(\d{4}-\d{2}-\d{2})", ln))]
+
+    def _entry_date(ln: str) -> str | None:
+        # The entry's own date leads the line; a date it merely mentions
+        # ("following the 2020-01-01 baseline") does not date it.
+        lead = re.match(r"^\s*[-*|]?\s*\**\s*(\d{4}-\d{2}-\d{2})", ln)
+        if lead:
+            return lead.group(1)
+        found = re.findall(r"\d{4}-\d{2}-\d{2}", ln)
+        return found[-1] if found else None
+
+    dated = [(d, ln) for ln in section.splitlines() if (d := _entry_date(ln))]
     accepted = str(fm.get("accepted_date") or fm.get("accepted") or "").strip()[:10]
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", accepted):
         acc = [d for d, ln in dated if re.search(r"accept", ln, re.IGNORECASE)]
         accepted = acc[-1] if acc else ""
     if not accepted:
-        return []  # never accepted through the lifecycle: nothing to be past
+        return [
+            "> **Revision History stops at accept**: no acceptance date on record, in the "
+            "frontmatter or in the history, so nothing shows when acceptance happened or what "
+            "landed after it. Set `accepted_date` and add one line per implementation phase.",
+            "",
+        ]
     after = [d for d, _ in dated if d > accepted]
     if after:
         return []
@@ -3830,6 +3866,10 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
         while k < len(toks):
             tok = toks[k]
             nxt = toks[k + 1] if k + 1 < len(toks) else None
+            consumed = 2
+            if tok.startswith(("--classification=", "--method=")):
+                tok, nxt = tok.split("=", 1)
+                consumed = 1
             if tok in ("--classification", "--method"):
                 if nxt is None or nxt.startswith("--"):
                     raise click.ClickException(f"rdr-research add: {tok} needs a value.")
@@ -3843,7 +3883,7 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
                     classification = val
                 else:
                     method = val
-                k += 2
+                k += consumed
                 continue
             rest.append(tok)
             k += 1
@@ -4498,14 +4538,18 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
             # never `latest`'s own id — see `_prior_round_identity`.
             prev_round_id = _prior_round_identity(client, project, latest_content)
             rows = client.get_all(project=project) or [] if callable(getattr(client, "get_all", None)) else []
-            # Distinct by content, and never this round's own critique
-            # (whatever title it was stored under).
-            _this = client.get(project=project, title=critique_title)
-            _this_content = str(_this.get("content", "")) if isinstance(_this, dict) else None
-            critique_count = sum(
-                1 for title, content in _distinct_critique_rows(rows, t2_key)
-                if title != critique_title and content != _this_content
-            )
+            # Never this round's own critique. By title when the scan lists
+            # it; by content only when it does not (the nexus-zu1q0 race, a
+            # record hidden from get_all), never both: a later round that
+            # re-raises a finding verbatim is a different title and counts
+            # (review of 637b8149b, finding 1).
+            distinct = _distinct_critique_rows(rows, t2_key)
+            if any(title == critique_title for title, _ in distinct):
+                critique_count = sum(1 for title, _ in distinct if title != critique_title)
+            else:
+                _this = client.get(project=project, title=critique_title)
+                _this_content = str(_this.get("content", "")) if isinstance(_this, dict) else None
+                critique_count = sum(1 for _, content in distinct if content != _this_content)
     except Exception as exc:  # noqa: BLE001 — T2 unreachable must be a visible note, never silence
         print(f"> T2 unreachable ({type(exc).__name__}: {exc}); the verdict cannot be computed.")
         return

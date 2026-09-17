@@ -241,3 +241,56 @@ class TestSetStatusWritesTheReason:
         assert res.exit_code == 0, res.output
         assert "close_reason" not in (d / "rdr-151-x.md").read_text()
         assert "close_reason" not in fake._store["151"]
+
+
+class TestReviewRoundFixes:
+    """Round-1 code review of 637b8149b, findings 1 to 6."""
+
+    def test_verdict_count_keeps_a_prior_round_that_this_round_re_raises_verbatim(self, rdr_env, monkeypatch):
+        _write_rdr(rdr_env["rdr_dir"], "rdr-207-x.md", {"title": "X", "status": "draft"}, _BODY)
+        crit = "## Critical Issues\n\n### Issue: same finding\n- Location: a\n\n## Verdict\n- **outcome**: not-justified\n- **critical_count**: 1\n"
+        fake = _FakeT2ResearchClient(entries={
+            "207-gate-critique-2026-09-10-r1": crit,
+            "207-gate-critique-2026-09-12-r2": crit,
+            "207-gate-latest": "outcome: BLOCKED\ndate: 2026-09-10\ncritique: nexus_rdr/207-gate-critique-2026-09-10-r1\n",
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        res = _runner().invoke(rdr, ["preamble", "rdr-verdict", "--", "207", "207-gate-critique-2026-09-12-r2"])
+        assert "Gate round 2" in res.output, res.output
+
+    def test_research_add_accepts_the_equals_form(self, monkeypatch):
+        fake = _FakeT2ResearchClient()
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        res = _runner().invoke(rdr, [
+            "preamble", "rdr-research", "--", "add", "209", "--classification=verified", "--method=spike", "the", "finding",
+        ])
+        assert res.exit_code == 0, res.output
+        content = fake._store["209-research-1"]
+        assert "classification: verified\n" in content and "verification_method: spike\n" in content
+        assert "=" not in content.split("finding:")[1]
+
+    def test_a_declared_dispatch_count_above_the_verdict_lines_is_not_trusted(self):
+        lines = rdr_mod._fix_check_pointer_lines(
+            "nexus_rdr/207-fix-check-abc1234", "abc1234", is_regate=True,
+            record_exists=True, record_content="dispatches: 3\nFIX CHECK: PASS\n",
+        )
+        assert any("three dispatches" in ln for ln in lines), lines
+
+    def test_an_accepted_rdr_with_no_acceptance_date_anywhere_is_named(self, rdr_env, monkeypatch):
+        _write_rdr(rdr_env["rdr_dir"], "rdr-210-x.md", {"title": "X", "status": "accepted"},
+                   _BODY + "- 2026-09-05: phase one\n")
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: _FakeT2ResearchClient())
+        res = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "210", "--reason", "implemented"])
+        assert "no acceptance date" in res.output, res.output
+
+    def test_an_entry_is_dated_by_its_leading_date_not_a_date_it_mentions(self):
+        text = "## Revision History\n\n- 2026-09-05: following the 2020-01-01 baseline, phase one landed\n"
+        assert rdr_mod._revision_history_after_accept_lines(text, {"accepted_date": "2026-09-01"}) == []
+
+    def test_unparseable_closed_dates_are_counted_in_the_override_row(self):
+        rows = [
+            {"title": "201", "content": "status: closed\nclosed_date: 09/17/2026\n"},
+            {"title": "202", "content": "status: closed\nclosed_date: 2026-09-12\n"},
+        ]
+        text = "\n".join(rdr_mod._close_override_lines(rows, today="2026-09-17"))
+        assert "1 closed record" in text and "could not be dated" in text, text
