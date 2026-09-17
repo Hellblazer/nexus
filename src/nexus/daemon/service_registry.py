@@ -1164,25 +1164,78 @@ def storage_service_stack_matcher(config_dir: Path) -> Callable[[str], bool]:
     is the documented multi-profile mechanism, and a bare
     ``str(config_dir) in command`` would match ``.config/nexus`` against
     ``.config/nexus-staging``'s command line, folding a healthy sibling
-    profile's supervisor into a kill set. The engine match is argv[0]-exact
-    for the same reason (never a substring match on a `tail .../nexus-service.log`
-    or similar diagnostic command).
+    profile's supervisor into a kill set. The engine match is a literal
+    prefix match on the whole *engine_path* string for the same reason
+    (never a substring match on a `tail .../nexus-service.log` or similar
+    diagnostic command) — see the space-safety note below for why this is
+    a prefix check rather than a ``.split()``-then-compare.
+
+    Flagless unit-launched supervisors (nexus-cd1k0.3): the shipped
+    launchd/systemd units exec ``nx daemon service start --foreground``
+    with NO ``--config-dir`` token at all — ``ensure_storage_supervisor``
+    (the client spawn path) always passes the flag, but a unit's
+    ``ExecStart``/``ProgramArguments`` never went through that path, so a
+    unit-launched supervisor was invisible to this matcher entirely: with
+    an expired lease, ``nx daemon service stop`` swept only the engine,
+    the supervisor exited non-zero on its child's death, and the OS unit
+    restarted the whole stack. A command with no ``--config-dir`` token
+    is therefore treated as belonging to the DEFAULT config dir — the
+    directory a flagless process resolves to on its own
+    (``nexus.config.nexus_config_dir()``'s own fallback, mirrored here as
+    a literal so this check never depends on THIS process's own
+    ``NEXUS_CONFIG_DIR``, only on what a bare invocation would resolve
+    to) — and to NOTHING else: an explicit non-default *config_dir* (an
+    isolated test stack, a second profile) must never be matched by a
+    flagless command, or a live default-dir ``stop`` would sweep an
+    unrelated isolated stack and vice versa.
+
+    Known, DOCUMENTED limitation: this matcher sees only argv (the
+    process table's ``command`` string), never a process's environment.
+    A unit that sets ``NEXUS_CONFIG_DIR`` itself (rather than passing
+    ``--config-dir``) resolves to that env var's directory in the real
+    process, but is indistinguishable here from a flagless process that
+    truly means the default — both look identical from argv alone. There
+    is no portable, unprivileged way to read another process's
+    environment from this module (see ``process_command``'s procfs/``ps``
+    split), so this case is accepted as unresolvable rather than
+    silently mismatched against a guess.
+
+    Space-safety (nexus-cd1k0.3): the process table's ``command`` string
+    is already a SPACE-JOINED rendering of the real argv (``/proc/<pid>/
+    cmdline`` NUL bytes replaced with spaces, or ``ps``'s single-string
+    output) — true argv boundaries are lost before this function ever
+    sees the string, so a config_dir containing a space cannot be
+    recovered by re-splitting on whitespace: ``command.split()`` would
+    slice it apart and never match. Every comparison below is therefore
+    a literal SUBSTRING/PREFIX/SUFFIX check against the whole
+    *engine_path* / *target* string, never a re-tokenization — correct
+    for a config_dir with an EMBEDDED space, as far as this platform's
+    process-table abstraction allows; it cannot help a config_dir that
+    also embeds a value indistinguishable from a following flag or the
+    NUL-turned-space bytes.
     """
     engine_path = str(config_dir / "service" / "nexus-service")
     target = str(config_dir)
+    # The literal default a FLAGLESS process resolves to on its own
+    # (nexus.config.nexus_config_dir()'s fallback branch) — NOT that
+    # function itself, so this never depends on this process's own
+    # NEXUS_CONFIG_DIR.
+    is_default_target = config_dir == (Path.home() / ".config" / "nexus")
+    config_dir_eq = f" --config-dir={target}"
+    config_dir_sp = f" --config-dir {target}"
 
     def _match(command: str) -> bool:
-        if command.split()[:1] == [engine_path]:
+        if command == engine_path or command.startswith(engine_path + " "):
             return True
         if "daemon service start" not in command:
             return False
-        tokens = command.split()
-        for i, tok in enumerate(tokens):
-            if tok == "--config-dir" and i + 1 < len(tokens):
-                return tokens[i + 1] == target
-            if tok.startswith("--config-dir="):
-                return tok[len("--config-dir="):] == target
-        return False
+        if command.endswith(config_dir_eq) or (config_dir_eq + " ") in command:
+            return True
+        if command.endswith(config_dir_sp) or (config_dir_sp + " ") in command:
+            return True
+        if "--config-dir" in command:
+            return False  # an explicit OTHER config-dir; never match by omission
+        return is_default_target
 
     return _match
 

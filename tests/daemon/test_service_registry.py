@@ -19,6 +19,7 @@ Core semantics under test (RDR-149 Decision):
 """
 from __future__ import annotations
 
+import contextlib
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -499,6 +500,67 @@ class TestStorageServiceStackMatcher:
         )
         assert not matcher(f"tail -f {cfg}/service/nexus-service.log")
 
+    def test_flagless_unit_launched_supervisor_matches_the_default_dir(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-cd1k0.3: the shipped launchd/systemd units exec
+        ``nx daemon service start --foreground`` with NO ``--config-dir``
+        token at all (``ensure_storage_supervisor`` -- the client spawn
+        path -- always passes the flag; a unit's ExecStart never goes
+        through it). A unit-launched supervisor is invisible to this
+        matcher unless a flagless command is recognized as belonging to
+        the DEFAULT config dir."""
+        default_dir = Path("/home/fakehome") / ".config" / "nexus"
+        monkeypatch.setattr(Path, "home", lambda: Path("/home/fakehome"))
+        matcher = storage_service_stack_matcher(default_dir)
+        assert matcher("/usr/local/bin/nx daemon service start --foreground")
+
+    def test_flagless_command_never_matches_an_explicit_other_dir(
+        self, tmp_path: Path,
+    ) -> None:
+        """A flagless command means ONLY the default dir, never an
+        explicit non-default one -- an isolated test/second-profile stack
+        must not be swept by a live default-dir stop, and vice versa."""
+        other = tmp_path / "isolated-stack"
+        matcher = storage_service_stack_matcher(other)
+        assert not matcher("/usr/local/bin/nx daemon service start --foreground")
+
+    def test_config_dir_containing_a_space_matches_itself(self) -> None:
+        """nexus-cd1k0.3: the process table's command string is already
+        space-joined argv, so a naive ``.split()`` shreds a config_dir
+        that itself contains a space. Every comparison must be a literal
+        substring/prefix/suffix check against the whole path string."""
+        spaced = Path("/Users/x/Library/Application Support/nexus")
+        matcher = storage_service_stack_matcher(spaced)
+        assert matcher(
+            f"nx daemon service start --foreground --config-dir {spaced}"
+        )
+        assert matcher(f"{spaced}/service/nexus-service -Duser.timezone=UTC")
+
+    def test_config_dir_with_a_space_still_requires_the_flag(self) -> None:
+        """A flagless command means only the DEFAULT dir -- a space in the
+        target config_dir does not change that; it must not accidentally
+        become a wildcard."""
+        spaced = Path("/Users/x/Library/Application Support/nexus")
+        matcher = storage_service_stack_matcher(spaced)
+        assert not matcher("/usr/local/bin/nx daemon service start --foreground")
+
+    def test_config_dir_with_a_space_followed_by_more_argv(self) -> None:
+        """--config-dir need not be the LAST token; a value containing a
+        space must still match when more argv follows it."""
+        spaced = Path("/Users/x/Library/Application Support/nexus")
+        matcher = storage_service_stack_matcher(spaced)
+        assert matcher(
+            f"nx daemon service start --config-dir {spaced} --foreground"
+        )
+
+    def test_equals_form_with_a_space_matches(self) -> None:
+        spaced = Path("/Users/x/Library/Application Support/nexus")
+        matcher = storage_service_stack_matcher(spaced)
+        assert matcher(
+            f"nx daemon service start --foreground --config-dir={spaced}"
+        )
+
 
 class TestSweepMatchingProcesses:
     """``sweep_matching_processes`` — THE shared mechanism nexus-oyo2g's
@@ -604,6 +666,55 @@ class TestSweepMatchingProcesses:
             result = sweep_matching_processes(storage_service_stack_matcher(cfg))
         assert result.pids == (196,)
         assert result.stubborn == (196,)
+
+
+class TestServiceStackPidsSeesUnitLaunchedSupervisor:
+    """nexus-cd1k0.3 end-to-end, with a REAL process (no mocks of the
+    process table): ``upgrade_finish.service_stack_pids`` (the upgrade
+    convergence path) shares ``storage_service_stack_matcher`` with
+    ``stop_storage_service``'s lease-miss fallback, so fixing the matcher
+    fixes both call sites at once. A real child process stands in for a
+    unit-launched (flagless) supervisor -- extra positional argv appended
+    to a bare python invocation so the REAL argv the OS reports contains
+    the exact substrings the matcher looks for, without needing an actual
+    ``nx`` binary."""
+
+    def test_flagless_real_process_is_discovered_at_the_default_dir(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import subprocess
+        import sys
+        import time
+
+        from nexus.upgrade_finish import service_stack_pids
+
+        fake_home = Path("/home/fakehome-cd1k0")
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        default_dir = fake_home / ".config" / "nexus"
+
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+            [
+                sys.executable, "-c", "import time; time.sleep(30)",
+                "daemon", "service", "start", "--foreground",
+            ],
+        )
+        try:
+            deadline = time.monotonic() + 5.0
+            found_pids: list[int] = []
+            while time.monotonic() < deadline:
+                found_pids = [pid for pid, _cmd in service_stack_pids(default_dir)]
+                if proc.pid in found_pids:
+                    break
+                time.sleep(0.1)
+        finally:
+            proc.terminate()
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=5)
+
+        assert proc.pid in found_pids, (
+            "a unit-launched (flagless) supervisor process must be visible "
+            f"to service_stack_pids at the DEFAULT config dir; found={found_pids}"
+        )
 
 
 class TestProcessState:
