@@ -823,3 +823,18 @@ class TestTopicBoost:
 
         assert r1.distance == 0.0
         assert r2.distance == 0.0
+
+
+def test_a_lone_result_scores_as_the_best_of_its_window_whatever_its_distance():
+    """Min-max normalisation is relative: the best of any window scores 1.0
+    and absolute quality is not expressed (distance thresholds, where they
+    apply, run before scoring). A lone poor hit therefore scores exactly what
+    the better of two poor hits scores. Pinned at a BAD distance so the
+    property is stated, not implied (critique of 43ca11469: every other
+    singleton test used a good distance and could not tell this rule from an
+    absolute-distance one)."""
+    lone = apply_hybrid_scoring([_r(coll="docs__corpus", dist=0.95)], hybrid=False)
+    pair = apply_hybrid_scoring(
+        [_r(coll="docs__corpus", dist=0.95), _r(coll="docs__corpus", dist=0.99)], hybrid=False,
+    )
+    assert lone[0].hybrid_score == pytest.approx(max(r.hybrid_score for r in pair)) == pytest.approx(1.0)

@@ -1568,6 +1568,7 @@ def _index_document(
     hooks: "HookRegistry | None" = None,
     doc_id: str = "",
     source_uri: str = "",
+    doc_just_created: bool = False,
 ) -> int | list[dict]:
     """Shared indexing pipeline: credential check, staleness, embed, upsert, prune.
 
@@ -1728,7 +1729,15 @@ def _index_document(
         if doc_id:
             _fence_fail(doc_id, str(exc))
         raise
-    if not force and existing["metadatas"]:
+    # nexus-o19i0: the lookup above matches on content_hash collection-wide,
+    # and identical text collapses to one T3 row per collection, so a
+    # byte-identical file at a SECOND path read as "already indexed": its
+    # Document was registered with no manifest, present in the catalog and
+    # absent from every search. A Document this very call minted cannot have
+    # been indexed before, whatever another path's chunks say. The flag comes
+    # from the pre-flight registration the caller already made; no catalog
+    # read is added to the skip path (RDR-191 Phase 6 stands).
+    if not force and not doc_just_created and existing["metadatas"]:
         stored_hash = existing["metadatas"][0].get("content_hash", "")
         stored_model = existing["metadatas"][0].get("embedding_model", "")
         # nexus-5xn3k AC2 / RUNFENCE (nexus-5xn3k.3): the match above is
@@ -2712,7 +2721,10 @@ def index_pdf(
         if doc_id:
             _fence_fail(doc_id, str(exc))
         raise
-    if not force and existing["metadatas"]:
+    # nexus-o19i0 sibling: same collection-wide content_hash match, same
+    # wrong skip for a byte-identical PDF at a second path. index_pdf has
+    # carried the freshly-minted flag since nexus-uxg4u; it now gates the skip.
+    if not force and not _doc_id_freshly_minted and existing["metadatas"]:
         stored_hash = existing["metadatas"][0].get("content_hash", "")
         stored_model = existing["metadatas"][0].get("embedding_model", "")
         # nexus-5xn3k AC2 / RUNFENCE (nexus-5xn3k.3): the hash/model match
@@ -3537,7 +3549,11 @@ def index_markdown(
     # nexus-ivzw8: thread the frontmatter title/year into the PRE-FLIGHT
     # registration so a fresh Document row never carries the stem default.
     _fm_title, _fm_year = _parse_md_title_year(md_path)
-    doc_id = _register_or_lookup_doc_id(
+    # with_created (nexus-o19i0): whether THIS call minted the Document. Same
+    # defensive unpack as index_pdf (nexus-uxg4u): a test double patching this
+    # function returns a bare ``str`` whatever kwargs it is given, and a bare
+    # str reads as "not freshly minted", which is what those doubles assert.
+    _reg_result = _register_or_lookup_doc_id(
         md_path, corpus,
         content_type=content_type,
         physical_collection=col_name,
@@ -3545,7 +3561,12 @@ def index_markdown(
         year=_fm_year,
         base_path=base_path,
         source_uri=source_uri,
+        with_created=True,
     )
+    if isinstance(_reg_result, tuple):
+        doc_id, _doc_just_created = _reg_result
+    else:
+        doc_id, _doc_just_created = _reg_result, False
     chunk_fn = partial(
         _markdown_chunks,
         base_path=base_path,
@@ -3563,6 +3584,7 @@ def index_markdown(
         hooks=hooks,
         doc_id=doc_id,
         source_uri=source_uri,
+        doc_just_created=_doc_just_created,
     )
     if not return_metadata:
         assert isinstance(raw, int)

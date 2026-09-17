@@ -666,3 +666,127 @@ def test_pdf_indexer_handles_duplicate_chunks_within_document(
         "both manifest rows must point at the shared chash; "
         f"got {[r.chash for r in manifest]!r}"
     )
+
+
+# ── (2c) docs__: a byte-identical file at a second path (nexus-o19i0) ─────
+
+
+@pytest.fixture
+def identical_docs_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "identical-docs-repo"
+    (repo / "copies").mkdir(parents=True)
+    body = (
+        "# Notice\n\n## Licensing\n\n"
+        f"{_SHARED_PARAGRAPH}"
+        "\n## Terms\n\nThe same prose in both places, byte for byte.\n"
+    )
+    (repo / "NOTICE.md").write_text(body, encoding="utf-8")
+    (repo / "copies" / "NOTICE.md").write_text(body, encoding="utf-8")
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@nexus")
+    _git(repo, "config", "user.name", "Nexus Test")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "Initial commit")
+    return repo
+
+
+def test_byte_identical_file_at_a_second_path_gets_its_own_manifest(
+    identical_docs_repo: Path,
+    local_t3: T3Database,
+    catalog_env: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Intrastate review [26119] #11. The incremental-skip check matches on
+    content_hash collection-wide, so the second copy read as "already
+    indexed" and its catalog Document was registered with no chunks: present
+    in the catalog, absent from every search and from verify. Each path is
+    its own Document and must carry its own manifest, pointing at the shared
+    T3 rows."""
+    registry = RepoRegistry(tmp_path / "repos.json")
+    registry.add(identical_docs_repo)
+    _do_index(identical_docs_repo, registry, local_t3, monkeypatch)
+
+    info = registry.get(identical_docs_repo)
+    assert info is not None
+    docs_collection = info.get("docs_collection")
+    assert docs_collection
+
+    cat = ActiveCatalog()
+    documents = [d for d in cat.list_by_collection(docs_collection) if d.file_path]
+    by_path = {d.file_path: str(d.tumbler) for d in documents}
+    assert {"NOTICE.md", "copies/NOTICE.md"} <= by_path.keys(), by_path
+    manifests = {p: [r.chash for r in cat.get_manifest(t)] for p, t in by_path.items()}
+    assert manifests["NOTICE.md"], manifests
+    assert manifests["copies/NOTICE.md"] == manifests["NOTICE.md"], manifests
+
+
+def test_single_file_index_of_a_byte_identical_copy_gets_its_own_manifest(
+    local_t3: T3Database,
+    catalog_env: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same defect on the single-file path, ``index_markdown`` (what
+    ``nx index md`` drives): the repo indexer above was never affected."""
+    from nexus.doc_indexer import index_markdown  # noqa: PLC0415 — deferred: only this scenario drives the single-file entry point
+
+    body = (
+        "# Notice\n\n## Licensing\n\n"
+        f"{_SHARED_PARAGRAPH}"
+        "\n## Terms\n\nThe same prose in both places, byte for byte.\n"
+    )
+    first = tmp_path / "one" / "NOTICE.md"
+    second = tmp_path / "two" / "NOTICE.md"
+    for p in (first, second):
+        p.parent.mkdir(parents=True)
+        p.write_text(body, encoding="utf-8")
+
+    # Same seam _do_index uses: the manifest's FK wants a real engine chunk
+    # row for every chash the fake T3 client writes.
+    from tests._catalog_fixture_ops import seed_manifest_chunks  # noqa: PLC0415 — deferred, as in _do_index
+
+    monkeypatch.setenv("NX_LOCAL", "1")
+    orig_write_batch = local_t3._write_batch
+
+    def _seeding_write_batch(col, collection_name, ids, documents, metadatas, embeddings=None, **kwargs):
+        orig_write_batch(col, collection_name, ids, documents, metadatas, embeddings, **kwargs)
+        seed_manifest_chunks(collection_name, ids)
+
+    monkeypatch.setattr(local_t3, "_write_batch", _seeding_write_batch)
+
+    # The second copy's chunks already exist (same text, one T3 row each), so
+    # it takes the metadata-only refresh path, which needs the store's
+    # "missing" report. The production client returns that list; this fake
+    # facade returns None. The rows are genuinely present, so report none
+    # missing, which is what the engine would say.
+    orig_update_chunks = local_t3.update_chunks
+
+    def _reporting_update_chunks(collection, ids, metadatas):
+        orig_update_chunks(collection, ids, metadatas)
+        return []
+
+    monkeypatch.setattr(local_t3, "update_chunks", _reporting_update_chunks)
+
+    corpus = "o19i0-identical-copy"
+    with patch("nexus.config.get_credential", side_effect=fake_credentials()):
+        n_first = index_markdown(first, corpus=corpus, t3=local_t3)
+        n_second = index_markdown(second, corpus=corpus, t3=local_t3)
+    assert n_first > 0
+
+    cat = ActiveCatalog()
+    m_first = [r.chash for r in cat.get_manifest(_doc_tumbler(cat, first))]
+    m_second = [r.chash for r in cat.get_manifest(_doc_tumbler(cat, second))]
+    assert m_first, "the first copy must have a manifest"
+    assert m_second == m_first, (
+        f"the second, byte-identical copy registered with manifest {m_second!r} "
+        f"(index_markdown returned {n_second}); expected {m_first!r}"
+    )
+
+
+def _doc_tumbler(cat: ActiveCatalog, path: Path) -> str:
+    from nexus.doc_indexer import _doc_id_for_path  # noqa: PLC0415 — deferred: test-local helper over the production resolver
+
+    tumbler = _doc_id_for_path(path)
+    assert tumbler, f"no catalog document for {path}"
+    return tumbler

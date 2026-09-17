@@ -1366,8 +1366,28 @@ def test_index_raises_credentials_missing_when_cloud_mode_explicit(
     assert "NX_LOCAL" in str(excinfo.value)
 
 
+
+def _registered_before(path, corpus: str, content_type: str) -> None:
+    """Make the catalog agree with a T3 double that says "already indexed".
+
+    A skip-path test mocks T3 as holding this file's hash. Before
+    nexus-o19i0 the catalog side was left untold: the indexer minted a
+    brand-new Document in the same call and skipped anyway, which is the
+    defect (a byte-identical file at a second path registered with no
+    chunks). A Document the call itself mints is now never skipped, so a
+    test about the skip path registers the Document first, as a real
+    earlier index run would have.
+    """
+    from nexus.doc_indexer import _register_or_lookup_doc_id
+
+    # physical_collection is left empty: registration is keyed on the file's
+    # path, which is what makes the indexer's own call find this Document.
+    _register_or_lookup_doc_id(path, corpus, content_type=content_type, physical_collection="")
+
+
 def test_index_pdf_skips_if_hash_unchanged(sample_pdf, monkeypatch, cloud_mode):
     set_credentials(monkeypatch)
+    _registered_before(sample_pdf, "mybook", "paper")
     content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
     mock_col = MagicMock()
     mock_col.get.return_value = {
@@ -1381,6 +1401,28 @@ def test_index_pdf_skips_if_hash_unchanged(sample_pdf, monkeypatch, cloud_mode):
             result = index_pdf(sample_pdf, corpus="mybook", t3=mock_t3)
     assert result == 0
     ext_cls.assert_not_called()
+
+
+def test_index_pdf_never_skips_a_document_this_call_minted(sample_pdf, monkeypatch, cloud_mode):
+    """nexus-o19i0, the PDF sibling: T3 holds this content hash (a
+    byte-identical PDF at another path put it there) and the catalog has
+    never seen THIS path. The old skip returned 0 and left a Document with no
+    chunks; a Document the call itself mints is indexed."""
+    set_credentials(monkeypatch)
+    content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "ids": ["existing_chunk_id"],
+        "metadatas": [{"content_hash": content_hash, "embedding_model": "voyage-context-3"}],
+    }
+    mock_t3 = MagicMock()
+    mock_t3.get_or_create_collection.return_value = mock_col
+    with patch("nexus.doc_indexer.make_t3", return_value=mock_t3), \
+         patch("nexus.doc_indexer.PDFExtractor") as ext_cls:
+        ext_cls.return_value.extract.side_effect = RuntimeError("reached extraction")
+        with pytest.raises(RuntimeError, match="reached extraction"):
+            index_pdf(sample_pdf, corpus="o19i0-pdf-sibling", t3=mock_t3, streaming="never")
+    ext_cls.assert_called()
 
 
 def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch, mock_t3, voyage_client):
@@ -1862,6 +1904,7 @@ def test_index_pdf_uses_cce_for_docs_collection(sample_pdf, monkeypatch):
 ])
 def test_index_pdf_hash_match_model_check(stored_model, expected_result, sample_pdf, monkeypatch, cloud_mode):
     set_credentials(monkeypatch)
+    _registered_before(sample_pdf, "mybook", "paper")
     content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
     mock_chunk, mock_extract = _make_pdf_mocks()
     mock_col = MagicMock()
@@ -1968,6 +2011,7 @@ def test_force_bypasses_staleness(indexer, sample_pdf, sample_md, monkeypatch, c
 
 def test_force_default_false_still_skips(sample_pdf, monkeypatch, cloud_mode):
     set_credentials(monkeypatch)
+    _registered_before(sample_pdf, "mybook", "paper")
     content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
     mock_col = MagicMock()
     mock_col.get.return_value = {
@@ -2222,6 +2266,7 @@ def test_index_markdown_return_metadata_true_returns_dict(sample_md, monkeypatch
 
 def test_index_markdown_return_metadata_true_skipped_returns_empty_dict(sample_md, monkeypatch, cloud_mode):
     set_credentials(monkeypatch)
+    _registered_before(sample_md, "test", "prose")
     content_hash = hashlib.sha256(sample_md.read_bytes()).hexdigest()
     mock_col = MagicMock()
     mock_col.get.return_value = {
