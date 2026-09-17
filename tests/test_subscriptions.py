@@ -30,6 +30,7 @@ from nexus.mcp.subscriptions import (
     load,
     persist,
     registration_path,
+    write_instance_registration,
 )
 
 
@@ -112,6 +113,34 @@ class TestSubscribeValidation:
         s = SubscriptionSet(session_id=str(uuid.uuid4()))
         with pytest.raises(SchemaViolationError):
             s.subscribe("mailbox/", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path)
+
+    def test_mailbox_name_with_a_newline_is_refused_before_any_write_or_lease(self, tmp_path):
+        """Code review Minor 6: an instance name outside the mailbox
+        address charset must be refused loudly (`SchemaViolationError`),
+        before `write_instance_registration` or the `directory/<name>`
+        lease -- `_poison_store_factory` is the falsifier that no lease
+        was ever started."""
+        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        with pytest.raises(SchemaViolationError):
+            s.subscribe(
+                "mailbox/evil\nname", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path,
+            )
+        assert list(tmp_path.rglob("*")) == []
+
+    def test_mailbox_name_with_a_slash_is_refused_before_any_write_or_lease(self, tmp_path):
+        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        with pytest.raises(SchemaViolationError):
+            s.subscribe(
+                "mailbox/evil/name", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path,
+            )
+        assert list(tmp_path.rglob("*")) == []
+
+    def test_write_instance_registration_itself_rejects_a_charset_hostile_instance(self, tmp_path):
+        """Defense in depth: even a direct call to
+        `write_instance_registration` -- bypassing `subscribe`'s loud
+        refusal -- must never write a bad name to disk."""
+        write_instance_registration(tmp_path, "sess-1", "evil/name")
+        assert list(tmp_path.rglob("*")) == []
 
     def test_subscribing_the_sessions_own_mailbox_is_a_noop(self, tmp_path):
         sid = str(uuid.uuid4())

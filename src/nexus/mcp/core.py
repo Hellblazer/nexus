@@ -6699,6 +6699,12 @@ def tuple_release(
         _t2_index_write(
             lambda db: db.tuples.release(claim_id, claimant), op="tuple_release",
         )
+        # RDR-211 review (code review, Significant 2): a release is also
+        # credit -- the session handed the claim back itself, so the
+        # waiter is free to claim its next mailbox row immediately rather
+        # than waiting up to a full renew tick for a ClaimNotFound to
+        # clear its outstanding slot.
+        _channel.note_credit(_current_subscription_session_id(), claim_id)
         return f"Released claim {claim_id}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("tuple_release", e)

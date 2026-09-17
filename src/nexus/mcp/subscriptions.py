@@ -75,6 +75,15 @@ _STATE_SUBDIR = "tuple-watch"
 #: trusted with a directory write.
 _SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
+#: The mailbox address charset (RDR-211 fix round, bead nexus-rplay.18,
+#: code review Minor 6): a `mailbox/<name>` instance name becomes both a
+#: bare directory-entry name (:func:`write_instance_registration`) and a
+#: `directory/<name>` lease key, so a name outside this charset -- a
+#: newline, a slash, a leading `.`/`-`/`_` -- is refused rather than
+#: sanitised, exactly as :data:`_SAFE_SESSION_ID` already refuses a bad
+#: session id.
+_SAFE_INSTANCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
 #: Matches ``directory.yaml``'s own ``retention_seconds`` -- a re-send can
 #: never move a directory entry's expiry past its own ``created_at`` plus
 #: this window, so a lease that outlives it mints a fresh nonce and writes
@@ -116,13 +125,17 @@ def write_instance_registration(state_dir: Path, session_id: str, instance: str)
     crash the caller -- it only means this session's instance-addressed
     mail has no drain floor until the next successful call.
 
-    A *session_id* outside the safe charset (or an empty *instance*) is a
-    silent no-op, mirroring the former CLI mailbox-watch module's own
-    ``write_instance_registration`` exactly (same path, same format, same
-    guard) -- see this module's docstring for why it is copied rather than
-    imported.
+    A *session_id* outside the safe charset, or an *instance* that is
+    empty or outside :data:`_SAFE_INSTANCE_NAME` (a defense-in-depth
+    guard: :meth:`SubscriptionSet.subscribe` already refuses a bad
+    instance name loudly, with ``SchemaViolationError``, before this
+    function is ever reached on that path -- this guard only matters to
+    a caller that bypasses `subscribe`), is a silent no-op, mirroring the
+    former CLI mailbox-watch module's own ``write_instance_registration``
+    exactly (same path, same format, same guard) -- see this module's
+    docstring for why it is copied rather than imported.
     """
-    if not instance or not _SAFE_SESSION_ID.fullmatch(session_id):
+    if not instance or not _SAFE_INSTANCE_NAME.fullmatch(instance) or not _SAFE_SESSION_ID.fullmatch(session_id):
         return
     path = registration_path(state_dir, session_id)
     try:
@@ -367,6 +380,11 @@ class SubscriptionSet:
             name = subspace[len("mailbox/"):]
             if not name:
                 raise SchemaViolationError("mailbox subspace must include a name")
+            if not _SAFE_INSTANCE_NAME.fullmatch(name):
+                raise SchemaViolationError(
+                    f"{name!r} is not a valid mailbox address name -- must match "
+                    f"{_SAFE_INSTANCE_NAME.pattern!r}; refused before any write or lease"
+                )
             self._subscribe_instance_mailbox(
                 name,
                 store_factory=store_factory,

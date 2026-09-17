@@ -29,11 +29,25 @@ Two independent halves live here:
   mail under pure back pressure (one live claim at a time, held, renewed
   and re-notified until the session's own ``tuple_ack``/``tuple_nack``
   supplies the credit for the next -- Sam, T2 ``nexus_rdr/211-decision-
-  channel-delivery-2026-09-16`` item 6). It also publishes its
-  :meth:`ChannelWaiter.status` to a per-session on-disk record
-  (:func:`write_channel_status`) at every wake/renew/release, since the
-  `nx doctor` row (bead nexus-rplay.13) runs in the separate CLI process
-  and has no other way to see this process's live state.
+  channel-delivery-2026-09-16`` item 6). Every notification's ``content``
+  is a FIXED template built only from server-controlled identifiers
+  (subspace, tuple id, and for mail the claim id and claimant) -- never
+  the tuple's own body, ``from``, ``kind``, or ``correlation_id`` (Sam, T2
+  ``nexus_rdr/211-decision-push-reference-2026-09-17``): the channel is a
+  push-to-ATTEND signal, not a delivery transport, and the session reads
+  the actual content back itself with ``tuple_rd`` once notified. It also
+  publishes its :meth:`ChannelWaiter.status` to a per-session on-disk
+  record (:func:`write_channel_status`) at every wake/renew/release,
+  since the `nx doctor` row (bead nexus-rplay.13) runs in the separate
+  CLI process and has no other way to see this process's live state --
+  that same record is also what a restarted waiter for the SAME session
+  reads back at start, BEFORE any normal claim, to renew and re-adopt an
+  outstanding mailbox claim its crashed predecessor left live (RDR-211
+  review, Significant 1): a crash-and-restart is otherwise
+  indistinguishable, IN THIS PROCESS's memory, from never having claimed
+  anything at all, which is exactly what let a fresh `_maybe_claim_mail`
+  call claim a second message from a different mailbox while the first
+  was still live.
 
 Neither half needs ``mcp.server.session.ServerSession`` at all: sending a
 notification is a raw ``JSONRPCNotification`` on the write stream (the
@@ -319,7 +333,16 @@ def detect_channel_argv(
 @dataclass
 class _Outstanding:
     """The one live mailbox claim this waiter may hold at a time (pure
-    back pressure, RDR-211 decision item 6)."""
+    back pressure, RDR-211 decision item 6).
+
+    ``claimed_at`` (ISO-8601, set once at the original claim and carried
+    forward on adoption -- see :meth:`ChannelWaiter._adopt_persisted_
+    outstanding`) is persisted alongside ``claim_id``/``subspace``/
+    ``tuple_id``/``resend_count`` in the on-disk status record
+    (:meth:`ChannelWaiter.status`'s ``outstanding`` key) so a crashed
+    and restarted waiter for the SAME session can renew and re-adopt
+    this exact claim instead of leaving it live and untracked while
+    claiming a second one elsewhere (RDR-211 review, Significant 1)."""
 
     subspace: str
     tuple_id: str
@@ -329,6 +352,31 @@ class _Outstanding:
     meta: dict[str, str]
     next_renew_at: float
     resend_count: int = 0
+    claimed_at: str = ""
+
+
+#: Sam's decision, T2 ``nexus_rdr/211-decision-push-reference-2026-09-17``:
+#: the notification `content` a mailbox claim or board post sends is a
+#: FIXED template built only from server-controlled identifiers -- never
+#: the tuple's own body, `from`, `kind`, or `correlation_id` (those stay in
+#: `meta`, unchanged). The channel is a push-to-attend signal, not a
+#: delivery transport: the session reads the actual content back itself
+#: with `tuple_rd` once notified. A resend at renew re-sends the exact
+#: same string (`_Outstanding.content` is built once, at claim or
+#: adoption time, and never rebuilt from the row again).
+def _mailbox_notification_content(subspace: str, tuple_id: str, claim_id: str, claimant: str) -> str:
+    return (
+        f"nexus mailbox message: subspace {subspace}, tuple {tuple_id}, claim {claim_id} "
+        f"held by {claimant}. Read it with tuple_rd on that subspace, then tuple_ack "
+        "(with a reply for a request), tuple_nack, or tuple_release with the claim id."
+    )
+
+
+def _board_notification_content(subspace: str, tuple_id: str) -> str:
+    return (
+        f"nexus board post: subspace {subspace}, tuple {tuple_id}. Read new posts with "
+        "tuple_rd on that subspace from your cursor (tuple_subscriptions shows it)."
+    )
 
 
 class ChannelWaiter:
@@ -461,13 +509,25 @@ class ChannelWaiter:
         `None` before the first one. `unacked`: 1 while a mailbox claim
         is outstanding, else 0 (pure back pressure caps this at one).
         `released`: the cumulative count of claims released after
-        exhausting `max_resends`."""
+        exhausting `max_resends`. `outstanding`: `None`, or
+        `{claim_id, subspace, tuple_id, resends, claimed_at}` for the one
+        live mailbox claim this waiter holds -- the record
+        :meth:`_adopt_persisted_outstanding` reads back at the next
+        waiter start for THIS session (RDR-211 review, Significant 1)."""
+        outstanding: dict[str, Any] | None = None
+        if self._outstanding is not None:
+            o = self._outstanding
+            outstanding = {
+                "claim_id": o.claim_id, "subspace": o.subspace, "tuple_id": o.tuple_id,
+                "resends": o.resend_count, "claimed_at": o.claimed_at,
+            }
         return {
             "proof": self._proof,
             "alive": self._alive,
             "last_wake": self._last_wake.isoformat() if self._last_wake else None,
             "unacked": 1 if self._outstanding is not None else 0,
             "released": self._released_count,
+            "outstanding": outstanding,
         }
 
     def _publish_status(self) -> None:
@@ -486,6 +546,7 @@ class ChannelWaiter:
     async def run(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._alive = True
+        await self._adopt_persisted_outstanding()
         self._publish_status()
         try:
             if not self.channel_live.is_set():
@@ -502,6 +563,54 @@ class ChannelWaiter:
             return
         self._probe_sent = True
         await self.sender(_PROBE_CONTENT, {"kind": "channel_probe"})
+
+    async def _adopt_persisted_outstanding(self) -> None:
+        """At waiter start, BEFORE any normal claim: read back this
+        session's last-persisted outstanding claim (if any) and try to
+        renew it (RDR-211 review, Significant 1).
+
+        A crashed process's live claim would otherwise sit untracked in
+        memory while a FRESH `_maybe_claim_mail` call -- gated only by
+        `self._outstanding is None` IN THIS PROCESS -- claims a second
+        message from a different mailbox, exceeding the one-live-claim
+        invariant across the crash: the existing same-claimant retake
+        only protects a re-claim within THAT claim's own subspace, never
+        a different one.
+
+        `renew` succeeding means the claim is still live: adopt it
+        (restoring the resend count and the original `claimed_at`) and
+        re-send its notification once, so the session sees it again
+        post-restart. `ClaimNotFoundError` means it already lapsed (a
+        successor already reclaimed it, or the sweep did) -- nothing to
+        adopt, and the stale record is left for the next `_publish_status`
+        to overwrite.
+        """
+        if self.state_dir is None:
+            return
+        status = read_channel_status(self.state_dir, self.session_id)
+        persisted = (status or {}).get("outstanding")
+        if not persisted:
+            return
+        claim_id = persisted.get("claim_id")
+        subspace = persisted.get("subspace")
+        tuple_id = persisted.get("tuple_id")
+        if not claim_id or not subspace or not tuple_id:
+            return
+        try:
+            await asyncio.to_thread(self._call, lambda t: t.renew(claim_id, self.claimant, self.lease_s))
+        except ClaimNotFoundError:
+            return
+        content = _mailbox_notification_content(subspace, tuple_id, claim_id, self.claimant)
+        meta = {"subspace": subspace, "tuple_id": tuple_id, "claim_id": claim_id, "claimant": self.claimant}
+        self._outstanding = _Outstanding(
+            subspace=subspace, tuple_id=tuple_id, claim_id=claim_id, claimant=self.claimant,
+            content=content, meta=meta,
+            next_renew_at=time.monotonic() + self.renew_interval_s,
+            resend_count=int(persisted.get("resends", 0) or 0),
+            claimed_at=persisted.get("claimed_at") or datetime.now(UTC).isoformat(),
+        )
+        await self.sender(self._outstanding.content, self._outstanding.meta)
+        self._publish_status()
 
     def _call(self, fn: Callable[[Any], Any]) -> Any:
         """Run *fn* against a freshly opened tuples store, closing it
@@ -570,16 +679,26 @@ class ChannelWaiter:
                 self.subs.advance_cursor(result.subspace, (last.created_at or "", last.id))
                 advanced = True
         if advanced:
-            self.persist()
+            # Code review Significant 3: `self.persist()` (a T1 write-back,
+            # a synchronous HTTP call) must never run directly on the event
+            # loop -- every other store call in this class already goes
+            # through `asyncio.to_thread` for exactly this reason.
+            await asyncio.to_thread(self.persist)
 
     async def _deliver_board_post(self, subspace: str, row: TupleRow) -> None:
         meta = {"subspace": subspace, "tuple_id": row.id}
         for key in ("from", "kind"):
             if row.dims.get(key):
                 meta[key] = row.dims[key]
-        await self.sender(row.body or "", meta)
+        await self.sender(_board_notification_content(subspace, row.id), meta)
 
     async def _maybe_claim_mail(self) -> None:
+        if self._outstanding is not None:
+            # "Never claim while an adopted or live outstanding exists"
+            # (RDR-211 review, Significant 1) -- enforced here too, not
+            # only by `tick()`'s `if self._outstanding is None` gate, so
+            # the invariant holds for any direct caller (tests included).
+            return
         mailbox_subspaces = [e["subspace"] for e in self.subs.entries() if not e["subspace"].startswith("board/")]
         candidates: list[tuple[str, str, str]] = []
         for subspace in mailbox_subspaces:
@@ -607,8 +726,9 @@ class ChannelWaiter:
                 meta[key] = row.dims[key]
         self._outstanding = _Outstanding(
             subspace=subspace, tuple_id=row.id, claim_id=claim_id, claimant=self.claimant,
-            content=row.body or "", meta=meta,
+            content=_mailbox_notification_content(subspace, row.id, claim_id, self.claimant), meta=meta,
             next_renew_at=time.monotonic() + self.renew_interval_s,
+            claimed_at=datetime.now(UTC).isoformat(),
         )
         await self.sender(self._outstanding.content, self._outstanding.meta)
 
