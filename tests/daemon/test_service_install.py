@@ -19,6 +19,7 @@ for real.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -553,9 +554,12 @@ class TestActivationFailure:
         ALREADY_PRESENT and activated nothing (activation attempts stayed
         at 1 across two installs). Reproduced pre-fix. Since nexus-mac7t
         the invariant is held at the short-circuit, which asks the manager
-        (here: launchd lists the label disabled) before it answers
-        ALREADY_PRESENT; the file itself stays, so `nx doctor` can report
-        the unit that was wanted and could not be registered."""
+        before it answers ALREADY_PRESENT. The fake here reports the state
+        a failed bootstrap REALLY leaves on launchd (critic on 6867dbe4d,
+        measured): the label is unlisted by print-disabled (bootstrap
+        writes no override, so registration for login reads fine) and
+        `launchctl print` says "Could not find service" (not loaded now).
+        The file itself stays, so `nx doctor` can report on it."""
         _set_platform(monkeypatch, "darwin")
         _stub_paths(tmp_path, monkeypatch)
         calls: list[list[str]] = []
@@ -563,9 +567,9 @@ class TestActivationFailure:
         def _fake_run(cmd, *a, **k):
             calls.append(list(cmd))
             if cmd[1] == "print-disabled":
-                return subprocess.CompletedProcess(
-                    cmd, 0, stdout='\tdisabled services = {\n\t\t"com.nexus.service" => disabled\n\t}\n', stderr="",
-                )
+                return subprocess.CompletedProcess(cmd, 0, stdout="\tdisabled services = {\n\t}\n", stderr="")
+            if cmd[1] == "print":
+                return subprocess.CompletedProcess(cmd, 113, stdout="", stderr="Could not find service \"com.nexus.service\" in domain for uid: 501")
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="Failed to bootstrap")
 
         monkeypatch.setattr(installer.subprocess, "run", _fake_run)
@@ -575,7 +579,30 @@ class TestActivationFailure:
         assert dest.exists(), "the file stays; the retry is gated on the manager's answer, not on the file"
         with pytest.raises(installer.ActivationError):
             installer.install_autostart(tier="service")
-        assert sum(1 for c in calls if "bootstrap" in c) == 2, calls
+        assert [c[1] for c in calls] == ["bootstrap", "print-disabled", "print", "bootstrap"], calls
+
+    def test_force_over_identical_content_bypasses_the_short_circuit_and_reactivates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--force is the operator's explicit re-activation; it never asks
+        the manager and never answers ALREADY_PRESENT. It unloads first
+        (cd1k0.5) so a loaded job re-reads the file."""
+        _set_platform(monkeypatch, "darwin")
+        _stub_paths(tmp_path, monkeypatch)
+        dest = tmp_path / "units" / "com.nexus.service.plist"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _, rendered = installer.rendered_unit_content(tier="service")
+        dest.write_text(rendered)
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(installer.subprocess, "run", _fake_run)
+        result = installer.install_autostart(tier="service", force=True)
+        assert result.status is installer.InstallStatus.NEWLY_INSTALLED
+        assert [c[1] for c in calls] == ["bootout", "bootstrap"], calls
 
     def test_force_over_a_differing_unit_unloads_it_before_activating(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -666,6 +693,52 @@ class TestAutostartActivationState:
         script.write_text("#!/bin/sh\nprintf '%s' '\tdisabled services = {\n\t}\n'\nexit 0\n")
         probe = installer.autostart_activation_state(tmp_path / "com.nexus.service.plist", tier="service")
         assert probe.state is installer.ActivationState.ACTIVE
+
+    def test_darwin_older_dialect_true_is_disabled_and_an_unknown_token_is_unreachable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`=> true` was the older launchctl dialect for disabled; a token
+        the parser does not know must not read as good news."""
+        _set_platform(monkeypatch, "darwin")
+        script = _fake_manager(tmp_path, monkeypatch, "launchctl", "printf '%s' '\t\t\"com.nexus.service\" => true\n'\nexit 0\n")
+        probe = installer.autostart_activation_state(tmp_path / "com.nexus.service.plist", tier="service")
+        assert probe.state is installer.ActivationState.NOT_ACTIVE
+        script.write_text("#!/bin/sh\nprintf '%s' '\t\t\"com.nexus.service\" => maybe\n'\nexit 0\n")
+        probe = installer.autostart_activation_state(tmp_path / "com.nexus.service.plist", tier="service")
+        assert probe.state is installer.ActivationState.UNREACHABLE
+        assert "`maybe`" in probe.detail
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="parses the real launchctl on a Mac only")
+    def test_real_launchctl_print_disabled_speaks_a_dialect_the_parser_knows(self) -> None:
+        """The regex and token sets are pinned to output the author typed;
+        this reads the REAL binary once so a dialect change surfaces here
+        rather than as a silent ACTIVE."""
+        import os  # noqa: PLC0415 — local import, test-only convenience
+        import re  # noqa: PLC0415 — local import, test-only convenience
+
+        result = subprocess.run(
+            ["/bin/launchctl", "print-disabled", f"gui/{os.getuid()}"],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        if result.returncode != 0:
+            pytest.skip(f"no gui domain for this uid here: {result.stderr.strip()}")
+        rows = re.findall(r'"([^"]+)"\s*=>\s*(\S+)', result.stdout)
+        assert rows, result.stdout
+        known = installer._LAUNCHD_DISABLED_TOKENS | installer._LAUNCHD_ENABLED_TOKENS
+        unknown = sorted({tok for _, tok in rows if tok not in known})
+        assert unknown == [], f"launchctl print-disabled speaks tokens the parser does not know: {unknown}"
+
+    def test_a_manager_that_will_not_run_is_unreachable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-executable launchctl on PATH: which() skips it, the bare
+        spawn hits it and raises PermissionError -- the OSError arm."""
+        _set_platform(monkeypatch, "darwin")
+        script = _fake_manager(tmp_path, monkeypatch, "launchctl", "exit 0\n")
+        script.chmod(0o644)
+        probe = installer.autostart_activation_state(tmp_path / "com.nexus.service.plist", tier="service")
+        assert probe.state is installer.ActivationState.UNREACHABLE
+        assert "could not run" in probe.detail
 
     def test_darwin_no_gui_domain_is_unreachable_never_not_active(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -760,6 +833,8 @@ class TestInstallAutostartConsultsTheManager:
         empty = tmp_path / "empty"
         empty.mkdir()
         monkeypatch.setenv("PATH", str(empty))
+        # the absolute fallback would otherwise reach the REAL /bin/launchctl
+        monkeypatch.setattr(installer, "_MANAGER_ABSOLUTE_PATHS", {})
         dest = tmp_path / "units" / "com.nexus.service.plist"
         with pytest.raises(installer.ActivationError) as excinfo:
             installer.install_autostart(tier="service")
@@ -789,6 +864,74 @@ class TestInstallAutostartConsultsTheManager:
         result = installer.install_autostart(tier="service")
         assert result.status is installer.InstallStatus.NEWLY_INSTALLED
         assert [c[1] for c in calls] == ["print-disabled", "bootstrap"], calls
+
+    def test_identical_file_registered_but_not_loaded_is_reactivated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The state after a failed bootstrap: unlisted by print-disabled,
+        unknown to launchctl print. A retry must bootstrap again."""
+        _set_platform(monkeypatch, "darwin")
+        _stub_paths(tmp_path, monkeypatch)
+        dest = tmp_path / "units" / "com.nexus.service.plist"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _, rendered = installer.rendered_unit_content(tier="service")
+        dest.write_text(rendered)
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            if cmd[1] == "print":
+                return subprocess.CompletedProcess(cmd, 113, stdout="", stderr="Could not find service \"com.nexus.service\" in domain for uid: 501")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(installer.subprocess, "run", _fake_run)
+        result = installer.install_autostart(tier="service")
+        assert result.status is installer.InstallStatus.NEWLY_INSTALLED
+        assert [c[1] for c in calls] == ["print-disabled", "print", "bootstrap"], calls
+
+    def test_identical_file_registered_and_loaded_is_already_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_platform(monkeypatch, "darwin")
+        _stub_paths(tmp_path, monkeypatch)
+        dest = tmp_path / "units" / "com.nexus.service.plist"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _, rendered = installer.rendered_unit_content(tier="service")
+        dest.write_text(rendered)
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="com.nexus.service = { active count = 1 }", stderr="")
+
+        monkeypatch.setattr(installer.subprocess, "run", _fake_run)
+        result = installer.install_autostart(tier="service")
+        assert result.status is installer.InstallStatus.ALREADY_PRESENT
+        assert "registered" in result.detail
+        assert [c[1] for c in calls] == ["print-disabled", "print"], calls
+
+    def test_disabled_label_whose_bootstrap_refuses_names_the_enable_remedy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The one path that hard-fails must carry the same remedy the
+        doctor row and converge name (code-review-expert on 6867dbe4d)."""
+        _set_platform(monkeypatch, "darwin")
+        _stub_paths(tmp_path, monkeypatch)
+        dest = tmp_path / "units" / "com.nexus.service.plist"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _, rendered = installer.rendered_unit_content(tier="service")
+        dest.write_text(rendered)
+
+        def _fake_run(cmd, *a, **k):
+            if cmd[1] == "print-disabled":
+                return subprocess.CompletedProcess(cmd, 0, stdout=_DISABLED_LISTING, stderr="")
+            return subprocess.CompletedProcess(cmd, 125, stdout="", stderr="Bootstrap failed: 125: Domain does not support specified action")
+
+        monkeypatch.setattr(installer.subprocess, "run", _fake_run)
+        with pytest.raises(installer.ActivationError) as excinfo:
+            installer.install_autostart(tier="service")
+        assert "exited 125" in str(excinfo.value)
+        assert "launchctl enable gui/" in str(excinfo.value)
 
     def test_identical_file_with_an_unreachable_manager_is_already_present_and_says_unconfirmed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

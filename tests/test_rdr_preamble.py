@@ -4424,6 +4424,21 @@ class TestU1jxtVerdictAndPaths:
         assert "**Worktree found:**" in out and str(rdr_env["repo_root"]) in out, out
         assert "bogus-status" in out, out
 
+    def test_rdr_audit_current_checkout_beats_a_valid_env_root(self, rdr_env, monkeypatch):
+        """The precedence flipped twice across two commits with nothing
+        holding it: with NEXUS_PROJECT_ROOTS naming a root that DOES hold a
+        directory named like the target, the checkout the command runs in
+        still wins, and the preamble says which source won."""
+        name = rdr_env["repo_root"].name
+        elsewhere = rdr_env["repo_root"].parent / "elsewhere"
+        (elsewhere / name / "docs" / "rdr").mkdir(parents=True)
+        _write_rdr(elsewhere / name / "docs" / "rdr", "rdr-205-y.md", {"title": "Y", "status": "bogus-elsewhere", "type": "feature"})
+        _write_rdr(rdr_env["rdr_dir"], "rdr-204-x.md", {"title": "X", "status": "bogus-here", "type": "feature"})
+        monkeypatch.setenv("NEXUS_PROJECT_ROOTS", str(elsewhere))
+        out = _runner().invoke(rdr, ["preamble", "rdr-audit", "--", name]).output
+        assert f"**Worktree found:** `{rdr_env['repo_root']}` (via the current checkout)" in out, out
+        assert "bogus-here" in out and "bogus-elsewhere" not in out, out
+
     def test_blank_status_key_is_an_empty_status_not_a_crash(self, rdr_env, monkeypatch):
         """nexus-u1jxt.10: ``status:`` with no value made rdr-accept (no id)
         and rdr-close die with AttributeError on ``None.lower()``."""

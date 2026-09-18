@@ -404,7 +404,7 @@ class TestCheckServiceAutostartDrift:
         dest = self._matching(tmp_path)
         r = self._row(dest, self._activation(ActivationState.ACTIVE))
         assert r.ok is True and r.warn is False and r.fatal is False
-        assert str(dest) in r.detail and "registered" in r.detail
+        assert str(dest) in r.detail and "enabled for login" in r.detail
 
     def test_local_content_matches_but_manager_reports_disabled_warns_with_the_probes_remedy(self, tmp_path):
         """nexus-mac7t: the file matched the template, so after one warning

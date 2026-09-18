@@ -2432,11 +2432,13 @@ def converge_service_autostart_unit(
         # re-register it, and leave a NEEDS HUMAN line where a working
         # box was (code-review-expert and critic on 9ffaa462f). Name the
         # platform remedy the probe carries; the doctor row names the same.
-        assert probe.activation is not None  # manager_lacks_unit implies it
+        activation = probe.activation
+        if activation is None:  # manager_lacks_unit implies otherwise; keep the guard explicit
+            return []
         return [
             f"NOTE: the storage-service autostart unit at {dest} is current "
-            f"but not registered for login ({probe.activation.detail}). Not "
-            f"touching it here -- run `{probe.activation.remedy}` to "
+            f"but not registered for login ({activation.detail}). Not "
+            f"touching it here -- run `{activation.remedy}` to "
             "re-register it, then `nx doctor` to confirm."
         ]
 
@@ -2553,18 +2555,17 @@ def converge_service_autostart_unit(
                     f"NOTE: {note}. {failure_detail} -- {restart_clause}. "
                     f"The unit file is installed but NOT registered for "
                     f"autostart because {command} is absent on this box. "
-                    # nexus-ebbvt review round 1, finding 1: `install
-                    # --autostart --force` is a proven no-op here --
-                    # install_autostart returns ALREADY_PRESENT (no
-                    # activation attempt at all, force or not) whenever
-                    # dest already equals the rendered template, which it
-                    # does the moment this pass writes it. uninstall
-                    # first forces a genuine rewrite + a fresh activation
-                    # attempt.
-                    "Once a service manager becomes available on this "
-                    "box, run `nx daemon service uninstall --autostart "
-                    "&& nx daemon service install --autostart` to "
-                    "register it."
+                    # nexus-ebbvt review round 1, finding 1, restated
+                    # after nexus-mac7t: install_autostart now asks the
+                    # manager before it short-circuits, so a plain
+                    # `install --autostart` on this file would attempt
+                    # activation again; the uninstall-first form is kept
+                    # because it also clears whatever half-registered
+                    # state the manager that appears may find, and it is
+                    # the one remedy every surface (this NOTE, the doctor
+                    # row, the ActivationError) names.
+                    f"Once a service manager becomes available on this "
+                    f"box, run `{installer.REINSTALL_REMEDY}` to register it."
                 ]
             return [
                 f"NEEDS HUMAN: {note}. {failure_detail}, and {restart_clause} "

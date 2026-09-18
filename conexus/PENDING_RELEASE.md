@@ -40,4 +40,6 @@ mechanize, it matters enough to ship.
 - `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`: the hand-back advice names SubagentHandback or SendMessage (bead nexus-4xo3k).
 - `conexus/skills/orchestration/SKILL.md`: the completion protocol and HAND-BACK lines name SubagentHandback or SendMessage (bead nexus-4xo3k).
 
+- `conexus/skills/rdr-audit-checklist/SKILL.md`: the worktree resolution names the current checkout as the root after an explicit path, ahead of `NEXUS_PROJECT_ROOTS` and the default candidates, as the code has resolved it since nexus-u1jxt.6 (bead nexus-mac7t review round).
+
 - `conexus/skills/mailbox/SKILL.md`: a board post's notification names the subspace and tuple id only, read with `tuple_rd`; a post is announced once per session from the engine's per-subscriber stamp, and `tuple_subscriptions` lists the set without a cursor (bead nexus-q82tk).

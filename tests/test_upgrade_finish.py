@@ -2760,6 +2760,11 @@ class TestConvergeServiceAutostartUnitNoServiceManager:
         monkeypatch.setattr(daemon_cmd, "_autostart_install_dir", lambda: tmp_path / "units")
         monkeypatch.setattr(daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "logs")
         monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/conexus/bin/nx"])
+        # nexus-mac7t: the manager lookup falls back to /bin/launchctl when
+        # PATH is trimmed; a "no manager" test must empty that table too or
+        # it reaches the REAL launchd.
+        from nexus.daemon import installer as _installer  # noqa: PLC0415 — local import, test-only convenience
+        monkeypatch.setattr(_installer, "_MANAGER_ABSOLUTE_PATHS", {})
         (tmp_path / "units").mkdir()
 
     def _fake_nx_only_path(self, tmp_path, monkeypatch):
@@ -3860,6 +3865,7 @@ class TestConvergeServiceAutostartUnitActivation:
             assert actions == [], (state, actions)
             asked.assert_called_once()
             uninstall.assert_not_called()
+            install.assert_not_called()
             sp.assert_not_called()
 
     def test_drifted_content_never_asks_the_manager(self, tmp_path):

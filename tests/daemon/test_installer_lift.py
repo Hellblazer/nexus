@@ -149,12 +149,14 @@ class TestInstallIdempotent:
         # Second call: content matches the freshly rendered template, so
         # no write and no activation shell-out happens.
         with patch.object(daemon_cmd.subprocess, "run") as mock_run2:
+            mock_run2.return_value.returncode = 0
+            mock_run2.return_value.stdout = ""
+            mock_run2.return_value.stderr = ""
             result = installer.install_autostart(tier="service")
         assert result.status is installer.InstallStatus.ALREADY_PRESENT
-        # nexus-mac7t: the one call is the read-only registration query
-        # (launchctl print-disabled), never an activation.
-        assert mock_run2.call_count == 1
-        assert mock_run2.call_args.args[0][1] == "print-disabled"
+        # nexus-mac7t: the only calls are the read-only queries (registered
+        # for login, loaded now), never an activation.
+        assert [c.args[0][1] for c in mock_run2.call_args_list] == ["print-disabled", "print"]
         assert result.activated_cmd is None
 
 

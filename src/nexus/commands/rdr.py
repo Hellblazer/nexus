@@ -5275,9 +5275,10 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
         else:
             found_path = next((p for p in candidate_paths if p.is_dir()), None)
             found_via = roots_source
+        declared_rdr_dir = _preamble_rdr_dir(str(found_path)) if found_path else "docs/rdr"
         if found_path:
             print(f"**Worktree found:** `{found_path}` (via {found_via})")
-            postmortem_dir = found_path / _preamble_rdr_dir(str(found_path)) / "post-mortem"
+            postmortem_dir = found_path / declared_rdr_dir / "post-mortem"
             if postmortem_dir.exists():
                 count = len(list(postmortem_dir.glob("*.md")))
                 print(f"**Post-mortems available:** {count} files in `{postmortem_dir}`")
@@ -5285,7 +5286,7 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
                     print(line)
             else:
                 print(
-                    f"> No `docs/rdr/post-mortem/` directory found at `{found_path}`."
+                    f"> No `{declared_rdr_dir}/post-mortem/` directory found at `{found_path}`."
                 )
         else:
             probed = (
@@ -5299,11 +5300,11 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
             print("> Set `NEXUS_PROJECT_ROOTS` to the directory(ies) for project worktrees.")
 
         print()
-        print("**Status vocabulary scan (`docs/rdr/*.md`, non-recursive):**")
+        print(f"**Status vocabulary scan (`{declared_rdr_dir}/*.md`, non-recursive):**")
         if found_path:
             # nexus-u1jxt.6: the RDR directory the repo declares, not a
             # hard-coded docs/rdr.
-            scan_dir = found_path / _preamble_rdr_dir(str(found_path))
+            scan_dir = found_path / declared_rdr_dir
             if scan_dir.is_dir():
                 try:
                     status_domain = frozenset(
@@ -5330,7 +5331,7 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
                         f"scanned, {companion_count} `kind: companion` file(s) skipped."
                     )
             else:
-                print(f"> No `docs/rdr/` directory found at `{found_path}` — nothing to scan.")
+                print(f"> No `{declared_rdr_dir}/` directory found at `{found_path}` — nothing to scan.")
         else:
             print("> No local worktree found for the target project — nothing to scan.")
 
@@ -5347,9 +5348,7 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
             print(f"**T2 `{target}_rdr` status census:** {census_str}")
             # nexus-u1jxt.6 sibling: the same declared RDR dir the vocabulary
             # scan above reads, not a hard-coded docs/rdr.
-            scan_dir = (
-                found_path / _preamble_rdr_dir(str(found_path)) if found_path else None
-            )
+            scan_dir = (found_path / declared_rdr_dir) if found_path else None
             if scan_dir is not None and scan_dir.is_dir():
                 drift = _file_vs_t2_status_drift(_rdr_file_statuses(scan_dir), t2_by_number)
                 for number, file_status, t2_status in drift:

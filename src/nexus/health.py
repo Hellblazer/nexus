@@ -3879,15 +3879,16 @@ def _check_service_autostart_drift() -> list[HealthResult]:
         # or one this process cannot ask is informational (nothing here
         # can act, and a false warning fed a destructive repair once).
         activation = probe.activation
-        assert activation is not None  # the probe asks whenever content matches
+        if activation is None:  # the probe asks whenever content matches; keep the guard explicit
+            return [HealthResult(label=label, ok=True, detail=f"{dest} matches the current template")]
         match activation.state:
             case ActivationState.ACTIVE:
                 return [HealthResult(
                     label=label,
                     ok=True,
                     detail=(
-                        f"{dest} matches the current template and is "
-                        "registered with the service manager"
+                        f"{dest} matches the current template and the "
+                        "service manager reports it enabled for login"
                     ),
                 )]
             case ActivationState.NOT_ACTIVE:
@@ -3921,7 +3922,10 @@ def _check_service_autostart_drift() -> list[HealthResult]:
                         "service install --autostart  # once a service manager is available",
                     ],
                 )]
-            case _:
+            case ActivationState.UNREACHABLE | _:
+                # UNREACHABLE by name; a state added later inherits the
+                # informational row rather than a crash (this check must
+                # never break nx doctor) until it gets its own case.
                 return [HealthResult(
                     label=label,
                     ok=True,
