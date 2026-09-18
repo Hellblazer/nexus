@@ -456,6 +456,27 @@ the row is announced once more and claimed. (4) Leave one message unclaimed
 for ten minutes: at most five announcements, then silence, doctor row shows
 `pending 1` and its age. Counts recorded in this section.
 
+Recorded (T2 `nexus_rdr/213-mvv-2026-09-17`, `213-mvv-run2-2026-09-17`,
+`213-mvv-run3-2026-09-18`; real Claude Code 2.1.274 sessions, engine
+v0.1.127 dev jar, the cursor waiter at the landed tree): (1) with the
+plugin's hooks, two messages sent 1 s apart produced two references 1.19 s
+apart, each 4 to 5 ms after its row was created; the drain hook rendered
+both; the session made 0 `tuple_in` calls; consumed 2, claimed 0. Control
+without the hooks: the session claimed both with `tuple_in` in order and
+acked. (2) No flag: idle 313 s with no notification, the row available
+throughout; the hook rendered it 123 ms after the next prompt. (3) Kill and
+`/mcp` reconnect: the row was referenced once more 0.7 s after the
+reconnect and claimed with attempts 0. (4) Ignored: references at +0,
++150.0, +300.1, +450.2, +600.3 s, none through 660 s; a later message was
+referenced 42 ms after creation and the old reference was never re-sent.
+A dead-lettered head was never referenced, cost one wake, and the live row
+behind it was referenced 4 ms after creation. Waiter load: one wait per
+22.5 to 24.6 s per session, zero `rd`, CPU under 2 percent. Re-sends of a
+row already consumed cost the session a turn each (11 of 16 re-sends in
+run 3); the engine announce stamp (nexus-vsipz) removes them. Run 1 found
+the identity-tracking waiter spinning (160 wakes per second, ephemeral-port
+exhaustion) and the hook claiming at the wake; both are recorded above.
+
 ### Phase 1: Code Implementation
 
 #### Step 1: Mailbox announce path
@@ -670,3 +691,4 @@ The MVV is Phase 1's exit, not deferred.
   Back pressure, Empty spec, the pseudocode; the Existing Infrastructure
   Audit row; Risks; Performance Expectations; the MVV part 1 second-message
   expectation; Test Plan scenario 2.
+- 2026-09-18: Minimum Viable Validation counts recorded from runs 1 to 3 (T2 `nexus_rdr/213-mvv-run3-2026-09-18`); the cursor design landed with nexus-vsipz filed for the engine announce stamp (T2 `nexus_rdr/213-decision-announcements-rate-limited-not-ack-gated-2026-09-17`).
