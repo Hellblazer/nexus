@@ -231,6 +231,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-212](rdr-212-orb-cockpit-surfaces-over-the-tuple-space.md) | ORB Cockpit Surfaces over the Tuple Space | Architecture | Draft | 2026-09-16 |
 | [RDR-213](rdr-213-channel-delivery-without-a-proof-gate.md) | Channel Delivery Without a Proof Gate: Notify a Reference, Let the Session Claim | Architecture | Closed | 2026-09-17 |
 | [RDR-214](rdr-214-standing-code-correctness-review.md) | Standing-Code Correctness Review: From Pilot to Decision | Technical Debt | Abandoned | 2026-09-17 |
+| [RDR-215](rdr-215-plugin-hooks-as-nx-verbs.md) | Plugin Hooks as nx Verbs: Retire the Bash Hook Layer | Technical Debt | Draft | 2026-09-18 |
 
 > **Scrapped 2026-05-19 (RDR-110-119 arc).** Bundled the storage-substrate split with new abstractions (tuplespace, ORB, host-trust, surfaces-as-tuples, UI fabric); scope discipline failed across nine RDRs and 67 stranded beads. Files preserved as tombstones per the "never delete RDR files" rule. Postmortem: [docs/postmortem/2026-05-16-rdr110-113-remediation-chain.md](../postmortem/2026-05-16-rdr110-113-remediation-chain.md). Active substrate work continues as [RDR-120](rdr-120-storage-substrate-split.md) with an explicit moratorium on co-shipped consumers. Numbers RDR-114 through RDR-117 are unused on `main` (drafted on feature branches that never merged).
 
