@@ -539,3 +539,4 @@ package.
 - 2026-09-18: research-6, the contract map; Technical Design written from
   it; the external-command list corrected (no `timeout`, `uname`, `curl`
   or `jq`).
+- 2026-09-18: Gate round 1 — BLOCKED (2 Critical, 3 Significant, 2 ship-blocker(s)); commit `766e3be42`; critique `nexus_rdr/215-gate-critique-2026-09-18-r1`.
