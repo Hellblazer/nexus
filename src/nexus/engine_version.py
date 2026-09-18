@@ -556,7 +556,7 @@ from __future__ import annotations
 #: (nexus-33q80, no changeset). Both wire-ledger entries lead with
 #: [additive], so the engine deploys BEFORE this client tag (nexus-1emxn
 #: choreography (a)).
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 128)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 129)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

@@ -4,6 +4,42 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.53.0] - 2026-09-18
+
+Paired engine: engine-service-v0.1.129 (`REQUIRED_ENGINE_VERSION` (0, 1, 129),
+was engine-service-v0.1.128), RDR-213 boards (bead nexus-q82tk), the
+per-document pipeline row (nexus-edjmu) and the run epoch (nexus-8vu8p).
+Plugin version aligned with conexus 7.53.0. This pin advance makes live the
+nine plugin changes `PENDING_RELEASE.md` held:
+
+- `hooks/scripts/rdr_hook.py`: the SessionStart RDR line reads a file's own
+  frontmatter status before defaulting to draft, skips companion notes, and
+  names the repo by its git common dir in a linked worktree, so a closed RDR
+  is no longer told to run rdr-fix (bead nexus-u1jxt.7).
+- `hooks/scripts/subagent-stop-scan.py`: a `SubagentHandback` tool_use counts
+  as the completion report alongside `SendMessage`, so a background agent
+  that hands back is no longer blocked once and made to re-send (bead
+  nexus-4xo3k).
+- `hooks/scripts/subagent-stop.sh`: the decision table, the report-check note
+  and the block reason name SubagentHandback as a report (bead nexus-4xo3k).
+- `hooks/scripts/tuple_ledger_project.py`: the report tuple's text comes from
+  the last SendMessage `content` or SubagentHandback `message` (bead
+  nexus-4xo3k).
+- `hooks/scripts/subagent-start.sh`: the Completion directive names
+  SubagentHandback first (bead nexus-4xo3k).
+- `hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`: the
+  hand-back advice names SubagentHandback or SendMessage (bead nexus-4xo3k).
+- `skills/orchestration/SKILL.md`: the completion protocol and HAND-BACK lines
+  name SubagentHandback or SendMessage (bead nexus-4xo3k).
+- `skills/rdr-audit-checklist/SKILL.md`: the worktree resolution names the
+  current checkout as the root after an explicit path, ahead of
+  `NEXUS_PROJECT_ROOTS` and the default candidates, as the code has resolved
+  it since nexus-u1jxt.6 (bead nexus-mac7t review round).
+- `skills/mailbox/SKILL.md`: a board post's notification names the subspace
+  and tuple id only, read with `tuple_rd`; a post is announced once per
+  session from the engine's per-subscriber stamp, and `tuple_subscriptions`
+  lists the set without a cursor (bead nexus-q82tk).
+
 ## [7.52.0] - 2026-09-18
 
 Paired engine: engine-service-v0.1.128 (`REQUIRED_ENGINE_VERSION` (0, 1, 128),

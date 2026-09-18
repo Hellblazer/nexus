@@ -6,7 +6,61 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.53.0] - 2026-09-18
+
+Paired engine: engine-service-v0.1.129 (`REQUIRED_ENGINE_VERSION` (0, 1, 129);
+was engine-service-v0.1.128), tagged 2026-09-18 on 43e180595 and deployed
+before this client tag on the additive branch of the paired-release
+choreography. That tag carries three changes, every wire entry additive, so an
+older client on the new engine is unaffected and this client stops loud on an
+older engine: the RDR-213 boards half (nexus-q82tk, new table
+`nexus.tuple_deliveries`), the per-document pipeline row (nexus-edjmu,
+`pipeline-002-per-row-identity.xml`, three changesets with DATA EFFECT lines
+on the WAL backfill) and the pipeline run epoch (nexus-8vu8p,
+`pipeline-003-run-epoch.xml`).
+
 ### Fixed
+- **A byte-identical PDF at a second path, or in a second collection, or a
+  tombstone-and-reindex at the same path, no longer registers a catalog
+  Document with no chunks (bead nexus-edjmu).** The engine's `pdf_pipeline`
+  row was keyed on the content hash, so a row left over by a crash between
+  `mark_completed` and cleanup made every later document sharing the bytes
+  skip with zero chunks: present in the catalog, absent from search. A row
+  is now one run of one document (`pipeline_id`, unique on hash plus
+  collection plus path), the page and chunk buffers are keyed on the run,
+  and a leftover completed row is reset and re-run instead of skipped. The
+  client rides the run's id on every call, `--force` names its own document
+  so a sibling sharing the bytes keeps its run, and the orphan scan deletes
+  exactly the row it listed. A client older than this release keeps the old
+  one-row-per-hash behaviour on the new engine, byte for byte.
+- **A pipeline run that stalled past the stale-heartbeat threshold and was
+  resumed by another client can no longer write into the new owner's buffer
+  (bead nexus-8vu8p).** Every takeover bumps the run's `run_epoch`; every
+  write carries it and the engine refuses a stale one before touching a row
+  (409 `stale_run`). The fenced run stops without marking the row failed,
+  clearing its buffer, or stamping the catalog document failed, all of which
+  belong to the new owner. Pre-existing since the streaming pipeline moved
+  engine-side; a run on a client older than this release carries no epoch
+  and stays unfenced until that client is upgraded.
+- **A board post is announced once per subscriber from an engine-side stamp;
+  the client-side board cursor is gone (RDR-213, bead nexus-q82tk).** A
+  post from a slower, earlier-started transaction could commit after a
+  subscriber's cursor had passed a younger post and be skipped for good.
+  `POST /v1/tuples/wait`'s `announce` names the subscriber and the stamp
+  lives in `nexus.tuple_deliveries`; `tuple_subscriptions` lists the set
+  with no cursor. On an engine without per-subscriber announce the waiter
+  stops loud (`no_subscriber_support`, named by the `nx doctor` channel row)
+  before it can silence a post for other subscribers.
+- **`nx doctor`'s autostart row asks the service manager, not only the unit
+  file (bead nexus-mac7t).** The row has four states: active, not active
+  (only on a positive answer, launchd's `print-disabled` listing or
+  systemd's disabled, not-found or masked), no manager, and unreachable,
+  which is never a repair trigger. The install short-circuit asks launchd
+  both questions (registered for login and loaded now) so a retry after a
+  failed bootstrap activates; converge never bounces a current file, it
+  names the manager's remedy; a failed activation restores the tree so the
+  retry activates instead of answering already-present (nexus-cd1k0.4), and
+  `--force` over a differing loaded unit unloads it first (nexus-cd1k0.5).
 - **A local-mode install with an autostart unit sees a one-time drift NOTE
   after upgrading past 7.52.0 (bead nexus-ebbvt).** 7.52.0's autostart unit
   template gained an explicit `--config-dir` (bead nexus-cd1k0.3), so an
@@ -15,7 +69,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   service once to reinstall it, same as any other template change. On a box
   with no service manager on PATH (a container, some Linux setups), the
   engine is now restarted directly and the unit file is installed but not
-  activated, rather than left stopped with no recovery.
+  activated, rather than left stopped with no recovery. The NOTE's remedy
+  now names a command that actually re-activates (bead nexus-ebbvt review).
+- **Standing-code review run 2, nine P2 defects (bead nexus-cd1k0).**
+  `nx config set pdf.mineru_autostart false` turns autostart off (the stored
+  string is read as a bool); a config section whose children are all
+  commented out is the empty section, not `None`, so `is_local_mode` and
+  `get_credential` no longer raise at startup; the ripgrep cache skips a
+  UTF-8 file carrying a NUL instead of treating the whole cache as binary,
+  and its line numbers count newlines only; a direct connectivity error is
+  retryable; the markdown chunker and the retry helper fix their P3
+  siblings; `nx rdr audit` rows count each RDR once.
+- **Standing-code review run 3, the `nx rdr` lifecycle (bead nexus-u1jxt).**
+  The gate verdict reads the critic's own outcome and blocks on a
+  `blocked` or `not-justified` verdict even when no Critical block is
+  headed as one; an Issue under Minor is not a Critical; `rdr-fix` matches
+  residuals strict then loose; resume stamps its date on the file and T2; a
+  flip stamps its own date key even when it already carries a value, so a
+  re-accept after a resume dates both alike (Sam's decision); CRLF fence
+  lines survive the rewriter; a blank `status:` is an empty status;
+  `rdr-close --force` prints the lifecycle table's own command; `set-status`
+  quotes a close reason that cannot stand as a plain YAML scalar
+  (nexus-z2rvr).
+- **The SessionStart RDR line reads a file's own frontmatter status before
+  defaulting to draft, so a closed RDR is no longer told to run rdr-fix
+  (bead nexus-u1jxt.7).** Companion notes are skipped and a linked worktree
+  is named by its git common dir.
+- **A background agent that hands back through `SubagentHandback` is no
+  longer blocked once and made to re-send its report as a message (bead
+  nexus-4xo3k).** The stop hook, the ledger projector and the completion
+  directive count the hand-back as the report.
+
+### Changed
+- RDR-213 (channel delivery without a proof gate) is closed as implemented
+  with a post-mortem (epic nexus-gomuo); RDR-214 is abandoned (nexus-z2rvr);
+  RDR-215 (plugin hooks as `nx` verbs, retiring the bash hook layer) is
+  drafted.
 
 ## [7.52.0] - 2026-09-18
 
