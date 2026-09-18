@@ -32,8 +32,8 @@ class TestDoctorCleanPipelines:
             result = CliRunner().invoke(doctor_cmd, ["--clean-pipelines"])
         assert result.exit_code == 0, result.output
         assert "Deleted 1 orphaned" in result.output
-        assert "gone" * 8 not in engine.pipelines
-        assert "live" * 8 in engine.pipelines
+        assert "gone" * 8 not in engine.hashes()
+        assert "live" * 8 in engine.hashes()
 
     def test_clean_pipelines_none_found(self):
         db, _engine = make_fake_engine_db()

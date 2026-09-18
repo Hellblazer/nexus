@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-edjmu: a pipeline row is a RUN of one document, not a
+    content hash.
+
+    THE DEFECT. pipeline-001 keyed nexus.pdf_pipeline on (tenant_id,
+    content_hash) and both WAL tables on (tenant_id, content_hash, idx).
+    Every PDF takes the streaming pipeline (doc_indexer._STREAMING_THRESHOLD
+    is 0), and a row outlives its run whenever the client dies between
+    mark_completed and delete_pipeline_data. While that leftover exists,
+    every document sharing the bytes (a second path, a second collection,
+    a tombstone-and-reindex at the same path) gets create -> "skip" and a
+    catalog Document with no manifest: present in the catalog, absent from
+    search. Widening only the pipeline key (the parked branch
+    edjmu-wal-per-row-wip, rejected in T2 nexus/critique-nexus-edjmu-33q80-
+    pipeline-key) leaves the WAL hash-scoped, so a sibling row's already
+    uploaded chunks seed the new row's counters (an untimed wait that never
+    completes) and any row's cleanup deletes a sibling's WAL.
+
+    THE SHAPE. pdf_pipeline gains a synthetic identity, pipeline_id, and
+    becomes PRIMARY KEY (tenant_id, pipeline_id) with UNIQUE (tenant_id,
+    content_hash, collection, pdf_path). pdf_pages and pdf_chunks are re-keyed
+    on (tenant_id, pipeline_id, idx), FK (tenant_id, pipeline_id) ->
+    pdf_pipeline ON DELETE CASCADE, and LOSE content_hash: with the column
+    gone, a hash-scoped WAL read or write cannot be written again, which is
+    what closes both rejected-attempt blockers structurally rather than by
+    convention. The composite FK carries tenant_id so a WAL row can never
+    point at another tenant's run.
+
+    keyed_by records which create algorithm made the row: 'content_hash'
+    (a client that predates this changeset, one row per hash, the
+    pipeline-001 semantics verbatim) or 'document' (a client that sends
+    identity="document" on /create and addresses the row by pipeline_id).
+    The partial unique index pdf_pipeline_legacy_uq (tenant_id,
+    content_hash) WHERE keyed_by = 'content_hash' keeps the legacy
+    algorithm's one-row-per-hash invariant ATOMIC at the database, as
+    pipeline-001's primary key did: two old clients racing /create for the
+    same bytes at two paths still collide on the insert (the loser re-reads
+    and gets the 409), instead of both inserting under the four-column
+    UNIQUE and then addressing each other's row by hash.
+    An old client's hash-only calls resolve to ITS row first (the newest
+    'content_hash' row for the hash) so a document row a newer client
+    inserts mid-run cannot hijack an old client's own progress/complete
+    sequence. Every existing row is a legacy row by construction (the
+    DEFAULT). The column is dead weight once no released client predates
+    the engine cut that carries this file; drop it then.
+
+    BACKFILL (changeset 2). Pre-002 state holds exactly one pdf_pipeline row
+    per (tenant, hash), so the WAL join on (tenant_id, content_hash) is
+    deterministic. A WAL row whose parent is already gone (writePages /
+    writeChunks never checked the parent existed, so a page flush racing a
+    delete could strand rows) has no owner to attach to and is deleted; the
+    FK forbids it from here on. Row-DML under FORCE RLS: nexus_admin is
+    NOSUPERUSER/NOBYPASSRLS and owns all three tables, and no nexus.tenant
+    GUC is set at migration time, so the UPDATE and DELETE run inside the
+    NO FORCE / FORCE toggle on all three tables (aspects-004-1's shape,
+    tests/test_changelog_rls_lint.py Approved Shape 1), restored LIFO.
+
+    ROLLBACK. Both rollbacks reduce every (tenant_id, content_hash) to ONE
+    run before restoring the pipeline-001 keys: the legacy row when one
+    exists, else the oldest pipeline_id; the other runs' rows and WAL are
+    deleted. They are transient working state that re-runs from the source
+    PDF (pipeline-001's own header; the RDR-048 resume design), and a
+    rollback that kept them could not restore a key of (tenant_id,
+    content_hash). Row-DML under FORCE RLS, so toggled like the forward
+    backfill. Pipeline002PerRowIdentityMigrationTest walks this rollback
+    over a populated buffer holding two runs of one hash.
+
+    LOCKS. ADD COLUMN ... AS IDENTITY, the PK rebuilds, the UNIQUE and
+    DROP COLUMN each take ACCESS EXCLUSIVE and rewrite the table. All three
+    tables are transient working state whose live population is a handful
+    of rows per tenant (a running ingest; pipeline-001's own header), so
+    the rewrite is milliseconds; the PITR-fork walk sizes it before deploy.
+
+    Grants: grants-nexus-svc.xml / grants-nexus-diag.xml iterate every
+    relation in schema nexus and run after this file; no per-store grant.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: pdf_pipeline identity, keyed_by, new PK, document UNIQUE ── -->
+    <changeSet id="pipeline-002-1" author="nexus-edjmu">
+        <comment>pdf_pipeline gains pipeline_id (BIGINT identity, stamped onto every existing row by the ADD) and keyed_by ('content_hash' for every existing row, 'document' for identity="document" creates); PRIMARY KEY moves from (tenant_id, content_hash) to (tenant_id, pipeline_id); UNIQUE (tenant_id, content_hash, collection, pdf_path) makes one row per document; the partial unique index pdf_pipeline_legacy_uq keeps one row per hash for legacy-keyed rows, atomically, as the old PRIMARY KEY did. DDL only: no existing row is modified or removed (the identity ADD assigns new values to a new column), so no DATA EFFECT.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.pdf_pipeline
+    ADD COLUMN pipeline_id BIGINT GENERATED BY DEFAULT AS IDENTITY;
+ALTER TABLE nexus.pdf_pipeline
+    ADD COLUMN keyed_by TEXT NOT NULL DEFAULT 'content_hash';
+ALTER TABLE nexus.pdf_pipeline
+    ADD CONSTRAINT pdf_pipeline_keyed_by_chk CHECK (keyed_by IN ('content_hash', 'document'));
+ALTER TABLE nexus.pdf_pipeline DROP CONSTRAINT pdf_pipeline_pk;
+ALTER TABLE nexus.pdf_pipeline
+    ADD CONSTRAINT pdf_pipeline_pk PRIMARY KEY (tenant_id, pipeline_id);
+ALTER TABLE nexus.pdf_pipeline
+    ADD CONSTRAINT pdf_pipeline_document_uq UNIQUE (tenant_id, content_hash, collection, pdf_path);
+CREATE UNIQUE INDEX pdf_pipeline_legacy_uq
+    ON nexus.pdf_pipeline (tenant_id, content_hash)
+    WHERE keyed_by = 'content_hash';
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.pdf_pipeline NO FORCE ROW LEVEL SECURITY;
+            DELETE FROM nexus.pdf_pipeline WHERE pipeline_id NOT IN (SELECT DISTINCT ON (tenant_id, content_hash) pipeline_id FROM nexus.pdf_pipeline ORDER BY tenant_id, content_hash, (keyed_by &lt;&gt; 'content_hash'), pipeline_id);
+            ALTER TABLE nexus.pdf_pipeline FORCE ROW LEVEL SECURITY;
+            DROP INDEX nexus.pdf_pipeline_legacy_uq;
+            ALTER TABLE nexus.pdf_pipeline DROP CONSTRAINT pdf_pipeline_document_uq;
+            ALTER TABLE nexus.pdf_pipeline DROP CONSTRAINT pdf_pipeline_pk;
+            ALTER TABLE nexus.pdf_pipeline ADD CONSTRAINT pdf_pipeline_pk PRIMARY KEY (tenant_id, content_hash);
+            ALTER TABLE nexus.pdf_pipeline DROP CONSTRAINT pdf_pipeline_keyed_by_chk;
+            ALTER TABLE nexus.pdf_pipeline DROP COLUMN keyed_by;
+            ALTER TABLE nexus.pdf_pipeline DROP COLUMN pipeline_id;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: WAL tables re-keyed on the run ─────────────────────── -->
+    <changeSet id="pipeline-002-2" author="nexus-edjmu">
+        <comment>pdf_pages and pdf_chunks gain pipeline_id, backfilled from their owning pdf_pipeline row by (tenant_id, content_hash) (deterministic: pre-002 state has one row per hash); WAL rows with no owning row are deleted; PRIMARY KEY moves to (tenant_id, pipeline_id, page_index|chunk_index); FOREIGN KEY (tenant_id, pipeline_id) REFERENCES pdf_pipeline ON DELETE CASCADE; content_hash is dropped from both WAL tables so no hash-scoped WAL query can exist. Toggles FORCE RLS off on pdf_pipeline, pdf_pages and pdf_chunks for the DML (nexus_admin owns them with no BYPASSRLS) and restores it LIFO before the constraints. DATA EFFECT: UPDATEs pdf_pages.pipeline_id and pdf_chunks.pipeline_id (new column, NULL) for every WAL row whose (tenant_id, content_hash) matches a pdf_pipeline row; DELETEs every pdf_pages and pdf_chunks row with no matching pdf_pipeline row (already unreachable through the API, which reads the WAL only via a live pipeline row); DROPs COLUMN content_hash from pdf_pages and pdf_chunks (the value is re-derivable from the parent row via pipeline_id, which is exactly what the rollback below does). Reversible via the rollback for every row that survives; the parentless rows are gone for good.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.pdf_pages  ADD COLUMN pipeline_id BIGINT;
+ALTER TABLE nexus.pdf_chunks ADD COLUMN pipeline_id BIGINT;
+
+ALTER TABLE nexus.pdf_pipeline NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.pdf_pages    NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.pdf_chunks   NO FORCE ROW LEVEL SECURITY;
+
+UPDATE nexus.pdf_pages w
+   SET pipeline_id = p.pipeline_id
+  FROM nexus.pdf_pipeline p
+ WHERE p.tenant_id = w.tenant_id
+   AND p.content_hash = w.content_hash;
+
+UPDATE nexus.pdf_chunks w
+   SET pipeline_id = p.pipeline_id
+  FROM nexus.pdf_pipeline p
+ WHERE p.tenant_id = w.tenant_id
+   AND p.content_hash = w.content_hash;
+
+DELETE FROM nexus.pdf_pages  WHERE pipeline_id IS NULL;
+DELETE FROM nexus.pdf_chunks WHERE pipeline_id IS NULL;
+
+ALTER TABLE nexus.pdf_chunks   FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.pdf_pages    FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.pdf_pipeline FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE nexus.pdf_pages  ALTER COLUMN pipeline_id SET NOT NULL;
+ALTER TABLE nexus.pdf_chunks ALTER COLUMN pipeline_id SET NOT NULL;
+
+ALTER TABLE nexus.pdf_pages DROP CONSTRAINT pdf_pages_pk;
+ALTER TABLE nexus.pdf_pages
+    ADD CONSTRAINT pdf_pages_pk PRIMARY KEY (tenant_id, pipeline_id, page_index);
+ALTER TABLE nexus.pdf_pages
+    ADD CONSTRAINT pdf_pages_pipeline_fk FOREIGN KEY (tenant_id, pipeline_id)
+        REFERENCES nexus.pdf_pipeline (tenant_id, pipeline_id) ON DELETE CASCADE;
+ALTER TABLE nexus.pdf_pages DROP COLUMN content_hash;
+
+ALTER TABLE nexus.pdf_chunks DROP CONSTRAINT pdf_chunks_pk;
+ALTER TABLE nexus.pdf_chunks
+    ADD CONSTRAINT pdf_chunks_pk PRIMARY KEY (tenant_id, pipeline_id, chunk_index);
+ALTER TABLE nexus.pdf_chunks
+    ADD CONSTRAINT pdf_chunks_pipeline_fk FOREIGN KEY (tenant_id, pipeline_id)
+        REFERENCES nexus.pdf_pipeline (tenant_id, pipeline_id) ON DELETE CASCADE;
+ALTER TABLE nexus.pdf_chunks DROP COLUMN content_hash;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.pdf_pages  ADD COLUMN content_hash TEXT;
+            ALTER TABLE nexus.pdf_chunks ADD COLUMN content_hash TEXT;
+            ALTER TABLE nexus.pdf_pipeline NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.pdf_pages    NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.pdf_chunks   NO FORCE ROW LEVEL SECURITY;
+            DELETE FROM nexus.pdf_pages WHERE pipeline_id NOT IN (SELECT DISTINCT ON (tenant_id, content_hash) pipeline_id FROM nexus.pdf_pipeline ORDER BY tenant_id, content_hash, (keyed_by &lt;&gt; 'content_hash'), pipeline_id);
+            DELETE FROM nexus.pdf_chunks WHERE pipeline_id NOT IN (SELECT DISTINCT ON (tenant_id, content_hash) pipeline_id FROM nexus.pdf_pipeline ORDER BY tenant_id, content_hash, (keyed_by &lt;&gt; 'content_hash'), pipeline_id);
+            UPDATE nexus.pdf_pages w SET content_hash = p.content_hash FROM nexus.pdf_pipeline p WHERE p.tenant_id = w.tenant_id AND p.pipeline_id = w.pipeline_id;
+            UPDATE nexus.pdf_chunks w SET content_hash = p.content_hash FROM nexus.pdf_pipeline p WHERE p.tenant_id = w.tenant_id AND p.pipeline_id = w.pipeline_id;
+            ALTER TABLE nexus.pdf_chunks   FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.pdf_pages    FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.pdf_pipeline FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.pdf_pages  ALTER COLUMN content_hash SET NOT NULL;
+            ALTER TABLE nexus.pdf_chunks ALTER COLUMN content_hash SET NOT NULL;
+            ALTER TABLE nexus.pdf_pages DROP CONSTRAINT pdf_pages_pipeline_fk;
+            ALTER TABLE nexus.pdf_pages DROP CONSTRAINT pdf_pages_pk;
+            ALTER TABLE nexus.pdf_pages ADD CONSTRAINT pdf_pages_pk PRIMARY KEY (tenant_id, content_hash, page_index);
+            ALTER TABLE nexus.pdf_pages DROP COLUMN pipeline_id;
+            ALTER TABLE nexus.pdf_chunks DROP CONSTRAINT pdf_chunks_pipeline_fk;
+            ALTER TABLE nexus.pdf_chunks DROP CONSTRAINT pdf_chunks_pk;
+            ALTER TABLE nexus.pdf_chunks ADD CONSTRAINT pdf_chunks_pk PRIMARY KEY (tenant_id, content_hash, chunk_index);
+            ALTER TABLE nexus.pdf_chunks DROP COLUMN pipeline_id;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 3: column comments ─────────────────────────────────────── -->
+    <changeSet id="pipeline-002-3" author="nexus-edjmu">
+        <comment>Column comments for pdf_pipeline.pipeline_id, pdf_pipeline.keyed_by, pdf_pages.pipeline_id and pdf_chunks.pipeline_id. Comments only, no DDL beyond COMMENT ON COLUMN.</comment>
+        <sql splitStatements="true" stripComments="false">
+COMMENT ON COLUMN nexus.pdf_pipeline.pipeline_id IS
+    'Synthetic identity of one pipeline RUN of one document (nexus-edjmu, pipeline-002-per-row-identity.xml). The unit both WAL tables key on; one row per (tenant_id, content_hash, collection, pdf_path). Returned by POST /v1/pipeline/create and accepted by every other /v1/pipeline route in place of content_hash.';
+COMMENT ON COLUMN nexus.pdf_pipeline.keyed_by IS
+    'Which create algorithm made this row: content_hash (a client older than pipeline-002, one row per hash, addressed by hash only) or document (identity="document" on /create, addressed by pipeline_id). Hash-only calls resolve to the newest content_hash row first so an old client is never hijacked onto a sibling document row. Dead weight once no released client predates the engine cut carrying pipeline-002.';
+COMMENT ON COLUMN nexus.pdf_pages.pipeline_id IS
+    'Owning run (nexus-edjmu): FK (tenant_id, pipeline_id) -> pdf_pipeline ON DELETE CASCADE. content_hash was dropped from this table in pipeline-002-2 so no hash-scoped WAL query can exist; derive it through the parent row.';
+COMMENT ON COLUMN nexus.pdf_chunks.pipeline_id IS
+    'Owning run (nexus-edjmu): FK (tenant_id, pipeline_id) -> pdf_pipeline ON DELETE CASCADE. uploaded is a per-run fact: a second document sharing the bytes uploads its own copy of the same chunk text (RDR-181 skips the re-embed; the manifest is per document). content_hash was dropped from this table in pipeline-002-2.';
+        </sql>
+        <rollback>
+            COMMENT ON COLUMN nexus.pdf_chunks.pipeline_id IS NULL;
+            COMMENT ON COLUMN nexus.pdf_pages.pipeline_id IS NULL;
+            COMMENT ON COLUMN nexus.pdf_pipeline.keyed_by IS NULL;
+            COMMENT ON COLUMN nexus.pdf_pipeline.pipeline_id IS NULL;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -37,6 +37,21 @@ Embedding wire mapping (nexus-9n1u3 sentinel, both directions): bytes
 ``None`` ↔ JSON null (not embedded); ``b""`` ↔ ``""`` (service-mode
 sentinel: the JVM embeds at upload); packed floats ↔ base64.
 
+ROW HANDLE (nexus-edjmu). The engine keys a pipeline row on one RUN of
+one document (``pipeline_id``, unique on content_hash + collection +
+pdf_path; pipeline-002-per-row-identity.xml), not on the content hash, so
+a byte-identical PDF at a second path or in a second collection gets its
+own row and its own WAL instead of skipping on a leftover. ``create_pipeline``
+sends ``identity="document"`` and remembers the ``pipeline_id`` the engine
+returns per content_hash; every later call for that hash rides the id on
+the wire. The stage functions and the buffers stay keyed by content_hash,
+which makes ONE INSTANCE PER RUN the contract: two concurrent runs sharing
+a hash in one instance would merge their page buffers, so
+``create_pipeline`` refuses the second while the first is live
+(production builds one instance per ``pipeline_index_pdf`` call; a
+sequential re-run of the same hash on one instance, after the first run
+completed or failed, is fine and replaces the mapping).
+
 Thread-safety: a single lock guards the buffers; HTTP calls happen outside
 it. Matches PipelineDB's cross-thread usage contract (three stage threads,
 one store). Known transient: two threads flushing the same hash race —
@@ -157,6 +172,27 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
         self._page_buffer: dict[str, list[dict[str, Any]]] = {}
         self._chunk_buffer: dict[str, list[dict[str, Any]]] = {}
         self._progress_buffer: dict[str, dict[str, int]] = {}
+        # nexus-edjmu: content_hash -> the engine's pipeline_id for THIS
+        # instance's run of that document, and the hashes whose run has not
+        # reached a terminal call yet (see the module docstring).
+        self._pipeline_ids: dict[str, int] = {}
+        self._live: dict[str, tuple[str, str]] = {}
+
+    def _ref(self, content_hash: str) -> dict[str, Any]:
+        """The wire fields naming *content_hash*'s row: the engine's
+        ``pipeline_id`` once ``create_pipeline`` learned it, plus the hash
+        for readability; the bare hash before that."""
+        with self._buffer_lock:
+            pipeline_id = self._pipeline_ids.get(content_hash)
+        if pipeline_id is None:
+            return {"content_hash": content_hash}
+        return {"content_hash": content_hash, "pipeline_id": pipeline_id}
+
+    def pipeline_id_for(self, content_hash: str) -> int | None:
+        """The engine ``pipeline_id`` this instance holds for *content_hash*,
+        or ``None`` before ``create_pipeline`` ran for it here."""
+        with self._buffer_lock:
+            return self._pipeline_ids.get(content_hash)
 
     # ── pipeline lifecycle ──────────────────────────────────────────────────
 
@@ -171,12 +207,43 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
         ``RefreshableHttpStoreMixin`` (the endpoint-refresh axis only
         treats 401 as retryable; the gateway axis only treats
         502/503/504).
+
+        nexus-edjmu: sends ``identity="document"`` so the engine keys the
+        row on (content_hash, collection, pdf_path), and keeps the returned
+        ``pipeline_id`` for every later call on *content_hash*. Never
+        returns ``"skip"`` on this path: a leftover completed row is reset
+        by the engine and answered ``"created"``. Raises
+        :class:`PipelineConflictRunning` before any HTTP call when THIS
+        instance already has a live run for *content_hash* on a DIFFERENT
+        document (the one-instance-per-run contract in the module
+        docstring: two documents sharing bytes would merge their page
+        buffers here; a re-create of the SAME document is the engine's
+        call, resume or 409), and
+        ``RuntimeError`` when the engine answers without a ``pipeline_id``
+        (an engine older than pipeline-002: a hand-mixed install, since a
+        released client is pinned to ``REQUIRED_ENGINE_VERSION``).
         """
+        document = (collection, str(pdf_path))
+        with self._buffer_lock:
+            live = self._live.get(content_hash)
+        if live is not None and live != document:
+            raise PipelineConflictRunning(
+                f"pipeline for content_hash={content_hash} is already running "
+                f"on this HttpPipelineDB instance for collection={live[0]} "
+                f"pdf_path={live[1]}",
+                content_hash=content_hash,
+                started_at="",
+                heartbeat_age_seconds=0,
+                stale_threshold_seconds=int(STALE_THRESHOLD.total_seconds()),
+                remedy="run each document through its own HttpPipelineDB "
+                       "instance (one instance per pipeline_index_pdf call)",
+            )
         try:
             result = self._post("/v1/pipeline/create", {
                 "content_hash": content_hash,
                 "pdf_path": str(pdf_path),
                 "collection": collection,
+                "identity": "document",
             })
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 409:
@@ -205,11 +272,26 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
                             remedy=body.get("remedy", ""),
                         ) from exc
             raise
-        return result["status"]
+        status = result["status"]
+        pipeline_id = result.get("pipeline_id")
+        if not isinstance(pipeline_id, int) or isinstance(pipeline_id, bool):
+            from nexus.engine_version import REQUIRED_ENGINE_VERSION  # noqa: PLC0415 - deferred: message-only import
+
+            raise RuntimeError(
+                "POST /v1/pipeline/create answered without a pipeline_id: the "
+                "engine predates pipeline-002 (per-document pipeline rows); "
+                "this client requires engine-service-v"
+                + ".".join(str(n) for n in REQUIRED_ENGINE_VERSION)
+                + " or newer"
+            )
+        with self._buffer_lock:
+            self._pipeline_ids[content_hash] = pipeline_id
+            self._live[content_hash] = document
+        return status
 
     def get_pipeline_state(self, content_hash: str) -> dict[str, Any] | None:
         self.flush(content_hash)
-        return self._get("/v1/pipeline/state", {"content_hash": content_hash})["pipeline"]
+        return self._get("/v1/pipeline/state", self._ref(content_hash))["pipeline"]
 
     def update_progress(self, content_hash: str, **fields: int) -> None:
         """Coalesced (latest value per field); rides the next flush — the
@@ -230,13 +312,14 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
     def store_extraction_metadata(self, content_hash: str, metadata: dict) -> None:
         self.flush(content_hash)
         self._post("/v1/pipeline/extraction_meta", {
-            "content_hash": content_hash,
+            **self._ref(content_hash),
             "metadata_json": json.dumps(metadata),
         })
 
     def mark_completed(self, content_hash: str) -> None:
         self.flush(content_hash)
-        self._post("/v1/pipeline/complete", {"content_hash": content_hash})
+        self._post("/v1/pipeline/complete", self._ref(content_hash))
+        self._retire(content_hash)
 
     def mark_failed(self, content_hash: str, error: str = "") -> None:
         """Mark *content_hash* failed with *error* as the audit record.
@@ -270,7 +353,8 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
                 content_hash=content_hash,
                 exc_info=True,
             )
-        self._post("/v1/pipeline/fail", {"content_hash": content_hash, "error": error})
+        self._post("/v1/pipeline/fail", {**self._ref(content_hash), "error": error})
+        self._retire(content_hash)
 
     # ── pages ───────────────────────────────────────────────────────────────
 
@@ -299,7 +383,7 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
         self.flush(content_hash)  # read-your-writes: the chunker sees the extractor's pages
         rows = self._get(
             "/v1/pipeline/pages",
-            {"content_hash": content_hash, "start": start_index},
+            {**self._ref(content_hash), "start": start_index},
         )["pages"]
         return rows
 
@@ -335,7 +419,7 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
 
     def _read_chunks(self, content_hash: str, *, uploadable: bool, limit: int) -> list[dict[str, Any]]:
         self.flush(content_hash)
-        params: dict[str, Any] = {"content_hash": content_hash}
+        params: dict[str, Any] = self._ref(content_hash)
         if uploadable:
             params["uploadable"] = "1"
         if limit > 0:
@@ -350,14 +434,14 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
             return
         self.flush(content_hash)
         self._post("/v1/pipeline/mark_uploaded", {
-            "content_hash": content_hash,
+            **self._ref(content_hash),
             "chunk_indices": chunk_indices,
         })
 
     def count_embedded_chunks(self, content_hash: str) -> int:
         self.flush(content_hash)
         return int(self._get(
-            "/v1/pipeline/counts", {"content_hash": content_hash}
+            "/v1/pipeline/counts", self._ref(content_hash)
         )["embedded_chunks"])
 
     def count_pipelines(self) -> int:
@@ -378,19 +462,14 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
             pages = self._page_buffer.pop(content_hash, [])
             chunks = self._chunk_buffer.pop(content_hash, [])
             progress = self._progress_buffer.pop(content_hash, {})
+        ref = self._ref(content_hash)
         try:
             if pages:
-                self._post("/v1/pipeline/pages", {
-                    "content_hash": content_hash, "pages": pages,
-                })
+                self._post("/v1/pipeline/pages", {**ref, "pages": pages})
             if chunks:
-                self._post("/v1/pipeline/chunks", {
-                    "content_hash": content_hash, "chunks": chunks,
-                })
+                self._post("/v1/pipeline/chunks", {**ref, "chunks": chunks})
             if progress:
-                self._post("/v1/pipeline/progress", {
-                    "content_hash": content_hash, "fields": progress,
-                })
+                self._post("/v1/pipeline/progress", {**ref, "fields": progress})
         except BaseException:
             with self._buffer_lock:
                 self._page_buffer[content_hash] = pages + self._page_buffer.get(content_hash, [])
@@ -410,11 +489,58 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
 
     def clear_orphan_wal(self, content_hash: str) -> None:
         self._drop_buffers(content_hash)
-        self._post("/v1/pipeline/clear_wal", {"content_hash": content_hash})
+        self._post("/v1/pipeline/clear_wal", self._ref(content_hash))
 
-    def delete_pipeline_data(self, content_hash: str) -> None:
+    def delete_pipeline_data(
+        self,
+        content_hash: str,
+        *,
+        collection: str = "",
+        pdf_path: str = "",
+        pipeline_id: int | None = None,
+    ) -> bool:
+        """Delete ONE run's row (its pages and chunks cascade engine-side).
+
+        Which run: *pipeline_id* when given (a row read from
+        ``scan_orphaned_pipelines``'s listing, which belongs to whatever
+        process made it); else *content_hash* narrowed by *collection* and
+        *pdf_path* when either is given (the caller names the document, so
+        an id this instance may hold from an earlier run is not consulted);
+        else the id this instance holds for *content_hash*; else the bare
+        hash. The ``--force`` pre-flight in ``pipeline_index_pdf``
+        runs BEFORE ``create_pipeline`` and MUST pass both narrowing
+        fields: a bare hash would resolve to whichever row the engine
+        prefers for it, and a sibling document sharing the bytes would
+        lose its run (the cross-row WAL destruction the parked key-widen
+        attempt shipped; T2 nexus/critique-nexus-edjmu-33q80-pipeline-key).
+        Returns whether a row was deleted.
+        """
         self._drop_buffers(content_hash)
-        self._post("/v1/pipeline/delete", {"content_hash": content_hash})
+        if pipeline_id is not None:
+            body: dict[str, Any] = {"content_hash": content_hash, "pipeline_id": pipeline_id}
+        elif collection or pdf_path:
+            body = {"content_hash": content_hash}
+            if collection:
+                body["collection"] = collection
+            if pdf_path:
+                body["pdf_path"] = str(pdf_path)
+        else:
+            body = self._ref(content_hash)
+        result = self._post("/v1/pipeline/delete", body)
+        with self._buffer_lock:
+            held = self._pipeline_ids.get(content_hash)
+            if held is not None and held == body.get("pipeline_id"):
+                self._pipeline_ids.pop(content_hash, None)
+                self._live.pop(content_hash, None)
+        return bool(result.get("deleted", False))
+
+    def _retire(self, content_hash: str) -> None:
+        """The run reached a terminal call: a later ``create_pipeline`` for
+        the same hash on this instance is a sequential re-run, not a
+        concurrent one. The id mapping stays until ``delete_pipeline_data``
+        so the post-passes' reads keep addressing the same row."""
+        with self._buffer_lock:
+            self._live.pop(content_hash, None)
 
     def delete_pipeline_data_for_collection(self, collection: str) -> int:
         # Flush first: the client cannot map buffered hashes to collections,
@@ -439,17 +565,21 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
         orphans: list[str] = []
         for row in rows:
             content_hash = row["content_hash"]
+            # nexus-edjmu: delete exactly the LISTED row. Several rows can
+            # share a hash now (one per document), and this process holds
+            # no mapping for rows other processes made.
+            pipeline_id = int(row["pipeline_id"])
             if not Path(row["pdf_path"]).exists():
                 orphans.append(content_hash)
                 if delete:
-                    self.delete_pipeline_data(content_hash)
+                    self.delete_pipeline_data(content_hash, pipeline_id=pipeline_id)
                 continue
             if row["status"] in ("running", "resuming"):
                 updated_at = datetime.fromisoformat(row["updated_at"])
                 if now - updated_at > STALE_THRESHOLD:
                     orphans.append(content_hash)
                     if delete:
-                        self.delete_pipeline_data(content_hash)
+                        self.delete_pipeline_data(content_hash, pipeline_id=pipeline_id)
         return orphans
 
     def _drop_buffers(self, content_hash: str) -> None:

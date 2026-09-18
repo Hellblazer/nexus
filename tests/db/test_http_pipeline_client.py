@@ -230,9 +230,10 @@ def test_orphan_scan_checks_paths_client_side(
 
     now_iso = datetime.now(UTC).isoformat()
     server.pipelines_response = [
-        {"content_hash": "a" * 32, "pdf_path": str(live), "status": "running",
-         "updated_at": now_iso},
-        {"content_hash": "b" * 32, "pdf_path": str(tmp_path / "gone.pdf"),
+        {"pipeline_id": 11, "content_hash": "a" * 32, "pdf_path": str(live),
+         "status": "running", "updated_at": now_iso},
+        {"pipeline_id": 12, "content_hash": "b" * 32,
+         "pdf_path": str(tmp_path / "gone.pdf"),
          "status": "completed", "updated_at": now_iso},
     ]
 
@@ -240,7 +241,10 @@ def test_orphan_scan_checks_paths_client_side(
 
     assert orphans == ["b" * 32]
     deletes = server.calls("/v1/pipeline/delete")
-    assert [d["content_hash"] for d in deletes] == ["b" * 32]
+    # nexus-edjmu: the delete names the LISTED row by pipeline_id; several
+    # rows can share a hash now and this process holds no mapping for
+    # rows other processes made.
+    assert [(d["content_hash"], d["pipeline_id"]) for d in deletes] == [("b" * 32, 12)]
 
 
 def test_mark_and_lifecycle_flush_first(db: HttpPipelineDB, server: _Server) -> None:

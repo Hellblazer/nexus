@@ -1077,17 +1077,26 @@ def pipeline_index_pdf(
     # pipeline-buffer state and T3 orphan chunks can independently block
     # re-ingest; wipe both before the pre-flight.
     if force:
-        db.delete_pipeline_data(content_hash)
+        # nexus-edjmu: this runs BEFORE create_pipeline, so the client holds
+        # no pipeline_id yet; name THIS document's row by all three fields
+        # or a sibling document sharing the bytes loses its run (the
+        # cross-row WAL destruction of the parked key-widen attempt).
+        db.delete_pipeline_data(content_hash, collection=collection, pdf_path=str(pdf_path))
         _force_t3_orphan_cleanup(t3, collection, content_hash)
 
     # Pre-flight: check if pipeline should run before resolving credentials.
     result = db.create_pipeline(content_hash, str(pdf_path), collection)
-    if result == "skip":
-        # nexus-lcmbp: "skip" now means ONLY "already completed" — a
-        # fresh-heartbeat 'running' row raises PipelineConflictRunning
-        # from create_pipeline() above instead of reaching this branch.
-        _log.info("pipeline_skip", content_hash=content_hash, reason="already completed")
-        return 0
+    if result not in ("created", "resuming"):
+        # nexus-edjmu: a document-identity create never answers "skip" (a
+        # leftover completed row is reset engine-side and answered
+        # "created"), and a fresh-heartbeat 'running' row raises
+        # PipelineConflictRunning from create_pipeline() above. Anything
+        # else is an engine this client does not know; a silent 0 here was
+        # the bead's own symptom (a catalog Document with no manifest).
+        raise RuntimeError(
+            f"POST /v1/pipeline/create answered status={result!r} for "
+            f"content_hash={content_hash}; expected 'created' or 'resuming'"
+        )
 
     # Resolve embed_fn from credentials when not provided (matches batch path).
     if embed_fn is None:
@@ -1298,16 +1307,17 @@ def pipeline_index_pdf(
         # nexus-6m9zy.5 (#10): uploader_loop already called
         # db.mark_completed() -- BEFORE any post-pass ran -- the moment
         # chunks_uploaded caught up to chunks_created. Leaving the row at
-        # status='completed' here means the NEXT create_pipeline() call
-        # returns "skip" (status=='completed' is the ONLY skip
-        # condition), so pipeline_index_pdf never even reaches this
-        # function again — "kept for retry" data that can never actually
-        # be retried. Move the row to 'failed' (never clear_orphan_wal:
-        # that would delete the very chunk/page data this branch exists
-        # to preserve) so the next create_pipeline() call sees
-        # 'failed' -> 'resuming'. All three stages then short-circuit
-        # near-instantly on resume (everything is already uploaded), and
-        # execution reaches the post-passes again for a genuine retry.
+        # status='completed' used to make the NEXT create_pipeline() call
+        # return "skip", so pipeline_index_pdf never reached this function
+        # again; since nexus-edjmu a document-identity create RESETS a
+        # completed leftover instead (WAL wiped, answered "created"), which
+        # would discard the very checkpoint this branch preserves and
+        # re-extract everything. Move the row to 'failed' (never
+        # clear_orphan_wal: that would delete the chunk/page data too) so
+        # the next create_pipeline() call sees 'failed' -> 'resuming'. All
+        # three stages then short-circuit near-instantly on resume
+        # (everything is already uploaded), and execution reaches the
+        # post-passes again for a genuine retry.
         try:
             db.mark_failed(content_hash, error="post-pass failed — kept for retry")
         except Exception:  # noqa: BLE001 — boundary catch: best-effort, mirrors the other terminal-state writes in this function

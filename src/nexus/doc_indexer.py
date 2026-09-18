@@ -2753,12 +2753,13 @@ def index_pdf(
         use_streaming = streaming == "always" or (page_count >= 0 and page_count >= _STREAMING_THRESHOLD)
         if use_streaming:
             from nexus.pipeline_stages import pipeline_index_pdf  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-            # Returns 0 if skipped (already completed by another process).
-            # The staleness check above (line 638-644) handles the "unchanged"
-            # case. nexus-lcmbp: a concurrent, still-fresh 'running' pipeline
-            # is NOT a 0 here — pipeline_index_pdf lets PipelineConflictRunning
-            # propagate instead, so a stranded-row retry is a loud failure,
-            # never a silent 0-chunk "success".
+            # The staleness check above handles the "unchanged" case; the
+            # pipeline itself never returns a silent 0 (nexus-edjmu: a
+            # leftover completed row is reset engine-side, and an unknown
+            # create status raises). nexus-lcmbp: a concurrent, still-fresh
+            # 'running' pipeline is NOT a 0 here — pipeline_index_pdf lets
+            # PipelineConflictRunning propagate instead, so a stranded-row
+            # retry is a loud failure, never a silent 0-chunk "success".
             try:
                 count = pipeline_index_pdf(
                     pdf_path, content_hash, col_name, db,

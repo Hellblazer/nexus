@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.PipelineRepository;
+import dev.nexus.service.db.PipelineRepository.CreateResult;
+import dev.nexus.service.db.PipelineRepository.PipelineRef;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -24,26 +26,38 @@ import java.util.Map;
  * <p>Routes (all under {@code /v1/pipeline/}) mirror the client
  * {@code PipelineDB} surface 1:1 so {@code HttpPipelineDB} is a drop-in:
  * <pre>
- *   POST /v1/pipeline/create             {content_hash, pdf_path, collection} → {status: created|resuming|skip}
+ *   POST /v1/pipeline/create             {content_hash, pdf_path, collection, identity?}
+ *                                         → {status: created|resuming|skip, pipeline_id}
  *                                         (409 conflict_running — nexus-lcmbp — when an
  *                                         existing 'running' row's heartbeat is still fresh;
  *                                         see {@link dev.nexus.service.db.PipelineConflictException})
- *   GET  /v1/pipeline/state              ?content_hash= → {pipeline: {...}|null}
+ *   GET  /v1/pipeline/state              ?REF → {pipeline: {...}|null}
  *   GET  /v1/pipeline/list               → {pipelines: [...]} (client-side orphan scan input)
- *   POST /v1/pipeline/progress           {content_hash, fields: {...}} (allowlisted counters)
- *   POST /v1/pipeline/extraction_meta    {content_hash, metadata_json}
- *   POST /v1/pipeline/complete           {content_hash}
- *   POST /v1/pipeline/fail               {content_hash, error?}
- *   POST /v1/pipeline/pages              {content_hash, pages: [...]} → {written}   (batch = one txn)
- *   GET  /v1/pipeline/pages              ?content_hash=&start= → {pages: [...]}
- *   POST /v1/pipeline/chunks             {content_hash, chunks: [...]} → {inserted} (INSERT-OR-IGNORE)
- *   GET  /v1/pipeline/chunks             ?content_hash=&uploadable=0|1&limit= → {chunks: [...]}
- *   POST /v1/pipeline/mark_uploaded      {content_hash, chunk_indices: [...]} → {updated}
- *   GET  /v1/pipeline/counts             ?content_hash= → {embedded_chunks, pipelines}
- *   POST /v1/pipeline/clear_wal          {content_hash}   (pages+chunks only; audit row survives)
- *   POST /v1/pipeline/delete             {content_hash}
+ *   POST /v1/pipeline/progress           {REF, fields: {...}} (allowlisted counters)
+ *   POST /v1/pipeline/extraction_meta    {REF, metadata_json}
+ *   POST /v1/pipeline/complete           {REF}
+ *   POST /v1/pipeline/fail               {REF, error?}
+ *   POST /v1/pipeline/pages              {REF, pages: [...]} → {written}   (batch = one txn)
+ *   GET  /v1/pipeline/pages              ?REF&start= → {pages: [...]}
+ *   POST /v1/pipeline/chunks             {REF, chunks: [...]} → {inserted} (INSERT-OR-IGNORE)
+ *   GET  /v1/pipeline/chunks             ?REF&uploadable=0|1&limit= → {chunks: [...]}
+ *   POST /v1/pipeline/mark_uploaded      {REF, chunk_indices: [...]} → {updated}
+ *   GET  /v1/pipeline/counts             ?REF → {embedded_chunks, pipelines}
+ *   POST /v1/pipeline/clear_wal          {REF}   (pages+chunks only; audit row survives)
+ *   POST /v1/pipeline/delete             {REF} → {deleted: bool}
  *   POST /v1/pipeline/delete_collection  {collection} → {deleted}
  * </pre>
+ *
+ * <p><strong>REF (nexus-edjmu).</strong> Every route after {@code /create}
+ * names a row either by {@code pipeline_id} (the id {@code /create} returned;
+ * what a client at or past this engine sends) or by {@code content_hash},
+ * optionally narrowed by {@code collection} and {@code pdf_path} (what a
+ * client older than pipeline-002 sends, hash alone). The repository's
+ * {@link PipelineRepository#resolve} turns either into one row; see its
+ * javadoc for why a hash-only caller always lands on its own row.
+ * {@code identity="document"} on {@code /create} selects one-row-per-document
+ * keying; absent, the pipeline-001 one-row-per-hash algorithm runs verbatim,
+ * so a client that predates this engine sees no behavioural change.
  *
  * <p>Embedding wire mapping (the nexus-9n1u3 sentinel, carried verbatim):
  * JSON {@code null} ↔ SQL NULL (not embedded); {@code ""} ↔ empty BYTEA
@@ -114,17 +128,28 @@ public final class PipelineHandler implements HttpHandler {
     private void handleCreate(HttpExchange exchange, String tenant, String method) throws IOException {
         if (wrongMethod(exchange, method, "POST")) return;
         Map<String, Object> body = readBody(exchange);
-        String status = repo.create(tenant,
+        boolean documentIdentity;
+        Object identity = body.get("identity");
+        if (identity == null || PipelineRepository.KEYED_BY_CONTENT_HASH.equals(identity)) {
+            documentIdentity = false;
+        } else if (PipelineRepository.KEYED_BY_DOCUMENT.equals(identity)) {
+            documentIdentity = true;
+        } else {
+            throw new IllegalArgumentException(
+                "'identity' must be \"document\" or \"content_hash\" when present");
+        }
+        CreateResult result = repo.create(tenant,
                 requireString(body, "content_hash"),
                 requireString(body, "pdf_path"),
-                requireString(body, "collection"));
-        HttpUtil.send(exchange, 200, "{\"status\":\"" + status + "\"}");
+                requireString(body, "collection"),
+                documentIdentity);
+        HttpUtil.send(exchange, 200, "{\"status\":\"" + result.status()
+                + "\",\"pipeline_id\":" + result.pipelineId() + "}");
     }
 
     private void handleState(HttpExchange exchange, String tenant, String method) throws IOException {
         if (wrongMethod(exchange, method, "GET")) return;
-        String contentHash = requireParam(exchange, "content_hash");
-        Map<String, Object> row = repo.get(tenant, contentHash);
+        Map<String, Object> row = repo.get(tenant, refFromQuery(exchange));
         Map<String, Object> out = new HashMap<>();
         out.put("pipeline", row);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(out));
@@ -139,7 +164,7 @@ public final class PipelineHandler implements HttpHandler {
     private void handleProgress(HttpExchange exchange, String tenant, String method) throws IOException {
         if (wrongMethod(exchange, method, "POST")) return;
         Map<String, Object> body = readBody(exchange);
-        String contentHash = requireString(body, "content_hash");
+        PipelineRef ref = refFromBody(body);
         Map<String, Integer> fields = new HashMap<>();
         if (body.get("fields") instanceof Map<?, ?> raw) {
             for (var entry : raw.entrySet()) {
@@ -150,15 +175,14 @@ public final class PipelineHandler implements HttpHandler {
                 fields.put(String.valueOf(entry.getKey()), n.intValue());
             }
         }
-        repo.updateProgress(tenant, contentHash, fields);
+        repo.updateProgress(tenant, ref, fields);
         HttpUtil.send(exchange, 200, "{\"updated\":true}");
     }
 
     private void handleExtractionMeta(HttpExchange exchange, String tenant, String method) throws IOException {
         if (wrongMethod(exchange, method, "POST")) return;
         Map<String, Object> body = readBody(exchange);
-        repo.storeExtractionMeta(tenant,
-                requireString(body, "content_hash"),
+        repo.storeExtractionMeta(tenant, refFromBody(body),
                 body.get("metadata_json") instanceof String s ? s : "");
         HttpUtil.send(exchange, 200, "{\"updated\":true}");
     }
@@ -166,15 +190,14 @@ public final class PipelineHandler implements HttpHandler {
     private void handleComplete(HttpExchange exchange, String tenant, String method) throws IOException {
         if (wrongMethod(exchange, method, "POST")) return;
         Map<String, Object> body = readBody(exchange);
-        repo.markCompleted(tenant, requireString(body, "content_hash"));
+        repo.markCompleted(tenant, refFromBody(body));
         HttpUtil.send(exchange, 200, "{\"updated\":true}");
     }
 
     private void handleFail(HttpExchange exchange, String tenant, String method) throws IOException {
         if (wrongMethod(exchange, method, "POST")) return;
         Map<String, Object> body = readBody(exchange);
-        repo.markFailed(tenant,
-                requireString(body, "content_hash"),
+        repo.markFailed(tenant, refFromBody(body),
                 body.get("error") instanceof String s ? s : "");
         HttpUtil.send(exchange, 200, "{\"updated\":true}");
     }
@@ -185,7 +208,7 @@ public final class PipelineHandler implements HttpHandler {
     private void handlePages(HttpExchange exchange, String tenant, String method) throws IOException {
         if ("POST".equals(method)) {
             Map<String, Object> body = readBody(exchange);
-            String contentHash = requireString(body, "content_hash");
+            PipelineRef ref = refFromBody(body);
             if (!(body.get("pages") instanceof List<?> pages) || pages.isEmpty()) {
                 throw new IllegalArgumentException("'pages' must be a non-empty array");
             }
@@ -197,15 +220,14 @@ public final class PipelineHandler implements HttpHandler {
                         "each page must be an object with integer 'page_index' and string 'page_text'");
                 }
             }
-            int written = repo.writePages(tenant, contentHash, (List<Map<String, Object>>) pages);
+            int written = repo.writePages(tenant, ref, (List<Map<String, Object>>) pages);
             HttpUtil.send(exchange, 200, "{\"written\":" + written + "}");
             return;
         }
         if (wrongMethod(exchange, method, "GET")) return;
-        String contentHash = requireParam(exchange, "content_hash");
         int start = intParam(exchange, "start", 0);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
-                Map.of("pages", repo.readPagesFrom(tenant, contentHash, start))));
+                Map.of("pages", repo.readPagesFrom(tenant, refFromQuery(exchange), start))));
     }
 
     // ── chunks ───────────────────────────────────────────────────────────────
@@ -213,7 +235,7 @@ public final class PipelineHandler implements HttpHandler {
     private void handleChunks(HttpExchange exchange, String tenant, String method) throws IOException {
         if ("POST".equals(method)) {
             Map<String, Object> body = readBody(exchange);
-            String contentHash = requireString(body, "content_hash");
+            PipelineRef ref = refFromBody(body);
             if (!(body.get("chunks") instanceof List<?> raw) || raw.isEmpty()) {
                 throw new IllegalArgumentException("'chunks' must be a non-empty array");
             }
@@ -233,17 +255,17 @@ public final class PipelineHandler implements HttpHandler {
                 chunk.put("embedding", decodeEmbedding(chunk.get("embedding")));
                 chunks.add(chunk);
             }
-            int inserted = repo.writeChunks(tenant, contentHash, chunks);
+            int inserted = repo.writeChunks(tenant, ref, chunks);
             HttpUtil.send(exchange, 200, "{\"inserted\":" + inserted + "}");
             return;
         }
         if (wrongMethod(exchange, method, "GET")) return;
-        String contentHash = requireParam(exchange, "content_hash");
+        PipelineRef ref = refFromQuery(exchange);
         boolean uploadable = "1".equals(queryParam(exchange, "uploadable"));
         int limit = intParam(exchange, "limit", 0);
         List<Map<String, Object>> rows = uploadable
-                ? repo.readUploadableChunks(tenant, contentHash, limit)
-                : repo.readReadyChunks(tenant, contentHash);
+                ? repo.readUploadableChunks(tenant, ref, limit)
+                : repo.readReadyChunks(tenant, ref);
         for (Map<String, Object> row : rows) {
             row.put("embedding", encodeEmbedding(row.get("embedding")));
         }
@@ -253,7 +275,7 @@ public final class PipelineHandler implements HttpHandler {
     private void handleMarkUploaded(HttpExchange exchange, String tenant, String method) throws IOException {
         if (wrongMethod(exchange, method, "POST")) return;
         Map<String, Object> body = readBody(exchange);
-        String contentHash = requireString(body, "content_hash");
+        PipelineRef ref = refFromBody(body);
         List<Integer> indices = new ArrayList<>();
         if (body.get("chunk_indices") instanceof List<?> raw) {
             for (Object v : raw) {
@@ -263,15 +285,17 @@ public final class PipelineHandler implements HttpHandler {
                 indices.add(n.intValue());
             }
         }
-        int updated = repo.markUploaded(tenant, contentHash, indices);
+        int updated = repo.markUploaded(tenant, ref, indices);
         HttpUtil.send(exchange, 200, "{\"updated\":" + updated + "}");
     }
 
     private void handleCounts(HttpExchange exchange, String tenant, String method) throws IOException {
         if (wrongMethod(exchange, method, "GET")) return;
-        String contentHash = queryParam(exchange, "content_hash");
-        int embedded = contentHash == null || contentHash.isBlank()
-                ? 0 : repo.countEmbeddedChunks(tenant, contentHash);
+        // A call naming no row at all (count_pipelines()) yields
+        // embedded_chunks=0, never a 400 and never a global sum: the count is
+        // per-pipeline-only by contract (.16 critic Significant #3).
+        PipelineRef ref = optionalRefFromQuery(exchange);
+        int embedded = ref == null ? 0 : repo.countEmbeddedChunks(tenant, ref);
         HttpUtil.send(exchange, 200,
                 "{\"embedded_chunks\":" + embedded
                 + ",\"pipelines\":" + repo.countPipelines(tenant) + "}");
@@ -282,15 +306,15 @@ public final class PipelineHandler implements HttpHandler {
     private void handleClearWal(HttpExchange exchange, String tenant, String method) throws IOException {
         if (wrongMethod(exchange, method, "POST")) return;
         Map<String, Object> body = readBody(exchange);
-        repo.clearOrphanWal(tenant, requireString(body, "content_hash"));
+        repo.clearOrphanWal(tenant, refFromBody(body));
         HttpUtil.send(exchange, 200, "{\"cleared\":true}");
     }
 
     private void handleDelete(HttpExchange exchange, String tenant, String method) throws IOException {
         if (wrongMethod(exchange, method, "POST")) return;
         Map<String, Object> body = readBody(exchange);
-        repo.deletePipeline(tenant, requireString(body, "content_hash"));
-        HttpUtil.send(exchange, 200, "{\"deleted\":true}");
+        boolean deleted = repo.deletePipeline(tenant, refFromBody(body));
+        HttpUtil.send(exchange, 200, "{\"deleted\":" + deleted + "}");
     }
 
     private void handleDeleteCollection(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -301,6 +325,49 @@ public final class PipelineHandler implements HttpHandler {
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    /** The row a POST body names: {@code pipeline_id} when present, else
+     *  {@code content_hash} narrowed by any {@code collection}/{@code pdf_path}
+     *  given. One of the two must be present. */
+    private static PipelineRef refFromBody(Map<String, Object> body) {
+        Object id = body.get("pipeline_id");
+        if (id != null) {
+            if (!(id instanceof Number n)) {
+                throw new IllegalArgumentException("'pipeline_id' must be an integer");
+            }
+            return PipelineRef.byId(n.longValue());
+        }
+        return PipelineRef.byDocument(
+                requireString(body, "content_hash"),
+                body.get("collection") instanceof String c ? c : null,
+                body.get("pdf_path") instanceof String p ? p : null);
+    }
+
+    /** {@link #refFromBody}'s query-string twin. */
+    private static PipelineRef refFromQuery(HttpExchange exchange) {
+        PipelineRef ref = optionalRefFromQuery(exchange);
+        if (ref == null) {
+            throw new IllegalArgumentException(
+                "'pipeline_id' or 'content_hash' query param is required");
+        }
+        return ref;
+    }
+
+    /** {@code null} when the query names no row at all. */
+    private static PipelineRef optionalRefFromQuery(HttpExchange exchange) {
+        String id = queryParam(exchange, "pipeline_id");
+        if (id != null && !id.isBlank()) {
+            try {
+                return PipelineRef.byId(Long.parseLong(id));
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("'pipeline_id' must be an integer, got: " + id);
+            }
+        }
+        String contentHash = queryParam(exchange, "content_hash");
+        if (contentHash == null || contentHash.isBlank()) return null;
+        return PipelineRef.byDocument(contentHash,
+                queryParam(exchange, "collection"), queryParam(exchange, "pdf_path"));
+    }
 
     /** JSON null → SQL NULL; "" → empty bytes (service-mode sentinel);
      *  base64 string → packed floats. */
@@ -342,14 +409,6 @@ public final class PipelineHandler implements HttpHandler {
             throw new IllegalArgumentException("'" + field + "' is required");
         }
         return s;
-    }
-
-    private static String requireParam(HttpExchange exchange, String key) {
-        String value = queryParam(exchange, key);
-        if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException("'" + key + "' query param is required");
-        }
-        return value;
     }
 
     private static int intParam(HttpExchange exchange, String key, int defaultValue) {
