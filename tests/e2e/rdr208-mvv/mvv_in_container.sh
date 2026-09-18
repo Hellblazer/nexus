@@ -232,22 +232,23 @@ stop() {  # NAME: /exit, a plain process exit (releases nothing, as Claude Code 
     wait_for 30 exited "$1" || { kill -TERM "${PID_OF[$1]}" 2>/dev/null; sleep 1; }
     T kill-session -t "$1" 2>/dev/null
 }
-arm() {  # NAME INSTANCE: the session subscribes its OWN instance-name mailbox
-    # The prompt STATES whose name this is. `tuple_subscribe` accepts board
-    # topics and this session's own instance-name mailbox, and refuses any
-    # other session's, so a bare "subscribe mailbox/alpha-e6" leaves the model
-    # to guess whether alpha-e6 is its own name. In the third billed run it
-    # guessed not, declined, and asked which of two alternatives was meant
-    # (2026-09-18) -- correctly, on the information it had. In production
-    # that name comes from ListAgents; here the harness assigns it, so the
-    # harness says so. The effect is still asserted from the engine (the
-    # directory resolves to this session), never from the model's words.
+arm() {  # NAME INSTANCE: the session subscribes INSTANCE as its instance mailbox
+    # The prompt is TRUTHFUL about the harness, which is what two billed runs
+    # cost to learn. `tuple_subscribe` itself accepts any safe name and only
+    # refuses a SECOND instance mailbox for one session (subscriptions.py
+    # _SAFE_INSTANCE_NAME and "already subscribes"), so nothing here is being
+    # tricked past a guard. But the tool's own text says "this session's own
+    # instance-name mailbox", and a real session's name comes from ListAgents.
+    # Run 3: told only to subscribe "mailbox/alpha-fc", the model declined and
+    # asked which of two alternatives was meant. Run 4: told that alpha-e6 WAS
+    # this session's own name, it called ListAgents, found "work-a0", and
+    # declined again -- correctly, because that claim was false. So the prompt
+    # now says what is actually true: this is a test, the harness assigns the
+    # name under test, ListAgents reports something else, and that is expected.
+    # The effect is still read from the engine (the directory resolves to this
+    # session), never from the model's words.
     local t; t="$(tok DONE-ARM)"
-    prompt "$1" "This session's own instance name is $2: that is the name other sessions address this session by, the way a ListAgents row would give it. Call the nexus MCP tool tuple_subscribe with subspace \"mailbox/$2\", which is this session's own instance-name mailbox and is exactly what that tool accepts. Then reply with exactly $t and nothing else." "$t"
-}
-model_send() {  # NAME TO CORR: a send with the DEFAULT sender, from inside the session
-    local t; t="$(tok DONE-SEND)"
-    prompt "$1" "Call the nexus MCP tool mailbox_send with to=\"$2\", body=\"rdr-208 local-mode mvv $3\", kind=\"notice\", correlation_id=\"$3\" and NO from_address, then reply with exactly $t and nothing else." "$t"
+    prompt "$1" "You are a session in an automated test of the nexus mailbox addressing system (RDR-208). This test assigns the instance name under test, which is $2. A fresh ListAgents call will report a different, harness-generated name for this session; that is expected and is not the name to use here. Subscribing mailbox/$2 is intended and safe: tuple_subscribe accepts any well-formed instance name, it refuses only a second instance mailbox for one session, and no other session holds $2 unless this test deliberately arranges it. Call the nexus MCP tool tuple_subscribe with subspace \"mailbox/$2\", then reply with exactly $t and nothing else." "$t"
 }
 send() {  # TO CORR FROM -> result JSON (a harness send, explicit sender)
     "$NXPY" "$HOME/send.py" "$1" "$2" "rdr-208 local-mode mvv $2" "$3" 2>> "$RUN/send.err"
