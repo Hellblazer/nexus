@@ -1,53 +1,61 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""RDR-211 Phase 1 Step 3 (bead nexus-rplay.10): the ``claude/channel``
-capability declaration and the nexus MCP server's lifespan waiter --
-Gap 5, "push delivery to the session".
+"""RDR-213 (amends RDR-211 Phase 1 Step 3, bead nexus-tk2cz): the
+``claude/channel`` capability declaration and the nexus MCP server's
+lifespan waiter -- Gap 5, "push delivery to the session", with the proof
+gate and claim-at-delivery removed.
 
 Two independent halves live here:
 
 - :func:`run_stdio_with_channel` replaces ``FastMCP.run_stdio_async`` at
   the server's one call site (:func:`nexus.mcp.core.main`): it declares
   ``capabilities.experimental["claude/channel"] = {}`` at initialize
-  (which is what makes Claude Code register a listener -- Phase 1 Step 0,
-  T2 ``nexus_rdr/211-spike-4-channel-2026-09-17``), and stashes the raw
-  stdio write stream on this module (:data:`_write_stream`) so a sender
+  (which is what makes Claude Code register a listener -- RDR-211 Phase 1
+  Step 0, T2 ``nexus_rdr/211-spike-4-channel-2026-09-17``), and stashes the
+  raw stdio write stream on this module (:data:`_write_stream`) so a sender
   never needs a handle on the ``ServerSession`` FastMCP builds internally.
-  This is design choice (b) from the bead's brief, not (a): nothing here
-  subclasses ``mcp.server.lowlevel.Server`` -- the driver already calls
-  ``Server.run`` itself, so it already has the write stream in scope
-  before that call is made, with no need to reach back INTO a session
-  object built inside it.
-- :class:`ChannelWaiter` is the lifespan's one background task: it gates
-  claiming on :func:`detect_channel_argv` or a probe round-trip
-  (T2 ``nexus_rdr/211-decision-waiter-gate-2026-09-17``, replacing the
-  RDR's original handshake-capability guard, which Phase 1 Step 0 found
-  had nothing to read -- Claude Code's declared experimental capabilities
-  are empty whether or not the channel flag was used), then loops
+- :class:`ChannelWaiter` is the lifespan's one background task: it parks
   ``HttpTupleStore.wait`` over the session's :class:`~nexus.mcp.
-  subscriptions.SubscriptionSet`, delivering board posts on cursor and
-  mail under pure back pressure (one live claim at a time, held, renewed
-  and re-notified until the session's own ``tuple_ack``/``tuple_nack``
-  supplies the credit for the next -- Sam, T2 ``nexus_rdr/211-decision-
-  channel-delivery-2026-09-16`` item 6). Every notification's ``content``
-  is a FIXED template built only from server-controlled identifiers
-  (subspace, tuple id, and for mail the claim id and claimant) -- never
-  the tuple's own body, ``from``, ``kind``, or ``correlation_id`` (Sam, T2
-  ``nexus_rdr/211-decision-push-reference-2026-09-17``): the channel is a
-  push-to-ATTEND signal, not a delivery transport, and the session reads
-  the actual content back itself with ``tuple_rd`` once notified. It also
-  publishes its :meth:`ChannelWaiter.status` to a per-session on-disk
-  record (:func:`write_channel_status`) at every wake/renew/release,
-  since the `nx doctor` row (bead nexus-rplay.13) runs in the separate
-  CLI process and has no other way to see this process's live state --
-  that same record is also what a restarted waiter for the SAME session
-  reads back at start, BEFORE any normal claim, to renew and re-adopt an
-  outstanding mailbox claim its crashed predecessor left live (RDR-211
-  review, Significant 1): a crash-and-restart is otherwise
-  indistinguishable, IN THIS PROCESS's memory, from never having claimed
-  anything at all, which is exactly what let a fresh `_maybe_claim_mail`
-  call claim a second message from a different mailbox while the first
-  was still live.
+  subscriptions.SubscriptionSet`, and NEVER claims anything (T2
+  ``nexus_rdr/213-decision-notify-then-claim-2026-09-17`` -- Sam's
+  original intent). The mailbox path and the board path share ONE shape
+  (T2 ``nexus_rdr/213-decision-announcements-rate-limited-not-ack-gated-
+  2026-09-17``): a per-mailbox CURSOR past the last referenced row, kept
+  in the wait spec every tick, plus the last reference's own re-send
+  budget. The waiter tracks POSITION, not row identity -- no read-back,
+  no claim-state classification, no reconcile.
+
+RDR-211 gated every mailbox claim on proof that the channel was live for
+this session (a parent command-line read, or a probe notification the
+session had to answer), because a claim held for a session that could
+never hear the channel would strand the message for the lease. RDR-213
+deletes the gate along with the claim itself: with no claim to strand, the
+worst a lost notification costs is a wait until the next wake or the next
+prompt, which the ``UserPromptSubmit`` drain hook (``conexus/hooks/
+scripts/mailbox_drain.py``) renders regardless. The command-line-reading
+gate function, its probe fallback and probe MCP tool are deleted outright,
+not kept as fallbacks (Approach item 3). So are the waiter's claimant
+identity, its lease/renew loop, and the persisted-outstanding-claim
+adoption at restart -- all of it existed only to make a claim survivable,
+and there is no claim left to protect.
+
+Every notification's ``content`` is still a FIXED template built only from
+server-controlled identifiers (subspace, tuple id) -- never the tuple's
+own body, ``from``, ``kind``, or ``correlation_id`` (those travel in
+``meta`` only, unchanged from RDR-211): the channel is a push-to-ATTEND
+signal, not a delivery transport, and the session claims it itself with
+``tuple_in`` once notified -- which returns the body WITH the claim, so
+there is no separate read-then-claim step. With the plugin's hooks
+loaded, the notification itself fires ``UserPromptSubmit`` and the drain
+hook claims, acks and renders the body with THAT prompt before the
+session's own turn, so the session claims for itself only when that
+rendering did not already happen (MVV finding F1, T2
+``nexus_rdr/213-decision-hook-delivers-on-channel-wake-2026-09-17``).
+
+It also publishes its :meth:`ChannelWaiter.status` to a per-session
+on-disk record (:func:`write_channel_status`) at every wake, since the
+`nx doctor` row (bead nexus-rplay.13) runs in the separate CLI process and
+has no other way to see this process's live state.
 
 Neither half needs ``mcp.server.session.ServerSession`` at all: sending a
 notification is a raw ``JSONRPCNotification`` on the write stream (the
@@ -72,10 +80,9 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import subprocess
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -83,7 +90,6 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import structlog
 
-from nexus.db.t2.http_tuple_store import ClaimNotFoundError, ClaimOwnershipError
 from nexus.db.t2.records import TupleRow, WaitResult, WaitSpec
 
 if TYPE_CHECKING:
@@ -95,7 +101,7 @@ _log = structlog.get_logger(__name__)
 
 #: Declared at initialize (RDR-211 Approach item 7). An empty object --
 #: Claude Code's channel preview reads the KEY's presence, not any value
-#: inside it (Phase 1 Step 0 spike).
+#: inside it (RDR-211 Phase 1 Step 0 spike).
 CHANNEL_CAPABILITY: dict[str, dict[str, Any]] = {"claude/channel": {}}
 
 #: The notification method the spike proved works (T2
@@ -104,13 +110,31 @@ CHANNEL_CAPABILITY: dict[str, dict[str, Any]] = {"claude/channel": {}}
 #: ``JSONRPCNotification``.
 _CHANNEL_METHOD = "notifications/claude/channel"
 
-#: Production constants (RDR-211 Technical Design "Delivery"). Tests
+#: Production constants (RDR-213 Technical Design "Delivery"). Tests
 #: inject short overrides through :class:`ChannelWaiter`'s constructor so
-#: the suite never actually waits 150s/300s/25s.
-DEFAULT_LEASE_S = 300
-DEFAULT_RENEW_INTERVAL_S = 150.0
+#: the suite never actually waits 150s.
 DEFAULT_WAIT_TIMEOUT_S = 25
-DEFAULT_MAX_RESENDS = 5
+DEFAULT_REANNOUNCE_INTERVAL_S = 150.0
+DEFAULT_MAX_ANNOUNCES = 5
+#: Seconds `run()` sleeps after a tick fails for a reason other than
+#: "engine without wait" (a transient HTTP or store error) before the next
+#: tick. The loop never dies on one bad round-trip.
+DEFAULT_TICK_ERROR_BACKOFF_S: float = 5.0
+#: Belt-and-braces floor: a minimum real-clock gap `run()` enforces
+#: between the START of one tick and the START of the next, whenever a
+#: tick returns faster than this. Genuinely defensive under the cursor
+#: design (T2 `nexus_rdr/213-decision-announcements-rate-limited-not-ack-
+#: gated-2026-09-17`) -- the cursor moving past every referenced row
+#: already makes a busy loop structurally impossible, since `wait`'s own
+#: `since` then excludes it from matching again -- kept as a belt against
+#: a future bug, or an engine, that returns from `wait()` before its own
+#: timeout for a reason this waiter did not anticipate.
+DEFAULT_MIN_TICK_INTERVAL_S: float = 0.25
+#: Consecutive fast ticks (faster than `min_tick_interval_s`) before the
+#: floor logs a warning -- once per streak, not on every occurrence: an
+#: occasional fast tick (e.g. a re-send point was already due) is
+#: expected and not itself a problem.
+_FAST_TICK_WARN_STREAK = 5
 
 # ── Cross-process status (RDR-211 Phase 1 Step 3, bead nexus-rplay.13) ─────
 #
@@ -187,8 +211,8 @@ def read_channel_status(state_dir: Path, session_id: str) -> dict[str, Any] | No
 
 #: Set by :func:`run_stdio_with_channel` for the lifetime of the stdio
 #: connection; ``None`` outside it (HTTP/SSE transports, or before/after
-#: the ``async with stdio_server()`` block) so a sender never mistakes a
-#: torn-down connection for a live one.
+#: the ``async with stdio_server() as`` block) so a sender never mistakes
+#: a torn-down connection for a live one.
 _write_stream: Any | None = None
 
 #: Set once the client's ``notifications/initialized`` has been observed
@@ -272,132 +296,49 @@ async def send_channel_notification(content: str, meta: dict[str, str]) -> bool:
     return True
 
 
-# ── The gate: parent argv, with a probe fallback ────────────────────────────
-#
-# T2 nexus_rdr/211-decision-waiter-gate-2026-09-17: Phase 1 Step 0 found
-# Claude Code's declared experimental capabilities empty whether or not
-# the channel launch flag was used, so the RDR's original "claim only
-# when the handshake carried the channel" guard has nothing to read. Sam's
-# replacement: read the parent `claude` process's own command line first
-# (every nx-mcp's parent IS the claude process that spawned it, measured
-# on the live box); when that shows neither flag, send one probe
-# notification asking the session to call `tuple_channel_probe()` and
-# claim only once that call arrives. No call, no claim, ever, in that
-# process -- the drain hook is the floor either way.
-
-_CHANNEL_ARGV_FLAGS: tuple[str, ...] = (
-    "--channels server:nexus",
-    "--dangerously-load-development-channels server:nexus",
-    # The plugin form (bead nexus-tk2cz, measured 2026-09-17): a plugin on
-    # the effective channel allowlist (Anthropic's, or `allowedChannelPlugins`
-    # in managed settings) loads with no dialog as
-    # `--channels plugin:conexus@<marketplace>`; the marketplace segment is
-    # not fixed, so the match stops at the `@`.
-    "--channels plugin:conexus@",
-    "--dangerously-load-development-channels plugin:conexus@",
-)
-
-#: Seconds `run()` waits before the FIRST probe notification. Claude Code
-#: registers channel delivery for a server shortly AFTER the connection is
-#: up (0.5 s measured 2026-09-17, bead nexus-tk2cz); a probe sent at
-#: lifespan start raced that registration and was dropped, and a dropped
-#: probe meant no claim ever in that process.
-DEFAULT_PROBE_DELAY_S: float = 5.0
-#: Seconds `run()` waits for the probe's answer before sending the probe a
-#: SECOND (and last) time. Two probes total, not one: the RDR-211 design's
-#: "one probe" assumed the first one always reached the session.
-DEFAULT_PROBE_RESEND_AFTER_S: float = 60.0
-#: Seconds `run()` sleeps after a tick fails for a reason other than
-#: "engine without wait" (a transient HTTP or store error) before the next
-#: tick. The loop never dies on one bad round-trip.
-DEFAULT_TICK_ERROR_BACKOFF_S: float = 5.0
-
-_PROBE_CONTENT = (
-    "The nexus MCP server's channel waiter is checking whether this session "
-    "was launched with the Claude Code channel enabled for `server:nexus`. "
-    "Please call the `tuple_channel_probe` tool once to confirm."
-)
-
-
-def _read_parent_command(pid: int) -> str:
-    """Best-effort: the running process's full command line, or `""` on
-    any failure (an unreadable /proc entry, no `ps` binary, a timeout).
-    Never raises -- this is a liveness probe, not a precondition."""
-    try:
-        result = subprocess.run(
-            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
-            capture_output=True, text=True, timeout=2.0, check=False,
-        )
-        return result.stdout or ""
-    except Exception:  # noqa: BLE001 — best-effort probe; a failure here means "argv unreadable", not "channel absent"
-        return ""
-
-
-def detect_channel_argv(
-    ppid: int | None = None, *, argv_reader: Callable[[int], str] = _read_parent_command,
-) -> bool:
-    """`True` iff the parent process's command line names the channel
-    launch flag for `server:nexus`. `ppid` defaults to `os.getppid()`;
-    `argv_reader` is the seam tests fake (T2
-    ``nexus_rdr/211-spike-4-channel-2026-09-17`` addendum: every nx-mcp's
-    parent pid IS the `claude` process, and `ps -o command=` reads its
-    argv)."""
-    import os  # noqa: PLC0415 — stdlib, branch-local
-
-    pid = ppid if ppid is not None else os.getppid()
-    argv = argv_reader(pid)
-    # A whole-token match: `server:nexus` must end at whitespace or the end
-    # of the command line, so a server named `nexusdev` (measured 2026-09-17,
-    # bead nexus-tk2cz) is not read as ours; the plugin form ends at the `@`
-    # because the marketplace segment varies.
-    return any(
-        re.search(re.escape(flag) + (r"(?=\s|$)" if not flag.endswith("@") else ""), argv) is not None
-        for flag in _CHANNEL_ARGV_FLAGS
-    )
-
-
 # ── The waiter ───────────────────────────────────────────────────────────
 
 
 @dataclass
-class _Outstanding:
-    """The one live mailbox claim this waiter may hold at a time (pure
-    back pressure, RDR-211 decision item 6).
+class _LastRef:
+    """The last reference sent for one mailbox (RDR-213 Approach item 2,
+    T2 `nexus_rdr/213-decision-announcements-rate-limited-not-ack-gated-
+    2026-09-17`): the exact rendered `(content, meta)` a re-send replays
+    verbatim (never re-derived from a row read back -- there is no row
+    read-back anywhere in this design), when it was last sent, and how
+    many times. Superseded outright -- this dict entry simply replaced --
+    the instant a DIFFERENT row is referenced for the same mailbox;
+    re-sent at `reannounce_interval_s` intervals up to `max_announces`
+    times, then left alone (never dropped) until superseded."""
 
-    ``claimed_at`` (ISO-8601, set once at the original claim and carried
-    forward on adoption -- see :meth:`ChannelWaiter._adopt_persisted_
-    outstanding`) is persisted alongside ``claim_id``/``subspace``/
-    ``tuple_id``/``resend_count`` in the on-disk status record
-    (:meth:`ChannelWaiter.status`'s ``outstanding`` key) so a crashed
-    and restarted waiter for the SAME session can renew and re-adopt
-    this exact claim instead of leaving it live and untracked while
-    claiming a second one elsewhere (RDR-211 review, Significant 1)."""
-
-    subspace: str
-    tuple_id: str
-    claim_id: str
-    claimant: str
     content: str
     meta: dict[str, str]
-    next_renew_at: float
-    resend_count: int = 0
-    claimed_at: str = ""
+    sent_at: float
+    count: int = 1
 
 
-#: Sam's decision, T2 ``nexus_rdr/211-decision-push-reference-2026-09-17``:
-#: the notification `content` a mailbox claim or board post sends is a
-#: FIXED template built only from server-controlled identifiers -- never
-#: the tuple's own body, `from`, `kind`, or `correlation_id` (those stay in
-#: `meta`, unchanged). The channel is a push-to-attend signal, not a
-#: delivery transport: the session reads the actual content back itself
-#: with `tuple_rd` once notified. A resend at renew re-sends the exact
-#: same string (`_Outstanding.content` is built once, at claim or
-#: adoption time, and never rebuilt from the row again).
-def _mailbox_notification_content(subspace: str, tuple_id: str, claim_id: str, claimant: str) -> str:
+#: Sam's decision, T2 ``nexus_rdr/211-decision-push-reference-2026-09-17``,
+#: carried into RDR-213: the notification `content` a mailbox row or board
+#: post sends is a FIXED template built only from server-controlled
+#: identifiers -- never the tuple's own body, `from`, `kind`, or
+#: `correlation_id` (those stay in `meta`, unchanged). MVV finding F1 (T2
+#: `nexus_rdr/213-decision-hook-delivers-on-channel-wake-2026-09-17`): with
+#: the plugin's hooks loaded, the channel notification itself fires
+#: `UserPromptSubmit` and `mailbox_drain.py` claims, acks and renders the
+#: body with THAT prompt, before the model's turn, so the session claims
+#: for itself only when no body was rendered that way -- the text states
+#: both outcomes so the model does not act on an already-claimed row. The
+#: SAME text covers a row already claimed when the cursor passes it (T2
+#: `nexus_rdr/213-decision-announcements-rate-limited-not-ack-gated-2026-
+#: 09-17`): the model calls `tuple_in`, gets nothing, and this text
+#: already says what that means.
+def _mailbox_notification_content(subspace: str, tuple_id: str, to_address: str) -> str:
     return (
-        f"nexus mailbox message: subspace {subspace}, tuple {tuple_id}, claim {claim_id} "
-        f"held by {claimant}. Read it with tuple_rd on that subspace, then tuple_ack "
-        "(with a reply for a request), tuple_nack, or tuple_release with the claim id."
+        f"nexus mailbox message: subspace {subspace}, tuple {tuple_id}. If its body is rendered "
+        "with this message, the mailbox hook already claimed and acked it: act on it, claim "
+        f'nothing. If not, claim it yourself with tuple_in("{subspace}", {{"to": "{to_address}"}}), '
+        "then act: tuple_ack (with a reply for a request), tuple_nack, or tuple_release with the "
+        "claim id. The waiter holds no claim."
     )
 
 
@@ -409,15 +350,40 @@ def _board_notification_content(subspace: str, tuple_id: str) -> str:
 
 
 class ChannelWaiter:
-    """One session's lifespan waiter: gates on the channel, then loops
-    ``HttpTupleStore.wait`` over its :class:`~nexus.mcp.subscriptions.
-    SubscriptionSet`, delivering board posts on cursor and mail under
-    pure back pressure.
+    """One session's lifespan waiter: loops ``HttpTupleStore.wait`` over
+    its :class:`~nexus.mcp.subscriptions.SubscriptionSet`, delivering
+    board posts and mailbox references by CURSOR, never a claim (RDR-213,
+    T2 ``nexus_rdr/213-decision-announcements-rate-limited-not-ack-gated-
+    2026-09-17``).
 
-    Constants (`lease_s`, `renew_interval_s`, `wait_timeout_s`,
-    `max_resends`) default to the production values (RDR-211 Technical
-    Design "Delivery": 300/150/25/5) and are overridden only by tests, so
-    the suite never actually waits real minutes.
+    Every subscription -- board or mailbox -- enters the SAME single
+    ``wait`` call every tick, with ``since`` set to that subspace's own
+    cursor (:meth:`_build_specs`): the position just past the last row
+    this waiter has already referenced or skipped. The spec is NEVER
+    empty. A wake returning a new mailbox row advances that mailbox's
+    cursor past it and, unless the row is dead-lettered (skipped
+    silently -- the ``UserPromptSubmit`` drain hook surfaces a dead row
+    once on its own), sends ONE reference for it, claimed or not: the
+    notification text already states what an empty ``tuple_in`` means, so
+    there is nothing to read back first. The reference is re-sent at
+    ``reannounce_interval_s`` intervals up to ``max_announces`` times
+    (:meth:`_resend_due_references`) until superseded by the next row's
+    own reference; nothing is ever read back to check whether the prior
+    row was consumed.
+
+    This makes a busy loop structurally impossible rather than excluded
+    by a rule: the cursor moves past every row this waiter has ever acted
+    on, so ``wait``'s own ``since`` filter stops that row from matching
+    again, and the call genuinely parks. Two rows arriving together are
+    referenced one wake apart (the second becomes the new cursor position
+    the very next tick, immediately, not gated on the first being acked);
+    a restart walks a backlog one reference per wake, exactly as RDR-213
+    already says a restart re-announces once more.
+
+    Constants (`wait_timeout_s`, `reannounce_interval_s`, `max_announces`)
+    default to the production values (RDR-213 Technical Design "Delivery":
+    25/150/5) and are overridden only by tests, so the suite never
+    actually waits real minutes.
 
     `sender` defaults to :func:`send_channel_notification`; tests inject
     a fake recording calls instead of touching a real stdio connection.
@@ -438,22 +404,18 @@ class ChannelWaiter:
         store_factory: Callable[[], Any],
         subs: "SubscriptionSet",
         *,
-        channel_live: bool,
         sender: Callable[[str, dict[str, str]], Awaitable[bool]] = send_channel_notification,
         persist: Callable[[], None] = lambda: None,
         state_dir: Path | None = None,
-        lease_s: int = DEFAULT_LEASE_S,
-        renew_interval_s: float = DEFAULT_RENEW_INTERVAL_S,
         wait_timeout_s: int = DEFAULT_WAIT_TIMEOUT_S,
-        max_resends: int = DEFAULT_MAX_RESENDS,
-        probe_delay_s: float = DEFAULT_PROBE_DELAY_S,
-        probe_resend_after_s: float = DEFAULT_PROBE_RESEND_AFTER_S,
+        reannounce_interval_s: float = DEFAULT_REANNOUNCE_INTERVAL_S,
+        max_announces: int = DEFAULT_MAX_ANNOUNCES,
         tick_error_backoff_s: float = DEFAULT_TICK_ERROR_BACKOFF_S,
+        min_tick_interval_s: float = DEFAULT_MIN_TICK_INTERVAL_S,
     ) -> None:
         self.session_id = session_id
         self.store_factory = store_factory
         self.subs = subs
-        self.claimant = f"waiter:{session_id}"
         self.sender = sender
         #: Best-effort T1 write-back after a board cursor advances, so a
         #: `/resume` does not re-deliver posts already shown this
@@ -466,69 +428,45 @@ class ChannelWaiter:
         #: `nexus_config_dir()` so the `nx doctor` row (bead nexus-rplay.13)
         #: can read this waiter's status cross-process.
         self.state_dir = state_dir
-        self.lease_s = lease_s
-        self.renew_interval_s = renew_interval_s
         self.wait_timeout_s = wait_timeout_s
-        self.max_resends = max_resends
-        self.probe_delay_s = probe_delay_s
-        self.probe_resend_after_s = probe_resend_after_s
+        self.reannounce_interval_s = reannounce_interval_s
+        self.max_announces = max_announces
         self.tick_error_backoff_s = tick_error_backoff_s
+        self.min_tick_interval_s = min_tick_interval_s
+        #: Consecutive ticks in `run()`'s loop faster than
+        #: `min_tick_interval_s` -- the floor's own bookkeeping, not the
+        #: fix (see `DEFAULT_MIN_TICK_INTERVAL_S`).
+        self._fast_tick_streak = 0
+        self._warned_fast_ticks = False
 
-        self._proof = "argv" if channel_live else "none"
-        self.channel_live = asyncio.Event()
-        if channel_live:
-            self.channel_live.set()
+        #: subspace -> `(created_at, id)` past the last row this waiter
+        #: has referenced OR skipped (dead-lettered) for that mailbox --
+        #: the position `_build_specs` threads into that mailbox's own
+        #: `WaitSpec.since`, exactly the board path's own cursor. Only
+        #: ever moves forward.
+        self._cursor: dict[str, tuple[str, str]] = {}
+        #: subspace -> the last reference sent for that mailbox (see
+        #: `_LastRef`) -- the whole of this design's back-pressure state.
+        self._last_ref: dict[str, _LastRef] = {}
+        #: Cumulative count of DISTINCT rows ever referenced (never
+        #: incremented on a re-send of the same reference).
+        self._announced_total = 0
 
-        self._outstanding: _Outstanding | None = None
         self._alive = False
         self._stopped = False
         self._last_wake: datetime | None = None
-        self._released_count = 0
-        self._probes_sent = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task | None = None
 
         subs.add_listener(self._on_subscription_change)
 
-    # ── credit hooks (called from tuple_ack/tuple_nack; may be a worker thread) ──
-
-    def note_credit(self, claim_id: str) -> None:
-        """The credit for the next mailbox claim: called by `tuple_ack`/
-        `tuple_nack` when the session consumes *claim_id* (RDR-211
-        decision item 6 -- "the session's ack or nack is the credit for
-        the next"). Thread-safe: FastMCP tool functions run in a worker
-        thread, never on this waiter's own event loop."""
-        self._call_soon(self._clear_outstanding, claim_id)
-
-    def _clear_outstanding(self, claim_id: str) -> None:
-        if self._outstanding is not None and self._outstanding.claim_id == claim_id:
-            self._outstanding = None
-            self._publish_status()
-
-    def note_probe_ack(self) -> None:
-        """`tuple_channel_probe()` calls this: the gate's probe fallback
-        proved live. Thread-safe, same reasoning as :meth:`note_credit`."""
-        self._call_soon(self._mark_probed)
-
-    def _mark_probed(self) -> None:
-        self._proof = "probe"
-        self.channel_live.set()
-        self._publish_status()
-
-    def _call_soon(self, fn: Callable[..., None], *args: Any) -> None:
-        loop = self._loop
-        if loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(fn, *args)
-        else:
-            fn(*args)
-
     def _on_subscription_change(self, _subs: "SubscriptionSet") -> None:
-        """RDR-211 Technical Design "Waiting": "A subscription change
-        cancels the parked wait ... and re-issues it with the new list".
-        This waiter takes the RDR's explicitly-offered alternative --
-        "let the engine's 25s cap bound it" -- rather than cancelling an
-        in-flight synchronous httpx call from another thread: every
-        `tick()` already rebuilds its `WaitSpec`s fresh from
+        """RDR-211 Technical Design "Waiting" (unchanged by RDR-213): "A
+        subscription change cancels the parked wait ... and re-issues it
+        with the new list". This waiter takes the RDR's explicitly-offered
+        alternative -- "let the engine's 25s cap bound it" -- rather than
+        cancelling an in-flight synchronous httpx call from another
+        thread: every `tick()` already rebuilds its `WaitSpec`s fresh from
         `subs.entries()`, so the new list is live at the very next tick,
         at most one `wait_timeout_s` later. This callback's only job is
         the log line the RDR asks to "record what you did"."""
@@ -537,56 +475,52 @@ class ChannelWaiter:
     # ── status (the doctor-row bead, .13, is the intended reader) ───────────
 
     def status(self) -> dict[str, Any]:
-        """`proof`: `"argv"`, `"probe"`, or `"none"` (never proved live).
-        `alive`: this waiter's task is running (never proved past
+        """`alive`: this waiter's task is running (never proved past
         `_stop_no_wait_support` or a real cancellation). `last_wake`:
         ISO-8601 timestamp of the last completed `wait()` round-trip, or
-        `None` before the first one. `unacked`: 1 while a mailbox claim
-        is outstanding, else 0 (pure back pressure caps this at one).
-        `released`: the cumulative count of claims released after
-        exhausting `max_resends`. `outstanding`: `None`, or
-        `{claim_id, subspace, tuple_id, resends, claimed_at}` for the one
-        live mailbox claim this waiter holds -- the record
-        :meth:`_adopt_persisted_outstanding` reads back at the next
-        waiter start for THIS session (RDR-211 review, Significant 1)."""
-        outstanding: dict[str, Any] | None = None
-        if self._outstanding is not None:
-            o = self._outstanding
-            outstanding = {
-                "claim_id": o.claim_id, "subspace": o.subspace, "tuple_id": o.tuple_id,
-                "resends": o.resend_count, "claimed_at": o.claimed_at,
-            }
+        `None` before the first one. `announced`: the cumulative count of
+        DISTINCT rows this waiter has ever referenced (never incremented
+        on a re-send). `pending`: how many mailboxes have a last reference
+        still under budget (`count < max_announces`) and not yet
+        superseded by a newer row's own reference -- 0 or 1 per mailbox.
+        `oldest_pending_age_s`: seconds since the oldest such reference
+        was (last) sent, or `None` when `pending` is 0."""
+        active = [ref for ref in self._last_ref.values() if ref.count < self.max_announces]
+        oldest_pending_age_s = (time.monotonic() - min(ref.sent_at for ref in active)) if active else None
         return {
-            "proof": self._proof,
             "alive": self._alive,
             "last_wake": self._last_wake.isoformat() if self._last_wake else None,
-            "unacked": 1 if self._outstanding is not None else 0,
-            "released": self._released_count,
-            "outstanding": outstanding,
+            "announced": self._announced_total,
+            "pending": len(active),
+            "oldest_pending_age_s": oldest_pending_age_s,
         }
 
     def _publish_status(self) -> None:
         """Best-effort refresh of the on-disk record (bead nexus-rplay.13)
         -- a no-op when this waiter was constructed with no `state_dir`.
-        Called at every wake (:meth:`tick`'s end), every renew and release
-        (:meth:`_renew_or_release`'s exit points), every proof change
-        (:meth:`_mark_probed`), and this loop's own start/stop, so a
-        cross-process reader never sees a record older than the waiter's
-        current state by more than one in-flight operation."""
+        Called at every wake (:meth:`tick`'s end) and this loop's own
+        start/stop, so a cross-process reader never sees a record older
+        than the waiter's current state by more than one in-flight
+        operation."""
         if self.state_dir is not None:
             write_channel_status(self.state_dir, self.session_id, self.status())
 
     # ── the loop ─────────────────────────────────────────────────────────
 
     async def run(self) -> None:
+        """The loop. The cursor design (`tick`/`_build_specs`) makes a
+        busy loop structurally impossible on its own -- `wait`'s own
+        `since` excludes every row this waiter has already referenced or
+        skipped, so a healthy tick never returns faster than a genuine
+        wake or its own capped timeout; the floor below is a defensive
+        belt on top of that, not the fix -- see
+        `DEFAULT_MIN_TICK_INTERVAL_S`."""
         self._loop = asyncio.get_running_loop()
         self._alive = True
-        await self._adopt_persisted_outstanding()
         self._publish_status()
         try:
-            if not self.channel_live.is_set():
-                await self._probe_until_live()
             while not self._stopped:
+                tick_started = time.monotonic()
                 try:
                     await self.tick()
                 except asyncio.CancelledError:
@@ -597,80 +531,23 @@ class ChannelWaiter:
                         error=repr(exc), backoff_s=self.tick_error_backoff_s,
                     )
                     await asyncio.sleep(self.tick_error_backoff_s)
+                    continue  # the backoff above already paces this tick; the floor below is redundant for it
+                elapsed = time.monotonic() - tick_started
+                if elapsed < self.min_tick_interval_s:
+                    self._fast_tick_streak += 1
+                    if self._fast_tick_streak >= _FAST_TICK_WARN_STREAK and not self._warned_fast_ticks:
+                        _log.warning(
+                            "channel_waiter_fast_tick_floor_triggered",
+                            session_id=self.session_id, streak=self._fast_tick_streak,
+                        )
+                        self._warned_fast_ticks = True
+                    await asyncio.sleep(self.min_tick_interval_s - elapsed)
+                else:
+                    self._fast_tick_streak = 0
+                    self._warned_fast_ticks = False
         finally:
             self._alive = False
             self._publish_status()
-
-    async def _probe_until_live(self) -> None:
-        """Send the probe after :attr:`probe_delay_s` (Claude Code registers
-        channel delivery shortly after the connection is up, so an immediate
-        probe is dropped), wait :attr:`probe_resend_after_s` for the
-        session's `tuple_channel_probe` call, send the probe once more if it
-        has not come, then wait for as long as the process lives. Two probes
-        total; no call, no claim, ever, in this process."""
-        await asyncio.sleep(self.probe_delay_s)
-        await self._send_probe()
-        try:
-            await asyncio.wait_for(self.channel_live.wait(), timeout=self.probe_resend_after_s)
-            return
-        except TimeoutError:
-            pass
-        await self._send_probe()
-        await self.channel_live.wait()
-
-    async def _send_probe(self) -> None:
-        if self._probes_sent >= 2:
-            return
-        self._probes_sent += 1
-        await self.sender(_PROBE_CONTENT, {"kind": "channel_probe"})
-
-    async def _adopt_persisted_outstanding(self) -> None:
-        """At waiter start, BEFORE any normal claim: read back this
-        session's last-persisted outstanding claim (if any) and try to
-        renew it (RDR-211 review, Significant 1).
-
-        A crashed process's live claim would otherwise sit untracked in
-        memory while a FRESH `_maybe_claim_mail` call -- gated only by
-        `self._outstanding is None` IN THIS PROCESS -- claims a second
-        message from a different mailbox, exceeding the one-live-claim
-        invariant across the crash: the existing same-claimant retake
-        only protects a re-claim within THAT claim's own subspace, never
-        a different one.
-
-        `renew` succeeding means the claim is still live: adopt it
-        (restoring the resend count and the original `claimed_at`) and
-        re-send its notification once, so the session sees it again
-        post-restart. `ClaimNotFoundError` means it already lapsed (a
-        successor already reclaimed it, or the sweep did) -- nothing to
-        adopt, and the stale record is left for the next `_publish_status`
-        to overwrite.
-        """
-        if self.state_dir is None:
-            return
-        status = read_channel_status(self.state_dir, self.session_id)
-        persisted = (status or {}).get("outstanding")
-        if not persisted:
-            return
-        claim_id = persisted.get("claim_id")
-        subspace = persisted.get("subspace")
-        tuple_id = persisted.get("tuple_id")
-        if not claim_id or not subspace or not tuple_id:
-            return
-        try:
-            await asyncio.to_thread(self._call, lambda t: t.renew(claim_id, self.claimant, self.lease_s))
-        except ClaimNotFoundError:
-            return
-        content = _mailbox_notification_content(subspace, tuple_id, claim_id, self.claimant)
-        meta = {"subspace": subspace, "tuple_id": tuple_id, "claim_id": claim_id, "claimant": self.claimant}
-        self._outstanding = _Outstanding(
-            subspace=subspace, tuple_id=tuple_id, claim_id=claim_id, claimant=self.claimant,
-            content=content, meta=meta,
-            next_renew_at=time.monotonic() + self.renew_interval_s,
-            resend_count=int(persisted.get("resends", 0) or 0),
-            claimed_at=persisted.get("claimed_at") or datetime.now(UTC).isoformat(),
-        )
-        await self.sender(self._outstanding.content, self._outstanding.meta)
-        self._publish_status()
 
     def _call(self, fn: Callable[[Any], Any]) -> Any:
         """Run *fn* against a freshly opened tuples store, closing it
@@ -682,33 +559,33 @@ class ChannelWaiter:
             return fn(db.tuples)
 
     async def tick(self) -> None:
-        """One iteration: renew/release a due outstanding claim, park on
-        `wait()` over the current subscription list, then deliver
-        whatever it returned. Exposed (not folded into :meth:`run`) so
-        tests can drive iterations directly instead of a real timed
-        loop."""
-        now = time.monotonic()
-        if self._outstanding is not None and now >= self._outstanding.next_renew_at:
-            await self._renew_or_release(now)
+        """One iteration. Drops the cursor and last reference of any
+        mailbox no longer subscribed (unsubscribe), then parks ONE
+        `wait()` call over EVERY subscription -- board or mailbox alike,
+        the spec is never empty -- capped to the nearest still-active
+        mailbox's next re-send point so a re-send is never late by up to
+        a full tick merely because some OTHER subspace kept the spec
+        matching sooner. Exposed (not folded into :meth:`run`) so tests
+        can drive iterations directly instead of a real timed loop."""
+        live_subspaces = {e["subspace"] for e in self.subs.entries()}
+        for subspace in list(self._cursor):
+            if subspace not in live_subspaces:
+                del self._cursor[subspace]
+        for subspace in list(self._last_ref):
+            if subspace not in live_subspaces:
+                del self._last_ref[subspace]
 
         specs = self._build_specs()
-        timeout_s = self.wait_timeout_s
-        if self._outstanding is not None:
-            remaining = self._outstanding.next_renew_at - time.monotonic()
-            timeout_s = max(0, min(self.wait_timeout_s, int(remaining)))
-        if not specs:
-            # Mailbox-only subscriptions with a claim outstanding: every
-            # mailbox is held out of the wait by back pressure and there is
-            # no board to park on. The engine refuses an empty `wait`
-            # (SchemaViolation, "must name at least one subspace"), and
-            # before bead nexus-tk2cz that refusal ended the loop for good
-            # after the FIRST mailbox delivery of any session without a
-            # board topic. Sleep until the renew is due instead.
-            await asyncio.sleep(max(1, timeout_s))
-            self._publish_status()
-            return
+        effective_timeout_s = min(self.wait_timeout_s, self._seconds_to_nearest_resend_s())
+        # `HttpTupleStore.wait`'s `timeout_s` is typed (and wired to the
+        # engine's `long timeoutSeconds`) as an integer -- floor, never
+        # round, so this tick wakes AT OR BEFORE the nearest re-send
+        # point, never after it.
+        wait_timeout_arg = max(0, int(effective_timeout_s))
         try:
-            results: list[WaitResult] = await asyncio.to_thread(self._call, lambda t: t.wait(specs, timeout_s))
+            results: list[WaitResult] = await asyncio.to_thread(
+                self._call, lambda t: t.wait(specs, wait_timeout_arg),
+            )
         except httpx.HTTPStatusError as exc:
             if exc.response is not None and exc.response.status_code == 404:
                 # The route switch's default branch on an engine predating
@@ -717,17 +594,37 @@ class ChannelWaiter:
                 self._stop_no_wait_support()
                 return
             raise  # any other status is a transient fault: `run()` logs, backs off and ticks again
+        just_referenced = await self._process_results(results)
         self._last_wake = datetime.now(UTC)
-        await self._process_results(results)
-        if self._outstanding is None:
-            await self._maybe_claim_mail()
+        await self._resend_due_references(skip=just_referenced)
         self._publish_status()
 
     def _stop_no_wait_support(self) -> None:
         self._stopped = True
         _log.warning("channel_waiter_no_wait_support", session_id=self.session_id)
 
+    def _seconds_to_nearest_resend_s(self) -> float:
+        """Seconds until the nearest still-active mailbox's next re-send
+        is due (floored at 0); `wait_timeout_s` when none is due at all --
+        either no mailbox has a last reference, or every one is already
+        spent (`count >= max_announces`, which must never re-enter this
+        calculation -- a spent reference is left alone, not resent)."""
+        now = time.monotonic()
+        due_times = [
+            ref.sent_at + self.reannounce_interval_s
+            for ref in self._last_ref.values()
+            if ref.count < self.max_announces
+        ]
+        if not due_times:
+            return float(self.wait_timeout_s)
+        return max(0.0, min(due_times) - now)
+
     def _build_specs(self) -> list[WaitSpec]:
+        """Every subscription -- board or mailbox -- enters the spec
+        every tick (T2 `nexus_rdr/213-decision-announcements-rate-
+        limited-not-ack-gated-2026-09-17`): a mailbox's own spec asks for
+        `n=1` since its own cursor, exactly the board path's own shape.
+        The spec is NEVER empty."""
         specs: list[WaitSpec] = []
         for entry in self.subs.entries():
             subspace = entry["subspace"]
@@ -735,31 +632,50 @@ class ChannelWaiter:
                 cursor = entry.get("cursor")
                 since = (cursor["created_at"], cursor["id"]) if cursor else None
                 specs.append(WaitSpec(subspace=subspace, since=since))
-            elif self._outstanding is None:
-                # Pure back pressure: a mailbox is left OUT of the wait
-                # entirely while a claim is outstanding, since claiming
-                # more mail ahead of the session's own ack/nack is
-                # exactly what this design refuses to do.
-                specs.append(WaitSpec(subspace=subspace, n=1))
+            else:
+                specs.append(WaitSpec(subspace=subspace, since=self._cursor.get(subspace)))
         return specs
 
-    async def _process_results(self, results: list[WaitResult]) -> None:
+    async def _process_results(self, results: list[WaitResult]) -> set[str]:
+        """Board posts: unchanged -- deliver each, advance the cursor,
+        persist. Mailboxes: each spec asks for `n=1`, so at most one NEW
+        row per mailbox per wake -- dead-lettered: advance the cursor
+        past it and send nothing (the drain hook surfaces a dead row once
+        on its own); otherwise reference it, claimed or not (the
+        notification text already covers an empty `tuple_in`), and
+        advance the cursor past it too.
+
+        Returns the set of mailbox subspaces just referenced THIS tick,
+        so :meth:`tick` can exclude them from :meth:`_resend_due_
+        references` -- a fresh reference's own `sent_at` is `now`, and
+        `reannounce_interval_s=0` (several tests use it to force "always
+        due" quickly) would otherwise make the SAME tick's resend pass
+        re-send it a second time immediately."""
         advanced = False
+        just_referenced: set[str] = set()
         for result in results:
-            if not result.subspace.startswith("board/"):
+            if result.subspace.startswith("board/"):
+                for row in result.tuples:
+                    await self._deliver_board_post(result.subspace, row)
+                if result.tuples:
+                    last = result.tuples[-1]
+                    self.subs.advance_cursor(result.subspace, (last.created_at or "", last.id))
+                    advanced = True
                 continue
-            for row in result.tuples:
-                await self._deliver_board_post(result.subspace, row)
-            if result.tuples:
-                last = result.tuples[-1]
-                self.subs.advance_cursor(result.subspace, (last.created_at or "", last.id))
-                advanced = True
+            for row in result.tuples:  # n=1 caps this to at most one row
+                if row.claim_state == "dead":
+                    self._cursor[result.subspace] = (row.created_at or "", row.id)
+                    continue
+                await self._reference_mailbox_row(result.subspace, row)
+                just_referenced.add(result.subspace)
         if advanced:
-            # Code review Significant 3: `self.persist()` (a T1 write-back,
-            # a synchronous HTTP call) must never run directly on the event
-            # loop -- every other store call in this class already goes
-            # through `asyncio.to_thread` for exactly this reason.
+            # Code review Significant 3 (RDR-211): `self.persist()` (a T1
+            # write-back, a synchronous HTTP call) must never run directly
+            # on the event loop -- every other store call in this class
+            # already goes through `asyncio.to_thread` for exactly this
+            # reason.
             await asyncio.to_thread(self.persist)
+        return just_referenced
 
     async def _deliver_board_post(self, subspace: str, row: TupleRow) -> None:
         meta = {"subspace": subspace, "tuple_id": row.id}
@@ -768,73 +684,40 @@ class ChannelWaiter:
                 meta[key] = row.dims[key]
         await self.sender(_board_notification_content(subspace, row.id), meta)
 
-    async def _maybe_claim_mail(self) -> None:
-        if self._outstanding is not None:
-            # "Never claim while an adopted or live outstanding exists"
-            # (RDR-211 review, Significant 1) -- enforced here too, not
-            # only by `tick()`'s `if self._outstanding is None` gate, so
-            # the invariant holds for any direct caller (tests included).
-            return
-        mailbox_subspaces = [e["subspace"] for e in self.subs.entries() if not e["subspace"].startswith("board/")]
-        candidates: list[tuple[str, str, str]] = []
-        for subspace in mailbox_subspaces:
-            rows = await asyncio.to_thread(self._call, lambda t, s=subspace: t.rd(s, {}, n=1))
-            if rows:
-                candidates.append((rows[0].created_at or "", rows[0].id, subspace))
-        if not candidates:
-            return
-        candidates.sort()
-        _, _, subspace = candidates[0]
-        # `in`/`inp` require every pinned key (unlike `rd`'s subset
-        # matching above) -- the mailbox template pins `to`, whose value
-        # is exactly the subspace's own address segment.
+    async def _reference_mailbox_row(self, subspace: str, row: TupleRow) -> None:
+        """Send ONE reference for *row* (claimed or not -- the
+        notification text already covers an empty `tuple_in`), advance
+        *subspace*'s cursor past it, and start a fresh re-send budget --
+        superseding, by simple dict overwrite, whatever reference this
+        mailbox tracked before."""
         to_address = subspace.removeprefix("mailbox/")
-        result = await asyncio.to_thread(
-            self._call,
-            lambda t, s=subspace, a=to_address: t.in_(s, {"to": a}, claimant=self.claimant, lease_s=self.lease_s),
-        )
-        if result is None:
-            return  # lost the race (the drain hook, or another waiter restart) -- fine, nothing to deliver
-        row, claim_id = result
-        meta = {"subspace": subspace, "tuple_id": row.id, "claim_id": claim_id, "claimant": self.claimant}
+        meta = {"subspace": subspace, "tuple_id": row.id}
         for key in ("from", "kind", "correlation_id"):
             if row.dims.get(key):
                 meta[key] = row.dims[key]
-        self._outstanding = _Outstanding(
-            subspace=subspace, tuple_id=row.id, claim_id=claim_id, claimant=self.claimant,
-            content=_mailbox_notification_content(subspace, row.id, claim_id, self.claimant), meta=meta,
-            next_renew_at=time.monotonic() + self.renew_interval_s,
-            claimed_at=datetime.now(UTC).isoformat(),
-        )
-        await self.sender(self._outstanding.content, self._outstanding.meta)
+        content = _mailbox_notification_content(subspace, row.id, to_address)
+        await self.sender(content, meta)
+        self._cursor[subspace] = (row.created_at or "", row.id)
+        self._last_ref[subspace] = _LastRef(content=content, meta=meta, sent_at=time.monotonic(), count=1)
+        self._announced_total += 1
 
-    async def _renew_or_release(self, now: float) -> None:
-        outstanding = self._outstanding
-        if outstanding is None:  # pragma: no cover — guarded by the caller
-            return
-        if outstanding.resend_count >= self.max_resends:
-            try:
-                await asyncio.to_thread(self._call, lambda t: t.release(outstanding.claim_id, outstanding.claimant))
-            except (ClaimNotFoundError, ClaimOwnershipError) as exc:
-                _log.warning("channel_waiter_release_failed", claim_id=outstanding.claim_id, error=str(exc))
-            self._released_count += 1
-            self._outstanding = None
-            self._publish_status()
-            return
-        try:
-            await asyncio.to_thread(
-                self._call, lambda t: t.renew(outstanding.claim_id, outstanding.claimant, self.lease_s),
-            )
-        except ClaimNotFoundError:
-            # Lapsed already -- a successor's `in_` (or the sweep) already
-            # reclaimed it; nothing left here to renew or re-notify.
-            self._outstanding = None
-            self._publish_status()
-            return
-        outstanding.resend_count += 1
-        outstanding.next_renew_at = now + self.renew_interval_s
-        await self.sender(outstanding.content, outstanding.meta)
-        self._publish_status()
+    async def _resend_due_references(self, *, skip: set[str]) -> None:
+        """Re-send every mailbox's last reference whose budget is not yet
+        spent and whose re-send point is due -- the EXACT `(content,
+        meta)` last sent, replayed verbatim; nothing is ever read back to
+        check whether the row was consumed. *skip* names the mailboxes
+        `_process_results` just referenced THIS tick -- excluded here
+        so a fresh reference (`sent_at = now`) is never ALSO resent in
+        the same tick merely because `reannounce_interval_s` happens to
+        be 0 (several tests use that to force "always due" quickly)."""
+        now = time.monotonic()
+        for subspace, ref in self._last_ref.items():
+            if subspace in skip:
+                continue
+            if ref.count < self.max_announces and (now - ref.sent_at) >= self.reannounce_interval_s:
+                await self.sender(ref.content, ref.meta)
+                ref.sent_at = now
+                ref.count += 1
 
     def start(self) -> None:
         self._task = asyncio.create_task(self.run())
@@ -867,21 +750,3 @@ def unregister_active_waiter(session_id: str) -> None:
 
 def active_waiter(session_id: str) -> ChannelWaiter | None:
     return _ACTIVE.get(session_id)
-
-
-def note_credit(session_id: str, claim_id: str) -> None:
-    """Called by `tuple_ack`/`tuple_nack` after a successful engine call
-    (RDR-211 decision item 6). A no-op when this session has no active
-    waiter (the channel is off, or this process pre-dates the waiter) --
-    the credit hook only matters to a waiter that is holding a claim."""
-    waiter = _ACTIVE.get(session_id)
-    if waiter is not None:
-        waiter.note_credit(claim_id)
-
-
-def note_probe_ack(session_id: str) -> None:
-    """Called by the `tuple_channel_probe` MCP tool. A no-op when this
-    session has no active waiter."""
-    waiter = _ACTIVE.get(session_id)
-    if waiter is not None:
-        waiter.note_probe_ack()

@@ -1527,15 +1527,6 @@
       },
       "qualname": "tuple_ack"
     },
-    "tuple_channel_probe": {
-      "is_async": false,
-      "module": "nexus.mcp.core",
-      "parameters": {
-        "properties": {},
-        "type": "object"
-      },
-      "qualname": "tuple_channel_probe"
-    },
     "tuple_in": {
       "is_async": false,
       "module": "nexus.mcp.core",

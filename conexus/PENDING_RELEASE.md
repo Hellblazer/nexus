@@ -42,3 +42,4 @@ mechanize, it matters enough to ship.
 - `conexus/skills/rdr-gate-checklist/SKILL.md`: the critique is stored under the round-numbered title the preamble prints (`{id}-gate-critique-{date}-r{N}`), `{repo}_rdr` is named as its only home, and Layer 2 reads the preamble's computed census, with `Layer 2 VACUOUS` as a named non-pass (bead nexus-5r0ho).
 - `conexus/skills/rdr-research/SKILL.md`: `add` takes `--classification` and `--method` from closed sets; the gate's Layer 2 reads them (bead nexus-5r0ho).
 - `conexus/skills/rdr-fix-checklist/SKILL.md`: the fix-check record opens with `dispatches: 3` and one `FIX CHECK:` line per run; the gate preamble counts them (bead nexus-5r0ho).
+- `conexus/hooks/scripts/auto-approve-nx-mcp.sh`: `tuple_channel_probe` dropped from the auto-approval allowlist, RDR-213's deleted proof-gate tool (bead nexus-gomuo.1).

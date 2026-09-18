@@ -5841,8 +5841,9 @@ _TUPLE_CHANNEL_DELIVERY_LABEL = "tuples.channel_delivery"
 
 
 def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[HealthResult]:
-    """RDR-211 Phase 1 Step 3 doctor row 3 (bead nexus-rplay.13): the
-    `claude/channel` push-delivery waiter's own status for THIS session.
+    """RDR-211 Phase 1 Step 3 doctor row 3 (bead nexus-rplay.13), rewritten
+    under RDR-213: the `claude/channel` push-delivery waiter's own status
+    for THIS session.
 
     `nx doctor` runs in the CLI process; the waiter runs in the session's
     `nx-mcp` process. The two never share memory, so this row reads the
@@ -5850,12 +5851,11 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
     session id (`nexus.mcp.channel.write_channel_status`) via
     `nexus.mcp.channel.read_channel_status` -- no engine call, no network
     round trip, purely local files. A record's mere presence is how this
-    row infers "the capability is declared": only the waiter that ran
-    `run_stdio_with_channel`'s declaration ever writes one, so a session
-    with no record never declared the capability at all, as far as this
-    row can observe -- it makes no independent claim about the handshake,
-    which Phase 1 Step 0 found carries no channel marker either way (T2
-    `nexus_rdr/211-spike-4-channel-2026-09-17`).
+    row infers "the waiter has run here": only a waiter that completed at
+    least one wake ever writes one, so a session with no record has no
+    live waiter, as far as this row can observe -- RDR-213 deleted the
+    proof gate entirely, so there is no "declared but unproven" state left
+    to report; the waiter starts parking at lifespan start unconditionally.
 
     Not applicable (informational, ok=True, never a WARN, never
     allowlisted in the fresh-install MVV -- the nexus-7zhag doctrine) in
@@ -5865,26 +5865,19 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
     a session whose MCP server predates this feature or has not
     completed its first tick yet).
 
-    Declared but never proven live (`proof == "none"`) is ALSO
-    informational, ok=True, never a WARN -- Sam's decision makes the
-    channel opt-in, so a session launched without a channel flag
-    (`--channels plugin:conexus@nexus-plugins` or
-    `--dangerously-load-development-channels server:nexus`) and never
-    calling `tuple_channel_probe` is the ordinary case, not a defect; the
-    drain hook is the floor either way.
+    The waiter alive with a fresh `last_wake` (within
+    :data:`_TUPLE_CHANNEL_DELIVERY_STALE_S` of now) is OK, reporting wake
+    age, `announced` (the cumulative count of distinct rows ever pushed),
+    `pending` (0 or 1 -- a row announced and not yet gone) and
+    `oldest_pending_age_s` when `pending` is nonzero. A session launched
+    without a channel flag (`--channels plugin:conexus@nexus-plugins` or
+    `--dangerously-load-development-channels server:nexus`) reports the
+    same shape as any other idle waiter -- RDR-213 deleted the proof gate,
+    so there is no separate "declared but not proven" state to report;
+    the drain hook is the floor either way.
 
-    Proof `"argv"` or `"probe"` and the waiter alive with a fresh
-    `last_wake` (within :data:`_TUPLE_CHANNEL_DELIVERY_STALE_S` of now) is
-    OK, reporting proof, wake age, `unacked` (the live back-pressure
-    gauge, 0 or 1) and `released` (the cumulative count of claims
-    returned to the floor after exhausting resends -- mentioned plainly
-    whenever it is nonzero, in every branch, never itself a reason to
-    warn: whether it GREW since the last `nx doctor` run is not something
-    a stateless row can know).
-
-    Proof present but the waiter is not alive, or its last wake is
-    stale, is a WARN: push delivery for this session is not actually
-    happening even though the gate once proved it live, and the fix is
+    The waiter not alive, or its last wake stale, is a WARN: push
+    delivery for this session is not actually happening, and the fix is
     to restart the MCP server. The drain hook still delivers at the next
     prompt either way, so this is a soft warning, never fatal.
 
@@ -5904,7 +5897,7 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
             label=label, ok=True,
             detail=(
                 "informational — no active session resolvable; nothing to check "
-                "for the RDR-211 channel-delivery waiter"
+                "for the RDR-213 channel-delivery waiter"
             ),
         )]
 
@@ -5917,33 +5910,19 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
             label=label, ok=True,
             detail=(
                 "informational — no channel-waiter status recorded for this "
-                "session; the nexus MCP server has not run the RDR-211 waiter "
-                "here (a CLI-only session, a virgin box, or an MCP server that "
+                "session; the nexus MCP server has not run the waiter here "
+                "(a CLI-only session, a virgin box, or an MCP server that "
                 "predates this feature or has not completed its first wait "
                 "yet). Mail still arrives via the drain hook at the next prompt."
             ),
         )]
 
-    proof = status.get("proof", "none")
     alive = bool(status.get("alive", False))
     last_wake = status.get("last_wake")
-    unacked = status.get("unacked", 0)
-    released = status.get("released", 0)
+    announced = status.get("announced", 0)
+    pending = status.get("pending", 0)
+    oldest_pending_age_s = status.get("oldest_pending_age_s")
 
-    if proof == "none":
-        detail = (
-            "capability declared; channel not proven live for this session "
-            "(no launch flag on the claude command line -- `--channels "
-            "plugin:conexus@nexus-plugins` (dialog-free once allowlisted) or "
-            "`--dangerously-load-development-channels server:nexus` -- and no "
-            "probe reply; alias claude to the first form to make it stick); "
-            "mail arrives at the next prompt through the drain hook"
-        )
-        if released:
-            detail += f"; {released} message(s) previously released to the floor after exhausting resends"
-        return [HealthResult(label=label, ok=True, detail=detail)]
-
-    # proof is "argv" or "probe" past this point.
     age_s: float | None = None
     if isinstance(last_wake, str) and last_wake:
         try:
@@ -5953,6 +5932,9 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
 
     stale = age_s is not None and age_s > _TUPLE_CHANNEL_DELIVERY_STALE_S
     wake_desc = f"{age_s:.0f}s ago" if age_s is not None else "not recorded yet"
+    pending_desc = f"pending={pending}"
+    if pending and isinstance(oldest_pending_age_s, (int, float)):
+        pending_desc += f" (oldest {oldest_pending_age_s:.0f}s)"
 
     if not alive or stale:
         reason = "the waiter is not alive" if not alive else (
@@ -5961,8 +5943,8 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=(
-                f"proof={proof}; {reason} for this session; last wake "
-                f"{wake_desc}; unacked={unacked}, released={released}"
+                f"{reason} for this session; last wake {wake_desc}; "
+                f"announced={announced}, {pending_desc}"
             ),
             fix_suggestions=["Restart the MCP server: /mcp"],
         )]
@@ -5970,8 +5952,7 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
     return [HealthResult(
         label=label, ok=True,
         detail=(
-            f"channel live (proof={proof}); waiter alive; last wake {wake_desc}; "
-            f"unacked={unacked}, released={released}"
+            f"waiter alive; last wake {wake_desc}; announced={announced}, {pending_desc}"
         ),
     )]
 

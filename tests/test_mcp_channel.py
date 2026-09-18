@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""RDR-211 Phase 1 Step 3 (bead nexus-rplay.10): the `claude/channel`
-capability declaration and the lifespan waiter (`nexus.mcp.channel`).
+"""RDR-213 (amends RDR-211 Phase 1 Step 3, bead nexus-tk2cz): the
+`claude/channel` capability declaration and the lifespan waiter
+(`nexus.mcp.channel`), with the proof gate and claim-at-delivery deleted,
+and (T2 `nexus_rdr/213-decision-announcements-rate-limited-not-ack-gated-
+2026-09-17`) the mailbox path rebuilt on the SAME cursor shape the board
+path already used.
 
 Layers, cheapest first:
 
@@ -9,43 +13,30 @@ Layers, cheapest first:
   harness (``mcp.shared.memory``) drives a REAL low-level `Server.run()`
   round trip and reads the returned `InitializeResult` -- no stdio, no
   engine.
-- ``TestChannelArgvGate``: pure, a fake `ps` reader.
-- ``TestChannelWaiterFakeStore``: a `_FakeTupleStore` (mirrors
-  ``tests/test_subscriptions.py``'s own `_FakeTuples`) drives every
-  `ChannelWaiter` branch deterministically with short injected constants
-  -- back pressure, the re-send cap, the old-engine 404 stop, board
-  delivery + cursor advance, and the probe gate.
-- ``TestChannelWaiterRealEngine`` (``t2_service_env``): the one property a
-  fake store cannot prove -- the engine's own same-claimant retake, which
-  is what makes a restarted waiter's retake spend no attempt.
-- ``TestCreditHookWiring``: `tuple_ack`/`tuple_nack` call
-  `channel.note_credit`; `tuple_channel_probe` calls
-  `channel.note_probe_ack`.
+- ``TestChannelWaiterFakeStore``: a `_FakeTupleStore` -- a minimally
+  stateful in-memory model of the engine's own `queryOnce` semantics
+  (since/n/ordering/claim_state) -- drives every `ChannelWaiter` branch
+  deterministically.
+- ``TestChannelWaiterRealEngine`` (``t2_service_env``): the properties a
+  fake store cannot prove -- genuine parking against a real `wait()`,
+  and the cursor design's one loss-of-liveness risk under concurrent
+  writers.
+- ``TestChannelStatusPublish``: the on-disk record `nx doctor` reads.
 """
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import threading
 import time
 import uuid
-from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 import pytest
 
-from nexus.db.t2.records import TupleRow, WaitResult
+from nexus.db.t2.records import TupleRow, WaitResult, WaitSpec
 from nexus.mcp import channel
-
-
-def _row(
-    id_: str, subspace: str, body: str | None, *, dims: dict[str, str] | None = None,
-    created_at: str = "2026-01-01T00:00:00+00:00",
-) -> TupleRow:
-    return TupleRow(
-        id=id_, subspace=subspace, template=subspace.split("/")[0], keys={}, dims=dims or {},
-        body=body, claim_state=None, claimant=None, lease_until=None, attempts=0,
-        consumed_at=None, consumed_by=None, expires_at=None, created_at=created_at,
-    )
 
 
 class TestCapabilityDeclaration:
@@ -126,85 +117,118 @@ class TestCapabilityDeclaration:
                     tg.cancel_scope.cancel()
 
 
-class TestChannelArgvGate:
-    def test_channels_flag_is_detected(self) -> None:
-        assert channel.detect_channel_argv(123, argv_reader=lambda _pid: "claude --channels server:nexus")
-
-    def test_dangerously_load_development_channels_flag_is_detected(self) -> None:
-        argv = "claude --dangerously-load-development-channels server:nexus"
-        assert channel.detect_channel_argv(123, argv_reader=lambda _pid: argv)
-
-    def test_plugin_form_is_detected_whatever_the_marketplace(self) -> None:
-        """Bead nexus-tk2cz (measured 2026-09-17): a plugin on the effective
-        channel allowlist loads with `--channels plugin:conexus@<marketplace>`
-        and no dialog; the argv leg must prove that launch too, or every
-        such session falls back to the probe."""
-        for argv in (
-            "claude --channels plugin:conexus@nexus-plugins",
-            "claude --dangerously-load-development-channels plugin:conexus@local-dev",
-        ):
-            assert channel.detect_channel_argv(123, argv_reader=lambda _pid, a=argv: a), argv
-
-    def test_a_server_whose_name_merely_starts_with_nexus_is_not_ours(self) -> None:
-        for argv in (
-            "claude --dangerously-load-development-channels server:nexusdev",
-            "claude --channels server:nexus-catalog",
-        ):
-            assert not channel.detect_channel_argv(123, argv_reader=lambda _pid, a=argv: a), argv
-
-    def test_another_plugins_channel_is_not_ours(self) -> None:
-        assert not channel.detect_channel_argv(
-            123, argv_reader=lambda _pid: "claude --channels plugin:telegram@claude-plugins-official",
-        )
-
-    def test_plain_launch_is_not_detected(self) -> None:
-        assert not channel.detect_channel_argv(123, argv_reader=lambda _pid: "claude --resume abc123")
-
-    def test_unreadable_argv_is_not_detected(self) -> None:
-        assert not channel.detect_channel_argv(123, argv_reader=lambda _pid: "")
-
-    def test_default_reader_never_raises_on_a_bogus_pid(self) -> None:
-        # No injected reader: exercises the real `ps` subprocess path
-        # against a pid essentially guaranteed not to exist.
-        assert channel._read_parent_command(999_999) == "" or isinstance(channel._read_parent_command(999_999), str)
-
-
 class _FakeTupleStore:
-    """Records every call; `wait`/`rd`/`in_` are pre-loaded with canned
-    return values per test. Mirrors `tests/test_subscriptions.py`'s own
-    `_FakeTuples` in spirit -- a store double, never a real engine."""
+    """A minimally-stateful in-memory model of the engine's own
+    `queryOnce` semantics (`TupleRepository.java`, confirmed live by
+    `TestChannelWaiterRealEngine::
+    test_wait_returns_claimed_and_dead_rows_not_just_available_ones`):
+    one append-only, creation-ordered table per subspace (`seed()`
+    appends; nothing else adds rows). `wait` returns UNCONSUMED rows
+    (claimed and dead-lettered included, never filtered on
+    `claim_state`) strictly after `since`, capped at `n`, in
+    `(created_at, id)` order -- exactly `queryOnce`'s own contract. It
+    returns immediately with whatever specs currently match (there is no
+    real blocking here -- honouring `timeout_s` with a genuine
+    wall-clock wait would cost the suite real seconds per empty-spec
+    call for no test-value); a spec with no match is simply ABSENT from
+    the result, never present with empty `tuples` (`WaitResult`'s own
+    documented contract).
+
+    `claim`/`release`/`dead_letter`/`consume` mutate a row's state,
+    mirroring the real engine operation that produces each
+    `claim_state`/`consumed_at` value (`tuple_in`, `tuple_release`,
+    repeated `tuple_nack` to `max_attempts`, and an ack, respectively).
+    `max_calls` is a fail-fast busy-loop guard, orthogonal to the
+    stateful table -- the cursor design (T2 `nexus_rdr/213-decision-
+    announcements-rate-limited-not-ack-gated-2026-09-17`) has no
+    reconcile path any more, so `rd` is never called by the waiter at
+    all; this fake still implements it (mirroring `wait`'s own read
+    path) purely so a test can assert it stays at zero."""
 
     def __init__(self) -> None:
+        self._rows: dict[str, list[TupleRow]] = {}
+        self._seq = 0
         self.wait_calls: list[tuple[list, int]] = []
-        self.rd_calls: list[str] = []
-        self.in_calls: list[tuple[str, str, int]] = []
-        self.renew_calls: list[tuple[str, str, int]] = []
-        self.release_calls: list[tuple[str, str]] = []
-        self.wait_results: list[list[WaitResult]] = []
         self.wait_raises: Exception | None = None
-        self.rd_results: dict[str, list[TupleRow]] = {}
-        self.in_results: dict[str, tuple[TupleRow, str] | None] = {}
+        self.rd_calls: list[tuple[str, dict | None, int, tuple | None, int]] = []
+        #: Fail-fast busy-loop guard: when set, `wait`+`rd` calls combined
+        #: past this count raise instead of letting a genuine mechanism
+        #: regression spin for the whole test's real-time window.
+        self.max_calls: int | None = None
+
+    def _check_max_calls(self) -> None:
+        if self.max_calls is not None and (len(self.wait_calls) + len(self.rd_calls)) > self.max_calls:
+            raise RuntimeError(
+                f"busy-loop guard tripped: more than {self.max_calls} wait+rd calls "
+                f"(wait={len(self.wait_calls)}, rd={len(self.rd_calls)}) -- failing fast "
+                "instead of spinning for the rest of the test's real-time window"
+            )
+
+    # ── table setup, mirroring the real engine operation that produces
+    # ── each state ───────────────────────────────────────────────────
+
+    def seed(
+        self, subspace: str, id_: str, body: str | None = None, *,
+        claim_state: str | None = None, dims: dict[str, str] | None = None,
+    ) -> TupleRow:
+        """Append a new row to *subspace*'s table -- a real `tuple_out`.
+        `created_at` is this store's own monotonic sequence, zero-padded
+        so lexicographic string ordering matches insertion order exactly
+        -- insertion order IS creation order, as the real engine
+        guarantees. Returns the row for convenience."""
+        self._seq += 1
+        row = TupleRow(
+            id=id_, subspace=subspace, template=subspace.split("/")[0], keys={}, dims=dims or {},
+            body=body, claim_state=claim_state, claimant=None, lease_until=None, attempts=0,
+            consumed_at=None, consumed_by=None, expires_at=None, created_at=f"{self._seq:020d}",
+        )
+        self._rows.setdefault(subspace, []).append(row)
+        return row
+
+    def _mutate(self, subspace: str, id_: str, **changes: Any) -> None:
+        rows = self._rows.get(subspace, [])
+        for i, row in enumerate(rows):
+            if row.id == id_:
+                rows[i] = dataclasses.replace(row, **changes)
+                return
+        raise KeyError(f"{subspace}/{id_} was never seeded")
+
+    def claim(self, subspace: str, id_: str) -> None:
+        self._mutate(subspace, id_, claim_state="claimed")
+
+    def release(self, subspace: str, id_: str) -> None:
+        self._mutate(subspace, id_, claim_state=None)
+
+    def dead_letter(self, subspace: str, id_: str) -> None:
+        self._mutate(subspace, id_, claim_state="dead")
+
+    def consume(self, subspace: str, id_: str) -> None:
+        self._mutate(subspace, id_, consumed_at="2026-01-01T00:00:01+00:00")
+
+    # ── the read path ─────────────────────────────────────────────────
+
+    def _unconsumed(self, subspace: str, since: tuple[str, str] | None, n: int) -> list[TupleRow]:
+        rows = [r for r in self._rows.get(subspace, []) if r.consumed_at is None]
+        if since is not None:
+            rows = [r for r in rows if (r.created_at, r.id) > since]
+        return rows[:n]
+
+    def rd(self, subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0):
+        self.rd_calls.append((subspace, keys_pattern, n, since, timeout_s))
+        self._check_max_calls()
+        return self._unconsumed(subspace, since, n)
 
     def wait(self, specs, timeout_s):
         self.wait_calls.append((list(specs), timeout_s))
+        self._check_max_calls()
         if self.wait_raises is not None:
             raise self.wait_raises
-        return self.wait_results.pop(0) if self.wait_results else []
-
-    def rd(self, subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0):
-        self.rd_calls.append(subspace)
-        return list(self.rd_results.get(subspace, []))
-
-    def in_(self, subspace, keys_pattern, *, claimant, lease_s, timeout_s=0):
-        self.in_calls.append((subspace, claimant, lease_s))
-        return self.in_results.get(subspace)
-
-    def renew(self, claim_id, claimant, lease_s):
-        self.renew_calls.append((claim_id, claimant, lease_s))
-        return datetime.now(UTC)
-
-    def release(self, claim_id, claimant):
-        self.release_calls.append((claim_id, claimant))
+        results = []
+        for spec in specs:
+            rows = self._unconsumed(spec.subspace, spec.since, spec.n)
+            if rows:
+                results.append(WaitResult(subspace=spec.subspace, tuples=rows))
+        return results
 
 
 class _Db:
@@ -222,13 +246,69 @@ def _fake_store_factory(fake: _FakeTupleStore):
     return lambda: _Db(fake)
 
 
+class _CountingTuples:
+    """Wraps a REAL `HttpTupleStore.tuples` handle, counting `wait()`/
+    `rd()` calls without touching production code -- for the real-engine
+    busy-loop / stop-rule tests. `counts["max_calls"]`, when set (not
+    `None`), is a fail-fast busy-loop guard: a combined wait+rd count
+    past it raises instead of letting a genuine mechanism regression
+    spin against the real engine for the whole test's window."""
+
+    def __init__(self, real: Any, counts: dict[str, int | None]) -> None:
+        self._real = real
+        self._counts = counts
+
+    def _check_max_calls(self) -> None:
+        max_calls = self._counts.get("max_calls")
+        if max_calls is not None and (self._counts["wait"] + self._counts["rd"]) > max_calls:
+            raise RuntimeError(
+                f"busy-loop guard tripped: more than {max_calls} wait+rd calls "
+                f"(wait={self._counts['wait']}, rd={self._counts['rd']})"
+            )
+
+    def wait(self, *args: Any, **kwargs: Any) -> Any:
+        self._counts["wait"] += 1
+        self._check_max_calls()
+        return self._real.wait(*args, **kwargs)
+
+    def rd(self, *args: Any, **kwargs: Any) -> Any:
+        self._counts["rd"] += 1
+        self._check_max_calls()
+        return self._real.rd(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+class _CountingDb:
+    def __init__(self, counts: dict[str, int]) -> None:
+        from nexus.mcp_infra import t2_ctx  # noqa: PLC0415 — test-local, mirrors the sibling real-engine tests' own deferred import
+
+        self._real = t2_ctx()
+        self._counts = counts
+        self.tuples: _CountingTuples | None = None
+
+    def __enter__(self) -> "_CountingDb":
+        real_db = self._real.__enter__()
+        self.tuples = _CountingTuples(real_db.tuples, self._counts)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return self._real.__exit__(*exc)
+
+
+def _counting_store_factory(counts: dict[str, int]):
+    return lambda: _CountingDb(counts)
+
+
 class _FakeSender:
-    def __init__(self) -> None:
+    def __init__(self, *, always_ok: bool = True) -> None:
         self.calls: list[tuple[str, dict[str, str]]] = []
+        self._always_ok = always_ok
 
     async def __call__(self, content: str, meta: dict[str, str]) -> bool:
         self.calls.append((content, meta))
-        return True
+        return self._always_ok
 
 
 def _subs(session_id: str):
@@ -237,171 +317,310 @@ def _subs(session_id: str):
     return SubscriptionSet(session_id=session_id)
 
 
+def _dead_letter_n_rows(addr: str, to_key: str, claimant: str, count: int, prefix: str = "dead") -> None:
+    """Create *count* real tuples in *addr*, keyed to *to_key*, and
+    dead-letter each one in turn (repeated claim+nack to the mailbox
+    template's own `max_attempts`) -- real engine operations, real
+    `claim_state="dead"` rows, for the real-engine tests below.
+    `tuple_in` always claims the OLDEST unclaimed row matching its exact
+    `keys_pattern`, so nacking one to the cap before moving on
+    dead-letters rows in creation order."""
+    from nexus.mcp.core import tuple_in, tuple_nack, tuple_out, tuple_registry  # noqa: PLC0415 — test-local, mirrors sibling real-engine helpers
+
+    reg = tuple_registry()
+    mailbox_template = next(t for t in reg["templates"] if t["name"] == "mailbox/<address>")
+    max_attempts = mailbox_template["take"]["max_attempts"]
+    for i in range(count):
+        tuple_out(
+            addr, {"to": to_key}, {"from": f"sender-{prefix}-{i}"}, f"{prefix}-{i}", nonce=uuid.uuid4().hex,
+        )
+        for _attempt in range(max_attempts):
+            claim = tuple_in(addr, {"to": to_key}, claimant=claimant, lease_s=300)
+            assert claim is not None and "error" not in claim
+            tuple_nack(claim["claim_id"], claimant)
+
+
 class TestChannelWaiterFakeStore:
-    def test_argv_proof_starts_channel_live(self) -> None:
-        session_id = str(uuid.uuid4())
-        fake = _FakeTupleStore()
-        waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=True,
-        )
-        assert waiter.channel_live.is_set()
-        assert waiter.status()["proof"] == "argv"
+    """The cursor design's Test Plan scenarios against the fake store
+    (T2 `nexus_rdr/213-decision-announcements-rate-limited-not-ack-
+    gated-2026-09-17`)."""
 
     @pytest.mark.asyncio
-    async def test_probe_gate_unblocks_on_note_probe_ack(self) -> None:
-        session_id = str(uuid.uuid4())
-        fake = _FakeTupleStore()
-        sender = _FakeSender()
-        waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=False, sender=sender,
-            probe_delay_s=0,
-        )
-        assert not waiter.channel_live.is_set()
-        assert waiter.status()["proof"] == "none"
-        run_task = asyncio.create_task(waiter.run())
-        await asyncio.sleep(0.05)
-        # Sent exactly one probe notification so far, never claimed anything.
-        assert sum(1 for _content, meta in sender.calls if meta.get("kind") == "channel_probe") == 1
-        assert fake.in_calls == []
-        waiter.note_probe_ack()
-        await asyncio.sleep(0.05)
-        assert waiter.status()["proof"] == "probe"
-        run_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await run_task
-
-    @pytest.mark.asyncio
-    async def test_never_probed_never_claims(self) -> None:
-        """"No call, no claim, ever, in that process" (T2
-        nexus_rdr/211-decision-waiter-gate-2026-09-17)."""
-        session_id = str(uuid.uuid4())
-        fake = _FakeTupleStore()
-        row = _row("t1", f"mailbox/{session_id}", "hello")
-        fake.rd_results[f"mailbox/{session_id}"] = [row]
-        fake.in_results[f"mailbox/{session_id}"] = (row, "claim-1")
-        waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=False, sender=_FakeSender(),
-            probe_delay_s=0,
-        )
-        run_task = asyncio.create_task(waiter.run())
-        await asyncio.sleep(0.1)
-        assert fake.in_calls == []
-        run_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await run_task
-
-    @pytest.mark.asyncio
-    async def test_back_pressure_second_claim_withheld_until_credit(self) -> None:
-        """Mutation-check target: removing the `if self._outstanding is
-        None` guard around `_maybe_claim_mail` (or leaving the mailbox
-        spec in `_build_specs` while a claim is outstanding) must fail
-        this test."""
+    async def test_one_row_is_referenced_once_and_the_cursor_advances(self) -> None:
+        """(a) one row: referenced exactly once; the cursor advances
+        past it so it can never match again."""
         session_id = str(uuid.uuid4())
         addr = f"mailbox/{session_id}"
         fake = _FakeTupleStore()
-        row1 = _row("t1", addr, "first")
-        row2 = _row("t2", addr, "second")
-        fake.rd_results[addr] = [row1]
-        fake.in_results[addr] = (row1, "claim-1")
+        row = fake.seed(addr, "t1", "hello")
         sender = _FakeSender()
-        waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=True, sender=sender,
-            renew_interval_s=10_000.0,  # never due within this test
-        )
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
 
-        await waiter.tick()  # claims row1
-        assert len(fake.in_calls) == 1
-        assert waiter.status()["unacked"] == 1
-        expected_1 = channel._mailbox_notification_content(addr, "t1", "claim-1", waiter.claimant)  # noqa: SLF001
-        assert sender.calls[-1] == (expected_1, waiter._outstanding.meta)  # noqa: SLF001 — white-box assertion
-        assert "first" not in expected_1, "the notification must never carry the tuple body"
-
-        # A second tick, still no credit: the mailbox must be OUT of the
-        # wait spec list, and _maybe_claim_mail must not run at all.
-        fake.rd_results[addr] = [row2]  # a second message has since arrived
-        fake.in_results[addr] = (row2, "claim-2")
         await waiter.tick()
-        assert len(fake.in_calls) == 1, "a second claim was attempted before the first was credited"
-        # With the one mailbox held out and no board subscribed there is
-        # nothing to park on, so the tick sleeps instead of sending the
-        # engine an empty `wait` (bead nexus-tk2cz): no new wait call at all.
         assert len(fake.wait_calls) == 1
-        assert not any(spec.subspace == addr for specs, _t in fake.wait_calls[1:] for spec in specs)
+        mail_sends = [m for _c, m in sender.calls if m.get("tuple_id") == "t1"]
+        assert len(mail_sends) == 1
+        assert waiter._cursor[addr] == (row.created_at, "t1")  # noqa: SLF001
 
-        # The credit arrives (as tuple_ack/tuple_nack would supply it) --
-        # only NOW may the second message be claimed.
-        waiter.note_credit("claim-1")
-        await waiter.tick()
-        assert len(fake.in_calls) == 2
-        expected_2 = channel._mailbox_notification_content(addr, "t2", "claim-2", waiter.claimant)  # noqa: SLF001
-        assert sender.calls[-1] == (expected_2, waiter._outstanding.meta)  # noqa: SLF001
-        assert "second" not in expected_2
+        await waiter.tick()  # since now excludes t1 -- nothing new, no re-send (cadence not due)
+        assert len(fake.wait_calls) == 2, "every tick calls wait() exactly once"
+        mail_sends = [m for _c, m in sender.calls if m.get("tuple_id") == "t1"]
+        assert len(mail_sends) == 1
+        assert len(fake.rd_calls) == 0, "nothing is ever read back"
 
     @pytest.mark.asyncio
-    async def test_resend_cap_then_release(self) -> None:
-        """Mutation-check target: widening `max_resends` or dropping the
-        `>=` -> `>` comparison must fail this test at the boundary."""
+    async def test_two_rows_arriving_together_are_referenced_one_wake_apart(self) -> None:
+        """(b) two rows arriving together: two references, one wake
+        apart, in (created_at, id) order -- the mailbox spec's own `n=1`
+        means only the oldest unreferenced row appears per wake."""
         session_id = str(uuid.uuid4())
         addr = f"mailbox/{session_id}"
         fake = _FakeTupleStore()
-        row = _row("t1", addr, "unacked-forever")
-        fake.rd_results[addr] = [row]
-        fake.in_results[addr] = (row, "claim-1")
+        fake.seed(addr, "t1", "first")
+        fake.seed(addr, "t2", "second")
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
 
-        # Once released, the fake "forgets" the row -- simulating that
-        # nothing else is waiting to claim it -- so the SAME tick's
-        # unconditional re-check (`tick()` always tries `_maybe_claim_mail`
-        # once `_outstanding` clears) does not immediately re-claim it and
-        # mask the release this test is asserting.
-        orig_release = fake.release
+        await waiter.tick()
+        assert [m.get("tuple_id") for _c, m in sender.calls] == ["t1"]
 
-        def _release_and_forget(claim_id: str, claimant: str) -> None:
-            orig_release(claim_id, claimant)
-            fake.rd_results[addr] = []
-            fake.in_results[addr] = None
+        await waiter.tick()
+        assert [m.get("tuple_id") for _c, m in sender.calls] == ["t1", "t2"]
+        assert waiter.status()["announced"] == 2
 
-        fake.release = _release_and_forget
-
+    @pytest.mark.asyncio
+    async def test_an_ignored_reference_is_resent_five_times_then_falls_silent(self) -> None:
+        """(c) an ignored reference is re-sent at `reannounce_interval_s`
+        up to `max_announces` times, then left alone."""
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        fake.seed(addr, "t1", "unread-forever")
         sender = _FakeSender()
         waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=True, sender=sender,
-            renew_interval_s=0.0, max_resends=5,  # every subsequent tick is immediately "due"
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            reannounce_interval_s=0.0, max_announces=5, wait_timeout_s=0,
         )
 
-        await waiter.tick()  # the initial claim + send (not a resend)
-        assert waiter.status()["unacked"] == 1
-        for _ in range(5):
+        for _ in range(11):  # 1 initial + 4 resends reaches the cap; the rest must stay silent
             await waiter.tick()
-        assert len(fake.renew_calls) == 5
-        assert len(fake.release_calls) == 0, "released before exhausting all five re-sends"
-        assert waiter.status()["unacked"] == 1
 
-        await waiter.tick()  # the sixth check: exhausted -> release
-        assert len(fake.release_calls) == 1
-        assert fake.release_calls[0] == ("claim-1", waiter.claimant)
-        assert waiter.status()["unacked"] == 0
-        assert waiter.status()["released"] == 1
-        # One initial send + five re-sends, all carrying the SAME content/claim_id
-        # -- the fixed reference template, never the tuple body.
-        mail_sends = [c for c in sender.calls if c[1].get("claim_id") == "claim-1"]
-        assert len(mail_sends) == 6
-        expected = channel._mailbox_notification_content(addr, "t1", "claim-1", waiter.claimant)  # noqa: SLF001
-        assert all(content == expected for content, _meta in mail_sends)
-        assert "unacked-forever" not in expected
+        mail_sends = [m for _c, m in sender.calls if m.get("tuple_id") == "t1"]
+        assert len(mail_sends) == 5, "must stop at max_announces=5 and never exceed it"
+        assert waiter.status()["announced"] == 1
+        assert waiter.status()["pending"] == 0, "spent -- no longer counts as pending"
+
+    @pytest.mark.asyncio
+    async def test_a_new_row_supersedes_the_resend_budget_of_the_old_one(self) -> None:
+        """(c) a new row supersedes whatever the mailbox was tracking --
+        by simple dict overwrite, never a merge of two budgets."""
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        fake.seed(addr, "t1", "first")
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            reannounce_interval_s=10_000.0, max_announces=5, wait_timeout_s=0,
+        )
+
+        await waiter.tick()  # t1 referenced, count=1
+        await waiter.tick()  # nothing new, no resend due
+        fake.seed(addr, "t2", "second")
+        await waiter.tick()  # t2 referenced -- supersedes t1's entry entirely
+
+        mail_sends = [m.get("tuple_id") for _c, m in sender.calls]
+        assert mail_sends == ["t1", "t2"]
+        assert waiter.status()["announced"] == 2
+        assert waiter.status()["pending"] == 1, "only ONE active last-reference per mailbox -- t2's, not both"
+
+    @pytest.mark.asyncio
+    async def test_a_claimed_row_seen_at_the_wake_gets_one_reference_nothing_read_back(self) -> None:
+        """(d) a row already claimed when the wake sees it gets one
+        reference like any other -- the notification text already
+        covers an empty `tuple_in`, so nothing is ever read back."""
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        fake.seed(addr, "t1", "already-claimed", claim_state="claimed")
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
+
+        await waiter.tick()
+
+        mail_sends = [m for _c, m in sender.calls if m.get("tuple_id") == "t1"]
+        assert len(mail_sends) == 1
+        assert len(fake.rd_calls) == 0
+        assert waiter.status()["announced"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_dead_row_at_the_head_is_skipped_and_the_cursor_advances_past_it(self) -> None:
+        """(e) a dead-lettered row is skipped silently, its cursor
+        advanced past it; the live row behind it is referenced the very
+        next wake (the mailbox spec's own `n=1` caps one row per wake)."""
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        dead = fake.seed(addr, "d1", None, claim_state="dead")
+        fake.seed(addr, "live1", "finally-live")
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
+
+        await waiter.tick()  # d1 is dead -- skipped, cursor advances past it, nothing sent
+        assert sender.calls == []
+        assert waiter._cursor[addr] == (dead.created_at, "d1")  # noqa: SLF001
+
+        await waiter.tick()  # since=d1's position now -- live1 is the oldest, referenced
+        mail_sends = [m.get("tuple_id") for _c, m in sender.calls]
+        assert mail_sends == ["live1"]
+
+    @pytest.mark.asyncio
+    async def test_nine_dead_rows_then_a_live_one_is_referenced_within_ten_wakes(self) -> None:
+        """(e) nine dead rows then a live one: the live one is
+        referenced within 10 wakes and nothing else is ever sent."""
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        for i in range(9):
+            fake.seed(addr, f"d{i}", None, claim_state="dead")
+        fake.seed(addr, "live1", "finally-live")
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
+
+        for _ in range(10):
+            await waiter.tick()
+
+        mail_sends = [m.get("tuple_id") for _c, m in sender.calls]
+        assert mail_sends == ["live1"], "the live row must be referenced within 10 wakes, nothing else sent"
+
+    @pytest.mark.asyncio
+    async def test_restart_with_a_backlog_of_three_references_one_per_wake(self) -> None:
+        """(f) a restart with no persisted cursor walks a backlog one
+        reference per wake."""
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        fake.seed(addr, "t1", "one")
+        fake.seed(addr, "t2", "two")
+        fake.seed(addr, "t3", "three")
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
+
+        for _ in range(3):
+            await waiter.tick()
+
+        mail_sends = [m.get("tuple_id") for _c, m in sender.calls]
+        assert mail_sends == ["t1", "t2", "t3"]
+
+    @pytest.mark.asyncio
+    async def test_two_mailboxes_and_a_board_post_in_one_wake(self) -> None:
+        """(h) two mailboxes and a board, all in one wake -- every
+        subscription enters the SAME `wait()` call."""
+        session_id = str(uuid.uuid4())
+        subs = _subs(session_id)
+        addr_a = subs.session_mailbox
+        addr_b = f"mailbox/{uuid.uuid4().hex}"
+        subs.instance_mailbox = addr_b  # noqa: SLF001 — test-only shortcut, bypassing subscribe()'s directory-lease side effects
+        subs.subscribe(
+            "board/release-notes", templates=[],
+            store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
+            state_dir=None,
+        )
+        fake = _FakeTupleStore()
+        fake.seed(addr_a, "a1", "first-a")
+        fake.seed(addr_b, "b1", "first-b")
+        post = fake.seed("board/release-notes", "p1", "hi")
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), subs, sender=sender, persist=lambda: None,
+        )
+
+        await waiter.tick()
+
+        tuple_ids = {m.get("tuple_id") for _c, m in sender.calls}
+        assert tuple_ids == {"a1", "b1", "p1"}
+        assert subs.entries()[-1]["cursor"] == {"created_at": post.created_at, "id": "p1"}
+        assert len(fake.wait_calls) == 1, "one wait() call covers every subscription"
+
+    @pytest.mark.asyncio
+    async def test_unsubscribing_a_mailbox_drops_its_cursor_and_last_reference(self) -> None:
+        """(h) unsubscribing a mailbox drops its cursor and last
+        reference -- nothing further is ever sent for it."""
+        session_id = str(uuid.uuid4())
+        subs = _subs(session_id)
+        addr_b = f"mailbox/{uuid.uuid4().hex}"
+        subs.instance_mailbox = addr_b  # noqa: SLF001 — test-only shortcut
+        fake = _FakeTupleStore()
+        fake.seed(addr_b, "b1", "leaky-if-unsubscribed")
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), subs, sender=sender,
+            reannounce_interval_s=0.0, max_announces=10,
+        )
+
+        await waiter.tick()
+        assert addr_b in waiter._cursor  # noqa: SLF001
+        assert addr_b in waiter._last_ref  # noqa: SLF001
+
+        subs.unsubscribe(addr_b)
+        for _ in range(3):
+            await waiter.tick()
+
+        assert addr_b not in waiter._cursor  # noqa: SLF001
+        assert addr_b not in waiter._last_ref  # noqa: SLF001
+        mail_sends = [m for _c, m in sender.calls if m.get("tuple_id") == "b1"]
+        assert len(mail_sends) == 1, "zero further sends once unsubscribed"
 
     @pytest.mark.asyncio
     async def test_old_engine_without_wait_stops_the_waiter(self) -> None:
+        """(h) a bare 404 (an engine predating `/wait`) stops the loop."""
         session_id = str(uuid.uuid4())
         fake = _FakeTupleStore()
         fake.wait_raises = httpx.HTTPStatusError(
             "404", request=httpx.Request("POST", "http://x/v1/tuples/wait"),
             response=httpx.Response(404, request=httpx.Request("POST", "http://x/v1/tuples/wait")),
         )
-        waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=True,
-        )
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id))
         await waiter.tick()
         assert waiter._stopped is True  # noqa: SLF001 — white-box assertion
+
+    @pytest.mark.asyncio
+    async def test_a_refused_wait_does_not_stop_the_waiter(self) -> None:
+        """(h) any OTHER status is a transient fault: `run()` logs, backs
+        off, and ticks again -- only the bare 404 stops the loop."""
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        fake.wait_raises = httpx.HTTPStatusError(
+            "400", request=httpx.Request("POST", "http://x/v1/tuples/wait"),
+            response=httpx.Response(400, request=httpx.Request("POST", "http://x/v1/tuples/wait")),
+        )
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), tick_error_backoff_s=0.01,
+        )
+        run_task = asyncio.create_task(waiter.run())
+        await asyncio.sleep(0.3)
+        assert waiter.status()["alive"] is True
+        assert waiter._stopped is False  # noqa: SLF001
+        assert len(fake.wait_calls) >= 2, "the loop must keep ticking through a refused wait"
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+    @pytest.mark.asyncio
+    async def test_a_store_exception_in_a_tick_does_not_end_the_loop(self) -> None:
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        fake.wait_raises = RuntimeError("engine hiccup")
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), tick_error_backoff_s=0.01,
+        )
+        run_task = asyncio.create_task(waiter.run())
+        await asyncio.sleep(0.3)
+        assert waiter.status()["alive"] is True
+        assert len(fake.wait_calls) >= 2
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
 
     @pytest.mark.asyncio
     async def test_board_post_is_delivered_and_cursor_advances(self) -> None:
@@ -413,12 +632,11 @@ class TestChannelWaiterFakeStore:
             state_dir=None,
         )
         fake = _FakeTupleStore()
-        post = _row("p1", "board/release-notes", "v7.50 shipped", dims={"from": "author-a", "kind": "note"})
-        fake.wait_results = [[WaitResult(subspace="board/release-notes", tuples=[post])]]
+        post = fake.seed("board/release-notes", "p1", "v7.50 shipped", dims={"from": "author-a", "kind": "note"})
         sender = _FakeSender()
         persisted = []
         waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), subs, channel_live=True, sender=sender,
+            session_id, _fake_store_factory(fake), subs, sender=sender,
             persist=lambda: persisted.append(True),
         )
         await waiter.tick()
@@ -430,18 +648,14 @@ class TestChannelWaiterFakeStore:
         assert "v7.50 shipped" not in expected_content, "the notification must never carry the post body"
         assert subs.entries()[-1]["cursor"] == {"created_at": post.created_at, "id": "p1"}
         assert persisted == [True]
-        # Board posts carry no claim; nothing was claimed.
-        assert fake.in_calls == []
 
     @pytest.mark.asyncio
     async def test_persist_runs_off_the_event_loop_thread(self) -> None:
-        """Code review Significant 3: `_process_results` called
-        `self.persist()` synchronously on the event loop while every
-        other store call in this class goes through `asyncio.to_thread`.
-        A blocking `persist` (T1 is a synchronous HTTP client) would stall
-        the whole waiter loop. The falsifier: a persist stub that records
-        the thread it ran on must never see the test's own (event loop)
-        thread id."""
+        """Code review Significant 3 (RDR-211, unchanged by RDR-213):
+        `_process_results` called `self.persist()` synchronously on the
+        event loop while every other store call in this class goes
+        through `asyncio.to_thread`. A blocking `persist` (T1 is a
+        synchronous HTTP client) would stall the whole waiter loop."""
         session_id = str(uuid.uuid4())
         subs = _subs(session_id)
         subs.subscribe(
@@ -450,12 +664,11 @@ class TestChannelWaiterFakeStore:
             state_dir=None,
         )
         fake = _FakeTupleStore()
-        post = _row("p1", "board/release-notes", "hi")
-        fake.wait_results = [[WaitResult(subspace="board/release-notes", tuples=[post])]]
+        fake.seed("board/release-notes", "p1", "hi")
         loop_thread_id = threading.get_ident()
         persist_thread_ids: list[int] = []
         waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), subs, channel_live=True, sender=_FakeSender(),
+            session_id, _fake_store_factory(fake), subs, sender=_FakeSender(),
             persist=lambda: persist_thread_ids.append(threading.get_ident()),
         )
         await waiter.tick()
@@ -463,64 +676,20 @@ class TestChannelWaiterFakeStore:
         assert persist_thread_ids[0] != loop_thread_id, "persist ran ON the event loop thread"
 
     @pytest.mark.asyncio
-    async def test_release_then_a_different_second_message_is_claimed(self) -> None:
-        """Critic Minor: `test_resend_cap_then_release` has the fake store
-        `_release_and_forget` the released row, proving release frees the
-        slot but never proving a GENUINELY DIFFERENT second message
-        still sitting in the mailbox is what gets claimed next."""
-        session_id = str(uuid.uuid4())
-        addr = f"mailbox/{session_id}"
-        fake = _FakeTupleStore()
-        row1 = _row("t1", addr, "first")
-        row2 = _row("t2", addr, "second")
-        fake.rd_results[addr] = [row1]
-        fake.in_results[addr] = (row1, "claim-1")
-        sender = _FakeSender()
-        waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=True, sender=sender,
-            renew_interval_s=0.0, max_resends=0,  # every subsequent tick is immediately "due"
-        )
-
-        await waiter.tick()  # claims row1
-        assert waiter.status()["unacked"] == 1
-        assert waiter._outstanding.tuple_id == "t1"  # noqa: SLF001
-
-        # row2 is a genuinely DIFFERENT message, never claimed before now.
-        fake.rd_results[addr] = [row2]
-        fake.in_results[addr] = (row2, "claim-2")
-        await waiter.tick()  # due immediately (max_resends=0) -> release, then the same tick claims row2
-        assert len(fake.release_calls) == 1
-        assert fake.release_calls[0] == ("claim-1", waiter.claimant)
-        assert waiter.status()["unacked"] == 1
-        assert waiter._outstanding.tuple_id == "t2"  # noqa: SLF001
-        expected = channel._mailbox_notification_content(addr, "t2", "claim-2", waiter.claimant)  # noqa: SLF001
-        assert sender.calls[-1] == (expected, waiter._outstanding.meta)  # noqa: SLF001
-        assert "second" not in expected
-
-    @pytest.mark.asyncio
     async def test_late_subscription_is_picked_up_at_the_next_tick(self) -> None:
-        """RDR-211 Phase 1 close gate cross-walk (Test Plan scenario with
-        no named unit test): the session subscribes to a topic while the
-        waiter is parked. Recorded design variance (RDR Revision History
-        2026-09-17): a subscription change is picked up at the waiter's
-        NEXT `wait` tick, within the 25s cap -- the parked call itself is
-        never cancelled. The fake store proves the list-content half of
-        that: the first tick's specs carry no board subspace at all, and
-        only the following tick -- issued AFTER `subscribe()` -- sees
-        `board/late` and delivers its post."""
+        """A subscription change is picked up at the waiter's NEXT
+        `wait` tick -- the parked call itself is never cancelled."""
         session_id = str(uuid.uuid4())
         subs = _subs(session_id)
         fake = _FakeTupleStore()
-        post = _row("p1", "board/late", "hi", dims={"from": "author-a", "kind": "note"})
-        fake.wait_results = [[], [WaitResult(subspace="board/late", tuples=[post])]]
         sender = _FakeSender()
         persisted = []
         waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), subs, channel_live=True, sender=sender,
+            session_id, _fake_store_factory(fake), subs, sender=sender,
             persist=lambda: persisted.append(True),
         )
 
-        await waiter.tick()  # first tick: only the session mailbox exists yet
+        await waiter.tick()  # first tick: only the session mailbox exists yet, and it has nothing
         first_specs, _timeout = fake.wait_calls[-1]
         assert not any(spec.subspace.startswith("board/") for spec in first_specs), (
             "the waiter must not park on a topic it has not subscribed yet"
@@ -531,9 +700,10 @@ class TestChannelWaiterFakeStore:
             store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
             state_dir=None,
         )
+        post = fake.seed("board/late", "p1", "hi", dims={"from": "author-a", "kind": "note"})
 
         await waiter.tick()  # the NEXT tick -- picks up the new subscription
-        assert len(fake.wait_calls) == 2, "the park report must never show two slots for one session"
+        assert len(fake.wait_calls) == 2
         second_specs, _timeout2 = fake.wait_calls[-1]
         assert any(spec.subspace == "board/late" for spec in second_specs)
 
@@ -548,234 +718,61 @@ class TestChannelWaiterFakeStore:
 
 
 class TestChannelWaiterRealEngine:
-    """Properties a fake store cannot prove: the engine's OWN same-
-    claimant retake, a genuine lease lapse, and the persisted-outstanding
-    adoption across a real crash-and-restart."""
+    """Properties a fake store cannot prove: the real engine's own
+    global park-slot accounting, genuine parking under `wait()`, and the
+    cursor design's one loss-of-liveness risk under concurrent writers
+    (T2 `nexus_rdr/213-waiter-deep-analysis-2026-09-17` (2/2) section E,
+    stop rule 1)."""
 
-    def test_restarted_waiter_retakes_its_own_claim_with_no_attempt_spent(self, t2_service_env) -> None:
+    def test_wait_returns_claimed_and_dead_rows_not_just_available_ones(self, t2_service_env) -> None:
+        """Engine-fact check, confirmed against the real engine
+        (`TupleRepository.queryOnce`, `wait`'s per-spec query, filters
+        ONLY `consumed_at IS NULL AND expires_at > now` -- no
+        `claim_state` condition at all; only `claimOnce`, backing
+        `in`/`inp`, filters to claimable rows). `wait` returns the
+        oldest UNCONSUMED row, which can be claimed or dead-lettered --
+        exactly what the cursor design's items (d) and (e) depend on."""
+        from nexus.mcp.core import tuple_in, tuple_nack, tuple_out, tuple_registry
         from nexus.mcp_infra import t2_ctx
 
         session_id = str(uuid.uuid4())
         addr = f"mailbox/{session_id}"
-        with t2_ctx() as db:
-            db.tuples.out(addr, {"to": session_id}, {"from": "sender"}, "payload", nonce=str(uuid.uuid4()))
+        tuple_out(
+            addr, {"to": session_id}, {"from": "sender-claimstate"}, "claim-state-check",
+            nonce=uuid.uuid4().hex,
+        )
 
-        subs_a = _subs(session_id)
-        waiter_a = channel.ChannelWaiter(session_id, t2_ctx, subs_a, channel_live=True, sender=_FakeSender())
-        asyncio.run(waiter_a._maybe_claim_mail())  # noqa: SLF001 — drive the claim step directly
-        assert waiter_a._outstanding is not None  # noqa: SLF001
-        first_claim_id = waiter_a._outstanding.claim_id  # noqa: SLF001
-
-        # A "restarted server for the same session": a FRESH ChannelWaiter,
-        # same session id (hence the SAME stable claimant), same store.
-        subs_b = _subs(session_id)
-        waiter_b = channel.ChannelWaiter(session_id, t2_ctx, subs_b, channel_live=True, sender=_FakeSender())
-        assert waiter_a.claimant == waiter_b.claimant
-        asyncio.run(waiter_b._maybe_claim_mail())  # noqa: SLF001
-        assert waiter_b._outstanding is not None  # noqa: SLF001
-        assert waiter_b._outstanding.claim_id == first_claim_id  # noqa: SLF001 — the SAME claim, retaken
+        claim = tuple_in(addr, {"to": session_id}, claimant=session_id, lease_s=300)
+        assert claim is not None and "error" not in claim
+        claim_id = claim["claim_id"]
 
         with t2_ctx() as db:
-            stats = db.tuples.subspace_stats(addr)
-            rows = db.tuples.rd(addr, {})
-        assert stats.claimed == 1
-        # Critic Significant 3: `stats.dead == 0` is a weak proxy -- a
-        # retake could spend an attempt and still read `dead == 0` right
-        # up to the template's `max_attempts` ceiling. The claim's own
-        # `attempts` count is the direct falsifier: a same-claimant
-        # retake of a still-LIVE claim must spend none.
-        assert len(rows) == 1
-        assert rows[0].attempts == 0, "a same-claimant retake before expiry must spend no attempt"
+            wait_rows = db.tuples.wait([WaitSpec(subspace=addr, n=1)], 0)
+        assert len(wait_rows) == 1 and len(wait_rows[0].tuples) == 1
+        assert wait_rows[0].tuples[0].claim_state == "claimed"
 
-    def test_lease_lapse_with_no_successor_yields_one_new_claim_after_expiry(self, t2_service_env) -> None:
-        """Critic Significant 2 (missing scenario): a killed server with
-        NO successor inside the lease -- the lease genuinely lapses,
-        unlike the same-claimant retake above, which reclaims a claim
-        that is still LIVE. `HttpTupleStore` exposes no claim-transition
-        log or `nx`-verb equivalent (checked: rd/rdp/in_/inp/ack/nack/
-        renew/release/wait/subspace_stats/subspace_list/registry/
-        park_stats are the whole surface), so this pins the same
-        observable proxy `tests/test_scenario_journeys.py`'s h61dl15
-        journey already uses for an identical real lapse: a genuinely
-        NEW claim id on the SAME redelivered tuple, with exactly one
-        live claimed row throughout."""
-        from nexus.mcp_infra import t2_ctx
-
-        session_id = str(uuid.uuid4())
-        addr = f"mailbox/{session_id}"
-        with t2_ctx() as db:
-            db.tuples.out(addr, {"to": session_id}, {"from": "sender"}, "payload", nonce=str(uuid.uuid4()))
-
-        subs_a = _subs(session_id)
-        waiter_a = channel.ChannelWaiter(
-            session_id, t2_ctx, subs_a, channel_live=True, sender=_FakeSender(), lease_s=1,
-        )
-        asyncio.run(waiter_a._maybe_claim_mail())  # noqa: SLF001
-        assert waiter_a._outstanding is not None  # noqa: SLF001
-        first_claim_id = waiter_a._outstanding.claim_id  # noqa: SLF001
-        first_tuple_id = waiter_a._outstanding.tuple_id  # noqa: SLF001
-
-        time.sleep(1.5)  # let the 1s lease lapse -- no renew, no successor watching it
-
-        subs_b = _subs(session_id)
-        waiter_b = channel.ChannelWaiter(
-            session_id, t2_ctx, subs_b, channel_live=True, sender=_FakeSender(), lease_s=60,
-        )
-        asyncio.run(waiter_b._maybe_claim_mail())  # noqa: SLF001
-        assert waiter_b._outstanding is not None  # noqa: SLF001
-        assert waiter_b._outstanding.tuple_id == first_tuple_id, "the SAME tuple must be redelivered"  # noqa: SLF001
-        assert waiter_b._outstanding.claim_id != first_claim_id, (  # noqa: SLF001
-            "a genuinely lapsed claim must be reclaimed as a NEW claim, not the old one retaken"
-        )
+        reg = tuple_registry()
+        mailbox_template = next(t for t in reg["templates"] if t["name"] == "mailbox/<address>")
+        max_attempts = mailbox_template["take"]["max_attempts"]
+        for _ in range(max_attempts):
+            tuple_nack(claim_id, session_id)
+            reclaim = tuple_in(addr, {"to": session_id}, claimant=session_id, lease_s=300)
+            if reclaim is None:
+                break
+            claim_id = reclaim["claim_id"]
 
         with t2_ctx() as db:
-            stats = db.tuples.subspace_stats(addr)
-        assert stats.claimed == 1, "exactly one live claimed row after the reclaim"
-        assert stats.available == 0
-
-    def test_waiter_restart_adopts_its_persisted_outstanding_claim_across_two_mailboxes(
-        self, t2_service_env, tmp_path,
-    ) -> None:
-        """Code review Significant 1: the crash race across two mailboxes.
-        Process A claims X in mailbox 1 and is dropped with no `cancel()`
-        (no release). A second, genuinely different message Y then lands
-        in a DIFFERENT mailbox. A restarted process B (same session id,
-        same state dir) must adopt X from the persisted status record
-        (the SAME claim id, renewed, not a fresh claim) and must claim
-        NOTHING else while X is outstanding -- only once X is acked does
-        Y become claimable."""
-        from nexus.mcp_infra import t2_ctx
-
-        session_id = str(uuid.uuid4())
-        instance_name = f"inst-{uuid.uuid4().hex[:8]}"
-        addr_1 = f"mailbox/{session_id}"       # the session's own mailbox
-        addr_2 = f"mailbox/{instance_name}"    # a second, distinct mailbox
-
-        with t2_ctx() as db:
-            db.tuples.out(addr_1, {"to": session_id}, {"from": "sender"}, "X", nonce=str(uuid.uuid4()))
-
-        subs_a = _subs(session_id)
-        waiter_a = channel.ChannelWaiter(
-            session_id, t2_ctx, subs_a, channel_live=True, sender=_FakeSender(),
-            state_dir=tmp_path, lease_s=60,
-        )
-        asyncio.run(waiter_a._maybe_claim_mail())  # noqa: SLF001
-        assert waiter_a._outstanding is not None  # noqa: SLF001
-        claim_id_x = waiter_a._outstanding.claim_id  # noqa: SLF001
-        tuple_id_x = waiter_a._outstanding.tuple_id  # noqa: SLF001
-        waiter_a._outstanding.resend_count = 2  # noqa: SLF001 — simulate two resends already sent
-        waiter_a._publish_status()  # noqa: SLF001 — the on-disk record a real crash leaves behind
-        del waiter_a  # "dropped without cancel()" -- no release, nothing else touches it again
-
-        # A genuinely different message Y lands in a DIFFERENT mailbox
-        # while X sits unrenewed.
-        with t2_ctx() as db:
-            db.tuples.out(addr_2, {"to": instance_name}, {"from": "sender"}, "Y", nonce=str(uuid.uuid4()))
-
-        # "Waiter B starts from the same session id and state_dir."
-        subs_b = _subs(session_id)
-        subs_b.subscribe(
-            addr_2, templates=[{"name": "mailbox/<address>", "take": {"enabled": True}}],
-            store_factory=t2_ctx, state_dir=tmp_path,
-        )
-        sender_b = _FakeSender()
-        waiter_b = channel.ChannelWaiter(
-            session_id, t2_ctx, subs_b, channel_live=True, sender=sender_b,
-            state_dir=tmp_path, lease_s=60,
-        )
-        try:
-            asyncio.run(waiter_b._adopt_persisted_outstanding())  # noqa: SLF001
-            assert waiter_b._outstanding is not None  # noqa: SLF001
-            assert waiter_b._outstanding.claim_id == claim_id_x  # noqa: SLF001 — adopted, not a fresh claim
-            assert waiter_b._outstanding.tuple_id == tuple_id_x  # noqa: SLF001
-            assert waiter_b._outstanding.resend_count == 2  # noqa: SLF001 — the resend count was restored
-            assert sender_b.calls, "the adopted claim must be re-sent once on adoption"
-            expected_content = channel._mailbox_notification_content(  # noqa: SLF001
-                addr_1, tuple_id_x, claim_id_x, waiter_b.claimant,
-            )
-            assert sender_b.calls[-1] == (expected_content, waiter_b._outstanding.meta)  # noqa: SLF001
-            assert "X" not in expected_content, "the re-sent notification must never carry the tuple body"
-
-            # Claims nothing else while X is outstanding -- the internal
-            # guard fires even called directly, not only via tick()'s gate.
-            asyncio.run(waiter_b._maybe_claim_mail())  # noqa: SLF001
-            with t2_ctx() as db:
-                stats_2 = db.tuples.subspace_stats(addr_2)
-            assert stats_2.available == 1, "Y must remain unclaimed while X is outstanding"
-            assert stats_2.claimed == 0
-
-            # Only once X is acked (the session's own credit) does Y become claimable.
-            with t2_ctx() as db:
-                db.tuples.ack(claim_id_x, waiter_b.claimant)
-            waiter_b.note_credit(claim_id_x)
-            assert waiter_b._outstanding is None  # noqa: SLF001
-
-            asyncio.run(waiter_b._maybe_claim_mail())  # noqa: SLF001
-            assert waiter_b._outstanding is not None  # noqa: SLF001
-            with t2_ctx() as db:
-                stats_2_after = db.tuples.subspace_stats(addr_2)
-            assert stats_2_after.claimed == 1
-            assert stats_2_after.available == 0
-        finally:
-            subs_b.shutdown()
-
-    def test_adopt_with_no_persisted_outstanding_is_a_noop(self, t2_service_env, tmp_path) -> None:
-        from nexus.mcp_infra import t2_ctx
-
-        session_id = str(uuid.uuid4())
-        waiter = channel.ChannelWaiter(
-            session_id, t2_ctx, _subs(session_id), channel_live=True, sender=_FakeSender(),
-            state_dir=tmp_path,
-        )
-        asyncio.run(waiter._adopt_persisted_outstanding())  # noqa: SLF001
-        assert waiter._outstanding is None  # noqa: SLF001
-
-    def test_adopt_of_an_already_lapsed_persisted_claim_clears_it(self, t2_service_env, tmp_path) -> None:
-        """"renew raises ClaimNotFound -> clear it" -- a persisted record
-        pointing at a claim that already lapsed (or was acked) between
-        the crash and the restart must be dropped, not adopted."""
-        from nexus.mcp_infra import t2_ctx
-        from nexus.mcp.channel import write_channel_status
-
-        session_id = str(uuid.uuid4())
-        addr = f"mailbox/{session_id}"
-        with t2_ctx() as db:
-            db.tuples.out(addr, {"to": session_id}, {"from": "sender"}, "payload", nonce=str(uuid.uuid4()))
-            row, claim_id = db.tuples.in_(addr, {"to": session_id}, claimant=f"waiter:{session_id}", lease_s=1)
-            db.tuples.ack(claim_id, f"waiter:{session_id}")  # already consumed -- the claim is gone
-
-        write_channel_status(
-            tmp_path, session_id,
-            {
-                "proof": "argv", "alive": False, "last_wake": None, "unacked": 1, "released": 0,
-                "outstanding": {
-                    "claim_id": claim_id, "subspace": addr, "tuple_id": row.id,
-                    "resends": 0, "claimed_at": datetime.now(UTC).isoformat(),
-                },
-            },
-        )
-
-        waiter = channel.ChannelWaiter(
-            session_id, t2_ctx, _subs(session_id), channel_live=True, sender=_FakeSender(),
-            state_dir=tmp_path,
-        )
-        asyncio.run(waiter._adopt_persisted_outstanding())  # noqa: SLF001
-        assert waiter._outstanding is None  # noqa: SLF001
+            wait_rows_dead = db.tuples.wait([WaitSpec(subspace=addr, n=1)], 0)
+        assert len(wait_rows_dead) == 1 and len(wait_rows_dead[0].tuples) == 1
+        assert wait_rows_dead[0].tuples[0].claim_state == "dead"
 
     def test_subscribing_mid_park_never_opens_a_second_global_slot(self, t2_service_env) -> None:
-        """RDR-211 Phase 1 close gate cross-walk (Test Plan scenario with
-        no named unit test), the property a fake store cannot prove: the
-        engine counts ONE global park slot per parked `wait()` call
-        (`HttpTupleStore.wait`'s own docstring -- "parks with NO
-        claimant, so it takes one GLOBAL park slot regardless of how many
-        subspaces specs names"), so a subscription added while this
-        session's waiter sits parked must never raise `park_stats().
-        global_in_use` -- the new subspace is only picked up at the NEXT
-        `tick()`'s fresh `wait()` call (RDR Revision History
-        2026-09-17), never by cancelling and re-issuing the in-flight
-        one. Read before/during/after, mirroring `tests/db/
-        test_http_tuple_store.py::TestParkStats::
-        test_global_in_use_moves_while_a_parked_call_is_in_flight`."""
+        """RDR-211 Phase 1 close gate cross-walk: the engine counts ONE
+        global park slot per parked `wait()` call regardless of how many
+        subspaces its specs name, so a subscription added while this
+        session's waiter sits parked must never raise
+        `park_stats().global_in_use` -- the new subspace is only picked
+        up at the NEXT `tick()`'s fresh `wait()` call."""
         from concurrent.futures import ThreadPoolExecutor
 
         from nexus.db.t2.http_tuple_store import HttpTupleStore
@@ -783,9 +780,7 @@ class TestChannelWaiterRealEngine:
 
         session_id = str(uuid.uuid4())
         subs = _subs(session_id)
-        waiter = channel.ChannelWaiter(
-            session_id, t2_ctx, subs, channel_live=True, sender=_FakeSender(), wait_timeout_s=6,
-        )
+        waiter = channel.ChannelWaiter(session_id, t2_ctx, subs, sender=_FakeSender(), wait_timeout_s=6)
         probe = HttpTupleStore()
         before = probe.park_stats().global_in_use
 
@@ -818,343 +813,347 @@ class TestChannelWaiterRealEngine:
         after = probe.park_stats().global_in_use
         assert after == before
 
+    def test_one_row_is_referenced_once_and_wait_genuinely_parks(self, t2_service_env) -> None:
+        """(a) real-engine companion: over a real bounded window, `wait()`
+        must genuinely PARK once the cursor has passed the one row --
+        never return immediately -- so the call count stays small."""
+        from concurrent.futures import ThreadPoolExecutor
 
-class TestCreditHookWiring:
-    def test_tuple_ack_calls_note_credit(self, t2_service_env, monkeypatch) -> None:
-        from nexus.mcp.core import tuple_ack, tuple_in, tuple_out
-
-        addr = f"mailbox/{uuid.uuid4().hex[:10]}"
-        session_id = str(uuid.uuid4())
-        monkeypatch.setenv("NX_T1_SESSION_ID", session_id)
-        tuple_out(addr, {"to": addr}, {"from": "sender"}, "payload", nonce=str(uuid.uuid4()))
-        claimant = f"claimant-{uuid.uuid4().hex[:8]}"
-        claim = tuple_in(addr, {"to": addr}, claimant=claimant, lease_s=30)
-        assert claim is not None
-
-        calls: list[tuple[str, str]] = []
-        monkeypatch.setattr(
-            channel, "note_credit", lambda sid, cid: calls.append((sid, cid)),
-        )
-        tuple_ack(claim["claim_id"], claimant)
-        assert calls == [(session_id, claim["claim_id"])]
-
-    def test_tuple_nack_calls_note_credit(self, t2_service_env, monkeypatch) -> None:
-        from nexus.mcp.core import tuple_in, tuple_nack, tuple_out
-
-        addr = f"mailbox/{uuid.uuid4().hex[:10]}"
-        session_id = str(uuid.uuid4())
-        monkeypatch.setenv("NX_T1_SESSION_ID", session_id)
-        tuple_out(addr, {"to": addr}, {"from": "sender"}, "payload", nonce=str(uuid.uuid4()))
-        claimant = f"claimant-{uuid.uuid4().hex[:8]}"
-        claim = tuple_in(addr, {"to": addr}, claimant=claimant, lease_s=30)
-        assert claim is not None
-
-        calls: list[tuple[str, str]] = []
-        monkeypatch.setattr(
-            channel, "note_credit", lambda sid, cid: calls.append((sid, cid)),
-        )
-        tuple_nack(claim["claim_id"], claimant)
-        assert calls == [(session_id, claim["claim_id"])]
-
-    def test_tuple_release_calls_note_credit(self, t2_service_env, monkeypatch) -> None:
-        """Code review Significant 2: `tuple_release` (unlike `tuple_ack`/
-        `tuple_nack`) bypassed `channel.note_credit`, leaving `_outstanding`
-        set until the next renew tick's `ClaimNotFound` -- up to a full
-        `renew_interval_s` (150s in production)."""
-        from nexus.mcp.core import tuple_in, tuple_out, tuple_release
-
-        addr = f"mailbox/{uuid.uuid4().hex[:10]}"
-        session_id = str(uuid.uuid4())
-        monkeypatch.setenv("NX_T1_SESSION_ID", session_id)
-        tuple_out(addr, {"to": addr}, {"from": "sender"}, "payload", nonce=str(uuid.uuid4()))
-        claimant = f"claimant-{uuid.uuid4().hex[:8]}"
-        claim = tuple_in(addr, {"to": addr}, claimant=claimant, lease_s=30)
-        assert claim is not None
-
-        calls: list[tuple[str, str]] = []
-        monkeypatch.setattr(
-            channel, "note_credit", lambda sid, cid: calls.append((sid, cid)),
-        )
-        tuple_release(claim["claim_id"], claimant)
-        assert calls == [(session_id, claim["claim_id"])]
-
-    def test_tuple_release_clears_outstanding_immediately_and_frees_the_next_claim(
-        self, t2_service_env, monkeypatch,
-    ) -> None:
-        """The full effect, not just the call: a fake-store waiter with an
-        outstanding claim, registered as this session's active waiter,
-        sees `_outstanding` cleared the instant the real `tuple_release`
-        tool call lands -- no renew tick required -- and its next `tick()`
-        claims a genuinely different second message (mirrors
-        `test_back_pressure_second_claim_withheld_until_credit`)."""
-        from nexus.mcp.core import tuple_in, tuple_out, tuple_release
+        from nexus.mcp.core import tuple_out
 
         session_id = str(uuid.uuid4())
-        monkeypatch.setenv("NX_T1_SESSION_ID", session_id)
-
-        # A real engine claim `tuple_release` can actually release.
-        real_addr = f"mailbox/{uuid.uuid4().hex[:10]}"
-        tuple_out(real_addr, {"to": real_addr}, {"from": "sender"}, "payload", nonce=str(uuid.uuid4()))
-        claimant = f"waiter:{session_id}"
-        real_claim = tuple_in(real_addr, {"to": real_addr}, claimant=claimant, lease_s=30)
-        assert real_claim is not None
-        real_claim_id = real_claim["claim_id"]
-
-        # The waiter's OWN view of its outstanding claim, on a fake store,
-        # sharing only the claim id string with the real claim above.
         addr = f"mailbox/{session_id}"
-        fake = _FakeTupleStore()
-        row2 = _row("t2", addr, "second")
+        tuple_out(addr, {"to": session_id}, {"from": "sender-a"}, "hello", nonce=uuid.uuid4().hex)
+
+        subs = _subs(session_id)
+        counts: dict[str, int | None] = {"wait": 0, "rd": 0, "max_calls": 40}
         sender = _FakeSender()
         waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=True, sender=sender,
-            renew_interval_s=10_000.0,  # never due within this test
+            session_id, _counting_store_factory(counts), subs, sender=sender,
+            wait_timeout_s=1, reannounce_interval_s=10_000.0, min_tick_interval_s=0.0,
         )
-        waiter._outstanding = channel._Outstanding(  # noqa: SLF001
-            subspace=addr, tuple_id="t1", claim_id=real_claim_id, claimant=claimant,
-            content="irrelevant", meta={}, next_renew_at=time.monotonic() + 10_000.0,
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, waiter.run())
+            time.sleep(2.5)
+            waiter._stopped = True  # noqa: SLF001 — cross-thread stop signal, see the sibling park-slot test
+            future.result(timeout=10)
+
+        assert counts["wait"] <= 4, (
+            f"wait() must genuinely park over a 2.5s window at wait_timeout_s=1; "
+            f"got {counts['wait']} calls"
         )
-        channel.register_active_waiter(waiter)
-        try:
-            assert waiter.status()["unacked"] == 1
-            tuple_release(real_claim_id, claimant)
-            assert waiter._outstanding is None, "release must clear outstanding immediately, no renew tick needed"  # noqa: SLF001
+        assert counts["rd"] == 0, "nothing is ever read back"
+        mail_sends = [m for _c, m in sender.calls if m.get("subspace") == addr]
+        assert len(mail_sends) == 1
 
-            fake.rd_results[addr] = [row2]
-            fake.in_results[addr] = (row2, "claim-2")
-            asyncio.run(waiter.tick())
-            assert waiter._outstanding is not None  # noqa: SLF001
-            assert waiter._outstanding.tuple_id == "t2"  # noqa: SLF001
-        finally:
-            channel.unregister_active_waiter(session_id)
-
-    def test_tuple_channel_probe_calls_note_probe_ack_and_returns_ok(self, monkeypatch) -> None:
-        from nexus.mcp.core import tuple_channel_probe
+    def test_two_rows_arriving_together_are_referenced_one_wake_apart_real_engine(self, t2_service_env) -> None:
+        """(b) real-engine companion."""
+        from nexus.mcp.core import tuple_out
+        from nexus.mcp_infra import t2_ctx
 
         session_id = str(uuid.uuid4())
-        monkeypatch.setenv("NX_T1_SESSION_ID", session_id)
-        calls: list[str] = []
-        monkeypatch.setattr(channel, "note_probe_ack", lambda sid: calls.append(sid))
-        result = tuple_channel_probe()
-        assert result == "ok"
-        assert calls == [session_id]
+        addr = f"mailbox/{session_id}"
+        tuple_out(addr, {"to": session_id}, {"from": "sender-a"}, "first", nonce=uuid.uuid4().hex)
+        tuple_out(addr, {"to": session_id}, {"from": "sender-a"}, "second", nonce=uuid.uuid4().hex)
 
-    def test_note_probe_ack_flips_a_registered_waiter(self) -> None:
-        session_id = str(uuid.uuid4())
-        fake = _FakeTupleStore()
+        subs = _subs(session_id)
+        sender = _FakeSender()
         waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=False,
+            session_id, t2_ctx, subs, sender=sender, reannounce_interval_s=10_000.0, wait_timeout_s=1,
         )
-        channel.register_active_waiter(waiter)
-        try:
-            channel.note_probe_ack(session_id)
-            assert waiter.status()["proof"] == "probe"
-            assert waiter.channel_live.is_set()
-        finally:
-            channel.unregister_active_waiter(session_id)
 
-    def test_note_credit_on_an_unregistered_session_is_a_silent_no_op(self) -> None:
-        channel.note_credit(str(uuid.uuid4()), "some-claim-id")  # must not raise
+        asyncio.run(waiter.tick())
+        asyncio.run(waiter.tick())
+
+        mail_sends = [m.get("tuple_id") for _c, m in sender.calls if m.get("subspace") == addr]
+        assert len(mail_sends) == 2
+        assert mail_sends[0] != mail_sends[1]
+
+    def test_an_ignored_reference_is_resent_then_falls_silent_real_engine(self, t2_service_env) -> None:
+        """(c) real-engine companion."""
+        from nexus.mcp.core import tuple_out
+        from nexus.mcp_infra import t2_ctx
+
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        tuple_out(addr, {"to": session_id}, {"from": "sender-a"}, "unread-forever", nonce=uuid.uuid4().hex)
+
+        subs = _subs(session_id)
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, t2_ctx, subs, sender=sender, reannounce_interval_s=0.0, max_announces=3, wait_timeout_s=1,
+        )
+
+        for _ in range(6):
+            asyncio.run(waiter.tick())
+
+        mail_sends = [m for _c, m in sender.calls if m.get("subspace") == addr]
+        assert len(mail_sends) == 3
+
+    def test_a_claimed_row_seen_at_the_wake_gets_one_reference_real_engine(self, t2_service_env) -> None:
+        """(d) real-engine companion."""
+        from nexus.mcp.core import tuple_in, tuple_out
+        from nexus.mcp_infra import t2_ctx
+
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        tuple_out(addr, {"to": session_id}, {"from": "sender-a"}, "already-claimed", nonce=uuid.uuid4().hex)
+        claim = tuple_in(addr, {"to": session_id}, claimant="someone-else", lease_s=300)
+        assert claim is not None and "error" not in claim
+
+        subs = _subs(session_id)
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, t2_ctx, subs, sender=sender)
+
+        asyncio.run(waiter.tick())
+
+        mail_sends = [m for _c, m in sender.calls if m.get("subspace") == addr]
+        assert len(mail_sends) == 1
+
+    def test_nine_dead_rows_then_a_live_one_is_referenced_within_ten_wakes_real_engine(self, t2_service_env) -> None:
+        """(e) real-engine companion."""
+        from nexus.mcp.core import tuple_out
+        from nexus.mcp_infra import t2_ctx
+
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        _dead_letter_n_rows(addr, session_id, session_id, 9)
+        tuple_out(addr, {"to": session_id}, {"from": "sender-live"}, "finally-live", nonce=uuid.uuid4().hex)
+
+        subs = _subs(session_id)
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, t2_ctx, subs, sender=sender, wait_timeout_s=1)
+
+        for _ in range(10):
+            asyncio.run(waiter.tick())
+
+        mail_sends = [m for _c, m in sender.calls if m.get("subspace") == addr]
+        assert len(mail_sends) == 1
+
+    def test_restart_with_a_backlog_of_three_real_engine(self, t2_service_env) -> None:
+        """(f) real-engine companion."""
+        from nexus.mcp.core import tuple_out
+        from nexus.mcp_infra import t2_ctx
+
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        for i in range(3):
+            tuple_out(addr, {"to": session_id}, {"from": "sender-a"}, f"row-{i}", nonce=uuid.uuid4().hex)
+
+        subs = _subs(session_id)
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, t2_ctx, subs, sender=sender, wait_timeout_s=1)
+
+        for _ in range(3):
+            asyncio.run(waiter.tick())
+
+        mail_sends = [m for _c, m in sender.calls if m.get("subspace") == addr]
+        assert len(mail_sends) == 3
+
+    def test_two_mailboxes_referenced_in_one_wake_real_engine(self, t2_service_env) -> None:
+        """(h) real-engine companion (the board half of (h) is covered on
+        the fake store only -- constructing a real board post needs no
+        extra engine-fact proof beyond what boards already had)."""
+        from nexus.mcp.core import tuple_out
+        from nexus.mcp_infra import t2_ctx
+
+        session_id = str(uuid.uuid4())
+        subs = _subs(session_id)
+        addr_a = subs.session_mailbox
+        addr_b = f"mailbox/{uuid.uuid4().hex}"
+        subs.instance_mailbox = addr_b  # noqa: SLF001 — test-only shortcut
+        tuple_out(addr_a, {"to": session_id}, {"from": "sender-a"}, "first-a", nonce=uuid.uuid4().hex)
+        to_b = addr_b.removeprefix("mailbox/")
+        tuple_out(addr_b, {"to": to_b}, {"from": "sender-b"}, "first-b", nonce=uuid.uuid4().hex)
+
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, t2_ctx, subs, sender=sender, wait_timeout_s=1)
+
+        asyncio.run(waiter.tick())
+
+        subspaces_referenced = {m.get("subspace") for _c, m in sender.calls}
+        assert subspaces_referenced == {addr_a, addr_b}
+
+    def test_stop_rule_two_hundred_rows_two_concurrent_writers_no_row_ever_lost_to_the_cursor(
+        self, t2_service_env,
+    ) -> None:
+        """(g) THE STOP RULE (T2 `nexus_rdr/213-waiter-deep-analysis-
+        2026-09-17` (2/2) section E): the one loss-of-liveness risk the
+        cursor design introduces is a row assigned a (created_at, id)
+        at or behind a cursor a reader has ALREADY advanced past -- such
+        a row could never be returned by a `since=cursor` query again,
+        and would be silently skipped forever. 200 rows, written by TWO
+        CONCURRENT writer threads to ONE mailbox, while a reader
+        repeatedly advances its own cursor after each read: every
+        written row must eventually be observed. A lost row here is
+        evidence the cursor design itself is wrong (the decision
+        record's own stop rule), to be reported, not patched past."""
+        from nexus.mcp.core import tuple_out
+        from nexus.mcp_infra import t2_ctx
+
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        written_ids: set[str] = set()
+        written_lock = threading.Lock()
+        rows_per_writer = 100
+
+        def _writer(prefix: str) -> None:
+            for i in range(rows_per_writer):
+                tid = tuple_out(
+                    addr, {"to": session_id}, {"from": prefix}, f"{prefix}-{i}", nonce=uuid.uuid4().hex,
+                )
+                with written_lock:
+                    written_ids.add(tid)
+
+        t1 = threading.Thread(target=_writer, args=("writer-a",))
+        t2 = threading.Thread(target=_writer, args=("writer-b",))
+        t1.start()
+        t2.start()
+
+        seen_ids: set[str] = set()
+        cursor: tuple[str, str] | None = None
+        with t2_ctx() as db:
+            deadline = time.monotonic() + 60.0
+            empty_polls = 0
+            while time.monotonic() < deadline:
+                rows = db.tuples.rd(addr, None, n=50, since=cursor, timeout_s=0)
+                if rows:
+                    empty_polls = 0
+                    for r in rows:
+                        seen_ids.add(r.id)
+                    cursor = (rows[-1].created_at or "", rows[-1].id)
+                    continue
+                empty_polls += 1
+                writers_done = not t1.is_alive() and not t2.is_alive()
+                if writers_done and empty_polls >= 5:
+                    break
+                time.sleep(0.05)
+
+        t1.join()
+        t2.join()
+        assert len(written_ids) == 2 * rows_per_writer, "sanity: both writers must have completed all their writes"
+        missing = written_ids - seen_ids
+        assert not missing, (
+            f"STOP RULE VIOLATED: {len(missing)} of {len(written_ids)} rows were never observed by a "
+            f"since-advancing reader -- the cursor design can silently skip live mail under concurrent "
+            f"writers. ids: {sorted(missing)[:10]}"
+        )
+
+    def test_falsify_cursor_removed_from_mailbox_spec_wait_call_count_explodes(self, t2_service_env) -> None:
+        """Falsification of (a): reverting `_build_specs` to drop the
+        mailbox cursor (`since=None`, always) must make `wait()` return
+        the SAME row immediately every time -- the engine's own
+        immediate-match short circuit -- exploding the call count well
+        past the healthy bound over the SAME real-time window."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        from nexus.mcp.core import tuple_out
+
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        tuple_out(addr, {"to": session_id}, {"from": "sender-a"}, "hello", nonce=uuid.uuid4().hex)
+
+        subs = _subs(session_id)
+        counts: dict[str, int | None] = {"wait": 0, "rd": 0, "max_calls": 200}
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _counting_store_factory(counts), subs, sender=sender,
+            wait_timeout_s=1, reannounce_interval_s=10_000.0, min_tick_interval_s=0.0,
+        )
+
+        def _reverted_build_specs(self: "channel.ChannelWaiter") -> list[WaitSpec]:
+            # The bug: every mailbox spec's `since` is dropped, so the
+            # SAME already-referenced row matches again on every call.
+            specs: list[WaitSpec] = []
+            for entry in self.subs.entries():
+                subspace = entry["subspace"]
+                if subspace.startswith("board/"):
+                    cursor = entry.get("cursor")
+                    since = (cursor["created_at"], cursor["id"]) if cursor else None
+                    specs.append(WaitSpec(subspace=subspace, since=since))
+                else:
+                    specs.append(WaitSpec(subspace=subspace, since=None))
+            return specs
+
+        original = channel.ChannelWaiter._build_specs  # noqa: SLF001
+        channel.ChannelWaiter._build_specs = _reverted_build_specs  # type: ignore[method-assign]
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, waiter.run())
+                time.sleep(2.5)
+                waiter._stopped = True  # noqa: SLF001
+                try:
+                    future.result(timeout=10)
+                except RuntimeError:
+                    pass  # the fail-fast guard tripping is an acceptable end state too
+        finally:
+            channel.ChannelWaiter._build_specs = original  # type: ignore[method-assign]
+
+        assert counts["wait"] > 4, (
+            f"removing the cursor from the mailbox spec must blow past the healthy bound of 4 "
+            f"wait() calls over 2.5s at wait_timeout_s=1 -- confirming that bound tests the "
+            f"cursor, not an artifact of the floor (OFF here too); got {counts['wait']}"
+        )
 
 
 class TestChannelStatusPublish:
-    """RDR-211 Phase 1 Step 3 (bead nexus-rplay.13): the on-disk status
-    record the `nx doctor` row reads cross-process
-    (`nexus.health._check_tuple_channel_delivery`)."""
+    """RDR-213: the on-disk status record the `nx doctor` row reads
+    cross-process (`nexus.health._check_tuple_channel_delivery`)."""
 
     def test_no_state_dir_is_a_silent_no_op(self) -> None:
         """The default (`state_dir=None`, every other test in this file)
         must never raise just because nothing was ever wired to publish."""
         session_id = str(uuid.uuid4())
-        waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(_FakeTupleStore()), _subs(session_id), channel_live=True,
-        )
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(_FakeTupleStore()), _subs(session_id))
         waiter._publish_status()  # noqa: SLF001 — must not raise
 
     @pytest.mark.asyncio
     async def test_a_tick_publishes_the_status_record(self, tmp_path) -> None:
         session_id = str(uuid.uuid4())
         fake = _FakeTupleStore()
-        waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=True,
-            state_dir=tmp_path,
-        )
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), state_dir=tmp_path)
         assert channel.read_channel_status(tmp_path, session_id) is None
 
         await waiter.tick()
 
         recorded = channel.read_channel_status(tmp_path, session_id)
         assert recorded == waiter.status()
-        assert recorded["proof"] == "argv"
         assert recorded["last_wake"] is not None
+        assert recorded["announced"] == 0
+        assert recorded["pending"] == 0
 
     @pytest.mark.asyncio
-    async def test_probe_ack_publishes_the_updated_proof(self, tmp_path) -> None:
-        session_id = str(uuid.uuid4())
-        fake = _FakeTupleStore()
-        sender = _FakeSender()
-        waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=False, sender=sender,
-            state_dir=tmp_path,
-        )
-        run_task = asyncio.create_task(waiter.run())
-        await asyncio.sleep(0.05)
-        assert channel.read_channel_status(tmp_path, session_id)["proof"] == "none"
-        waiter.note_probe_ack()
-        await asyncio.sleep(0.05)
-        assert channel.read_channel_status(tmp_path, session_id)["proof"] == "probe"
-        run_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await run_task
-        # run()'s finally publishes alive=False on the way out.
-        assert channel.read_channel_status(tmp_path, session_id)["alive"] is False
-
-    @pytest.mark.asyncio
-    async def test_release_publishes_the_incremented_count(self, tmp_path) -> None:
+    async def test_announce_and_spend_are_reflected_in_the_published_record(self, tmp_path) -> None:
         session_id = str(uuid.uuid4())
         addr = f"mailbox/{session_id}"
         fake = _FakeTupleStore()
-        row = _row("t1", addr, "unacked-forever")
-        fake.rd_results[addr] = [row]
-        fake.in_results[addr] = (row, "claim-1")
+        fake.seed(addr, "t1", "hello")
         waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=True, sender=_FakeSender(),
-            state_dir=tmp_path, renew_interval_s=0.0, max_resends=0,
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=_FakeSender(), state_dir=tmp_path,
+            reannounce_interval_s=0.0, max_announces=2, wait_timeout_s=1,
         )
-        await waiter.tick()  # claims row1 into `_outstanding`
-        assert channel.read_channel_status(tmp_path, session_id)["unacked"] == 1
-        fake.in_results[addr] = None  # nothing else to claim on the next tick
-        await waiter.tick()  # next_renew_at already due (renew_interval_s=0.0) -> release
+        await waiter.tick()  # count=1, still under budget (2)
         recorded = channel.read_channel_status(tmp_path, session_id)
-        assert recorded["released"] == 1
-        assert recorded["unacked"] == 0
+        assert recorded["announced"] == 1
+        assert recorded["pending"] == 1
+        assert recorded["oldest_pending_age_s"] is not None
+
+        await waiter.tick()  # cadence immediately due -- resend, count=2, now spent
+        recorded = channel.read_channel_status(tmp_path, session_id)
+        assert recorded["pending"] == 0
+        assert recorded["oldest_pending_age_s"] is None
 
     def test_write_channel_status_rejects_a_path_hostile_session_id(self, tmp_path) -> None:
-        channel.write_channel_status(tmp_path, "../escape", {"proof": "none"})
-        assert list(tmp_path.rglob("*")) == []
+        channel.write_channel_status(tmp_path, "../../etc/passwd", {"alive": True})
+        assert not any(tmp_path.rglob("*"))
 
     def test_read_channel_status_missing_file_is_none(self, tmp_path) -> None:
-        assert channel.read_channel_status(tmp_path, "no-such-session") is None
+        assert channel.read_channel_status(tmp_path, "nonexistent-session") is None
 
     def test_read_channel_status_malformed_json_is_none(self, tmp_path) -> None:
-        path = channel._channel_status_path(tmp_path, "sess-1")  # noqa: SLF001
-        path.parent.mkdir(parents=True)
-        path.write_text("not json", encoding="utf-8")
-        assert channel.read_channel_status(tmp_path, "sess-1") is None
-
-
-class TestWaiterSurvivesMailboxOnlySessions:
-    """Bead nexus-tk2cz, found live 2026-09-17 on a session with no board
-    topic: the first mailbox delivery ended the waiter for good. With a
-    claim outstanding every mailbox is held out of the wait, so the spec
-    list was empty; the engine refuses an empty `wait` and the waiter read
-    that refusal as "engine without wait"."""
-
-    @pytest.mark.asyncio
-    async def test_outstanding_claim_with_no_board_never_sends_an_empty_wait(self) -> None:
-        session_id = str(uuid.uuid4())
-        addr = f"mailbox/{session_id}"
-        fake = _FakeTupleStore()
-        row = _row("t1", addr, "hello")
-        fake.rd_results[addr] = [row]
-        fake.in_results[addr] = (row, "claim-1")
-        sender = _FakeSender()
-        waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=True, sender=sender,
-            wait_timeout_s=1,
-        )
-        await waiter.tick()  # parks on the one mailbox, claims t1, pushes its reference
-        assert len(fake.wait_calls) == 1
-        assert waiter.status()["unacked"] == 1
-        await waiter.tick()  # nothing to park on: must sleep, never call wait([])
-        assert len(fake.wait_calls) == 1, "an empty wait spec was sent to the engine"
-        assert waiter._stopped is False  # noqa: SLF001
-        assert waiter.status()["unacked"] == 1
-
-    @pytest.mark.asyncio
-    async def test_a_refused_wait_does_not_stop_the_waiter(self) -> None:
-        """A 400 (or any non-404 status) from `wait` is a fault of one
-        round-trip; `run()` logs, backs off and ticks again. Only the bare
-        404 of an engine without the route stops the loop."""
-        session_id = str(uuid.uuid4())
-        fake = _FakeTupleStore()
-        fake.wait_raises = httpx.HTTPStatusError(
-            "400", request=httpx.Request("POST", "http://x/v1/tuples/wait"),
-            response=httpx.Response(400, request=httpx.Request("POST", "http://x/v1/tuples/wait")),
-        )
-        waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=True,
-            tick_error_backoff_s=0.01,
-        )
-        run_task = asyncio.create_task(waiter.run())
-        await asyncio.sleep(0.4)
-        assert waiter.status()["alive"] is True
-        assert waiter._stopped is False  # noqa: SLF001
-        assert len(fake.wait_calls) >= 2, "the loop must keep ticking through a refused wait"
-        run_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await run_task
-
-    @pytest.mark.asyncio
-    async def test_a_store_exception_in_a_tick_does_not_end_the_loop(self) -> None:
-        session_id = str(uuid.uuid4())
-        fake = _FakeTupleStore()
-        fake.wait_raises = RuntimeError("engine hiccup")
-        waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=True,
-            tick_error_backoff_s=0.01,
-        )
-        run_task = asyncio.create_task(waiter.run())
-        await asyncio.sleep(0.4)
-        assert waiter.status()["alive"] is True
-        assert len(fake.wait_calls) >= 2
-        run_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await run_task
-
-
-class TestProbeTiming:
-    """Bead nexus-tk2cz: Claude Code registers channel delivery shortly
-    after the connection is up (0.5 s measured), so the probe is delayed
-    and, unanswered, sent a second and last time."""
-
-    @pytest.mark.asyncio
-    async def test_probe_waits_for_the_delay_then_resends_once(self) -> None:
-        session_id = str(uuid.uuid4())
-        fake = _FakeTupleStore()
-        sender = _FakeSender()
-        waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=False, sender=sender,
-            probe_delay_s=0.05, probe_resend_after_s=0.05,
-        )
-        run_task = asyncio.create_task(waiter.run())
-        await asyncio.sleep(0.02)
-        assert sender.calls == [], "the probe must not go out before the registration delay"
-        await asyncio.sleep(0.25)
-        probes = [m for _c, m in sender.calls if m.get("kind") == "channel_probe"]
-        assert len(probes) == 2, "exactly two probes: the delayed first and one re-send"
-        assert waiter.status()["proof"] == "none"
-        assert fake.in_calls == []
-        run_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await run_task
-
-    @pytest.mark.asyncio
-    async def test_an_answered_probe_is_not_resent(self) -> None:
-        session_id = str(uuid.uuid4())
-        fake = _FakeTupleStore()
-        sender = _FakeSender()
-        waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), _subs(session_id), channel_live=False, sender=sender,
-            probe_delay_s=0, probe_resend_after_s=0.2,
-        )
-        run_task = asyncio.create_task(waiter.run())
-        await asyncio.sleep(0.02)
-        waiter.note_probe_ack()
-        await asyncio.sleep(0.3)
-        probes = [m for _c, m in sender.calls if m.get("kind") == "channel_probe"]
-        assert len(probes) == 1
-        assert waiter.status()["proof"] == "probe"
-        run_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await run_task
+        session_id = "malformed-test"
+        path = channel._channel_status_path(tmp_path, session_id)  # noqa: SLF001
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("not valid json{{{", encoding="utf-8")
+        assert channel.read_channel_status(tmp_path, session_id) is None
