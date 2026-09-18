@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A local-mode install with an autostart unit sees a one-time drift NOTE
+  after upgrading past 7.52.0 (bead nexus-ebbvt).** 7.52.0's autostart unit
+  template gained an explicit `--config-dir` (bead nexus-cd1k0.3), so an
+  already-installed launchd/systemd unit now differs from the current
+  template; the first `nx daemon restart-stale` after upgrading bounces the
+  service once to reinstall it, same as any other template change. On a box
+  with no service manager on PATH (a container, some Linux setups), the
+  engine is now restarted directly and the unit file is installed but not
+  activated, rather than left stopped with no recovery.
+
 ## [7.52.0] - 2026-09-18
 
 Paired engine: engine-service-v0.1.128 (`REQUIRED_ENGINE_VERSION` (0, 1, 128);

@@ -2270,14 +2270,30 @@ def _restart_service_after_unit_reinstall(config_dir: Path) -> tuple[bool, str]:
     restart, ``(False, "<clause describing the failure>")`` otherwise —
     never raises, so every caller can splice the clause into its own
     NOTE/NEEDS HUMAN line unconditionally.
+
+    nexus-ebbvt review round 1, finding 5: always emits ONE structured
+    ``upgrade_autostart_unit_restart`` event (``config_dir`` and
+    ``returncode`` -- ``None`` on the raised-exception path, since there
+    is no process exit to report) so a restart this function performed
+    is visible in the log even when the caller's own returned line is
+    the only thing a human reads.
     """
     resolved_config_dir = str(config_dir.resolve())
     argv = ["nx", "daemon", "service", "start", "--config-dir", resolved_config_dir]
     try:
         start = subprocess.run(argv, capture_output=True, text=True, timeout=120)
     except Exception as exc:  # noqa: BLE001 — best-effort restart; surfaced in the returned clause
+        _log.warning(
+            "upgrade_autostart_unit_restart",
+            config_dir=resolved_config_dir, returncode=None, ok=False, error=str(exc),
+        )
         return False, f"restarting the service also raised {exc}"
-    if start.returncode != 0:
+    ok = start.returncode == 0
+    _log.info(
+        "upgrade_autostart_unit_restart",
+        config_dir=resolved_config_dir, returncode=start.returncode, ok=ok,
+    )
+    if not ok:
         detail = (start.stderr or start.stdout or "").strip()
         return False, (
             f"the direct restart also failed (`{' '.join(argv)}` exited "
@@ -2372,9 +2388,18 @@ def converge_service_autostart_unit(
         "then `nx doctor` to confirm the service came back up."
     )
 
+    # nexus-ebbvt review round 1, finding 3: the initial stop and the
+    # compensating restart below must target the SAME resolved config
+    # dir explicitly, not let the stop re-derive its own from environment
+    # while the restart (already explicit since nexus-cd1k0.3/.19) uses
+    # this function's own `config_dir` parameter -- otherwise a caller
+    # running under a non-default NEXUS_CONFIG_DIR could stop one
+    # storage-service instance and restart a different one.
+    resolved_config_dir = str(config_dir.resolve())
+
     try:
         stop = subprocess.run(
-            ["nx", "daemon", "service", "stop"],
+            ["nx", "daemon", "service", "stop", "--config-dir", resolved_config_dir],
             capture_output=True, text=True, timeout=60,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort convergence; surfaced in the line
@@ -2386,6 +2411,21 @@ def converge_service_autostart_unit(
             f"{stop.returncode} ({detail}) -- {manual_fallback}"
         ]
 
+    # nexus-ebbvt review round 1, finding 4: from here on the service is
+    # CONFIRMED stopped, and every exit path funnels through ONE
+    # checkpoint below (the `finally`) that restarts it unless the
+    # activation itself already did (`activated=True`, the only branch
+    # that sets it). The guarantee lives at the funnel, not in each
+    # branch -- a future branch that forgets to call the restart itself
+    # still gets one, because nothing branch-specific decides whether the
+    # restart happens, only whether `activated` ended up True.
+    activated = False
+    install_result = None
+    failure_detail = ""
+    missing_manager_exc: Exception | None = None
+    restarted = False
+    restart_clause = ""
+
     try:
         from nexus.daemon import installer  # noqa: PLC0415 — deferred, CLI startup cost
 
@@ -2394,56 +2434,81 @@ def converge_service_autostart_unit(
             installer.UninstallStatus.REMOVED,
             installer.UninstallStatus.NOT_INSTALLED,
         ):
-            _restarted, restart_clause = _restart_service_after_unit_reinstall(config_dir)
-            return [
-                f"NEEDS HUMAN: {note}, but removing the stale unit reported "
-                f"{uninstall_result.status} -- {restart_clause} -- {manual_fallback}"
-            ]
-        try:
-            install_result = installer.install_autostart(tier="service")
-        except installer.ActivationError as exc:
-            # nexus-cd1k0.3 follow-up: install_autostart WRITES the unit
-            # file before it ever attempts activation, so a
-            # FileNotFoundError cause here means the file already carries
-            # the current template -- only the OS-level activation
-            # (launchctl/systemctl) could not run because the service
-            # manager itself is absent (a container, some Linux setups).
-            # That is not a human-needed failure: restart the service
-            # directly and report a NOTE, same as a clean convergence,
-            # rather than stranding the engine down over a box shape the
-            # installer itself already distinguishes as non-fatal under
-            # force=True. Any OTHER ActivationError (a service manager
-            # THAT EXISTS but exited non-zero -- permissions, a broken
-            # user session, etc.) re-raises to the blanket handler below,
-            # which is still a genuine NEEDS HUMAN: activation failing
-            # with the manager PRESENT means something is actually wrong,
-            # not merely absent.
-            if isinstance(exc.__cause__, FileNotFoundError):
-                restarted, restart_clause = _restart_service_after_unit_reinstall(config_dir)
-                if restarted:
-                    return [
-                        f"NOTE: {note}. Reinstalled the unit at {uninstall_result.dest} "
-                        f"with the current template, but activation could not run "
-                        f"({exc}) -- {restart_clause}. Once a service manager "
-                        "(launchctl/systemctl) is available on this box, run `nx "
-                        "daemon service install --autostart --force` to also "
-                        "register it for autostart."
-                    ]
-                return [
-                    f"NEEDS HUMAN: {note}. Reinstalled the unit at "
-                    f"{uninstall_result.dest} with the current template, but "
-                    f"activation could not run ({exc}), and {restart_clause} -- "
-                    f"{manual_fallback}"
-                ]
-            raise
+            failure_detail = (
+                f"removing the stale unit reported {uninstall_result.status}"
+            )
+        else:
+            try:
+                install_result = installer.install_autostart(tier="service")
+                activated = True
+            except installer.ActivationError as exc:
+                # nexus-cd1k0.3 follow-up: install_autostart WRITES the unit
+                # file before it ever attempts activation, so a
+                # FileNotFoundError cause here means the file already
+                # carries the current template -- only the OS-level
+                # activation (launchctl/systemctl) could not run because
+                # the service manager itself is absent (a container, some
+                # Linux setups). That is not a human-needed failure -- see
+                # the NOTE branch below. Any OTHER ActivationError (a
+                # service manager THAT EXISTS but exited non-zero --
+                # permissions, a broken user session, etc.) re-raises to
+                # the blanket handler below, which is still a genuine
+                # NEEDS HUMAN: activation failing with the manager PRESENT
+                # means something is actually wrong, not merely absent.
+                if isinstance(exc.__cause__, FileNotFoundError):
+                    missing_manager_exc = exc
+                    failure_detail = (
+                        f"reinstalled the unit at {uninstall_result.dest} "
+                        f"with the current template, but activation could "
+                        f"not run ({exc})"
+                    )
+                else:
+                    raise
     except Exception as exc:  # noqa: BLE001 — never let convergence crash the finish pass
         _log.warning("service_autostart_convergence_failed", error=str(exc))
-        _restarted, restart_clause = _restart_service_after_unit_reinstall(config_dir)
+        failure_detail = f"converging it raised {exc}"
+    finally:
+        if not activated:
+            restarted, restart_clause = _restart_service_after_unit_reinstall(config_dir)
+
+    if not activated:
+        if missing_manager_exc is not None:
+            # nexus-ebbvt review round 1, finding 5: name the absent
+            # command in plain text (from the FileNotFoundError's own
+            # `.filename`, not just buried inside the interpolated `{exc}`
+            # text) so a human reading only the first sentence still
+            # learns which manager is missing.
+            command = getattr(missing_manager_exc.__cause__, "filename", None) or "the service manager"
+            if restarted:
+                return [
+                    f"NOTE: {note}. {failure_detail} -- {restart_clause}. "
+                    f"The unit file is installed but NOT registered for "
+                    f"autostart because {command} is absent on this box. "
+                    # nexus-ebbvt review round 1, finding 1: `install
+                    # --autostart --force` is a proven no-op here --
+                    # install_autostart returns ALREADY_PRESENT (no
+                    # activation attempt at all, force or not) whenever
+                    # dest already equals the rendered template, which it
+                    # does the moment this pass writes it. uninstall
+                    # first forces a genuine rewrite + a fresh activation
+                    # attempt.
+                    "Once a service manager becomes available on this "
+                    "box, run `nx daemon service uninstall --autostart "
+                    "&& nx daemon service install --autostart` to "
+                    "register it."
+                ]
+            return [
+                f"NEEDS HUMAN: {note}. {failure_detail}, and {restart_clause} "
+                f"-- {manual_fallback}"
+            ]
         return [
-            f"NEEDS HUMAN: {note}, and converging it raised {exc} -- "
-            f"{restart_clause} -- {manual_fallback}"
+            f"NEEDS HUMAN: {note}, but {failure_detail} -- {restart_clause} "
+            f"-- {manual_fallback}"
         ]
 
+    # activated == True: install_result is guaranteed set (the only branch
+    # that sets `activated` also sets `install_result`, together).
+    #
     # The freshly-activated unit does not publish its lease instantly; bound
     # the wait the same way _restart_and_verify does rather than declaring
     # victory on returncode alone (nexus-4yf4u's lesson, one leg over). Bound
