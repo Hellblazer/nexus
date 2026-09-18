@@ -1292,3 +1292,76 @@ def test_rerun_mirror_writes_the_files_own_date_not_today(tmp_path, monkeypatch)
     content = entries[(project, "999")]["content"]
     assert "status: closed" in content
     assert "closed_date: 2026-06-01" in content, content
+
+
+# ---------------------------------------------------------------------------
+# nexus-u1jxt.4: resumed work re-gates; nexus-u1jxt.10: escaped pipes
+# ---------------------------------------------------------------------------
+
+
+def test_deferred_to_draft_stamps_resumed_date(tmp_path):
+    """The only flip TO draft the table admits is resume; the stamp is what
+    the accept guard compares the gate record's date against."""
+    rdr_dir = _rdr_dir(tmp_path)
+    f = _write_rdr(rdr_dir, 230, "deferred")
+    _write_readme(rdr_dir, 230, "Deferred")
+    res = _invoke(rdr_dir, "230", "draft", "--date", "2026-09-18")
+    assert res.exit_code == 0, res.output
+    text = f.read_text()
+    assert "status: draft" in text
+    assert "resumed_date: 2026-09-18" in text
+
+
+def test_accept_is_refused_when_the_gate_record_predates_the_resume(tmp_path, monkeypatch):
+    """accepted -> deferred -> draft -> design rewritten -> accepted used to
+    succeed on the old PASSED record. Reproduced pre-fix."""
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 231, "draft", extra_fm="resumed_date: 2026-09-10\n")
+    _write_readme(rdr_dir, 231, "Draft")
+    project, title = _gate_coords(tmp_path, 231)
+    _install_fake_t2(monkeypatch, entries={
+        (project, title): {"content": "outcome: PASSED\ndate: 2026-09-01\n"},
+        (project, "231"): {"content": "status: draft\nresumed_date: 2026-09-10\n"},
+    })
+    res = _invoke(rdr_dir, "231", "accepted", "--date", "2026-09-18")
+    assert res.exit_code != 0, res.output
+    assert "resumed" in res.output and "re-gate" in res.output, res.output
+
+
+def test_accept_is_refused_for_a_regated_record_without_a_fix_check(tmp_path, monkeypatch):
+    """The gate preamble prints "accept refuses this record" for a re-gated
+    record with no fix_check; the guard now does refuse it, and admits the
+    same record once the field names the commit's own sha."""
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 232, "draft")
+    _write_readme(rdr_dir, 232, "Draft")
+    project, title = _gate_coords(tmp_path, 232)
+    base = "outcome: PASSED\ndate: 2026-09-18\ncommit: abc1234\nprior: [1] (BLOCKED 1C 0S)\n"
+    _install_fake_t2(monkeypatch, entries={(project, title): {"content": base}})
+    res = _invoke(rdr_dir, "232", "accepted", "--date", "2026-09-18")
+    assert res.exit_code != 0, res.output
+    assert "fix_check" in res.output or "fix check" in res.output, res.output
+
+    _install_fake_t2(monkeypatch, entries={
+        (project, title): {"content": base + "fix_check: nexus_rdr/232-fix-check-abc1234\n"},
+    })
+    res = _invoke(rdr_dir, "232", "accepted", "--date", "2026-09-18")
+    assert res.exit_code == 0, res.output
+
+
+def test_readme_row_with_an_escaped_pipe_keeps_its_title(tmp_path):
+    """nexus-u1jxt.10: rows were split on every ``|``, so ``\\|`` in a title
+    shifted the Status index and the status landed in the title."""
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 233, "accepted", extra_fm="accepted_date: 2026-06-22\n")
+    readme = rdr_dir / "README.md"
+    readme.write_text(
+        "# RDR Index\n\n| RDR | Title | Type | Status | Date |\n|-----|-------|------|--------|------|\n"
+        "| [RDR-233](rdr-233-example-title.md) | A \\| B in one title | Architecture | Accepted | 2026-06-22 |\n",
+        encoding="utf-8",
+    )
+    res = _invoke(rdr_dir, "233", "closed", "--date", "2026-09-18")
+    assert res.exit_code == 0, res.output
+    row = [ln for ln in readme.read_text().splitlines() if "RDR-233" in ln][0]
+    assert "A \\| B in one title" in row, row
+    assert "| Closed |" in row, row

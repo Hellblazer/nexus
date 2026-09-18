@@ -153,6 +153,8 @@ def _preamble_rdr_dir(repo_root: str) -> str:
         try:
             d = yaml.safe_load(content) or {}
             paths = (d.get("indexing") or {}).get("rdr_paths", ["docs/rdr"])
+            if isinstance(paths, str):  # nexus-u1jxt.10: a scalar resolved to its first character
+                paths = [paths]
             rdr_dir = paths[0] if paths else "docs/rdr"
         except Exception:  # noqa: BLE001 — fallback parse path; tries alternate regex extraction on failure
             m_yml = (
@@ -432,6 +434,10 @@ def lint(paths: tuple[Path, ...], root: Path | None) -> None:
 _STATUS_DATE_KEY: dict[str, str] = {
     "accepted": "accepted_date",
     "closed": "closed_date",
+    # nexus-u1jxt.4: the only flip TO draft the lifecycle table admits is
+    # resume (deferred -> draft), and resumed work re-gates. The stamp is
+    # what lets the accept guard refuse a gate record older than the resume.
+    "draft": "resumed_date",
 }
 
 #: ``open`` is retired from the rdr-lifecycle table's ``status`` domain but
@@ -655,7 +661,10 @@ def _update_readme_status_row(
             # stale index from an earlier table wrote into the wrong cell).
             status_col = None
             continue
-        cells = line.split("|")
+        # nexus-u1jxt.10: an escaped pipe in a title (``\|``) is not a cell
+        # boundary; splitting on every ``|`` shifted the Status index and
+        # wrote the status into the title.
+        cells = re.split(r"(?<!\\)\|", line)
         # A header row names the Status column; the row's cell at that
         # position is the one to rewrite. A title cell whose leading word
         # is a status ("Deferred indexing of large trees") was the first
@@ -892,7 +901,7 @@ def _append_marker_to_t2(client: object, project: str, number: int, marker: str)
     return None
 
 
-_STATUS_DATE_KEY: dict[str, str] = {"accepted": "accepted_date", "closed": "closed_date"}
+_STATUS_DATE_KEY: dict[str, str] = {"accepted": "accepted_date", "closed": "closed_date", "draft": "resumed_date"}
 
 
 def _t2_statuses_for(repo_name: str, rdr_num: int) -> dict[str, str]:
@@ -1059,11 +1068,57 @@ def _gate_outcome_for(rdr_num: str, repo_name: str) -> tuple[str, str | None]:
     if outcome is None:
         return "none", f"gate record {title!r} has no `outcome:` field"
     outcome_upper = outcome.strip().upper()
-    if outcome_upper == "PASSED":
-        return "passed", None
     if outcome_upper == "BLOCKED":
         return "blocked", None
-    return "none", f"gate record {title!r} outcome is {outcome!r} (expected PASSED or BLOCKED)"
+    if outcome_upper != "PASSED":
+        return "none", f"gate record {title!r} outcome is {outcome!r} (expected PASSED or BLOCKED)"
+    # nexus-u1jxt.4: a PASSED record is admitted only when it still stands
+    # for this design. Three refusals the gate preamble already prints as
+    # "accept refuses this record" but this guard never checked: a re-gated
+    # record (one with a prior: chain) with no fix_check, one whose
+    # fix_check names a sha other than its commit, and a record dated
+    # before the RDR was resumed from deferred (the lifecycle table says
+    # resumed work re-gates; the old record is for the design before it).
+    defect = _gate_record_accept_defect(content, title)
+    if defect is not None:
+        return "none", defect
+    try:
+        with _t2_client_factory() as client:
+            for status_title in _t2_rdr_titles(int(rdr_num)):
+                status_entry = client.get(project=project, title=status_title)
+                if not status_entry:
+                    continue
+                status_content = status_entry.get("content", "") if isinstance(status_entry, dict) else ""
+                resumed = (_preamble_parse_t2_field(status_content, "resumed_date") or "").strip().strip('"')
+                gate_date = (_preamble_parse_t2_field(content, "date") or "").strip().strip('"')
+                if resumed and gate_date and resumed > gate_date:
+                    return "none", (
+                        f"gate record {title!r} is dated {gate_date}, before the RDR was resumed from "
+                        f"deferred on {resumed}; resumed work re-gates (rdr-lifecycle table), so run the gate again"
+                    )
+                break
+    except Exception as exc:  # noqa: BLE001 — same posture as the gate read above: named, never raised past the CLI
+        return "none", f"T2 unreachable reading the status record: {type(exc).__name__}: {exc}"
+    return "passed", None
+
+
+def _gate_record_accept_defect(content: str, title: str) -> str | None:
+    """The reason a PASSED gate record still cannot admit accept, or
+    ``None`` (nexus-u1jxt.4). Mirrors :func:`_fix_check_pointer_lines`'s
+    first two refusals, which the gate preamble prints as "accept refuses
+    this record" and which the guard used to ignore."""
+    is_regate = bool(_t2_field_block(content, "prior"))
+    fix_check_field = (_preamble_parse_t2_field(content, "fix_check") or "").strip()
+    if is_regate and not fix_check_field:
+        return f"gate record {title!r} is a re-gate (it has a `prior:` chain) with no `fix_check:`; a skipped fix check is not a clean one"
+    if fix_check_field and not fix_check_field.lower().startswith("none"):
+        gated_commit = (_preamble_parse_t2_field(content, "commit") or "").strip().strip('"').strip("`")
+        m = re.search(r"fix-check-([0-9a-f]{6,40})", fix_check_field)
+        sha = m.group(1) if m else fix_check_field.split()[0]
+        shorter = min(len(sha), len(gated_commit))
+        if gated_commit and not (shorter >= 7 and sha[:shorter] == gated_commit[:shorter]):
+            return f"gate record {title!r} names fix check {sha} but its commit is {gated_commit}; the fix check is of an older tree"
+    return None
 
 
 def _gate_repo_name(repo_root: str) -> str:
@@ -1522,9 +1577,18 @@ def set_status(
         if t2_note:
             click.echo(t2_note, err=True)
         if new_status == "superseded":
-            edge, edge_note = _ensure_supersedes_edge(
-                _catalog_reader_factory(), repo_root, int(flipped_num_match.group(0)), superseded_by,
-            )
+            # nexus-u1jxt.10: the factory used to be evaluated outside the
+            # edge writer's own try, so a factory failure tracebacked AFTER
+            # the file, README and T2 were flipped and the dependents walk
+            # below never ran. Named, and the walk still runs.
+            try:
+                cat_reader = _catalog_reader_factory()
+            except Exception as exc:  # noqa: BLE001 — the flip already happened; the edge is report-only
+                edge, edge_note = None, f"catalog unavailable ({type(exc).__name__}: {exc})"
+            else:
+                edge, edge_note = _ensure_supersedes_edge(
+                    cat_reader, repo_root, int(flipped_num_match.group(0)), superseded_by,
+                )
             if edge:
                 click.echo(f"catalog edge ensured: {edge}")
             if edge_note:
@@ -2370,7 +2434,11 @@ def _preamble_regate_block(
                         )
                     if idx >= 2:
                         older_critique_rows = critique_rows[:idx - 1]
-                elif critique_count >= 1:
+                elif idx == -1 and critique_count >= 1:
+                    # nexus-u1jxt.3: idx == 0 is an ordinary first re-gate
+                    # (the latest critique is the earliest enumerated one,
+                    # nothing older exists) and must not print the note;
+                    # only the hidden-title case below (idx == -1) may.
                     # Follow-on review F2: critique_rows/critique_count is
                     # built from get_all's enumeration, which EXCLUDES the
                     # current title when it is hidden from that scan (the
@@ -3865,6 +3933,11 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
     # write here, deterministically — see _rdr_research_add. ``add <id>``
     # alone (no text) is unchanged: it falls through to the context-printing
     # path below, exactly as before (nexus-zu1q0 scope).
+    # nexus-u1jxt.10: the add verb handed over as ONE element ("add 205 the
+    # finding ...", a caller that did not split its own line) used to fall
+    # through to the read path and print context, exit 0, writing nothing.
+    if len(args) == 1 and args[0].split()[:1] == ["add"]:
+        args = tuple(shlex.split(args[0]))
     add_id = re.match(r"^(?:rdr-)?(\d+)$", args[1], re.IGNORECASE) if len(args) >= 3 else None
     if add_id and args[0].lower() == "add":
         # Zero-padded to three digits: that is the shape every live
@@ -4121,13 +4194,23 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
     print("#### Findings to fix (each at every site named)")
     print()
     if findings and own_round > GATE_MAX_ANY_CRITICAL_ROUNDS:
-        residual_keys = {_finding_title_key(t) for t in _residual_titles(content)}
+        residual_titles = _residual_titles(content)
+        residual_keys = {_finding_title_key(t) for t in residual_titles}
+        # nexus-u1jxt.9: the SAME strict-then-loose rule the gate preamble
+        # applies (nexus-yjf5l.14), so a residual whose title drifted by a
+        # digit reads as a recorded residual here too, never as a fresh
+        # ship-blocker the gate would then refuse to re-open.
+        residual_loose_unique = _loose_unique_index(residual_titles)
+        finding_loose_unique = _loose_unique_index([f for f in findings if not f.startswith("  ")])
         ship_blockers: list[str] = []
         residuals_out: list[str] = []
         is_residual = False
         for f in findings:
             if not f.startswith("  "):
                 is_residual = _finding_title_key(f) in residual_keys
+                if not is_residual:
+                    loose = _finding_title_key_loose(f)
+                    is_residual = loose in residual_loose_unique and loose in finding_loose_unique
             (residuals_out if is_residual else ship_blockers).append(f)
         print(
             f"From round {GATE_MAX_ANY_CRITICAL_ROUNDS + 1}, fix only the ship-blockers below; "
@@ -4370,6 +4453,10 @@ def _gate_loop_health_lines(rows: list[dict]) -> list[str]:
 # preamble rdr-verdict — the gate outcome computed from the critique (nexus-yxo2l)
 # ---------------------------------------------------------------------------
 
+#: nexus-u1jxt.2: a critic outcome that means "do not pass", whatever the
+#: counted blocks say. ``partial`` and ``justified`` never block on their own.
+_CRITIC_BLOCKING_OUTCOMES: frozenset[str] = frozenset({"blocked", "not-justified", "not_justified", "failed", "fail"})
+
 _VERDICT_FIELD_RE = re.compile(r"^\s*-\s*\*\*(outcome|critical_count|significant_count|ship_blockers)\*\*\s*:\s*(\S+)", re.IGNORECASE | re.MULTILINE)
 _VERDICT_INLINE_RE = re.compile(r"\b(critical_count|significant_count|ship_blockers)\s*=\s*(\d+)", re.IGNORECASE)
 _SHIP_BLOCKER_RE = re.compile(r"^\s*(?:-\s*)?\*{0,2}Ship-blocker\*{0,2}\s*:\s*\*{0,2}(yes|no)\b", re.IGNORECASE | re.MULTILINE)
@@ -4399,6 +4486,10 @@ class CritiqueTally:
     #: unclassified — see ``_classification_of``'s conservative default,
     #: which rdr-gate applies for disposition only, never for blocking.
     classifications: dict[str, str]
+    #: nexus-u1jxt.2: the critic's own ``- **outcome**:`` value (lower-
+    #: cased, punctuation stripped), ``None`` when the Verdict has none.
+    #: rdr-verdict takes the stricter of this and the counted blocks.
+    reported_outcome: str | None = None
 
 
 def _critique_tally(text: str) -> CritiqueTally:
@@ -4443,8 +4534,13 @@ def _critique_tally(text: str) -> CritiqueTally:
         if not stripped:
             continue
         sec = re.match(r"^\s*#{1,3}\s*(critical|significant|observation|verification|verdict)", line, re.IGNORECASE)
-        if sec and not _CRITIQUE_ISSUE_RE.match(line):
-            word = sec.group(1).lower()
+        # ANY heading ends the current section (nexus-u1jxt.8): before this
+        # only the five named headings did, so an ``### Issue:`` under a
+        # later ``## Minor Issues`` was counted as a Critical the findings
+        # parser (which resets on every heading) could not see -- BLOCKED
+        # with an empty findings list.
+        if re.match(r"^\s*#{1,3}\s+\S", line) and not _CRITIQUE_ISSUE_RE.match(line):
+            word = sec.group(1).lower() if sec else ""
             section = word if word in ("critical", "significant") else None
             current = None
             continue
@@ -4498,6 +4594,7 @@ def _critique_tally(text: str) -> CritiqueTally:
         v = reported.get(key, "").strip().rstrip(".,")
         return int(v) if v.isdigit() else None
 
+    outcome_raw = reported.get("outcome", "").strip().rstrip(".,").lower() or None
     return CritiqueTally(
         criticals=criticals,
         significants=significants,
@@ -4506,6 +4603,7 @@ def _critique_tally(text: str) -> CritiqueTally:
         reported_significant=_int("significant_count"),
         reported_ship_blockers=_int("ship_blockers"),
         classifications=classes,
+        reported_outcome=outcome_raw,
     )
 
 
@@ -4647,6 +4745,26 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
         blocked = ship_blockers > 0
     else:
         blocked = False
+    # nexus-u1jxt.2: the critic's own outcome was captured and never read,
+    # so a Critical section whose blocks were not headed ``### Issue:``
+    # counted zero and the round PASSED against an explicit BLOCKED. Under
+    # the any-critical rule the stricter of the two wins and the
+    # disagreement is named. From round 3 the rule is ship-blockers only,
+    # which the critic's outcome does not account for (a "blocked" over
+    # Significants alone is exactly what that rule admits), so it is noted
+    # there and never overrides.
+    if tally.reported_outcome in _CRITIC_BLOCKING_OUTCOMES and not blocked and rule.blocks_on != "any-critical":
+        notes.append(
+            f"outcome: the critic's own Verdict says {tally.reported_outcome!r}; under the round's "
+            f"{rule.blocks_on} rule only ship-blockers block ({ship_blockers} counted), so it does not."
+        )
+    if tally.reported_outcome in _CRITIC_BLOCKING_OUTCOMES and not blocked and rule.blocks_on == "any-critical":
+        notes.append(
+            f"outcome: the critic's own Verdict says {tally.reported_outcome!r} while the counted "
+            f"blocks ({critical_count} Critical, {ship_blockers} ship-blocker) would pass; the "
+            "stricter reading wins, BLOCKED. Check the critique's block headings (`### Issue:`)."
+        )
+        blocked = True
     outcome = "BLOCKED" if blocked else "PASSED"
     # nexus-yjf5l.14: a residual recorded at round N that Layer 0 tells the
     # critic not to re-raise vanishes from round N+1's OWN critique — so this
@@ -4969,31 +5087,15 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
     """Print RDR audit dispatch context."""
     args_str = " ".join(args).strip()
 
-    # Derive current project name: git remote -> git root -> cwd
+    # nexus-u1jxt.6: the T2 project name is the checkout's own name, the
+    # way every writer under <repo>_rdr derives it (_preamble_resolve_repo:
+    # the git common dir's parent, worktree-stable); the origin URL's
+    # basename was a different string whenever the two disagreed, so the
+    # audit read a project nobody wrote to.
+    cwd_repo_root, cwd_repo_name = _preamble_resolve_repo()
+
     def _derive_project_name() -> str:
-        try:
-            url = subprocess.check_output(
-                ["git", "remote", "get-url", "origin"],
-                stderr=subprocess.DEVNULL, text=True,
-            ).strip()
-            if url:
-                name = url.rsplit("/", 1)[-1]
-                if name.endswith(".git"):
-                    name = name[:-4]
-                if name:
-                    return name
-        except Exception:  # noqa: BLE001 — best-effort git lookup; falls back to next strategy
-            pass
-        try:
-            root = subprocess.check_output(
-                ["git", "rev-parse", "--show-toplevel"],
-                stderr=subprocess.DEVNULL, text=True,
-            ).strip()
-            if root:
-                return Path(root).name
-        except Exception:  # noqa: BLE001 — best-effort git lookup; falls back to cwd name
-            pass
-        return Path.cwd().name
+        return cwd_repo_name
 
     current_project = _derive_project_name()
 
@@ -5078,9 +5180,15 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
             roots_source = "default candidates (set NEXUS_PROJECT_ROOTS to override)"
 
         candidate_paths = [r / target for r in roots if r.is_dir()]
-        found_path = next(
-            (p for p in candidate_paths if p.exists() and p.is_dir()), None
-        )
+        # nexus-u1jxt.6: the checkout the command runs in IS the target when
+        # the names agree, whatever directory it lives under -- the home
+        # candidates alone scanned nothing from a repo outside them, and from
+        # a linked worktree they scanned the primary checkout's files.
+        found_path = Path(cwd_repo_root) if target == cwd_repo_name else None
+        if found_path is None:
+            found_path = next(
+                (p for p in candidate_paths if p.exists() and p.is_dir()), None
+            )
         if found_path:
             print(f"**Worktree found:** `{found_path}`")
             postmortem_dir = found_path / "docs" / "rdr" / "post-mortem"
@@ -5107,7 +5215,9 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
         print()
         print("**Status vocabulary scan (`docs/rdr/*.md`, non-recursive):**")
         if found_path:
-            scan_dir = found_path / "docs" / "rdr"
+            # nexus-u1jxt.6: the RDR directory the repo declares, not a
+            # hard-coded docs/rdr.
+            scan_dir = found_path / _preamble_rdr_dir(str(found_path))
             if scan_dir.is_dir():
                 try:
                     status_domain = frozenset(

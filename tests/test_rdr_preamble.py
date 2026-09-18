@@ -2683,6 +2683,32 @@ class TestRdrGateRegateBlock:
         assert "could not be loaded" in out
         assert "finding C" in out, "the latest critique's own findings still sweep"
 
+    def test_ordinary_first_regate_prints_no_second_critique_note(self, rdr_env, monkeypatch):
+        """nexus-u1jxt.3: the latest critique is the ONLY enumerated one
+        (idx == 0), an ordinary round-2 gate. The ``critique_count >= 1``
+        branch fired here too and printed a false "Second critique
+        missing"; only the hidden-title case (idx == -1) may. Reproduced
+        pre-fix: this test printed the note."""
+        import nexus.commands.rdr as rdr_mod
+
+        self._write(rdr_env)
+        fake = _FakeT2ResearchClient(
+            entries={
+                "204-gate-latest": (
+                    "outcome: \"BLOCKED\"\ndate: \"2026-09-09\"\n"
+                    "critique: nexus_rdr/204-gate-critique-2026-09-09\n"
+                ),
+                "204-gate-critique-2026-09-09": (
+                    "## Critical Issues\n\n### Issue: finding A\n- **Location**: L1\n"
+                ),
+            },
+        )
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "204"])
+        assert result.exit_code == 0, result.output
+        assert "Second critique missing" not in result.output, result.output
+        assert "finding A" in result.output
+
     def test_missing_second_critique_is_a_visible_note_at_round_2(self, rdr_env, monkeypatch):
         """Follow-on review F2: the round-2 boundary of the idx==-1
         (hidden-current-title, nexus-zu1q0 race) path. ``critique_count``
@@ -3155,6 +3181,34 @@ class TestRdrFixPreamble:
         assert "#### Before the edit" not in out, "past the gate, the instructions do not print"
         assert "204-fix-check-<sha>" in out, "the pointer at rdr-accept names the check it carries"
         assert "bead id" in out and "needs none" in out, "the bead-disposition exemption"
+
+    def test_round_three_residual_that_drifted_by_a_digit_is_still_a_residual(self, rdr_env, monkeypatch):
+        """nexus-u1jxt.9: rdr-fix matched residuals strict-key only while
+        rdr-gate matched strict-then-loose, so a residual whose title
+        drifted by a digit was a ship-blocker to fix here and a recorded
+        residual not to re-open there. Same rule now. Reproduced pre-fix:
+        the drifted title printed under ship-blockers."""
+        import nexus.commands.rdr as rdr_mod
+
+        gated = self._commit(rdr_env, self._BODY, "gated")
+        fake = _FakeT2ResearchClient({
+            "204-gate-latest": (
+                f"outcome: \"BLOCKED\"\ndate: \"2026-09-09\"\ncommit: {gated}\n"
+                "critique: nexus_rdr/204-gate-critique-2026-09-09z\n"
+                "prior: [1] (BLOCKED 1C), [2] (BLOCKED 1C)\n"
+                "residuals:\n  - the round 5 counter is off by one in the fallback branch\n"
+            ),
+            "204-gate-critique-2026-09-09z": (
+                "## Significant Issues\n\n### Issue: the round 6 counter is off by one in the fallback branch\n"
+                "- **Location**: L200\n- **Ship-blocker**: no\n"
+            ),
+        })
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-fix", "--", "204"]).output
+        assert "Residuals (record; do not fix in this change)" in out, out
+        res_idx = out.index("Residuals (record; do not fix in this change)")
+        assert out.index("the round 6 counter is off by one") > res_idx, out
+        assert "(none" in out[out.index("Ship-blockers (fix these)"):res_idx], out
 
     def test_unreachable_t2_is_named(self, rdr_env, monkeypatch):
         import nexus.commands.rdr as rdr_mod
@@ -4316,3 +4370,64 @@ class TestResolverSkipsCompanions:
             got = _preamble_find_rdr_file(tree, str(n))
             assert got in real, f"{n} resolved to {got.name}, a companion; real: {[f.name for f in real]}"
 
+
+
+class TestU1jxtVerdictAndPaths:
+    """Standing-code review run 3 (epic nexus-u1jxt): the verdict honours
+    the critic's own outcome, an Issue under a non-finding heading is not a
+    Critical, the audit scans the checkout it runs in, and a scalar
+    rdr_paths resolves to a directory."""
+
+    def test_verdict_takes_the_critics_blocked_outcome_over_zero_counted_blocks(self, rdr_env, monkeypatch):
+        """nexus-u1jxt.2: a Critical section whose blocks are headed
+        ``### C1:`` rather than ``### Issue:`` counted zero, and the critic's
+        explicit ``outcome: BLOCKED`` was captured and never read, so the
+        round PASSED. Reproduced pre-fix."""
+        import nexus.commands.rdr as rdr_mod
+
+        _write_rdr(rdr_env["rdr_dir"], "rdr-204-x.md", {"title": "X", "status": "draft", "type": "feature"})
+        crit = (
+            "## Critical Issues\n\n### C1: The design contradicts itself\n- **Location**: L1\n"
+            "- **Ship-blocker**: yes\n\n## Significant Issues\n\nNone.\n\n## Verdict\n\n- **outcome**: BLOCKED\n"
+        )
+        fake = _FakeT2ResearchClient({"204-gate-critique-2026-09-07": crit})
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        out = _runner().invoke(rdr, ["preamble", "rdr-verdict", "--", "204", "204-gate-critique-2026-09-07"]).output
+        assert "**Outcome: BLOCKED**" in out, out
+        assert "stricter reading wins" in out, out
+
+    def test_tally_does_not_count_an_issue_under_a_later_non_finding_heading(self):
+        """nexus-u1jxt.8: the tally reset its section only on five named
+        headings, so ``### Issue:`` under ``## Minor Issues`` counted as a
+        Critical while the findings parser (which resets on any heading)
+        saw nothing: BLOCKED with an empty findings list."""
+        from nexus.commands.rdr import _critique_findings, _critique_tally
+
+        crit = (
+            "## Critical Issues\n\nNone.\n\n## Minor Issues\n\n### Issue: a typo in the title\n"
+            "- **Location**: L1\n\n## Verdict\n\n- **outcome**: PASSED\n- **critical_count**: 0\n"
+            "- **significant_count**: 0\n- **ship_blockers**: 0\n"
+        )
+        t = _critique_tally(crit)
+        assert t.criticals == [] and t.significants == []
+        assert t.reported_outcome == "passed"
+        assert _critique_findings(crit) == []
+
+    def test_rdr_audit_scans_the_checkout_it_runs_in(self, rdr_env, monkeypatch):
+        """nexus-u1jxt.6: from a repo outside the home candidate roots the
+        audit scanned nothing and read clean. The checkout the command runs
+        in is the target when the names agree."""
+        rdr_dir = rdr_env["rdr_dir"]
+        _write_rdr(rdr_dir, "rdr-204-x.md", {"title": "X", "status": "bogus-status", "type": "feature"})
+        monkeypatch.setenv("NEXUS_PROJECT_ROOTS", str(rdr_env["repo_root"] / "nowhere"))
+        out = _runner().invoke(rdr, ["preamble", "rdr-audit", "--", rdr_env["repo_root"].name]).output
+        assert "**Worktree found:**" in out and str(rdr_env["repo_root"]) in out, out
+        assert "bogus-status" in out, out
+
+    def test_preamble_rdr_dir_accepts_a_scalar_rdr_paths(self, tmp_path):
+        """nexus-u1jxt.10: ``rdr_paths: docs/decisions`` (a scalar, not a
+        list) resolved to its first character."""
+        from nexus.commands.rdr import _preamble_rdr_dir
+
+        (tmp_path / ".nexus.yml").write_text("indexing:\n  rdr_paths: docs/decisions\n")
+        assert _preamble_rdr_dir(str(tmp_path)) == "docs/decisions"

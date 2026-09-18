@@ -32,6 +32,7 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.52.0)
 
+- `conexus/hooks/scripts/rdr_hook.py`: the SessionStart RDR line reads a file's own frontmatter status before defaulting to draft, skips companion notes, and names the repo by its git common dir in a linked worktree, so a closed RDR is no longer told to run rdr-fix (bead nexus-u1jxt.7).
 - `conexus/hooks/scripts/subagent-stop-scan.py`: a `SubagentHandback` tool_use counts as the completion report alongside `SendMessage`, so a background agent that hands back is no longer blocked once and made to re-send (bead nexus-4xo3k).
 - `conexus/hooks/scripts/subagent-stop.sh`: the decision table, the report-check note and the block reason name SubagentHandback as a report (bead nexus-4xo3k).
 - `conexus/hooks/scripts/tuple_ledger_project.py`: the report tuple's text comes from the last SendMessage `content` or SubagentHandback `message` (bead nexus-4xo3k).
