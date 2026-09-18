@@ -173,9 +173,9 @@ Python hooks already present and launched through the bash launcher:
 `routing/phase_review_close_requires_gate.py`, with their helper modules.
 Seven of the eight need only a declaration change to exec form once a
 verb wraps them. The eighth, `version_lockstep_hook.py`, is the permanent
-exception of Approach item 4: it is never wrapped, and it also calls the
+exception of Approach item 3: it is never wrapped, and it also names the
 launcher in its own code (lines 101, 218 and 521) to dispatch its repair
-action, so its port is a change to those three lines, not a declaration.
+action, so its port changes those three lines and its declaration.
 
 The full contract map, one row per script with stdin fields, stdout
 shapes, exit codes, files touched outside the repo and every quoting
@@ -275,10 +275,11 @@ functions.
    "tool": "hook_<name>", "input": {...}}`. The `input` map names the
    payload fields the hook reads (the contract map lists them per script)
    as `${session_id}`, `${tool_input.command}` and so on. The tool returns
-   the same decision JSON the script wrote to stdout. That is 19 of the 24
+   the same decision JSON the script wrote to stdout. That is 16 of the 24
    conexus entries.
-2. **The command tier.** The seven `SessionStart` entries stay command
-   hooks in exec form on `nx-hook`, a new console script beside
+2. **The command tier.** Six of the seven `SessionStart` entries (the
+   seventh is item 3) become command hooks in exec form on `nx-hook`, a
+   new console script beside
    `nx-session-end-launcher` in `pyproject.toml`, whose entry module
    imports `os`, `sys` and `json` and resolves the verb to its module
    lazily. `SessionEnd` keeps `nx-session-end-launcher`, reshaped to exec
@@ -287,10 +288,11 @@ functions.
 3. **The lockstep exception.** `version_lockstep_hook.py` repairs a wheel
    that is behind the plugin, so it can depend on neither tier. It stays a
    stdlib-only script declared as `{"command": "python3", "args":
-   ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py"]}`, and
-   its two dispatch lines (218 and 521) run `python3
-   version_lockstep_action.py` directly, which is sound because the action
-   imports only the standard library (research-8).
+   ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py"]}`, its
+   two dispatch lines (218 and 521) run `python3 version_lockstep_action.py`
+   directly, which is sound because the action imports only the standard
+   library (research-8), and the `_LAUNCHER` assignment at line 101 is
+   deleted with them.
 4. **One implementation, two entries.** Each bash script becomes a module
    under `src/nexus/hooks/` with one function
    `run(payload: dict | None) -> HookResult`. The tool tier registers it
@@ -319,9 +321,12 @@ functions.
    `tests/hooks/test_run_python_hook_runner.py`, and
    `tests/e2e/plugin-lockstep-gate.sh` lines 146 and 235. Docstring and
    prose mentions are updated, not counted.
-8. **The sn plugin.** Its three hooks join the tool tier on the conexus
-   server where the event allows it (`SubagentStart`, `PreToolUse`,
-   `PermissionRequest`) and its `SessionStart` entry goes to `nx-hook`.
+8. **The sn plugin.** sn ships no Python package and no server of its
+   own, and its hook logic already lives in two bundled stdlib scripts
+   (`auto_approve_sn_mcp.py`, `worktree_guard.py`) that the bash wrappers
+   call with `python3`. Its four entries become exec-form `python3` on
+   those scripts, with the session-start section emitted by a third small
+   script. sn keeps no dependency on the conexus wheel or server.
 9. **Move, then delete.** Each port retargets the script's existing test
    at the new entry with the same payload and the same expected output,
    passes, and only then deletes the script. Byte and timing budgets keep
@@ -336,7 +341,10 @@ the decision JSON as its text content; a raised exception is caught at
 the tool boundary, logged to the hook log, and returned as empty text
 with `isError` false, so the event continues exactly as a bash script
 without `set -e` lets it continue today. The two async wrappers become a
-daemon thread started inside the server, which replaces the double-fork.
+daemon thread started inside the server, which replaces the double-fork,
+and the Stop hook's `nx catalog sync`, synchronous in the script today
+(line 94), moves to a daemon thread as well so a git push never holds
+the server; that is a deliberate change, listed under Failure Modes.
 The hook tools are visible in the model's tool list, since MCP has no
 way to hide a tool; the `hook_` prefix and a one-line description saying
 so are the mitigation, and the auto-approve matcher covers them.
@@ -377,7 +385,7 @@ omits `permissionDecisionReason`; the sn auto-approve wrapper swallows a
 Python crash with an unconditional `exit 0`; the sn session-start script
 has no error boundary. Each gets the shared envelope and boundary.
 
-**Lint.** A test asserts, for every entry in both `hooks.json` files,
+**Lint.** A test asserts, for every entry in the conexus `hooks.json`,
 one of two shapes. Tool tier: `type` is `mcp_tool`, `server` is
 `plugin:conexus:nexus`, `tool` starts with `hook_` and names a registered
 tool, and the event is not `SessionStart`. Command tier: the entry has an
@@ -385,14 +393,17 @@ tool, and the event is not `SessionStart`. Command tier: the entry has an
 `nx-session-end-launcher`, or `python3` whose sole `args` element ends in
 `version_lockstep_hook.py`, and no `command` or `args` element equals
 `bash`, `sh` or `nx` or ends in `.sh`; matching is whole-string, so
-`nx-hook` is not `nx`. A `SessionStart` entry must be command tier.
+`nx-hook` is not `nx`. A `SessionStart` entry must be command tier. For
+the sn `hooks.json`: every entry has `args`, `command` is exactly
+`python3`, and the sole `args` element is a `.py` path under
+`${CLAUDE_PLUGIN_ROOT}/hooks/scripts/`.
 
 **Tests.** Each retargeted test keeps its payload fixture and expected
 bytes. Tool-tier tests call the registered tool through the server's
 in-process dispatch; one integration test drives a real `nx-mcp` over
-stdio for one tool. Command-tier tests spawn `nx-hook <verb>`. Three
-scripts have no test today (`sn/session-start.sh`, `sn/mcp-inject.sh`,
-the sn auto-approve wrapper); their ports get one.
+stdio for one tool. Command-tier tests spawn `nx-hook <verb>`. Two
+scripts have no test today (`sn/session-start.sh`, `sn/mcp-inject.sh`);
+their ports get one.
 
 ### Decision Rationale
 
@@ -447,8 +458,9 @@ that client or shell out to `nx` for every call.
   and ships through the drift ledger and a plugin cut or client release;
   the tool tier also requires a wheel whose `nx-mcp` registers the hook
   tools, so the drift ledger entry states the wheel floor.
-- 19 conexus hooks and 3 sn hooks stop spawning a process at all; seven
-  `SessionStart` hooks spawn one `nx-hook` each instead of bash.
+- 16 conexus hooks stop spawning a process at all; six `SessionStart`
+  hooks spawn one `nx-hook` each instead of bash, the lockstep hook
+  spawns `python3`, and the four sn hooks spawn `python3` instead of bash.
 - The hook tools appear in the model's tool list.
 - 4,200 lines of bash leave; roughly the same amount of Python arrives,
   with unit tests per module.
@@ -466,19 +478,21 @@ that client or shell out to `nx` for every call.
   Mitigation: the retargeted test asserts the exact bytes; a grep for the
   quoted strings runs before each script is deleted.
 - **A hook tool blocks the server.** Mitigation: hook tools do no more
-  than the script did; the Stop hook's `nx catalog sync` runs in a
-  thread, as it is backgrounded today.
+  than the script did, and the one long call, the Stop hook's
+  `nx catalog sync`, moves off the synchronous path into a daemon thread.
 
 ### Failure Modes
 
 - A hook module imports a heavy module at start-up and regresses every
   `SessionStart`. Guard: imports deferred to the branch that needs them.
-- The daemon thread for an async hook outlives its work and leaks.
-  Guard: `test_subagent_tuple_async_wrappers.py` retargeted to assert
-  the thread completes.
-- The model calls a `hook_` tool by itself. Guard: the tools are
-  idempotent reads or ledger writes the model could already reach
-  through `nx`; the description says the tool is a hook entry.
+- A daemon thread (the two async projectors, the catalog sync) outlives
+  its work, leaks, or fails silently where the synchronous call would
+  have logged. Guard: `test_subagent_tuple_async_wrappers.py` retargeted
+  to assert completion; the thread logs its outcome to the hook log.
+- The model calls a `hook_` tool by itself. Guard: the tools do what the
+  hook did, reads and ledger appends the model can already reach through
+  `nx`; a stray append surfaces in the census rather than hiding; the
+  description says the tool is a hook entry.
 
 ## Implementation Plan
 
@@ -519,7 +533,7 @@ distro, with the timing of the first `PreToolUse` after launch recorded.
    dispatch lines rewritten (Approach item 3). The four shell-form `nx`
    entries per Approach item 6. The launcher and its tests per Approach
    item 7.
-6. The three sn hooks per Approach item 8.
+6. The four sn entries per Approach item 8.
 
 ### Phase 4: Close
 
@@ -542,7 +556,8 @@ distro, with the timing of the first `PreToolUse` after launch recorded.
 
 - Gap 3 names two hook forms that need no shell; the Approach uses both,
   by event. The tool tier is unavailable on `SessionStart` at launch
-  (research-9), which is exactly the set the command tier covers.
+  (research-9); the command tier covers that set plus `SessionEnd`, which
+  stays on `nx-session-end-launcher` by choice.
 - The inventory (research-1) counted `timeout`, `uname` and `curl` as
   call sites; the contract map (research-6) found no script calls them.
   The Technical Environment carries the corrected list.
@@ -601,6 +616,8 @@ replaces the lines that carry them; no other behaviour changes.
 - **Hook tools in the model's tool list.** MCP cannot hide a tool; the
   `hook_` prefix, the description, and the auto-approve matcher are the
   mitigation.
+- **Plugin independence.** sn's hooks depend on `python3` and its own
+  bundled scripts only; nothing in this RDR makes sn require conexus.
 - **Logging.** Hooks log to the hook log through `_hook_logging.py`
   today; the shared boundary keeps that path so a swallowed exception is
   still recorded.
