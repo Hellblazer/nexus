@@ -34,5 +34,5 @@ RUN if ls /home/nexus/wheel/*.whl > /dev/null 2>&1; then \
     fi
 COPY --chown=nexus:nexus plugin/ /home/nexus/plugin/
 COPY --chown=nexus:nexus settings.json /home/nexus/.claude/settings.json
-COPY --chown=nexus:nexus mvv_in_container.sh send.py assistant_said.py /home/nexus/
+COPY --chown=nexus:nexus mvv_in_container.sh send.py assistant_said.py turn_end.py channel_wakes.py /home/nexus/
 ENTRYPOINT ["/bin/bash", "/home/nexus/mvv_in_container.sh"]

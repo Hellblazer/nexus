@@ -47,7 +47,7 @@ trap 'rm -rf "$STAGE"' EXIT
 umask 077
 printf '%s' "$FRESHCREDS" > "$STAGE/.claude-credentials.json"
 umask 022
-cp "$HERE/Dockerfile" "$HERE/mvv_in_container.sh" "$HERE/send.py" "$HERE/assistant_said.py" "$STAGE/"
+cp "$HERE/Dockerfile" "$HERE/mvv_in_container.sh" "$HERE/send.py" "$HERE/assistant_said.py" "$HERE/turn_end.py" "$HERE/channel_wakes.py" "$STAGE/"
 mkdir -p "$STAGE/wheel" "$STAGE/plugin/.claude-plugin" "$STAGE/plugin/hooks/scripts"
 if [ -n "$PUBLISHED" ]; then
     LABEL="published-$PUBLISHED"
@@ -115,6 +115,13 @@ json.dump({"hooks": {
         {"type": "command",
          "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/mailbox_drain.py",
          "timeout": 10}]}],
+    # The turn-end sentinel (~/git/recording-rig lib/sentinels.sh): the driver
+    # waits for a hook signal that the turn ENDED instead of scraping the pane.
+    # Per-session with no templating, since the hook reads its own session id.
+    "Stop": [{"matcher": "", "hooks": [
+        {"type": "command",
+         "command": "/home/nexus/nxenv/bin/python /home/nexus/turn_end.py",
+         "timeout": 5}]}],
 }}, open(sys.argv[1], "w"), indent=2)
 PY
 rm -rf "$STAGE/conexus"

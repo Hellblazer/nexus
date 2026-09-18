@@ -95,8 +95,14 @@ transcript_of() {
     printf '%s' "${hits%%$'\n'*}"
 }
 transcripts() { ls "$HOME/.claude/projects"/*/*.jsonl 2>/dev/null | sort; }
-wake_count() {  # NAME -> wake lines for its mailbox in the pane
-    pane "$1" | grep -c "nexus mailbox message: subspace mailbox/${SID_OF[$1]}," | tr -d ' '
+wake_count() {  # NAME -> CHANNEL-delivered wakes for its own mailbox
+    # From the transcript's `origin.kind == "channel"`, never the pane: the
+    # pane truncates the wake line mid-session-id ("subspace mailbox/6a70b05f-
+    # 1e35-4d1f-...") so the id can never match there, and a typed prompt
+    # mentioning the same mailbox would match if it did. Measured 2026-09-18.
+    local f; f="$(transcript_of "$1")"
+    [ -n "$f" ] || { echo 0; return; }
+    "$NXPY" "$HOME/channel_wakes.py" "$f" "${SID_OF[$1]}"
 }
 snap() { ANN[$1]="$(status_field "${SID_OF[$1]}" announced)"; WAKES[$1]="$(wake_count "$1")"; }
 rendered_count() {  # NAME CORR -> UserPromptSubmit hook_success attachments rendering CORR
@@ -124,12 +130,27 @@ rendered_from() {  # NAME CORR -> the from= the hook rendered for CORR
     [[ "${hits%%$'\n'*}" =~ ^from=([^ ]+) ]] && printf '%s' "${BASH_REMATCH[1]}"
 }
 
-prompt() {  # NAME TEXT TOKEN: paste TEXT, Enter, wait for TOKEN in a reply
+turn_stamp() {  # NAME -> the mtime of its turn-end sentinel, 0 when absent
+    local f="$RUN/turn-end.${SID_OF[$1]}"
+    [ -f "$f" ] && stat -c %Y "$f" 2>/dev/null || echo 0
+}
+turn_ended_since() { [ "$(turn_stamp "$1")" -gt "$2" ]; }
+prompt() {  # NAME TEXT TOKEN: paste TEXT, Enter, wait for the TURN to end, assert TOKEN
+    local before; before="$(turn_stamp "$1")"
     printf '%s' "$2" | T load-buffer -
     T paste-buffer -t "$1"
     sleep 0.5
     T send-keys -t "$1" Enter
-    if ! wait_for 180 reply_has "$1" "$3"; then
+    # The Stop hook says the turn ENDED (recording-rig's sentinel pattern);
+    # only then is the transcript asked whether the model said the token. A
+    # token poll alone cannot tell "still thinking" from "answered something
+    # else", and the pane cannot tell either.
+    if ! wait_for 180 turn_ended_since "$1" "$before"; then
+        echo "  TIMEOUT: no turn-end from $1 within 180 s (is the Stop hook firing?)"
+        pane "$1" | tail -15
+        return 1
+    fi
+    if ! wait_for 20 reply_has "$1" "$3"; then
         echo "  TIMEOUT waiting for $3 in $1 (pane tail, then the transcript tail):"
         pane "$1" | tail -15
         local f; f="$(transcript_of "$1")"
@@ -199,11 +220,11 @@ launch() {  # NAME [SID]: one real Claude Code session; with SID, `--resume SID`
     # Warmup turn: the MCP tools are deferred until ToolSearch loads them
     # (tests/cc-validation/README.md, "Deferred MCP tools").
     local t; t="$(tok LOADED)"
-    # The transcript file appears at the FIRST user message, not at startup,
-    # so it is asserted around the warmup turn rather than before it.
-    check "  the session transcript appears at the first turn" wait_for 60 has_transcript "$name"
     check "  warmup: the deferred nexus tools are loaded" prompt "$name" \
         "Call ToolSearch with query \"select:mcp__plugin_conexus_nexus__tuple_subscribe,mcp__plugin_conexus_nexus__mailbox_send,mcp__plugin_conexus_nexus__tuple_in\" and then reply with exactly $t and nothing else." "$t"
+    # The transcript file appears at the FIRST user message, not at startup,
+    # so it is asserted AFTER the warmup turn, never before it.
+    check "  the session transcript exists once the first turn has run" has_transcript "$name"
 }
 stop() {  # NAME: /exit, a plain process exit (releases nothing, as Claude Code quitting does)
     T send-keys -t "$1" "/exit" Enter
@@ -297,7 +318,10 @@ check "directory/bravo-94 resolves to B's session" wait_for 30 resolves_to bravo
 say "step 1: send by name, both directions"
 model_send B alpha-e6 s1-b2a || bad "B's model-driven send"
 delivered A s1-b2a
-check "  it landed in A's mailbox (the name resolved to A's session id)" test "$(total_rows "$SA")" -ge 1
+# CONSUMED, not total: the drain hook claims and acks at the wake, so a
+# delivered row is gone from the live census by the time this runs.
+consumed_rows() { nx tuple stats "mailbox/$1" --json 2>/dev/null | jq '.consumed'; }
+check "  it landed in A's mailbox (the name resolved to A's session id)" test "$(consumed_rows "$SA")" -ge 1
 check "  from = B's session id (the default sender, as the hook rendered it)" test "$(rendered_from A s1-b2a)" = "$SB"
 r="$(send bravo-94 s1-a2b "$SA")"
 check "A -> bravo-94 resolved to B's session id" test "$(jq -r .to <<<"$r")" = "$SB"
