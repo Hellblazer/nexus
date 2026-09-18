@@ -539,9 +539,12 @@ def _rewrite_frontmatter_status(text: str, new_status: str, date: str, reason: s
     to a date key (accepted/closed): if the key is absent it is inserted
     immediately after the ``status:`` line; if the key is present but blank
     (``accepted_date:`` with no value, as the RDR template ships it) it is
-    filled with *date*; an existing key that already carries a value is left
-    untouched (never overwritten). (nexus-re3nm: the present-but-blank case
-    previously left the date empty, forcing a hand-edit.)
+    filled with *date*; an existing value under the flip's OWN date key is
+    replaced with *date* (nexus-u1jxt.10, Sam 2026-09-18: a re-accept after
+    a resume stamps the new date on the file and T2 alike; the old value was
+    the previous acceptance's). Any OTHER status's date key is never touched.
+    (nexus-re3nm: the present-but-blank case previously left the date empty,
+    forcing a hand-edit.)
     """
     if not text.startswith("---"):
         raise ValueError("RDR file has no YAML frontmatter fence")
@@ -566,11 +569,11 @@ def _rewrite_frontmatter_status(text: str, new_status: str, date: str, reason: s
 
     date_key = _STATUS_DATE_KEY.get(new_status)
     if date_key:
-        # Present-but-blank (``accepted_date:`` with no value) -> fill it.
-        blank_pat = rf"^{date_key}:[ \t]*(\r?)$"
-        if re.search(blank_pat, fm, re.MULTILINE):
+        # Present, blank or valued -> this flip's own date (nexus-u1jxt.10).
+        present_pat = rf"^{date_key}:.*?(\r?)$"
+        if re.search(present_pat, fm, re.MULTILINE):
             fm = re.sub(
-                blank_pat,
+                present_pat,
                 lambda m: f"{date_key}: {date}{m.group(1)}",
                 fm,
                 count=1,

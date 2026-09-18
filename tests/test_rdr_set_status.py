@@ -707,7 +707,12 @@ def test_rewrite_frontmatter_status_fills_blank_accepted_date():
     assert "accepted_date:\n" not in new_text
 
 
-def test_rewrite_frontmatter_status_idempotent_does_not_overwrite_date():
+def test_rewrite_frontmatter_status_stamps_its_own_date_key_once():
+    """A flip's own date key takes the flip's date, replacing an earlier
+    value (nexus-u1jxt.10, Sam 2026-09-18: a re-accept after a resume is a
+    new acceptance). The key is written exactly once. The command never
+    re-runs the rewriter on an RDR already in the target status (that path
+    is the no-op branch), so this is the re-accept case, not idempotence."""
     text = (
         "---\n"
         'title: "RDR-302 Example"\n'
@@ -716,8 +721,8 @@ def test_rewrite_frontmatter_status_idempotent_does_not_overwrite_date():
         "---\n\n## Body\n"
     )
     new_text = _rewrite_frontmatter_status(text, "accepted", "2026-06-24")
-    assert "accepted_date: 2026-06-22" in new_text
-    assert "2026-06-24" not in new_text
+    assert "accepted_date: 2026-06-24" in new_text
+    assert "2026-06-22" not in new_text
     assert new_text.count("status:") == 1
     assert new_text.count("accepted_date:") == 1
 
@@ -1375,3 +1380,19 @@ def test_crlf_file_keeps_crlf_fence_lines_through_the_rewriter():
     assert "\n" not in out.replace("\r\n", ""), out
     assert out.startswith("---\r\n") and "\r\n---\r\nbody" in out, out
     assert "status: accepted\r\n" in out and "accepted_date: 2026-09-17\r\n" in out
+
+
+def test_reaccept_after_resume_stamps_the_new_accepted_date_on_the_file(tmp_path, monkeypatch):
+    """nexus-u1jxt.10 (Sam, 2026-09-18): accepted -> deferred -> draft ->
+    accepted kept the file's old accepted_date while T2 took the new one.
+    The new date is the acceptance of record on both."""
+    rdr_dir = _rdr_dir(tmp_path)
+    f = _write_rdr(rdr_dir, 240, "draft", extra_fm="accepted_date: 2026-01-05\nresumed_date: 2026-09-10\n")
+    _write_readme(rdr_dir, 240, "Draft")
+    project, title = _gate_coords(tmp_path, 240)
+    _install_fake_t2(monkeypatch, entries={(project, title): {"content": "outcome: PASSED\ndate: 2026-09-17\n"}})
+    res = _invoke(rdr_dir, "240", "accepted", "--date", "2026-09-17")
+    assert res.exit_code == 0, res.output
+    text = f.read_text()
+    assert "accepted_date: 2026-09-17" in text and "2026-01-05" not in text, text
+    assert text.count("accepted_date:") == 1
