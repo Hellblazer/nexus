@@ -32,4 +32,11 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.52.0)
 
+- `conexus/hooks/scripts/subagent-stop-scan.py`: a `SubagentHandback` tool_use counts as the completion report alongside `SendMessage`, so a background agent that hands back is no longer blocked once and made to re-send (bead nexus-4xo3k).
+- `conexus/hooks/scripts/subagent-stop.sh`: the decision table, the report-check note and the block reason name SubagentHandback as a report (bead nexus-4xo3k).
+- `conexus/hooks/scripts/tuple_ledger_project.py`: the report tuple's text comes from the last SendMessage `content` or SubagentHandback `message` (bead nexus-4xo3k).
+- `conexus/hooks/scripts/subagent-start.sh`: the Completion directive names SubagentHandback first (bead nexus-4xo3k).
+- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`: the hand-back advice names SubagentHandback or SendMessage (bead nexus-4xo3k).
+- `conexus/skills/orchestration/SKILL.md`: the completion protocol and HAND-BACK lines name SubagentHandback or SendMessage (bead nexus-4xo3k).
+
 - `conexus/skills/mailbox/SKILL.md`: a board post's notification names the subspace and tuple id only, read with `tuple_rd`; a post is announced once per session from the engine's per-subscriber stamp, and `tuple_subscriptions` lists the set without a cursor (bead nexus-q82tk).
