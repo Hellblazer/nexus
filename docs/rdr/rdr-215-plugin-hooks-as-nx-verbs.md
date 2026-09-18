@@ -665,3 +665,4 @@ registration module on the existing server, and one package.
 - 2026-09-18: Gate round 2 — PASSED (0 Critical, 0 Significant, 0 ship-blocker(s)); commit `c77ae4e49`; critique `nexus_rdr/215-gate-critique-2026-09-18-r2`.
 - 2026-09-18: Design amended to two tiers (research-9): `mcp_tool` hooks on `nx-mcp` for every event after session start, `nx-hook` command hooks for `SessionStart`, the lockstep hook on stdlib `python3`.
 - 2026-09-18: Gate round 3 — PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `dd95743fa`; critique `nexus_rdr/215-gate-critique-2026-09-18-r3`.
+- 2026-09-18: Accept dispositions of the round-3 residuals: the four carried from round 2 closed by `dd95743fa` (fix check `nexus_rdr/215-fix-check-dd95743fa`); the four from round 3 fixed in `faa779251`.
