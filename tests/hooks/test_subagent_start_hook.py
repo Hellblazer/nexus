@@ -73,7 +73,7 @@ class TestSubagentStartHook:
         result = _run_hook()
         ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         assert "| Completion |" in ctx
-        assert "Background: SendMessage" in ctx
+        assert "Background: SubagentHandback (or SendMessage)" in ctx  # nexus-4xo3k: the hand-back is the report
         assert "Foreground: final message IS the hand-back" in ctx
         assert "| Inbox |" in ctx
         assert "Re-check inbox right before composing any hand-back" in ctx

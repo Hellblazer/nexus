@@ -224,7 +224,7 @@ cat <<'ORCH'
 
 | Directive | Rule |
 |-----------|------|
-| Completion | Background: SubagentHandback or SendMessage (ToolSearch first) full result to main before idling: success/failure/blocked + live task ids. Foreground: final message IS the hand-back. |
+| Completion | Background: SubagentHandback (or SendMessage) full result to main before idling: success/failure/blocked + live task ids. Foreground: final message IS the hand-back. |
 | Inbox | Re-check inbox right before composing any hand-back; newest directive wins |
 | Git | Shared tree: NEVER git add/commit (hook-ENFORCED; linked worktrees exempt). Hand back diffs+paths; orchestrator commits pathspec-limited |
 ORCH
