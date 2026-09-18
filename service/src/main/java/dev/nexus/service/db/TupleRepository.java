@@ -1122,7 +1122,24 @@ public final class TupleRepository {
      *  with nothing to report is simply absent, never present with an empty {@code
      *  tuples} list, so a client iterating results always has cursor-advancing work
      *  to do for every entry it sees. */
-    public record WaitResult(String subspace, List<TupleRow> tuples) {
+    public record WaitResult(String subspace, List<TupleRow> tuples, String subscriber) {
+
+        /** Back-compat constructor (every pre-nexus-q82tk call site): no
+         *  subscriber echo. */
+        public WaitResult(String subspace, List<TupleRow> tuples) {
+            this(subspace, tuples, null);
+        }
+
+        /** {@code subscriber} (bead nexus-q82tk) echoes the {@code
+         *  announce.subscriber} the engine HONOURED for this spec -- rendered
+         *  on the wire only when non-null -- so a client can tell a per-
+         *  subscriber stamp from a row-level one: an engine that accepted
+         *  {@code announce} but never read {@code subscriber} (v0.1.128)
+         *  renders no such field, and the client's waiter stops loud on a
+         *  board result without it instead of letting the row-level stamp
+         *  silence the post for every other subscriber. The same proof-by-
+         *  rendered-field shape {@code announce_count} gives for announce
+         *  support itself. */
     }
 
     /**
@@ -1234,7 +1251,8 @@ public final class TupleRepository {
             List<TupleRow> rows = queryOnce(tenant, spec.subspace(), spec.pattern(), spec.n(), spec.since(),
                     spec.announce());
             if (!rows.isEmpty()) {
-                out.add(new WaitResult(spec.subspace(), rows));
+                String honoured = spec.announce() == null ? null : spec.announce().subscriber();
+                out.add(new WaitResult(spec.subspace(), rows, honoured));
             }
         }
         return out;

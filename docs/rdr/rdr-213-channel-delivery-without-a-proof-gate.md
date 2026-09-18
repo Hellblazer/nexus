@@ -230,10 +230,13 @@ throwaway engine with real sessions).
    lease-lapsed) and due (never announced, or announced more than
    `interval_s` ago fewer than `max` times), and stamps `announced_at` and
    `announce_count` on the rows it returns, in the same statement. The
-   client keeps no cursor and no re-send state for mailboxes. Boards keep
-   their own `since` cursor for now (bead nexus-q82tk records that boards
-   move to a per-subscriber stamp later; the `created_at` race remains for
-   boards until then).
+   client keeps no cursor and no re-send state for mailboxes. Boards moved
+   to the same mechanism under bead nexus-q82tk: a board spec carries
+   `announce` with `subscriber` set to the session id and `max=1`, and the
+   engine keeps the stamp per `(subspace, subscriber, tuple)` in
+   `nexus.tuple_deliveries`, so a post is announced once to each subscriber
+   and the `created_at` race is closed for boards too. The client keeps no
+   cursor for any shape.
 3. **No proof, no probe, no flag table.** The waiter starts parking at
    lifespan start and pushes whenever a row appears. A session that cannot
    hear the channel loses nothing: its rows stay available and the drain hook
@@ -391,12 +394,11 @@ the drain hook or a restart mid-work; every lapse counts an attempt against
   hear it is exactly as well served as today's floor.
 - Positive: about a third of `channel.py` and one MCP tool are deleted; the
   waiter holds no lease and cannot strand a message.
-- Positive: the mailbox path drops its client-side cursor and re-send
-  bookkeeping entirely, to an engine-side stamp; the board path keeps its
-  own `since` cursor for now (bead nexus-q82tk decides its fix later). The
-  two paths are two shapes, not one, but the mailbox path needs no
-  client-side position or re-send bookkeeping at all, simpler than a
-  cursor.
+- Positive: both paths drop their client-side cursor entirely, to an
+  engine-side stamp: on the row for a mailbox, per subscriber for a board
+  (bead nexus-q82tk). One shape, no client-side position or re-send
+  bookkeeping at all, simpler than a cursor. The cost is one delivery row
+  per distinct subscriber per live post, bounded by the post's own expiry.
 - Negative: a message can be referenced by the channel and then rendered in
   full by the drain hook at the next prompt if nothing claimed it in
   between. With the plugin's hooks loaded this is rare: the same
@@ -756,10 +758,11 @@ names it, so a session can check it got what was announced.
   client keeps no cursor and no re-send state for mailboxes. This is a
   wire and engine change, not client-only as originally stated; it rides
   `engine-service-v0.1.128` with `REQUIRED_ENGINE_VERSION` bumped in
-  conexus 7.52.0. Boards keep their `since` cursor for now (bead
+  conexus 7.52.0. Boards kept their `since` cursor at that release (bead
   nexus-q82tk). Provenance; Approach 2 and 4; Technical Design Delivery,
   Back pressure, Errors, the pseudocode, Deleted; Existing Infrastructure
   Audit; Trade-offs; Risks; Failure Modes; Test Plan scenario 7; Testing
   Strategy 1; Performance Expectations; Cross-Cutting Concerns Versioning
   and Deployment model; Phase 2 Activation Step 1; Open Questions (item 1
   answered, closed).
+- 2026-09-18: boards move to the engine-side per-subscriber stamp (bead nexus-q82tk, commit 6f03ff0fe, engine tag pending): Approach item 2, Trade-offs, and this history updated; the board cursor is deleted from the client.

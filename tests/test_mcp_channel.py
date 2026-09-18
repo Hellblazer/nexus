@@ -183,6 +183,10 @@ class _FakeTupleStore:
         #: own `announced_at`/`announce_count` are never touched by a
         #: per-subscriber announce, exactly as in the engine.
         self._deliveries: dict[tuple[str, str, str], tuple[float, int]] = {}
+        #: Simulates engine-service-v0.1.128 (bead nexus-q82tk): `announce`
+        #: is honoured but `subscriber` is never read -- the stamp lands on
+        #: the ROW and the result echoes no subscriber.
+        self.ignore_subscriber = False
         self._seq = 0
         self.wait_calls: list[tuple[list, int]] = []
         self.wait_raises: Exception | None = None
@@ -278,7 +282,7 @@ class _FakeTupleStore:
         # included, never excluded, never stamped (see `_announce_rows`).
         if row.announce_count is None:
             return True
-        if announce.subscriber is not None:
+        if announce.subscriber is not None and not self.ignore_subscriber:
             seen = self._deliveries.get((subspace, announce.subscriber, row.id))
             if seen is None:
                 return True
@@ -304,7 +308,7 @@ class _FakeTupleStore:
                 # mutated by an announce-mode call this fake models.
                 stamped.append(row)
                 continue
-            if announce.subscriber is not None:
+            if announce.subscriber is not None and not self.ignore_subscriber:
                 key = (subspace, announce.subscriber, row.id)
                 prior = self._deliveries.get(key)
                 new_count = (prior[1] if prior else 0) + 1
@@ -333,7 +337,10 @@ class _FakeTupleStore:
                 else self._unconsumed(spec.subspace, spec.since, spec.n)
             )
             if rows:
-                results.append(WaitResult(subspace=spec.subspace, tuples=rows))
+                honoured = None
+                if spec.announce is not None and not self.ignore_subscriber:
+                    honoured = spec.announce.subscriber
+                results.append(WaitResult(subspace=spec.subspace, tuples=rows, subscriber=honoured))
         return results
 
 
@@ -807,6 +814,34 @@ class TestChannelWaiterFakeStore:
             await waiter.tick()
         board_sends = [m for _c, m in sender.calls if m.get("subspace") == "board/release-notes"]
         assert len(board_sends) == 1, "max=1: announced once to this subscriber, interval 0 notwithstanding"
+
+    @pytest.mark.asyncio
+    async def test_engine_that_ignores_the_subscriber_stops_the_waiter_before_any_board_send(self) -> None:
+        """Bead nexus-q82tk: engine-service-v0.1.128 honours `announce`
+        but never reads `subscriber`, so it stamps the board ROW and
+        echoes no subscriber. A local install converges to the floor
+        rather than refusing at spawn, so this pairing is real for the
+        convergence window; the waiter must stop loud with
+        `no_subscriber_support` before sending a reference whose stamp
+        would silence the post for every other subscriber."""
+        session_id = str(uuid.uuid4())
+        subs = _subs(session_id)
+        subs.subscribe(
+            "board/release-notes", templates=[],
+            store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
+            state_dir=None,
+        )
+        fake = _FakeTupleStore()
+        fake.ignore_subscriber = True
+        fake.seed("board/release-notes", "p1", "hi")
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+
+        await waiter.tick()
+
+        assert waiter.status()["stopped_reason"] == "no_subscriber_support"
+        assert waiter._stopped is True  # noqa: SLF001
+        assert sender.calls == [], "must stop BEFORE referencing a row whose stamp it cannot trust"
 
     @pytest.mark.asyncio
     async def test_two_subscribers_each_get_a_board_post_once(self) -> None:

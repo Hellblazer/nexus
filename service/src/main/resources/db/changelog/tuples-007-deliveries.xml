@@ -29,7 +29,14 @@
     tuple_id REFERENCES nexus.tuples(id) ON DELETE CASCADE: the sweep's
     purge of expired tuples (TupleRepository.purgeExpiredTuplesBatch) drops
     a post's delivery rows with it, so this table is bounded by the posts
-    it describes and needs no sweep arm of its own. Indexed on tuple_id for
+    it describes and needs no sweep arm of its own. The other axis is
+    fanout: one row per distinct subscriber that ever read a still-live
+    post, never removed on unsubscribe or session end, so a popular topic
+    holds posts x distinct-ever-subscribers rows until each post expires
+    (board/<topic>: at most 500 live posts, 7 days). At roughly 150 bytes
+    a row that is accepted debt, named here rather than bounded; a bound
+    would need a subscriber lifecycle the engine does not track. Indexed
+    on tuple_id for
     exactly that cascade, the tuples-001 claim-log FK precedent (an
     unindexed child turns every purge batch into a sequential scan).
     RLS ENABLE+FORCE with the tenant_isolation policy, tuples-001-1's

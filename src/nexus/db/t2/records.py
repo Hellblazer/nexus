@@ -313,6 +313,13 @@ class WaitResult:
 
     subspace: str
     tuples: list["TupleRow"]
+    #: The ``announce.subscriber`` the engine HONOURED for this spec (bead
+    #: nexus-q82tk), ``None`` when the spec carried none or the engine
+    #: predates the per-subscriber stamp and never read the field. The
+    #: channel waiter stops loud on a board result whose echo is not its
+    #: own session id, the way a missing ``announce_count`` stops it on
+    #: an engine predating announce mode.
+    subscriber: str | None = None
 
 
 @dataclass(frozen=True)

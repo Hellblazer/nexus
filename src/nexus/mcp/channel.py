@@ -499,8 +499,9 @@ class ChannelWaiter:
         `_stop_no_wait_support`/`_stop_no_announce_support` or a real
         cancellation). `stopped_reason` (bead nexus-vsipz review round):
         `None` while alive or on an ordinary `cancel()` teardown;
-        `"no_wait_support"` or `"no_announce_support"` when one of those
-        two loud stops fired -- lets a reader (the doctor row) name WHY
+        `"no_wait_support"`, `"no_announce_support"` or
+        `"no_subscriber_support"` (bead nexus-q82tk) when one of those
+        three loud stops fired -- lets a reader (the doctor row) name WHY
         the waiter is not alive instead of only THAT it is not.
         `last_wake`: ISO-8601 timestamp of the last
         completed `wait()` round-trip, or `None` before the first one.
@@ -629,6 +630,9 @@ class ChannelWaiter:
         if self._engine_ignores_announce(results):
             self._stop_no_announce_support()
             return
+        if self._engine_ignores_subscriber(results):
+            self._stop_no_subscriber_support()
+            return
         await self._process_results(results)
         self._last_wake = datetime.now(UTC)
         self._publish_status()
@@ -655,14 +659,38 @@ class ChannelWaiter:
         for an engine predating `wait` entirely. Every spec carries
         `announce` now (bead nexus-q82tk moved boards onto it), so every
         row is checked. An engine that renders the field but predates
-        the per-subscriber stamp (v0.1.128) would stamp the board ROW
-        instead; that pairing never runs, because the client refuses an
-        engine below its floor at spawn."""
+        the per-subscriber stamp (v0.1.128) is a different case, caught
+        by :meth:`_engine_ignores_subscriber`."""
         for result in results:
             for row in result.tuples:
                 if row.announce_count is None:
                     return True
         return False
+
+    def _engine_ignores_subscriber(self, results: list[WaitResult]) -> bool:
+        """`True` the first time a board result comes back without this
+        session's id echoed as its `subscriber` (bead nexus-q82tk): an
+        engine that honours `announce.subscriber` echoes it on the
+        result, so a board result without it is proof the engine read
+        `announce` but never the subscriber (v0.1.128) and stamped the
+        board ROW instead -- which, at `max=1`, would silence the post
+        for every other subscriber. A local install converges to the
+        engine floor rather than refusing it at spawn
+        (`nexus.engine_version`), so the window between a client upgrade
+        and the engine's convergence is real, and this check is the
+        guard for it: the waiter stops loud, the `nx doctor` row names
+        the reason, and mailboxes keep working through the drain hook.
+        Mailbox results are never checked: their spec carries no
+        subscriber."""
+        for result in results:
+            if result.subspace.startswith("board/") and result.subscriber != self.session_id:
+                return True
+        return False
+
+    def _stop_no_subscriber_support(self) -> None:
+        self._stopped = True
+        self._stopped_reason = "no_subscriber_support"
+        _log.warning("channel_waiter_no_subscriber_support", session_id=self.session_id)
 
     def _build_specs(self) -> list[WaitSpec]:
         """Every subscription -- board or mailbox -- enters the spec

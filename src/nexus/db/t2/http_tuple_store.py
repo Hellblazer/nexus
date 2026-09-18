@@ -872,6 +872,7 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             WaitResult(
                 subspace=entry.get("subspace", ""),
                 tuples=[_body_to_tuple_row(t) for t in entry.get("tuples", [])],
+                subscriber=entry.get("subscriber"),
             )
             for entry in (r or {}).get("results", [])
         ]

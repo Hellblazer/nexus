@@ -102,6 +102,7 @@ class TupleAnnounceTest {
         List<TupleRepository.WaitResult> result = probe(mailboxSpec(to, 1, 5));
 
         assertThat(result).hasSize(1);
+        assertThat(result.get(0).subscriber()).as("a row-level announce echoes no subscriber").isNull();
         TupleRepository.TupleRow row = result.get(0).tuples().get(0);
         assertThat(row.announcedAt()).as("stamped on the row it returns").isNotNull();
         assertThat(row.announceCount()).isEqualTo(1);
@@ -436,6 +437,9 @@ class TupleAnnounceTest {
 
         List<TupleRepository.WaitResult> a1 = probe(forA);
         assertThat(a1).as("subscriber A is announced the post").hasSize(1);
+        assertThat(a1.get(0).subscriber())
+                .as("the result echoes the subscriber this engine honoured (the client's old-engine proof)")
+                .isEqualTo("session-a");
         assertThat(a1.get(0).tuples().get(0).announceCount()).as("A's own per-subscriber count").isEqualTo(1);
         assertThat(probe(forA)).as("max=1: never again for A, interval 0 notwithstanding").isEmpty();
 

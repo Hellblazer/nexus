@@ -1190,6 +1190,25 @@ class TestCheckTupleChannelDelivery:
         assert any("current engine" in s for s in r.fix_suggestions)
         assert not any(s == "Restart the MCP server: /mcp" for s in r.fix_suggestions)
 
+    def test_no_subscriber_support_names_the_cause_and_suggests_rebuilding_the_engine(
+        self, monkeypatch, tmp_path: Path,
+    ) -> None:
+        """Bead nexus-q82tk: `stopped_reason="no_subscriber_support"` means
+        the local engine accepted `announce` but never read its
+        `subscriber` (v0.1.128), the window between a client upgrade and
+        a local engine's convergence. Named, with the engine fix, and
+        with the reassurance that mail still arrives."""
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        now = datetime.now(UTC).isoformat()
+        _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason="no_subscriber_support")
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is False and r.warn is True
+        assert "subscriber" in r.detail
+        assert "drain hook" in r.detail
+        assert any("current engine" in s for s in r.fix_suggestions)
+        assert not any(s == "Restart the MCP server: /mcp" for s in r.fix_suggestions)
+
     def test_no_wait_support_names_the_cause_and_suggests_rebuilding_the_engine(
         self, monkeypatch, tmp_path: Path,
     ) -> None:

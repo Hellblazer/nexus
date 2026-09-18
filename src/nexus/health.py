@@ -5890,8 +5890,9 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
     The waiter not alive, or its last wake stale, is a WARN: push
     delivery for this session is not actually happening. `stopped_reason`
     (bead nexus-vsipz review round) names WHY when the waiter itself
-    knows: `"no_announce_support"` or `"no_wait_support"` both mean the
-    LOCAL ENGINE predates a feature this client's waiter depends on, so
+    knows: `"no_announce_support"`, `"no_subscriber_support"` (bead
+    nexus-q82tk) or `"no_wait_support"` all mean the LOCAL ENGINE
+    predates a feature this client's waiter depends on, so
     the fix is to rebuild/reinstall the engine, not to restart the MCP
     server (a restart would hit the identical stale engine); any other
     not-alive or stale case has no known cause and the fix stays
@@ -5978,6 +5979,12 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
         restart_fix = ["Restart the MCP server: /mcp"]
         if not alive and stopped_reason == "no_announce_support":
             reason = "the waiter stopped: the local engine never renders announce_count (predates RDR-213's announce mode, bead nexus-vsipz)"
+            fix_suggestions = rebuild_fix
+        elif not alive and stopped_reason == "no_subscriber_support":
+            reason = (
+                "the waiter stopped: the local engine never echoes announce.subscriber on a board result "
+                "(predates the per-subscriber board stamp, bead nexus-q82tk); mailboxes still arrive through the drain hook"
+            )
             fix_suggestions = rebuild_fix
         elif not alive and stopped_reason == "no_wait_support":
             reason = "the waiter stopped: the local engine predates /wait entirely (a bare 404)"

@@ -1670,9 +1670,9 @@ async def _t1_lifespan(_app: Any):
         # RDR-211 (bead nexus-rplay.10), rewritten under RDR-213: cancel
         # the channel waiter before anything else in this teardown -- it
         # holds no lock and no claim any more (RDR-213 deleted the
-        # waiter's claim entirely), but its background task can still be
-        # mid-`tick()`, writing back through the SAME `t1` handle
-        # (`_subscriptions.persist`, the board-cursor write-back) and T2
+        # waiter's claim entirely; bead nexus-q82tk deleted its T1
+        # write-back with the board cursor), but its background task can
+        # still be mid-`tick()`, parked on a `wait()` through the T2
         # context this teardown is about to invalidate a few lines below
         # (`store.close_session()`, `_t1_shutdown()`). `await`ing its
         # cancellation here, first, is the same "cancel before close so
