@@ -72,6 +72,54 @@ def _repo_root() -> Path | None:
     return None
 
 
+def _repo_name(root: Path) -> str:
+    """The checkout's own name: the git COMMON dir's parent basename, the
+    same derivation ``nx rdr preamble`` uses (``_preamble_resolve_repo``),
+    so a linked worktree reads the repo's T2 project, not one named after
+    the worktree directory (nexus-u1jxt.7). Falls back to *root*'s name."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return Path(result.stdout.strip()).resolve().parent.name
+    except Exception:  # noqa: BLE001 — a hook never fails the prompt over a git probe; the fallback name is the honest degraded answer
+        pass
+    return root.name
+
+
+def _file_frontmatter(path: Path) -> dict[str, str]:
+    """The first ``key: value`` lines of *path*'s YAML frontmatter, lower-
+    cased keys, quotes stripped -- enough to read ``status``, ``kind`` and
+    ``id`` without a YAML parser the hook cannot import. ``{}`` for a file
+    with no frontmatter or one it cannot read."""
+    out: dict[str, str] = {}
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            first = fh.readline()
+            if first.strip() != "---":
+                return out
+            for line in fh:
+                stripped = line.strip()
+                if stripped == "---":
+                    break
+                if ":" in stripped and not stripped.startswith("#"):
+                    key, _, val = stripped.partition(":")
+                    out[key.strip().lower()] = val.strip().strip('"').strip("'")
+    except OSError:
+        return {}
+    return out
+
+
+def _is_companion(path: Path) -> bool:
+    """A companion note carries no lifecycle status (nexus-u1jxt.7, the
+    same two markers ``nx rdr``'s ``_rdr_meta_is_companion`` reads:
+    ``kind: companion``, or the older ``id: companion-note``)."""
+    meta = _file_frontmatter(path)
+    return meta.get("kind") == "companion" or meta.get("id", "").lower() == "companion-note"
+
+
 def _resolve_rdr_collection(repo_root: Path) -> str | None:
     """Resolve the indexed RDR collection name for ``repo_root``.
 
@@ -337,7 +385,14 @@ def _unchecked_fix_edits(root: Path, rdr_files: list[Path], statuses: dict[str, 
         gated_norm = {str(int(k)): v for k, v in gated.items() if k.isdigit()}
         if key not in gated_norm:
             continue
-        if statuses.get(rid, statuses.get(key, "draft")) not in ("draft", "open"):
+        # nexus-u1jxt.7: a closed or accepted RDR with no T2 status row (or
+        # two disagreeing shapes, which the loader drops) defaulted to draft
+        # and was told to run rdr-fix. The file's own frontmatter is the
+        # fallback, and only a file that states no status defaults.
+        status = statuses.get(rid, statuses.get(key))
+        if status is None:
+            status = _file_frontmatter(path).get("status") or "draft"
+        if status.lower() not in ("draft", "open"):
             continue
         try:
             tip = subprocess.run(
@@ -374,6 +429,8 @@ def _rdr_dir(root: Path) -> Path:
             with config_path.open() as fh:
                 data = yaml.safe_load(fh) or {}
             paths = data.get("indexing", {}).get("rdr_paths", [])
+            if isinstance(paths, str):  # nexus-u1jxt.10: a scalar resolved to root / its first character
+                paths = [paths]
             if paths:
                 return root / paths[0]
         except Exception:
@@ -388,6 +445,7 @@ def _rdr_files(rdr_dir: Path) -> list[Path]:
     return [
         p for p in rdr_dir.glob("*.md")
         if p.name.lower() not in _EXCLUDE_FILES and _extract_rdr_id(p) is not None
+        and not _is_companion(p)  # nexus-u1jxt.7: a companion is not an RDR
     ]
 
 
@@ -413,7 +471,7 @@ def main() -> None:
     if not rdr_files:
         sys.exit(0)
 
-    repo_name = root.name
+    repo_name = _repo_name(root)
     _hook_logging.configure_hook_logging()
     rdr_collection = _resolve_rdr_collection(root)
     indexed = bool(rdr_collection) and _collection_exists(rdr_collection)

@@ -18,7 +18,8 @@
 #   agent not listed / sync / unnamed     -> exit 0        (sync stays unblockable by construction)
 #   BLOCKED row already present           -> resolution stamp*, exit 0  (once-guard belt)
 #   transcript missing/not-a-file/junk    -> exit 0        (fail-open; scan crash too)
-#   assistant SendMessage in transcript   -> REPORTED row, exit 0   (report sent)
+#   assistant SendMessage or SubagentHandback in transcript
+#                                         -> REPORTED row, exit 0   (report sent)
 #   ...and writes failed, mode=block      -> UNLANDEDWRITE + BLOCKED + block  (piqm5 L1)
 #   otherwise, mode=observe               -> WOULDBLOCK row, exit 0   (.11 measurement)
 #   otherwise, mode=block                 -> BLOCKED row + {"decision":"block"}
@@ -44,8 +45,11 @@
 # Same fail-open posture: a failed re-scan stamps nothing and never blocks.
 #
 # REPORT CHECK SCOPE (documented narrowing): the RDR's ideal is "final
-# turn lacks a SendMessage-to-main". v1 checks for any SendMessage
-# tool_use in an ASSISTANT message of the agent transcript, to any
+# turn lacks a SendMessage-to-main". v1 checks for any SendMessage or
+# SubagentHandback tool_use in an ASSISTANT message of the agent
+# transcript (the harness's hand-back call IS a background agent's
+# report, bead nexus-4xo3k: before it counted, every hand-back agent was
+# blocked once and re-sent the same report as a SendMessage), to any
 # recipient — turn boundaries and recipient identity are
 # transcript-format-fragile, and the marathon failure class this guards
 # (idle-without-report x10) was zero-SendMessage teammates. Fail-open
@@ -94,8 +98,8 @@ print("\t".join(f.replace("\t", " ").replace("\n", " ") for f in fields))
 ' 2>/dev/null
 )"
 
-# Report check: a SendMessage tool_use in an ASSISTANT message of the
-# agent transcript (scoped to assistant tool_use blocks so
+# Report check: a SendMessage or SubagentHandback tool_use in an ASSISTANT
+# message of the agent transcript (scoped to assistant tool_use blocks so
 # SendMessage-shaped JSON the agent merely READ — nested in a
 # tool_result — never counts as its report). VERDICT-TOKEN plumbing: the
 # scan echoes FOUND / NOTFOUND; only the literal NOTFOUND may block.
@@ -278,7 +282,7 @@ expectations_mark_blocked "$SESSION_ID" "$AGENT_ID" "$EXPECTATIONS_OWES_CAUSE"
 # an over-blocked agent's operator can tell it apart from a genuine,
 # credit-backed owes verdict (the ledger's BLOCKED row carries the same
 # cause in its 4th field for later audit).
-REASON="You are the named background teammate ${AGENT_TYPE} and your orchestrator expects a completion report you have not sent. Use SendMessage now to report: outcome, artifacts (paths/commits/IDs), and anything blocking. Then stop."
+REASON="You are the named background teammate ${AGENT_TYPE} and your orchestrator expects a completion report you have not sent. Use SubagentHandback (or SendMessage) now to report: outcome, artifacts (paths/commits/IDs), and anything blocking. Then stop."
 if [[ "$EXPECTATIONS_OWES_CAUSE" == "lock-exhausted" ]]; then
     REASON="${REASON} (NOTE: this block could not verify remaining report credit under lock contention -- treat it as a precaution, not a confirmed miss; see nexus-plycy.)"
 fi

@@ -380,3 +380,32 @@ def test_naive_fallback_has_section_type(monkeypatch):
     chunks = chunker.chunk("Some content here.\n\nMore content.", {})
     for c in chunks:
         assert c.metadata.get("section_type") == ""
+
+
+# ── nexus-cd1k0.12 / .13 ─────────────────────────────────────────────────────
+
+
+def test_fence_keeps_its_markup_and_language_tag():
+    """A markdown-it fence token's .content is the code body only, so the
+    chunk lost its backticks and language and has_code_blocks was never
+    true on the semantic path. Reproduced pre-fix."""
+    from nexus.md_chunker import SemanticMarkdownChunker  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+
+    md = "# H\n\nText.\n\n```python\nprint('hi')\n```\n"
+    chunks = SemanticMarkdownChunker().chunk(md, {})
+    assert chunks, "one chunk expected"
+    text = "\n".join(c.text for c in chunks)
+    assert "```python\nprint('hi')\n```" in text, text
+    assert any(c.metadata["has_code_blocks"] for c in chunks)
+
+
+def test_naive_chunking_emits_no_overlap_only_tail():
+    """Once a window reached EOF the next start (end - overlap) still landed
+    past start, emitting a chunk that was only the previous chunk's overlap
+    tail: a 360-char document yielded 359 and 164 chars. The sibling fix
+    482c4bb57 in pdf_chunker never reached this file."""
+    from nexus.md_chunker import SemanticMarkdownChunker  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+
+    short = "tiny doc " * 40
+    chunks = SemanticMarkdownChunker()._naive_chunking(short, {})
+    assert [len(c.text) for c in chunks] == [len(short.strip())], [len(c.text) for c in chunks]

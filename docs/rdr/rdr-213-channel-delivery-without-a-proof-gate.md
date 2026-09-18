@@ -2,7 +2,8 @@
 title: "Channel Delivery Without a Proof Gate: Notify a Reference, Let the Session Claim"
 id: RDR-213
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-09-18
 priority: high
 author: Sam
 reviewed-by: self
@@ -60,7 +61,9 @@ claim on proof that the channel is live. Both proofs are heuristics, and a
 heuristic that fails leaves a session with no push at all, silently, for the
 life of its MCP server process. Nothing in the engine or the wire requires
 this: board posts already travel as notify-only references with no claim, in
-the same waiter.
+the same waiter (with one defect of their own, the `created_at` cursor race
+that bead nexus-q82tk later closed for boards; it is a cursor defect, not a
+consequence of carrying no claim).
 
 ### Enumerated gaps to close
 
@@ -100,7 +103,7 @@ claiming safe. Every one is a place the 2026-09-17 finding could recur.
 | Prior RDR | Relationship | What it means for this one |
 | --- | --- | --- |
 | RDR-211 | Origin | It chose claim-at-delivery so a re-send is bounded and the drain hook never renders a message the channel already delivered, and gated the claim on proof because a stranded claim is worse than no push. The rationale for bounding re-sends holds and is kept by other means (Approach item 2). The rationale for the proof gate has expired: the client cannot give the proof (Step 0), so the gate can only be a heuristic. This RDR amends RDR-211's Technical Design (Delivery, Subscriptions) and Approach item 7. |
-| RDR-211 board delivery | Precedent | Board posts are pushed as references with no claim, with a cursor so a post is announced once. This RDR extends that shape to mailboxes. |
+| RDR-211 board delivery | Precedent | Board posts are pushed as references with no claim, with a cursor so a post is announced once. This RDR extends that shape to mailboxes. The cursor itself carried the `created_at` race and, unlike a mailbox, a board has no drain-hook floor; both halves moved to the engine's stamp (beads nexus-vsipz, nexus-q82tk). |
 | RDR-205 | Origin of the floor | The drain hook claims and renders at every prompt regardless of the channel. Unchanged; it is what makes a notify-only channel safe to lose. |
 | RDR-206 | Precedent | `renew` and reply-in-ack stay as session operations. The waiter stops using `renew`; nothing in RDR-206 changes. |
 | RDR-208 | Adjacent, shipped | Session-id addressing and the directory lease are untouched; the instance-name subscription keeps writing the lease. |
@@ -154,7 +157,10 @@ throwaway engine with real sessions).
 ### Key Discoveries
 
 - **Verified**: a board post is delivered as a reference with no claim and a
-  cursor, by the same waiter, and this path has no proof gate.
+  cursor, by the same waiter, and this path has no proof gate. The cursor
+  was later found to skip a post whose transaction committed late, with no
+  drain-hook floor for a board (bead nexus-q82tk); the no-claim shape is
+  what this RDR borrows, not the cursor.
 - **Verified**: without a proof, the only cost of a lost mailbox notification
   is that the message waits for the next wake or the next prompt; it is never
   claimed by anyone but the session or the drain hook.
@@ -230,10 +236,13 @@ throwaway engine with real sessions).
    lease-lapsed) and due (never announced, or announced more than
    `interval_s` ago fewer than `max` times), and stamps `announced_at` and
    `announce_count` on the rows it returns, in the same statement. The
-   client keeps no cursor and no re-send state for mailboxes. Boards keep
-   their own `since` cursor for now (bead nexus-q82tk records that boards
-   move to a per-subscriber stamp later; the `created_at` race remains for
-   boards until then).
+   client keeps no cursor and no re-send state for mailboxes. Boards moved
+   to the same mechanism under bead nexus-q82tk: a board spec carries
+   `announce` with `subscriber` set to the session id and `max=1`, and the
+   engine keeps the stamp per `(subspace, subscriber, tuple)` in
+   `nexus.tuple_deliveries`, so a post is announced once to each subscriber
+   and the `created_at` race is closed for boards too. The client keeps no
+   cursor for any shape.
 3. **No proof, no probe, no flag table.** The waiter starts parking at
    lifespan start and pushes whenever a row appears. A session that cannot
    hear the channel loses nothing: its rows stay available and the drain hook
@@ -342,8 +351,11 @@ wait/rd with announce={interval_s, max}:
 
 The design that needs proof cannot get it, so its safety is a heuristic and
 its failure is silent. The design that needs no proof already exists in the
-same file for boards and has no comparable failure mode: the worst a lost
-notification does is defer to the next wake or the next prompt. The cost is a
+same file for boards and has no comparable failure mode from the missing
+claim: the worst a lost notification does is defer to the next wake or the
+next prompt. (Boards' cursor had a failure mode of its own, the `created_at`
+race with no drain-hook floor, closed by bead nexus-q82tk; it argues against
+the cursor, not against notify-without-claim.) The cost is a
 possible duplicate reference (channel, then the drain hook's body at the
 prompt), which is a repeat of a pointer, not of content.
 
@@ -391,12 +403,11 @@ the drain hook or a restart mid-work; every lapse counts an attempt against
   hear it is exactly as well served as today's floor.
 - Positive: about a third of `channel.py` and one MCP tool are deleted; the
   waiter holds no lease and cannot strand a message.
-- Positive: the mailbox path drops its client-side cursor and re-send
-  bookkeeping entirely, to an engine-side stamp; the board path keeps its
-  own `since` cursor for now (bead nexus-q82tk decides its fix later). The
-  two paths are two shapes, not one, but the mailbox path needs no
-  client-side position or re-send bookkeeping at all, simpler than a
-  cursor.
+- Positive: both paths drop their client-side cursor entirely, to an
+  engine-side stamp: on the row for a mailbox, per subscriber for a board
+  (bead nexus-q82tk). One shape, no client-side position or re-send
+  bookkeeping at all, simpler than a cursor. The cost is one delivery row
+  per distinct subscriber per live post, bounded by the post's own expiry.
 - Negative: a message can be referenced by the channel and then rendered in
   full by the drain hook at the next prompt if nothing claimed it in
   between. With the plugin's hooks loaded this is rare: the same
@@ -640,13 +651,25 @@ announced five times then left to the floor.
 Both Critical Assumptions are verified by live spikes against a throwaway
 engine with real Claude Code sessions (T2
 `nexus_rdr/213-spike-1-session-claims-2026-09-17` and
-`nexus_rdr/213-spike-2-reannounce-cadence-2026-09-17`). Nothing remains
-unverified. Two caveats from the spikes are recorded there, not here: a session
+`nexus_rdr/213-spike-2-reannounce-cadence-2026-09-17`). Nothing from those
+two assumptions remains unverified. Two caveats from the spikes are recorded there, not here: a session
 told to ignore a reference still claims once, because the reference carries no
 body to read the instruction from, and releases it; and the spike harness has
 no plugin hooks, so the drain hook's rendering at the next prompt was not
 exercised there (it is unchanged by this RDR and covered by RDR-205 and
 RDR-211's own tests).
+
+Gate rounds 1 and 2 verified the design as accepted on 2026-09-17, with a
+client-side cursor. The engine-side stamp that shipped (bead nexus-vsipz,
+engine-service-v0.1.128, conexus 7.52.0) and its boards half (bead
+nexus-q82tk) postdate acceptance and were not re-gated. Their one new claim,
+that a full re-scan with no client position cannot skip a late-committing row,
+is verified deterministically by `TupleAnnounceTest`: a held transaction
+commits after a faster sibling and the announce query still returns it, on a
+mailbox (`announce_sinceCursorSkipsALateCommit_announceModeDoesNot`) and on a
+board (`subscriberAnnounce_lateCommittingPost_isStillAnnouncedToTheSubscriber`),
+and statistically by the two-writer stop-rule tests in
+`tests/test_mcp_channel.py` against the real engine.
 
 #### API Verification
 
@@ -756,10 +779,11 @@ names it, so a session can check it got what was announced.
   client keeps no cursor and no re-send state for mailboxes. This is a
   wire and engine change, not client-only as originally stated; it rides
   `engine-service-v0.1.128` with `REQUIRED_ENGINE_VERSION` bumped in
-  conexus 7.52.0. Boards keep their `since` cursor for now (bead
+  conexus 7.52.0. Boards kept their `since` cursor at that release (bead
   nexus-q82tk). Provenance; Approach 2 and 4; Technical Design Delivery,
   Back pressure, Errors, the pseudocode, Deleted; Existing Infrastructure
   Audit; Trade-offs; Risks; Failure Modes; Test Plan scenario 7; Testing
   Strategy 1; Performance Expectations; Cross-Cutting Concerns Versioning
   and Deployment model; Phase 2 Activation Step 1; Open Questions (item 1
   answered, closed).
+- 2026-09-18: boards move to the engine-side per-subscriber stamp (bead nexus-q82tk, commit 6f03ff0fe, engine tag pending): Approach item 2, Trade-offs, and this history updated; the board cursor is deleted from the client.

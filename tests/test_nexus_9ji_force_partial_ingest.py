@@ -68,25 +68,62 @@ class _FakeServiceCollection:
 class TestPipelineStateBypass:
 
     def test_force_wipes_completed_pipeline_state(self, tmp_path: Path):
-        """When pipeline.db already records a content_hash as 'completed',
-        a force=True caller must see delete_pipeline_data called BEFORE
-        create_pipeline so the new run isn't silently skipped."""
+        """The force pre-flight deletes THIS document's row before
+        create_pipeline. nexus-edjmu: rows are per document now, so the
+        delete must name the document (collection + pdf_path) and leave a
+        sibling document sharing the bytes alone; a leftover 'completed'
+        row for the same document no longer blocks a re-run either (the
+        engine resets it and answers "created")."""
         from tests.pipeline_fake_engine import make_fake_engine_db
 
         db, engine = make_fake_engine_db()
-        # Seed: mark a content_hash as completed (aged heartbeat, as a
-        # prior ingest would have left it)
         h = "a" * 64
-        db.create_pipeline(h, str(tmp_path / "fake.pdf"), "knowledge__test")
+        path_a = str(tmp_path / "fake.pdf")
+        db.create_pipeline(h, path_a, "knowledge__test")
         db.mark_completed(h)
-        engine.pipelines[h]["updated_at"] = "2026-04-15T00:00:00+00:00"
-        # Sanity: create_pipeline returns skip when not forced
-        assert db.create_pipeline(h, "fake.pdf", "x") == "skip"
+        engine.row_for(h)["updated_at"] = "2026-04-15T00:00:00+00:00"
+        # A sibling document with the same bytes, on its own instance.
+        sibling, _ = make_fake_engine_db()
+        sibling._client = db._client
+        assert sibling.create_pipeline(h, str(tmp_path / "copy.pdf"), "knowledge__test") == "created"
+        assert len(engine.rows_for(h)) == 2
 
-        # Post-fix: delete_pipeline_data wipes the row
-        db.delete_pipeline_data(h)
-        # create_pipeline now re-inserts as 'created'
-        assert db.create_pipeline(h, "fake.pdf", "x") == "created"
+        # The force pre-flight names the document: only A's row goes.
+        fresh, _ = make_fake_engine_db()
+        fresh._client = db._client
+        assert fresh.delete_pipeline_data(h, collection="knowledge__test", pdf_path=path_a) is True
+        remaining = engine.rows_for(h)
+        assert [r["pdf_path"] for r in remaining] == [str(tmp_path / "copy.pdf")]
+        # ...and the re-run inserts A afresh.
+        assert fresh.create_pipeline(h, path_a, "knowledge__test") == "created"
+        assert len(engine.rows_for(h)) == 2
+
+    def test_completed_leftover_same_document_is_reset_not_skipped(self, tmp_path: Path):
+        """nexus-edjmu: a 'completed' row that outlived its run (the client
+        died between mark_completed and delete) used to make every later
+        create_pipeline for the same document answer "skip", so a
+        tombstone-and-reindex registered a Document with no manifest. A
+        document-identity create now resets that row and answers
+        "created" with an empty WAL."""
+        from tests.pipeline_fake_engine import make_fake_engine_db
+
+        db, engine = make_fake_engine_db()
+        h = "a" * 64
+        path_a = str(tmp_path / "fake.pdf")
+        db.create_pipeline(h, path_a, "knowledge__test")
+        db.write_page(h, 0, "page zero")
+        db.update_progress(h, total_pages=1, pages_extracted=1, chunks_created=3, chunks_uploaded=3)
+        db.mark_completed(h)
+        assert engine.row_for(h)["status"] == "completed"
+
+        rerun, _ = make_fake_engine_db()
+        rerun._client = db._client
+        assert rerun.create_pipeline(h, path_a, "knowledge__test") == "created"
+        row = engine.row_for(h)
+        assert row["status"] == "running"
+        assert (row["pages_extracted"], row["chunks_uploaded"], row["chunks_created"]) == (0, 0, None)
+        assert rerun.read_pages(h) == []
+        assert rerun.pipeline_id_for(h) == row["pipeline_id"]
 
 
 # ── pipeline_index_pdf integration ──────────────────────────────────────────
@@ -113,13 +150,16 @@ class TestPipelineIndexPdfForce:
         partial-ingest / force-race scenario."""
         db.create_pipeline(content_hash, str(pdf_path), "knowledge__reproducer")
         db.mark_completed(content_hash)
-        engine.pipelines[content_hash]["updated_at"] = "2026-04-15T00:00:00+00:00"
+        engine.row_for(content_hash)["updated_at"] = "2026-04-15T00:00:00+00:00"
 
-    def test_force_false_still_skips_when_pipeline_completed(
+    def test_force_false_reruns_a_completed_leftover(
         self, tmp_path: Path, fake_pdf: Path,
     ):
-        """Default behaviour (no --force) is preserved: pipeline.db says
-        completed → skip with no work done."""
+        """nexus-edjmu: without --force, a leftover 'completed' row for the
+        same document used to make pipeline_index_pdf return 0 with no
+        work done (a Document with no manifest). The engine now resets the
+        leftover and the run proceeds; the row is gone after the
+        post-passes exactly as on a first run."""
         from nexus.pipeline_stages import pipeline_index_pdf
         from tests.pipeline_fake_engine import make_fake_engine_db
 
@@ -128,13 +168,28 @@ class TestPipelineIndexPdfForce:
         self._seed_prior_completed(db, engine, h, fake_pdf)
 
         fake_t3 = MagicMock()
-        result = pipeline_index_pdf(
-            fake_pdf, h, "knowledge__reproducer", fake_t3, db=db,
-        )
-        assert result == 0
-        # Pipeline row is untouched
-        row = db.get_pipeline_state(h)
-        assert row["status"] == "completed"
+        fake_t3.get_or_create_collection.return_value = MagicMock()
+        fake_embed = lambda texts, model: ([[0.1] * 1024] * len(texts), model)
+        fake_extraction = MagicMock()
+        fake_extraction.metadata = {"table_regions": []}
+        with patch(
+            "nexus.pipeline_stages.extractor_loop", return_value=fake_extraction,
+        ), patch(
+            "nexus.pipeline_stages.chunker_loop", return_value=None,
+        ), patch(
+            "nexus.pipeline_stages.uploader_loop", return_value=0,
+        ), patch(
+            "nexus.pipeline_stages._enrich_metadata_from_extraction",
+            return_value=True,
+        ), patch(
+            "nexus.pipeline_stages._update_chunk_metadata",
+            return_value=None,
+        ):
+            pipeline_index_pdf(
+                fake_pdf, h, "knowledge__reproducer", fake_t3, db=db, embed_fn=fake_embed,
+            )
+        assert db.get_pipeline_state(h) is None, "the leftover blocked the re-run"
+        assert engine.rows_for(h) == []
 
     def test_force_true_bypasses_completed_pipeline(
         self, tmp_path: Path, fake_pdf: Path,

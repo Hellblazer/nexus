@@ -3380,6 +3380,9 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     # nexus.tuple_tenants is deliberately NOT here (no RLS, it names tenants
     # and holds no tenant data).
     "nexus.tuple_claim_log",
+    # nexus.tuple_deliveries: RDR-213 boards half (nexus-q82tk),
+    # tuples-007-deliveries.xml, ENABLE + FORCE + tenant_isolation.
+    "nexus.tuple_deliveries",
     "nexus.tuples",
     "t1.scratch",
 )
@@ -3864,13 +3867,75 @@ def _check_service_autostart_drift() -> list[HealthResult]:
     if probe is None:
         return []  # not local mode, or no service-tier unit installed here
 
-    dest, existing, rendered = probe
-    if existing == rendered:
-        return [HealthResult(
-            label="Service autostart unit (local mode)",
-            ok=True,
-            detail=f"{dest} matches the current template",
-        )]
+    from nexus.daemon.installer import ActivationState  # noqa: PLC0415 — deferred, CLI startup cost
+
+    dest = probe.dest
+    label = "Service autostart unit (local mode)"
+    if probe.content_matches:
+        # nexus-mac7t: content alone masked a unit the manager did not have
+        # after the first warning, because the file matched the template
+        # from then on. The manager's answer is the other half. Only a
+        # POSITIVE "disabled / unknown" answer warns; a box with no manager
+        # or one this process cannot ask is informational (nothing here
+        # can act, and a false warning fed a destructive repair once).
+        activation = probe.activation
+        if activation is None:  # the probe asks whenever content matches; keep the guard explicit
+            return [HealthResult(label=label, ok=True, detail=f"{dest} matches the current template")]
+        match activation.state:
+            case ActivationState.ACTIVE:
+                return [HealthResult(
+                    label=label,
+                    ok=True,
+                    detail=(
+                        f"{dest} matches the current template and the "
+                        "service manager reports it enabled for login"
+                    ),
+                )]
+            case ActivationState.NOT_ACTIVE:
+                return [HealthResult(
+                    label=label,
+                    ok=False,
+                    warn=True,
+                    detail=(
+                        f"{dest} is installed but not registered for login: "
+                        f"{activation.detail} -- the unit file matches the "
+                        "current template, so nothing re-attempts the "
+                        "registration on its own; the service will not "
+                        "start at login until it is re-registered"
+                    ),
+                    fix_suggestions=[
+                        f"{activation.remedy}  # re-registers the unit with the service manager",
+                    ],
+                )]
+            case ActivationState.NO_MANAGER:
+                return [HealthResult(
+                    label=label,
+                    ok=True,
+                    detail=(
+                        f"{dest} matches the current template; no service "
+                        f"manager on this box can register it "
+                        f"({activation.detail}), so the service will not "
+                        "start at login here until one exists"
+                    ),
+                    fix_suggestions=[
+                        "nx daemon service uninstall --autostart && nx daemon "
+                        "service install --autostart  # once a service manager is available",
+                    ],
+                )]
+            case ActivationState.UNREACHABLE | _:
+                # UNREACHABLE by name; a state added later inherits the
+                # informational row rather than a crash (this check must
+                # never break nx doctor) until it gets its own case.
+                return [HealthResult(
+                    label=label,
+                    ok=True,
+                    detail=(
+                        f"{dest} matches the current template; the service "
+                        f"manager could not be asked from this process "
+                        f"({activation.detail}) -- run `nx doctor` from a "
+                        "login session to confirm it is registered"
+                    ),
+                )]
 
     return [HealthResult(
         label="Service autostart unit (local mode)",
@@ -5890,8 +5955,9 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
     The waiter not alive, or its last wake stale, is a WARN: push
     delivery for this session is not actually happening. `stopped_reason`
     (bead nexus-vsipz review round) names WHY when the waiter itself
-    knows: `"no_announce_support"` or `"no_wait_support"` both mean the
-    LOCAL ENGINE predates a feature this client's waiter depends on, so
+    knows: `"no_announce_support"`, `"no_subscriber_support"` (bead
+    nexus-q82tk) or `"no_wait_support"` all mean the LOCAL ENGINE
+    predates a feature this client's waiter depends on, so
     the fix is to rebuild/reinstall the engine, not to restart the MCP
     server (a restart would hit the identical stale engine); any other
     not-alive or stale case has no known cause and the fix stays
@@ -5978,6 +6044,12 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
         restart_fix = ["Restart the MCP server: /mcp"]
         if not alive and stopped_reason == "no_announce_support":
             reason = "the waiter stopped: the local engine never renders announce_count (predates RDR-213's announce mode, bead nexus-vsipz)"
+            fix_suggestions = rebuild_fix
+        elif not alive and stopped_reason == "no_subscriber_support":
+            reason = (
+                "the waiter stopped: the local engine never echoes announce.subscriber on a board result "
+                "(predates the per-subscriber board stamp, bead nexus-q82tk); mailboxes still arrive through the drain hook"
+            )
             fix_suggestions = rebuild_fix
         elif not alive and stopped_reason == "no_wait_support":
             reason = "the waiter stopped: the local engine predates /wait entirely (a bare 404)"

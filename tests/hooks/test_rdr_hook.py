@@ -590,3 +590,61 @@ def test_status_loader_leaves_out_an_rdr_whose_title_shapes_disagree(rdr_hook_mo
         rows[0], rows[1] = rows[1], rows[0]
     monkeypatch.setattr(mod, "_fetch_rdr_rows", lambda repo: rows)
     assert mod._load_all_t2_statuses("nexus") == {"7": "closed"}
+
+
+def test_closed_rdr_with_no_t2_status_row_is_not_told_to_run_rdr_fix(rdr_hook_module, tmp_path, monkeypatch, capsys) -> None:
+    """nexus-u1jxt.7: an RDR absent from the T2 status map (no row, or two
+    disagreeing shapes the loader drops) defaulted to draft and was told to
+    run rdr-fix even when its own frontmatter says closed. The file is the
+    fallback. Reproduced pre-fix: the line printed."""
+    mod = rdr_hook_module
+    root = tmp_path
+    (root / "docs" / "rdr").mkdir(parents=True)
+    f = root / "docs" / "rdr" / "rdr-204-example.md"
+    f.write_text("---\nstatus: closed\n---\n# x\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "gated"], check=True)
+    gated = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%h"], capture_output=True, text=True, check=True).stdout.strip()
+    f.write_text("---\nstatus: closed\n---\n# x edited after the gate\n")
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "edit"], check=True)
+
+    monkeypatch.setattr(mod, "_repo_root", lambda: root)
+    monkeypatch.setattr(mod, "_load_all_t2_statuses", lambda repo: {})
+    monkeypatch.setattr(mod, "_load_gated_commits", lambda repo: {"204": gated})
+    monkeypatch.setattr(mod, "_resolve_rdr_collection", lambda r: None)
+    monkeypatch.setattr(mod, "_collection_exists", lambda t: False)
+    with pytest.raises(SystemExit):
+        mod.main()
+    assert "rdr-fix" not in capsys.readouterr().out
+
+
+def test_companion_notes_are_not_rdrs(rdr_hook_module, tmp_path) -> None:
+    """nexus-u1jxt.7 sibling: a companion note (``kind: companion`` or the
+    older ``id: companion-note``) shares the RDR's number and carries no
+    status; it was counted as an RDR and walked against the gate record."""
+    mod = rdr_hook_module
+    rdr_dir = tmp_path / "docs" / "rdr"
+    rdr_dir.mkdir(parents=True)
+    (rdr_dir / "rdr-204-example.md").write_text("---\nid: RDR-204\nstatus: draft\n---\n")
+    (rdr_dir / "rdr-204-consolidation-plan.md").write_text("---\nkind: companion\n---\n")
+    (rdr_dir / "rdr-079-calibration.md").write_text("---\nid: companion-note\n---\n")
+    names = sorted(p.name for p in mod._rdr_files(rdr_dir))
+    assert names == ["rdr-204-example.md"], names
+
+
+def test_repo_name_reads_the_git_common_dir_in_a_linked_worktree(rdr_hook_module, tmp_path) -> None:
+    """nexus-u1jxt.7 sibling: ``root.name`` was the worktree directory's
+    basename in a linked worktree, so the hook read a T2 project nobody
+    writes to."""
+    mod = rdr_hook_module
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "a").write_text("a")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "one"], check=True)
+    wt = tmp_path / "agent-a1b2c3"
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", str(wt), "-b", "wt"], check=True)
+    assert mod._repo_name(wt) == "myrepo"
+    assert mod._repo_name(repo) == "myrepo"

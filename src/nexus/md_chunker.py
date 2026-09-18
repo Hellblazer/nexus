@@ -310,6 +310,14 @@ class SemanticMarkdownChunker:
         return sections
 
     def _token_content(self, token: Any, source_text: str) -> str:
+        if token.type == "fence" and token.content:
+            # nexus-cd1k0.12: a fence token's .content is the code body only.
+            # Re-fence it with its own markup and info string so the chunk
+            # carries the language tag and has_code_blocks can be true.
+            markup = token.markup or "```"
+            info = (token.info or "").strip()
+            body = token.content if token.content.endswith("\n") else token.content + "\n"
+            return f"{markup}{info}\n{body}{markup}\n"
         if token.content:
             return token.content
         if token.map:
@@ -483,6 +491,12 @@ class SemanticMarkdownChunker:
                 chunks.append(MarkdownChunk(text=chunk_text, chunk_index=chunk_index, metadata=meta, header_path=[]))
                 chunk_index += 1
 
+            # nexus-cd1k0.13: this window reached EOF, so stop; otherwise
+            # next_start = end - overlap still lands past start and emits
+            # one more chunk that is only this chunk's overlap tail (the
+            # sibling 482c4bb57 fixed in pdf_chunker).
+            if end >= len(text):
+                break
             next_start = end - overlap_chars
             if next_start <= start:
                 break

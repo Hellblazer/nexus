@@ -1039,6 +1039,25 @@ def _sendmessage_entry(content_text: str, *, to: str = "main") -> dict:
     }
 
 
+def _handback_entry(message_text: str) -> dict:
+    """The harness's own hand-back call (bead nexus-4xo3k): a
+    ``SubagentHandback`` tool_use whose input field is ``message``."""
+    return {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "hb1",
+                    "name": "SubagentHandback",
+                    "input": {"message": message_text},
+                }
+            ],
+        },
+    }
+
+
 def _write_transcript(tmp_path: Path, entries: list[dict], name: str = "agent_transcript.jsonl") -> Path:
     p = tmp_path / name
     p.write_text("\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8")
@@ -1078,6 +1097,39 @@ def test_report_kind_extracts_verify_dims_from_final_assistant_text(
         "commit": "abc1234",
         "t2_ref": "nexus/impl-notes.md",
     }
+
+
+def test_report_kind_extracts_verify_dims_from_handback_message(
+    tmp_path: Path, mock_engine,
+) -> None:
+    """Bead nexus-4xo3k: a background agent that reports through the
+    harness's SubagentHandback call carries its VERIFY lines in that
+    call's ``message`` field, and the projector reads them exactly as it
+    reads a SendMessage's ``content``."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+
+    transcript = _write_transcript(tmp_path, [
+        {"type": "user", "message": {"role": "user", "content": "do the thing"}},
+        _handback_entry("Done.\nVERIFY: commit=cafe123\nVERIFY: t2=nexus/handback-notes"),
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t9", "name": "Bash", "input": {}}]},
+        },
+    ])
+
+    proc = _run(
+        "report", tmp_path=tmp_path,
+        stdin=_payload(agent_transcript_path=str(transcript)),
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+    dims = engine.requests[0]["dims"]
+    assert dims["verify"] == "present"
+    assert dims["commit"] == "cafe123"
+    assert dims["t2_ref"] == "nexus/handback-notes"
 
 
 def test_report_kind_extracts_verify_dims_from_sendmessage_content(

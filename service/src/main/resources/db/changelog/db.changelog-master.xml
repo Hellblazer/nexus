@@ -1432,6 +1432,45 @@
     <include file="db/changelog/tuples-006-announce-columns.xml"/>
 
     <!--
+        Bead nexus-q82tk (RDR-213 boards half): nexus.tuple_deliveries, the
+        per-(subspace, subscriber, tuple) announce stamp a board post needs
+        because it is read by many subscribers and never claimed, so the
+        row-level stamp tuples-006 gave mailboxes cannot serve it. CREATE
+        TABLE only, no DATA EFFECT line (see the included file's own
+        header). tuple_id cascades from nexus.tuples, so the sweep bounds
+        the table. Placed after tuples-006-announce-columns.xml (current
+        tail) and before the grants-nexus-svc.xml runAlways block, matching
+        the established late-append convention (D0.1).
+    -->
+    <include file="db/changelog/tuples-007-deliveries.xml"/>
+
+    <!--
+        Bead nexus-edjmu: a pdf_pipeline row is one RUN of one document, not
+        a content hash. pdf_pipeline gains the identity pipeline_id and
+        keyed_by, PK (tenant_id, pipeline_id), UNIQUE (tenant_id,
+        content_hash, collection, pdf_path); pdf_pages and pdf_chunks are
+        re-keyed on (tenant_id, pipeline_id, idx) with an ON DELETE CASCADE
+        FK and lose content_hash. Carries DATA EFFECT lines (the WAL
+        backfill UPDATE, the parentless-WAL DELETE, the two DROP COLUMNs)
+        under the FORCE-RLS toggle. Depends on pipeline-001-baseline.xml.
+        Placed after tuples-007-deliveries.xml (current tail) and before the
+        grants-nexus-svc.xml runAlways block, matching the established
+        late-append convention (D0.1).
+    -->
+    <include file="db/changelog/pipeline-002-per-row-identity.xml"/>
+
+    <!--
+        Bead nexus-8vu8p: pdf_pipeline.run_epoch, the run's ownership
+        generation, bumped in the same UPDATE as every takeover and checked
+        under a row lock by every write that carries it (409 stale_run).
+        ADD COLUMN with a DEFAULT only, no DATA EFFECT. Depends on
+        pipeline-002-per-row-identity.xml. Placed after it (current tail)
+        and before the grants-nexus-svc.xml runAlways block, matching the
+        established late-append convention (D0.1).
+    -->
+    <include file="db/changelog/pipeline-003-run-epoch.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

@@ -33,11 +33,27 @@ def build_cache(
                 break  # Soft cap reached — omit remaining files
 
             try:
-                text = file.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
-                continue  # Skip binary or unreadable files
+                raw = file.read_bytes()
+            except OSError:
+                continue  # unreadable
+            # nexus-cd1k0.9: NUL is valid UTF-8, so "decodes" was not "is
+            # text"; one file with a NUL made rg treat the WHOLE cache as a
+            # binary file ("binary file matches") and every search returned
+            # nothing. rg's own binary test is a NUL in the leading bytes.
+            if b"\x00" in raw[:8192]:
+                continue
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                continue  # Skip binary files
 
-            for lineno, line in enumerate(text.splitlines(), start=1):
+            # split("\n"), not splitlines(): rg numbers lines by "\n" alone,
+            # while splitlines() also breaks on form feed and friends, so a
+            # hit past such a character reported the wrong line (cd1k0.9 LOW).
+            lines = text.split("\n")
+            if lines and lines[-1] == "":
+                lines.pop()
+            for lineno, line in enumerate(lines, start=1):
                 entry = f"{file}:{lineno}:{line}\n"
                 fh.write(entry)
                 # Approximate: counts UTF-8 bytes of the Python string, not actual
@@ -114,7 +130,7 @@ def search_ripgrep(
         return []
 
     parsed: list[dict] = []
-    for raw_line in proc.stdout.splitlines():
+    for raw_line in proc.stdout.split("\n"):
         # Each matched line is a cache entry: /abs/path:lineno:content
         # Split on ":" with maxsplit=2 to get exactly three parts.
         # This assumes the file path does NOT contain colons; paths with

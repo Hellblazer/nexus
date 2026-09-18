@@ -149,9 +149,14 @@ class TestInstallIdempotent:
         # Second call: content matches the freshly rendered template, so
         # no write and no activation shell-out happens.
         with patch.object(daemon_cmd.subprocess, "run") as mock_run2:
+            mock_run2.return_value.returncode = 0
+            mock_run2.return_value.stdout = ""
+            mock_run2.return_value.stderr = ""
             result = installer.install_autostart(tier="service")
         assert result.status is installer.InstallStatus.ALREADY_PRESENT
-        assert mock_run2.call_count == 0
+        # nexus-mac7t: the only calls are the read-only queries (registered
+        # for login, loaded now), never an activation.
+        assert [c.args[0][1] for c in mock_run2.call_args_list] == ["print-disabled", "print"]
         assert result.activated_cmd is None
 
 
@@ -216,7 +221,9 @@ class TestActivationFailure:
             mock_run.return_value.stdout = ""
             with pytest.raises(installer.ActivationError):
                 installer.install_autostart(tier="service")
-        # The file was written before activation was attempted.
+        # The file stays on an activation failure (nexus-mac7t): the retry
+        # asks the service manager before it short-circuits, so cd1k0.4's
+        # invariant no longer needs the file deleted.
         assert (tmp_path / "units" / "com.nexus.service.plist").exists()
 
     def test_activation_failure_with_force_returns_newly_installed_with_warning(

@@ -774,7 +774,6 @@ def _start_channel_waiter() -> None:
         subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
         waiter = _channel.ChannelWaiter(
             session_id, _t2_ctx, subs,
-            persist=lambda: _subscriptions.persist(t1, subs),
             state_dir=nexus_config_dir(),
         )
         _channel.register_active_waiter(waiter)
@@ -1671,9 +1670,9 @@ async def _t1_lifespan(_app: Any):
         # RDR-211 (bead nexus-rplay.10), rewritten under RDR-213: cancel
         # the channel waiter before anything else in this teardown -- it
         # holds no lock and no claim any more (RDR-213 deleted the
-        # waiter's claim entirely), but its background task can still be
-        # mid-`tick()`, writing back through the SAME `t1` handle
-        # (`_subscriptions.persist`, the board-cursor write-back) and T2
+        # waiter's claim entirely; bead nexus-q82tk deleted its T1
+        # write-back with the board cursor), but its background task can
+        # still be mid-`tick()`, parked on a `wait()` through the T2
         # context this teardown is about to invalidate a few lines below
         # (`store.close_session()`, `_t1_shutdown()`). `await`ing its
         # cancellation here, first, is the same "cancel before close so
@@ -6928,8 +6927,7 @@ def tuple_subscribe(
     itself fires `UserPromptSubmit` and the drain hook claims, acks and
     renders the body with THAT prompt before the session's own turn, so
     the session claims for itself only when that rendering did not
-    already happen. `tuple_subscriptions` lists the current set with
-    each entry's cursor.
+    already happen. `tuple_subscriptions` lists the current set.
     Only board topics and the session's own instance-name mailbox are
     accepted: a queue or a lock is refused naming `in`, since those are
     never delivered, and any mailbox other than the session's own
@@ -6998,12 +6996,12 @@ def tuple_unsubscribe(
     structured_output=False,
 )
 def tuple_subscriptions() -> list[dict]:
-    """List this session's MCP server's subscription set, each with its cursor (RDR-211).
+    """List this session's MCP server's subscription set (RDR-211).
 
     Always the session's own mailbox first, then the instance-name
-    mailbox if one was subscribed, then subscribed board topics. A
-    `cursor` of `null` means the delivery waiter has not advanced past
-    that subspace's start.
+    mailbox if one was subscribed, then subscribed board topics. There
+    is no cursor: the engine keeps every subspace's delivery position
+    (a row stamp for a mailbox, a per-subscriber stamp for a board).
     """
     try:
         session_id = _current_subscription_session_id()

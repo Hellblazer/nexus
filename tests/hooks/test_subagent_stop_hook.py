@@ -49,9 +49,12 @@ def _payload(
     )
 
 
-def _transcript(tmp_path: Path, *, with_sendmessage: bool) -> Path:
-    """A minimal agent transcript JSONL, optionally containing a SendMessage
-    tool_use (shaped like real Claude Code transcript entries)."""
+def _transcript(tmp_path: Path, *, with_sendmessage: bool, report_tool: str = "SendMessage") -> Path:
+    """A minimal agent transcript JSONL, optionally containing a report
+    tool_use (shaped like real Claude Code transcript entries). The report
+    is a ``SendMessage`` by default, or a ``SubagentHandback`` (whose input
+    field is ``message``, as the harness's own call carries it) when
+    *report_tool* says so (bead nexus-4xo3k)."""
     lines = [
         {"type": "user", "message": {"role": "user", "content": "do the thing"}},
         {
@@ -74,8 +77,12 @@ def _transcript(tmp_path: Path, *, with_sendmessage: bool) -> Path:
                         {
                             "type": "tool_use",
                             "id": "t2",
-                            "name": "SendMessage",
-                            "input": {"to": "main", "content": "done: report"},
+                            "name": report_tool,
+                            "input": (
+                                {"message": "done: report"}
+                                if report_tool == "SubagentHandback"
+                                else {"to": "main", "content": "done: report"}
+                            ),
                         }
                     ],
                 },
@@ -957,6 +964,55 @@ class TestBlockMode:
         _run_hook(_payload(transcript=str(t)), tmp_path, mode="block")
         content = _expectations_file(tmp_path).read_text()
         assert f"\tREPORTED\t{AGENT_ID}\n" in content
+
+    def test_handback_agent_not_blocked_and_gets_reported_row(self, tmp_path: Path) -> None:
+        """Bead nexus-4xo3k: the harness's own SubagentHandback call IS a
+        background agent's report. Before this fix the scan saw only
+        SendMessage, so every hand-back agent was blocked once and re-sent
+        the same report (every one of a session's dispatches read as
+        BLOCKED_RESOLVED immediate in the census). Reproduced pre-fix: this
+        test blocked."""
+        _expect_row(tmp_path)
+        t = _transcript(tmp_path, with_sendmessage=True, report_tool="SubagentHandback")
+        proc = _run_hook(_payload(transcript=str(t)), tmp_path, mode="block")
+        assert proc.returncode == 0
+        assert _decision(proc) is None
+        content = _expectations_file(tmp_path).read_text()
+        assert f"\tREPORTED\t{AGENT_ID}\n" in content
+        assert f"\tBLOCKED\t{AGENT_ID}" not in content
+
+    def test_handback_inside_tool_result_does_not_count(self, tmp_path: Path) -> None:
+        """The same decoy rule as SendMessage: a SubagentHandback-shaped
+        tool_use nested in a tool_result the agent merely read is not its
+        report."""
+        _expect_row(tmp_path)
+        p = tmp_path / "agent_transcript.jsonl"
+        entry = {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t9",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "embedded",
+                                "name": "SubagentHandback",
+                                "input": {"message": "decoy from a read file"},
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+        p.write_text(json.dumps(entry) + "\n")
+        proc = _run_hook(_payload(transcript=str(p)), tmp_path, mode="block")
+        assert proc.returncode == 0
+        decision = _decision(proc)
+        assert decision is not None and decision["decision"] == "block"
+        assert "SubagentHandback" in decision["reason"]
 
     def test_sendmessage_inside_tool_result_does_not_count(self, tmp_path: Path) -> None:
         """A SendMessage-shaped tool_use embedded in a tool_result (e.g. the

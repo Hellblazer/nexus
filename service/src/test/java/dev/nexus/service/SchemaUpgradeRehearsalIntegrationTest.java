@@ -527,6 +527,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   hygiene-005-3 nexus-uxd2a
                 //   tuples-003-2 nexus-r7xao
                 //   tuples-004-1 nexus-8zoyp
+                //   pipeline-002-2 nexus-edjmu
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -1118,6 +1119,30 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .isEqualTo(0);
                 }
 
+                // ── nexus-edjmu seed-coverage follow-up: pipeline-002-2's backfill
+                // (pdf_pages/pdf_chunks.pipeline_id from the owning pdf_pipeline
+                // row by (tenant_id, content_hash), then DELETE of parentless WAL
+                // rows, then DROP COLUMN content_hash) -- the pipeline tables do
+                // not exist at OLD_TAG (pipeline-001 landed at v0.1.47), so
+                // migrate up to just before pipeline-002-1 (this also applies
+                // tuples-004-1 through tuples-007, still pending from the
+                // migrateUpTo call above), seed the pipeline-001 shape directly:
+                // two tenants sharing one content_hash (each WAL row must attach
+                // to ITS tenant's parent, never the other's) plus one parentless
+                // WAL family, THEN let the whole-hop migrate below finish
+                // pipeline-002-1/2/3 through the rest of HEAD. ──────────────────
+                migrateUpTo(adminDs, "pipeline-002-1");
+                try (Connection su = pg.createConnection("")) {
+                    su.setAutoCommit(true);
+                    seedPipelinePreRowIdentityRows(su);
+                }
+                try (Connection admin = adminDs.getConnection()) {
+                    assertThat(DSL.using(admin, SQLDialect.POSTGRES).fetchCount(PIPELINE_PAGES))
+                        .as("FORCE RLS must hide every seeded nexus.pdf_pages row from the "
+                            + "non-BYPASSRLS owner -- pipeline-002-2's own toggle-wrap target")
+                        .isEqualTo(0);
+                }
+
                 // ── HEAD LEG over a populated database. This is the leg the
                 // v0.1.33 outage proved was untested: catalog-013-0's naked DML
                 // no-ops under RLS here exactly as it did in production; only
@@ -1188,6 +1213,38 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     assertThat(unconsumedRow.getBody())
                         .as("tuples-004-1 must leave an unconsumed row's body intact")
                         .isEqualTo("still-here");
+                }
+
+                // ── pipeline-002-2's own effect: every surviving WAL row carries
+                // the pipeline_id of the pdf_pipeline row with ITS tenant and
+                // content_hash; the parentless family is gone; content_hash is
+                // no longer a column of either WAL table. A toggle-less backfill
+                // would have matched zero rows for the NOBYPASSRLS owner and the
+                // SET NOT NULL that follows would have failed the hop above.
+                try (Connection su = pg.createConnection("")) {
+                    var ctx = DSL.using(su, SQLDialect.POSTGRES);
+                    for (var table : List.of(PIPELINE_PAGES, PIPELINE_CHUNKS)) {
+                        assertThat(ctx.meta().getTables(table.getQualifiedName()).get(0).field("content_hash"))
+                            .as(table + ": pipeline-002-2 drops content_hash from the WAL tables").isNull();
+                        assertThat(ctx.fetchCount(table))
+                            .as(table + ": two parents x two rows survive, the parentless family is gone")
+                            .isEqualTo(4);
+                        assertThat(ctx.selectCount()
+                                .from(table.as("w"))
+                                .join(PIPELINE_ROWS.as("p"))
+                                .on(DSL.field(DSL.name("p", "tenant_id"), String.class)
+                                        .eq(DSL.field(DSL.name("w", "tenant_id"), String.class))
+                                    .and(DSL.field(DSL.name("p", "pipeline_id"), Long.class)
+                                        .eq(DSL.field(DSL.name("w", "pipeline_id"), Long.class))))
+                                .where(DSL.field(DSL.name("p", "content_hash"), String.class).eq(PIPELINE_SHARED_HASH)
+                                    .and(DSL.field(DSL.name("p", "keyed_by"), String.class).eq("content_hash")))
+                                .fetchOne(0, int.class))
+                            .as(table + ": every survivor attaches to its own tenant's parent")
+                            .isEqualTo(4);
+                    }
+                    assertThat(ctx.select(DSL.countDistinct(DSL.field(DSL.name("pipeline_id"), Long.class)))
+                            .from(PIPELINE_CHUNKS).fetchOne(0, int.class))
+                        .as("the two tenants' WAL rows attach to two DISTINCT parents").isEqualTo(2);
                 }
 
                 // ── Ground truth as superuser: the DML took EFFECT (rows changed),
@@ -2512,6 +2569,52 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * already enforced by this point in the walk (tuples-003-3/4 ran as part
      * of the {@code migrateUpTo("tuples-004-1")} call above).
      */
+    /** One content_hash shared by two tenants, plus a parentless WAL family
+     *  (pipeline-002-2's DELETE arm). Typed handles rather than the generated
+     *  classes: those describe the POST-002 schema, where the WAL tables have
+     *  no content_hash column (RawSqlGateTest: no raw SQL text in tests). */
+    private static final String PIPELINE_SHARED_HASH = "rehearsal-shared-" + "0".repeat(24);
+    private static final String PIPELINE_ORPHAN_HASH = "rehearsal-orphan-" + "0".repeat(24);
+    private static final org.jooq.Table<?> PIPELINE_ROWS = DSL.table(DSL.name("nexus", "pdf_pipeline"));
+    private static final org.jooq.Table<?> PIPELINE_PAGES = DSL.table(DSL.name("nexus", "pdf_pages"));
+    private static final org.jooq.Table<?> PIPELINE_CHUNKS = DSL.table(DSL.name("nexus", "pdf_chunks"));
+
+    /** The pipeline-001 shape (WAL keyed by content_hash), as superuser. */
+    private static void seedPipelinePreRowIdentityRows(Connection su) {
+        var ctx = DSL.using(su, SQLDialect.POSTGRES);
+        var tenantId = DSL.field(DSL.name("tenant_id"), String.class);
+        var contentHash = DSL.field(DSL.name("content_hash"), String.class);
+        var createdAt = DSL.field(DSL.name("created_at"), java.time.OffsetDateTime.class);
+        var now = java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC);
+        for (String tenant : List.of("t1", "t2")) {
+            ctx.insertInto(PIPELINE_ROWS, tenantId, contentHash,
+                    DSL.field(DSL.name("pdf_path"), String.class),
+                    DSL.field(DSL.name("collection"), String.class),
+                    DSL.field(DSL.name("status"), String.class),
+                    DSL.field(DSL.name("started_at"), java.time.OffsetDateTime.class),
+                    DSL.field(DSL.name("updated_at"), java.time.OffsetDateTime.class))
+               .values(tenant, PIPELINE_SHARED_HASH, "/" + tenant + "/shared.pdf",
+                       "knowledge__rehearsal", "completed", now, now)
+               .execute();
+        }
+        for (String[] w : new String[][] {
+                {"t1", PIPELINE_SHARED_HASH}, {"t2", PIPELINE_SHARED_HASH}, {"t1", PIPELINE_ORPHAN_HASH}}) {
+            for (int i = 0; i < 2; i++) {
+                ctx.insertInto(PIPELINE_PAGES, tenantId, contentHash,
+                        DSL.field(DSL.name("page_index"), Integer.class),
+                        DSL.field(DSL.name("page_text"), String.class), createdAt)
+                   .values(w[0], w[1], i, "p" + i, now)
+                   .execute();
+                ctx.insertInto(PIPELINE_CHUNKS, tenantId, contentHash,
+                        DSL.field(DSL.name("chunk_index"), Integer.class),
+                        DSL.field(DSL.name("chunk_text"), String.class),
+                        DSL.field(DSL.name("chunk_id"), String.class), createdAt)
+                   .values(w[0], w[1], i, "c" + i, "cid-" + w[0] + "-" + i, now)
+                   .execute();
+            }
+        }
+    }
+
     private static void seedTupleConsumedBodyCleanupRows(Connection su, String tenant, byte[] consumedId,
                                                           byte[] unconsumedId) throws Exception {
         java.time.OffsetDateTime now = java.time.OffsetDateTime.now();

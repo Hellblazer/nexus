@@ -286,8 +286,8 @@ def _final_assistant_text(path: Path) -> str:
     """Text content of the LAST assistant-role transcript entry, its
     ``"text"`` content blocks concatenated. For a synchronous dispatch
     this IS the agent's hand-back the caller reads; a background
-    teammate's real report instead lives inside a SendMessage tool_use
-    (see :func:`_last_send_message_text`) -- there is no reliable
+    teammate's real report instead lives inside a SendMessage or
+    SubagentHandback tool_use (see :func:`_last_send_message_text`) -- there is no reliable
     transcript-format signal for which dispatch shape produced a given
     transcript (subagent-stop.sh's own comments document the identical
     ambiguity for its report check), so both are searched.
@@ -317,17 +317,17 @@ def _final_assistant_text(path: Path) -> str:
 
 
 def _last_send_message_text(path: Path) -> str:
-    """Text of the LAST assistant SendMessage tool_use's ``"content"``
-    input field anywhere in the transcript -- the field name a real
-    SendMessage tool_use call carries (``{"to": ..., "content": ...}``,
-    matching every other transcript-scanning hook in this directory,
-    e.g. subagent-stop-scan.py's own FOUND detection, which this mirrors
-    but returns the payload text from instead of a boolean)."""
+    """Text of the LAST assistant report tool_use anywhere in the
+    transcript: a SendMessage's ``"content"`` input field (``{"to": ...,
+    "content": ...}``) or a SubagentHandback's ``"message"`` field (bead
+    nexus-4xo3k: the harness's hand-back call is a background agent's
+    report too). Mirrors subagent-stop-scan.py's FOUND detection but
+    returns the payload text instead of a boolean."""
     last = ""
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.strip()
-            if not line or '"SendMessage"' not in line:
+            if not line or ('"SendMessage"' not in line and '"SubagentHandback"' not in line):
                 continue
             try:
                 entry = json.loads(line)
@@ -336,14 +336,14 @@ def _last_send_message_text(path: Path) -> str:
             if entry.get("type") != "assistant":
                 continue
             for block in _content_blocks(entry):
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") == "tool_use"
-                    and block.get("name") == "SendMessage"
-                ):
-                    tool_input = block.get("input")
-                    if isinstance(tool_input, dict) and isinstance(tool_input.get("content"), str):
-                        last = tool_input["content"]
+                if not (isinstance(block, dict) and block.get("type") == "tool_use"):
+                    continue
+                field = {"SendMessage": "content", "SubagentHandback": "message"}.get(block.get("name"))
+                if field is None:
+                    continue
+                tool_input = block.get("input")
+                if isinstance(tool_input, dict) and isinstance(tool_input.get(field), str):
+                    last = tool_input[field]
     return last
 
 

@@ -489,6 +489,18 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # consumed row's body is NULL, the unconsumed row's body survives
         # untouched).
         ("tuples-004-1", "nexus-8zoyp"),
+        # nexus-edjmu: pipeline-002-2 re-keys pdf_pages/pdf_chunks on the
+        # owning run -- a backfill UPDATE of the new pipeline_id column by
+        # (tenant_id, content_hash), a DELETE of parentless WAL rows, then
+        # DROP COLUMN content_hash, inside one NO FORCE/FORCE toggle over
+        # all three pipeline tables (tuples-004-1's shape). Seeded, after a
+        # migrateUpTo("pipeline-002-1") (the tables postdate OLD_TAG), as
+        # two tenants sharing one content_hash plus one parentless WAL
+        # family; effect-asserted (every survivor joins ITS tenant's parent
+        # by pipeline_id, the two tenants attach to two distinct parents,
+        # the parentless family is gone, content_hash is no longer a column
+        # of either WAL table).
+        ("pipeline-002-2", "nexus-edjmu"),
     }
 )
 

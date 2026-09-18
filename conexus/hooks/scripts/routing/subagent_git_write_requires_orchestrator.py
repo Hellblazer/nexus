@@ -1150,8 +1150,8 @@ def _deny_message(agent_type: str, verb_names: str, *,
     return (
         f"{head}\n"
         f"Hand back your changes as diffs + file paths -- a background "
-        f"dispatch does that via SendMessage before idling; a foreground "
-        f"one's final message IS the hand-back, no separate SendMessage "
+        f"dispatch does that via SubagentHandback or SendMessage before idling; a foreground "
+        f"one's final message IS the hand-back, no separate report call "
         f"needed -- so the ORCHESTRATOR commits, pathspec-limited "
         f"(RDR-184 Gap-4, feedback_orchestration_friction).\n"
         f"Rephrase without the literal git verb, or hand the edit back to "

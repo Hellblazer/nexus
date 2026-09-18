@@ -443,3 +443,46 @@ def test_upsert_chunks_retry_false_does_not_self_retry_real_server(
 
     assert handler.call_count == 1  # no self-retry
     mock_sleep.assert_not_called()
+
+
+# ── nexus-cd1k0.10 / .11 ─────────────────────────────────────────────────────
+
+
+def test_direct_connection_reset_while_handling_a_401_is_retryable() -> None:
+    """http_vector_client's post-401 re-resolve retry runs inside the except
+    block, so a ConnectionResetError raised there chains the 401 in
+    __context__; the chained-status walk classed it non-retryable on the
+    first attempt. The direct exception's own type decides first."""
+    from nexus.retry import _is_retryable_vector_error  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+
+    try:
+        try:
+            raise _make_status_exc(401)
+        except httpx.HTTPStatusError:
+            raise ConnectionResetError("connection reset by peer")
+    except ConnectionResetError as exc:
+        chained = exc
+    assert isinstance(chained.__context__, httpx.HTTPStatusError)
+    assert _is_retryable_vector_error(chained) is True
+
+
+def test_breaker_max_trips_is_counted_per_batch() -> None:
+    """max_trips is documented per batch and was counted per leg on the shared
+    breaker, so a later batch that would recover was abandoned. Three
+    batches, each failing once then succeeding, must all succeed with
+    max_trips=1; pre-fix the second raised."""
+    breaker = EtlCircuitBreaker(trip_threshold=1, pause_seconds=0.0, max_trips=1)
+
+    def _fails_once():
+        state = {"n": 0}
+
+        def fn():
+            state["n"] += 1
+            if state["n"] == 1:
+                raise ConnectionResetError("drop")
+            return "ok"
+        return fn
+
+    with patch("nexus.retry.time.sleep"):
+        for _ in range(3):
+            assert _etl_batch_with_breaker(_fails_once(), breaker=breaker, max_attempts=1) == "ok"

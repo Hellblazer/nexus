@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
 import nexus.commands.rdr as rdr_mod
 from nexus.commands.rdr import rdr
 from tests.test_rdr_preamble import (  # noqa: F401 — rdr_env and _rdr_git_template are fixtures
@@ -232,6 +233,26 @@ class TestSetStatusWritesTheReason:
         assert "close_reason: premise void after RDR-155" in (d / "rdr-150-x.md").read_text()
         assert "close_reason: premise void after RDR-155\n" in fake._store["150"]
 
+    def test_reason_with_a_colon_still_parses_as_yaml(self, rdr_env, monkeypatch):
+        """RDR-214's abandonment (2026-09-18) wrote `close_reason: Sam's decision
+        2026-09-18: the batch tier ...` verbatim; the bare `: ` inside a plain
+        scalar broke the whole frontmatter, `nx rdr lint` went red and the
+        indexer would skip the file. A reason that cannot stand as a plain
+        scalar is written quoted, on the file and on the T2 record; one that
+        can stays plain (the sibling test pins that)."""
+        d = rdr_env["rdr_dir"]
+        _write_rdr(d, "rdr-152-x.md", {"title": "X", "status": "draft"}, "x\n")
+        fake = _FakeT2ResearchClient(entries={"152": "id: RDR-152\nstatus: draft\n"})
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        reason = "Sam's decision 2026-09-18: the batch tier re-creates a backlog; #3 stands"
+        res = _runner().invoke(rdr, ["set-status", "152", "abandoned", "--reason", reason])
+        assert res.exit_code == 0, res.output
+        text = (d / "rdr-152-x.md").read_text()
+        fm = yaml.safe_load(text.split("---")[1])
+        assert fm["close_reason"] == reason
+        assert fm["status"] == "abandoned"
+        assert yaml.safe_load(fake._store["152"])["close_reason"] == reason
+
     def test_no_reason_writes_no_field(self, rdr_env, monkeypatch):
         d = rdr_env["rdr_dir"]
         _write_rdr(d, "rdr-151-x.md", {"title": "X", "status": "accepted"}, "x\n")
@@ -294,3 +315,38 @@ class TestReviewRoundFixes:
         ]
         text = "\n".join(rdr_mod._close_override_lines(rows, today="2026-09-17"))
         assert "1 closed record" in text and "could not be dated" in text, text
+
+
+class TestAuditRowsCountEachRdrOnce:
+    """nexus-duwtl (intrastate-4e's review of nexus-5r0ho): 39 RDRs carry
+    both a bare NNN and an RDR-NNN T2 row and the three new audit rows
+    counted each twice; and the reason field the corpus carries is
+    deferred_reason, which the field list did not name."""
+
+    def test_terminated_records_dedup_by_number_and_read_deferred_reason(self):
+        from nexus.commands.rdr import _terminated_reason_lines  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+
+        rows = [
+            {"title": "147", "content": "status: deferred\ndeferred_reason: parked on beads\n"},
+            {"title": "RDR-147", "content": "status: deferred\n"},
+            {"title": "150", "content": "status: abandoned\nclose_reason: superseded by 205\n"},
+            {"title": "150-gate-latest", "content": "outcome: PASSED\n"},
+        ]
+        lines = _terminated_reason_lines(rows)
+        assert lines and "2 terminated" in lines[0], lines
+        assert "no reason: 0" in lines[0], lines
+        assert not any("RDR-147 (deferred)" in ln for ln in lines), lines
+
+    def test_post_mortem_coverage_counts_a_closed_rdr_once(self, tmp_path):
+        from nexus.commands.rdr import _post_mortem_coverage_lines  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+
+        pm = tmp_path / "post-mortem"
+        pm.mkdir()
+        (pm / "rdr-211-x.md").write_text("# pm\n")
+        rows = [
+            {"title": "211", "content": "status: closed\n"},
+            {"title": "RDR-211", "content": "status: closed\n"},
+            {"title": "212", "content": "status: closed\n"},
+        ]
+        lines = _post_mortem_coverage_lines(rows, pm)
+        assert any("closed: 1 of 2" in ln for ln in lines), lines

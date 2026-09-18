@@ -48,7 +48,7 @@ def test_frecency_old_commit_near_zero() -> None:
 
 def test_batch_frecency_single_subprocess_call() -> None:
     """batch_frecency issues a single git log call regardless of file count."""
-    from nexus.frecency import batch_frecency
+    from nexus.frecency import batch_frecency  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
 
     # The parser expects ``|||nxcommit|||<ts>|||nxcommit|||`` sentinels per
     # commit (search review I-7) so file paths that happen to start with
@@ -84,7 +84,7 @@ def test_batch_frecency_single_subprocess_call() -> None:
 
 def test_batch_frecency_timeout_returns_empty() -> None:
     """batch_frecency returns {} on git timeout."""
-    from nexus.frecency import batch_frecency
+    from nexus.frecency import batch_frecency  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
 
     with patch("subprocess.run", side_effect=__import__("subprocess").TimeoutExpired("git", 60)):
         scores = batch_frecency(Path("/repo"))
@@ -94,7 +94,7 @@ def test_batch_frecency_timeout_returns_empty() -> None:
 
 def test_batch_frecency_empty_repo_returns_empty() -> None:
     """batch_frecency returns {} when git log has no output."""
-    from nexus.frecency import batch_frecency
+    from nexus.frecency import batch_frecency  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
 
     mock_result = MagicMock()
     mock_result.returncode = 0
@@ -134,7 +134,7 @@ def test_git_commit_timestamps_nonzero_returncode() -> None:
 
 def test_batch_frecency_invalid_timestamp_skipped() -> None:
     """When the commit sentinel has a non-numeric value, it is skipped gracefully."""
-    from nexus.frecency import batch_frecency
+    from nexus.frecency import batch_frecency  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
 
     git_output = (
         "|||nxcommit|||not-a-number|||nxcommit|||\n"
@@ -188,3 +188,26 @@ def test_git_commit_timestamps_skips_blank_and_invalid_lines() -> None:
 
     # Should include the two valid timestamps, skip the blank and invalid lines
     assert timestamps == [1700000000.0, 1700200000.0]
+
+
+def test_batch_frecency_scores_a_non_ascii_path(tmp_path) -> None:
+    """nexus-cd1k0.15: git C-quotes a non-ASCII path in `git log
+    --name-only` unless core.quotePath is off, so the key never matched the
+    real path and the file scored 0.0 while compute_frecency on the same
+    file returned a real score. Real git, real path."""
+    import subprocess  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+
+    from nexus.frecency import batch_frecency  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    target = repo / "café.py"
+    target.write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "one"],
+        check=True,
+    )
+    scores = batch_frecency(repo)
+    assert scores.get(target, 0.0) > 0.9, scores

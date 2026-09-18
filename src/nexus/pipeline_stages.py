@@ -39,7 +39,7 @@ import structlog
 from nexus.embed_window import window_for_model
 from nexus.pdf_chunker import PDFChunker
 from nexus.pdf_extractor import ExtractionResult, PDFExtractor
-from nexus.db.http_pipeline_client import HttpPipelineDB
+from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineRunFenced
 from nexus.retry import _vector_with_retry
 
 _log = structlog.get_logger(__name__)
@@ -892,10 +892,14 @@ def _force_t3_orphan_cleanup(t3: Any, collection: str, content_hash: str) -> int
     return actual
 
 
-def _mark_failed_and_reset_wal(db: HttpPipelineDB, content_hash: str, first_exc: BaseException) -> None:
+def _mark_failed_and_reset_wal(db: HttpPipelineDB, content_hash: str, first_exc: BaseException) -> bool:
     """Terminal bookkeeping for a failed pipeline run: mark the row failed
     and wipe its WAL. Never raises: the caller re-raises *first_exc*, and
-    nothing here may mask it.
+    nothing here may mask it. Returns True when the engine FENCED the
+    bookkeeping (nexus-8vu8p: a newer resume took the run over between
+    the original failure and this cleanup; the row and its WAL belong to
+    the new owner, and the caller must not stamp the catalog document
+    failed either), False otherwise.
 
     nexus-33q80: ``clear_orphan_wal`` now zeroes ``chunks_uploaded`` (and
     ``pages_extracted``, nexus-gl99l's own counter) on the pipeline row in
@@ -914,6 +918,16 @@ def _mark_failed_and_reset_wal(db: HttpPipelineDB, content_hash: str, first_exc:
     try:
         db.mark_failed(content_hash, error=str(first_exc))
         db.clear_orphan_wal(content_hash)
+    except PipelineRunFenced as fenced:
+        _log.warning(
+            "pipeline_run_fenced_at_cleanup",
+            content_hash=content_hash,
+            pipeline_id=fenced.pipeline_id,
+            run_epoch=fenced.run_epoch,
+            current_epoch=fenced.current_epoch,
+            original_error=str(first_exc),
+        )
+        return True
     except Exception:  # noqa: BLE001 — boundary catch: terminal-state bookkeeping must never mask first_exc
         _log.warning(
             "pipeline_terminal_mark_failed",
@@ -921,6 +935,7 @@ def _mark_failed_and_reset_wal(db: HttpPipelineDB, content_hash: str, first_exc:
             original_error=str(first_exc),
             exc_info=True,
         )
+    return False
 
 
 def pipeline_index_pdf(
@@ -1077,17 +1092,26 @@ def pipeline_index_pdf(
     # pipeline-buffer state and T3 orphan chunks can independently block
     # re-ingest; wipe both before the pre-flight.
     if force:
-        db.delete_pipeline_data(content_hash)
+        # nexus-edjmu: this runs BEFORE create_pipeline, so the client holds
+        # no pipeline_id yet; name THIS document's row by all three fields
+        # or a sibling document sharing the bytes loses its run (the
+        # cross-row WAL destruction of the parked key-widen attempt).
+        db.delete_pipeline_data(content_hash, collection=collection, pdf_path=str(pdf_path))
         _force_t3_orphan_cleanup(t3, collection, content_hash)
 
     # Pre-flight: check if pipeline should run before resolving credentials.
     result = db.create_pipeline(content_hash, str(pdf_path), collection)
-    if result == "skip":
-        # nexus-lcmbp: "skip" now means ONLY "already completed" — a
-        # fresh-heartbeat 'running' row raises PipelineConflictRunning
-        # from create_pipeline() above instead of reaching this branch.
-        _log.info("pipeline_skip", content_hash=content_hash, reason="already completed")
-        return 0
+    if result not in ("created", "resuming"):
+        # nexus-edjmu: a document-identity create never answers "skip" (a
+        # leftover completed row is reset engine-side and answered
+        # "created"), and a fresh-heartbeat 'running' row raises
+        # PipelineConflictRunning from create_pipeline() above. Anything
+        # else is an engine this client does not know; a silent 0 here was
+        # the bead's own symptom (a catalog Document with no manifest).
+        raise RuntimeError(
+            f"POST /v1/pipeline/create answered status={result!r} for "
+            f"content_hash={content_hash}; expected 'created' or 'resuming'"
+        )
 
     # Resolve embed_fn from credentials when not provided (matches batch path).
     if embed_fn is None:
@@ -1219,13 +1243,31 @@ def pipeline_index_pdf(
         # stays 'running' when the engine's /fail endpoint is down) is
         # covered systemically by lcmbp's young-running-row conflict
         # semantics: the NEXT retry is loud, never a silent skip.
-        _mark_failed_and_reset_wal(db, content_hash, first_exc)
+        # nexus-8vu8p: a run the engine fenced (a newer resume of the same
+        # document took the row over) owns nothing any more. Its terminal
+        # bookkeeping is refused, and it must not stamp the catalog document
+        # failed either: that is the SAME doc_id the new owner is indexing
+        # (a takeover is per document), and a late stamp would flip a
+        # document the new owner has already completed. The fence is
+        # discovered either as the stage's own exception or inside the
+        # cleanup's /fail call, hence both checks.
+        fenced = isinstance(first_exc, PipelineRunFenced)
+        if fenced:
+            _log.warning(
+                "pipeline_run_fenced",
+                content_hash=content_hash,
+                pipeline_id=first_exc.pipeline_id,
+                run_epoch=first_exc.run_epoch,
+                current_epoch=first_exc.current_epoch,
+            )
+        else:
+            fenced = _mark_failed_and_reset_wal(db, content_hash, first_exc)
         # nexus-5xn3k.4: _fence_fail never raises, so first_exc propagation
         # below cannot be masked by a fence-write failure. nexus-uxg4u:
         # never touch the catalog on a dry run (doc_id is already "" in
         # that case per the pre-flight gate above, but check explicitly
         # for the same defense-in-depth reason as the fence-begin gate).
-        if doc_id and not dry_run:
+        if doc_id and not dry_run and not fenced:
             from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
             _fence_fail(doc_id, str(first_exc))
         raise first_exc
@@ -1298,16 +1340,17 @@ def pipeline_index_pdf(
         # nexus-6m9zy.5 (#10): uploader_loop already called
         # db.mark_completed() -- BEFORE any post-pass ran -- the moment
         # chunks_uploaded caught up to chunks_created. Leaving the row at
-        # status='completed' here means the NEXT create_pipeline() call
-        # returns "skip" (status=='completed' is the ONLY skip
-        # condition), so pipeline_index_pdf never even reaches this
-        # function again — "kept for retry" data that can never actually
-        # be retried. Move the row to 'failed' (never clear_orphan_wal:
-        # that would delete the very chunk/page data this branch exists
-        # to preserve) so the next create_pipeline() call sees
-        # 'failed' -> 'resuming'. All three stages then short-circuit
-        # near-instantly on resume (everything is already uploaded), and
-        # execution reaches the post-passes again for a genuine retry.
+        # status='completed' used to make the NEXT create_pipeline() call
+        # return "skip", so pipeline_index_pdf never reached this function
+        # again; since nexus-edjmu a document-identity create RESETS a
+        # completed leftover instead (WAL wiped, answered "created"), which
+        # would discard the very checkpoint this branch preserves and
+        # re-extract everything. Move the row to 'failed' (never
+        # clear_orphan_wal: that would delete the chunk/page data too) so
+        # the next create_pipeline() call sees 'failed' -> 'resuming'. All
+        # three stages then short-circuit near-instantly on resume
+        # (everything is already uploaded), and execution reaches the
+        # post-passes again for a genuine retry.
         try:
             db.mark_failed(content_hash, error="post-pass failed — kept for retry")
         except Exception:  # noqa: BLE001 — boundary catch: best-effort, mirrors the other terminal-state writes in this function

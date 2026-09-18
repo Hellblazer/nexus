@@ -86,6 +86,10 @@ class TuplesBaselineSchemaLiquibaseTest {
     private static final Set<String> TUPLE_TENANTS_EXPECTED_COLUMNS = Set.of(
         "tenant_id", "first_seen", "last_seen", "last_swept_at");
 
+    // Bead nexus-q82tk (RDR-213 boards half): the per-subscriber announce stamp.
+    private static final Set<String> TUPLE_DELIVERIES_EXPECTED_COLUMNS = Set.of(
+        "tenant_id", "subspace", "subscriber", "tuple_id", "announced_at", "announce_count");
+
     PostgreSQLContainer<?> pg;
 
     @BeforeAll
@@ -233,6 +237,38 @@ class TuplesBaselineSchemaLiquibaseTest {
             assertThat(rls.forced()).as("nexus.tuple_tenants must NOT have RLS forced").isFalse();
             assertThat(PgCatalogProbes.policies(ctx, "nexus", "tuple_tenants"))
                 .as("nexus.tuple_tenants must have no RLS policy").isEmpty();
+        }
+    }
+
+    // ── Test 9b: nexus.tuple_deliveries (bead nexus-q82tk) — columns, RLS, cascade FK ──
+
+    @Test
+    void tupleDeliveries_hasExactColumnSet_rlsForced_andCascadesFromTuples() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            assertThat(columnNames(su, "tuple_deliveries")).isEqualTo(TUPLE_DELIVERIES_EXPECTED_COLUMNS);
+
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgCatalogProbes.RowSecurity rls = PgCatalogProbes.rowSecurity(ctx, "nexus", "tuple_deliveries");
+            assertThat(rls).as("nexus.tuple_deliveries must exist in pg_class").isNotNull();
+            assertThat(rls.enabled()).as("nexus.tuple_deliveries RLS ENABLE").isTrue();
+            assertThat(rls.forced()).as("nexus.tuple_deliveries RLS FORCE").isTrue();
+            List<PgCatalogProbes.Policy> policies = PgCatalogProbes.policies(ctx, "nexus", "tuple_deliveries");
+            assertThat(policies).hasSize(1);
+            assertThat(policies.get(0).policyname()).isEqualTo("tenant_isolation");
+
+            PgCatalogProbes.Constraint fk =
+                PgCatalogProbes.foreignKey(ctx, "nexus", "tuple_deliveries_tuple_fk");
+            assertThat(fk).as("tuple_deliveries_tuple_fk must exist").isNotNull();
+            assertThat(fk.convalidated()).isTrue();
+            assertThat(fk.confdeltype())
+                .as("ON DELETE must be CASCADE ('c'): the sweep's purge bounds this table").isEqualTo("c");
+
+            assertThat(PgCatalogProbes.indexExists(ctx, "nexus", "idx_tuple_deliveries_tuple_id"))
+                .as("tuple_id must be indexed so the cascade on purge is not a sequential scan")
+                .isTrue();
+            String[] opts = PgCatalogProbes.relOptions(ctx, "nexus", "tuple_deliveries");
+            assertThat(opts).isNotNull();
+            assertThat(List.of(opts)).contains("autovacuum_vacuum_scale_factor=0.01");
         }
     }
 

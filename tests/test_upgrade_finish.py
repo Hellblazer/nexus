@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from nexus.engine_version import REQUIRED_ENGINE_VERSION
 from nexus.upgrade_finish import (
     PoisonProbe,
@@ -2279,6 +2281,20 @@ class TestConvergeServiceAutostartUnit:
     without a human hand-editing ~/Library/LaunchAgents, and must never
     bounce the service from the unattended/dry-run paths."""
 
+    @pytest.fixture(autouse=True)
+    def _manager_has_the_unit(self):
+        """nexus-mac7t: the probe now also asks the service manager. Every
+        case here is about CONTENT drift, so the manager answers ACTIVE and
+        the real launchctl/systemctl is never reached. The activation cases
+        live in TestConvergeServiceAutostartUnitActivation."""
+        from nexus.daemon.installer import ActivationProbe, ActivationState  # noqa: PLC0415 — local import, test-only convenience
+
+        with patch(
+            "nexus.daemon.installer.autostart_activation_state",
+            return_value=ActivationProbe(ActivationState.ACTIVE),
+        ):
+            yield
+
     def _dest(self, tmp_path):
         from pathlib import Path as _P  # noqa: PLC0415 — local import, test-only convenience
         return _P(tmp_path) / "com.nexus.service.plist"
@@ -2433,7 +2449,7 @@ class TestConvergeServiceAutostartUnit:
             actions = converge_service_autostart_unit(tmp_path)
 
         sp.assert_called_once_with(
-            ["nx", "daemon", "service", "stop"],
+            ["nx", "daemon", "service", "stop", "--config-dir", str(tmp_path.resolve())],
             capture_output=True, text=True, timeout=60,
         )
         uninstall.assert_called_once_with(tier="service")
@@ -2556,6 +2572,131 @@ class TestConvergeServiceAutostartUnit:
         assert sp.call_count == 2, "start must be invoked after stop, not skipped"
         assert sp.call_args_list[1].args[0][:4] == ["nx", "daemon", "service", "start"]
 
+    def test_activation_error_with_no_chained_cause_is_needs_human_and_still_restarts(
+        self, tmp_path,
+    ):
+        """nexus-ebbvt review round 1, finding 2: install_autostart raising
+        ActivationError whose ``__cause__`` is NOT a FileNotFoundError (the
+        service manager IS present but activation itself failed --
+        permissions, a broken user session) must re-raise past the
+        FileNotFoundError-only NOTE branch to the generic NEEDS HUMAN
+        handler, restart the service, and never let the exception escape.
+        Before this test existed, dropping the ``raise`` in that branch
+        would fall through to `install_result.dest` with `install_result`
+        unbound -- an UnboundLocalError escaping uncaught, the exact
+        'never let convergence crash the finish pass' contract this
+        function exists to uphold."""
+        from nexus.daemon import installer as installer_mod  # noqa: PLC0415 — local import, test-only convenience
+        from nexus.daemon.installer import UninstallResult, UninstallStatus  # noqa: PLC0415 — local import, test-only convenience
+
+        dest = self._drifted(tmp_path)
+        stop_result = MagicMock(returncode=0, stdout="", stderr="")
+        start_result = MagicMock(returncode=0, stdout="", stderr="")
+        # No `from exc` -- __cause__ is None, exactly the
+        # manager-present-but-activation-failed shape (installer.py's own
+        # nonzero-returncode branch raises ActivationError this same way).
+        activation_error = installer_mod.ActivationError(
+            "systemctl --user enable --now nexus-service.service exited 1: "
+            "Failed to connect to bus: No such file or directory"
+        )
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
+             patch("nexus.daemon.installer.uninstall_autostart",
+                   return_value=UninstallResult(status=UninstallStatus.REMOVED, dest=dest)), \
+             patch("nexus.daemon.installer.install_autostart",
+                   side_effect=activation_error), \
+             patch("nexus.upgrade_finish.subprocess.run",
+                   side_effect=[stop_result, start_result]) as sp:
+            actions = converge_service_autostart_unit(tmp_path)
+        assert len(actions) == 1, actions
+        assert "NEEDS HUMAN" in actions[0]
+        assert "NOTE" not in actions[0]
+        assert "Failed to connect to bus" in actions[0]
+        assert sp.call_count == 2, "start must be invoked after stop, not skipped"
+        assert sp.call_args_list[1].args[0][:4] == ["nx", "daemon", "service", "start"]
+
+    def test_a_new_unnamed_exit_path_still_restarts_via_the_funnel(self, tmp_path):
+        """nexus-ebbvt review round 1, finding 4: the restart guarantee
+        lives at ONE checkpoint (the funnel's `finally`), not duplicated
+        per branch -- proven by an exception type NO branch names at all.
+        `uninstall_autostart` raising a brand-new exception (never
+        mentioned by the FileNotFoundError/ActivationError-specific
+        branches) still hits the generic outer `except Exception`, and the
+        restart still fires, because nothing branch-specific decided that;
+        only whether `activated` ended up True did."""
+        dest = self._drifted(tmp_path)
+        stop_result = MagicMock(returncode=0, stdout="", stderr="")
+        start_result = MagicMock(returncode=0, stdout="", stderr="")
+
+        class _NoBranchNamesThis(Exception):
+            pass
+
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
+             patch("nexus.daemon.installer.uninstall_autostart",
+                   side_effect=_NoBranchNamesThis("disk full")) as uninstall, \
+             patch("nexus.daemon.installer.install_autostart") as install, \
+             patch("nexus.upgrade_finish.subprocess.run",
+                   side_effect=[stop_result, start_result]) as sp:
+            actions = converge_service_autostart_unit(tmp_path)
+        assert len(actions) == 1, actions
+        assert "NEEDS HUMAN" in actions[0]
+        assert "disk full" in actions[0]
+        install.assert_not_called()
+        assert sp.call_count == 2, "the funnel must restart even though no branch named this exception"
+        assert sp.call_args_list[1].args[0][:4] == ["nx", "daemon", "service", "start"]
+
+    def test_restart_helper_emits_a_structured_log_line(self, tmp_path):
+        """nexus-ebbvt review round 1, finding 5: `_restart_service_after_
+        unit_reinstall` itself logs `upgrade_autostart_unit_restart` with
+        `config_dir` and `returncode`, independent of whatever the caller
+        goes on to return.
+
+        Asserted by patching the module's own `_log`, not
+        `structlog.testing.capture_logs()`: this repo's `configure_logging`
+        installs a level-FILTERING wrapper_class (WARNING by default for
+        CLI-mode processes -- src/nexus/logging_setup.py:135), and
+        `capture_logs()` only swaps the processors list, not the
+        wrapper_class, so an ambient WARNING floor silently swallows an
+        `.info()` call before `capture_logs()`'s own processor ever runs
+        -- confirmed by reproducing it standalone. Patching `_log` sidesteps
+        the ambient level entirely."""
+        from nexus.upgrade_finish import _restart_service_after_unit_reinstall  # noqa: PLC0415 — local import, test-only convenience
+
+        start_result = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("nexus.upgrade_finish.subprocess.run", return_value=start_result), \
+             patch("nexus.upgrade_finish._log") as mock_log:
+            ok, _clause = _restart_service_after_unit_reinstall(tmp_path)
+        assert ok is True
+        mock_log.info.assert_called_once_with(
+            "upgrade_autostart_unit_restart",
+            config_dir=str(tmp_path.resolve()), returncode=0, ok=True,
+        )
+        mock_log.warning.assert_not_called()
+
+    def test_restart_helper_logs_none_returncode_when_the_subprocess_itself_raises(
+        self, tmp_path,
+    ):
+        """Sibling of the case above: when subprocess.run itself raises (no
+        process exit to report), the structured log still fires, with
+        `returncode=None` rather than a fabricated value."""
+        from nexus.upgrade_finish import _restart_service_after_unit_reinstall  # noqa: PLC0415 — local import, test-only convenience
+
+        with patch("nexus.upgrade_finish.subprocess.run",
+                   side_effect=OSError("no such file")), \
+             patch("nexus.upgrade_finish._log") as mock_log:
+            ok, clause = _restart_service_after_unit_reinstall(tmp_path)
+        assert ok is False
+        assert "no such file" in clause
+        mock_log.warning.assert_called_once_with(
+            "upgrade_autostart_unit_restart",
+            config_dir=str(tmp_path.resolve()), returncode=None, ok=False,
+            error="no such file",
+        )
+        mock_log.info.assert_not_called()
+
     def test_activation_succeeds_no_direct_restart(self, tmp_path):
         """nexus-cd1k0.3 follow-up, item (c): when a service manager IS
         present and activation succeeds, behaviour is unchanged -- the
@@ -2588,7 +2729,7 @@ class TestConvergeServiceAutostartUnit:
         assert "NEEDS HUMAN" not in actions[0]
         assert "converged" in actions[0]
         sp.assert_called_once_with(
-            ["nx", "daemon", "service", "stop"],
+            ["nx", "daemon", "service", "stop", "--config-dir", str(tmp_path.resolve())],
             capture_output=True, text=True, timeout=60,
         )
 
@@ -2619,6 +2760,11 @@ class TestConvergeServiceAutostartUnitNoServiceManager:
         monkeypatch.setattr(daemon_cmd, "_autostart_install_dir", lambda: tmp_path / "units")
         monkeypatch.setattr(daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "logs")
         monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/conexus/bin/nx"])
+        # nexus-mac7t: the manager lookup falls back to /bin/launchctl when
+        # PATH is trimmed; a "no manager" test must empty that table too or
+        # it reaches the REAL launchd.
+        from nexus.daemon import installer as _installer  # noqa: PLC0415 — local import, test-only convenience
+        monkeypatch.setattr(_installer, "_MANAGER_ABSOLUTE_PATHS", {})
         (tmp_path / "units").mkdir()
 
     def _fake_nx_only_path(self, tmp_path, monkeypatch):
@@ -2650,7 +2796,21 @@ class TestConvergeServiceAutostartUnitNoServiceManager:
         assert len(actions) == 1, actions
         assert "NOTE" in actions[0]
         assert "NEEDS HUMAN" not in actions[0]
-        assert "launchctl" in actions[0]
+        # nexus-ebbvt review round 1, finding 5: the absent command is named
+        # in a PLAIN sentence, not only buried inside the interpolated
+        # exception text.
+        assert "because launchctl is absent on this box" in actions[0]
+
+        # nexus-ebbvt review round 1, finding 1: `install --autostart
+        # --force` is a proven no-op once the file already matches the
+        # template (installer.py's own ALREADY_PRESENT short-circuit skips
+        # activation entirely, force or not) -- the remedy must be the
+        # uninstall+install sequence that forces a genuine rewrite instead.
+        assert "install --autostart --force" not in actions[0]
+        assert (
+            "nx daemon service uninstall --autostart && nx daemon service "
+            "install --autostart" in actions[0]
+        )
 
         # The file was rewritten to the (REAL, unmocked) current template --
         # not left at the stale content, and not merely written-but-untouched.
@@ -2658,11 +2818,15 @@ class TestConvergeServiceAutostartUnitNoServiceManager:
         assert "<!-- old content" not in rewritten
         assert "/opt/conexus/bin/nx" in rewritten
 
-        # stop, then start (with an explicit --config-dir), via the REAL
-        # subprocess.run finding the fake `nx` on the stripped PATH.
+        # nexus-ebbvt review round 1, finding 3: stop, then start, BOTH
+        # carrying the explicit --config-dir, via the REAL subprocess.run
+        # finding the fake `nx` on the stripped PATH.
         argv_lines = [line for line in recorder.read_text().splitlines() if line.strip()]
         assert len(argv_lines) == 2, argv_lines
-        assert argv_lines[0].split() == ["daemon", "service", "stop"]
+        stop_tokens = argv_lines[0].split()
+        assert stop_tokens[:3] == ["daemon", "service", "stop"]
+        assert "--config-dir" in stop_tokens
+        assert str(tmp_path.resolve()) in stop_tokens
         start_tokens = argv_lines[1].split()
         assert start_tokens[:3] == ["daemon", "service", "start"]
         assert "--config-dir" in start_tokens
@@ -3632,3 +3796,98 @@ class TestDevCheckoutNeverStamps:
         monkeypatch.setattr(uf, "running_from_tool_install", lambda: False)
         assert uf.check_version_transition(tmp_path, preview=False) is None
         assert stamp.read_text().strip() == "7.33.0"
+
+
+class TestConvergeServiceAutostartUnitActivation:
+    """nexus-mac7t: install_autostart writes the unit file before it
+    activates, so a unit the manager did not have matched the template on
+    every later pass and read as "already up to date" forever. The probe
+    now asks the service manager too. A current file the manager
+    positively reports disabled or unknown gets a NOTE naming the
+    platform remedy and is never bounced (a disabled launchd label refuses
+    bootstrap, so the bounce would stop the service and leave a NEEDS
+    HUMAN where a working box was); NO_MANAGER and UNREACHABLE are benign."""
+
+    def _current(self, tmp_path):
+        from pathlib import Path as _P  # noqa: PLC0415 — local import, test-only convenience
+        dest = _P(tmp_path) / "com.nexus.service.plist"
+        dest.write_text("current content\n")
+        return dest
+
+    def _probe(self, state, detail="", remedy=""):
+        from nexus.daemon.installer import ActivationProbe  # noqa: PLC0415 — local import, test-only convenience
+        return ActivationProbe(state, detail, remedy)
+
+    def _run(self, tmp_path, dest, probe, **kwargs):
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "current content\n")), \
+             patch("nexus.daemon.installer.autostart_activation_state", return_value=probe) as asked, \
+             patch("nexus.daemon.installer.uninstall_autostart") as uninstall, \
+             patch("nexus.daemon.installer.install_autostart") as install, \
+             patch("nexus.upgrade_finish.subprocess.run") as sp:
+            actions = converge_service_autostart_unit(tmp_path, **kwargs)
+        return actions, asked, uninstall, install, sp
+
+    def test_current_file_the_manager_lacks_names_the_remedy_and_never_bounces(self, tmp_path):
+        from nexus.daemon.installer import ActivationState  # noqa: PLC0415 — local import, test-only convenience
+
+        dest = self._current(tmp_path)
+        probe = self._probe(
+            ActivationState.NOT_ACTIVE,
+            "`launchctl print-disabled gui/501` reports com.nexus.service disabled",
+            "launchctl enable gui/501/com.nexus.service && nx daemon service uninstall --autostart && nx daemon service install --autostart",
+        )
+        for kwargs in ({}, {"unattended": True}, {"dry_run": True}):
+            actions, asked, uninstall, install, sp = self._run(tmp_path, dest, probe, **kwargs)
+            assert len(actions) == 1, (kwargs, actions)
+            assert actions[0].startswith("NOTE:")
+            assert "not registered for login" in actions[0]
+            assert "reports com.nexus.service disabled" in actions[0]
+            assert "launchctl enable gui/501/com.nexus.service && nx daemon service uninstall --autostart" in actions[0]
+            asked.assert_called_once()
+            uninstall.assert_not_called()
+            install.assert_not_called()
+            sp.assert_not_called()
+            assert dest.read_text() == "current content\n"
+
+    def test_current_file_with_no_manager_or_an_unreachable_one_is_benign(self, tmp_path):
+        """Consulted, and answered benign: neither state is a defect this
+        pass can act on (the doctor row reports both as informational)."""
+        from nexus.daemon.installer import ActivationState  # noqa: PLC0415 — local import, test-only convenience
+
+        dest = self._current(tmp_path)
+        for state, detail in (
+            (ActivationState.NO_MANAGER, "launchctl not found on PATH or at /bin/launchctl"),
+            (ActivationState.UNREACHABLE, "`systemctl --user is-enabled nexus-service.service` exited 1: Failed to connect to bus"),
+        ):
+            actions, asked, uninstall, install, sp = self._run(tmp_path, dest, self._probe(state, detail))
+            assert actions == [], (state, actions)
+            asked.assert_called_once()
+            uninstall.assert_not_called()
+            install.assert_not_called()
+            sp.assert_not_called()
+
+    def test_drifted_content_never_asks_the_manager(self, tmp_path):
+        """The answer is unused on the content-drift branch, and the query is
+        a subprocess on every nx doctor; the probe skips it."""
+        from pathlib import Path as _P  # noqa: PLC0415 — local import, test-only convenience
+
+        dest = _P(tmp_path) / "com.nexus.service.plist"
+        dest.write_text("old content\n")
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "new content\n")), \
+             patch("nexus.daemon.installer.autostart_activation_state") as asked:
+            actions = converge_service_autostart_unit(tmp_path, dry_run=True)
+        asked.assert_not_called()
+        assert len(actions) == 1 and "differs from the current template" in actions[0]
+
+    def test_probe_raising_is_needs_human_never_a_silent_noop(self, tmp_path):
+        dest = self._current(tmp_path)
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content", return_value=(dest, "current content\n")), \
+             patch("nexus.daemon.installer.autostart_activation_state", side_effect=RuntimeError("boom")):
+            actions = converge_service_autostart_unit(tmp_path)
+        assert len(actions) == 1 and "NEEDS HUMAN" in actions[0], actions

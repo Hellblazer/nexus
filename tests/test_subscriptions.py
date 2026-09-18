@@ -85,7 +85,7 @@ class TestSubscribeValidation:
                 "queue/builds", templates=_FIXTURE_TEMPLATES,
                 store_factory=_poison_store_factory(), state_dir=tmp_path,
             )
-        assert s.entries() == [{"subspace": s.session_mailbox, "cursor": None}]
+        assert s.entries() == [{"subspace": s.session_mailbox}]
 
     def test_lock_is_refused_naming_in(self, tmp_path):
         s = SubscriptionSet(session_id=str(uuid.uuid4()))
@@ -236,7 +236,7 @@ class TestUnsubscribe:
         s.subscribe("board/release-notes", templates=[], store_factory=poison, state_dir=tmp_path)
         assert len(s.entries()) == 2
         s.unsubscribe("board/release-notes")
-        assert s.entries() == [{"subspace": s.session_mailbox, "cursor": None}]
+        assert s.entries() == [{"subspace": s.session_mailbox}]
 
     def test_session_mailbox_cannot_be_unsubscribed(self):
         s = SubscriptionSet(session_id=str(uuid.uuid4()))
@@ -379,6 +379,6 @@ class TestPersistenceAcrossResumeAndClear:
 
         fresh_b = load(t1_b, session_b)
         try:
-            assert fresh_b.entries() == [{"subspace": f"mailbox/{session_b}", "cursor": None}]
+            assert fresh_b.entries() == [{"subspace": f"mailbox/{session_b}"}]
         finally:
             fresh_b.shutdown()

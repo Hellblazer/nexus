@@ -148,8 +148,17 @@ def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
     return PDFConfig(
         extractor=extractor,
         mineru_server_url=pdf.get("mineru_server_url", "http://127.0.0.1:8010"),
-        mineru_autostart=bool(pdf.get("mineru_autostart", True)),
-        mineru_table_enable=bool(pdf.get("mineru_table_enable", True)),
+        # nexus-cd1k0.7: `nx config set pdf.mineru_autostart false` stores the
+        # STRING, and bool("false") is True, so the switch nx doctor names
+        # for turning autostart off never turned it off.
+        mineru_autostart=_coerce_bool(
+            pdf.get("mineru_autostart", True), key="pdf.mineru_autostart", default=True,
+            event="pdf_config_malformed",
+        ),
+        mineru_table_enable=_coerce_bool(
+            pdf.get("mineru_table_enable", True), key="pdf.mineru_table_enable", default=True,
+            event="pdf_config_malformed",
+        ),
         mineru_page_batch=max(1, int(pdf.get("mineru_page_batch", 1))),
         mineru_memory_ceiling_mb=max(0, int(pdf.get("mineru_memory_ceiling_mb", 0))),
         mineru_page_timeout_s=max(1, int(pdf.get("mineru_page_timeout_s", 180))),
@@ -188,6 +197,17 @@ def _coerce_bool(
     """
     if isinstance(value, bool):
         return value
+    # nexus-cd1k0.7: `nx config set` stores every value as a STRING, so the
+    # forms a person types at that prompt are booleans here, not malformed
+    # input. bool("false") is True; this is the switch nx doctor names.
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "yes", "on", "1"):
+            return True
+        if lowered in ("false", "no", "off", "0"):
+            return False
+    elif isinstance(value, int) and value in (0, 1):
+        return bool(value)
     _log.warning(
         event,
         key=key,
@@ -1215,6 +1235,12 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     for key, value in override.items():
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
             result[key] = _deep_merge(result[key], value)
+        elif value is None and isinstance(result.get(key), dict):
+            # nexus-cd1k0.8: a section whose every child is commented out
+            # parses as `tuning: None`; letting it replace the default dict
+            # made five readers raise AttributeError at CLI and MCP startup.
+            # An empty section is the default section.
+            continue
         else:
             result[key] = value
     return result
@@ -1247,6 +1273,20 @@ def _global_config_path() -> Path:
 #: trade. Here that trade is unnecessary: stat() is the thing we were trying
 #: to avoid paying yaml.safe_load on top of, and stat alone is ~40x cheaper.
 _GLOBAL_CONFIG_CACHE: tuple[tuple[str, int, int], dict] | None = None
+
+
+def _empty_none_sections(cfg: dict[str, Any]) -> dict[str, Any]:
+    """nexus-cd1k0.8: a section whose children are all commented out parses
+    as ``install: None`` / ``credentials: None``; readers call ``.get`` on
+    the section, so a None section raised AttributeError at CLI and MCP
+    startup (``is_local_mode``, ``get_credential``). Every top-level
+    section that is None becomes the empty section, in the merged config
+    and in the cached raw global file alike. A scalar top-level default is
+    never touched."""
+    for k, v in list(cfg.items()):
+        if v is None and (k not in _DEFAULTS or isinstance(_DEFAULTS.get(k), dict)):
+            cfg[k] = {}
+    return cfg
 _GLOBAL_CONFIG_LOCK = threading.Lock()
 
 
@@ -1277,13 +1317,13 @@ def _load_global_config(path: Path) -> dict:
         # Unreadable/vanished between exists() and stat(): fall back to an
         # uncached parse attempt rather than serving a stale hit.
         try:
-            return dict(yaml.safe_load(path.read_text()) or {})
+            return _empty_none_sections(dict(yaml.safe_load(path.read_text()) or {}))
         except OSError:
             return {}
     cached = _GLOBAL_CONFIG_CACHE
     if cached is not None and cached[0] == key:
         return dict(cached[1])
-    data = dict(yaml.safe_load(path.read_text()) or {})
+    data = _empty_none_sections(dict(yaml.safe_load(path.read_text()) or {}))
     with _GLOBAL_CONFIG_LOCK:
         _GLOBAL_CONFIG_CACHE = (key, data)
     return dict(data)
@@ -1470,6 +1510,6 @@ def load_config(repo_root: Path | None = None) -> dict[str, Any]:
         config = _deep_merge(config, data)
 
     # Env var overrides
-    config = _apply_env_overrides(config)
+    config = _empty_none_sections(_apply_env_overrides(config))
 
     return config

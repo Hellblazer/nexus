@@ -378,28 +378,132 @@ class TestCheckServiceAutostartDrift:
             results = _check_service_autostart_drift()
         assert results == []
 
-    def test_local_content_matches_returns_ok(self, tmp_path):
+    @staticmethod
+    def _activation(state, detail=""):
+        from nexus.daemon.installer import ActivationProbe  # noqa: PLC0415 — local import, test-only convenience
+        return ActivationProbe(state, detail)
+
+    def _matching(self, tmp_path):
         dest = tmp_path / "com.nexus.service.plist"
         dest.write_text("same content\n")
+        return dest
+
+    def _row(self, dest, probe):
         with patch("nexus.config.is_local_mode", return_value=True), \
              patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
              patch("nexus.daemon.installer.rendered_unit_content",
-                   return_value=(dest, "same content\n")):
+                   return_value=(dest, "same content\n")), \
+             patch("nexus.daemon.installer.autostart_activation_state", return_value=probe):
             results = _check_service_autostart_drift()
-        assert len(results) == 1
-        r = results[0]
-        assert r.ok is True
-        assert r.warn is False
-        assert r.fatal is False
-        assert str(dest) in r.detail
+        assert len(results) == 1, results
+        return results[0]
+
+    def test_local_content_matches_and_registered_returns_ok(self, tmp_path):
+        from nexus.daemon.installer import ActivationState  # noqa: PLC0415 — local import, test-only convenience
+
+        dest = self._matching(tmp_path)
+        r = self._row(dest, self._activation(ActivationState.ACTIVE))
+        assert r.ok is True and r.warn is False and r.fatal is False
+        assert str(dest) in r.detail and "enabled for login" in r.detail
+
+    def test_local_content_matches_but_manager_reports_disabled_warns_with_the_probes_remedy(self, tmp_path):
+        """nexus-mac7t: the file matched the template, so after one warning
+        a unit the manager did not have read as up to date on every later
+        doctor / restart-stale / finish pass."""
+        from nexus.daemon.installer import ActivationProbe, ActivationState  # noqa: PLC0415 — local import, test-only convenience
+
+        dest = self._matching(tmp_path)
+        r = self._row(dest, ActivationProbe(
+            ActivationState.NOT_ACTIVE,
+            "`launchctl print-disabled gui/501` reports com.nexus.service disabled",
+            "launchctl enable gui/501/com.nexus.service && nx daemon service uninstall --autostart && nx daemon service install --autostart",
+        ))
+        assert r.ok is False and r.warn is True and r.fatal is False
+        assert "installed but not registered for login" in r.detail
+        assert "reports com.nexus.service disabled" in r.detail
+        assert r.fix_suggestions and r.fix_suggestions[0].startswith(
+            "launchctl enable gui/501/com.nexus.service && nx daemon service uninstall --autostart && nx daemon service install --autostart"
+        ), r.fix_suggestions
+
+    def test_local_content_matches_with_no_manager_is_informational_and_states_the_consequence(self, tmp_path):
+        from nexus.daemon.installer import ActivationState  # noqa: PLC0415 — local import, test-only convenience
+
+        dest = self._matching(tmp_path)
+        r = self._row(dest, self._activation(ActivationState.NO_MANAGER, "launchctl not found on PATH or at /bin/launchctl"))
+        assert r.ok is True and r.warn is False
+        assert "no service manager" in r.detail and "will not start at login" in r.detail
+        assert any("uninstall --autostart && nx daemon service install --autostart" in f for f in r.fix_suggestions)
+
+    def test_local_content_matches_with_an_unreachable_manager_is_informational_never_a_warning(self, tmp_path):
+        """No user bus over ssh / no gui domain headless: cannot tell, and a
+        warning here once fed a repair that deleted a working unit."""
+        from nexus.daemon.installer import ActivationState  # noqa: PLC0415 — local import, test-only convenience
+
+        dest = self._matching(tmp_path)
+        r = self._row(dest, self._activation(
+            ActivationState.UNREACHABLE,
+            "`systemctl --user is-enabled nexus-service.service` exited 1: Failed to connect to bus",
+        ))
+        assert r.ok is True and r.warn is False
+        assert "could not be asked" in r.detail and "Failed to connect to bus" in r.detail
+        assert r.fix_suggestions == []
+
+    def _end_to_end(self, tmp_path, monkeypatch, launchctl_body):
+        """A real unit file on disk and a fake `launchctl` as the only
+        thing on PATH (absolute fallbacks emptied), through the REAL
+        subprocess path."""
+        from nexus.commands import daemon as daemon_cmd  # noqa: PLC0415 — local import, test-only convenience
+        from nexus.daemon import installer  # noqa: PLC0415 — local import, test-only convenience
+
+        units = tmp_path / "units"
+        units.mkdir()
+        dest = units / "com.nexus.service.plist"
+        dest.write_text("<plist>current</plist>\n")
+        fake_bin = tmp_path / "fakebin"
+        fake_bin.mkdir()
+        script = fake_bin / "launchctl"
+        script.write_text("#!/bin/sh\n" + launchctl_body)
+        script.chmod(0o755)
+        monkeypatch.setenv("PATH", str(fake_bin))
+        monkeypatch.setattr(installer, "_MANAGER_ABSOLUTE_PATHS", {})
+        monkeypatch.setattr(daemon_cmd, "_autostart_platform", lambda: "darwin")
+        monkeypatch.setattr(daemon_cmd, "_autostart_install_dir", lambda: units)
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.daemon.installer.rendered_unit_content",
+                   return_value=(dest, "<plist>current</plist>\n")):
+            results = _check_service_autostart_drift()
+        assert len(results) == 1, results
+        return results[0]
+
+    def test_real_unit_file_and_a_fake_manager_that_lists_it_disabled_warns(self, tmp_path, monkeypatch):
+        r = self._end_to_end(
+            tmp_path, monkeypatch,
+            "printf '%s' '\tdisabled services = {\n\t\t\"com.nexus.service\" => disabled\n\t}\n'\nexit 0\n",
+        )
+        assert r.ok is False and r.warn is True
+        assert "installed but not registered for login" in r.detail
+        assert "reports com.nexus.service disabled" in r.detail
+        assert r.fix_suggestions[0].startswith("launchctl enable gui/")
+
+    def test_real_unit_file_and_a_fake_manager_with_no_gui_domain_is_informational(self, tmp_path, monkeypatch):
+        r = self._end_to_end(
+            tmp_path, monkeypatch,
+            "echo 'Could not find domain for gui/501' >&2\nexit 113\n",
+        )
+        assert r.ok is True and r.warn is False
+        assert "could not be asked" in r.detail and "exited 113" in r.detail
 
     def test_local_content_drifted_returns_warn_naming_restart_stale(self, tmp_path):
+        from nexus.daemon.installer import ActivationState  # noqa: PLC0415 — local import, test-only convenience
+
         dest = tmp_path / "com.nexus.service.plist"
         dest.write_text("old content with ProcessType Background\n")
         with patch("nexus.config.is_local_mode", return_value=True), \
              patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
              patch("nexus.daemon.installer.rendered_unit_content",
-                   return_value=(dest, "new content\n")):
+                   return_value=(dest, "new content\n")), \
+             patch("nexus.daemon.installer.autostart_activation_state",
+                   return_value=self._activation(ActivationState.ACTIVE)):
             results = _check_service_autostart_drift()
         assert len(results) == 1
         r = results[0]
@@ -1007,6 +1111,7 @@ _ALL_TENANT_TABLES = [
     "nexus.topic_links",
     "nexus.topics",
     "nexus.tuple_claim_log",  # RDR-205 Phase 1 (mirrors health._RLS_TENANT_TABLES)
+    "nexus.tuple_deliveries",  # RDR-213 boards half, nexus-q82tk (mirrors health._RLS_TENANT_TABLES)
     "nexus.tuples",
     "t1.scratch",
 ]

@@ -213,9 +213,6 @@ def _format_with_bat(
             "--paging", "never",
             "--style=plain",
         ]
-        for start, end in merged:
-            cmd.extend(["--line-range", f"{start}:{end}"])
-
         # Feed chunk content via stdin (source file may not exist locally)
         # Reconstruct full content from all chunks for this file
         all_content_lines: dict[int, str] = {}
@@ -232,7 +229,14 @@ def _format_with_bat(
                 stdin_lines.append(all_content_lines.get(ln, ""))
             stdin_text = "\n".join(stdin_lines)
         else:
+            min_line = 1
             stdin_text = "\n".join(r.content or "" for r in file_results)
+        # nexus-cd1k0.14: the stdin starts at the first chunk's line, so the
+        # ranges bat sees are relative to it, not the file's own numbering
+        # (a chunk at lines 40-42 over a 3-line stdin highlighted nothing).
+        offset = min_line - 1
+        for start, end in merged:
+            cmd.extend(["--line-range", f"{start - offset}:{end - offset}"])
 
         # Use stdin mode: bat reads from stdin with --file-name for language detection
         # Replace the file arg with "-" for stdin

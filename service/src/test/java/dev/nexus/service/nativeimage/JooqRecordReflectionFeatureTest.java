@@ -202,7 +202,11 @@ class JooqRecordReflectionFeatureTest {
     // Record type (GcQuarantineOrphansBoundedRecord) -- same shape as the
     // taxonomy-016 RETURNS TABLE functions above, +1. The pre-existing
     // gc_quarantine_orphans is untouched, so this is the whole delta.
-    private static final int EXPECTED_RECORD_TYPES = 97;
+    // 97 -> 98: nexus-q82tk (RDR-213 boards half), tuples-007-deliveries.xml
+    // added ONE table, nexus.tuple_deliveries (the per-subscriber board
+    // announce stamp), one generated Record type (TupleDeliveriesRecord).
+    // No function, no column change elsewhere, so this is the whole delta.
+    private static final int EXPECTED_RECORD_TYPES = 98;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

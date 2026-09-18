@@ -709,7 +709,7 @@ class TestTupleSubscriptions:
         entries = tuple_subscriptions()
         subspaces = {e["subspace"] for e in entries}
         assert "board/release-notes" in subspaces
-        assert all("cursor" in e for e in entries)
+        assert all(set(e) == {"subspace"} for e in entries), "no cursor: delivery position lives in the engine (nexus-q82tk)"
 
         msg = tuple_unsubscribe("board/release-notes")
         assert "Unsubscribed" in msg
@@ -746,12 +746,11 @@ class TestTupleSubscriptions:
         entries = tuple_subscriptions()
         assert f"mailbox/{name}" not in {e["subspace"] for e in entries}
 
-    def test_subscriptions_lists_entries_with_cursors(self, t2_service_env) -> None:
+    def test_subscriptions_lists_entries_without_a_cursor(self, t2_service_env) -> None:
         entries = tuple_subscriptions()
         assert isinstance(entries, list)
         assert len(entries) == 1
-        assert "cursor" in entries[0]
-        assert entries[0]["cursor"] is None
+        assert entries[0] == {"subspace": entries[0]["subspace"]}, "no cursor field (nexus-q82tk)"
 
     def test_a_change_fires_the_observer(self, t2_service_env) -> None:
         import os

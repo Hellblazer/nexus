@@ -31,6 +31,8 @@ Design rules:
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
@@ -180,6 +182,12 @@ def rendered_unit_content(tier: str) -> tuple[Path, str]:
     return _render_for(tier)
 
 
+def _is_darwin() -> bool:
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    return _daemon._autostart_platform() == "darwin"
+
+
 def _activate_cmd(dest: Path) -> list[str]:
     from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
@@ -205,6 +213,229 @@ def _deactivate_cmd(dest: Path, *, tier: str = "t2") -> list[str]:
         )
         return ["launchctl", "bootout", f"gui/{uid}/{label}"]
     return ["systemctl", "--user", "disable", "--now", dest.name]
+
+
+class ActivationState(Enum):
+    """What the OS service manager says about an installed autostart unit
+    (nexus-mac7t). Distinct from the unit FILE being present: the file is
+    written before activation, and a later ``launchctl disable`` /
+    ``systemctl disable`` leaves it in place, so the file alone cannot
+    say whether the service starts at login."""
+
+    #: Registered for login: the unit is not in launchd's disabled
+    #: overrides (``launchctl print-disabled gui/<uid>``) / ``systemctl
+    #: --user is-enabled`` exits 0.
+    ACTIVE = "active"
+    #: A manager answered and positively reports the unit disabled or
+    #: unknown. Only this state is a defect; the remedy rides in
+    #: :attr:`ActivationProbe.remedy`.
+    NOT_ACTIVE = "not_active"
+    #: No ``launchctl`` / ``systemctl`` on this box: nothing here can
+    #: register the unit, so its state is not a defect to fix here.
+    NO_MANAGER = "no_manager"
+    #: A manager exists but could not be asked from this process: no user
+    #: bus over ssh, no GUI domain on a headless Mac, a hung or broken
+    #: binary. Never read as a defect (code-review-expert and critic on
+    #: 9ffaa462f: reading this as NOT_ACTIVE sent ``nx daemon
+    #: restart-stale`` over ssh into a bounce that deleted a working unit).
+    UNREACHABLE = "unreachable"
+
+
+@dataclass(frozen=True)
+class ActivationProbe:
+    """Result of :func:`autostart_activation_state`."""
+
+    state: ActivationState
+    #: The manager's own words (first line of stderr/stdout), the missing
+    #: command, or the timeout, for the caller's report line. Empty on
+    #: ``ACTIVE``.
+    detail: str = ""
+    #: The command that re-registers the unit, filled only on
+    #: ``NOT_ACTIVE`` (platform-specific: a launchd label disabled by
+    #: ``launchctl disable`` has to be enabled first, or ``bootstrap``
+    #: refuses).
+    remedy: str = ""
+
+
+#: Ceiling on the activation query. A hung manager must not wedge
+#: ``nx doctor`` or the finish pass; a timeout reads as ``UNREACHABLE``.
+_ACTIVATION_QUERY_TIMEOUT: float = 10.0
+
+#: Where the manager binaries live when the calling process's PATH is
+#: trimmed (an MCP server, cron). Consulted after PATH by every manager
+#: spawn in this module, probe and actuator alike (critic on 6867dbe4d:
+#: resolving it in the probe only left the activator raising "not found"
+#: on the same box the probe had just answered for). When neither
+#: resolves, the bare name is spawned and the OS's own FileNotFoundError
+#: is the "no manager" signal.
+_MANAGER_ABSOLUTE_PATHS: dict[str, tuple[str, ...]] = {
+    "launchctl": ("/bin/launchctl",),
+    "systemctl": ("/usr/bin/systemctl", "/bin/systemctl"),
+}
+
+REINSTALL_REMEDY = "nx daemon service uninstall --autostart && nx daemon service install --autostart"
+
+#: ``systemctl is-enabled`` words that mean "the unit will not start at
+#: login" (a positive answer, as opposed to a bus failure).
+_SYSTEMD_NOT_ENABLED_WORDS = frozenset({"disabled", "not-found", "masked", "masked-runtime"})
+
+#: ``launchctl print-disabled`` value tokens. macOS 26 prints ``=> disabled``
+#: / ``=> enabled``; older dialects printed ``=> true`` / ``=> false``. A
+#: listed label with any other token is UNREACHABLE, never ACTIVE: the
+#: parser must not read what it did not understand as good news.
+_LAUNCHD_DISABLED_TOKENS = frozenset({"disabled", "true"})
+_LAUNCHD_ENABLED_TOKENS = frozenset({"enabled", "false"})
+
+
+def _manager_executable(name: str) -> str:
+    """The argv[0] to spawn for a manager command: the bare name when PATH
+    resolves it (the OS does the lookup, argv stays as every log and test
+    has always seen it), a known absolute location when PATH is trimmed,
+    and the bare name again when neither holds so the spawn raises the
+    OS's own FileNotFoundError."""
+    if shutil.which(name):
+        return name
+    for candidate in _MANAGER_ABSOLUTE_PATHS.get(name, ()):
+        if os.access(candidate, os.X_OK):
+            return candidate
+    return name
+
+
+def _run_manager(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    """``subprocess.run`` of a launchctl/systemctl command with the binary
+    resolved through PATH then :data:`_MANAGER_ABSOLUTE_PATHS`. Raises
+    ``FileNotFoundError`` (filename = the bare command) when no manager
+    exists, exactly as a bare spawn would."""
+    return subprocess.run([_manager_executable(cmd[0]), *cmd[1:]], **kwargs)  # type: ignore[call-overload]
+
+
+def _launchd_label_for(tier: str) -> str:
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    return _daemon._SERVICE_LAUNCHD_LABEL if tier == "service" else _daemon._T2_LAUNCHD_LABEL
+
+
+def _activation_query_cmd(dest: Path, *, tier: str) -> list[str]:
+    """The read-only registration query. macOS: ``launchctl print-disabled
+    gui/<uid>`` -- the disabled overrides are the only persistent
+    de-registration of a plist that sits in ``~/Library/LaunchAgents``
+    (``launchctl print gui/<uid>/<label>`` answers "loaded right now", a
+    different fact: ``bootout`` is session-only and a booted-out job loads
+    again at the next login; measured 2026-09-18 on three enabled but
+    unloaded LaunchAgents). Linux: ``systemctl --user is-enabled <unit>``,
+    which is the enable state directly."""
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    if _daemon._autostart_platform() == "darwin":
+        return ["launchctl", "print-disabled", f"gui/{os.getuid()}"]
+    return ["systemctl", "--user", "is-enabled", dest.name]
+
+
+def _first_line(result: subprocess.CompletedProcess[str]) -> str:
+    raw = (result.stderr or "").strip() or (result.stdout or "").strip()
+    return raw.splitlines()[0] if raw else ""
+
+
+def autostart_activation_state(dest: Path, *, tier: str) -> ActivationProbe:
+    """Ask the OS service manager whether the installed unit at ``dest`` is
+    registered for login (nexus-mac7t).
+
+    :func:`install_autostart` writes the unit file before it activates, and
+    every drift check compared file content only, so a unit the manager
+    did not have read as "already up to date" on every later pass. This is
+    the second half of that check, and the answer :func:`install_autostart`
+    itself consults before it short-circuits on identical content.
+
+    Never raises. ``NOT_ACTIVE`` only on a POSITIVE answer from the manager
+    (the label listed as disabled by launchd; ``disabled`` / ``not-found``
+    / ``masked`` from systemd). Every other failure to get an answer is
+    ``UNREACHABLE``: a non-zero exit with any other text (``Failed to
+    connect to bus``, ``Could not find domain``), a timeout, a binary that
+    would not run, a listing token the parser does not know. ``NO_MANAGER``
+    when neither PATH nor the known absolute locations hold the binary.
+    """
+    cmd = _activation_query_cmd(dest, tier=tier)
+    shown = " ".join(cmd)
+    try:
+        result = _run_manager(
+            cmd, capture_output=True, text=True, check=False,
+            timeout=_ACTIVATION_QUERY_TIMEOUT,
+        )
+    except FileNotFoundError:
+        known = ", ".join(_MANAGER_ABSOLUTE_PATHS.get(cmd[0], ()))
+        return ActivationProbe(
+            ActivationState.NO_MANAGER,
+            f"{cmd[0]} not found on PATH" + (f" or at {known}" if known else ""),
+        )
+    except subprocess.TimeoutExpired:
+        return ActivationProbe(
+            ActivationState.UNREACHABLE,
+            f"`{shown}` did not answer within {_ACTIVATION_QUERY_TIMEOUT:g}s",
+        )
+    except OSError as exc:
+        return ActivationProbe(ActivationState.UNREACHABLE, f"`{shown}` could not run ({exc})")
+
+    if cmd[0] == "launchctl":
+        if result.returncode != 0:
+            return ActivationProbe(
+                ActivationState.UNREACHABLE,
+                f"`{shown}` exited {result.returncode}: {_first_line(result)}",
+            )
+        label = _launchd_label_for(tier)
+        listed = re.search(rf'"{re.escape(label)}"\s*=>\s*(\S+)', result.stdout or "")
+        if listed is None:
+            return ActivationProbe(ActivationState.ACTIVE)  # unlisted labels are enabled
+        token = listed.group(1)
+        if token in _LAUNCHD_DISABLED_TOKENS:
+            return ActivationProbe(
+                ActivationState.NOT_ACTIVE,
+                f"`{shown}` reports {label} disabled",
+                remedy=f"launchctl enable gui/{os.getuid()}/{label} && {REINSTALL_REMEDY}",
+            )
+        if token in _LAUNCHD_ENABLED_TOKENS:
+            return ActivationProbe(ActivationState.ACTIVE)
+        return ActivationProbe(
+            ActivationState.UNREACHABLE,
+            f"`{shown}` lists {label} as `{token}`, a value this client does not know",
+        )
+
+    if result.returncode == 0:
+        return ActivationProbe(ActivationState.ACTIVE)
+    word = (result.stdout or "").strip().split("\n", 1)[0].strip()
+    if word in _SYSTEMD_NOT_ENABLED_WORDS:
+        return ActivationProbe(
+            ActivationState.NOT_ACTIVE,
+            f"`{shown}` reports {word}",
+            remedy=REINSTALL_REMEDY,
+        )
+    return ActivationProbe(
+        ActivationState.UNREACHABLE,
+        f"`{shown}` exited {result.returncode}: {_first_line(result)}",
+    )
+
+
+def _launchd_loaded_now(tier: str) -> bool | None:
+    """macOS only: is the job bootstrapped in this login session right now?
+    ``launchctl print gui/<uid>/<label>`` exits 0 when it is; "Could not
+    find service" when it is not. Anything else (no gui domain over ssh, a
+    timeout) is ``None``: could not tell. This is the fact a FAILED
+    ``bootstrap`` leaves behind (it writes no disabled override, so
+    ``print-disabled`` still reads enabled); the install short-circuit asks
+    it so a retry re-activates instead of answering ALREADY_PRESENT
+    (critic on 6867dbe4d, measured)."""
+    cmd = ["launchctl", "print", f"gui/{os.getuid()}/{_launchd_label_for(tier)}"]
+    try:
+        result = _run_manager(
+            cmd, capture_output=True, text=True, check=False,
+            timeout=_ACTIVATION_QUERY_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode == 0:
+        return True
+    if "Could not find service" in (result.stderr or "") + (result.stdout or ""):
+        return False
+    return None
 
 
 def _autostart_filename_for(tier: str) -> str:
@@ -234,8 +465,10 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
     one left behind by a pre-retirement install.
 
     The OS unit is the source of truth. If the destination already holds
-    the freshly-rendered content, returns ``ALREADY_PRESENT`` without
-    re-activating. Otherwise the unit is written and activated via
+    the freshly-rendered content AND the service manager reports it
+    registered (or cannot be asked -- :func:`autostart_activation_state`),
+    returns ``ALREADY_PRESENT`` without re-activating. Otherwise the unit
+    is written and activated via
     ``launchctl bootstrap`` (macOS) / ``systemctl --user enable --now``
     (Linux), returning ``NEWLY_INSTALLED``.
 
@@ -250,6 +483,7 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
     the returned :class:`InstallResult` rather than raised.
     """
     dest, rendered = _render_for(tier)
+    probe: ActivationProbe | None = None
 
     if dest.is_symlink():
         raise SymlinkRefusedError(
@@ -261,13 +495,45 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
             existing: str | None = dest.read_text()
         except OSError:
             existing = None
-        if existing == rendered:
-            return InstallResult(
-                status=InstallStatus.ALREADY_PRESENT,
-                dest=dest,
-                detail=f"{dest} already up to date; no changes",
-            )
-        if not force and existing is not None:
+        if existing == rendered and not force:
+            # nexus-mac7t: identical content alone used to answer
+            # ALREADY_PRESENT, so a unit the manager did not have (an
+            # install whose activation failed, a later `launchctl disable`,
+            # a manager that appeared after a no-manager install) was never
+            # activated by a retry (cd1k0.4's defect, held here now rather
+            # than by deleting the file on failure). Two questions on
+            # macOS: registered for login (print-disabled) AND loaded now
+            # (launchctl print), because a failed bootstrap leaves the
+            # first true and the second false. ACTIVE and loaded: nothing
+            # to do. UNREACHABLE: activation would fail for the same
+            # environmental reason, so say what could not be confirmed
+            # instead of churning. Anything else falls through to a
+            # genuine activation attempt. --force always falls through.
+            probe = autostart_activation_state(dest, tier=tier)
+            unconfirmed = ""
+            if probe.state is ActivationState.ACTIVE:
+                loaded = _launchd_loaded_now(tier) if _is_darwin() else True
+                if loaded is True:
+                    return InstallResult(
+                        status=InstallStatus.ALREADY_PRESENT,
+                        dest=dest,
+                        detail=f"{dest} already up to date and registered; no changes",
+                    )
+                if loaded is None:
+                    unconfirmed = "whether it is loaded in this login session could not be checked"
+            elif probe.state is ActivationState.UNREACHABLE:
+                unconfirmed = probe.detail
+            if unconfirmed:
+                return InstallResult(
+                    status=InstallStatus.ALREADY_PRESENT,
+                    dest=dest,
+                    detail=(
+                        f"{dest} already up to date; could not confirm it is "
+                        f"registered with the service manager ({unconfirmed}) -- "
+                        "run `nx doctor` from a login session to confirm"
+                    ),
+                )
+        if not force and existing is not None and existing != rendered:
             raise ContentDiffersError(
                 f"{dest} exists and its content differs from the rendered "
                 "template; refusing to overwrite. Re-run with --force to "
@@ -275,15 +541,42 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
                 "lost), or remove the file first."
             )
 
+    # nexus-cd1k0.5: --force over a unit the OS already loaded must unload
+    # it first, or launchd keeps running the OLD definition (bootstrap of an
+    # already-loaded label is a no-op) and systemd keeps the old ExecStart
+    # until a daemon-reload. converge_service_autostart_unit avoids this by
+    # uninstalling first; the CLI's --force path did not. A deactivation
+    # that fails (nothing loaded) is harmless and ignored.
+    # --force over identical content is a deliberate re-activation
+    # (nexus-mac7t: the one way past a short-circuit that reads registered),
+    # so the unload runs for any previous content, not only differing.
+    previous: str | None = existing if dest.exists() else None
+    if force and previous is not None:
+        try:
+            _run_manager(_deactivate_cmd(dest, tier=tier), capture_output=True, text=True, check=False)
+        except (FileNotFoundError, OSError):
+            pass
+
     dest.write_text(rendered)
     dest.chmod(0o644)
 
+    # The unit file STAYS on every activation failure. cd1k0.4 restored the
+    # tree here so a retry would not read file == render and answer
+    # ALREADY_PRESENT; that invariant now lives at the short-circuit above,
+    # which asks the manager. Keeping the file is what lets `nx doctor`'s
+    # activation row and converge_service_autostart_unit's no-manager NOTE
+    # report a unit that was wanted and could not be registered, and what
+    # the ActivationError message says ("file installed but not
+    # activated").
     cmd = _activate_cmd(dest)
     warnings: tuple[str, ...] = ()
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        result = _run_manager(cmd, capture_output=True, text=True, check=False)
     except FileNotFoundError as exc:
-        msg = f"{cmd[0]} not found on PATH; file installed but not activated ({exc})."
+        msg = (
+            f"{cmd[0]} not found on PATH; file installed but not activated ({exc}). "
+            f"Once a service manager is available, run `{REINSTALL_REMEDY}` to register it."
+        )
         if not force:
             raise ActivationError(msg) from exc
         _log.warning(f"{tier}_install_activation_not_found", dest=str(dest), error=str(exc))
@@ -293,6 +586,11 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
     if result.returncode != 0:
         detail = (result.stderr or "").strip() or (result.stdout or "").strip()
         msg = f"{' '.join(cmd)} exited {result.returncode}: {detail}"
+        if probe is not None and probe.remedy:
+            # The manager had already said why (a disabled launchd label
+            # refuses bootstrap); the failing path names the same remedy
+            # the doctor row and converge do.
+            msg += f" -- {probe.detail}; run `{probe.remedy}`"
         if not force:
             raise ActivationError(msg)
         _log.warning(f"{tier}_install_activation_failed", dest=str(dest), returncode=result.returncode)
@@ -548,7 +846,7 @@ def uninstall_autostart(*, tier: str = "t2") -> UninstallResult:
     deactivated = True
     cmd = _deactivate_cmd(dest, tier=tier)
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        result = _run_manager(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             detail = (result.stderr or "").strip() or (result.stdout or "").strip()
             warnings.append(f"{' '.join(cmd)} exited {result.returncode}: {detail}")

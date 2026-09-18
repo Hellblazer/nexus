@@ -319,12 +319,11 @@ class TestPipelineDeleteCascade:
 
         # Verify against the fake engine's state directly (the purge closed
         # the shared client on context exit).
-        assert "hA" not in engine.pipelines
-        assert "hB" not in engine.pipelines
-        assert not any(h == "hA" for (h, _) in engine.pages)
-        assert not any(h == "hB" for (h, _) in engine.chunks)
+        assert "hA" not in engine.hashes()
+        assert "hB" not in engine.hashes()
+        assert engine.wal_hashes() == set()
         # Survivor row untouched.
-        assert "hC" in engine.pipelines
+        assert "hC" in engine.hashes()
 
         # Output must include the pipeline-rows count so operators can
         # see the cascade worked without re-running with `--force`.
@@ -371,4 +370,4 @@ class TestPipelineDeleteCascade:
             result = runner.invoke(delete_cmd, ["docs__gone", "--yes"])
 
         assert result.exit_code == 0, result.output
-        assert "orphan_h" not in engine.pipelines
+        assert "orphan_h" not in engine.hashes()

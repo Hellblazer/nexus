@@ -101,7 +101,11 @@ def batch_frecency(
     _MARKER = "|||nxcommit|||"
     try:
         result = subprocess.run(
-            ["git", "log", f"--format={_MARKER}%ct{_MARKER}", "--name-only"],
+            # nexus-cd1k0.15: without core.quotePath=false git C-quotes a
+            # non-ASCII path ("docs/\303\251.md"), so its key never matched
+            # the real path and the file scored 0.0 (the third site of the
+            # nexus-6m9zy.4 class).
+            ["git", "-c", "core.quotePath=false", "log", f"--format={_MARKER}%ct{_MARKER}", "--name-only"],
             cwd=repo,
             capture_output=True,
             text=True,

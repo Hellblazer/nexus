@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-q82tk (RDR-213 boards half; follows nexus-vsipz's mailbox
+    half in tuples-006-announce-columns.xml).
+
+    THE DEFECT: a board post is delivered to a subscriber by a client-side
+    (created_at, id) cursor, the shape nexus-vsipz removed for mailboxes.
+    out() stamps created_at at transaction START (TupleRepository.writeOut),
+    so a post from a slower, earlier-started transaction commits after a
+    subscriber's cursor has passed a younger post and is skipped by every
+    later since query, permanently, and no drain hook recovers a board post
+    (the drain hook drains mailboxes only). Boards have carried the race
+    since RDR-211 shipped.
+
+    THE FIX: the same move nexus-vsipz made, but a board is read by MANY
+    subscribers and never claimed, so the stamp cannot live on the row (one
+    subscriber's stamp would silence the post for every other). It lives in
+    a per-(subspace, subscriber, tuple) delivery row instead:
+    nexus.tuple_deliveries. TupleRepository.queryOnceAnnounceSubscriber is
+    the consumer: a WaitSpec whose announce field names a subscriber returns
+    the subspace's claimable rows that are DUE for that subscriber (no
+    delivery row, or one older than interval_s with announce_count < max),
+    oldest first, and upserts the delivery row in the same transaction. A
+    full re-scan ordered by created_at with no client position cannot skip
+    a late commit.
+
+    Shape: PRIMARY KEY (tenant_id, subspace, subscriber, tuple_id) is the
+    due-check's own lookup, so no second index is needed for it.
+    tuple_id REFERENCES nexus.tuples(id) ON DELETE CASCADE: the sweep's
+    purge of expired tuples (TupleRepository.purgeExpiredTuplesBatch) drops
+    a post's delivery rows with it, so this table is bounded by the posts
+    it describes and needs no sweep arm of its own. The other axis is
+    fanout: one row per distinct subscriber that ever read a still-live
+    post, never removed on unsubscribe or session end, so a popular topic
+    holds posts x distinct-ever-subscribers rows until each post expires
+    (board/<topic>: at most 500 live posts, 7 days). At roughly 150 bytes
+    a row that is accepted debt, named here rather than bounded; a bound
+    would need a subscriber lifecycle the engine does not track. Indexed
+    on tuple_id for
+    exactly that cascade, the tuples-001 claim-log FK precedent (an
+    unindexed child turns every purge batch into a sequential scan).
+    RLS ENABLE+FORCE with the tenant_isolation policy, tuples-001-1's
+    shape. autovacuum_vacuum_scale_factor = 0.01, tuples-001's reasoning:
+    high churn relative to size.
+
+    Grants: nexus_svc and nexus_diag pick the table up automatically:
+    grants-nexus-svc.xml and grants-nexus-diag.xml iterate every relation
+    in schema nexus at execution time and run after this file.
+
+    DDL only: CREATE TABLE, no data mutation of any existing row, so no
+    DATA EFFECT line applies per scripts/data_effect_lint.py's own scope.
+    Placed after tuples-006-announce-columns.xml (current tail of the
+    tuples-00N family) and before the grants-nexus-svc.xml runAlways block,
+    matching the established late-append convention (D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: nexus.tuple_deliveries + cascade index + RLS ───────── -->
+    <changeSet id="tuples-007-1" author="nexus-q82tk">
+        <comment>nexus.tuple_deliveries: per-(subspace, subscriber, tuple) announce stamp for board posts (bead nexus-q82tk, RDR-213 boards half). CREATE TABLE only, no data mutation of any existing row, so no DATA EFFECT line applies per scripts/data_effect_lint.py's own scope. Consumed by TupleRepository.queryOnceAnnounceSubscriber: a WaitSpec whose announce field names a subscriber returns the rows due for that subscriber and upserts the delivery row in the same transaction. tuple_id cascades from nexus.tuples so the sweep's purge bounds this table. RLS ENABLE+FORCE with tuples-001-1's tenant_isolation policy shape.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.tuple_deliveries (
+    tenant_id      TEXT        NOT NULL,
+    subspace       TEXT        NOT NULL,
+    subscriber     TEXT        NOT NULL,
+    tuple_id       BYTEA       NOT NULL,
+    announced_at   TIMESTAMPTZ NOT NULL,
+    announce_count INTEGER     NOT NULL DEFAULT 1,
+    CONSTRAINT tuple_deliveries_pk PRIMARY KEY (tenant_id, subspace, subscriber, tuple_id),
+    CONSTRAINT tuple_deliveries_tuple_fk FOREIGN KEY (tuple_id)
+        REFERENCES nexus.tuples (id) ON DELETE CASCADE
+) WITH (autovacuum_vacuum_scale_factor = 0.01);
+
+CREATE INDEX idx_tuple_deliveries_tuple_id ON nexus.tuple_deliveries (tuple_id);
+
+ALTER TABLE nexus.tuple_deliveries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.tuple_deliveries FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.tuple_deliveries
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                DROP POLICY IF EXISTS tenant_isolation ON nexus.tuple_deliveries;
+                ALTER TABLE nexus.tuple_deliveries NO FORCE ROW LEVEL SECURITY;
+                ALTER TABLE nexus.tuple_deliveries DISABLE ROW LEVEL SECURITY;
+                DROP INDEX IF EXISTS nexus.idx_tuple_deliveries_tuple_id;
+                DROP TABLE IF EXISTS nexus.tuple_deliveries;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

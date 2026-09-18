@@ -113,8 +113,8 @@ _ROUND_3_5_IDENTITY_TRACKING_BANNED_STRINGS: tuple[str, ...] = (
 #: (`TupleRepository.WaitSpec.Announce`, service-side): the engine now
 #: decides cadence and cap, and this waiter tracks no position of its
 #: own for a mailbox at all. `._cursor` (not the bare word `cursor`,
-#: which boards' own position-cursor dict key and `ReadCursor` both still
-#: use legitimately) is the exact attribute-access shape the deleted
+#: which `ReadCursor` and `rd`'s own `since` parameter still use
+#: legitimately) is the exact attribute-access shape the deleted
 #: `self._cursor`/`waiter._cursor` dict used and nothing else in the live
 #: tree ever wrote.
 _NEXUS_VSIPZ_ENGINE_STAMP_BANNED_STRINGS: tuple[str, ...] = (
@@ -124,6 +124,26 @@ _NEXUS_VSIPZ_ENGINE_STAMP_BANNED_STRINGS: tuple[str, ...] = (
     "_seconds_to_nearest_resend_s",
     "just_referenced",
     "._cursor",
+)
+
+#: Bead nexus-q82tk (RDR-213 boards half): the board path's own
+#: position cursor, the last client-side delivery position in the tree,
+#: replaced by the engine's per-subscriber stamp in
+#: `nexus.tuple_deliveries` (`TupleRepository.WaitSpec.Announce
+#: .subscriber`). `advance_cursor` and `_cursor_json` were
+#: `SubscriptionSet`'s cursor surface; `_session_cursor`/`_instance_cursor`
+#: its mailbox positions (dead since nexus-vsipz, deleted here);
+#: `persist=lambda` the one shape the waiter's deleted constructor
+#: callback was ever passed in, whose only caller was the board cursor's
+#: T1 write-back (the module-level `persist(t1, subs)` function the
+#: subscribe tools call is a different name and stays; a bare `persist=`
+#: is the scratch store's own keyword and never banned).
+_NEXUS_Q82TK_BOARD_STAMP_BANNED_STRINGS: tuple[str, ...] = (
+    "advance_cursor",
+    "_cursor_json",
+    "_session_cursor",
+    "_instance_cursor",
+    "persist=lambda",
 )
 
 RDR_213_BANNED_STRINGS: tuple[str, ...] = (
@@ -143,6 +163,7 @@ RDR_213_BANNED_STRINGS: tuple[str, ...] = (
     "max_resends",
     *_ROUND_3_5_IDENTITY_TRACKING_BANNED_STRINGS,
     *_NEXUS_VSIPZ_ENGINE_STAMP_BANNED_STRINGS,
+    *_NEXUS_Q82TK_BOARD_STAMP_BANNED_STRINGS,
 )
 
 #: Every directory this census walks, relative to the repo root.

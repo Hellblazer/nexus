@@ -324,6 +324,373 @@ class PipelineHandlerTest {
         assertThat(pipelineState(hash)).isNull();
     }
 
+    // ── nexus-edjmu: one row per document (pipeline-002-per-row-identity) ────
+
+    private static String docCreate(String hash, String path, String collection) {
+        return "{\"content_hash\":\"" + hash + "\",\"pdf_path\":\"" + path
+            + "\",\"collection\":\"" + collection + "\",\"identity\":\"document\"}";
+    }
+
+    private static String legacyCreate(String hash, String path, String collection) {
+        return "{\"content_hash\":\"" + hash + "\",\"pdf_path\":\"" + path
+            + "\",\"collection\":\"" + collection + "\"}";
+    }
+
+    private Map<String, Object> create(String body) throws Exception {
+        var r = post("/v1/pipeline/create", TOKEN, TENANT, body);
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        return mapper.readValue(r.body(), MAP_T);
+    }
+
+    private long pipelineId(Map<String, Object> created) {
+        return ((Number) created.get("pipeline_id")).longValue();
+    }
+
+    private Map<String, Object> stateById(long pipelineId) throws Exception {
+        var resp = get("/v1/pipeline/state?pipeline_id=" + pipelineId, TOKEN, TENANT);
+        assertThat(resp.statusCode()).isEqualTo(200);
+        return (Map<String, Object>) mapper.readValue(resp.body(), MAP_T).get("pipeline");
+    }
+
+    private List<?> pagesById(long pipelineId) throws Exception {
+        var r = get("/v1/pipeline/pages?pipeline_id=" + pipelineId, TOKEN, TENANT);
+        return (List<?>) mapper.readValue(r.body(), MAP_T).get("pages");
+    }
+
+    private List<?> uploadableById(long pipelineId) throws Exception {
+        var r = get("/v1/pipeline/chunks?uploadable=1&pipeline_id=" + pipelineId, TOKEN, TENANT);
+        return (List<?>) mapper.readValue(r.body(), MAP_T).get("chunks");
+    }
+
+    private int embeddedCountById(long pipelineId) throws Exception {
+        var r = get("/v1/pipeline/counts?pipeline_id=" + pipelineId, TOKEN, TENANT);
+        return ((Number) mapper.readValue(r.body(), MAP_T).get("embedded_chunks")).intValue();
+    }
+
+    @Test
+    void documentIdentity_twoPathsSharingAHash_ownRowsOwnWal() throws Exception {
+        String hash = "e1-" + "0".repeat(28);
+        var a = create(docCreate(hash, "/tmp/e1-a.pdf", "knowledge__t"));
+        var b = create(docCreate(hash, "/tmp/e1-b.pdf", "knowledge__t"));
+        assertThat(a.get("status")).isEqualTo("created");
+        assertThat(b.get("status")).as("a second path is its OWN run, never a skip or a 409").isEqualTo("created");
+        long idA = pipelineId(a), idB = pipelineId(b);
+        assertThat(idA).isNotEqualTo(idB);
+
+        post("/v1/pipeline/pages", TOKEN, TENANT, """
+            {"pipeline_id":%d,"pages":[{"page_index":0,"page_text":"a","metadata_json":"{}"}]}""".formatted(idA));
+        post("/v1/pipeline/chunks", TOKEN, TENANT, """
+            {"pipeline_id":%d,"chunks":[{"chunk_index":0,"chunk_text":"a0","chunk_id":"cid-a0","embedding":""}]}""".formatted(idA));
+        post("/v1/pipeline/mark_uploaded", TOKEN, TENANT,
+            "{\"pipeline_id\":" + idA + ",\"chunk_indices\":[0]}");
+        post("/v1/pipeline/chunks", TOKEN, TENANT, """
+            {"pipeline_id":%d,"chunks":[{"chunk_index":0,"chunk_text":"b0","chunk_id":"cid-b0","embedding":""}]}""".formatted(idB));
+
+        // The deadlock of the rejected key-widen attempt: B's counters and
+        // uploadable set were seeded from A's already-uploaded WAL. Per-row
+        // keying makes each run's WAL its own.
+        assertThat(pagesById(idB)).as("B has no pages of its own yet").isEmpty();
+        assertThat(embeddedCountById(idA)).isEqualTo(1);
+        assertThat(embeddedCountById(idB)).isEqualTo(1);
+        assertThat(uploadableById(idA)).as("A's chunk is uploaded").isEmpty();
+        assertThat(uploadableById(idB)).as("B's chunk is still to upload").hasSize(1);
+    }
+
+    @Test
+    void documentIdentity_oneRowsCleanup_leavesTheSiblingsWal() throws Exception {
+        String hash = "e2-" + "0".repeat(28);
+        long idA = pipelineId(create(docCreate(hash, "/tmp/e2-a.pdf", "knowledge__t")));
+        long idB = pipelineId(create(docCreate(hash, "/tmp/e2-b.pdf", "knowledge__t")));
+        for (long id : new long[] {idA, idB}) {
+            post("/v1/pipeline/pages", TOKEN, TENANT, """
+                {"pipeline_id":%d,"pages":[{"page_index":0,"page_text":"p","metadata_json":"{}"}]}""".formatted(id));
+        }
+        post("/v1/pipeline/clear_wal", TOKEN, TENANT, "{\"pipeline_id\":" + idA + "}");
+        assertThat(pagesById(idA)).isEmpty();
+        assertThat(pagesById(idB)).as("A's clear_wal must not touch B's WAL").hasSize(1);
+
+        var del = post("/v1/pipeline/delete", TOKEN, TENANT, "{\"pipeline_id\":" + idA + "}");
+        assertThat(mapper.readValue(del.body(), MAP_T).get("deleted")).isEqualTo(true);
+        assertThat(stateById(idA)).isNull();
+        assertThat(stateById(idB)).isNotNull();
+        assertThat(pagesById(idB)).as("A's delete must not cascade into B").hasSize(1);
+    }
+
+    @Test
+    void documentIdentity_completedLeftover_isResetAndCreated() throws Exception {
+        String hash = "e3-" + "0".repeat(28);
+        long id = pipelineId(create(docCreate(hash, "/tmp/e3.pdf", "knowledge__t")));
+        post("/v1/pipeline/pages", TOKEN, TENANT, """
+            {"pipeline_id":%d,"pages":[{"page_index":0,"page_text":"p","metadata_json":"{}"}]}""".formatted(id));
+        post("/v1/pipeline/progress", TOKEN, TENANT,
+            "{\"pipeline_id\":" + id + ",\"fields\":{\"pages_extracted\":1,\"chunks_created\":3,\"chunks_uploaded\":3}}");
+        post("/v1/pipeline/complete", TOKEN, TENANT, "{\"pipeline_id\":" + id + "}");
+
+        var again = create(docCreate(hash, "/tmp/e3.pdf", "knowledge__t"));
+        assertThat(again.get("status"))
+            .as("a completed row that outlived its run is crash residue: reset, never skipped")
+            .isEqualTo("created");
+        assertThat(pipelineId(again)).isEqualTo(id);
+        var state = stateById(id);
+        assertThat(state.get("status")).isEqualTo("running");
+        assertThat(state.get("pages_extracted")).isEqualTo(0);
+        assertThat(state.get("chunks_uploaded")).isEqualTo(0);
+        assertThat(state.get("chunks_created")).isNull();
+        assertThat(pagesById(id)).as("the leftover WAL is wiped").isEmpty();
+    }
+
+    @Test
+    void legacyCreate_secondPathIsTheSameRow_conflictThenSkip() throws Exception {
+        // A client older than pipeline-002 sends no identity: one row per
+        // hash, exactly the pipeline-001 contract (create_completed_skips
+        // above pins the completed -> skip half unchanged).
+        String hash = "e4-" + "0".repeat(28);
+        var first = create(legacyCreate(hash, "/tmp/e4-a.pdf", "knowledge__t"));
+        assertThat(first.get("status")).isEqualTo("created");
+        var second = post("/v1/pipeline/create", TOKEN, TENANT, legacyCreate(hash, "/tmp/e4-b.pdf", "knowledge__t"));
+        assertThat(second.statusCode()).as("legacy: a second path while running is the 409 it always was").isEqualTo(409);
+        post("/v1/pipeline/complete", TOKEN, TENANT, "{\"content_hash\":\"" + hash + "\"}");
+        var third = create(legacyCreate(hash, "/tmp/e4-b.pdf", "knowledge__t"));
+        assertThat(third.get("status")).isEqualTo("skip");
+        assertThat(pipelineId(third)).isEqualTo(pipelineId(first));
+    }
+
+    @Test
+    void legacyHashOnlyCalls_landOnTheLegacyRow_notASiblingDocumentRow() throws Exception {
+        // An old client mid-run must never be hijacked by a document row a
+        // newer client inserts for the same bytes.
+        String hash = "e5-" + "0".repeat(28);
+        long legacyId = pipelineId(create(legacyCreate(hash, "/tmp/e5-old.pdf", "knowledge__t")));
+        long docId = pipelineId(create(docCreate(hash, "/tmp/e5-new.pdf", "knowledge__t")));
+        assertThat(docId).isNotEqualTo(legacyId);
+
+        post("/v1/pipeline/progress", TOKEN, TENANT,
+            "{\"content_hash\":\"" + hash + "\",\"fields\":{\"pages_extracted\":7}}");
+        post("/v1/pipeline/pages", TOKEN, TENANT, """
+            {"content_hash":"%s","pages":[{"page_index":0,"page_text":"old","metadata_json":"{}"}]}""".formatted(hash));
+        post("/v1/pipeline/complete", TOKEN, TENANT, "{\"content_hash\":\"" + hash + "\"}");
+
+        var legacy = stateById(legacyId);
+        assertThat(legacy.get("pages_extracted")).isEqualTo(7);
+        assertThat(legacy.get("status")).isEqualTo("completed");
+        assertThat(pagesById(legacyId)).hasSize(1);
+        var doc = stateById(docId);
+        assertThat(doc.get("pages_extracted")).isEqualTo(0);
+        assertThat(doc.get("status")).isEqualTo("running");
+        assertThat(pagesById(docId)).isEmpty();
+        // The hash-only state read resolves the same way.
+        assertThat(((Number) pipelineState(hash).get("pipeline_id")).longValue()).isEqualTo(legacyId);
+    }
+
+    @Test
+    void legacyCreate_besideAStrangersDocumentRow_getsItsOwnRow() throws Exception {
+        // The substantive-critic's implementation finding: with NO legacy row
+        // for the hash, an old client's create used to adopt a document row
+        // of ANOTHER document (completed -> the bead's silent skip; failed ->
+        // resuming INTO the stranger's row). A bare hash now names legacy
+        // rows only, so the old client inserts beside the document row.
+        String hash = "f1-" + "0".repeat(28);
+        long docId = pipelineId(create(docCreate(hash, "/tmp/f1-b.pdf", "knowledge__t")));
+        post("/v1/pipeline/fail", TOKEN, TENANT, "{\"pipeline_id\":" + docId + ",\"error\":\"crash\"}");
+
+        var legacy = create(legacyCreate(hash, "/tmp/f1-a.pdf", "knowledge__t"));
+        assertThat(legacy.get("status")).isEqualTo("created");
+        long legacyId = pipelineId(legacy);
+        assertThat(legacyId).isNotEqualTo(docId);
+
+        post("/v1/pipeline/pages", TOKEN, TENANT, """
+            {"content_hash":"%s","pages":[{"page_index":0,"page_text":"a","metadata_json":"{}"}]}""".formatted(hash));
+        post("/v1/pipeline/complete", TOKEN, TENANT, "{\"content_hash\":\"" + hash + "\"}");
+        assertThat(stateById(legacyId).get("status")).isEqualTo("completed");
+        assertThat(pagesById(legacyId)).hasSize(1);
+        var stranger = stateById(docId);
+        assertThat(stranger.get("status")).as("the stranger's row is untouched").isEqualTo("failed");
+        assertThat(pagesById(docId)).isEmpty();
+        // ...and an old client's hash-only delete (its orphan scan) can never
+        // reach a document row: with the legacy row gone, it is a miss.
+        post("/v1/pipeline/delete", TOKEN, TENANT, "{\"content_hash\":\"" + hash + "\"}");
+        var again = post("/v1/pipeline/delete", TOKEN, TENANT, "{\"content_hash\":\"" + hash + "\"}");
+        assertThat(mapper.readValue(again.body(), MAP_T).get("deleted")).isEqualTo(false);
+        assertThat(stateById(docId)).isNotNull();
+    }
+
+    @Test
+    void legacyCreate_adoptsItsOwnDocumentsRow_andOwnsItFromThen() throws Exception {
+        // The one document row an old client may adopt: the SAME document's
+        // (same collection and path). On resume it becomes a legacy row so
+        // the client's later hash-only calls find it.
+        String hash = "f2-" + "0".repeat(28);
+        long docId = pipelineId(create(docCreate(hash, "/tmp/f2.pdf", "knowledge__t")));
+        post("/v1/pipeline/fail", TOKEN, TENANT, "{\"pipeline_id\":" + docId + ",\"error\":\"crash\"}");
+
+        var legacy = create(legacyCreate(hash, "/tmp/f2.pdf", "knowledge__t"));
+        assertThat(legacy.get("status")).isEqualTo("resuming");
+        assertThat(pipelineId(legacy)).isEqualTo(docId);
+        var row = stateById(docId);
+        assertThat(row.get("keyed_by")).isEqualTo("content_hash");
+        post("/v1/pipeline/progress", TOKEN, TENANT,
+            "{\"content_hash\":\"" + hash + "\",\"fields\":{\"pages_extracted\":3}}");
+        assertThat(stateById(docId).get("pages_extracted")).isEqualTo(3);
+    }
+
+    // ── nexus-8vu8p: run_epoch fences a taken-over run's writes ───────────
+
+    private int runEpoch(Map<String, Object> created) {
+        return ((Number) created.get("run_epoch")).intValue();
+    }
+
+    private HttpResponse<String> writeFenced(String route, long id, int epoch, String extra) throws Exception {
+        return post("/v1/pipeline/" + route, TOKEN, TENANT,
+            "{\"pipeline_id\":" + id + ",\"run_epoch\":" + epoch + extra + "}");
+    }
+
+    private void assertStaleRun(HttpResponse<String> r, long id, int carried, int current) throws Exception {
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
+        var body = mapper.readValue(r.body(), MAP_T);
+        assertThat(body.get("status")).isEqualTo("stale_run");
+        assertThat(((Number) body.get("pipeline_id")).longValue()).isEqualTo(id);
+        assertThat(body.get("run_epoch")).isEqualTo(carried);
+        assertThat(body.get("current_epoch")).isEqualTo(current);
+        assertThat((String) body.get("remedy")).contains("taken over");
+        assertThat((String) body.get("error")).contains("taken over");
+    }
+
+    @Test
+    void runEpoch_startsAtZero_bumpsOnEveryTakeover_neverResets() throws Exception {
+        String hash = "g1-" + "0".repeat(28);
+        var first = create(docCreate(hash, "/tmp/g1.pdf", "knowledge__t"));
+        long id = pipelineId(first);
+        assertThat(runEpoch(first)).isEqualTo(0);
+        // A stale-heartbeat takeover: 0 -> 1.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES).update(PDF_PIPELINE)
+               .set(PDF_PIPELINE.UPDATED_AT, OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10))
+               .where(PDF_PIPELINE.PIPELINE_ID.eq(id)).execute();
+        }
+        var second = create(docCreate(hash, "/tmp/g1.pdf", "knowledge__t"));
+        assertThat(second.get("status")).isEqualTo("resuming");
+        assertThat(runEpoch(second)).isEqualTo(1);
+        // A failed-row takeover: 1 -> 2 (monotonic across cycles).
+        post("/v1/pipeline/fail", TOKEN, TENANT, "{\"pipeline_id\":" + id + ",\"run_epoch\":1,\"error\":\"x\"}");
+        var third = create(docCreate(hash, "/tmp/g1.pdf", "knowledge__t"));
+        assertThat(runEpoch(third)).isEqualTo(2);
+        // A completed-leftover reset: 2 -> 3, never back to 0.
+        post("/v1/pipeline/complete", TOKEN, TENANT, "{\"pipeline_id\":" + id + ",\"run_epoch\":2}");
+        var fourth = create(docCreate(hash, "/tmp/g1.pdf", "knowledge__t"));
+        assertThat(fourth.get("status")).isEqualTo("created");
+        assertThat(runEpoch(fourth)).isEqualTo(3);
+        assertThat(stateById(id).get("run_epoch")).isEqualTo(3);
+        // The first run's delayed write, still at 0, is fenced by the reset row.
+        assertStaleRun(writeFenced("pages", id, 0,
+            ",\"pages\":[{\"page_index\":0,\"page_text\":\"stale\",\"metadata_json\":\"{}\"}]"), id, 0, 3);
+        assertThat(pagesById(id)).isEmpty();
+    }
+
+    @Test
+    void runEpoch_everyWriteRouteRefusesAStaleEpoch_andWritesNothing() throws Exception {
+        String hash = "g2-" + "0".repeat(28);
+        long id = pipelineId(create(docCreate(hash, "/tmp/g2.pdf", "knowledge__t")));
+        // The new owner's WAL and counters, written at the current epoch (1).
+        post("/v1/pipeline/fail", TOKEN, TENANT, "{\"pipeline_id\":" + id + ",\"run_epoch\":0,\"error\":\"x\"}");
+        var owner = create(docCreate(hash, "/tmp/g2.pdf", "knowledge__t"));
+        assertThat(runEpoch(owner)).isEqualTo(1);
+        assertThat(writeFenced("pages", id, 1,
+            ",\"pages\":[{\"page_index\":0,\"page_text\":\"owner\",\"metadata_json\":\"{}\"}]").statusCode()).isEqualTo(200);
+        assertThat(writeFenced("chunks", id, 1,
+            ",\"chunks\":[{\"chunk_index\":0,\"chunk_text\":\"o0\",\"chunk_id\":\"cid-o0\",\"embedding\":\"\"}]").statusCode()).isEqualTo(200);
+        assertThat(writeFenced("progress", id, 1, ",\"fields\":{\"pages_extracted\":1}").statusCode()).isEqualTo(200);
+
+        // The stale run, still holding 0: every write route refuses, nothing changes.
+        assertStaleRun(writeFenced("pages", id, 0,
+            ",\"pages\":[{\"page_index\":1,\"page_text\":\"stale\",\"metadata_json\":\"{}\"}]"), id, 0, 1);
+        assertStaleRun(writeFenced("chunks", id, 0,
+            ",\"chunks\":[{\"chunk_index\":1,\"chunk_text\":\"s1\",\"chunk_id\":\"cid-s1\"}]"), id, 0, 1);
+        assertStaleRun(writeFenced("progress", id, 0, ",\"fields\":{\"pages_extracted\":9}"), id, 0, 1);
+        assertStaleRun(writeFenced("extraction_meta", id, 0, ",\"metadata_json\":\"{}\""), id, 0, 1);
+        assertStaleRun(writeFenced("mark_uploaded", id, 0, ",\"chunk_indices\":[0]"), id, 0, 1);
+        assertStaleRun(writeFenced("complete", id, 0, ""), id, 0, 1);
+        assertStaleRun(writeFenced("fail", id, 0, ",\"error\":\"stale\""), id, 0, 1);
+        assertStaleRun(writeFenced("clear_wal", id, 0, ""), id, 0, 1);
+        assertStaleRun(writeFenced("delete", id, 0, ""), id, 0, 1);
+
+        var state = stateById(id);
+        assertThat(state).as("the stale delete removed nothing").isNotNull();
+        assertThat(state.get("status")).isEqualTo("resuming");
+        assertThat(state.get("pages_extracted")).isEqualTo(1);
+        assertThat(state.get("error")).isEqualTo("x");
+        assertThat(pagesById(id)).as("the stale clear_wal wiped nothing, the stale page never landed").hasSize(1);
+        assertThat(uploadableById(id)).as("the stale mark_uploaded flipped nothing").hasSize(1);
+        assertThat(embeddedCountById(id)).isEqualTo(1);
+        // Reads are never fenced: the stale run can still see the row.
+        var read = get("/v1/pipeline/pages?pipeline_id=" + id + "&run_epoch=0", TOKEN, TENANT);
+        assertThat(read.statusCode()).isEqualTo(200);
+        // A write carrying no epoch (a client older than pipeline-003) is unfenced.
+        var legacy = post("/v1/pipeline/progress", TOKEN, TENANT,
+            "{\"pipeline_id\":" + id + ",\"fields\":{\"pages_extracted\":2}}");
+        assertThat(legacy.statusCode()).isEqualTo(200);
+        assertThat(stateById(id).get("pages_extracted")).isEqualTo(2);
+    }
+
+    @Test
+    void hashNarrowedByDocument_missesRatherThanWidens() throws Exception {
+        String hash = "e6-" + "0".repeat(28);
+        long idA = pipelineId(create(docCreate(hash, "/tmp/e6-a.pdf", "knowledge__t")));
+        var miss = post("/v1/pipeline/delete", TOKEN, TENANT,
+            "{\"content_hash\":\"" + hash + "\",\"collection\":\"knowledge__t\",\"pdf_path\":\"/tmp/e6-zzz.pdf\"}");
+        assertThat(mapper.readValue(miss.body(), MAP_T).get("deleted")).isEqualTo(false);
+        assertThat(stateById(idA)).as("a narrowing that matches nothing never falls back to the bare hash").isNotNull();
+        var hit = post("/v1/pipeline/delete", TOKEN, TENANT,
+            "{\"content_hash\":\"" + hash + "\",\"collection\":\"knowledge__t\",\"pdf_path\":\"/tmp/e6-a.pdf\"}");
+        assertThat(mapper.readValue(hit.body(), MAP_T).get("deleted")).isEqualTo(true);
+        assertThat(stateById(idA)).isNull();
+    }
+
+    @Test
+    void deleteCollection_keepsTheSiblingRunInAnotherCollection() throws Exception {
+        String hash = "e7-" + "0".repeat(28);
+        long gone = pipelineId(create(docCreate(hash, "/tmp/e7.pdf", "knowledge__e7gone")));
+        long keep = pipelineId(create(docCreate(hash, "/tmp/e7.pdf", "knowledge__e7keep")));
+        for (long id : new long[] {gone, keep}) {
+            post("/v1/pipeline/pages", TOKEN, TENANT, """
+                {"pipeline_id":%d,"pages":[{"page_index":0,"page_text":"p","metadata_json":"{}"}]}""".formatted(id));
+        }
+        var r = post("/v1/pipeline/delete_collection", TOKEN, TENANT, "{\"collection\":\"knowledge__e7gone\"}");
+        assertThat(mapper.readValue(r.body(), MAP_T).get("deleted")).isEqualTo(1);
+        assertThat(stateById(gone)).isNull();
+        assertThat(pagesById(gone)).isEmpty();
+        assertThat(stateById(keep)).isNotNull();
+        assertThat(pagesById(keep)).as("the FK cascade is per row, not per hash").hasSize(1);
+    }
+
+    @Test
+    void walWriteWithoutARow_is400_neverASilentInsert() throws Exception {
+        String hash = "e8-" + "0".repeat(28);
+        var r = post("/v1/pipeline/pages", TOKEN, TENANT, """
+            {"content_hash":"%s","pages":[{"page_index":0,"page_text":"p","metadata_json":"{}"}]}""".formatted(hash));
+        assertThat(r.statusCode()).isEqualTo(400);
+        assertThat(r.body()).contains("no pipeline row");
+        var byId = post("/v1/pipeline/chunks", TOKEN, TENANT, """
+            {"pipeline_id":999999999,"chunks":[{"chunk_index":0,"chunk_text":"t","chunk_id":"c"}]}""");
+        assertThat(byId.statusCode()).isEqualTo(400);
+    }
+
+    @Test
+    void counts_withNoRef_isZeroNotAnError() throws Exception {
+        var r = get("/v1/pipeline/counts", TOKEN, TENANT);
+        assertThat(r.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(r.body(), MAP_T);
+        assertThat(body.get("embedded_chunks")).isEqualTo(0);
+        assertThat(((Number) body.get("pipelines")).intValue()).isGreaterThanOrEqualTo(0);
+    }
+
+    @Test
+    void create_unknownIdentity_is400() throws Exception {
+        var r = post("/v1/pipeline/create", TOKEN, TENANT,
+            "{\"content_hash\":\"e9\",\"pdf_path\":\"/tmp/e9.pdf\",\"collection\":\"knowledge__t\",\"identity\":\"tumbler\"}");
+        assertThat(r.statusCode()).isEqualTo(400);
+    }
+
     // ── Test 9: RLS isolation through HTTP ───────────────────────────────────
 
     @Test

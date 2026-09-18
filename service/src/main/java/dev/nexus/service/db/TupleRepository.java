@@ -40,6 +40,7 @@ import java.util.concurrent.TimeUnit;
 
 import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
 import static dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG;
+import static dev.nexus.service.jooq.nexus.Tables.TUPLE_DELIVERIES;
 import static dev.nexus.service.jooq.nexus.Tables.TUPLE_TENANTS;
 
 /**
@@ -830,6 +831,9 @@ public final class TupleRepository {
             for (var e : patternSafe.entrySet()) {
                 cond = cond.and(DSL.jsonbGetAttributeAsText(TUPLES.KEYS, e.getKey()).eq(e.getValue()));
             }
+            if (announce != null && announce.perSubscriber()) {
+                return queryOnceAnnounceSubscriber(ctx, cond, limit, announce, tenant, subspace);
+            }
             if (announce != null) {
                 return queryOnceAnnounce(ctx, cond, limit, announce);
             }
@@ -916,6 +920,99 @@ public final class TupleRepository {
         return out;
     }
 
+    /**
+     * Per-subscriber announce-mode branch of {@link #queryOnce} (bead nexus-q82tk,
+     * RDR-213 boards half). The predicate is {@link #queryOnceAnnounce}'s -- {@code
+     * baseCond} narrowed to claimable rows that are DUE -- but the stamp that
+     * decides "due" lives in {@code nexus.tuple_deliveries}, keyed by {@code
+     * (tenant, subspace, subscriber, tuple_id)}, not on the {@code nexus.tuples}
+     * row: a board post is read by many subscribers and never claimed, so a
+     * row-level stamp would let the first subscriber's announcement silence the
+     * post for every other. A row is due for {@code announce.subscriber()} when
+     * it has NO delivery row for that subscriber, or its delivery row is older
+     * than {@code intervalSeconds} with {@code announce_count < max} -- the same
+     * arithmetic as the row-level shape, so {@code max=1} means "once per
+     * subscriber, ever", which is what the client's board arm sends.
+     *
+     * <p>The claimable narrowing is kept for uniformity: a board row is never
+     * claimed, so it is trivially true there, and a mailbox spec that named a
+     * subscriber would behave exactly like the row-level shape with a
+     * per-subscriber count.
+     *
+     * <p>Locking and ordering are {@link #queryOnceAnnounce}'s: the SELECT takes
+     * {@code FOR NO KEY UPDATE SKIP LOCKED} on the tuple rows, so two waiters of
+     * the SAME subscriber (a restart overlap) cannot both stamp one row; two
+     * DIFFERENT subscribers whose calls overlap on one post see it one call
+     * apart, since the second skips the row the first still holds and finds it
+     * due again at its next call (the first's stamp is for a different subscriber
+     * and does not exclude it). The re-scan orders by {@code created_at} ASC
+     * every time with no client position, so a row whose {@code out} committed
+     * late is returned on the next call regardless -- the defect this bead closes
+     * for boards, {@code TupleAnnounceTest} proves it with a held transaction.
+     *
+     * <p>The stamp is one upsert per returned row in the SAME transaction:
+     * {@code INSERT ... ON CONFLICT (pk) DO UPDATE SET announced_at = now,
+     * announce_count = announce_count + 1 RETURNING announce_count}, so the rows
+     * returned carry the POST-stamp per-subscriber values in {@code announcedAt}/
+     * {@code announceCount} (the row's own columns are neither read for this
+     * decision nor written by it).
+     */
+    private List<TupleRow> queryOnceAnnounceSubscriber(DSLContext ctx, Condition baseCond, int limit,
+                                                        WaitSpec.Announce announce, String tenant,
+                                                        String subspace) {
+        String subscriber = announce.subscriber();
+        Condition claimable = TUPLES.CLAIM_STATE.isDistinctFrom(CLAIM_STATE_DEAD)
+                .and(TUPLES.CLAIM_STATE.isNull().or(TUPLES.LEASE_UNTIL.lt(DSL.currentOffsetDateTime())));
+        // Due iff no delivery row for this subscriber blocks it: a row blocks
+        // while it is younger than the interval, or once its count has reached
+        // the cap. NOT EXISTS over the blocking shape is the whole due test.
+        Condition blocked = TUPLE_DELIVERIES.TENANT_ID.eq(tenant)
+                .and(TUPLE_DELIVERIES.SUBSPACE.eq(subspace))
+                .and(TUPLE_DELIVERIES.SUBSCRIBER.eq(subscriber))
+                .and(TUPLE_DELIVERIES.TUPLE_ID.eq(TUPLES.ID))
+                .and(TUPLE_DELIVERIES.ANNOUNCED_AT.ge(DSL.currentOffsetDateTime().sub(interval(announce.intervalSeconds())))
+                        .or(TUPLE_DELIVERIES.ANNOUNCE_COUNT.ge(announce.max())));
+        Condition due = DSL.notExists(ctx.selectOne().from(TUPLE_DELIVERIES).where(blocked));
+        Condition cond = baseCond.and(claimable).and(due);
+
+        var rows = ctx.selectFrom(TUPLES)
+                .where(cond)
+                .orderBy(TUPLES.CREATED_AT.asc(), TUPLES.ID.asc())
+                .limit(limit)
+                .forNoKeyUpdate()
+                .skipLocked()
+                .fetch();
+        if (rows.isEmpty()) {
+            return List.of();
+        }
+
+        // Microsecond truncation: queryOnceAnnounce's own reasoning (Postgres
+        // TIMESTAMPTZ precision), so the in-memory value and a later read-back
+        // of the delivery row agree.
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        List<TupleRow> out = new ArrayList<>(rows.size());
+        for (TuplesRecord r : rows) {
+            Integer count = ctx.insertInto(TUPLE_DELIVERIES,
+                            TUPLE_DELIVERIES.TENANT_ID, TUPLE_DELIVERIES.SUBSPACE, TUPLE_DELIVERIES.SUBSCRIBER,
+                            TUPLE_DELIVERIES.TUPLE_ID, TUPLE_DELIVERIES.ANNOUNCED_AT, TUPLE_DELIVERIES.ANNOUNCE_COUNT)
+                    .values(tenant, subspace, subscriber, r.getId(), now, 1)
+                    .onConflict(TUPLE_DELIVERIES.TENANT_ID, TUPLE_DELIVERIES.SUBSPACE,
+                            TUPLE_DELIVERIES.SUBSCRIBER, TUPLE_DELIVERIES.TUPLE_ID)
+                    .doUpdate()
+                    .set(TUPLE_DELIVERIES.ANNOUNCED_AT, now)
+                    .set(TUPLE_DELIVERIES.ANNOUNCE_COUNT, TUPLE_DELIVERIES.ANNOUNCE_COUNT.add(1))
+                    .returning(TUPLE_DELIVERIES.ANNOUNCE_COUNT)
+                    .fetchOne(TUPLE_DELIVERIES.ANNOUNCE_COUNT);
+            if (count == null) {
+                // RETURNING on an upsert always yields the row; a null here means the
+                // statement did not run as written, which is a defect to fail loud on.
+                throw new IllegalStateException("tuple_deliveries upsert returned no row for subscriber " + subscriber);
+            }
+            out.add(toRow(r, now, count));
+        }
+        return out;
+    }
+
     // ── wait (multiplexed rd, RDR-211 Phase 1 Step 1, bead nexus-rplay.4) ──────
 
     /** One subspace subscription within a {@link #waitAny} call: {@code n}/{@code
@@ -963,7 +1060,14 @@ public final class TupleRepository {
          * next call regardless -- there is no cursor position for it to land
          * behind.
          */
-        public record Announce(long intervalSeconds, int max) {
+        public record Announce(long intervalSeconds, int max, String subscriber) {
+
+            /** Back-compat constructor (every nexus-vsipz call site, every mailbox
+             *  spec): {@code subscriber=null}, the row-level stamp on {@code
+             *  nexus.tuples} itself. */
+            public Announce(long intervalSeconds, int max) {
+                this(intervalSeconds, max, null);
+            }
 
             /** Bounds check (review round, bead nexus-vsipz): a compact constructor
              *  so EVERY construction path -- {@link TupleHandler#readAnnounce}, a
@@ -990,6 +1094,25 @@ public final class TupleRepository {
                 if (max < 1) {
                     throw new SchemaViolationException("max", "must be at least 1");
                 }
+                // Bead nexus-q82tk (RDR-213 boards half): a subscriber names the reader
+                // the stamp is kept for, so a board post read by many sessions is
+                // announced once to EACH of them, never once in total. It is a caller
+                // identity exactly as `claimant` is, and carries the same ceiling. An
+                // empty string is refused, not treated as absent -- a caller that
+                // sends the field means to name someone.
+                if (subscriber != null) {
+                    if (subscriber.isBlank()) {
+                        throw new SchemaViolationException("subscriber", "must not be blank");
+                    }
+                    checkFieldSize("subscriber", subscriber, TupleLimits.MAX_CLAIMANT_BYTES);
+                }
+            }
+
+            /** {@code true} when the stamp lives in {@code nexus.tuple_deliveries}
+             *  keyed by {@link #subscriber}, {@code false} when it lives on the
+             *  {@code nexus.tuples} row itself (the nexus-vsipz mailbox shape). */
+            public boolean perSubscriber() {
+                return subscriber != null;
             }
         }
     }
@@ -999,7 +1122,24 @@ public final class TupleRepository {
      *  with nothing to report is simply absent, never present with an empty {@code
      *  tuples} list, so a client iterating results always has cursor-advancing work
      *  to do for every entry it sees. */
-    public record WaitResult(String subspace, List<TupleRow> tuples) {
+    public record WaitResult(String subspace, List<TupleRow> tuples, String subscriber) {
+
+        /** Back-compat constructor (every pre-nexus-q82tk call site): no
+         *  subscriber echo. */
+        public WaitResult(String subspace, List<TupleRow> tuples) {
+            this(subspace, tuples, null);
+        }
+
+        /** {@code subscriber} (bead nexus-q82tk) echoes the {@code
+         *  announce.subscriber} the engine HONOURED for this spec -- rendered
+         *  on the wire only when non-null -- so a client can tell a per-
+         *  subscriber stamp from a row-level one: an engine that accepted
+         *  {@code announce} but never read {@code subscriber} (v0.1.128)
+         *  renders no such field, and the client's waiter stops loud on a
+         *  board result without it instead of letting the row-level stamp
+         *  silence the post for every other subscriber. The same proof-by-
+         *  rendered-field shape {@code announce_count} gives for announce
+         *  support itself. */
     }
 
     /**
@@ -1111,7 +1251,8 @@ public final class TupleRepository {
             List<TupleRow> rows = queryOnce(tenant, spec.subspace(), spec.pattern(), spec.n(), spec.since(),
                     spec.announce());
             if (!rows.isEmpty()) {
-                out.add(new WaitResult(spec.subspace(), rows));
+                String honoured = spec.announce() == null ? null : spec.announce().subscriber();
+                out.add(new WaitResult(spec.subspace(), rows, honoured));
             }
         }
         return out;

@@ -12,6 +12,17 @@ not yet uploaded. The authoritative server contract is pinned by the Java
 ``PipelineHandlerTest``; ``tests/db/test_pipeline_fake_engine_parity.py``
 keeps this fake honest against the same scenarios.
 
+nexus-edjmu (pipeline-002-per-row-identity.xml): a row is one RUN of one
+document, identity ``pipeline_id``, unique on (content_hash, collection,
+pdf_path); pages and chunks are keyed on (pipeline_id, idx) and carry no
+content_hash. Every route after ``/create`` names a row by ``pipeline_id``
+or by ``content_hash`` narrowed by ``collection``/``pdf_path``; a hash-only
+caller lands on the hash's ``keyed_by='content_hash'`` row only, never a
+document row (see ``PipelineRepository.resolve``). ``/create`` without ``identity`` runs the
+pipeline-001 one-row-per-hash algorithm verbatim (what a client older than
+this engine sends); ``identity="document"`` keys on the document and resets
+a leftover completed row instead of skipping it.
+
 ``clock`` is injectable for staleness tests (fixed clocks per house rule).
 """
 from __future__ import annotations
@@ -27,6 +38,26 @@ from nexus.db.http_pipeline_client import STALE_THRESHOLD, HttpPipelineDB
 _PROGRESS_FIELDS = {
     "total_pages", "pages_extracted", "chunks_created", "chunks_embedded", "chunks_uploaded",
 }
+
+
+class _StaleRun(Exception):
+    """Fake-engine twin of ``PipelineStaleRunException`` (nexus-8vu8p)."""
+
+    REMEDY = (
+        "this run was taken over by a newer resume of the same document; stop "
+        "without marking the row failed or clearing its WAL (the new owner "
+        "holds both) and re-run the document if the new owner does not finish"
+    )
+
+    def __init__(self, pipeline_id: int, content_hash: str, run_epoch: int, current_epoch: int) -> None:
+        self.pipeline_id = pipeline_id
+        self.content_hash = content_hash
+        self.run_epoch = run_epoch
+        self.current_epoch = current_epoch
+        super().__init__(
+            f"pipeline_id={pipeline_id} (content_hash={content_hash}) is at run_epoch "
+            f"{current_epoch}, this write carried {run_epoch} — {self.REMEDY}"
+        )
 
 
 class _ConflictRunning(Exception):
@@ -57,41 +88,153 @@ class _ConflictRunning(Exception):
 
 
 class FakePipelineEngine:
-    """Dict-backed twin of the three ``nexus.pdf_*`` tables."""
+    """Dict-backed twin of the three ``nexus.pdf_*`` tables.
+
+    ``pipelines`` is keyed by ``pipeline_id``; ``pages``/``chunks`` by
+    ``(pipeline_id, idx)``.
+    """
 
     def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
         self.clock = clock or (lambda: datetime.now(UTC))
-        self.pipelines: dict[str, dict[str, Any]] = {}
-        self.pages: dict[tuple[str, int], dict[str, Any]] = {}
-        self.chunks: dict[tuple[str, int], dict[str, Any]] = {}
+        self.pipelines: dict[int, dict[str, Any]] = {}
+        self.pages: dict[tuple[int, int], dict[str, Any]] = {}
+        self.chunks: dict[tuple[int, int], dict[str, Any]] = {}
+        self._next_id = 1
+
+    # ── test conveniences ───────────────────────────────────────────────────
+
+    def hashes(self) -> set[str]:
+        """Every content_hash with at least one row."""
+        return {r["content_hash"] for r in self.pipelines.values()}
+
+    def rows_for(self, content_hash: str) -> list[dict[str, Any]]:
+        """Every row for *content_hash*, oldest first."""
+        return [r for _, r in sorted(self.pipelines.items()) if r["content_hash"] == content_hash]
+
+    def row_for(self, content_hash: str) -> dict[str, Any]:
+        """The one row for *content_hash*; asserts exactly one exists."""
+        rows = self.rows_for(content_hash)
+        assert len(rows) == 1, f"expected one row for {content_hash}, found {len(rows)}"
+        return rows[0]
+
+    def wal_hashes(self) -> set[str]:
+        """content_hashes owning at least one page or chunk row."""
+        owners = {pid for pid, _ in self.pages} | {pid for pid, _ in self.chunks}
+        return {self.pipelines[pid]["content_hash"] for pid in owners if pid in self.pipelines}
+
+    # ── resolution (PipelineRepository.resolve's twin) ──────────────────────
+
+    def resolve(self, ref: dict) -> int | None:
+        """The one row *ref* names, or ``None``: ``pipeline_id`` when given,
+        else ``content_hash`` narrowed by any ``collection``/``pdf_path``
+        (newest), else the bare hash's legacy (``keyed_by='content_hash'``)
+        row only, never a document row."""
+        pid = ref.get("pipeline_id")
+        if pid not in (None, ""):
+            pid = int(pid)
+            return pid if pid in self.pipelines else None
+        h = ref.get("content_hash")
+        if not h:
+            raise ValueError("'pipeline_id' or 'content_hash' is required")
+        collection = ref.get("collection") or ""
+        pdf_path = ref.get("pdf_path") or ""
+        narrowed = bool(collection or pdf_path)
+        candidates = [
+            r for r in self.pipelines.values()
+            if r["content_hash"] == h
+            and (not collection or r["collection"] == collection)
+            and (not pdf_path or r["pdf_path"] == pdf_path)
+            # A bare hash names legacy rows only (an old client's own).
+            and (narrowed or r["keyed_by"] == "content_hash")
+        ]
+        if not candidates:
+            return None
+        best = max(candidates, key=lambda r: (r["started_at"], r["pipeline_id"]))
+        return best["pipeline_id"]
+
+    def _lock_run(self, ref: dict) -> int | None:
+        """PipelineRepository.lockRun's twin: the row, with the caller's
+        ``run_epoch`` (when given) compared against the row's; a mismatch is
+        a 409 stale_run and nothing is written."""
+        pid = self.resolve(ref)
+        if pid is None:
+            return None
+        epoch = ref.get("run_epoch")
+        if epoch not in (None, ""):
+            row = self.pipelines[pid]
+            if int(epoch) != row["run_epoch"]:
+                raise _StaleRun(pid, row["content_hash"], int(epoch), row["run_epoch"])
+        return pid
+
+    def _require_run(self, ref: dict) -> int:
+        pid = self._lock_run(ref)
+        if pid is None:
+            raise ValueError(f"no pipeline row for {ref}")
+        return pid
 
     # ── endpoint semantics ──────────────────────────────────────────────────
 
     def create(self, body: dict) -> dict:
         h = body["content_hash"]
+        identity = body.get("identity")
+        if identity in (None, "content_hash"):
+            document = False
+        elif identity == "document":
+            document = True
+        else:
+            raise ValueError("'identity' must be \"document\" or \"content_hash\" when present")
         now_dt = self.clock()
         now = now_dt.isoformat()
-        row = self.pipelines.get(h)
-        if row is None:
-            self.pipelines[h] = {
+        ref = (
+            {"content_hash": h, "collection": body["collection"], "pdf_path": body["pdf_path"]}
+            if document else {"content_hash": h}
+        )
+        pid = self.resolve(ref)
+        if pid is None and not document:
+            # No legacy row: the SAME document's document row, if any.
+            pid = self.resolve({"content_hash": h, "collection": body["collection"], "pdf_path": body["pdf_path"]})
+        if pid is None:
+            pid = self._next_id
+            self._next_id += 1
+            self.pipelines[pid] = {
+                "pipeline_id": pid,
                 "content_hash": h, "pdf_path": body["pdf_path"],
-                "collection": body["collection"], "total_pages": None,
+                "collection": body["collection"],
+                "keyed_by": "document" if document else "content_hash",
+                "run_epoch": 0,
+                "total_pages": None,
                 "pages_extracted": 0, "chunks_created": None,
                 "chunks_embedded": None, "chunks_uploaded": 0,
                 "status": "running", "error": "", "extraction_meta": "",
                 "started_at": now, "updated_at": now,
             }
-            return {"status": "created"}
+            return {"status": "created", "pipeline_id": pid, "run_epoch": 0}
+        row = self.pipelines[pid]
         if row["status"] == "completed":
-            return {"status": "skip"}
+            if not document:
+                return {"status": "skip", "pipeline_id": pid, "run_epoch": row["run_epoch"]}
+            # A leftover of a client that died between mark_completed and
+            # delete: wipe its WAL, reset it, answer "created".
+            self._delete_wal(pid)
+            # A takeover: the epoch is BUMPED, never reset (a delayed write
+            # from the completed run still holds the old one).
+            row.update(
+                status="running", keyed_by="document", total_pages=None,
+                pages_extracted=0, chunks_created=None, chunks_embedded=None,
+                chunks_uploaded=0, error="", extraction_meta="",
+                run_epoch=row["run_epoch"] + 1,
+                started_at=now, updated_at=now,
+            )
+            return {"status": "created", "pipeline_id": pid, "run_epoch": row["run_epoch"]}
+        keyed_by = "document" if document else "content_hash"
         if row["status"] == "failed":
-            row.update(status="resuming", updated_at=now)
-            return {"status": "resuming"}
+            row.update(status="resuming", keyed_by=keyed_by, run_epoch=row["run_epoch"] + 1, updated_at=now)
+            return {"status": "resuming", "pipeline_id": pid, "run_epoch": row["run_epoch"]}
         age = now_dt - datetime.fromisoformat(row["updated_at"])
         stale = age > STALE_THRESHOLD
         if stale:
-            row.update(status="resuming", updated_at=now)
-            return {"status": "resuming"}
+            row.update(status="resuming", keyed_by=keyed_by, run_epoch=row["run_epoch"] + 1, updated_at=now)
+            return {"status": "resuming", "pipeline_id": pid, "run_epoch": row["run_epoch"]}
         # running with a fresh heartbeat — nexus-lcmbp: LOUD conflict, never
         # a silent "skip" (mirrors PipelineRepository.create's Java twin).
         raise _ConflictRunning(
@@ -100,15 +243,16 @@ class FakePipelineEngine:
         )
 
     def state(self, params: dict) -> dict:
-        row = self.pipelines.get(params["content_hash"])
+        pid = self.resolve(params)
+        row = self.pipelines.get(pid) if pid is not None else None
         return {"pipeline": dict(row) if row else None}
 
     def write_pages(self, body: dict) -> dict:
-        h = body["content_hash"]
+        pid = self._require_run(body)
         now = self.clock().isoformat()
         for p in body["pages"]:
-            self.pages[(h, int(p["page_index"]))] = {
-                "content_hash": h, "page_index": int(p["page_index"]),
+            self.pages[(pid, int(p["page_index"]))] = {
+                "pipeline_id": pid, "page_index": int(p["page_index"]),
                 "page_text": p["page_text"],
                 "metadata_json": p.get("metadata_json", "{}"),
                 "created_at": now,
@@ -116,24 +260,26 @@ class FakePipelineEngine:
         return {"written": len(body["pages"])}
 
     def read_pages(self, params: dict) -> dict:
-        h = params["content_hash"]
+        pid = self.resolve(params)
+        if pid is None:
+            return {"pages": []}
         start = int(params.get("start", 0))
         rows = sorted(
-            (dict(r) for (ch, idx), r in self.pages.items() if ch == h and idx >= start),
+            (dict(r) for (rp, idx), r in self.pages.items() if rp == pid and idx >= start),
             key=lambda r: r["page_index"],
         )
         return {"pages": rows}
 
     def write_chunks(self, body: dict) -> dict:
-        h = body["content_hash"]
+        pid = self._require_run(body)
         now = self.clock().isoformat()
         inserted = 0
         for c in body["chunks"]:
-            key = (h, int(c["chunk_index"]))
+            key = (pid, int(c["chunk_index"]))
             if key in self.chunks:
                 continue  # INSERT OR IGNORE / ON CONFLICT DO NOTHING
             self.chunks[key] = {
-                "content_hash": h, "chunk_index": int(c["chunk_index"]),
+                "pipeline_id": pid, "chunk_index": int(c["chunk_index"]),
                 "chunk_text": c["chunk_text"], "chunk_id": c["chunk_id"],
                 "metadata_json": c.get("metadata_json", "{}"),
                 "embedding": c.get("embedding"),  # wire form: None | "" | base64
@@ -143,11 +289,13 @@ class FakePipelineEngine:
         return {"inserted": inserted}
 
     def read_chunks(self, params: dict) -> dict:
-        h = params["content_hash"]
+        pid = self.resolve(params)
+        if pid is None:
+            return {"chunks": []}
         uploadable = params.get("uploadable") in ("1", 1, True)
         limit = int(params.get("limit", 0))
         rows = sorted(
-            (dict(r) for (ch, _), r in self.chunks.items() if ch == h and r["uploaded"] == 0),
+            (dict(r) for (rp, _), r in self.chunks.items() if rp == pid and r["uploaded"] == 0),
             key=lambda r: r["chunk_index"],
         )
         if uploadable:
@@ -157,94 +305,102 @@ class FakePipelineEngine:
         return {"chunks": rows}
 
     def progress(self, body: dict) -> dict:
-        h = body["content_hash"]
         fields = body["fields"]
         bad = set(fields) - _PROGRESS_FIELDS
         if bad:
             raise ValueError(f"Unknown progress fields: {bad}")
-        row = self.pipelines.get(h)
+        pid = self._lock_run(body)
+        row = self.pipelines.get(pid) if pid is not None else None
         if row is not None:
             row.update(fields)
             row["updated_at"] = self.clock().isoformat()
-        return {"updated": row is not None}
+        return {"updated": True}
 
     def extraction_meta(self, body: dict) -> dict:
-        row = self.pipelines.get(body["content_hash"])
+        pid = self._lock_run(body)
+        row = self.pipelines.get(pid) if pid is not None else None
         if row is not None:
             row["extraction_meta"] = body["metadata_json"]
             row["updated_at"] = self.clock().isoformat()
-        return {"updated": row is not None}
+        return {"updated": True}
 
     def complete(self, body: dict) -> dict:
-        return self._set_status(body["content_hash"], "completed")
+        return self._set_status(body, "completed")
 
     def fail(self, body: dict) -> dict:
-        result = self._set_status(body["content_hash"], "failed")
-        row = self.pipelines.get(body["content_hash"])
-        if row is not None:
-            row["error"] = body.get("error", "")
-        return result
+        return self._set_status(body, "failed", error=body.get("error", ""))
 
-    def _set_status(self, h: str, status: str) -> dict:
-        row = self.pipelines.get(h)
+    def _set_status(self, ref: dict, status: str, *, error: str | None = None) -> dict:
+        pid = self._lock_run(ref)  # one lock per logical write, as the engine
+        row = self.pipelines.get(pid) if pid is not None else None
         if row is not None:
             row["status"] = status
+            if error is not None:
+                row["error"] = error
             row["updated_at"] = self.clock().isoformat()
-        return {"updated": row is not None}
+        return {"updated": True}
 
     def mark_uploaded(self, body: dict) -> dict:
-        h = body["content_hash"]
+        pid = self._lock_run(body)
+        if pid is None:
+            return {"updated": 0}
         n = 0
         for idx in body["chunk_indices"]:
-            row = self.chunks.get((h, int(idx)))
+            row = self.chunks.get((pid, int(idx)))
             if row is not None:
                 row["uploaded"] = 1
                 n += 1
         return {"updated": n}
 
     def counts(self, params: dict) -> dict:
-        # Mirrors PipelineHandler.handleCounts exactly: a blank/absent
-        # content_hash yields embedded_chunks=0 (NOT a global sum) — the
-        # count is per-pipeline-only by contract (.16 critic Significant #3).
-        h = params.get("content_hash")
-        if not h:
+        # Mirrors PipelineHandler.handleCounts exactly: a call naming no row
+        # at all yields embedded_chunks=0 (NOT a global sum) — the count is
+        # per-pipeline-only by contract (.16 critic Significant #3).
+        if not params.get("pipeline_id") and not params.get("content_hash"):
             embedded = 0
         else:
-            embedded = sum(
-                1 for (ch, _), r in self.chunks.items()
-                if ch == h and r["embedding"] is not None
+            pid = self.resolve(params)
+            embedded = 0 if pid is None else sum(
+                1 for (rp, _), r in self.chunks.items()
+                if rp == pid and r["embedding"] is not None
             )
         return {"embedded_chunks": embedded, "pipelines": len(self.pipelines)}
 
     def clear_wal(self, body: dict) -> dict:
-        h = body["content_hash"]
-        self.pages = {k: v for k, v in self.pages.items() if k[0] != h}
-        self.chunks = {k: v for k, v in self.chunks.items() if k[0] != h}
+        pid = self._lock_run(body)  # lock and compare BEFORE the WAL wipe
+        if pid is None:
+            return {"cleared": True}
+        self._delete_wal(pid)
         # nexus-33q80: zero chunks_uploaded/pages_extracted on the pipeline
         # row in the SAME call as the wipe, mirroring
         # PipelineRepository.clearOrphanWal's single transaction.
-        row = self.pipelines.get(h)
-        if row is not None:
-            row["chunks_uploaded"] = 0
-            row["pages_extracted"] = 0
-            row["updated_at"] = self.clock().isoformat()
+        row = self.pipelines[pid]
+        row["chunks_uploaded"] = 0
+        row["pages_extracted"] = 0
+        row["updated_at"] = self.clock().isoformat()
         return {"cleared": True}
 
+    def _delete_wal(self, pid: int) -> None:
+        self.pages = {k: v for k, v in self.pages.items() if k[0] != pid}
+        self.chunks = {k: v for k, v in self.chunks.items() if k[0] != pid}
+
     def delete(self, body: dict) -> dict:
-        h = body["content_hash"]
-        self.clear_wal(body)
-        self.pipelines.pop(h, None)
+        pid = self._lock_run(body)
+        if pid is None:
+            return {"deleted": False}
+        self._delete_wal(pid)  # the FK cascade
+        self.pipelines.pop(pid, None)
         return {"deleted": True}
 
     def delete_collection(self, body: dict) -> dict:
         collection = body["collection"]
-        hashes = [h for h, r in self.pipelines.items() if r["collection"] == collection]
-        for h in hashes:
-            self.delete({"content_hash": h})
-        return {"deleted": len(hashes)}
+        pids = [pid for pid, r in self.pipelines.items() if r["collection"] == collection]
+        for pid in pids:
+            self.delete({"pipeline_id": pid})
+        return {"deleted": len(pids)}
 
     def list_pipelines(self, params: dict) -> dict:
-        return {"pipelines": [dict(r) for r in self.pipelines.values()]}
+        return {"pipelines": [dict(r) for _, r in sorted(self.pipelines.items())]}
 
     # ── httpx transport ─────────────────────────────────────────────────────
 
@@ -279,6 +435,16 @@ class FakePipelineEngine:
             return httpx.Response(200, json=getattr(self, method_name)(payload))
         except ValueError as exc:
             return httpx.Response(400, json={"error": str(exc)})
+        except _StaleRun as exc:
+            return httpx.Response(409, json={
+                "error": str(exc),
+                "status": "stale_run",
+                "pipeline_id": exc.pipeline_id,
+                "content_hash": exc.content_hash,
+                "run_epoch": exc.run_epoch,
+                "current_epoch": exc.current_epoch,
+                "remedy": _StaleRun.REMEDY,
+            })
         except _ConflictRunning as exc:
             return httpx.Response(409, json={
                 "error": str(exc),
