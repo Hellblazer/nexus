@@ -378,7 +378,14 @@ class ChannelWaiter:
     referenced one wake apart (the second becomes the new cursor position
     the very next tick, immediately, not gated on the first being acked);
     a restart walks a backlog one reference per wake, exactly as RDR-213
-    already says a restart re-announces once more.
+    already says a restart re-announces once more. The cursor is not
+    perfectly ordered against the engine's own ``created_at`` (stamped at
+    transaction start, not commit -- ``nexus-vsipz``), so a row from a
+    slower, earlier-started transaction can commit after the cursor has
+    already advanced past a younger row's position and be skipped by
+    every later ``since`` query; the cost is a delayed wake, never a lost
+    message, since the ``UserPromptSubmit`` drain hook and ``tuple_in``
+    both filter by claim state, not by this cursor.
 
     Constants (`wait_timeout_s`, `reannounce_interval_s`, `max_announces`)
     default to the production values (RDR-213 Technical Design "Delivery":
