@@ -15,8 +15,15 @@ equivalent is a contract break.
 
 **Why an explicit boundary.** None of the 16 retired scripts set ``set -e``, and
 several say so in a comment: a hook must never fail. Bash gets that by default;
-Python does not, so every verb and tool is wrapped in :func:`never_fail`, which
-turns a crash into the same thing a hook that decided to stay silent produces.
+Python does not, so a ported hook is wrapped in :func:`never_fail`, which turns
+a crash into the same thing a hook that decided to stay silent produces.
+
+**One hook must not use this.** ``phase_review_close_requires_gate`` is the
+routing framework's only ``fail_closed: true`` rule
+(``conexus/hooks/scripts/routing/registry.yaml``), and failing open is exactly
+the wrong answer there — a crash would let a phase close without its gate. It
+needs a deny-emitting counterpart, not this boundary. Bead nexus-q02nx.21 owns
+that decision; do not reach for :func:`never_fail` on that hook by habit.
 """
 from __future__ import annotations
 
@@ -175,12 +182,19 @@ def never_fail(body: Callable[[], HookResult], hook: str) -> HookResult:
 
     Interpreter-shutdown signals pass through. Swallowing ``KeyboardInterrupt``
     or ``SystemExit`` would turn the harness killing a hook into a hang, which
-    is the opposite of failing open.
+    is the opposite of failing open. Cancellation passes through for the same
+    reason: ``asyncio.CancelledError`` is a ``BaseException``, the tool tier
+    calls ``run()`` from async handlers, and a swallowed cancellation breaks the
+    caller's own timeout rather than the hook's.
     """
     try:
         return body()
     except (KeyboardInterrupt, SystemExit, GeneratorExit):
         raise
     except BaseException as exc:  # noqa: BLE001 — the whole point: a hook must never fail
+        import asyncio  # noqa: PLC0415 — deferred import; only the crash path pays it, and nx-hook's cold start is budgeted
+
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         _log.warning("hook_boundary_swallowed_exception", hook=hook, error=str(exc))
         return HookResult()

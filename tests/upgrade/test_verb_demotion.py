@@ -283,6 +283,13 @@ def test_the_advertisement_census_is_not_vacuous() -> None:
     # Docstrings — prose, never user output — stay out of scope.
     assert _printed_strings("'''Run: nx guided-upgrade.'''\nx = 'plain'\n") == ["plain"]
 
+    # An allowlist entry is keyed by the FILE the parametrization uses, so one
+    # keyed on a package name ("hooks") would match nothing and quietly grant
+    # nothing. Empty today; this keeps it honest if an entry is ever added.
+    scanned = set(_surface_files())
+    for module, _verb in _ADVERTISEMENT_ALLOWLIST:
+        assert module in scanned, f"allowlist names {module!r}, which nothing scans"
+
     root = Path(nexus.__file__).parent
     for entry in _EVERYDAY_SURFACE_MODULES:
         path = root / entry

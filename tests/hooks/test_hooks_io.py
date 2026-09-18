@@ -10,6 +10,7 @@ routing framework match on the rendered text.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 
@@ -196,9 +197,19 @@ def test_never_fail_swallows_an_error_raised_outside_the_normal_hierarchy():
     assert _io.never_fail(boom, "demo").exit_code == 0
 
 
-@pytest.mark.parametrize("exc", [KeyboardInterrupt, SystemExit], ids=["sigint", "sysexit"])
-def test_never_fail_lets_interpreter_shutdown_through(exc):
-    """The harness kills hooks; swallowing that would turn a SIGTERM into a hang."""
+@pytest.mark.parametrize(
+    "exc",
+    [KeyboardInterrupt, SystemExit, GeneratorExit, asyncio.CancelledError],
+    ids=["sigint", "sysexit", "generatorexit", "cancelled"],
+)
+def test_never_fail_lets_shutdown_and_cancellation_through(exc):
+    """The harness kills hooks; swallowing that would turn a SIGTERM into a hang.
+
+    Cancellation is here for a different reason: ``asyncio.CancelledError`` is a
+    ``BaseException``, so a boundary that catches ``BaseException`` swallows it
+    by default. The tool tier calls ``run()`` from async handlers, so swallowing
+    it would break the *caller's* timeout while the hook reported success.
+    """
 
     def boom() -> _io.HookResult:
         raise exc()
