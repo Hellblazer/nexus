@@ -5879,7 +5879,7 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
     The waiter alive with a fresh `last_wake` (within
     :data:`_TUPLE_CHANNEL_DELIVERY_STALE_S` of now) is OK, reporting wake
     age, `announced` (the cumulative count of distinct rows ever pushed),
-    `pending` (0 or 1 -- a row announced and not yet gone) and
+    `pending` (0 or 1 per subscribed mailbox: a reference sent and not yet superseded) and
     `oldest_pending_age_s` when `pending` is nonzero. A session launched
     without a channel flag (`--channels plugin:conexus@nexus-plugins` or
     `--dangerously-load-development-channels server:nexus`) reports the

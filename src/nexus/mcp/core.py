@@ -759,6 +759,10 @@ def _start_channel_waiter() -> None:
     heuristic guessed from process lifetime, argv, or parentage.
     """
     if _os.environ.get("NX_MCP_PROBE") == "1":
+        # Logged, never silent: if this variable ever leaks into a real
+        # session's environment, the line below is the only trace of why
+        # that session has no channel waiter.
+        _log.info("channel_waiter_skipped_probe_process", pid=_os.getpid())
         return
     session_id = _current_subscription_session_id()
     if not session_id or _channel.active_waiter(session_id) is not None:
