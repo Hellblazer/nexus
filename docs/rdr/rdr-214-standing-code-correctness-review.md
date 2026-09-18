@@ -2,7 +2,8 @@
 title: "Standing-Code Correctness Review: From Pilot to Decision"
 id: RDR-214
 type: Technical Debt
-status: draft
+status: abandoned
+close_reason: Sam's decision 2026-09-18: the batch tier re-creates a backlog the fix-don't-file rule forbids, triage cost is uncosted, the near-ceiling result measures reviewer self-consistency, and the design adds process tooling; the remediation loop from the pilot has not closed
 priority: medium
 author: Sam
 reviewed-by: self
@@ -647,3 +648,4 @@ on the expensive half and leaves the cheap half nearly unconstrained.
 - 2026-09-18: Gate round 1 — BLOCKED (1 Critical, 6 Significant, 0 ship-blocker(s)); commit `f908e70dd`; critique `nexus_rdr/214-gate-critique-2026-09-18-r1`.
 - 2026-09-18: Gate round 2 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `08bce74d6`; critique `nexus_rdr/214-gate-critique-2026-09-18-r2`.
 - 2026-09-18: Gate round 3 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `5fe31be98`; critique `nexus_rdr/214-gate-critique-2026-09-18-r3`.
+- 2026-09-18: Abandoned by Sam after gate round 3. Reason in frontmatter `close_reason`; the assessment that led to it is in T2 `nexus_rdr/214-gate-critique-2026-09-18-r3` and this session. The pilot remediation beads under nexus-cd1k0 and nexus-u1jxt stay open on their own merits.
