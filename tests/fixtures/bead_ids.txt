@@ -2286,6 +2286,7 @@ nexus-cd1k0.17
 nexus-cd1k0.18
 nexus-cd1k0.19
 nexus-cd1k0.2
+nexus-cd1k0.20
 nexus-cd1k0.3
 nexus-cd1k0.4
 nexus-cd1k0.5
@@ -5751,6 +5752,7 @@ nexus-u1hpu
 nexus-u1jxt
 nexus-u1jxt.1
 nexus-u1jxt.10
+nexus-u1jxt.11
 nexus-u1jxt.2
 nexus-u1jxt.3
 nexus-u1jxt.4
@@ -6044,6 +6046,7 @@ nexus-vpl9c.1
 nexus-vqnls
 nexus-vqnls.1
 nexus-vscgz
+nexus-vsipz
 nexus-vtgeq
 nexus-vtp8h
 nexus-vu0
