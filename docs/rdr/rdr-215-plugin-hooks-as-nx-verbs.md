@@ -126,9 +126,14 @@ this RDR finishes it.
   `routing-stats` (`src/nexus/commands/hook.py`).
 - Hook tests: 36 files under `tests/hooks/`, most driving the scripts as
   subprocesses with a fixture `hooks.json` payload on stdin.
-- External tools the bash layer calls, by count of call sites: `nx` 74,
-  `python3` 70, `bd` 29, `awk` 22, `timeout` 16, `git` 16, `stat` 6,
-  `mktemp` 5, `sed` 4, `date` 4, `uname` 1, `curl` 1.
+- External commands the bash layer actually calls (research-6, a read of
+  every script, not a word count): `python3` for every JSON parse and
+  build, `awk` for the ledger, `mkdir`, `rmdir`, `find`, `ln -s` for
+  locks and claims, `nx` (`scratch`, `catalog sync`, `catalog
+  links-for-file`, `tuple`, `hook session-start`), `bd` (`list`,
+  `set-state`), `git` (`status --porcelain`, `rev-parse`), `date -u`,
+  `stat` in both BSD and GNU spellings, `mktemp`, `shasum`. No script
+  calls `jq`, `timeout`, `uname` or `curl`.
 
 ## Research Findings
 
@@ -162,6 +167,10 @@ Python hooks already present and launched through the bash launcher:
 `routing/phase_review_close_requires_gate.py`, and their helper modules.
 These need only a declaration change to exec form once a verb wraps them.
 
+The full contract map, one row per script with stdin fields, stdout
+shapes, exit codes, files touched outside the repo and every quoting
+site, is T2 `nexus_rdr/215-hook-contract-map` (research-6).
+
 ### Key Discoveries
 
 - **Verified** (source search, 2026-09-18): the Python hooks import
@@ -181,6 +190,19 @@ These need only a declaration change to exec form once a verb wraps them.
   `command -v nx` and degrade when it is absent; the close gate warns when
   `bd` is missing. A verb-based layer inherits that assumption rather than
   adding one. *Source: T2 `nexus_rdr/215-research-4`.*
+- **Verified** (source search, 2026-09-18): every hook exits 0 on every
+  path and encodes a block in its JSON body; the one exception is the sn
+  session-start script, which inherits `cat`'s exit. `set -e` and
+  `pipefail` are absent by design ("must never fail"), so a port needs an
+  explicit try-and-swallow boundary per verb to keep that property. The
+  ledger's atomic claims are `mkdir` and `ln -s`, which `os.mkdir` and
+  `os.symlink` reproduce exactly. *Source: T2
+  `nexus_rdr/215-hook-contract-map`.*
+- **Verified** (source search, 2026-09-18): `nx-session-end-launcher`
+  (`src/nexus/_session_end_launcher.py`) already exists as a console
+  script that imports only `os` and `sys` before it forks, built because
+  the Click import raced Claude Code's SIGTERM. It is the template for
+  `nx-hook` and for the two async tuple wrappers. *Source: research-6.*
 - **Verified** (spike, 2026-09-18, dev Mac, mean of five runs): the cost of
   an `nx` invocation is the CLI's import tree, not Python. The generation
   interpreter starts in 0.010 s and imports `nexus` in 0.010 s;
@@ -239,20 +261,62 @@ These need only a declaration change to exec form once a verb wraps them.
 
 ### Technical Design
 
-To be written after the first port (the smallest decision-emitting hook,
-`auto-approve-nx-mcp.sh`) settles the module shape: how a verb reads the
-payload, how it logs, how it reports a decision, and how a test drives it
-without a shell.
+**Entry point.** `nx-hook = "nexus.hooks.entry:main"` in
+`pyproject.toml`'s console-script table, beside `nx-session-end-launcher`
+and built the same way: the module imports `os`, `sys` and `json` only,
+reads `argv[1]` as the verb, and imports `nexus.hooks.<verb>` lazily.
+The Click group `nx hook` keeps its six verbs for a human and gains
+aliases to the new ones, but no `hooks.json` entry names `nx`.
 
-Open questions the design must settle:
+**Package.** `src/nexus/hooks/` (the existing `nexus.hooks` module that
+`session-start` calls becomes `nexus/hooks/__init__.py`). One module per
+retired script, one `run(payload: dict | None, argv: list[str]) -> int`
+per module. A shared `_io.py` holds the three things every script
+re-implemented: read the payload from stdin (TTY-aware, empty or
+malformed reads as `None`, as `_read_stdin_payload` does today), write a
+decision envelope (`hookSpecificOutput` with `permissionDecision` or
+`additionalContext`, or the top-level `decision` form the stop hooks
+use), and the never-fail boundary (a verb that raises logs the traceback
+to the hook log and exits 0 with no output, which is what the bash
+scripts' missing `set -e` gives them today).
 
-- Hooks that must not block the client (the two `*-tuple-async.sh`
-  wrappers spawn `nx` and return) need a portable detach. `subprocess.Popen`
-  with the standard streams closed is portable; process groups are not.
-- `pre_close_verification_hook.sh` reads T1 through the CLI and greps
-  Bash commands for `bd close`; the port keeps its matcher and its
-  refusal text verbatim, since three AGENTS.md entries quote it.
-- The sn plugin's hooks are small and can move in one step.
+**Exit codes and stdout are contracts.** The map lists them per script;
+the port reproduces each byte for byte, and the retargeted test asserts
+them. Two are quoted outside the repo's tests: the ledger verbs' codes
+(0 clean, 1 BLINDSPOT, 2 undeclared, 3 no ledger for `undeclared`; 0, 2,
+4 for `reconcile`) in AGENTS.md and the orchestration skill, and the
+close gate's deny text in 19 files.
+
+**The ledger** (`nexus.hooks.expectations`). A TSV file under
+`$XDG_STATE_HOME/nexus/orchestration/<session>.expectations` with
+`mkdir` lock directories and `ln -s` credit slots; the module keeps the
+file format, the paths and the atomicity primitives (`os.mkdir`,
+`os.symlink`, both atomic on every platform nexus runs on), and exposes
+`expect`, `start`, `census`, `undeclared`, `reconcile`, `archive`,
+`sweep` as verbs. `tests/e2e/lib/expectations.sh` and the byte-identity
+test go; the e2e scripts call `nx-hook <verb>`.
+
+**Async wrappers.** The two `*-tuple-async.sh` scripts background a
+Python projector and exit in about 18 ms. Their port is the launcher's
+double-fork with the standard streams redirected to `/dev/null`, in the
+entry module before any heavy import.
+
+**Shared resolver.** `NX_ORCH_STOP_GUARD` is read inline by four scripts
+today; `nexus.hooks._config` resolves it once.
+
+**Defects fixed in the port, not carried.** The close gate's `bd create`
+deny path omits `permissionDecisionReason`; the sn auto-approve wrapper
+swallows a Python crash with an unconditional `exit 0`; the sn
+session-start script has no error boundary at all. Each gets the shared
+envelope and boundary.
+
+**Tests.** Each retargeted test keeps its stdin fixture and expected
+bytes and spawns `nx-hook <verb>` instead of `bash <script>`. Three
+scripts have no test in `tests/hooks/` (`sn/session-start.sh`,
+`sn/mcp-inject.sh`, and the sn auto-approve wrapper); their ports get
+one. A lint test asserts no `hooks.json` command names `bash`, `sh` or a
+`.sh` path, and that every `command` is `nx-hook` or an existing console
+script.
 
 ### Decision Rationale
 
@@ -403,3 +467,6 @@ To be completed before the gate.
 - 2026-09-18: research-4 and research-5 recorded; the entry point moves
   from `nx hook` to a dedicated `nx-hook` console script after measuring
   the CLI's 0.8 s eager import.
+- 2026-09-18: research-6, the contract map; Technical Design written from
+  it; the external-command list corrected (no `timeout`, `uname`, `curl`
+  or `jq`).
