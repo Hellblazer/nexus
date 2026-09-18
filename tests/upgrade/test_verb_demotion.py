@@ -177,8 +177,30 @@ _EVERYDAY_SURFACE_MODULES = (
     "commands/upgrade.py",
     "commands/doctor.py",
     "health.py",
-    "hooks.py",
+    "hooks",
 )
+
+
+def _surface_files() -> tuple[str, ...]:
+    """Expand each surface entry to the files it covers, relative to the package.
+
+    An entry may name a module (``health.py``) or a package (``hooks``). A
+    package expands to every ``.py`` file under it, so adding a module to a
+    covered package does not silently fall outside this gate — which is exactly
+    what a hardcoded ``hooks.py`` did when RDR-215 turned that module into a
+    package (bead nexus-q02nx.1).
+    """
+    root = Path(nexus.__file__).parent
+    resolved: list[str] = []
+    for entry in _EVERYDAY_SURFACE_MODULES:
+        target = root / entry
+        if target.is_dir():
+            resolved.extend(
+                sorted(str(f.relative_to(root)) for f in target.rglob("*.py"))
+            )
+        else:
+            resolved.append(entry)
+    return tuple(resolved)
 
 #: Where a demoted verb name may legitimately appear in a printed string.
 #: EMPTY, deliberately — and an empty allowlist is a real claim, not an
@@ -231,7 +253,7 @@ def _advertisements(text: str) -> list[str]:
     return [verb for verb in _UNADVERTISABLE if f"nx {verb}" in text]
 
 
-@pytest.mark.parametrize("module", _EVERYDAY_SURFACE_MODULES)
+@pytest.mark.parametrize("module", _surface_files())
 def test_everyday_surfaces_never_advertise_a_demoted_verb(module: str) -> None:
     path = Path(nexus.__file__).parent / module
     offenders = [
@@ -261,10 +283,19 @@ def test_the_advertisement_census_is_not_vacuous() -> None:
     # Docstrings — prose, never user output — stay out of scope.
     assert _printed_strings("'''Run: nx guided-upgrade.'''\nx = 'plain'\n") == ["plain"]
 
-    for module in _EVERYDAY_SURFACE_MODULES:
-        path = Path(nexus.__file__).parent / module
-        assert path.exists(), f"{module} moved — the census is scanning nothing"
-        assert _printed_strings(path.read_text()), f"{module} parsed to zero strings"
+    root = Path(nexus.__file__).parent
+    for entry in _EVERYDAY_SURFACE_MODULES:
+        path = root / entry
+        assert path.exists(), f"{entry} moved — the census is scanning nothing"
+        # Per ENTRY, not per file: a package's claim is that the surface as a
+        # whole is being read. Asserting it file-by-file would fail the day a
+        # hook module legitimately holds no string literal, which is a property
+        # of that module, not evidence the census rotted.
+        covered = [f for f in _surface_files() if f == entry or f.startswith(f"{entry}/")]
+        assert covered, f"{entry} expanded to no files"
+        assert any(
+            _printed_strings((root / f).read_text()) for f in covered
+        ), f"{entry} parsed to zero strings across {len(covered)} file(s)"
 
 
 def test_no_upgrade_verb_grew_back(runner: CliRunner) -> None:
