@@ -223,26 +223,25 @@ throwaway engine with real sessions).
    claiming nothing. Only a session without those hooks claims with
    `tuple_in` on its mailbox, then acks, nacks, releases or replies as
    today.
-2. **One message in front of the session at a time, bounded.** The waiter
-   announces only the oldest unclaimed row of each mailbox. Once a row is
-   announced, that mailbox leaves the wait and is checked once per tick
-   (about every 25 seconds) and at each re-announce point instead of
-   parking continuously; boards and every other mailbox keep parking (a
-   mailbox left parking with a pending row busy-loops, measured at over 160
-   wakes a second and enough to exhaust the test box's ephemeral ports).
-   It re-announces the same row at most once every 150 seconds and at most
-   five times, then stops announcing it and leaves it to the drain hook. A
-   restart announces it once more. This keeps RDR-211's back-pressure
-   ruling in effect with no claim.
+2. **Announcements are rate-limited by a cursor, not gated on the previous
+   ack.** The waiter tracks a per-mailbox cursor past the last row it
+   referenced, kept in the wait spec on every tick, the same shape a board
+   topic already uses. Each new row is announced once as it passes the
+   cursor, at most one reference per mailbox per wake; the waiter never
+   reads a row back to check whether it is still current. It re-announces
+   the last reference at most once every 150 seconds and at most five
+   times, then stops. A restart starts the cursor empty, so the oldest row
+   is announced once more.
 3. **No proof, no probe, no flag table.** The waiter starts parking at
    lifespan start and pushes whenever a row appears. A session that cannot
    hear the channel loses nothing: its rows stay available and the drain hook
    renders them at the next prompt. `tuple_channel_probe` and
    `detect_channel_argv` are deleted, not kept as fallbacks.
 4. **The status record and doctor row report what is observable.** `alive`,
-   `last_wake`, `announced` (rows announced, cumulative), `pending` (rows
-   announced and not yet gone, 0 or 1 per mailbox), `oldest_pending_age_s`.
-   The `proof`, `unacked` and `released` facts go.
+   `last_wake`, `announced` (references sent for distinct rows, cumulative),
+   `pending` (mailboxes whose last reference is under budget and not yet
+   superseded, 0 or 1 per mailbox), `oldest_pending_age_s` (age of the
+   oldest such reference). The `proof`, `unacked` and `released` facts go.
 5. **Skills and docs say claim, not read.** The mailbox skill's push rule
    becomes: if the notification's body is rendered with that same prompt,
    act on it, claiming nothing, since the drain hook already claimed and
@@ -255,17 +254,21 @@ throwaway engine with real sessions).
 ### Technical Design
 
 **Delivery.** `tick()` builds one spec per subscription: boards with their
-cursor as today, and mailboxes with `n=1` and no cursor, except a mailbox
-already holding an announced, still-pending row: that mailbox leaves the
-wait and is checked directly, once per tick, instead of through `wait`.
-On wake, board results are handled as today. For each mailbox checked, the
-waiter looks at its oldest row. If that row's id is not in the announce
-table, it sends the reference and records `(id, first_announced, count=1)`.
-If it is, and `now - last_announced >= 150 s` and `count < 5`, it re-sends
-and increments. Otherwise it does nothing. A row that stops appearing
-(claimed, consumed, expired) is dropped from the table at the next check it
-is absent. The table is in memory; a restart starts empty, so the oldest
-row is announced once more.
+cursor as today, and mailboxes the same shape, `n=1` since a per-mailbox
+cursor past the last row referenced. Every subscription is in the spec on
+every tick; nothing removes a mailbox from it. On wake, for each mailbox
+result the waiter sends a reference for the returned row, advances the
+cursor to it, and records it as the last reference (tuple id, `sent_at`,
+`count=1`) -- unless the row is dead-lettered, in which case the cursor
+still advances past it but no reference is sent, since the drain hook
+already surfaces a dead row once on its own. On a tick with no new row for
+a mailbox whose last reference is still within budget (`count < 5` and
+`now - sent_at >= 150 s`), the waiter re-sends that same reference and
+increments the count. It never reads a row back to check whether it is
+still the head, whether it was claimed, or whether it dead-lettered after
+the fact: the cursor's advance and the last-reference budget are the only
+state kept, in memory; a restart starts the cursor empty, so the oldest row
+is announced once more.
 
 **Notification content**, unchanged in shape from RDR-211's reference:
 subspace, tuple id, and one line telling the session how to get the body:
@@ -280,18 +283,16 @@ nexus mailbox message: subspace {subspace}, tuple {tuple_id}. If its body is ren
 ```
 
 **Back pressure.** A mailbox with two available rows announces the oldest
-only. While that row stays pending, the mailbox is checked once per tick
-(about every 25 seconds) rather than through `wait`; once it is claimed and
-acked, the mailbox re-enters the wait spec and the next tick returns the
-next row, which the waiter announces.
+first; the cursor moves past it, so the next wake (immediate, since the
+spec now matches the second row) returns and announces the second. Nothing
+waits for the first row's ack. The bound is the rate limit itself: at most
+one new-row reference per mailbox per wake, plus the 150 s / five-time
+budget for re-sending the last one.
 
-**Empty spec.** The spec is empty when every subscription is a mailbox with
-a pending, already-announced row; the waiter then sleeps to the next tick
-or re-announce point instead of calling `wait`, rather than looping the
-call with nothing new to ask for (the reason: the MVV measured the earlier
-design at over 160 wakes a second and ephemeral-port exhaustion on the test
-box). A session subscribed to any idle mailbox or a board still has a
-non-empty spec on every tick and parks on `wait` as before.
+**Empty spec.** With every subscription, mailbox or board, in the spec on
+every tick, the spec list is never empty; the 7.51.1 sleep branch is dead
+code and is removed, with a test that proves a mailbox-only session parks
+on `wait` every tick.
 
 **Errors.** The 7.51.1 rule stays: a bare 404 from `wait` stops the waiter
 (engine without the route); any other failure is logged and retried after a
@@ -306,22 +307,23 @@ backoff.
 `tuple_release`. The deletion census test of RDR-211 gains these names.
 
 ```text
-// Illustrative; the announce table and its cadence
-announce: dict[tuple_id, (first_announced: float, last_announced: float, count: int)]
-on tick, for each mailbox m:
-  if m has an announced, still-pending row: check it directly, once, skip the wait for m
-  else: include m in this tick's wait spec
-for the row r seen for m (from wait, or the direct check):
-  if r.id not in announce: send(ref(m, r.id)); announce[r.id] = (now, now, 1)
-  elif now - last >= 150 and count < 5: send(ref(m, r.id)); update
-drop ids absent from this tick's result for m
+// Illustrative; the cursor and its re-send budget
+_cursor: dict[subspace, (created_at, id)]          // position past the last reference sent
+_last_ref: dict[subspace, (tuple_id, sent_at, count)]
+
+build_specs: every mailbox, every tick, n=1, since=_cursor.get(subspace)
+on a wake returning row R for mailbox m:
+  if R is dead-lettered: _cursor[m] = (R.created_at, R.id); continue  // skip, no reference
+  send(ref(m, R.id)); _cursor[m] = (R.created_at, R.id); _last_ref[m] = (R.id, now, 1)
+on a tick with no wake for m, _last_ref[m] set, count < 5, now - sent_at >= 150:
+  re-send the same reference; count += 1
 ```
 
 ### Existing Infrastructure Audit
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| Mailbox announce table | `_deliver_board_post` and the board cursor in `channel.py` | Extend: the board path is already notify-only; mailboxes use a per-row table where boards use a cursor |
+| Mailbox announce cursor | `_deliver_board_post` and the board cursor in `channel.py` | Reuse: the board path is already notify-only with a cursor; mailboxes use the identical cursor shape, not a separate per-row table |
 | Session-side claim | `tuple_in` MCP tool, `mailbox_drain.py` claim loop | Reuse unchanged |
 | Status record and doctor row | `write_channel_status`, `_check_tuple_channel_delivery` in `health.py` | Extend: replace the three claim facts with the two announce facts |
 | Proof gate and probe | `detect_channel_argv`, `tuple_channel_probe` | Replace with nothing; delete |
@@ -394,9 +396,12 @@ the drain hook or a restart mid-work; every lapse counts an attempt against
 
 ### Risks and Mitigations
 
-- **Risk**: sessions do not act on the reference and rows pile up unclaimed.
-  **Mitigation**: the drain hook claims at the next prompt as before; the
-  doctor row reports `oldest_pending_age_s`.
+- **Risk**: a session ignores a reference; only the mailbox's latest
+  reference gets re-announced, so an earlier row that already got its one
+  reference is not pushed again.
+  **Mitigation**: the drain hook claims at the next prompt as before, for
+  every available row regardless of announce history; the doctor row
+  reports `oldest_pending_age_s` for the mailbox's current reference.
 - **Risk**: the re-announce cadence wakes an idle session five times for one
   ignored message.
   **Mitigation**: the same bound RDR-211 chose for re-sends; the second
@@ -442,8 +447,9 @@ hooks and the channel: reference arrives, the drain hook claims, acks and
 renders the body at the wake, before the session's turn; the session acts
 on it, claiming nothing. Control, same mail to a session with the channel
 but without the plugin's hooks: reference arrives, the session claims with
-`tuple_in`, reads, acks. A second message follows the same way on the same
-waiter. (2) Mail to a session
+`tuple_in`, reads, acks. A second message sent right after the first
+produces its own reference one wake apart, not gated on the first's ack.
+(2) Mail to a session
 launched without the flag: no notification; the drain hook renders it at the
 next prompt. (3) Kill the MCP server between announce and claim, restart it:
 the row is announced once more and claimed. (4) Leave one message unclaimed
@@ -502,8 +508,8 @@ None.
   wake and the session acts on it, claiming nothing; without those hooks,
   the session's `tuple_in` claims it; no waiter claim ever recorded either
   way.
-- **Scenario**: two messages arrive together. **Verify**: only the oldest is
-  announced; the second is announced after the first is acked.
+- **Scenario**: two messages arrive together. **Verify**: two references,
+  one wake apart, in arrival order; neither waits for the other's ack.
 - **Scenario**: the session ignores a reference. **Verify**: re-announced at
   150 s intervals, five times, then silence; the drain hook renders it at the
   next prompt.
@@ -541,11 +547,10 @@ None.
 
 ### Performance Expectations
 
-No new load: a mailbox with no pending row waits as today; one with an
-already-announced, still-pending row is checked once per tick instead of
-looping the wait call, closing the busy-loop the earlier design ran there
-(the MVV measured at least 160 wakes a second before the fix).
-Announcements are bounded per row. Measured, not estimated, in the MVV.
+No new load: one `wait` per tick, every mailbox in the spec every time; no
+row is ever read back to check its state. Announcements are bounded by the
+per-mailbox, per-wake rate limit for new rows and the 150 s / five-time
+budget for a re-send. Measured, not estimated, in the MVV.
 
 ## Finalization Gate
 
@@ -650,3 +655,18 @@ The MVV is Phase 1's exit, not deferred.
   second and ephemeral-port exhaustion (Approach 2; Technical Design
   Delivery, Back pressure, Empty spec, the pseudocode; Performance
   Expectations).
+- 2026-09-17: Amended per Sam's decision (T2
+  `nexus_rdr/213-decision-announcements-rate-limited-not-ack-gated-2026-09-17`)
+  and the deep analysis it answers (T2 `nexus_rdr/213-waiter-deep-analysis-2026-09-17`
+  (1/2), (2/2)). The waiter's back pressure changes from "announce only the
+  oldest unclaimed row; the next row after the first is acked" to a
+  per-mailbox cursor, the same shape a board topic already uses: each new
+  row is announced once as it passes the cursor, at most one reference per
+  mailbox per wake, with the last reference re-sent at most every 150 s and
+  at most five times; the waiter never reads a row back. This also
+  replaces the round-3 text (a mailbox leaves the wait while a row is
+  pending, checked once per tick) with the cursor shape, which never
+  leaves the wait at all. Approach 2 and 4; Technical Design Delivery,
+  Back pressure, Empty spec, the pseudocode; the Existing Infrastructure
+  Audit row; Risks; Performance Expectations; the MVV part 1 second-message
+  expectation; Test Plan scenario 2.
