@@ -188,7 +188,7 @@ prediction was wrong, but the count is capped like the others, so it shows only
 that one capped pass does not exhaust a package
 (T2 `nexus_rdr/214-research-4`; beads under epic nexus-u1jxt).
 
-### Recapture: two independent passes over unfixed code (2026-09-17)
+### Recapture: a second pass over unfixed code (2026-09-17)
 
 To replace the capped counts, the daemon package and the seven quiet modules
 were each reviewed again at HEAD d8d45f761 by a fresh isolated reviewer under
@@ -338,7 +338,9 @@ say which findings are acted on.
    One uncapped pass alone re-found 89 and 83 percent of what the earlier
    capped pass had found, and held 96 and 93 percent of everything the two
    passes found together. A second pass over unchanged code added 4 and 8
-   percent. A package counts as reviewed after one pass.
+   percent. A package counts as reviewed after one pass, unless Phase 2's
+   two-pass check on `db` fails its threshold, in which case Phase 3 runs two
+   passes per package until three in a row come in under it.
 2. **Every finding carries an "affects" class.** The class is one of eight
    values in a checked table (below). It is assigned by rule from the file and
    the failure scenario. The reviewer proposes it and the session that takes
@@ -379,8 +381,9 @@ say which findings are acted on.
    like beads.
 7. **Each run records its own cost.** The ledger row gets, when the run's
    act-now beads close: commits made, reviewer findings against the fixes,
-   red runs on the integration branch, and regressions shipped. Three runs
-   after the first, those rows decide whether the practice continues.
+   red runs on the integration branch, and regressions shipped. After the
+   third run under the rule (the `db` run in Phase 2 is the first), those
+   rows decide whether the practice continues.
 
 ### Technical Design
 
@@ -419,11 +422,18 @@ what the caller then loses, which is usually diagnostics or service
 operations.
 
 **The ledger.** `docs/tables/standing-review-ledger.toml`. One row per run:
-package, reviewed commit, date, lines, brief hash, findings by class, beads
-filed, and the cost fields of Approach item 7. A second section lists
-dispositions: file, one-line description, the test or decision that settles
-it. The six capped passes and two recapture passes are entered as the first
-rows so the record starts complete.
+package, reviewed commit, date, lines, brief hash, findings by class, the
+predicted finding count when one was recorded before the run, beads filed,
+and the cost fields of Approach item 7. A batch-bead fix made later carries
+the run's row id in its commit message, so its cost is attributed to the run
+that found it. A second section lists dispositions: file, one-line
+description, the test or decision that settles it. A third section holds the
+Approach item 5 checkpoint entries: the three predicted-and-actual pairs and
+the fraction before and after. Dates, commits and counts are not enum
+values, so this file is checked by its own loading test in the sense of
+`docs/rdr/AGENTS.md`, not through the state-machine and decision-table
+loader the affects table uses. The six capped passes and two recapture
+passes are entered as the first rows so the record starts complete.
 
 **Order of the sweep.** By where act-now findings are most likely, from the
 classes of what each package handles: `db`, `catalog`, the indexing and
@@ -469,7 +479,7 @@ and a search query that could run a program.
 
 Simple to state and to check. It spends the same effort on unchanged code as
 on changed code, and the recapture shows a repeat pass over unchanged code
-adds about a tenth. Rejected in favour of return on change.
+adds 4 to 8 percent. Rejected in favour of return on change.
 
 ### Alternative 3: Fix every finding as it arrives
 
@@ -556,9 +566,10 @@ Sam whether to continue, change the tiers or stop.
 
 ## Test Plan
 
-- The two tables load and validate under the checked-table tests: every
-  ledger row names a class that exists, every class names a tier that exists,
-  every disposition names a file that exists.
+- The affects table loads under the decision-table loader; the ledger loads
+  under its own test: every ledger row names classes that exist in the
+  affects table, every affects row emits a disposition that exists, every
+  disposition entry names a file that exists.
 - The Phase 1 agreement measurement, with its prediction recorded first.
 - Each run's acceptance check: lines reviewed, time, and the not-reviewed
   list are present, and the reviewed commit is an ancestor of the branch.
