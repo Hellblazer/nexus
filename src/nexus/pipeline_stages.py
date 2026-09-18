@@ -39,7 +39,7 @@ import structlog
 from nexus.embed_window import window_for_model
 from nexus.pdf_chunker import PDFChunker
 from nexus.pdf_extractor import ExtractionResult, PDFExtractor
-from nexus.db.http_pipeline_client import HttpPipelineDB
+from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineRunFenced
 from nexus.retry import _vector_with_retry
 
 _log = structlog.get_logger(__name__)
@@ -892,10 +892,14 @@ def _force_t3_orphan_cleanup(t3: Any, collection: str, content_hash: str) -> int
     return actual
 
 
-def _mark_failed_and_reset_wal(db: HttpPipelineDB, content_hash: str, first_exc: BaseException) -> None:
+def _mark_failed_and_reset_wal(db: HttpPipelineDB, content_hash: str, first_exc: BaseException) -> bool:
     """Terminal bookkeeping for a failed pipeline run: mark the row failed
     and wipe its WAL. Never raises: the caller re-raises *first_exc*, and
-    nothing here may mask it.
+    nothing here may mask it. Returns True when the engine FENCED the
+    bookkeeping (nexus-8vu8p: a newer resume took the run over between
+    the original failure and this cleanup; the row and its WAL belong to
+    the new owner, and the caller must not stamp the catalog document
+    failed either), False otherwise.
 
     nexus-33q80: ``clear_orphan_wal`` now zeroes ``chunks_uploaded`` (and
     ``pages_extracted``, nexus-gl99l's own counter) on the pipeline row in
@@ -914,6 +918,16 @@ def _mark_failed_and_reset_wal(db: HttpPipelineDB, content_hash: str, first_exc:
     try:
         db.mark_failed(content_hash, error=str(first_exc))
         db.clear_orphan_wal(content_hash)
+    except PipelineRunFenced as fenced:
+        _log.warning(
+            "pipeline_run_fenced_at_cleanup",
+            content_hash=content_hash,
+            pipeline_id=fenced.pipeline_id,
+            run_epoch=fenced.run_epoch,
+            current_epoch=fenced.current_epoch,
+            original_error=str(first_exc),
+        )
+        return True
     except Exception:  # noqa: BLE001 — boundary catch: terminal-state bookkeeping must never mask first_exc
         _log.warning(
             "pipeline_terminal_mark_failed",
@@ -921,6 +935,7 @@ def _mark_failed_and_reset_wal(db: HttpPipelineDB, content_hash: str, first_exc:
             original_error=str(first_exc),
             exc_info=True,
         )
+    return False
 
 
 def pipeline_index_pdf(
@@ -1228,13 +1243,31 @@ def pipeline_index_pdf(
         # stays 'running' when the engine's /fail endpoint is down) is
         # covered systemically by lcmbp's young-running-row conflict
         # semantics: the NEXT retry is loud, never a silent skip.
-        _mark_failed_and_reset_wal(db, content_hash, first_exc)
+        # nexus-8vu8p: a run the engine fenced (a newer resume of the same
+        # document took the row over) owns nothing any more. Its terminal
+        # bookkeeping is refused, and it must not stamp the catalog document
+        # failed either: that is the SAME doc_id the new owner is indexing
+        # (a takeover is per document), and a late stamp would flip a
+        # document the new owner has already completed. The fence is
+        # discovered either as the stage's own exception or inside the
+        # cleanup's /fail call, hence both checks.
+        fenced = isinstance(first_exc, PipelineRunFenced)
+        if fenced:
+            _log.warning(
+                "pipeline_run_fenced",
+                content_hash=content_hash,
+                pipeline_id=first_exc.pipeline_id,
+                run_epoch=first_exc.run_epoch,
+                current_epoch=first_exc.current_epoch,
+            )
+        else:
+            fenced = _mark_failed_and_reset_wal(db, content_hash, first_exc)
         # nexus-5xn3k.4: _fence_fail never raises, so first_exc propagation
         # below cannot be masked by a fence-write failure. nexus-uxg4u:
         # never touch the catalog on a dry run (doc_id is already "" in
         # that case per the pre-flight gate above, but check explicitly
         # for the same defense-in-depth reason as the fence-begin gate).
-        if doc_id and not dry_run:
+        if doc_id and not dry_run and not fenced:
             from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
             _fence_fail(doc_id, str(first_exc))
         raise first_exc

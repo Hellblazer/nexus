@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from nexus.db.http_pipeline_client import PipelineConflictRunning
+from nexus.db.http_pipeline_client import PipelineConflictRunning, PipelineRunFenced
 from tests.pipeline_fake_engine import FakePipelineEngine, make_fake_engine_db
 
 _T0 = datetime(2026, 7, 18, 12, 0, 0, tzinfo=UTC)
@@ -441,7 +441,7 @@ class TestPerRowIdentity:
         db.mark_failed("h1", "crash")
         legacy = {"content_hash": "h1", "pdf_path": "/a.pdf", "collection": "docs__test"}
         resumed = engine.create(legacy)
-        assert resumed == {"status": "resuming", "pipeline_id": doc_id}
+        assert resumed == {"status": "resuming", "pipeline_id": doc_id, "run_epoch": 1}
         assert engine.pipelines[doc_id]["keyed_by"] == "content_hash"
         engine.progress({"content_hash": "h1", "fields": {"pages_extracted": 3}})
         assert engine.pipelines[doc_id]["pages_extracted"] == 3
@@ -482,4 +482,71 @@ class TestPerRowIdentity:
         original = engine.create
         monkeypatch.setattr(engine, "create", lambda body: {"status": original(body)["status"]})
         with pytest.raises(RuntimeError, match="pipeline_id"):
+            db.create_pipeline("h1", "/a.pdf", "docs__test")
+
+
+class TestRunEpoch:
+    """nexus-8vu8p: a run's ownership generation fences a taken-over run's
+    writes. Mirrors PipelineHandlerTest.runEpoch_* against the fake."""
+
+    def test_epoch_starts_at_zero_and_bumps_on_every_takeover(self, db, engine, clock):
+        assert db.create_pipeline("h1", "/a.pdf", "docs__test") == "created"
+        assert db.run_epoch_for("h1") == 0
+        clock.advance(minutes=6)
+        other, _ = make_fake_engine_db(clock=clock)
+        other._client = db._client
+        assert other.create_pipeline("h1", "/a.pdf", "docs__test") == "resuming"
+        assert other.run_epoch_for("h1") == 1
+        other.mark_failed("h1", "x")
+        third, _ = make_fake_engine_db(clock=clock)
+        third._client = db._client
+        assert third.create_pipeline("h1", "/a.pdf", "docs__test") == "resuming"
+        assert third.run_epoch_for("h1") == 2
+        third.mark_completed("h1")
+        fourth, _ = make_fake_engine_db(clock=clock)
+        fourth._client = db._client
+        assert fourth.create_pipeline("h1", "/a.pdf", "docs__test") == "created"
+        assert fourth.run_epoch_for("h1") == 3, "a leftover reset bumps, never returns to 0"
+
+    def test_every_write_of_the_stale_run_is_fenced_and_writes_nothing(self, db, engine, clock):
+        db.create_pipeline("h1", "/a.pdf", "docs__test")
+        pid = db.pipeline_id_for("h1")
+        clock.advance(minutes=6)
+        owner, _ = make_fake_engine_db(clock=clock)
+        owner._client = db._client
+        assert owner.create_pipeline("h1", "/a.pdf", "docs__test") == "resuming"
+        owner.write_page("h1", 0, "owner")
+        owner.write_chunk("h1", 0, "o0", "cid-o0", embedding=b"")
+        owner.update_progress("h1", pages_extracted=1)
+        owner.flush("h1")
+
+        with pytest.raises(PipelineRunFenced) as exc:
+            db.write_page("h1", 1, "stale"); db.flush("h1")
+        assert (exc.value.pipeline_id, exc.value.run_epoch, exc.value.current_epoch) == (pid, 0, 1)
+        for call in (
+            # Progress coalesces behind the pending page batch; the flush is the write.
+            lambda: (db.update_progress("h1", pages_extracted=9), db.flush("h1")),
+            lambda: db.store_extraction_metadata("h1", {}),
+            lambda: db.mark_uploaded("h1", [0]),
+            lambda: db.mark_completed("h1"),
+            lambda: db.mark_failed("h1", "stale"),
+            lambda: db.clear_orphan_wal("h1"),
+            lambda: db.delete_pipeline_data("h1"),
+        ):
+            with pytest.raises(PipelineRunFenced):
+                call()
+        row = engine.pipelines[pid]
+        assert (row["status"], row["pages_extracted"], row["run_epoch"]) == ("resuming", 1, 1)
+        assert [r["page_text"] for r in owner.read_pages("h1")] == ["owner"]
+        assert len(owner.read_uploadable_chunks("h1")) == 1
+        # Reads are never fenced.
+        assert db.get_pipeline_state("h1")["run_epoch"] == 1
+        # A write without an epoch (a client older than pipeline-003) is unfenced.
+        assert engine.progress({"pipeline_id": pid, "fields": {"pages_extracted": 2}}) == {"updated": True}
+        assert row["pages_extracted"] == 2
+
+    def test_create_answer_without_run_epoch_is_loud(self, db, engine, monkeypatch):
+        original = engine.create
+        monkeypatch.setattr(engine, "create", lambda body: {k: v for k, v in original(body).items() if k != "run_epoch"})
+        with pytest.raises(RuntimeError, match="run_epoch"):
             db.create_pipeline("h1", "/a.pdf", "docs__test")

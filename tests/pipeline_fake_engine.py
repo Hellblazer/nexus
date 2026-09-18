@@ -40,6 +40,26 @@ _PROGRESS_FIELDS = {
 }
 
 
+class _StaleRun(Exception):
+    """Fake-engine twin of ``PipelineStaleRunException`` (nexus-8vu8p)."""
+
+    REMEDY = (
+        "this run was taken over by a newer resume of the same document; stop "
+        "without marking the row failed or clearing its WAL (the new owner "
+        "holds both) and re-run the document if the new owner does not finish"
+    )
+
+    def __init__(self, pipeline_id: int, content_hash: str, run_epoch: int, current_epoch: int) -> None:
+        self.pipeline_id = pipeline_id
+        self.content_hash = content_hash
+        self.run_epoch = run_epoch
+        self.current_epoch = current_epoch
+        super().__init__(
+            f"pipeline_id={pipeline_id} (content_hash={content_hash}) is at run_epoch "
+            f"{current_epoch}, this write carried {run_epoch} — {self.REMEDY}"
+        )
+
+
 class _ConflictRunning(Exception):
     """Fake-engine twin of ``PipelineConflictException`` (nexus-lcmbp).
 
@@ -132,8 +152,22 @@ class FakePipelineEngine:
         best = max(candidates, key=lambda r: (r["started_at"], r["pipeline_id"]))
         return best["pipeline_id"]
 
-    def _require_run(self, ref: dict) -> int:
+    def _lock_run(self, ref: dict) -> int | None:
+        """PipelineRepository.lockRun's twin: the row, with the caller's
+        ``run_epoch`` (when given) compared against the row's; a mismatch is
+        a 409 stale_run and nothing is written."""
         pid = self.resolve(ref)
+        if pid is None:
+            return None
+        epoch = ref.get("run_epoch")
+        if epoch not in (None, ""):
+            row = self.pipelines[pid]
+            if int(epoch) != row["run_epoch"]:
+                raise _StaleRun(pid, row["content_hash"], int(epoch), row["run_epoch"])
+        return pid
+
+    def _require_run(self, ref: dict) -> int:
+        pid = self._lock_run(ref)
         if pid is None:
             raise ValueError(f"no pipeline row for {ref}")
         return pid
@@ -167,36 +201,40 @@ class FakePipelineEngine:
                 "content_hash": h, "pdf_path": body["pdf_path"],
                 "collection": body["collection"],
                 "keyed_by": "document" if document else "content_hash",
+                "run_epoch": 0,
                 "total_pages": None,
                 "pages_extracted": 0, "chunks_created": None,
                 "chunks_embedded": None, "chunks_uploaded": 0,
                 "status": "running", "error": "", "extraction_meta": "",
                 "started_at": now, "updated_at": now,
             }
-            return {"status": "created", "pipeline_id": pid}
+            return {"status": "created", "pipeline_id": pid, "run_epoch": 0}
         row = self.pipelines[pid]
         if row["status"] == "completed":
             if not document:
-                return {"status": "skip", "pipeline_id": pid}
+                return {"status": "skip", "pipeline_id": pid, "run_epoch": row["run_epoch"]}
             # A leftover of a client that died between mark_completed and
             # delete: wipe its WAL, reset it, answer "created".
             self._delete_wal(pid)
+            # A takeover: the epoch is BUMPED, never reset (a delayed write
+            # from the completed run still holds the old one).
             row.update(
                 status="running", keyed_by="document", total_pages=None,
                 pages_extracted=0, chunks_created=None, chunks_embedded=None,
                 chunks_uploaded=0, error="", extraction_meta="",
+                run_epoch=row["run_epoch"] + 1,
                 started_at=now, updated_at=now,
             )
-            return {"status": "created", "pipeline_id": pid}
+            return {"status": "created", "pipeline_id": pid, "run_epoch": row["run_epoch"]}
         keyed_by = "document" if document else "content_hash"
         if row["status"] == "failed":
-            row.update(status="resuming", keyed_by=keyed_by, updated_at=now)
-            return {"status": "resuming", "pipeline_id": pid}
+            row.update(status="resuming", keyed_by=keyed_by, run_epoch=row["run_epoch"] + 1, updated_at=now)
+            return {"status": "resuming", "pipeline_id": pid, "run_epoch": row["run_epoch"]}
         age = now_dt - datetime.fromisoformat(row["updated_at"])
         stale = age > STALE_THRESHOLD
         if stale:
-            row.update(status="resuming", keyed_by=keyed_by, updated_at=now)
-            return {"status": "resuming", "pipeline_id": pid}
+            row.update(status="resuming", keyed_by=keyed_by, run_epoch=row["run_epoch"] + 1, updated_at=now)
+            return {"status": "resuming", "pipeline_id": pid, "run_epoch": row["run_epoch"]}
         # running with a fresh heartbeat — nexus-lcmbp: LOUD conflict, never
         # a silent "skip" (mirrors PipelineRepository.create's Java twin).
         raise _ConflictRunning(
@@ -271,7 +309,7 @@ class FakePipelineEngine:
         bad = set(fields) - _PROGRESS_FIELDS
         if bad:
             raise ValueError(f"Unknown progress fields: {bad}")
-        pid = self.resolve(body)
+        pid = self._lock_run(body)
         row = self.pipelines.get(pid) if pid is not None else None
         if row is not None:
             row.update(fields)
@@ -279,7 +317,7 @@ class FakePipelineEngine:
         return {"updated": True}
 
     def extraction_meta(self, body: dict) -> dict:
-        pid = self.resolve(body)
+        pid = self._lock_run(body)
         row = self.pipelines.get(pid) if pid is not None else None
         if row is not None:
             row["extraction_meta"] = body["metadata_json"]
@@ -290,23 +328,20 @@ class FakePipelineEngine:
         return self._set_status(body, "completed")
 
     def fail(self, body: dict) -> dict:
-        result = self._set_status(body, "failed")
-        pid = self.resolve(body)
-        row = self.pipelines.get(pid) if pid is not None else None
-        if row is not None:
-            row["error"] = body.get("error", "")
-        return result
+        return self._set_status(body, "failed", error=body.get("error", ""))
 
-    def _set_status(self, ref: dict, status: str) -> dict:
-        pid = self.resolve(ref)
+    def _set_status(self, ref: dict, status: str, *, error: str | None = None) -> dict:
+        pid = self._lock_run(ref)  # one lock per logical write, as the engine
         row = self.pipelines.get(pid) if pid is not None else None
         if row is not None:
             row["status"] = status
+            if error is not None:
+                row["error"] = error
             row["updated_at"] = self.clock().isoformat()
         return {"updated": True}
 
     def mark_uploaded(self, body: dict) -> dict:
-        pid = self.resolve(body)
+        pid = self._lock_run(body)
         if pid is None:
             return {"updated": 0}
         n = 0
@@ -332,7 +367,7 @@ class FakePipelineEngine:
         return {"embedded_chunks": embedded, "pipelines": len(self.pipelines)}
 
     def clear_wal(self, body: dict) -> dict:
-        pid = self.resolve(body)
+        pid = self._lock_run(body)  # lock and compare BEFORE the WAL wipe
         if pid is None:
             return {"cleared": True}
         self._delete_wal(pid)
@@ -350,7 +385,7 @@ class FakePipelineEngine:
         self.chunks = {k: v for k, v in self.chunks.items() if k[0] != pid}
 
     def delete(self, body: dict) -> dict:
-        pid = self.resolve(body)
+        pid = self._lock_run(body)
         if pid is None:
             return {"deleted": False}
         self._delete_wal(pid)  # the FK cascade
@@ -400,6 +435,16 @@ class FakePipelineEngine:
             return httpx.Response(200, json=getattr(self, method_name)(payload))
         except ValueError as exc:
             return httpx.Response(400, json={"error": str(exc)})
+        except _StaleRun as exc:
+            return httpx.Response(409, json={
+                "error": str(exc),
+                "status": "stale_run",
+                "pipeline_id": exc.pipeline_id,
+                "content_hash": exc.content_hash,
+                "run_epoch": exc.run_epoch,
+                "current_epoch": exc.current_epoch,
+                "remedy": _StaleRun.REMEDY,
+            })
         except _ConflictRunning as exc:
             return httpx.Response(409, json={
                 "error": str(exc),

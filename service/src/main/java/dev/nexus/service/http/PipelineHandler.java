@@ -27,7 +27,7 @@ import java.util.Map;
  * {@code PipelineDB} surface 1:1 so {@code HttpPipelineDB} is a drop-in:
  * <pre>
  *   POST /v1/pipeline/create             {content_hash, pdf_path, collection, identity?}
- *                                         → {status: created|resuming|skip, pipeline_id}
+ *                                         → {status: created|resuming|skip, pipeline_id, run_epoch}
  *                                         (409 conflict_running — nexus-lcmbp — when an
  *                                         existing 'running' row's heartbeat is still fresh;
  *                                         see {@link dev.nexus.service.db.PipelineConflictException})
@@ -58,6 +58,13 @@ import java.util.Map;
  * {@code identity="document"} on {@code /create} selects one-row-per-document
  * keying; absent, the pipeline-001 one-row-per-hash algorithm runs verbatim,
  * so a client that predates this engine sees no behavioural change.
+ *
+ * <p><strong>run_epoch (nexus-8vu8p).</strong> {@code /create} answers the
+ * row's ownership generation; a POST body may carry {@code run_epoch}, and
+ * every write route then refuses a mismatch with 409 {@code stale_run}
+ * before touching a WAL row (the row was taken over by a newer resume). A
+ * body without it is unfenced, exactly pipeline-002's behaviour. Reads
+ * ignore it.
  *
  * <p>Embedding wire mapping (the nexus-9n1u3 sentinel, carried verbatim):
  * JSON {@code null} ↔ SQL NULL (not embedded); {@code ""} ↔ empty BYTEA
@@ -144,7 +151,8 @@ public final class PipelineHandler implements HttpHandler {
                 requireString(body, "collection"),
                 documentIdentity);
         HttpUtil.send(exchange, 200, "{\"status\":\"" + result.status()
-                + "\",\"pipeline_id\":" + result.pipelineId() + "}");
+                + "\",\"pipeline_id\":" + result.pipelineId()
+                + ",\"run_epoch\":" + result.runEpoch() + "}");
     }
 
     private void handleState(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -330,17 +338,26 @@ public final class PipelineHandler implements HttpHandler {
      *  {@code content_hash} narrowed by any {@code collection}/{@code pdf_path}
      *  given. One of the two must be present. */
     private static PipelineRef refFromBody(Map<String, Object> body) {
+        Integer runEpoch = null;
+        Object epoch = body.get("run_epoch");
+        if (epoch != null) {
+            if (!(epoch instanceof Number n)) {
+                throw new IllegalArgumentException("'run_epoch' must be an integer");
+            }
+            runEpoch = n.intValue();
+        }
         Object id = body.get("pipeline_id");
         if (id != null) {
             if (!(id instanceof Number n)) {
                 throw new IllegalArgumentException("'pipeline_id' must be an integer");
             }
-            return PipelineRef.byId(n.longValue());
+            return PipelineRef.byId(n.longValue()).withRunEpoch(runEpoch);
         }
         return PipelineRef.byDocument(
                 requireString(body, "content_hash"),
                 body.get("collection") instanceof String c ? c : null,
-                body.get("pdf_path") instanceof String p ? p : null);
+                body.get("pdf_path") instanceof String p ? p : null)
+            .withRunEpoch(runEpoch);
     }
 
     /** {@link #refFromBody}'s query-string twin. */

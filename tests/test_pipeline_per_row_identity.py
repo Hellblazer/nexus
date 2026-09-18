@@ -24,7 +24,7 @@ import httpx
 import pytest
 
 from nexus.db.t3 import T3Database
-from nexus.db.http_pipeline_client import HttpPipelineDB
+from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineRunFenced
 from nexus.pipeline_stages import pipeline_index_pdf
 from tests.pipeline_fake_engine import FakePipelineEngine, make_fake_engine_db
 from tests.test_pipeline_stages import _P_CHK, _P_EXT, _embed, _er, _fx, _tc
@@ -162,3 +162,101 @@ class TestSecondDocumentSharingTheBytes:
         assert results["/docs/x.pdf"][2].fire_batch.call_args.kwargs["catalog_doc_id"] == "1.9.6"
         assert results["/docs/y.pdf"][2].fire_batch.call_args.kwargs["catalog_doc_id"] == "1.9.7"
         assert engine.rows_for(_HASH) == []
+
+
+class TestRunEpochFence:
+    """nexus-8vu8p: a run the engine fenced stops without touching the row,
+    its WAL, or the catalog document, all of which belong to the new owner.
+    """
+
+    def _owner_takes_over(self, engine: FakePipelineEngine) -> HttpPipelineDB:
+        """A second instance resumes the run: the row's epoch bumps and the
+        owner writes its own page. The row is made resumable by marking it
+        failed engine-side (an unfenced legacy-shaped call) rather than by
+        aging its heartbeat, which the stale run's own threads keep
+        refreshing while they poll."""
+        for pid, row in engine.pipelines.items():
+            if row["content_hash"] == _HASH:
+                engine.fail({"pipeline_id": pid, "error": "made resumable"})
+        owner = _client_for(engine)
+        assert owner.create_pipeline(_HASH, "/docs/a.pdf", "docs__test") == "resuming"
+        owner.write_page(_HASH, 0, "owner's page")
+        owner.flush(_HASH)
+        return owner
+
+    def test_stale_runs_own_write_is_fenced_and_it_touches_nothing(self, engine, monkeypatch) -> None:
+        """The takeover lands mid-extraction (the stale run blocked on a
+        page); the stale run's next flush is fenced, it raises
+        PipelineRunFenced, and it touches neither the row nor the WAL nor
+        the catalog document."""
+        fence_fail = MagicMock()
+        monkeypatch.setattr("nexus.doc_indexer._fence_fail", fence_fail)
+        stale = _client_for(engine)
+        owner_box: dict = {}
+
+        def _extract_then_lose_ownership(pdf_path, *, on_page=None, **kw):
+            owner_box["owner"] = self._owner_takes_over(engine)
+            on_page(0, "stale page 0", {"page_number": 1, "text_length": 12})
+            return _er(1)
+
+        hooks = MagicMock()
+        t3 = create_autospec(T3Database, instance=True)
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _extract_then_lose_ownership
+            MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}))
+            with pytest.raises(PipelineRunFenced) as exc:
+                pipeline_index_pdf(Path("/docs/a.pdf"), _HASH, "docs__test", t3,
+                                   db=stale, embed_fn=_embed, doc_id="1.9.8", hooks=hooks)
+        owner = owner_box["owner"]
+        pid = owner.pipeline_id_for(_HASH)
+        assert exc.value.pipeline_id == pid
+        assert (exc.value.run_epoch, exc.value.current_epoch) == (0, 1)
+        row = engine.pipelines[pid]
+        assert row["status"] == "resuming", "the stale run must not mark the owner's row failed"
+        assert row["run_epoch"] == 1
+        assert [r["page_text"] for r in owner.read_pages(_HASH)] == ["owner's page"], "the owner's WAL survives"
+        fence_fail.assert_not_called()
+        t3.upsert_chunks_with_embeddings.assert_not_called()
+
+    def test_fence_discovered_at_cleanup_skips_the_catalog_stamp(self, engine, monkeypatch) -> None:
+        """The stale run's ORIGINAL failure is unrelated; the takeover happens
+        before its terminal bookkeeping runs, so the fence is discovered
+        inside mark_failed's /fail call. _fence_fail must still be skipped."""
+        fence_fail = MagicMock()
+        monkeypatch.setattr("nexus.doc_indexer._fence_fail", fence_fail)
+        stale = _client_for(engine)
+        owner_box: dict = {}
+
+        def _extract_then_lose_ownership(pdf_path, **kw):
+            owner_box["owner"] = self._owner_takes_over(engine)
+            raise RuntimeError("OCR died")
+
+        t3 = create_autospec(T3Database, instance=True)
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _extract_then_lose_ownership
+            MC.return_value.chunk.return_value = []
+            # Either the extractor's own error or the chunker's (it reads the
+            # owner's unfenced page and produces no chunk) wins FIRST_EXCEPTION;
+            # what matters is that the first exception is NOT the fence.
+            with pytest.raises(RuntimeError) as exc:
+                pipeline_index_pdf(Path("/docs/a.pdf"), _HASH, "docs__test", t3,
+                                   db=stale, embed_fn=_embed, doc_id="1.9.9", hooks=MagicMock())
+        assert not isinstance(exc.value, PipelineRunFenced)
+        owner = owner_box["owner"]
+        row = engine.pipelines[owner.pipeline_id_for(_HASH)]
+        assert row["status"] == "resuming", "the stale cleanup's mark_failed was fenced"
+        assert row["run_epoch"] == 1
+        assert [r["page_text"] for r in owner.read_pages(_HASH)] == ["owner's page"], "the stale clear_wal was fenced"
+        fence_fail.assert_not_called()
+
+    def test_completed_leftover_reset_fences_the_first_runs_delayed_write(self, engine) -> None:
+        first = _client_for(engine)
+        first.create_pipeline(_HASH, "/docs/a.pdf", "docs__test")
+        first.mark_completed(_HASH)
+        second = _client_for(engine)
+        assert second.create_pipeline(_HASH, "/docs/a.pdf", "docs__test") == "created"
+        assert second.run_epoch_for(_HASH) == 1
+        first.write_page(_HASH, 0, "delayed")
+        with pytest.raises(PipelineRunFenced):
+            first.flush(_HASH)
+        assert second.read_pages(_HASH) == []

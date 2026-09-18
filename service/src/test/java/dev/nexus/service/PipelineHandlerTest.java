@@ -533,6 +533,105 @@ class PipelineHandlerTest {
         assertThat(stateById(docId).get("pages_extracted")).isEqualTo(3);
     }
 
+    // ── nexus-8vu8p: run_epoch fences a taken-over run's writes ───────────
+
+    private int runEpoch(Map<String, Object> created) {
+        return ((Number) created.get("run_epoch")).intValue();
+    }
+
+    private HttpResponse<String> writeFenced(String route, long id, int epoch, String extra) throws Exception {
+        return post("/v1/pipeline/" + route, TOKEN, TENANT,
+            "{\"pipeline_id\":" + id + ",\"run_epoch\":" + epoch + extra + "}");
+    }
+
+    private void assertStaleRun(HttpResponse<String> r, long id, int carried, int current) throws Exception {
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
+        var body = mapper.readValue(r.body(), MAP_T);
+        assertThat(body.get("status")).isEqualTo("stale_run");
+        assertThat(((Number) body.get("pipeline_id")).longValue()).isEqualTo(id);
+        assertThat(body.get("run_epoch")).isEqualTo(carried);
+        assertThat(body.get("current_epoch")).isEqualTo(current);
+        assertThat((String) body.get("remedy")).contains("taken over");
+        assertThat((String) body.get("error")).contains("taken over");
+    }
+
+    @Test
+    void runEpoch_startsAtZero_bumpsOnEveryTakeover_neverResets() throws Exception {
+        String hash = "g1-" + "0".repeat(28);
+        var first = create(docCreate(hash, "/tmp/g1.pdf", "knowledge__t"));
+        long id = pipelineId(first);
+        assertThat(runEpoch(first)).isEqualTo(0);
+        // A stale-heartbeat takeover: 0 -> 1.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES).update(PDF_PIPELINE)
+               .set(PDF_PIPELINE.UPDATED_AT, OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10))
+               .where(PDF_PIPELINE.PIPELINE_ID.eq(id)).execute();
+        }
+        var second = create(docCreate(hash, "/tmp/g1.pdf", "knowledge__t"));
+        assertThat(second.get("status")).isEqualTo("resuming");
+        assertThat(runEpoch(second)).isEqualTo(1);
+        // A failed-row takeover: 1 -> 2 (monotonic across cycles).
+        post("/v1/pipeline/fail", TOKEN, TENANT, "{\"pipeline_id\":" + id + ",\"run_epoch\":1,\"error\":\"x\"}");
+        var third = create(docCreate(hash, "/tmp/g1.pdf", "knowledge__t"));
+        assertThat(runEpoch(third)).isEqualTo(2);
+        // A completed-leftover reset: 2 -> 3, never back to 0.
+        post("/v1/pipeline/complete", TOKEN, TENANT, "{\"pipeline_id\":" + id + ",\"run_epoch\":2}");
+        var fourth = create(docCreate(hash, "/tmp/g1.pdf", "knowledge__t"));
+        assertThat(fourth.get("status")).isEqualTo("created");
+        assertThat(runEpoch(fourth)).isEqualTo(3);
+        assertThat(stateById(id).get("run_epoch")).isEqualTo(3);
+        // The first run's delayed write, still at 0, is fenced by the reset row.
+        assertStaleRun(writeFenced("pages", id, 0,
+            ",\"pages\":[{\"page_index\":0,\"page_text\":\"stale\",\"metadata_json\":\"{}\"}]"), id, 0, 3);
+        assertThat(pagesById(id)).isEmpty();
+    }
+
+    @Test
+    void runEpoch_everyWriteRouteRefusesAStaleEpoch_andWritesNothing() throws Exception {
+        String hash = "g2-" + "0".repeat(28);
+        long id = pipelineId(create(docCreate(hash, "/tmp/g2.pdf", "knowledge__t")));
+        // The new owner's WAL and counters, written at the current epoch (1).
+        post("/v1/pipeline/fail", TOKEN, TENANT, "{\"pipeline_id\":" + id + ",\"run_epoch\":0,\"error\":\"x\"}");
+        var owner = create(docCreate(hash, "/tmp/g2.pdf", "knowledge__t"));
+        assertThat(runEpoch(owner)).isEqualTo(1);
+        assertThat(writeFenced("pages", id, 1,
+            ",\"pages\":[{\"page_index\":0,\"page_text\":\"owner\",\"metadata_json\":\"{}\"}]").statusCode()).isEqualTo(200);
+        assertThat(writeFenced("chunks", id, 1,
+            ",\"chunks\":[{\"chunk_index\":0,\"chunk_text\":\"o0\",\"chunk_id\":\"cid-o0\",\"embedding\":\"\"}]").statusCode()).isEqualTo(200);
+        assertThat(writeFenced("progress", id, 1, ",\"fields\":{\"pages_extracted\":1}").statusCode()).isEqualTo(200);
+
+        // The stale run, still holding 0: every write route refuses, nothing changes.
+        assertStaleRun(writeFenced("pages", id, 0,
+            ",\"pages\":[{\"page_index\":1,\"page_text\":\"stale\",\"metadata_json\":\"{}\"}]"), id, 0, 1);
+        assertStaleRun(writeFenced("chunks", id, 0,
+            ",\"chunks\":[{\"chunk_index\":1,\"chunk_text\":\"s1\",\"chunk_id\":\"cid-s1\"}]"), id, 0, 1);
+        assertStaleRun(writeFenced("progress", id, 0, ",\"fields\":{\"pages_extracted\":9}"), id, 0, 1);
+        assertStaleRun(writeFenced("extraction_meta", id, 0, ",\"metadata_json\":\"{}\""), id, 0, 1);
+        assertStaleRun(writeFenced("mark_uploaded", id, 0, ",\"chunk_indices\":[0]"), id, 0, 1);
+        assertStaleRun(writeFenced("complete", id, 0, ""), id, 0, 1);
+        assertStaleRun(writeFenced("fail", id, 0, ",\"error\":\"stale\""), id, 0, 1);
+        assertStaleRun(writeFenced("clear_wal", id, 0, ""), id, 0, 1);
+        assertStaleRun(writeFenced("delete", id, 0, ""), id, 0, 1);
+
+        var state = stateById(id);
+        assertThat(state).as("the stale delete removed nothing").isNotNull();
+        assertThat(state.get("status")).isEqualTo("resuming");
+        assertThat(state.get("pages_extracted")).isEqualTo(1);
+        assertThat(state.get("error")).isEqualTo("x");
+        assertThat(pagesById(id)).as("the stale clear_wal wiped nothing, the stale page never landed").hasSize(1);
+        assertThat(uploadableById(id)).as("the stale mark_uploaded flipped nothing").hasSize(1);
+        assertThat(embeddedCountById(id)).isEqualTo(1);
+        // Reads are never fenced: the stale run can still see the row.
+        var read = get("/v1/pipeline/pages?pipeline_id=" + id + "&run_epoch=0", TOKEN, TENANT);
+        assertThat(read.statusCode()).isEqualTo(200);
+        // A write carrying no epoch (a client older than pipeline-003) is unfenced.
+        var legacy = post("/v1/pipeline/progress", TOKEN, TENANT,
+            "{\"pipeline_id\":" + id + ",\"fields\":{\"pages_extracted\":2}}");
+        assertThat(legacy.statusCode()).isEqualTo(200);
+        assertThat(stateById(id).get("pages_extracted")).isEqualTo(2);
+    }
+
     @Test
     void hashNarrowedByDocument_missesRatherThanWidens() throws Exception {
         String hash = "e6-" + "0".repeat(28);

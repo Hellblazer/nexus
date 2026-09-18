@@ -222,6 +222,25 @@ public final class HttpUtil {
                 + "}");
             return true;
         }
+        // nexus-8vu8p: a pipeline write carried a run_epoch the row no longer has
+        // (a newer resume took the run over). Same business-logic-refusal shape as
+        // pipelineConflict above; the "remedy" literal is PipelineStaleRunException
+        // .REMEDY itself, so the two cannot drift.
+        var staleRun = staleRun(e);
+        if (staleRun != null) {
+            log.warn("event={}_pipeline_stale_run {} pipeline_id={} run_epoch={} current_epoch={}",
+                event, context, staleRun.pipelineId(), staleRun.runEpoch(), staleRun.currentEpoch());
+            send(exchange, 409,
+                "{\"error\":" + jsonString(staleRun.getMessage())
+                + ",\"status\":\"stale_run\""
+                + ",\"pipeline_id\":" + staleRun.pipelineId()
+                + ",\"content_hash\":" + jsonString(staleRun.contentHash())
+                + ",\"run_epoch\":" + staleRun.runEpoch()
+                + ",\"current_epoch\":" + staleRun.currentEpoch()
+                + ",\"remedy\":" + jsonString(dev.nexus.service.db.PipelineStaleRunException.REMEDY)
+                + "}");
+            return true;
+        }
         // RDR-204 Phase 1 (bead nexus-ft04v.7): the seven stub-insert paths that used
         // to auto-create a blank-attribute catalog_collections row on first write are
         // retired. CollectionRegistry.requireRegistered throws this INSTEAD of writing
@@ -378,6 +397,17 @@ public final class HttpUtil {
         for (Throwable c = t; c != null; c = c.getCause()) {
             if (c instanceof dev.nexus.service.db.PipelineConflictException pe) {
                 return pe;
+            }
+        }
+        return null;
+    }
+
+    /** The {@link dev.nexus.service.db.PipelineStaleRunException} in {@code t}'s
+     *  cause chain, or null (nexus-8vu8p; same walk as {@link #pipelineConflict}). */
+    static dev.nexus.service.db.PipelineStaleRunException staleRun(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.PipelineStaleRunException se) {
+                return se;
             }
         }
         return null;

@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-8vu8p: a pipeline run has an ownership generation.
+
+    THE DEFECT (pre-existing since pipeline-001; found on the nexus-edjmu
+    fix check, T2 nexus/critique-impl-nexus-edjmu-per-row-identity-fixcheck):
+    PipelineRepository.create's failed/stale branch hands a row to whoever
+    calls create next at the same document (the RDR-048 crash-resume). The
+    previous holder is not told. A client blocked past STALE_THRESHOLD on
+    one page still holds its pipeline_id and its buffered pages, and its
+    next flush lands on the row the new owner is writing; the two runs'
+    pages and chunks commingle, and the stale run's terminal cleanup wipes
+    the new owner's WAL.
+
+    THE SHAPE. run_epoch is bumped by SQL expression in the same UPDATE as
+    every takeover (the resuming branch and the completed-leftover reset;
+    never reset to a literal, so a delayed write from a completed run can
+    never match a reset row). /create answers it. Every write route locks
+    the pipeline row FOR UPDATE as its first statement and, when the
+    request carries run_epoch, refuses a mismatch with 409 stale_run before
+    touching a WAL row. A request without run_epoch (a client older than
+    this changeset) is unfenced, exactly pipeline-002's behaviour, so the
+    race stays open while either party runs such a client.
+
+    DDL only: ADD COLUMN with a DEFAULT, no existing row modified, no DATA
+    EFFECT. Grants: grants-nexus-svc.xml / grants-nexus-diag.xml iterate
+    every relation in schema nexus and run after this file.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="pipeline-003-1" author="nexus-8vu8p">
+        <comment>pdf_pipeline gains run_epoch INTEGER NOT NULL DEFAULT 0, the run's ownership generation, bumped on every takeover and checked under a row lock by every write that carries it. DDL only, no existing row modified, no DATA EFFECT.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.pdf_pipeline
+    ADD COLUMN run_epoch INTEGER NOT NULL DEFAULT 0;
+COMMENT ON COLUMN nexus.pdf_pipeline.run_epoch IS
+    'Ownership generation of this run (nexus-8vu8p, pipeline-003-run-epoch.xml): SET run_epoch = run_epoch + 1 in the same UPDATE as every takeover (create''s resuming branch and its completed-leftover reset), returned by POST /v1/pipeline/create, and compared under SELECT ... FOR UPDATE by every write route that receives run_epoch; a mismatch is 409 stale_run and writes nothing. A request without run_epoch (a client older than this changeset) is unfenced.';
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.pdf_pipeline DROP COLUMN run_epoch;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -160,6 +160,41 @@ class PipelineConflictRunning(RuntimeError):
         self.remedy = remedy
 
 
+class PipelineRunFenced(RuntimeError):
+    """A pipeline write answered HTTP 409 ``stale_run`` (nexus-8vu8p).
+
+    The run this instance created was taken over by a newer resume of the
+    same document (a stale heartbeat, or a completed leftover reset) and the
+    write carried the old ``run_epoch``; the engine wrote nothing. The stale
+    run must STOP: it must not mark the row failed, clear its WAL, or stamp
+    the catalog document failed, since all three now belong to the new
+    owner (``pipeline_index_pdf`` skips that bookkeeping on this type).
+    Subclasses :class:`RuntimeError` so ``nx index`` reports it as a
+    non-zero exit with the message, like :class:`PipelineConflictRunning`.
+    """
+
+    def __init__(
+        self,
+        error: str,
+        *,
+        pipeline_id: int,
+        content_hash: str,
+        run_epoch: int,
+        current_epoch: int,
+        remedy: str,
+    ) -> None:
+        message = error
+        if remedy and remedy not in error:
+            message = f"{error} (remedy: {remedy})"
+        super().__init__(message)
+        self.error = error
+        self.pipeline_id = pipeline_id
+        self.content_hash = content_hash
+        self.run_epoch = run_epoch
+        self.current_epoch = current_epoch
+        self.remedy = remedy
+
+
 class HttpPipelineDB(RefreshableHttpStoreMixin):
     """Thin, write-buffering HTTP client for ``/v1/pipeline``."""
 
@@ -177,16 +212,55 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
         # reached a terminal call yet (see the module docstring).
         self._pipeline_ids: dict[str, int] = {}
         self._live: dict[str, tuple[str, str]] = {}
+        # nexus-8vu8p: the run's ownership generation from the create
+        # answer; every write carries it and the engine refuses a stale one.
+        self._run_epochs: dict[str, int] = {}
 
     def _ref(self, content_hash: str) -> dict[str, Any]:
         """The wire fields naming *content_hash*'s row: the engine's
-        ``pipeline_id`` once ``create_pipeline`` learned it, plus the hash
-        for readability; the bare hash before that."""
+        ``pipeline_id`` and ``run_epoch`` once ``create_pipeline`` learned
+        them, plus the hash for readability; the bare hash before that."""
         with self._buffer_lock:
             pipeline_id = self._pipeline_ids.get(content_hash)
+            run_epoch = self._run_epochs.get(content_hash)
         if pipeline_id is None:
             return {"content_hash": content_hash}
-        return {"content_hash": content_hash, "pipeline_id": pipeline_id}
+        ref: dict[str, Any] = {"content_hash": content_hash, "pipeline_id": pipeline_id}
+        if run_epoch is not None:
+            ref["run_epoch"] = run_epoch
+        return ref
+
+    def run_epoch_for(self, content_hash: str) -> int | None:
+        """The ownership generation this instance holds for *content_hash*."""
+        with self._buffer_lock:
+            return self._run_epochs.get(content_hash)
+
+    def _post_fenced(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        """``_post`` for a WRITE: a 409 ``stale_run`` becomes
+        :class:`PipelineRunFenced`. One wrapper for every write call site,
+        so the translation cannot drift between them. Never retried: 409
+        is outside both of the mixin's retry axes."""
+        try:
+            return self._post(path, body)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                try:
+                    payload = exc.response.json()
+                except ValueError:
+                    payload = {}
+                if payload.get("status") == "stale_run":
+                    try:
+                        raise PipelineRunFenced(
+                            payload.get("error", "pipeline run was taken over"),
+                            pipeline_id=int(payload.get("pipeline_id", 0)),
+                            content_hash=str(payload.get("content_hash", body.get("content_hash", ""))),
+                            run_epoch=int(payload.get("run_epoch", -1)),
+                            current_epoch=int(payload.get("current_epoch", -1)),
+                            remedy=str(payload.get("remedy", "")),
+                        ) from exc
+                    except (TypeError, ValueError):
+                        pass  # a malformed body re-raises the original 409 below
+            raise
 
     def pipeline_id_for(self, content_hash: str) -> int | None:
         """The engine ``pipeline_id`` this instance holds for *content_hash*,
@@ -274,18 +348,22 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
             raise
         status = result["status"]
         pipeline_id = result.get("pipeline_id")
-        if not isinstance(pipeline_id, int) or isinstance(pipeline_id, bool):
+        run_epoch = result.get("run_epoch")
+        if any(not isinstance(v, int) or isinstance(v, bool) for v in (pipeline_id, run_epoch)):
             from nexus.engine_version import REQUIRED_ENGINE_VERSION  # noqa: PLC0415 - deferred: message-only import
 
+            missing = "pipeline_id" if not isinstance(pipeline_id, int) else "run_epoch"
             raise RuntimeError(
-                "POST /v1/pipeline/create answered without a pipeline_id: the "
-                "engine predates pipeline-002 (per-document pipeline rows); "
-                "this client requires engine-service-v"
+                f"POST /v1/pipeline/create answered without a {missing}: the "
+                "engine predates the per-document pipeline row (pipeline-002) or "
+                "its ownership generation (pipeline-003); this client requires "
+                "engine-service-v"
                 + ".".join(str(n) for n in REQUIRED_ENGINE_VERSION)
                 + " or newer"
             )
         with self._buffer_lock:
             self._pipeline_ids[content_hash] = pipeline_id
+            self._run_epochs[content_hash] = run_epoch
             self._live[content_hash] = document
         return status
 
@@ -311,14 +389,14 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
 
     def store_extraction_metadata(self, content_hash: str, metadata: dict) -> None:
         self.flush(content_hash)
-        self._post("/v1/pipeline/extraction_meta", {
+        self._post_fenced("/v1/pipeline/extraction_meta", {
             **self._ref(content_hash),
             "metadata_json": json.dumps(metadata),
         })
 
     def mark_completed(self, content_hash: str) -> None:
         self.flush(content_hash)
-        self._post("/v1/pipeline/complete", self._ref(content_hash))
+        self._post_fenced("/v1/pipeline/complete", self._ref(content_hash))
         self._retire(content_hash)
 
     def mark_failed(self, content_hash: str, error: str = "") -> None:
@@ -353,7 +431,7 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
                 content_hash=content_hash,
                 exc_info=True,
             )
-        self._post("/v1/pipeline/fail", {**self._ref(content_hash), "error": error})
+        self._post_fenced("/v1/pipeline/fail", {**self._ref(content_hash), "error": error})
         self._retire(content_hash)
 
     # ── pages ───────────────────────────────────────────────────────────────
@@ -433,7 +511,7 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
         if not chunk_indices:
             return
         self.flush(content_hash)
-        self._post("/v1/pipeline/mark_uploaded", {
+        self._post_fenced("/v1/pipeline/mark_uploaded", {
             **self._ref(content_hash),
             "chunk_indices": chunk_indices,
         })
@@ -465,11 +543,11 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
         ref = self._ref(content_hash)
         try:
             if pages:
-                self._post("/v1/pipeline/pages", {**ref, "pages": pages})
+                self._post_fenced("/v1/pipeline/pages", {**ref, "pages": pages})
             if chunks:
-                self._post("/v1/pipeline/chunks", {**ref, "chunks": chunks})
+                self._post_fenced("/v1/pipeline/chunks", {**ref, "chunks": chunks})
             if progress:
-                self._post("/v1/pipeline/progress", {**ref, "fields": progress})
+                self._post_fenced("/v1/pipeline/progress", {**ref, "fields": progress})
         except BaseException:
             with self._buffer_lock:
                 self._page_buffer[content_hash] = pages + self._page_buffer.get(content_hash, [])
@@ -489,7 +567,7 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
 
     def clear_orphan_wal(self, content_hash: str) -> None:
         self._drop_buffers(content_hash)
-        self._post("/v1/pipeline/clear_wal", self._ref(content_hash))
+        self._post_fenced("/v1/pipeline/clear_wal", self._ref(content_hash))
 
     def delete_pipeline_data(
         self,
@@ -526,11 +604,12 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
                 body["pdf_path"] = str(pdf_path)
         else:
             body = self._ref(content_hash)
-        result = self._post("/v1/pipeline/delete", body)
+        result = self._post_fenced("/v1/pipeline/delete", body)
         with self._buffer_lock:
             held = self._pipeline_ids.get(content_hash)
             if held is not None and held == body.get("pipeline_id"):
                 self._pipeline_ids.pop(content_hash, None)
+                self._run_epochs.pop(content_hash, None)
                 self._live.pop(content_hash, None)
         return bool(result.get("deleted", False))
 

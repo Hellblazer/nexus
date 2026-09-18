@@ -101,17 +101,25 @@ public final class PipelineRepository {
      * and {@code pdfPath} (the pre-create {@code --force} delete knows all
      * three; a client older than pipeline-002 sends the hash alone).
      */
-    public record PipelineRef(Long pipelineId, String contentHash, String collection, String pdfPath) {
+    public record PipelineRef(Long pipelineId, String contentHash, String collection, String pdfPath,
+                              Integer runEpoch) {
         public static PipelineRef byId(long pipelineId) {
-            return new PipelineRef(pipelineId, null, null, null);
+            return new PipelineRef(pipelineId, null, null, null, null);
         }
 
         public static PipelineRef byHash(String contentHash) {
-            return new PipelineRef(null, contentHash, null, null);
+            return new PipelineRef(null, contentHash, null, null, null);
         }
 
         public static PipelineRef byDocument(String contentHash, String collection, String pdfPath) {
-            return new PipelineRef(null, contentHash, collection, pdfPath);
+            return new PipelineRef(null, contentHash, collection, pdfPath, null);
+        }
+
+        /** The same row, with the ownership generation the caller holds
+         *  (nexus-8vu8p): every write then refuses a mismatch. {@code null}
+         *  leaves the write unfenced (a client older than pipeline-003). */
+        public PipelineRef withRunEpoch(Integer runEpoch) {
+            return new PipelineRef(pipelineId, contentHash, collection, pdfPath, runEpoch);
         }
 
         /** Human-readable form for error messages. */
@@ -124,8 +132,12 @@ public final class PipelineRepository {
         }
     }
 
-    /** {@link #create}'s answer: the wire {@code status} and the row it names. */
-    public record CreateResult(String status, long pipelineId) {}
+    /** {@link #create}'s answer: the wire {@code status}, the row it names,
+     *  and the row's ownership generation (nexus-8vu8p). */
+    public record CreateResult(String status, long pipelineId, int runEpoch) {}
+
+    /** A pipeline row locked FOR UPDATE for the rest of the transaction. */
+    private record LockedRun(long pipelineId, int runEpoch) {}
 
     private final TenantScope tenantScope;
 
@@ -262,21 +274,23 @@ public final class PipelineRepository {
                     existing = resolveIn(ctx, tenant, PipelineRef.byDocument(contentHash, collection, pdfPath));
                 }
                 if (existing == null) {
-                    Long inserted = ctx.insertInto(PDF_PIPELINE,
+                    var inserted = ctx.insertInto(PDF_PIPELINE,
                             PDF_PIPELINE.TENANT_ID, PDF_PIPELINE.CONTENT_HASH,
                             PDF_PIPELINE.PDF_PATH, PDF_PIPELINE.COLLECTION,
                             PDF_PIPELINE.KEYED_BY,
                             PDF_PIPELINE.STATUS, PDF_PIPELINE.STARTED_AT, PDF_PIPELINE.UPDATED_AT)
                        .values(tenant, contentHash, pdfPath, collection, keyedBy, "running", now, now)
                        .onConflictDoNothing()
-                       .returning(PDF_PIPELINE.PIPELINE_ID)
-                       .fetchOne(PDF_PIPELINE.PIPELINE_ID);
+                       .returning(PDF_PIPELINE.PIPELINE_ID, PDF_PIPELINE.RUN_EPOCH)
+                       .fetchOne();
                     if (inserted != null) {
-                        return new CreateResult("created", inserted);
+                        return new CreateResult("created",
+                            inserted.get(PDF_PIPELINE.PIPELINE_ID), inserted.get(PDF_PIPELINE.RUN_EPOCH));
                     }
                     continue;  // a concurrent insert won the UNIQUE race: re-read it
                 }
-                var row = ctx.select(PDF_PIPELINE.STATUS, PDF_PIPELINE.UPDATED_AT, PDF_PIPELINE.STARTED_AT)
+                var row = ctx.select(PDF_PIPELINE.STATUS, PDF_PIPELINE.UPDATED_AT, PDF_PIPELINE.STARTED_AT,
+                                     PDF_PIPELINE.RUN_EPOCH)
                              .from(PDF_PIPELINE)
                              .where(PDF_PIPELINE.TENANT_ID.eq(tenant)
                                      .and(PDF_PIPELINE.PIPELINE_ID.eq(existing)))
@@ -287,25 +301,37 @@ public final class PipelineRepository {
                 String status = row.value1();
                 if ("completed".equals(status)) {
                     if (!documentIdentity) {
-                        return new CreateResult("skip", existing);
+                        return new CreateResult("skip", existing, row.value4());
                     }
-                    resetLeftoverRow(ctx, tenant, existing, now);
-                    return new CreateResult("created", existing);
+                    Integer epoch = resetLeftoverRow(ctx, tenant, existing, now);
+                    if (epoch == null) {
+                        continue;  // deleted between the read and the reset: start over
+                    }
+                    return new CreateResult("created", existing, epoch);
                 }
                 OffsetDateTime updatedAt = row.value2();
                 boolean stale = updatedAt.isBefore(now.minus(STALE_THRESHOLD));
                 if ("failed".equals(status) || stale) {
                     // The resumer's algorithm owns the row from here: a
                     // document client addresses it by id; a legacy client
-                    // by bare hash, which finds legacy rows only.
-                    ctx.update(PDF_PIPELINE)
+                    // by bare hash, which finds legacy rows only. The
+                    // takeover bumps run_epoch by SQL expression in this
+                    // same UPDATE (nexus-8vu8p): a delayed write from the
+                    // previous holder is fenced from here on, and two creates
+                    // that both take this branch get distinct epochs.
+                    Integer epoch = ctx.update(PDF_PIPELINE)
                        .set(PDF_PIPELINE.STATUS, "resuming")
                        .set(PDF_PIPELINE.KEYED_BY, keyedBy)
+                       .set(PDF_PIPELINE.RUN_EPOCH, PDF_PIPELINE.RUN_EPOCH.plus(1))
                        .set(PDF_PIPELINE.UPDATED_AT, now)
                        .where(PDF_PIPELINE.TENANT_ID.eq(tenant)
                                .and(PDF_PIPELINE.PIPELINE_ID.eq(existing)))
-                       .execute();
-                    return new CreateResult("resuming", existing);
+                       .returning(PDF_PIPELINE.RUN_EPOCH)
+                       .fetchOne(PDF_PIPELINE.RUN_EPOCH);
+                    if (epoch == null) {
+                        continue;  // deleted between the read and the takeover: start over
+                    }
+                    return new CreateResult("resuming", existing, epoch);
                 }
                 // running with a fresh heartbeat — LOUD conflict, never silent success.
                 throw new PipelineConflictException(contentHash, row.value3(),
@@ -317,13 +343,17 @@ public final class PipelineRepository {
     }
 
     /** A leftover 'completed' row becomes a fresh run: WAL wiped, counters
-     *  and audit fields reset, {@code started_at} restarted, and the row
-     *  marked a document row. */
-    private static void resetLeftoverRow(DSLContext ctx, String tenant, long pipelineId, OffsetDateTime now) {
+     *  and audit fields reset, {@code started_at} restarted, the row marked
+     *  a document row, and {@code run_epoch} BUMPED (never reset: a delayed
+     *  write from the completed run still holds the old epoch and must be
+     *  fenced, nexus-8vu8p). Returns the new epoch, or {@code null} when the
+     *  row vanished between the caller's read and this UPDATE. */
+    private static Integer resetLeftoverRow(DSLContext ctx, String tenant, long pipelineId, OffsetDateTime now) {
         deleteWal(ctx, tenant, pipelineId);
-        ctx.update(PDF_PIPELINE)
+        return ctx.update(PDF_PIPELINE)
            .set(PDF_PIPELINE.STATUS, "running")
            .set(PDF_PIPELINE.KEYED_BY, KEYED_BY_DOCUMENT)
+           .set(PDF_PIPELINE.RUN_EPOCH, PDF_PIPELINE.RUN_EPOCH.plus(1))
            .setNull(PDF_PIPELINE.TOTAL_PAGES)
            .set(PDF_PIPELINE.PAGES_EXTRACTED, 0)
            .setNull(PDF_PIPELINE.CHUNKS_CREATED)
@@ -334,7 +364,8 @@ public final class PipelineRepository {
            .set(PDF_PIPELINE.STARTED_AT, now)
            .set(PDF_PIPELINE.UPDATED_AT, now)
            .where(PDF_PIPELINE.TENANT_ID.eq(tenant).and(PDF_PIPELINE.PIPELINE_ID.eq(pipelineId)))
-           .execute();
+           .returning(PDF_PIPELINE.RUN_EPOCH)
+           .fetchOne(PDF_PIPELINE.RUN_EPOCH);
     }
 
     /** Full pipeline row as a map, or null. */
@@ -372,8 +403,9 @@ public final class PipelineRepository {
         if (fields.isEmpty()) return;
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         tenantScope.withTenant(tenant, ctx -> {
-            Long id = resolveIn(ctx, tenant, ref);
-            if (id == null) return null;
+            LockedRun run = lockRun(ctx, tenant, ref);
+            if (run == null) return null;
+            long id = run.pipelineId();
             var update = ctx.update(PDF_PIPELINE).set(PDF_PIPELINE.UPDATED_AT, now);
             for (var entry : fields.entrySet()) {
                 update = update.set(
@@ -412,8 +444,9 @@ public final class PipelineRepository {
     private void setPipelineField(String tenant, PipelineRef ref, UpdateStart start) {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         tenantScope.withTenant(tenant, ctx -> {
-            Long id = resolveIn(ctx, tenant, ref);
-            if (id == null) return null;
+            LockedRun run = lockRun(ctx, tenant, ref);
+            if (run == null) return null;
+            long id = run.pipelineId();
             start.begin(ctx)
                  .set(PDF_PIPELINE.UPDATED_AT, now)
                  .where(PDF_PIPELINE.TENANT_ID.eq(tenant)
@@ -423,14 +456,44 @@ public final class PipelineRepository {
         });
     }
 
-    /** The row a WAL write belongs to; a ref that names no row is refused
-     *  (the FK would refuse the INSERT anyway; this names the reason). */
-    private static long requireRun(DSLContext ctx, String tenant, PipelineRef ref) {
+    /**
+     * The FIRST statement of every write route (nexus-8vu8p): the row
+     * {@code ref} names, locked {@code FOR UPDATE} for the rest of the
+     * transaction, and its ownership generation compared with the one the
+     * caller holds. The lock makes the fence atomic against a concurrent
+     * takeover ({@link #create}'s resuming UPDATE waits for an in-flight
+     * fenced write to commit, and the next fenced write sees the new epoch)
+     * and gives every write route the same lock order, pipeline row first,
+     * then WAL rows, so an unfenced legacy {@code clear_wal} can never
+     * deadlock a fenced page write. A mismatch throws
+     * {@link PipelineStaleRunException} before any WAL row is touched; a
+     * {@code null} epoch (a client older than pipeline-003) is unfenced.
+     * Returns {@code null} when the ref names no row.
+     */
+    private static LockedRun lockRun(DSLContext ctx, String tenant, PipelineRef ref) {
         Long id = resolveIn(ctx, tenant, ref);
-        if (id == null) {
+        if (id == null) return null;
+        var row = ctx.select(PDF_PIPELINE.PIPELINE_ID, PDF_PIPELINE.RUN_EPOCH, PDF_PIPELINE.CONTENT_HASH)
+                     .from(PDF_PIPELINE)
+                     .where(PDF_PIPELINE.TENANT_ID.eq(tenant).and(PDF_PIPELINE.PIPELINE_ID.eq(id)))
+                     .forUpdate()
+                     .fetchOne();
+        if (row == null) return null;  // deleted between the resolve and the lock
+        int current = row.value2();
+        if (ref.runEpoch() != null && ref.runEpoch() != current) {
+            throw new PipelineStaleRunException(row.value1(), row.value3(), ref.runEpoch(), current);
+        }
+        return new LockedRun(row.value1(), current);
+    }
+
+    /** {@link #lockRun} for a WAL write, where a ref that names no row is
+     *  refused (the FK would refuse the INSERT anyway; this names the reason). */
+    private static long requireRun(DSLContext ctx, String tenant, PipelineRef ref) {
+        LockedRun run = lockRun(ctx, tenant, ref);
+        if (run == null) {
             throw new IllegalArgumentException("no pipeline row for " + ref.describe());
         }
-        return id;
+        return run.pipelineId();
     }
 
     // ── pages ────────────────────────────────────────────────────────────────
@@ -553,8 +616,9 @@ public final class PipelineRepository {
     public int markUploaded(String tenant, PipelineRef ref, List<Integer> chunkIndices) {
         if (chunkIndices.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
-            Long id = resolveIn(ctx, tenant, ref);
-            if (id == null) return 0;
+            LockedRun run = lockRun(ctx, tenant, ref);
+            if (run == null) return 0;
+            long id = run.pipelineId();
             return ctx.update(PDF_CHUNKS)
                       .set(PDF_CHUNKS.UPLOADED, Boolean.TRUE)
                       .where(PDF_CHUNKS.TENANT_ID.eq(tenant)
@@ -605,8 +669,11 @@ public final class PipelineRepository {
     public void clearOrphanWal(String tenant, PipelineRef ref) {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         tenantScope.withTenant(tenant, ctx -> {
-            Long id = resolveIn(ctx, tenant, ref);
-            if (id == null) return null;
+            // Lock and compare BEFORE the WAL deletes (nexus-8vu8p): a stale
+            // run's cleanup must never wipe the new owner's WAL.
+            LockedRun run = lockRun(ctx, tenant, ref);
+            if (run == null) return null;
+            long id = run.pipelineId();
             deleteWal(ctx, tenant, id);
             ctx.update(PDF_PIPELINE)
                .set(PDF_PIPELINE.CHUNKS_UPLOADED, 0)
@@ -632,8 +699,9 @@ public final class PipelineRepository {
      *  was removed. */
     public boolean deletePipeline(String tenant, PipelineRef ref) {
         return tenantScope.withTenant(tenant, ctx -> {
-            Long id = resolveIn(ctx, tenant, ref);
-            if (id == null) return false;
+            LockedRun run = lockRun(ctx, tenant, ref);
+            if (run == null) return false;
+            long id = run.pipelineId();
             int deleted = ctx.deleteFrom(PDF_PIPELINE)
                              .where(PDF_PIPELINE.TENANT_ID.eq(tenant).and(PDF_PIPELINE.PIPELINE_ID.eq(id)))
                              .execute();
