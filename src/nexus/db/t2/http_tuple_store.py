@@ -854,7 +854,14 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             if since_body is not None:
                 entry["since"] = since_body
             if spec.announce is not None:
-                entry["announce"] = {"interval_s": spec.announce.interval_s, "max": spec.announce.max}
+                announce: dict[str, Any] = {"interval_s": spec.announce.interval_s, "max": spec.announce.max}
+                if spec.announce.subscriber is not None:
+                    # bead nexus-q82tk: the per-subscriber stamp (boards). The
+                    # engine caps the value at its claimant ceiling; checked
+                    # here first, the same way subspace is.
+                    _check_field_size("subscriber", spec.announce.subscriber, _MAX_CLAIMANT_BYTES)
+                    announce["subscriber"] = spec.announce.subscriber
+                entry["announce"] = announce
             payload_specs.append(entry)
         payload: dict[str, Any] = {"subspaces": payload_specs}
         if timeout_s:

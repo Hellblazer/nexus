@@ -21,24 +21,29 @@ Two independent halves live here:
   original intent). Mailboxes and boards now take DIFFERENT shapes (bead
   nexus-vsipz, RDR-213 engine half, superseding the cursor-shares-one-
   shape design T2 ``nexus_rdr/213-decision-announcements-rate-limited-
-  not-ack-gated-2026-09-17`` first landed): a board keeps its own
-  position cursor (unchanged -- boards have no analogue of a mailbox's
-  claim/ack lifecycle for the engine to gate on). A mailbox instead asks
-  the ENGINE to gate cadence and cap: every tick's mailbox spec carries
-  an ``announce={interval_s, max}`` field, and the engine returns a row
-  only when it is claimable and due, stamping ``announced_at``/
-  ``announce_count`` on it in the same statement that selects it
-  (``TupleRepository.WaitSpec.Announce``, service-side). This closes the
-  cursor design's one structural gap: a cursor keyed on ``(created_at,
-  id)`` can skip a transaction that started earlier but committed later,
+  not-ack-gated-2026-09-17`` first landed; bead nexus-q82tk then moved
+  boards onto the same mechanism): every spec, mailbox or board, asks
+  the ENGINE to gate cadence and cap with an ``announce={interval_s,
+  max[, subscriber]}`` field, and the engine returns a row only when it
+  is claimable and due, stamping ``announced_at``/``announce_count`` in
+  the same statement that selects it (``TupleRepository.WaitSpec
+  .Announce``, service-side). A mailbox's stamp lives on the row. A
+  board post is read by many sessions and never claimed, so its stamp
+  lives per ``(subspace, subscriber, tuple)`` in
+  ``nexus.tuple_deliveries``, keyed by this session's id, with ``max=1``
+  (:data:`DEFAULT_BOARD_MAX_ANNOUNCES`): announced once to each
+  subscriber, never again, since a post is never claimed and "unanswered"
+  is not observable for it. This closes the cursor design's one
+  structural gap for both shapes: a cursor keyed on ``(created_at, id)``
+  can skip a transaction that started earlier but committed later,
   because a client-side position has no way to know a slower sibling is
   still in flight. The engine's own re-scan of the claimable-and-due set,
   ordered oldest first with no position to skip past, cannot lose that
-  row. The waiter tracks nothing about pacing itself for a mailbox any
-  more -- no cursor, no last-reference bookkeeping, no re-send pass, no
-  same-tick double-send exclusion, no dead-row skip (the engine's own
-  claimable filter already excludes a dead-lettered row) -- it renders
-  whatever the engine hands it and stops.
+  row. The waiter tracks nothing about pacing itself any more -- no
+  cursor for either shape, no last-reference bookkeeping, no re-send
+  pass, no same-tick double-send exclusion, no dead-row skip (the
+  engine's own claimable filter already excludes a dead-lettered row) --
+  it renders whatever the engine hands it and stops.
 
 RDR-211 gated every mailbox claim on proof that the channel was live for
 this session (a parent command-line read, or a probe notification the
@@ -130,6 +135,11 @@ _CHANNEL_METHOD = "notifications/claude/channel"
 DEFAULT_WAIT_TIMEOUT_S = 25
 DEFAULT_REANNOUNCE_INTERVAL_S = 150.0
 DEFAULT_MAX_ANNOUNCES = 5
+#: A board post is announced ONCE per subscriber (bead nexus-q82tk): a
+#: post is never claimed, so nothing can tell the engine it was acted on,
+#: and a re-announce budget would only wake the session again for a post
+#: it already saw. The old cursor announced a post once too.
+DEFAULT_BOARD_MAX_ANNOUNCES = 1
 #: Seconds `run()` sleeps after a tick fails for a reason other than
 #: "engine without wait" (a transient HTTP or store error) before the next
 #: tick. The loop never dies on one bad round-trip.
@@ -137,10 +147,10 @@ DEFAULT_TICK_ERROR_BACKOFF_S: float = 5.0
 #: Belt-and-braces floor: a minimum real-clock gap `run()` enforces
 #: between the START of one tick and the START of the next, whenever a
 #: tick returns faster than this. Genuinely defensive, not the fix, for
-#: either subspace shape: a board's own cursor excludes an already-
-#: delivered post from matching again, and a mailbox's `announce` field
-#: makes the engine itself refuse to return a row before its own
-#: interval/cap says so (bead nexus-vsipz) -- kept as a belt against a
+#: either subspace shape: every spec's `announce` field makes the
+#: engine itself refuse to return a row before its own interval/cap says
+#: so (bead nexus-vsipz for mailboxes, nexus-q82tk for boards) -- kept as
+#: a belt against a
 #: future bug, or an engine, that returns from `wait()` before its own
 #: timeout for a reason this waiter did not anticipate.
 DEFAULT_MIN_TICK_INTERVAL_S: float = 0.25
@@ -342,8 +352,8 @@ def _mailbox_notification_content(subspace: str, tuple_id: str, to_address: str)
 
 def _board_notification_content(subspace: str, tuple_id: str) -> str:
     return (
-        f"nexus board post: subspace {subspace}, tuple {tuple_id}. Read new posts with "
-        "tuple_rd on that subspace from your cursor (tuple_subscriptions shows it)."
+        f"nexus board post: subspace {subspace}, tuple {tuple_id}. Read it with "
+        "tuple_rd on that subspace. Posts are never claimed."
     )
 
 
@@ -356,8 +366,10 @@ class ChannelWaiter:
 
     Every subscription enters the SAME single ``wait`` call every tick
     (:meth:`_build_specs`); the spec is NEVER empty. A board's spec
-    carries ``since`` set to its own position cursor, unchanged from
-    before. A mailbox's spec instead carries ``announce={interval_s,
+    (bead nexus-q82tk) carries ``announce`` with ``subscriber`` set to this session's id and
+    ``max=DEFAULT_BOARD_MAX_ANNOUNCES``: the engine keeps the stamp per
+    subscriber in ``nexus.tuple_deliveries`` and returns a post to this
+    session once. A mailbox's spec carries ``announce={interval_s,
     max}`` (bead nexus-vsipz, RDR-213 engine half): the ENGINE decides
     whether a row is claimable and due, and stamps it in the same
     statement that selects it, so a row it returns is a row this waiter
@@ -368,10 +380,9 @@ class ChannelWaiter:
     1``), never on a re-send the engine itself chose to make.
 
     This makes a busy loop structurally impossible for either subspace
-    shape, by different mechanisms: a board's cursor stops an
-    already-delivered post from matching `wait` again; a mailbox's
-    engine-side due check stops a row from matching before its own
-    interval/cap says so. Two rows arriving together are referenced one
+    shape, by one mechanism: the engine-side due check stops a row from
+    matching before its own interval/cap says so, per row for a mailbox
+    and per (row, subscriber) for a board. Two rows arriving together are referenced one
     wake apart (the second becomes newly due the very next tick,
     immediately, never gated on the first being acked); a restart with a
     backlog walks it one reference per wake, since a never-announced row
@@ -410,7 +421,6 @@ class ChannelWaiter:
         subs: "SubscriptionSet",
         *,
         sender: Callable[[str, dict[str, str]], Awaitable[bool]] = send_channel_notification,
-        persist: Callable[[], None] = lambda: None,
         state_dir: Path | None = None,
         wait_timeout_s: int = DEFAULT_WAIT_TIMEOUT_S,
         reannounce_interval_s: float = DEFAULT_REANNOUNCE_INTERVAL_S,
@@ -422,11 +432,6 @@ class ChannelWaiter:
         self.store_factory = store_factory
         self.subs = subs
         self.sender = sender
-        #: Best-effort T1 write-back after a board cursor advances, so a
-        #: `/resume` does not re-deliver posts already shown this
-        #: session. Defaults to a no-op (tests; a caller managing
-        #: persistence itself).
-        self.persist = persist
         #: `None` (the default; tests that do not care about the on-disk
         #: status record) means :meth:`_publish_status` is a no-op. A real
         #: caller (`nexus.mcp.core._start_channel_waiter`) passes
@@ -541,12 +546,10 @@ class ChannelWaiter:
     async def run(self) -> None:
         """The loop. `tick`/`_build_specs` make a busy loop structurally
         impossible on their own, by TWO SEPARATE mechanisms (bead
-        nexus-vsipz split boards from mailboxes): a board's own `since`
-        cursor excludes every post this waiter has already delivered, so
-        `wait` genuinely parks on that subspace; a mailbox's `announce`
-        field makes the ENGINE itself refuse to return a row before its
-        own interval/cap says so, so `wait` genuinely parks on that
-        subspace too -- for a different reason, but the same effect. A
+        nexus-vsipz for mailboxes, nexus-q82tk for boards): every spec's
+        `announce` field makes the ENGINE itself refuse to return a row
+        before its own interval/cap says so (per row for a mailbox, per
+        row and subscriber for a board), so `wait` genuinely parks. A
         healthy tick never returns faster than a genuine wake or its own
         capped timeout for either shape; the floor below is a defensive
         belt on top of that, not the fix -- see
@@ -642,20 +645,20 @@ class ChannelWaiter:
 
     @staticmethod
     def _engine_ignores_announce(results: list[WaitResult]) -> bool:
-        """`True` the first time ANY mailbox row in *results* carries
+        """`True` the first time ANY row in *results* carries
         `announce_count=None` (bead nexus-vsipz): a real engine ALWAYS
         renders that field, on every tuple it returns, whether or not the
         spec that matched it carried `announce` at all (0 is the column
         default) -- so seeing `None` on a row returned FOR an announce-
-        mode mailbox spec is proof the engine never even looked at that
-        field, exactly the same class of evidence a 404 from `/wait`
-        itself is for an engine predating `wait` entirely. A board's rows
-        are never checked here: a board spec carries no `announce`, so an
-        old engine's board behaviour is unaffected and tells us nothing
-        about announce support."""
+        mode spec is proof the engine never even looked at that field,
+        exactly the same class of evidence a 404 from `/wait` itself is
+        for an engine predating `wait` entirely. Every spec carries
+        `announce` now (bead nexus-q82tk moved boards onto it), so every
+        row is checked. An engine that renders the field but predates
+        the per-subscriber stamp (v0.1.128) would stamp the board ROW
+        instead; that pairing never runs, because the client refuses an
+        engine below its floor at spawn."""
         for result in results:
-            if result.subspace.startswith("board/"):
-                continue
             for row in result.tuples:
                 if row.announce_count is None:
                     return True
@@ -663,19 +666,26 @@ class ChannelWaiter:
 
     def _build_specs(self) -> list[WaitSpec]:
         """Every subscription -- board or mailbox -- enters the spec
-        every tick. The spec is NEVER empty. A board's spec is unchanged:
-        `since` set to its own position cursor. A mailbox's spec (bead
-        nexus-vsipz, RDR-213 engine half) asks for `n=1` and an `announce`
-        field carrying this waiter's `reannounce_interval_s`/
+        every tick. The spec is NEVER empty. A board's spec (bead
+        nexus-q82tk) carries `announce` with `subscriber` set to this
+        session's id and `max=DEFAULT_BOARD_MAX_ANNOUNCES`, so the engine
+        returns each post to this session once, from a per-subscriber
+        stamp, with no client cursor to skip a late commit. A mailbox's
+        spec (bead nexus-vsipz, RDR-213 engine half) asks for `n=1` and
+        an `announce` field carrying this waiter's `reannounce_interval_s`/
         `max_announces` -- the engine, not this waiter, decides whether
         anything is due."""
         specs: list[WaitSpec] = []
         for entry in self.subs.entries():
             subspace = entry["subspace"]
             if subspace.startswith("board/"):
-                cursor = entry.get("cursor")
-                since = (cursor["created_at"], cursor["id"]) if cursor else None
-                specs.append(WaitSpec(subspace=subspace, since=since))
+                specs.append(WaitSpec(
+                    subspace=subspace,
+                    announce=Announce(
+                        interval_s=int(self.reannounce_interval_s), max=DEFAULT_BOARD_MAX_ANNOUNCES,
+                        subscriber=self.session_id,
+                    ),
+                ))
             else:
                 specs.append(WaitSpec(
                     subspace=subspace, n=1,
@@ -684,8 +694,10 @@ class ChannelWaiter:
         return specs
 
     async def _process_results(self, results: list[WaitResult]) -> None:
-        """Board posts: unchanged -- deliver each, advance the cursor,
-        persist. Mailboxes (bead nexus-vsipz, RDR-213 engine half): each
+        """Board posts (bead nexus-q82tk): deliver each; the engine has
+        already stamped the per-subscriber delivery row, so there is no
+        cursor to advance and nothing to persist. Mailboxes (bead
+        nexus-vsipz, RDR-213 engine half): each
         spec asks for `n=1`, so at most one row per mailbox per wake, and
         the engine has already decided it is claimable and due -- there
         is no dead-row skip here any more, because the engine's own
@@ -693,25 +705,13 @@ class ChannelWaiter:
         ever sees it. Every returned mailbox row is referenced, claimed
         or not (the notification text already covers an empty
         `tuple_in`)."""
-        advanced = False
         for result in results:
             if result.subspace.startswith("board/"):
                 for row in result.tuples:
                     await self._deliver_board_post(result.subspace, row)
-                if result.tuples:
-                    last = result.tuples[-1]
-                    self.subs.advance_cursor(result.subspace, (last.created_at or "", last.id))
-                    advanced = True
                 continue
             for row in result.tuples:  # n=1 caps this to at most one row
                 await self._reference_mailbox_row(result.subspace, row)
-        if advanced:
-            # Code review Significant 3 (RDR-211): `self.persist()` (a T1
-            # write-back, a synchronous HTTP call) must never run directly
-            # on the event loop -- every other store call in this class
-            # already goes through `asyncio.to_thread` for exactly this
-            # reason.
-            await asyncio.to_thread(self.persist)
 
     async def _deliver_board_post(self, subspace: str, row: TupleRow) -> None:
         meta = {"subspace": subspace, "tuple_id": row.id}

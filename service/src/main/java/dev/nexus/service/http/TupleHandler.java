@@ -43,7 +43,10 @@ import java.util.Optional;
  *   POST /v1/tuples/out             {subspace, keys, dims?, body?, nonce?, ttl_seconds?} -&gt; {"id": "&lt;hex&gt;"}
  *   POST /v1/tuples/rd              {subspace, keys_pattern?, n?, since?, timeout_s?} -&gt; {"tuples": [...]}
  *   POST /v1/tuples/rdp             {subspace, keys_pattern?, n?, since?} -&gt; {"tuples": [...]}
- *   POST /v1/tuples/wait            {subspaces: [{subspace, keys_pattern?, n?, since?}, ...], timeout_s?}
+ *   POST /v1/tuples/wait            {subspaces: [{subspace, keys_pattern?, n?, since?, announce?}, ...], timeout_s?}
+ *                                   announce: {interval_s, max, subscriber?} -- subscriber (bead nexus-q82tk)
+ *                                   keys the stamp per reader in nexus.tuple_deliveries; absent, the stamp
+ *                                   is the row's own announced_at/announce_count (bead nexus-vsipz)
  *                                    -&gt; {"results": [{"subspace", "tuples": [...]}, ...]}
  *                                    (RDR-211 Phase 1 Step 1, bead nexus-rplay.4 -- a multi-subspace {@code rd};
  *                                    parks with NO claimant, one global slot regardless of subspace count; a
@@ -750,6 +753,19 @@ public final class TupleHandler implements HttpHandler {
         Map<String, Object> m = (Map<String, Object>) raw;
         long intervalS = requireLong(m, "interval_s");
         long max = requireLong(m, "max");
-        return new TupleRepository.WaitSpec.Announce(intervalS, (int) max);
+        // subscriber (bead nexus-q82tk, RDR-213 boards half): optional. Present,
+        // the stamp is kept per (subspace, subscriber, tuple) in
+        // nexus.tuple_deliveries instead of on the row; absent, the row-level
+        // nexus-vsipz shape. A non-string value is a malformed request, the same
+        // shape requireString gives every other string field.
+        Object subRaw = m.get("subscriber");
+        String subscriber = null;
+        if (subRaw != null) {
+            if (!(subRaw instanceof String s)) {
+                throw new IllegalArgumentException("subscriber must be a string");
+            }
+            subscriber = s;
+        }
+        return new TupleRepository.WaitSpec.Announce(intervalS, (int) max, subscriber);
     }
 }

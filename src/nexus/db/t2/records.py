@@ -253,10 +253,19 @@ class Announce:
     is the minimum gap between two announcements of the SAME row;
     ``max`` bounds how many times total. See ``WaitSpec.announce``'s own
     docstring for the full contract.
+
+    ``subscriber`` (bead nexus-q82tk, RDR-213 boards half) names the
+    reader the stamp is kept FOR: set, the engine keeps ``announced_at``/
+    ``announce_count`` per ``(subspace, subscriber, tuple)`` in
+    ``nexus.tuple_deliveries`` instead of on the row, so a board post
+    read by many sessions is announced once to EACH of them. ``None``
+    (the default, every mailbox spec) is the row-level stamp. The
+    channel waiter sends its session id for every board spec.
     """
 
     interval_s: int
     max: int
+    subscriber: str | None = None
 
 
 @dataclass(frozen=True)

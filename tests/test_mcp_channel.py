@@ -4,12 +4,12 @@
 `claude/channel` capability declaration and the lifespan waiter
 (`nexus.mcp.channel`), with the proof gate and claim-at-delivery deleted.
 
-Mailboxes and boards take DIFFERENT shapes (bead nexus-vsipz, RDR-213
-engine half): a board keeps its own position cursor, unchanged. A
-mailbox instead asks the ENGINE to gate cadence and cap via a
-`WaitSpec.announce` field -- superseding the first RDR-213 cut's
-cursor-shares-one-shape design (T2 `nexus_rdr/213-decision-
-announcements-rate-limited-not-ack-gated-2026-09-17`), which carried a
+Every spec, mailbox or board, asks the ENGINE to gate cadence and cap
+via a `WaitSpec.announce` field (bead nexus-vsipz for mailboxes, whose
+stamp lives on the row; bead nexus-q82tk for boards, whose stamp lives
+per subscriber in `nexus.tuple_deliveries`, `max=1`) -- superseding the
+first RDR-213 cut's cursor-shares-one-shape design (T2 `nexus_rdr/213-
+decision-announcements-rate-limited-not-ack-gated-2026-09-17`), which carried a
 structural gap this module's stop-rule test measured directly: a cursor
 keyed on `(created_at, id)` can skip a transaction that started earlier
 but committed later, because a client-side position has no way to know a
@@ -177,6 +177,12 @@ class _FakeTupleStore:
         #: here, never parsed) so due-ness can be computed against a real
         #: clock without needing a real timestamp format.
         self._announced_monotonic: dict[tuple[str, str], float] = {}
+        #: (subspace, subscriber, id) -> (monotonic time of the last
+        #: per-subscriber announce, per-subscriber count): the fake's
+        #: model of `nexus.tuple_deliveries` (bead nexus-q82tk). The row's
+        #: own `announced_at`/`announce_count` are never touched by a
+        #: per-subscriber announce, exactly as in the engine.
+        self._deliveries: dict[tuple[str, str, str], tuple[float, int]] = {}
         self._seq = 0
         self.wait_calls: list[tuple[list, int]] = []
         self.wait_raises: Exception | None = None
@@ -272,6 +278,12 @@ class _FakeTupleStore:
         # included, never excluded, never stamped (see `_announce_rows`).
         if row.announce_count is None:
             return True
+        if announce.subscriber is not None:
+            seen = self._deliveries.get((subspace, announce.subscriber, row.id))
+            if seen is None:
+                return True
+            last_at, count = seen
+            return (time.monotonic() - last_at) >= announce.interval_s and count < announce.max
         last = self._announced_monotonic.get((subspace, row.id))
         if last is None:
             return True
@@ -291,6 +303,15 @@ class _FakeTupleStore:
                 # unstamped, `announce_count` still `None` -- never
                 # mutated by an announce-mode call this fake models.
                 stamped.append(row)
+                continue
+            if announce.subscriber is not None:
+                key = (subspace, announce.subscriber, row.id)
+                prior = self._deliveries.get(key)
+                new_count = (prior[1] if prior else 0) + 1
+                self._deliveries[key] = (time.monotonic(), new_count)
+                # The returned row carries the PER-SUBSCRIBER post-stamp
+                # values; the stored row is untouched (engine contract).
+                stamped.append(dataclasses.replace(row, announced_at="stamped", announce_count=new_count))
                 continue
             new_count = row.announce_count + 1
             self._announced_monotonic[(subspace, row.id)] = time.monotonic()
@@ -659,14 +680,14 @@ class TestChannelWaiterFakeStore:
         post = fake.seed("board/release-notes", "p1", "hi")
         sender = _FakeSender()
         waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), subs, sender=sender, persist=lambda: None,
+            session_id, _fake_store_factory(fake), subs, sender=sender,
         )
 
         await waiter.tick()
 
         tuple_ids = {m.get("tuple_id") for _c, m in sender.calls}
         assert tuple_ids == {"a1", "b1", "p1"}
-        assert subs.entries()[-1]["cursor"] == {"created_at": post.created_at, "id": "p1"}
+        assert post.announce_count == 0, "the board row's own columns are never stamped (per-subscriber)"
         assert len(fake.wait_calls) == 1, "one wait() call covers every subscription"
 
     @pytest.mark.asyncio
@@ -748,7 +769,11 @@ class TestChannelWaiterFakeStore:
             await run_task
 
     @pytest.mark.asyncio
-    async def test_board_post_is_delivered_and_cursor_advances(self) -> None:
+    async def test_board_post_is_delivered_once_per_subscriber_via_the_engine_stamp(self) -> None:
+        """Bead nexus-q82tk: a board spec carries `announce` with this
+        session's id as `subscriber` and `max=1`; the engine's per-
+        subscriber stamp returns the post once and never again, and the
+        waiter keeps no cursor and persists nothing."""
         session_id = str(uuid.uuid4())
         subs = _subs(session_id)
         subs.subscribe(
@@ -757,12 +782,10 @@ class TestChannelWaiterFakeStore:
             state_dir=None,
         )
         fake = _FakeTupleStore()
-        post = fake.seed("board/release-notes", "p1", "v7.50 shipped", dims={"from": "author-a", "kind": "note"})
+        fake.seed("board/release-notes", "p1", "v7.50 shipped", dims={"from": "author-a", "kind": "note"})
         sender = _FakeSender()
-        persisted = []
         waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), subs, sender=sender,
-            persist=lambda: persisted.append(True),
+            session_id, _fake_store_factory(fake), subs, sender=sender, reannounce_interval_s=0.0,
         )
         await waiter.tick()
         expected_content = channel._board_notification_content("board/release-notes", "p1")  # noqa: SLF001
@@ -771,34 +794,46 @@ class TestChannelWaiterFakeStore:
             {"subspace": "board/release-notes", "tuple_id": "p1", "from": "author-a", "kind": "note"},
         )
         assert "v7.50 shipped" not in expected_content, "the notification must never carry the post body"
-        assert subs.entries()[-1]["cursor"] == {"created_at": post.created_at, "id": "p1"}
-        assert persisted == [True]
+        assert "cursor" not in expected_content
+        specs, _timeout = fake.wait_calls[-1]
+        board_spec = next(sp for sp in specs if sp.subspace == "board/release-notes")
+        assert board_spec.since is None
+        assert board_spec.announce == Announce(
+            interval_s=0, max=channel.DEFAULT_BOARD_MAX_ANNOUNCES, subscriber=session_id,
+        )
+        assert all("cursor" not in e for e in subs.entries())
+
+        for _ in range(3):
+            await waiter.tick()
+        board_sends = [m for _c, m in sender.calls if m.get("subspace") == "board/release-notes"]
+        assert len(board_sends) == 1, "max=1: announced once to this subscriber, interval 0 notwithstanding"
 
     @pytest.mark.asyncio
-    async def test_persist_runs_off_the_event_loop_thread(self) -> None:
-        """Code review Significant 3 (RDR-211, unchanged by RDR-213):
-        `_process_results` called `self.persist()` synchronously on the
-        event loop while every other store call in this class goes
-        through `asyncio.to_thread`. A blocking `persist` (T1 is a
-        synchronous HTTP client) would stall the whole waiter loop."""
-        session_id = str(uuid.uuid4())
-        subs = _subs(session_id)
-        subs.subscribe(
-            "board/release-notes", templates=[],
-            store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
-            state_dir=None,
-        )
+    async def test_two_subscribers_each_get_a_board_post_once(self) -> None:
+        """Bead nexus-q82tk: the stamp is per subscriber. A second
+        session's waiter over the same fake (one engine) is announced the
+        same post once, unaffected by the first's stamp."""
         fake = _FakeTupleStore()
-        fake.seed("board/release-notes", "p1", "hi")
-        loop_thread_id = threading.get_ident()
-        persist_thread_ids: list[int] = []
-        waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), subs, sender=_FakeSender(),
-            persist=lambda: persist_thread_ids.append(threading.get_ident()),
-        )
-        await waiter.tick()
-        assert persist_thread_ids, "persist must have been called"
-        assert persist_thread_ids[0] != loop_thread_id, "persist ran ON the event loop thread"
+        fake.seed("board/shared", "p1", "hi")
+        senders = []
+        for _ in range(2):
+            session_id = str(uuid.uuid4())
+            subs = _subs(session_id)
+            subs.subscribe(
+                "board/shared", templates=[],
+                store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
+                state_dir=None,
+            )
+            sender = _FakeSender()
+            senders.append(sender)
+            waiter = channel.ChannelWaiter(
+                session_id, _fake_store_factory(fake), subs, sender=sender, reannounce_interval_s=0.0,
+            )
+            await waiter.tick()
+            await waiter.tick()
+        for sender in senders:
+            board_sends = [m for _c, m in sender.calls if m.get("subspace") == "board/shared"]
+            assert len(board_sends) == 1
 
     @pytest.mark.asyncio
     async def test_late_subscription_is_picked_up_at_the_next_tick(self) -> None:
@@ -808,11 +843,7 @@ class TestChannelWaiterFakeStore:
         subs = _subs(session_id)
         fake = _FakeTupleStore()
         sender = _FakeSender()
-        persisted = []
-        waiter = channel.ChannelWaiter(
-            session_id, _fake_store_factory(fake), subs, sender=sender,
-            persist=lambda: persisted.append(True),
-        )
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
 
         await waiter.tick()  # first tick: only the session mailbox exists yet, and it has nothing
         first_specs, _timeout = fake.wait_calls[-1]
@@ -825,7 +856,7 @@ class TestChannelWaiterFakeStore:
             store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
             state_dir=None,
         )
-        post = fake.seed("board/late", "p1", "hi", dims={"from": "author-a", "kind": "note"})
+        fake.seed("board/late", "p1", "hi", dims={"from": "author-a", "kind": "note"})
 
         await waiter.tick()  # the NEXT tick -- picks up the new subscription
         assert len(fake.wait_calls) == 2
@@ -838,8 +869,6 @@ class TestChannelWaiterFakeStore:
             {"subspace": "board/late", "tuple_id": "p1", "from": "author-a", "kind": "note"},
         )
         assert "hi" not in expected_content, "the notification must never carry the post body"
-        assert subs.entries()[-1]["cursor"] == {"created_at": post.created_at, "id": "p1"}
-        assert persisted == [True]
 
 
 class TestChannelWaiterRealEngine:
@@ -944,7 +973,7 @@ class TestChannelWaiterRealEngine:
 
     def test_one_row_is_referenced_once_and_wait_genuinely_parks(self, t2_service_env) -> None:
         """(a) real-engine companion: over a real bounded window, `wait()`
-        must genuinely PARK once the cursor has passed the one row --
+        must genuinely PARK once the engine's stamp excludes the one row --
         never return immediately -- so the call count stays small."""
         from concurrent.futures import ThreadPoolExecutor
 
@@ -1110,87 +1139,72 @@ class TestChannelWaiterRealEngine:
         subspaces_referenced = {m.get("subspace") for _c, m in sender.calls}
         assert subspaces_referenced == {addr_a, addr_b}
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "nexus-vsipz: created_at is the transaction start time, so a cursor "
-            "can pass a row that commits later; the engine announce stamp "
-            "removes the cursor"
-        ),
-    )
-    def test_stop_rule_two_hundred_rows_two_concurrent_writers_no_row_ever_lost_to_the_cursor(
-        self, t2_service_env,
-    ) -> None:
-        """(g) A PRIMITIVE-LEVEL test of `rd`'s own `since`-cursor, under
-        two concurrent writers to one mailbox address -- NOT a test of
-        the mailbox delivery path, which this bead (nexus-vsipz) moves
-        off `since` entirely onto the engine's announce stamp, and NOT a
-        test of `ChannelWaiter`'s board branch either: this calls
-        `db.tuples.rd(...)` directly, never `_build_specs`, never
-        `_process_results`'s board arm, never `subs.advance_cursor`.
-        `TupleRepository.out()` stamps `created_at` at transaction START,
-        not commit, so a slower transaction that starts earlier can
-        commit later and land behind a `since` cursor a reader has
-        already advanced past a younger row's `(created_at, id)` --
-        silently and permanently skipping it. Kept, still exercising a
-        live risk, because BOARDS still read by `since` cursor through
-        exactly this code path (`_build_specs`'s board branch is
-        unchanged by this bead) -- the boards decision and fix are bead
-        nexus-q82tk's, not this one's. The xfail reason above (landed on
-        develop ahead of this bead) already states the mailbox path no
-        longer uses a cursor at all; this docstring is about what THIS
-        test exercises today, which the mailbox announce stamp does not
-        touch."""
+    def test_stop_rule_board_path_two_concurrent_writers_no_post_ever_lost(self, t2_service_env) -> None:
+        """(g) THE STOP RULE, board path (bead nexus-q82tk; the Java-side
+        deterministic proof is `TupleAnnounceTest.subscriberAnnounce_
+        lateCommittingPost_isStillAnnouncedToTheSubscriber`, which holds a
+        transaction open across a faster sibling's commit). This drives
+        the REAL delivery path -- `_build_specs`'s board arm, the engine's
+        per-subscriber stamp, `_process_results`, `_deliver_board_post`
+        -- through `ChannelWaiter.tick()` against the real engine, with
+        two writers posting to one board concurrently, and asserts every
+        post is referenced to this subscriber exactly once. The client-
+        side `since` cursor this replaced could skip a post whose
+        transaction started earlier but committed later (`created_at` is
+        the transaction START time); it was an xfail here until this
+        bead. Strict now: a lost or duplicated post fails."""
         from nexus.mcp.core import tuple_out
         from nexus.mcp_infra import t2_ctx
 
         session_id = str(uuid.uuid4())
-        addr = f"mailbox/{session_id}"
+        topic = f"stop-rule-{uuid.uuid4().hex}"
+        board = f"board/{topic}"
+        subs = _subs(session_id)
+        subs.subscribe(
+            board, templates=[],
+            store_factory=lambda: (_ for _ in ()).throw(AssertionError("a board subscription never touches the store")),
+            state_dir=None,
+        )
         written_ids: set[str] = set()
         written_lock = threading.Lock()
         rows_per_writer = 100
 
         def _writer(prefix: str) -> None:
             for i in range(rows_per_writer):
-                tid = tuple_out(
-                    addr, {"to": session_id}, {"from": prefix}, f"{prefix}-{i}", nonce=uuid.uuid4().hex,
-                )
+                tid = tuple_out(board, {"topic": topic}, {"from": prefix}, f"{prefix}-{i}", nonce=uuid.uuid4().hex)
                 with written_lock:
                     written_ids.add(tid)
+
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, t2_ctx, subs, sender=sender, wait_timeout_s=1)
 
         t1 = threading.Thread(target=_writer, args=("writer-a",))
         t2 = threading.Thread(target=_writer, args=("writer-b",))
         t1.start()
         t2.start()
 
-        seen_ids: set[str] = set()
-        cursor: tuple[str, str] | None = None
-        with t2_ctx() as db:
-            deadline = time.monotonic() + 60.0
-            empty_polls = 0
-            while time.monotonic() < deadline:
-                rows = db.tuples.rd(addr, None, n=50, since=cursor, timeout_s=0)
-                if rows:
-                    empty_polls = 0
-                    for r in rows:
-                        seen_ids.add(r.id)
-                    cursor = (rows[-1].created_at or "", rows[-1].id)
-                    continue
-                empty_polls += 1
-                writers_done = not t1.is_alive() and not t2.is_alive()
-                if writers_done and empty_polls >= 5:
-                    break
-                time.sleep(0.05)
+        deadline = time.monotonic() + 90.0
+        quiet_ticks = 0
+        while time.monotonic() < deadline:
+            before = len(sender.calls)
+            asyncio.run(waiter.tick())
+            if len(sender.calls) > before:
+                quiet_ticks = 0
+                continue
+            quiet_ticks += 1
+            if not t1.is_alive() and not t2.is_alive() and quiet_ticks >= 3:
+                break
 
         t1.join()
         t2.join()
         assert len(written_ids) == 2 * rows_per_writer, "sanity: both writers must have completed all their writes"
-        missing = written_ids - seen_ids
+        seen = [m.get("tuple_id") for _c, m in sender.calls if m.get("subspace") == board]
+        missing = written_ids - set(seen)
         assert not missing, (
-            f"STOP RULE VIOLATED: {len(missing)} of {len(written_ids)} rows were never observed by a "
-            f"since-advancing reader -- a client-side cursor can silently skip live mail under "
-            f"concurrent writers. ids: {sorted(missing)[:10]}"
+            f"STOP RULE VIOLATED: {len(missing)} of {len(written_ids)} posts were never announced to the "
+            f"subscriber through the board path. ids: {sorted(missing)[:10]}"
         )
+        assert len(seen) == len(set(seen)), "max=1 per subscriber: no post is announced twice"
 
     def test_announce_mode_never_loses_a_row_to_a_concurrent_writer_skew(self, t2_service_env) -> None:
         """(g) THE STOP RULE, mailbox path (bead nexus-vsipz, RDR-213
@@ -1294,12 +1308,7 @@ class TestChannelWaiterRealEngine:
             specs: list[WaitSpec] = []
             for entry in self.subs.entries():
                 subspace = entry["subspace"]
-                if subspace.startswith("board/"):
-                    cursor = entry.get("cursor")
-                    since = (cursor["created_at"], cursor["id"]) if cursor else None
-                    specs.append(WaitSpec(subspace=subspace, since=since))
-                else:
-                    specs.append(WaitSpec(subspace=subspace, n=1))
+                specs.append(WaitSpec(subspace=subspace, n=1))
             return specs
 
         original = channel.ChannelWaiter._build_specs  # noqa: SLF001

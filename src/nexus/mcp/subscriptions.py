@@ -5,8 +5,9 @@ per-session subscription set -- what the not-yet-built lifespan waiter
 (bead nexus-rplay.10) will park a single ``wait`` call on -- plus the
 instance-mailbox takeover (Technical Design "Subscriptions").
 
-The set holds three kinds of entry, each with a cursor the waiter will
-advance:
+The set holds three kinds of entry (no cursor: since bead nexus-vsipz a
+mailbox's position lives on the engine's row stamp, and since bead
+nexus-q82tk a board's lives in the engine's per-subscriber delivery row):
 
 - ``mailbox/<session id>``, present from construction, never removable
   (it is the floor's own address).
@@ -291,28 +292,22 @@ def _take_enabled(templates: list[dict[str, Any]], subspace: str) -> bool:
     return True
 
 
-def _cursor_json(cursor: tuple[str, str] | None) -> dict[str, str] | None:
-    if cursor is None:
-        return None
-    return {"created_at": cursor[0], "id": cursor[1]}
-
-
 @dataclass
 class SubscriptionSet:
     """One session's subscription list.
 
     ``session_mailbox`` (``mailbox/<session_id>``) is implicit and never
     stored in ``_board`` or removable. ``instance_mailbox`` is at most one
-    further mailbox. ``_board`` maps a subscribed ``board/<topic>`` to its
-    cursor (``None`` until the not-yet-built waiter advances it).
+    further mailbox. ``_board`` is the subscribed ``board/<topic>``
+    subspaces in subscription order (a dict used as an ordered set: the
+    value is always ``None``; the per-topic cursor it once held moved to
+    the engine, bead nexus-q82tk).
     """
 
     session_id: str
     instance_mailbox: str | None = None
     _instance_name: str | None = field(default=None, repr=False)
-    _board: dict[str, tuple[str, str] | None] = field(default_factory=dict)
-    _session_cursor: tuple[str, str] | None = field(default=None, repr=False)
-    _instance_cursor: tuple[str, str] | None = field(default=None, repr=False)
+    _board: dict[str, None] = field(default_factory=dict)
     version: int = 0
     _listeners: list[Callable[["SubscriptionSet"], None]] = field(default_factory=list, repr=False)
     _lease_thread: threading.Thread | None = field(default=None, repr=False, compare=False)
@@ -453,46 +448,23 @@ class SubscriptionSet:
             self._stop_lease()
             self.instance_mailbox = None
             self._instance_name = None
-            self._instance_cursor = None
             self._bump()
             return
         if subspace in self._board:
             del self._board[subspace]
             self._bump()
 
-    # ── Cursor bookkeeping (RDR-211 Phase 1 Step 3, bead nexus-rplay.10) ────
-
-    def advance_cursor(self, subspace: str, cursor: tuple[str, str]) -> None:
-        """Move *subspace*'s delivery cursor forward -- the lifespan
-        waiter's own bookkeeping as it delivers board posts past their
-        prior cursor.
-
-        Deliberately does NOT call :meth:`_bump` / notify listeners: a
-        cursor advance is not a subscription-LIST mutation, and
-        re-issuing the parked ``wait`` on every delivered tuple would be
-        wasteful and wrong (Technical Design "Waiting" -- only a
-        subscribe/unsubscribe re-issues it). A silent no-op for a
-        *subspace* this set does not hold (e.g. one unsubscribed between
-        the waiter reading its list and advancing this cursor).
-        """
-        if subspace == self.session_mailbox:
-            self._session_cursor = cursor
-        elif self.instance_mailbox and subspace == self.instance_mailbox:
-            self._instance_cursor = cursor
-        elif subspace in self._board:
-            self._board[subspace] = cursor
-
     def entries(self) -> list[dict[str, Any]]:
-        """This set's subspaces with their cursors, in the order
-        ``tuple_subscriptions`` renders them: the session mailbox first,
-        then the instance mailbox if any, then board topics."""
-        out: list[dict[str, Any]] = [
-            {"subspace": self.session_mailbox, "cursor": _cursor_json(self._session_cursor)},
-        ]
+        """This set's subspaces, in the order ``tuple_subscriptions``
+        renders them: the session mailbox first, then the instance
+        mailbox if any, then board topics. No cursor: delivery position
+        lives in the engine for every shape (beads nexus-vsipz,
+        nexus-q82tk)."""
+        out: list[dict[str, Any]] = [{"subspace": self.session_mailbox}]
         if self.instance_mailbox:
-            out.append({"subspace": self.instance_mailbox, "cursor": _cursor_json(self._instance_cursor)})
-        for topic, cursor in self._board.items():
-            out.append({"subspace": topic, "cursor": _cursor_json(cursor)})
+            out.append({"subspace": self.instance_mailbox})
+        for topic in self._board:
+            out.append({"subspace": topic})
         return out
 
     # ── Lease thread lifecycle ───────────────────────────────────────────
@@ -544,7 +516,7 @@ class SubscriptionSet:
             "session_id": self.session_id,
             "instance_mailbox": self.instance_mailbox,
             "instance_name": self._instance_name,
-            "board": {k: (list(v) if v else None) for k, v in self._board.items()},
+            "board": list(self._board),
         }
 
     @classmethod
@@ -552,8 +524,13 @@ class SubscriptionSet:
         obj = cls(session_id=data["session_id"])
         obj.instance_mailbox = data.get("instance_mailbox")
         obj._instance_name = data.get("instance_name")
-        board = data.get("board") or {}
-        obj._board = {k: (tuple(v) if v else None) for k, v in board.items()}
+        # A record written before bead nexus-q82tk carries a dict of
+        # topic -> cursor; only the topics survive a `/resume` across that
+        # change, which is exactly what the engine-side stamp makes
+        # sufficient.
+        board = data.get("board") or []
+        topics = list(board.keys()) if isinstance(board, dict) else list(board)
+        obj._board = dict.fromkeys(topics)
         return obj
 
 
