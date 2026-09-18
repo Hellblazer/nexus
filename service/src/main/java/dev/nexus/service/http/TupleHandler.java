@@ -249,7 +249,8 @@ public final class TupleHandler implements HttpHandler {
             Map<String, String> pattern = stringMap((Map<String, Object>) spec.get("keys_pattern"));
             int n = intOrDefault(spec.get("n"), 1);
             TupleRepository.ReadCursor since = readCursor(spec.get("since"));
-            specs.add(new TupleRepository.WaitSpec(subspace, pattern, n, since));
+            TupleRepository.WaitSpec.Announce announce = readAnnounce(spec.get("announce"));
+            specs.add(new TupleRepository.WaitSpec(subspace, pattern, n, since, announce));
         }
         long timeoutS = longOrDefault(body.get("timeout_s"), 0);
 
@@ -604,6 +605,12 @@ public final class TupleHandler implements HttpHandler {
         m.put("consumed_by", t.consumedBy());
         m.put("expires_at", t.expiresAt());
         m.put("created_at", t.createdAt());
+        // nexus-vsipz (RDR-213 engine half): additive wire fields, present on every
+        // tuple this handler renders, not only an announce-mode result -- a row
+        // nothing has ever announced simply carries announced_at=null,
+        // announce_count=0, the column defaults.
+        m.put("announced_at", t.announcedAt());
+        m.put("announce_count", t.announceCount());
         return m;
     }
 
@@ -728,5 +735,21 @@ public final class TupleHandler implements HttpHandler {
         OffsetDateTime createdAt = OffsetDateTime.parse(String.valueOf(createdAtRaw));
         byte[] id = HEX.parseHex(String.valueOf(idRaw));
         return new TupleRepository.ReadCursor(createdAt, id);
+    }
+
+    /** {@code announce: {interval_s, max}} on one {@code wait} spec (bead
+     *  nexus-vsipz, RDR-213 engine half) -- {@code null} (the field absent) is
+     *  today's unchanged semantics for every existing caller; present, both
+     *  sub-fields are required, same "missing required field" shape {@link
+     *  #requireLong} uses everywhere else in this class. */
+    @SuppressWarnings("unchecked")
+    private static TupleRepository.WaitSpec.Announce readAnnounce(Object raw) {
+        if (raw == null) {
+            return null;
+        }
+        Map<String, Object> m = (Map<String, Object>) raw;
+        long intervalS = requireLong(m, "interval_s");
+        long max = requireLong(m, "max");
+        return new TupleRepository.WaitSpec.Announce(intervalS, (int) max);
     }
 }
