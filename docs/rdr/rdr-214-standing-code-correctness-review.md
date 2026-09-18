@@ -596,3 +596,4 @@ on the expensive half and leaves the cheap half nearly unconstrained.
   (T2 `nexus_rdr/214-research-2` to `-5`).
 - 2026-09-17: Proposed Solution, Technical Design, alternatives and plan
   written from the research.
+- 2026-09-18: Gate round 1 — BLOCKED (1 Critical, 6 Significant, 0 ship-blocker(s)); commit `9336beff4`; critique `nexus_rdr/214-gate-critique-2026-09-18-r1`.
