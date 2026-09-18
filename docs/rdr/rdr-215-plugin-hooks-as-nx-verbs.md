@@ -26,8 +26,10 @@ related_rdrs: [RDR-184, RDR-205]
 are what tie nexus to a POSIX shell on the client side. Claude Code runs a
 hook's `command` through bash, or through PowerShell on Windows when Git
 Bash is absent, and it also offers an exec form (`command` plus `args`)
-that spawns a real executable with no shell at all. Sam's decision that
-day: move the hook logic out of bash and behind `nx hook` verbs.
+that spawns a real executable with no shell at all, and an `mcp_tool`
+form that calls a tool on an already-connected MCP server with no
+process at all. Sam's decision that day: move the hook logic out of bash
+and into the `nexus` package.
 
 ## Problem Statement
 
@@ -63,17 +65,18 @@ because two consumers source it.
 `_run_python_hook.sh` walks a four-rung ladder (`NX_HOOK_PYTHON`, a
 checkout venv whose `nexus` is this tree, the installed generation's
 `current/bin/python`, then `python3.13`, `python3.12`, `python3`) to find
-a Python that imports `nexus`. The `nx` console script already is that
-Python: the generation's shim resolves `current` at spawn and execs into
-it. A hook declared as `nx hook <verb>` inherits the resolution for free;
-a hook declared as a bash script has to rebuild it.
+a Python that imports `nexus`. The installed generation's console
+scripts, and the `nx-mcp` server Claude Code already runs from one of
+them, are that Python by construction. A hook served from either
+inherits the resolution for free; a hook declared as a bash script has
+to rebuild it.
 
 #### Gap 3: Hook behaviour cannot run on a host without a POSIX shell
 
-Claude Code's exec form runs `command` with `args` and no shell, on every
-platform, provided `command` is a real executable. `nx` is one (a console
-script on Linux and macOS, `nx.exe` on Windows). A hook layer built on
-`nx hook` verbs in exec form therefore runs wherever `nx` installs. The
+Claude Code's `mcp_tool` form runs a hook as a tool call on a connected
+server, and its exec form runs `command` with `args` and no shell, on
+every platform, provided `command` is a real executable. A hook layer
+built on those two forms runs wherever the conexus wheel installs. The
 bash layer runs only where bash and the GNU userland do. Windows support
 via WSL2 does not need this gap closed, since WSL2 is Linux; a native
 Windows client would, and so would any future host that ships without
@@ -180,6 +183,16 @@ site, is T2 `nexus_rdr/215-hook-contract-map` (research-6).
 
 ### Key Discoveries
 
+- **Verified** (docs, 2026-09-18): Claude Code's `mcp_tool` hook type
+  calls a tool on an already-connected server, for a plugin server under
+  the scoped name `plugin:conexus:nexus`, passing `input` values built by
+  `${path}` substitution from the hook payload, and reads the tool's text
+  output exactly as command-hook stdout. A server that is not connected,
+  or a tool that returns an error, is a non-blocking error and the event
+  continues. The type is skipped on `SessionStart` at launch and on
+  `Setup`, because those fire before the servers exist; a `SessionStart`
+  after `/clear` or a compaction runs it. *Source: T2
+  `nexus_rdr/215-research-9`.*
 - **Verified** (source search, 2026-09-18): the Python hooks import
   `nexus` and must run under the generation's interpreter; a bare Homebrew
   `python3` cannot even log the import failure (`_run_python_hook.sh`
@@ -223,147 +236,181 @@ site, is T2 `nexus_rdr/215-hook-contract-map` (research-6).
 
 ### Critical Assumptions
 
-- **Assumed**: the generation's console scripts are on the PATH Claude
-  Code gives hooks on every supported install. The bash layer already
-  assumes this (research-4), so a port cannot make it worse, but whether
-  an app-launched Claude Code on macOS or a WSL2 distro inherits the login
-  PATH is still to be measured in Phase 1. A hook that cannot find its
-  generation must fail loud, not silently skip.
-- **Verified, with a design consequence** (research-5): a hook that enters
-  through the `nx` console script pays about 0.8 s for the CLI's eager
-  imports. The verbs therefore get their own console script, `nx-hook`,
-  whose module imports only what the invoked verb needs, so a hook costs
-  what the Python hooks cost today (about 0.04 s) rather than what `nx`
-  costs. The budget tests keep their thresholds and pin this.
-- **Assumed**: the `bd` calls (29 sites) can stay as subprocess calls from
-  Python; no bead-tool Python API is required.
+- **Assumed**: the `nx-mcp` server is connected by the time the first
+  post-session-start hook fires, on every supported install. The doc
+  says only that `SessionStart` at launch precedes the servers; whether
+  the first `PreToolUse` can race the server's connection is measured in
+  Phase 1. A hook that runs before its server is connected is a
+  non-blocking error, which for the close gate means fail-open.
+- **Assumed**: the installed generation's console scripts are on the
+  PATH Claude Code gives `SessionStart` hooks. The bash layer already
+  assumes this (research-4). Phase 1 measures it on an app-launched macOS
+  Claude Code and in WSL2. A hook that cannot find its generation fails
+  loud.
+- **Verified, with a design consequence** (research-5): an entry through
+  the `nx` console script pays about 0.8 s for the CLI's eager imports.
+  The one command-tier script this design keeps, `nx-hook`, imports only
+  what the invoked verb needs; the tool tier pays no process at all.
+- **Assumed**: the `bd` calls (research-6: `bd list`, `bd set-state`)
+  stay subprocess calls from Python. No bead-tool Python API is needed.
 
 ## Proposed Solution
 
+Two tiers, chosen by when the event fires. Every hook event that fires
+after the session's MCP servers are connected becomes a tool on the
+plugin's own `nx-mcp` server, declared as an `mcp_tool` hook: no process,
+no shell, no PATH, no interpreter to find, and the hook runs in the
+process that already imports `nexus`. The `SessionStart` group, which
+fires before the servers exist, and the version-lockstep hook, which must
+work on a wheel older than the plugin, are command hooks in exec form.
+All logic lives in `src/nexus/hooks/`; both tiers call the same
+functions.
+
 ### Approach
 
-1. Every hook in both plugins is declared in exec form as
-   `nx-hook <verb>`, a new console script beside `nx-session-end-launcher`
-   in `pyproject.toml`, whose entry module imports nothing from
-   `nexus.cli` and resolves the verb to its module lazily. `nx hook <verb>`
-   stays as an alias for a human at a terminal; the plugin never declares
-   it, because `nx` pays the CLI's 0.8 s import on every call
-   (research-5).
-2. Each bash script becomes a module under `src/nexus/hooks/` with one
-   entry function, registered in the `nx-hook` verb table. The module
-   reads the hook payload from stdin and writes the decision JSON to
-   stdout, exactly as the script did. Heavy imports (the catalog client,
-   T3) happen inside the branch that needs them.
-3. `expectations.sh` becomes `nexus.hooks.expectations`, one module, with
-   the three ledger verbs exposed as `nx-hook expect`, `nx-hook census`
-   and `nx-hook undeclared` keeping the documented exit codes. The e2e
+1. **The tool tier.** Every entry on `PreToolUse`, `PostToolUse`,
+   `PermissionRequest`, `UserPromptSubmit`, `SubagentStart`,
+   `SubagentStop`, `Stop`, `StopFailure` and `PostCompact` in the conexus
+   plugin becomes `{"type": "mcp_tool", "server": "plugin:conexus:nexus",
+   "tool": "hook_<name>", "input": {...}}`. The `input` map names the
+   payload fields the hook reads (the contract map lists them per script)
+   as `${session_id}`, `${tool_input.command}` and so on. The tool returns
+   the same decision JSON the script wrote to stdout. That is 19 of the 24
+   conexus entries.
+2. **The command tier.** The seven `SessionStart` entries stay command
+   hooks in exec form on `nx-hook`, a new console script beside
+   `nx-session-end-launcher` in `pyproject.toml`, whose entry module
+   imports `os`, `sys` and `json` and resolves the verb to its module
+   lazily. `SessionEnd` keeps `nx-session-end-launcher`, reshaped to exec
+   form. No entry names `nx`, because `nx` pays the CLI's 0.8 s import on
+   every call (research-5).
+3. **The lockstep exception.** `version_lockstep_hook.py` repairs a wheel
+   that is behind the plugin, so it can depend on neither tier. It stays a
+   stdlib-only script declared as `{"command": "python3", "args":
+   ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py"]}`, and
+   its two dispatch lines (218 and 521) run `python3
+   version_lockstep_action.py` directly, which is sound because the action
+   imports only the standard library (research-8).
+4. **One implementation, two entries.** Each bash script becomes a module
+   under `src/nexus/hooks/` with one function
+   `run(payload: dict | None) -> HookResult`. The tool tier registers it
+   on `nx-mcp` under `hook_<name>`; the command tier registers it in
+   `nx-hook`'s verb table. Neither entry holds logic.
+5. **The ledger.** `expectations.sh` becomes `nexus.hooks.expectations`,
+   one module, keeping the file format, the paths, the `mkdir` and
+   `ln -s` atomicity primitives, and the documented exit codes. The e2e
    copy and its byte-identity test are deleted. Its consumers are two
    classes: the bash e2e scripts that `source` it call `nx-hook <verb>`
-   instead, and the Python test files that shell out to `bash -c "source
-   ..."` import `nexus.hooks.expectations` directly.
-4. `_run_python_hook.sh` is deleted once no declaration and no hook code
-   path names it, with one permanent exception to the verb migration:
-   `version_lockstep_hook.py` is the hook that repairs a wheel behind the
-   plugin, so it can never depend on a console script the stale wheel may
-   lack. It stays a stdlib-only script launched as
-   `{"command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py"]}`
-   (exec form, no shell, no `nexus` import). Its own dispatch of the repair
-   action, which today runs `bash _run_python_hook.sh version_lockstep_action.py`
-   at lines 218 and 521, becomes `python3 version_lockstep_action.py`,
-   which is sound because the action imports only the standard library
-   (research-8). The lint allows `python3` only when the entry's sole
-   `args` element ends in `version_lockstep_hook.py`.
-4b. The four entries that already name `nx` are in scope: `nx hook
-   session-start` becomes `{"command": "nx-hook", "args": ["session-start"]}`,
-   `nx-session-end-launcher` becomes `{"command": "nx-session-end-launcher", "args": []}`,
-   and `nx upgrade --auto` and `nx self gc`, whose shell logic (`||`,
-   redirects) lives in the command string, become `nx-hook upgrade-auto`
-   and `nx-hook self-gc` verbs that carry that logic. No entry names `nx`.
-5. Each port is a behaviour-preserving move: the existing subprocess test
-   for the script is retargeted at the verb with the same stdin payload
-   and the same expected stdout and exit code, and passes before the bash
-   script is deleted.
-6. Byte budgets and timing budgets that exist as tests today keep their
-   thresholds.
+   instead, and the Python test files that shell out to `bash -c
+   "source ..."` import the module directly.
+6. **The four shell-form `nx` entries.** `nx hook session-start` becomes
+   `{"command": "nx-hook", "args": ["session-start"]}`,
+   `nx-session-end-launcher` becomes
+   `{"command": "nx-session-end-launcher", "args": []}`, and
+   `nx upgrade --auto` and `nx self gc`, whose shell logic lives in the
+   command string, become `nx-hook upgrade-auto` and `nx-hook self-gc`.
+7. **The launcher.** `_run_python_hook.sh` is deleted once no
+   `hooks.json` entry, no executable line under `conexus/hooks/scripts/`,
+   and no test names it. The tests that do today are retired or inverted
+   in the same change: `tests/test_plugin_structure.py`'s
+   `test_python_hook_runner_helper_present_and_executable` and
+   `test_python_hooks_use_runner_helper` (the latter inspects `command`
+   and would pass vacuously under exec form),
+   `tests/hooks/test_run_python_hook_runner.py`, and
+   `tests/e2e/plugin-lockstep-gate.sh` lines 146 and 235. Docstring and
+   prose mentions are updated, not counted.
+8. **The sn plugin.** Its three hooks join the tool tier on the conexus
+   server where the event allows it (`SubagentStart`, `PreToolUse`,
+   `PermissionRequest`) and its `SessionStart` entry goes to `nx-hook`.
+9. **Move, then delete.** Each port retargets the script's existing test
+   at the new entry with the same payload and the same expected output,
+   passes, and only then deletes the script. Byte and timing budgets keep
+   their thresholds.
 
 ### Technical Design
 
-**Entry point.** `nx-hook = "nexus.hooks.entry:main"` in
-`pyproject.toml`'s console-script table, beside `nx-session-end-launcher`
-and built the same way: the module imports `os`, `sys` and `json` only,
-reads `argv[1]` as the verb, and imports `nexus.hooks.<verb>` lazily.
-The Click group `nx hook` keeps its six verbs for a human and gains
-aliases to the new ones, but no `hooks.json` entry names `nx`.
+**The tool tier on `nx-mcp`.** `src/nexus/mcp/hooks.py` registers one
+tool per hook module, named `hook_<name>`, with an input schema that
+mirrors the module's payload fields. The tool calls `run()` and returns
+the decision JSON as its text content; a raised exception is caught at
+the tool boundary, logged to the hook log, and returned as empty text
+with `isError` false, so the event continues exactly as a bash script
+without `set -e` lets it continue today. The two async wrappers become a
+daemon thread started inside the server, which replaces the double-fork.
+The hook tools are visible in the model's tool list, since MCP has no
+way to hide a tool; the `hook_` prefix and a one-line description saying
+so are the mitigation, and the auto-approve matcher covers them.
+
+**The command tier.** `nx-hook = "nexus.hooks.entry:main"` in
+`pyproject.toml`, built like `nx-session-end-launcher`: `os`, `sys` and
+`json` before dispatch, the verb's module after. It reads the payload
+from stdin (TTY-aware, empty or malformed reads as `None`), calls the
+same `run()`, writes the decision JSON to stdout, and exits 0. `nx hook`
+keeps its Click verbs for a human at a terminal; no `hooks.json` entry
+names it.
 
 **Package.** `src/nexus/hooks/` (the existing `nexus.hooks` module that
 `session-start` calls becomes `nexus/hooks/__init__.py`). One module per
-retired script, one `run(payload: dict | None, argv: list[str]) -> int`
-per module. A shared `_io.py` holds the three things every script
-re-implemented: read the payload from stdin (TTY-aware, empty or
-malformed reads as `None`, as `_read_stdin_payload` does today), write a
-decision envelope (`hookSpecificOutput` with `permissionDecision` or
-`additionalContext`, or the top-level `decision` form the stop hooks
-use), and the never-fail boundary (a verb that raises logs the traceback
-to the hook log and exits 0 with no output, which is what the bash
-scripts' missing `set -e` gives them today).
+retired script. A shared `_io.py` holds the payload reader, the decision
+envelope writers (`hookSpecificOutput` with `permissionDecision` or
+`additionalContext`, and the top-level `decision` form the stop hooks
+use), and the never-fail boundary. `_config.py` resolves
+`NX_ORCH_STOP_GUARD` once for the four hooks that read it inline today.
 
-**Exit codes and stdout are contracts.** The map lists them per script;
-the port reproduces each byte for byte, and the retargeted test asserts
-them. Two are quoted outside the repo's tests: the ledger verbs' codes
-(0 clean, 1 BLINDSPOT, 2 undeclared, 3 no ledger for `undeclared`; 0, 2,
-4 for `reconcile`) in AGENTS.md and the orchestration skill, and the
-close gate's deny text in 19 files.
+**Contracts.** The contract map (T2 `215-hook-contract-map`) lists each
+script's stdin fields, stdout shapes and exit codes; the port reproduces
+each byte for byte and the retargeted test asserts them. Two are quoted
+outside the tests: the ledger verbs' codes (0 clean, 1 BLINDSPOT, 2
+undeclared, 3 no ledger for `undeclared`; 0, 2, 4 for `reconcile`) in
+AGENTS.md and the orchestration skill, and the close gate's deny text in
+19 files.
 
 **The ledger** (`nexus.hooks.expectations`). A TSV file under
 `$XDG_STATE_HOME/nexus/orchestration/<session>.expectations` with
-`mkdir` lock directories and `ln -s` credit slots; the module keeps the
-file format, the paths and the atomicity primitives (`os.mkdir`,
-`os.symlink`, both atomic on every platform nexus runs on), and exposes
-`expect`, `start`, `census`, `undeclared`, `reconcile`, `archive`,
-`sweep` as verbs. `tests/e2e/lib/expectations.sh` and the byte-identity
-test go; the e2e scripts call `nx-hook <verb>`.
+`mkdir` lock directories and `ln -s` credit slots, kept as they are
+(`os.mkdir` and `os.symlink` are atomic create-or-fail on Linux, macOS
+and WSL2). Verbs: `expect`, `start`, `census`, `undeclared`, `reconcile`,
+`archive`, `sweep`.
 
-**Async wrappers.** The two `*-tuple-async.sh` scripts background a
-Python projector and exit in about 18 ms. Their port is the launcher's
-double-fork with the standard streams redirected to `/dev/null`, in the
-entry module before any heavy import.
+**Defects fixed in the port.** The close gate's `bd create` deny path
+omits `permissionDecisionReason`; the sn auto-approve wrapper swallows a
+Python crash with an unconditional `exit 0`; the sn session-start script
+has no error boundary. Each gets the shared envelope and boundary.
 
-**Shared resolver.** `NX_ORCH_STOP_GUARD` is read inline by four scripts
-today; `nexus.hooks._config` resolves it once.
+**Lint.** A test asserts, for every entry in both `hooks.json` files,
+one of two shapes. Tool tier: `type` is `mcp_tool`, `server` is
+`plugin:conexus:nexus`, `tool` starts with `hook_` and names a registered
+tool, and the event is not `SessionStart`. Command tier: the entry has an
+`args` key, `command` is exactly one of `nx-hook`,
+`nx-session-end-launcher`, or `python3` whose sole `args` element ends in
+`version_lockstep_hook.py`, and no `command` or `args` element equals
+`bash`, `sh` or `nx` or ends in `.sh`; matching is whole-string, so
+`nx-hook` is not `nx`. A `SessionStart` entry must be command tier.
 
-**Defects fixed in the port, not carried.** The close gate's `bd create`
-deny path omits `permissionDecisionReason`; the sn auto-approve wrapper
-swallows a Python crash with an unconditional `exit 0`; the sn
-session-start script has no error boundary at all. Each gets the shared
-envelope and boundary.
-
-**Tests.** Each retargeted test keeps its stdin fixture and expected
-bytes and spawns `nx-hook <verb>` instead of `bash <script>`. Three
-scripts have no test in `tests/hooks/` (`sn/session-start.sh`,
-`sn/mcp-inject.sh`, and the sn auto-approve wrapper); their ports get
-one. A lint test asserts, for every entry in both `hooks.json` files:
-the entry has an `args` key (the doc's exec-form selector); `command` is
-exactly `nx-hook` or `nx-session-end-launcher`, or `python3` with a sole
-`args` element ending in `version_lockstep_hook.py`; and no `command` or
-`args` element names `bash`, `sh`, `nx` or a `.sh` path. `nx` is excluded
-by name because it is itself a console script and pays the CLI import
-(research-5, research-8).
+**Tests.** Each retargeted test keeps its payload fixture and expected
+bytes. Tool-tier tests call the registered tool through the server's
+in-process dispatch; one integration test drives a real `nx-mcp` over
+stdio for one tool. Command-tier tests spawn `nx-hook <verb>`. Three
+scripts have no test today (`sn/session-start.sh`, `sn/mcp-inject.sh`,
+the sn auto-approve wrapper); their ports get one.
 
 ### Decision Rationale
 
-- **A generation console script over a second launcher.** The generation
-  install already produces console scripts whose interpreter is the right
-  one; `nx-hook` is one more entry in the same table, not a second copy of
-  the bash launcher's resolution ladder.
-- **A separate script over `nx hook`.** Measured, not preferred: `nx`
-  imports 38 command modules before it dispatches (research-5). Making
-  `nexus.cli` lazy would fix that for every `nx` call and is worth its own
-  bead, but this RDR does not depend on it.
-- **Exec form over `shell: powershell` variants.** One declaration per
-  hook, no per-platform fork of the logic.
+- **A tool over a process.** The server already runs, already imports
+  `nexus`, and is the installed wheel by construction. A hook served
+  there has no spawn cost, no PATH, no interpreter ladder and no
+  lock-step failure mode. The command tier exists only where the doc
+  says the tool tier cannot run.
+- **`nx-hook` over `nx` for the command tier.** `nx` imports 38 command
+  modules before it dispatches (research-5). Making `nexus.cli` lazy is
+  worth its own bead; this RDR does not depend on it.
+- **Fail-open is the existing posture.** A bash hook whose `nx` is
+  missing already returns nothing; a tool hook whose server is missing
+  returns a non-blocking error. The close gate is fail-open in both
+  worlds. Making it fail-closed is a separate decision this RDR does not
+  take.
 - **Move, do not rewrite.** The scripts encode months of measured
-  behaviour (budgets, exit codes, refusal text that other files quote).
-  Each port carries the existing test across first.
+  behaviour; each port carries the existing test across first.
 
 ## Alternatives Considered
 
@@ -373,48 +420,65 @@ Pros: zero work. Cons: the scripts assume GNU tools and `/tmp`; Git Bash
 is MSYS, and the failure catalogue for that combination is long. It also
 leaves Gap 2 and Gap 4 open on every platform.
 
-### Alternative 2: Rewrite the hook logic in Node
+### Alternative 2: One tier, everything through `nx-hook`
+
+Pros: one declaration shape, no MCP dependency. Cons: a process per hook
+event, about 0.05 s each, on every tool call; the lock-step failure mode
+for every hook rather than none; the PATH assumption on every event
+rather than session start only.
+
+### Alternative 3: The `http` hook type against the engine
+
+Pros: no process either. Cons: the hook logic is Python and the engine is
+Java; the engine would proxy to the client or the logic would move
+languages. The engine also does not run on a cloud-mode box.
+
+### Alternative 4: Rewrite the hook logic in Node
 
 Pros: Claude Code's own docs use `node` as the exec-form example. Cons:
-the hooks import `nexus` and talk to T1, T2 and the catalog; a Node port
-would reimplement that client or shell out to `nx` for every call, which
-is the bash layer's current shape.
-
-### Alternative 3: Port only the hooks that emit decisions
-
-Pros: smaller. Cons: the ledger library and the launcher, which are the
-two largest sources of shell dependency, emit no decision and would stay.
+the hooks talk to T1, T2 and the catalog; a Node port would reimplement
+that client or shell out to `nx` for every call.
 
 ## Trade-offs
 
 ### Consequences
 
-- The plugin's `hooks.json` files change shape (exec form). That is a
-  plugin-surface change and ships through the drift ledger and a plugin
-  cut or client release.
-- Hook start-up moves from "bash then maybe nx" to "nx". For hooks that
-  already called `nx`, that is one process fewer.
+- Both `hooks.json` files change shape. That is a plugin-surface change
+  and ships through the drift ledger and a plugin cut or client release;
+  the tool tier also requires a wheel whose `nx-mcp` registers the hook
+  tools, so the drift ledger entry states the wheel floor.
+- 19 conexus hooks and 3 sn hooks stop spawning a process at all; seven
+  `SessionStart` hooks spawn one `nx-hook` each instead of bash.
+- The hook tools appear in the model's tool list.
 - 4,200 lines of bash leave; roughly the same amount of Python arrives,
   with unit tests per module.
 
 ### Risks and Mitigations
 
-- **`nx` not on the hook PATH.** Mitigation: the first port measures it on
-  macOS terminal, macOS app-launched Claude Code, Linux and WSL2, and the
-  verb prints one line naming the fix when it cannot find its generation.
-- **A port changes a refusal text or exit code that another file quotes.**
+- **A hook fires before `nx-mcp` is connected.** Mitigation: Phase 1
+  measures the first `PreToolUse` after launch on macOS and WSL2; if it
+  can race the connection, that event's entry gets a command-tier twin
+  until the server is up.
+- **`nx-hook` not on the `SessionStart` PATH.** Mitigation: measured in
+  Phase 1 on an app-launched macOS Claude Code and in WSL2; the verb
+  prints one line naming the fix when it cannot find its generation.
+- **A port changes a refusal text or exit code another file quotes.**
   Mitigation: the retargeted test asserts the exact bytes; a grep for the
   quoted strings runs before each script is deleted.
-- **Timing.** Mitigation: the budget tests stay; a port that exceeds one
-  is a finding, not a threshold change.
+- **A hook tool blocks the server.** Mitigation: hook tools do no more
+  than the script did; the Stop hook's `nx catalog sync` runs in a
+  thread, as it is backgrounded today.
 
 ### Failure Modes
 
-- A hook verb that imports a heavy module at start-up regresses every
-  session start. Guard: imports deferred to the branch that needs them.
-- The detach for async hooks leaks a child on one platform. Guard: the
-  existing `test_subagent_tuple_async_wrappers.py` asserts no lingering
-  process.
+- A hook module imports a heavy module at start-up and regresses every
+  `SessionStart`. Guard: imports deferred to the branch that needs them.
+- The daemon thread for an async hook outlives its work and leaks.
+  Guard: `test_subagent_tuple_async_wrappers.py` retargeted to assert
+  the thread completes.
+- The model calls a `hook_` tool by itself. Guard: the tools are
+  idempotent reads or ledger writes the model could already reach
+  through `nx`; the description says the tool is a hook entry.
 
 ## Implementation Plan
 
@@ -422,110 +486,99 @@ No implementation starts before this RDR is accepted.
 
 ### Minimum Viable Validation
 
-The first port, `auto-approve-nx-mcp.sh` to `nx-hook auto-approve`, with
-its declaration in exec form, passing `tests/hooks/test_permission_request_hooks.py`
-retargeted, on macOS and inside a WSL2 distro. That settles the module
-shape and the PATH assumption before anything larger moves.
+Two first ports: `auto-approve-nx-mcp.sh` as `hook_auto_approve` on
+`nx-mcp` declared as an `mcp_tool` hook, and `nx hook session-start` as
+`nx-hook session-start` in exec form. Both pass their retargeted tests,
+and both fire in a real Claude Code session on macOS and inside a WSL2
+distro, with the timing of the first `PreToolUse` after launch recorded.
 
 ### Phase 1: Shape
 
-1. `src/nexus/hooks/` package, the `nx-hook` console script and its lazy
-   verb table, the payload reader and decision writer, one ported hook,
-   its test, and a timing assertion that the ported hook starts in under
-   0.1 s on the dev box.
-2. PATH measurement on the four host shapes above; the result recorded in
-   this RDR.
+1. `src/nexus/hooks/` package, `_io.py`, `_config.py`, the `nx-mcp`
+   registration module, the `nx-hook` console script, the two MVV ports
+   and their tests.
+2. The connection-race and PATH measurements on the host shapes above,
+   recorded in this RDR.
 
 ### Phase 2: The ledger
 
-3. `expectations.sh` to `nexus.hooks.expectations`; the three verbs; the
-   e2e copy and byte-identity test deleted; `agent-dispatch-expect.sh`,
-   `subagent-start.sh`, `subagent-stop.sh` ported since they source it.
+3. `expectations.sh` to `nexus.hooks.expectations`; `agent-dispatch-expect.sh`,
+   `subagent-start.sh` and `subagent-stop.sh` ported as tools since they
+   source it; the e2e copy and its byte-identity test deleted.
 
 ### Phase 3: The rest
 
-4. The remaining conexus scripts, largest first
+4. The remaining conexus scripts ported as tools, largest first
    (`pre_close_verification_hook.sh`, `stop_verification_hook.sh`,
    `subagent-start-stamp.sh`, `divergence-language-guard.sh`,
    `post_compact_hook.sh`, the two async wrappers).
-5. Seven of the eight existing Python hooks re-declared in exec form
-   behind verbs; `version_lockstep_hook.py` re-declared as exec-form
-   `python3` and its two dispatch lines rewritten (Approach item 4);
-   `_run_python_hook.sh` deleted once a grep of `hooks.json` and of
-   `conexus/hooks/scripts/` finds no reference. The four shell-form `nx`
-   entries reshaped or ported per Approach item 4b.
-6. The three sn hooks.
+5. The eight Python hooks: `mailbox_drain.py`, `stop_failure_hook.py`
+   and the two routing hooks re-declared as tools; `preflight.py`,
+   `session_start_hook.py` and `rdr_hook.py` re-declared on `nx-hook`;
+   `version_lockstep_hook.py` re-declared as exec-form `python3` with its
+   dispatch lines rewritten (Approach item 3). The four shell-form `nx`
+   entries per Approach item 6. The launcher and its tests per Approach
+   item 7.
+6. The three sn hooks per Approach item 8.
 
 ### Phase 4: Close
 
-7. Every `hooks.json` entry carries `args`; no entry names `bash`, `sh`,
-   `nx` or a `.sh`; and every `command` is `nx-hook`,
-   `nx-session-end-launcher`, or the lockstep hook's `python3` with its
-   script as the sole argument; a lint test pins all three clauses.
+7. The lint of Technical Design passes on both `hooks.json` files.
 8. AGENTS.md's `expectations_*` entry rewritten for the verbs.
 
 ## Test Plan
 
-- Every ported hook keeps its subprocess test, retargeted at the verb with
-  the same stdin and the same expected stdout and exit code.
-- A lint test asserts the three clauses of Phase 4 item 7: `args` on
-  every entry; no `bash`, `sh`, `nx` or `.sh` anywhere; and every
-  `command` one of `nx-hook`, `nx-session-end-launcher`, or `python3` with
-  `version_lockstep_hook.py` as its sole argument.
-- The expectations module gets unit tests for the three verbs' exit codes
-  0, 1, 2, 3 against fixture ledgers.
+- Every ported hook keeps its test, retargeted at the tool or the verb
+  with the same payload and the same expected output.
+- One stdio integration test drives a real `nx-mcp` for one hook tool.
+- The lint test of Technical Design, both shapes, whole-string matching.
+- The expectations module gets unit tests for the verbs' exit codes
+  0, 1, 2, 3 and 0, 2, 4 against fixture ledgers.
 - The budget tests keep their thresholds.
 
 ## Finalization Gate
 
 ### Contradiction Check
 
-- The Provenance line says Sam's decision was "behind `nx hook` verbs";
-  the Approach says the plugin declares `nx-hook`, a separate console
-  script, and keeps `nx hook` as a human alias. Both are true in
-  sequence: the decision named the verb surface, research-5 measured the
-  entry cost, and the entry point moved. The Revision History records the
-  move.
-- Gap 2 and Gap 3 speak of `nx` as the executable that inherits
-  interpreter resolution. The design uses a sibling console script from
-  the same generation table, which inherits it the same way. The gaps
-  describe the property; the design names the script.
-- The inventory (research-1) counted `timeout` 16, `uname` 1, `curl` 1
-  as call sites; the contract map (research-6) found no script calls
-  them. The Technical Environment carries the corrected list and names
-  the correction; research-1's counts stand as what a word count gave.
+- Gap 3 names two hook forms that need no shell; the Approach uses both,
+  by event. The tool tier is unavailable on `SessionStart` at launch
+  (research-9), which is exactly the set the command tier covers.
+- The inventory (research-1) counted `timeout`, `uname` and `curl` as
+  call sites; the contract map (research-6) found no script calls them.
+  The Technical Environment carries the corrected list.
+- Approach item 2 says no entry names `nx`; the lint's whole-string
+  clause enforces it; item 6 gives each reshape target. The three agree.
 
 ### Assumption Verification
 
-Three assumptions of record are in Critical Assumptions. Status at gate:
+Four assumptions of record are in Critical Assumptions. Status at gate:
 
-- **Console scripts on the hook PATH.** Assumed, inherited from the bash
-  layer (research-4: eight `command -v nx` sites). Not yet measured on
-  an app-launched macOS Claude Code or in WSL2. Phase 1 item 2 measures
-  it and records the result here; a verb that cannot find its generation
-  fails loud.
-- **Start-up cost.** Verified by spike (research-5): the cost is
-  `nexus.cli`'s eager import, avoided by a dedicated entry that imports
-  only the verb's module. Phase 1 pins a sub-0.1 s start on the dev box.
-- **`bd` stays a subprocess.** Assumed. The bash layer calls `bd list`
-  and `bd set-state` today (research-6); a Python port calls the same
-  binary with `subprocess.run`. No bead-tool Python API exists and none
-  is needed.
+- **Server connected before the first post-launch hook.** Assumed from
+  the doc's wording; measured in Phase 1 with the mitigation named in
+  Risks.
+- **Console scripts on the `SessionStart` PATH.** Assumed, inherited from
+  the bash layer (research-4); measured in Phase 1.
+- **Start-up cost.** Verified (research-5); the command tier avoids it by
+  construction and the tool tier has none.
+- **`bd` stays a subprocess.** Assumed; no API is needed.
 
 #### API Verification
 
 | Surface | Verification |
 | --- | --- |
-| Claude Code hook exec form (`command` plus `args`, real executable, no shell) | Docs only: code.claude.com/docs/en/hooks, read 2026-09-18 (research-2). Not yet exercised against a running Claude Code; the MVV does that. |
-| Console-script entry with pre-fork minimal imports | Source search: `src/nexus/_session_end_launcher.py`, `pyproject.toml:233` (research-6). |
-| Atomic claims via `os.mkdir` and `os.symlink` | Source search: `expectations.sh` uses `mkdir` and `ln -s` for the same guarantee (research-6); both calls are atomic create-or-fail on the platforms nexus runs on (Linux, macOS, WSL2); native Windows is out of scope and `os.symlink` there also needs a privilege. |
+| Claude Code `mcp_tool` hook (`server`, `tool`, `input` with `${path}` substitution; text output read as stdout; skipped on `SessionStart` at launch and `Setup`) | Docs only: code.claude.com/docs/en/hooks, read 2026-09-18 (research-9). Exercised by the MVV. |
+| Claude Code exec form (`command` plus `args`, real executable, no shell) | Docs only: same page (research-2). Exercised by the MVV. |
+| Plugin server scoped name `plugin:conexus:nexus` | Docs only: the hooks page's `server` field; the plugin's `.mcp.json` key is `nexus`. |
+| Console-script entry with pre-dispatch minimal imports | Source search: `src/nexus/_session_end_launcher.py`, `pyproject.toml:233` (research-6). |
+| Atomic claims via `os.mkdir` and `os.symlink` | Source search: `expectations.sh` uses `mkdir` and `ln -s` (research-6); both atomic create-or-fail on Linux, macOS and WSL2; native Windows is out of scope and `os.symlink` there also needs a privilege. |
 | Hook payload and decision envelope shapes | Source search: per-script stdout shapes cited to lines in T2 `215-hook-contract-map`. |
 
 ### Scope Verification
 
 In scope: the 16 scripts in the two plugins' `hooks/scripts/`, the
-launcher, the e2e copy of the ledger library, the `hooks.json`
-declarations, the tests that drive them, and the AGENTS.md entry that
+launcher and the four tests that name it, the e2e copy of the ledger
+library, the `hooks.json` declarations, the `nx-mcp` registration of the
+hook tools, the tests that drive the hooks, and the AGENTS.md entry that
 documents the ledger verbs. Out of scope: the bash generation-install
 scripts under `src/nexus/_install/` (a different surface with its own
 tests, and not a hook), the PG bundle, any Windows build, and making
@@ -539,12 +592,15 @@ replaces the lines that carry them; no other behaviour changes.
   `conexus/hooks/scripts/` are plugin content; the change ships through
   the drift ledger (`conexus/PENDING_RELEASE.md`) and a client release or
   a plugin cut. Until then the installed plugin keeps running the bash.
-- **Version lock-step.** A plugin whose `hooks.json` names `nx-hook`
-  requires a conexus wheel that ships that console script. On a box whose
-  wheel predates it, every `nx-hook` entry fails to spawn, so the hook
-  that repairs that state, `version_lockstep_hook.py`, must not be one
-  of them: it stays stdlib-only under exec-form `python3` (Approach item
-  4), and the drift ledger entry states the wheel floor.
+- **Version lock-step.** A plugin whose `hooks.json` names `nx-hook` or
+  the `hook_` tools requires a conexus wheel that ships them. On a box
+  whose wheel predates it, those entries fail to spawn or return a
+  non-blocking error, so the hook that repairs that state,
+  `version_lockstep_hook.py`, is on neither tier (Approach item 3), and
+  the drift ledger entry states the wheel floor.
+- **Hook tools in the model's tool list.** MCP cannot hide a tool; the
+  `hook_` prefix, the description, and the auto-approve matcher are the
+  mitigation.
 - **Logging.** Hooks log to the hook log through `_hook_logging.py`
   today; the shared boundary keeps that path so a swallowed exception is
   still recorded.
@@ -560,8 +616,8 @@ the ledger moves, and each phase leaves the plugin working. The
 alternative of keeping bash costs nothing today and blocks any host
 without a POSIX shell; the alternative of a Node rewrite would
 re-implement the `nexus` client. The work is sized to the surface it
-retires and adds no new mechanism beyond one console script and one
-package.
+retires and adds no new mechanism beyond one console script, one
+registration module on the existing server, and one package.
 
 ## References
 
@@ -582,14 +638,5 @@ package.
   it; the external-command list corrected (no `timeout`, `uname`, `curl`
   or `jq`).
 - 2026-09-18: Gate round 1 — BLOCKED (2 Critical, 3 Significant, 2 ship-blocker(s)); commit `766e3be42`; critique `nexus_rdr/215-gate-critique-2026-09-18-r1`.
-- 2026-09-18: Round 1 fix (research-7): the lockstep hook keeps a
-  stdlib-only `python3` launch; the four shell-form `nx` entries enter the
-  inventory; the lint asserts the `args` key; the stale `nx` example, the
-  e2e consumer sentence and the symlink claim corrected.
-- 2026-09-18: Second fix after fix check `215-fix-check-faeef1ce8`
-  (research-8): the lint names its allowed commands and excludes `nx`;
-  item 4b states each reshape target; the launcher's deletion criterion
-  covers hook code paths and the lockstep dispatch lines are rewritten;
-  counts corrected to 28 entries and 8 Python hooks; the Background and
-  Key Discoveries sentences and the ledger consumer classes corrected.
 - 2026-09-18: Gate round 2 — PASSED (0 Critical, 0 Significant, 0 ship-blocker(s)); commit `c77ae4e49`; critique `nexus_rdr/215-gate-critique-2026-09-18-r2`.
+- 2026-09-18: Design amended to two tiers (research-9): `mcp_tool` hooks on `nx-mcp` for every event after session start, `nx-hook` command hooks for `SessionStart`, the lockstep hook on stdlib `python3`.
