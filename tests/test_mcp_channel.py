@@ -22,6 +22,7 @@ Layers, cheapest first:
   and the cursor design's one loss-of-liveness risk under concurrent
   writers.
 - ``TestChannelStatusPublish``: the on-disk record `nx doctor` reads.
+- ``TestDoctorProbeNeverStartsAWaiter``: RDR-213 MVV run 2 finding D1.
 """
 from __future__ import annotations
 
@@ -1157,3 +1158,45 @@ class TestChannelStatusPublish:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("not valid json{{{", encoding="utf-8")
         assert channel.read_channel_status(tmp_path, session_id) is None
+
+
+class TestDoctorProbeNeverStartsAWaiter:
+    """RDR-213 MVV run 2 (T2 `nexus_rdr/213-mvv-run2-2026-09-17`, finding
+    D1): `nx doctor`'s MCP entry-point probe spawns an `nx-mcp` child
+    that inherits the REAL session's environment, session id included --
+    without an explicit skip signal that child would start its OWN
+    waiter under the SAME session id, and its teardown would overwrite
+    the live waiter's channel-status record with `alive: false` the
+    instant the probe process exits."""
+
+    def test_nx_mcp_probe_env_var_skips_starting_the_waiter(self, monkeypatch) -> None:
+        from nexus.mcp import core as _core
+
+        monkeypatch.setenv("NX_MCP_PROBE", "1")
+
+        def _must_not_be_called() -> str:
+            raise AssertionError("must not resolve a session id when NX_MCP_PROBE=1")
+
+        monkeypatch.setattr(_core, "_current_subscription_session_id", _must_not_be_called)
+
+        _core._start_channel_waiter()  # must return before ever calling the function above
+
+    def test_falsify_the_skip_by_removing_the_env_check(self, monkeypatch) -> None:
+        """Confirms the test above actually exercises a guard, not a
+        vacuous no-op: the pre-fix shape (no `NX_MCP_PROBE` check at all)
+        DOES reach `_current_subscription_session_id`, proven by the
+        same `AssertionError` firing instead of a clean return."""
+        from nexus.mcp import core as _core
+
+        monkeypatch.setenv("NX_MCP_PROBE", "1")
+
+        def _must_not_be_called() -> str:
+            raise AssertionError("reached -- the guard is not gating this call")
+
+        monkeypatch.setattr(_core, "_current_subscription_session_id", _must_not_be_called)
+
+        def _unguarded() -> None:  # the pre-fix shape: no NX_MCP_PROBE check at all
+            _core._current_subscription_session_id()
+
+        with pytest.raises(AssertionError, match="reached"):
+            _unguarded()

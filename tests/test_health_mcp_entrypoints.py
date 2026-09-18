@@ -498,6 +498,31 @@ class TestProbeMcpServer:
         assert ok is False
         assert "failed to spawn" in detail
 
+    def test_probe_sets_nx_mcp_probe_env_var_on_the_spawned_child(self, tmp_path: Path) -> None:
+        """RDR-213 MVV run 2 (T2 nexus_rdr/213-mvv-run2-2026-09-17, finding
+        D1): the spawned probe child must see NX_MCP_PROBE=1 so
+        `nexus.mcp.core._start_channel_waiter` skips starting a waiter
+        under the real session's inherited environment. The fake binary
+        reports a WRONG server name unless it sees the var set -- a
+        falsification by omission: drop the `env=` kwarg from
+        `_probe_mcp_server`'s `subprocess.Popen` call and this test goes
+        red (ok=False, name mismatch) instead of green."""
+        binary = tmp_path / "nx-mcp"
+        _write_fake_binary(
+            binary,
+            "#!/bin/sh\n"
+            "read -r line\n"
+            'if [ "$NX_MCP_PROBE" = "1" ]; then\n'
+            "  printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"serverInfo\":{\"name\":\"nexus\"}}}'\n"
+            "else\n"
+            "  printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"serverInfo\":{\"name\":\"NO-PROBE-VAR\"}}}'\n"
+            "fi\n",
+        )
+
+        ok, detail = _probe_mcp_server(str(binary), "nexus")
+
+        assert ok is True, f"the spawned child never saw NX_MCP_PROBE=1: {detail}"
+
 
 class TestProbeMcpServerAliveVsHung:
     """nexus-jw44t: the v0.1.114 acquire gate's ``nx-mcp`` timeout inside a

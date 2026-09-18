@@ -745,7 +745,21 @@ def _start_channel_waiter() -> None:
     lazy -- loaded only on the first `tuple_subscribe`/
     `tuple_unsubscribe`/`tuple_subscriptions` call): the waiter needs the
     list at server start, not on first tool call.
+
+    `NX_MCP_PROBE=1` (RDR-213 MVV run 2, T2
+    `nexus_rdr/213-mvv-run2-2026-09-17`, finding D1) is a hard skip,
+    checked ONCE here at the waiter's one call site: `nx doctor`'s MCP
+    entry-point probe (`src/nexus/health.py`'s `_probe_mcp_server`) spawns
+    a short-lived `nx-mcp` child that inherits the REAL session's
+    environment, session id included. Without this signal that child
+    starts its OWN waiter under the SAME session id, and its teardown
+    overwrites the live waiter's channel-status record with `alive:
+    false` the instant the probe process exits. `_probe_mcp_server` sets
+    the env var explicitly on the child it spawns; this is never a
+    heuristic guessed from process lifetime, argv, or parentage.
     """
+    if _os.environ.get("NX_MCP_PROBE") == "1":
+        return
     session_id = _current_subscription_session_id()
     if not session_id or _channel.active_waiter(session_id) is not None:
         return

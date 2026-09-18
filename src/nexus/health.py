@@ -1525,6 +1525,16 @@ def _probe_mcp_server(
     unaffected.
     """
     try:
+        # RDR-213 MVV run 2 (T2 nexus_rdr/213-mvv-run2-2026-09-17, finding
+        # D1): this probe child inherits the REAL session's environment,
+        # session id included, so without an explicit signal it would
+        # start its OWN channel waiter under that SAME session id and its
+        # teardown would overwrite the live waiter's channel-status
+        # record with alive=false the instant this probe process exits.
+        # NX_MCP_PROBE=1 tells `nexus.mcp.core._start_channel_waiter` (the
+        # one call site the waiter starts from) to skip entirely — a
+        # signal checked once there, never a heuristic guessed from
+        # process lifetime or argv.
         proc = subprocess.Popen(  # noqa: S603 — binary_path resolved via shutil.which, not attacker input
             [binary_path],
             stdin=subprocess.PIPE,
@@ -1532,6 +1542,7 @@ def _probe_mcp_server(
             stderr=subprocess.PIPE,
             text=True,
             errors="replace",  # non-UTF8 crash output (e.g. a mangled traceback) must not raise UnicodeDecodeError out of a health check
+            env={**os.environ, "NX_MCP_PROBE": "1"},
         )
     except OSError as exc:
         return False, f"failed to spawn {binary_path}: {exc}"
