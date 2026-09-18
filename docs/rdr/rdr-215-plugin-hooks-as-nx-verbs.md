@@ -592,3 +592,4 @@ package.
   covers hook code paths and the lockstep dispatch lines are rewritten;
   counts corrected to 28 entries and 8 Python hooks; the Background and
   Key Discoveries sentences and the ledger consumer classes corrected.
+- 2026-09-18: Gate round 2 — PASSED (0 Critical, 0 Significant, 0 ship-blocker(s)); commit `c77ae4e49`; critique `nexus_rdr/215-gate-critique-2026-09-18-r2`.
