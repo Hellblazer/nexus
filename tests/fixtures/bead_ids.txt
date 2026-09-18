@@ -3223,6 +3223,7 @@ nexus-gomuo.1
 nexus-gomuo.2
 nexus-gomuo.3
 nexus-gomuo.4
+nexus-gomuo.5
 nexus-gooqg
 nexus-got8h
 nexus-goypg
@@ -5016,6 +5017,7 @@ nexus-q6hi7
 nexus-q6uy6
 nexus-q6zww
 nexus-q7v2v
+nexus-q82tk
 nexus-q8rbu
 nexus-q9u2n
 nexus-qab

@@ -29,7 +29,7 @@ this." So this design is Sam's original intent for channel delivery; RDR-211's
 claim-at-delivery was the drafting rounds' reading of the back-pressure ruling
 (one message outstanding, the ack as the credit), not the ruling itself. This
 RDR amends the Delivery design of RDR-211, which is closed; it changes the
-client only, no engine or wire change.
+client, and, since bead nexus-vsipz, the engine and wire as well.
 
 Terms used throughout:
 
@@ -223,25 +223,27 @@ throwaway engine with real sessions).
    claiming nothing. Only a session without those hooks claims with
    `tuple_in` on its mailbox, then acks, nacks, releases or replies as
    today.
-2. **Announcements are rate-limited by a cursor, not gated on the previous
-   ack.** The waiter tracks a per-mailbox cursor past the last row it
-   referenced, kept in the wait spec on every tick, the same shape a board
-   topic already uses. Each new row is announced once as it passes the
-   cursor, at most one reference per mailbox per wake; the waiter never
-   reads a row back to check whether it is still current. It re-announces
-   the last reference at most once every 150 seconds and at most five
-   times, then stops. A restart starts the cursor empty, so the oldest row
-   is announced once more.
+2. **Announcements are rate-limited by an engine-side stamp, not a client
+   cursor (bead nexus-vsipz).** A mailbox `wait` spec carries
+   `announce: {interval_s: 150, max: 5}`. The engine returns only rows
+   that are claimable (unconsumed, unexpired, not dead, unclaimed or
+   lease-lapsed) and due (never announced, or announced more than
+   `interval_s` ago fewer than `max` times), and stamps `announced_at` and
+   `announce_count` on the rows it returns, in the same statement. The
+   client keeps no cursor and no re-send state for mailboxes. Boards keep
+   their own `since` cursor for now (bead nexus-q82tk records that boards
+   move to a per-subscriber stamp later; the `created_at` race remains for
+   boards until then).
 3. **No proof, no probe, no flag table.** The waiter starts parking at
    lifespan start and pushes whenever a row appears. A session that cannot
    hear the channel loses nothing: its rows stay available and the drain hook
    renders them at the next prompt. `tuple_channel_probe` and
    `detect_channel_argv` are deleted, not kept as fallbacks.
 4. **The status record and doctor row report what is observable.** `alive`,
-   `last_wake`, `announced` (references sent for distinct rows, cumulative),
-   `pending` (mailboxes whose last reference is under budget and not yet
-   superseded, 0 or 1 per mailbox), `oldest_pending_age_s` (age of the
-   oldest such reference). The `proof`, `unacked` and `released` facts go.
+   `last_wake`, `announced` (references sent, cumulative), `pending`
+   (mailboxes whose last returned row is under budget, 0 or 1 per
+   mailbox), `oldest_pending_age_s` (from that row's `announced_at`). The
+   `proof`, `unacked` and `released` facts go.
 5. **Skills and docs say claim, not read.** The mailbox skill's push rule
    becomes: if the notification's body is rendered with that same prompt,
    act on it, claiming nothing, since the drain hook already claimed and
@@ -254,21 +256,19 @@ throwaway engine with real sessions).
 ### Technical Design
 
 **Delivery.** `tick()` builds one spec per subscription: boards with their
-cursor as today, and mailboxes the same shape, `n=1` since a per-mailbox
-cursor past the last row referenced. Every subscription is in the spec on
-every tick; nothing removes a mailbox from it. On wake, for each mailbox
-result the waiter sends a reference for the returned row, advances the
-cursor to it, and records it as the last reference (tuple id, `sent_at`,
-`count=1`) -- unless the row is dead-lettered, in which case the cursor
-still advances past it but no reference is sent, since the drain hook
-already surfaces a dead row once on its own. On a tick with no new row for
-a mailbox whose last reference is still within budget (`count < 5` and
-`now - sent_at >= 150 s`), the waiter re-sends that same reference and
-increments the count. It never reads a row back to check whether it is
-still the head, whether it was claimed, or whether it dead-lettered after
-the fact: the cursor's advance and the last-reference budget are the only
-state kept, in memory; a restart starts the cursor empty, so the oldest row
-is announced once more.
+`since` cursor as today, and mailboxes with `announce: {interval_s: 150,
+max: 5}` instead of a cursor. The engine's `wait` (and `rd`, in announce
+mode) returns only rows that are claimable -- unconsumed, unexpired, not
+dead, and unclaimed or lease-lapsed, the same predicate `in` uses -- AND
+due: `announced_at IS NULL`, or `announced_at` more than `interval_s` ago
+with `announce_count < max`. It stamps `announced_at = now()` and
+increments `announce_count` on every row it returns, in the same
+statement that selects it; there is no second read, the row the waiter
+gets back already carries the post-stamp values. The client keeps no
+cursor and no re-send bookkeeping for mailboxes: a row that commits late
+behind a concurrent writer has no stamp to be behind, so it is returned at
+the next wake regardless of write order, closing the race a client-side
+`(created_at, id)` cursor could not.
 
 **Notification content**, unchanged in shape from RDR-211's reference:
 subspace, tuple id, and one line telling the session how to get the body:
@@ -283,11 +283,11 @@ nexus mailbox message: subspace {subspace}, tuple {tuple_id}. If its body is ren
 ```
 
 **Back pressure.** A mailbox with two available rows announces the oldest
-first; the cursor moves past it, so the next wake (immediate, since the
-spec now matches the second row) returns and announces the second. Nothing
-waits for the first row's ack. The bound is the rate limit itself: at most
-one new-row reference per mailbox per wake, plus the 150 s / five-time
-budget for re-sending the last one.
+first; once stamped, that row is no longer due, so the next wake returns
+and announces the second immediately. Nothing waits for the first row's
+ack. The bound is the rate limit itself: at most one new-row reference per
+mailbox per wake, plus the interval/max budget for re-sending an
+unclaimed row.
 
 **Empty spec.** With every subscription, mailbox or board, in the spec on
 every tick, the spec list is never empty; the 7.51.1 sleep branch is dead
@@ -295,8 +295,12 @@ code and is removed, with a test that proves a mailbox-only session parks
 on `wait` every tick.
 
 **Errors.** The 7.51.1 rule stays: a bare 404 from `wait` stops the waiter
-(engine without the route); any other failure is logged and retried after a
-backoff.
+(engine without the route). A second, additive stop (bead nexus-vsipz): an
+engine that answers `wait` but never renders `announce_count` on a mailbox
+row -- one predating this bead's columns -- stops the waiter the same way,
+loud, naming the reason `no_announce_support`; the doctor row's fix is to
+update the engine, not restart the MCP server. Any other failure is logged
+and retried after a backoff.
 
 **Deleted.** `_CHANNEL_ARGV_FLAGS`, `detect_channel_argv`,
 `_read_parent_command`, `_PROBE_CONTENT`, `_probe_until_live`,
@@ -304,26 +308,32 @@ backoff.
 `lease_s`, `renew_interval_s`, `max_resends`, `_Outstanding`,
 `_maybe_claim_mail`, `_renew_or_release`, `_adopt_persisted_outstanding`,
 `note_credit` and the credit hooks in `tuple_ack`, `tuple_nack` and
-`tuple_release`. The deletion census test of RDR-211 gains these names.
+`tuple_release`; and, from the cursor design (bead nexus-vsipz), `_LastRef`,
+`_cursor`, `_last_ref`, `_resend_due_references`,
+`_seconds_to_nearest_resend_s`, and the same-tick double-send exclusion
+(`just_referenced`). The deletion census test of RDR-211 gains these names.
 
 ```text
-// Illustrative; the cursor and its re-send budget
-_cursor: dict[subspace, (created_at, id)]          // position past the last reference sent
-_last_ref: dict[subspace, (tuple_id, sent_at, count)]
+// Illustrative; the engine's own predicate (TupleRepository.queryOnceAnnounce)
+claimable(row) := consumed_at IS NULL AND expires_at > now()
+              AND claim_state IS DISTINCT FROM 'dead'
+              AND (claim_state IS NULL OR lease_until < now())
+due(row)       := announced_at IS NULL
+              OR (announced_at < now() - interval_s AND announce_count < max)
 
-build_specs: every mailbox, every tick, n=1, since=_cursor.get(subspace)
-on a wake returning row R for mailbox m:
-  if R is dead-lettered: _cursor[m] = (R.created_at, R.id); continue  // skip, no reference
-  send(ref(m, R.id)); _cursor[m] = (R.created_at, R.id); _last_ref[m] = (R.id, now, 1)
-on a tick with no wake for m, _last_ref[m] set, count < 5, now - sent_at >= 150:
-  re-send the same reference; count += 1
+wait/rd with announce={interval_s, max}:
+  SELECT rows WHERE claimable(row) AND due(row)
+    ORDER BY created_at, id LIMIT n FOR NO KEY UPDATE SKIP LOCKED
+  UPDATE those rows SET announced_at = now(), announce_count = announce_count + 1
+  return the post-stamp rows -- no second SELECT
 ```
 
 ### Existing Infrastructure Audit
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| Mailbox announce cursor | `_deliver_board_post` and the board cursor in `channel.py` | Reuse: the board path is already notify-only with a cursor; mailboxes use the identical cursor shape, not a separate per-row table |
+| Mailbox announce gate | `claimOnce`'s own claimable predicate in `TupleRepository.java` | Extend: the announce-mode query ANDs the same claimable predicate with a due check, engine-side, in one statement; the client keeps no cursor |
+| Announce columns and spec field | `nexus.tuples` (Liquibase `tuples-006-announce-columns.xml`), `TupleRepository.WaitSpec.Announce` | New (bead nexus-vsipz): two additive columns, `announced_at`/`announce_count`, and a nested `WaitSpec.Announce(interval_s, max)` record -- engine and wire |
 | Session-side claim | `tuple_in` MCP tool, `mailbox_drain.py` claim loop | Reuse unchanged |
 | Status record and doctor row | `write_channel_status`, `_check_tuple_channel_delivery` in `health.py` | Extend: replace the three claim facts with the two announce facts |
 | Proof gate and probe | `detect_channel_argv`, `tuple_channel_probe` | Replace with nothing; delete |
@@ -381,7 +391,12 @@ the drain hook or a restart mid-work; every lapse counts an attempt against
   hear it is exactly as well served as today's floor.
 - Positive: about a third of `channel.py` and one MCP tool are deleted; the
   waiter holds no lease and cannot strand a message.
-- Positive: the mailbox path and the board path become one shape.
+- Positive: the mailbox path drops its client-side cursor and re-send
+  bookkeeping entirely, to an engine-side stamp; the board path keeps its
+  own `since` cursor for now (bead nexus-q82tk decides its fix later). The
+  two paths are two shapes, not one, but the mailbox path needs no
+  client-side position or re-send bookkeeping at all, simpler than a
+  cursor.
 - Negative: a message can be referenced by the channel and then rendered in
   full by the drain hook at the next prompt if nothing claimed it in
   between. With the plugin's hooks loaded this is rare: the same
@@ -396,12 +411,14 @@ the drain hook or a restart mid-work; every lapse counts an attempt against
 
 ### Risks and Mitigations
 
-- **Risk**: a session ignores a reference; only the mailbox's latest
-  reference gets re-announced, so an earlier row that already got its one
-  reference is not pushed again.
+- **Risk**: a session ignores a reference; the row keeps its own
+  re-announce budget (up to five times, every 150 s) independently of any
+  later row, so an idle mailbox with several unclaimed rows can produce
+  more than one reference over time, oldest due row first.
   **Mitigation**: the drain hook claims at the next prompt as before, for
   every available row regardless of announce history; the doctor row
-  reports `oldest_pending_age_s` for the mailbox's current reference.
+  reports `oldest_pending_age_s` for the mailbox's most recently returned
+  row.
 - **Risk**: the re-announce cadence wakes an idle session five times for one
   ignored message.
   **Mitigation**: the same bound RDR-211 chose for re-sends; the second
@@ -416,13 +433,33 @@ the drain hook or a restart mid-work; every lapse counts an attempt against
   wins the race, at the wake, before the session's own turn starts; `in` is
   atomic regardless, so the rare loser gets nothing and does nothing, as
   the drain hook already handles today.
+- **Risk** (bead nexus-vsipz): two MCP servers for one session's mailbox (a
+  crash/restart overlap, or a prior process still alive per JDR-001) both
+  poll the same due row; the engine's `SKIP LOCKED` selection means exactly
+  one wins each due check, so the losing waiter's session can go silent on
+  the channel path for that row's whole announce budget.
+  **Mitigation**: the drain hook still delivers at the next prompt
+  regardless; mail is never lost, only the notification.
+- **Risk** (bead nexus-vsipz): a restarted MCP server does not re-announce
+  a row that is not yet due -- the engine remembers
+  `announced_at`/`announce_count` across the restart, so "the oldest row
+  is announced once more" does not apply to a row still within its
+  interval.
+  **Mitigation**: the row is still announced at its own next due point,
+  and the drain hook delivers it regardless in the meantime.
 
 ### Failure Modes
 
 - Channel not live (no flag, or Claude Code drops notifications): nothing is
   pushed, the doctor row shows `announced` not advancing while rows are
-  pending, the drain hook renders at the next prompt. No claim is held.
-- Waiter dead (bare 404, engine without `wait`): as 7.51.1.
+  pending, the drain hook renders at the next prompt. No claim is held. A
+  dropped first notification still spends the engine's own stamp, so the
+  row is not due again until `interval_s` (150 s) later, not immediately.
+- Waiter dead: a bare 404 from `wait` (engine predating the route) or a
+  mailbox row missing `announce_count` (engine predating bead
+  nexus-vsipz's columns) both stop the waiter loud, naming the reason
+  (`no_wait_support` or `no_announce_support`); the doctor row's fix is to
+  update the engine.
 - Session claims and then crashes before ack: the lease lapses and the row is
   available again; the drain hook or the next announce picks it up. One
   attempt is spent, as for any claimant.
@@ -508,8 +545,12 @@ pointing here.
 
 #### Activation Step 1: Client release
 
-A client release carries it; no engine tag, no wire-ledger entry. The
-plugin pin advances with it so the skill text is live.
+An engine tag (`engine-service-v0.1.128`) carries the announce columns
+and the `wait`/`rd` predicate (bead nexus-vsipz); a client release
+(conexus 7.52.0) bumps `REQUIRED_ENGINE_VERSION` to it and carries the
+waiter's client half. `docs/wire-contract-pending.md` carries the
+`## Unshipped` ledger entry, additive. The plugin pin advances with the
+client release so the skill text is live.
 
 ### Day 2 Operations
 
@@ -546,8 +587,10 @@ None.
   host-only, Scenario 2 of the MVV above): the drain hook renders it at the
   next prompt -- the fake-store harness has no plugin hooks, so only the MVV
   can exercise that half.
-- **Scenario**: waiter restart with one pending row. **Verify**: announced
-  once more, count restarts at one.
+- **Scenario**: waiter restart with one pending row. **Verify**: the
+  engine remembers `announced_at`/`announce_count` across the restart; a
+  row still within its interval is not re-announced early, and a row that
+  has become due is announced at the next wake.
 - **Scenario**: engine without `wait`. **Verify**: waiter stops, doctor row
   says so.
 - **Scenario**: board post and mailbox message in one wake. **Verify**: both
@@ -560,7 +603,11 @@ None.
 1. **Scenario**: the Test Plan above as unit tests against the fake store,
    except the no-flag scenario's drain-hook-renders-at-next-prompt half,
    which the fake-store harness carries no plugin hooks to exercise and
-   which Testing Strategy 2's MVV covers instead.
+   which Testing Strategy 2's MVV covers instead. The Java late-commit
+   test (`TupleAnnounceTest`, engine suite, bead nexus-vsipz) is the proof
+   of record for the concurrent-writer defect this bead closes; the
+   Python stop-rule test is a statistical analogue only, since Python
+   cannot hold a transaction open over HTTP the way the Java test does.
    **Expected**: every scenario green; the deletion census names every
    removed symbol.
 2. **Scenario**: the MVV above on real sessions.
@@ -568,10 +615,12 @@ None.
 
 ### Performance Expectations
 
-No new load: one `wait` per tick, every mailbox in the spec every time; no
-row is ever read back to check its state. Announcements are bounded by the
-per-mailbox, per-wake rate limit for new rows and the 150 s / five-time
-budget for a re-send. Measured, not estimated, in the MVV.
+No new load on the client: one `wait` per tick, every mailbox in the spec
+every time; no row is ever read back to check its state. On the engine,
+one `UPDATE ... WHERE id IN (...)` per announced row, in the same
+statement as the `SELECT`. Announcements are bounded by the per-mailbox,
+per-wake rate limit for new rows and the interval/max budget for a
+re-send. Measured, not estimated, in the MVV.
 
 ## Finalization Gate
 
@@ -613,20 +662,26 @@ The MVV is Phase 1's exit, not deferred.
 
 ### Cross-Cutting Concerns
 
-- **Versioning**: client-only; the plugin pin advances with the release. N/A
-  for the engine.
+- **Versioning**: client and engine both (bead nexus-vsipz). The wire
+  change is additive -- a spec without `announce` gets today's query --
+  and rides `engine-service-v0.1.128`, with `REQUIRED_ENGINE_VERSION`
+  bumped in the client release that carries it (conexus 7.52.0), per the
+  paired-release choreography.
 - **Build tool compatibility**: N/A
 - **Licensing**: N/A
-- **Deployment model**: no cloud change.
+- **Deployment model**: the managed cloud engine needs the same
+  v0.1.128+ deploy before a cloud-mode client's mailbox announcements
+  gain the stamp; a client below that floor still works, just without
+  the fix.
 - **IDE compatibility**: N/A
 - **Incremental adoption**: a session on the old client keeps claim-at-
   delivery until it upgrades; both coexist against the same engine.
 
 ## Open Questions
 
-1. Should the reference name the tuple id at all, given the session claims
-   the oldest row rather than a specific one? Naming it lets the session
-   check it got what was announced.
+None currently open. Item 1 (should the reference name the tuple id at
+all) is answered: yes -- the engine returns the row and the reference
+names it, so a session can check it got what was announced.
 
 ## Revision History
 
@@ -692,3 +747,19 @@ The MVV is Phase 1's exit, not deferred.
   Audit row; Risks; Performance Expectations; the MVV part 1 second-message
   expectation; Test Plan scenario 2.
 - 2026-09-18: Minimum Viable Validation counts recorded from runs 1 to 3 (T2 `nexus_rdr/213-mvv-run3-2026-09-18`); the cursor design landed with nexus-vsipz filed for the engine announce stamp (T2 `nexus_rdr/213-decision-announcements-rate-limited-not-ack-gated-2026-09-17`).
+- 2026-09-18: Amended per bead nexus-vsipz and T2
+  `nexus_rdr/213-decision-announcements-rate-limited-not-ack-gated-2026-09-17`.
+  The client cursor and its `created_at` race are gone, replaced by an
+  engine-side stamp: a mailbox `wait` spec carries `announce: {interval_s,
+  max}`, the engine returns only claimable and due rows and stamps
+  `announced_at`/`announce_count` on them in the same statement, and the
+  client keeps no cursor and no re-send state for mailboxes. This is a
+  wire and engine change, not client-only as originally stated; it rides
+  `engine-service-v0.1.128` with `REQUIRED_ENGINE_VERSION` bumped in
+  conexus 7.52.0. Boards keep their `since` cursor for now (bead
+  nexus-q82tk). Provenance; Approach 2 and 4; Technical Design Delivery,
+  Back pressure, Errors, the pseudocode, Deleted; Existing Infrastructure
+  Audit; Trade-offs; Risks; Failure Modes; Test Plan scenario 7; Testing
+  Strategy 1; Performance Expectations; Cross-Cutting Concerns Versioning
+  and Deployment model; Phase 2 Activation Step 1; Open Questions (item 1
+  answered, closed).
