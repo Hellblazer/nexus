@@ -48,8 +48,13 @@ def _assert_service_cycled(sp) -> None:
         c.args[0] for c in sp.call_args_list
         if c.args and isinstance(c.args[0], list)
     ]
-    assert ["nx", "daemon", "service", "stop"] in argvs, argvs
-    assert ["nx", "daemon", "service", "start"] in argvs, argvs
+    # nexus-cd1k0.19 review round 2, finding 4: both verbs now carry an
+    # explicit --config-dir <resolved path> too (closing a matcher
+    # false-positive surface) -- match on the stable 4-token PREFIX so
+    # this stays a pure "were stop/start invoked" check, agnostic to
+    # what trailing args ride along.
+    assert any(a[:4] == ["nx", "daemon", "service", "stop"] for a in argvs), argvs
+    assert any(a[:4] == ["nx", "daemon", "service", "start"] for a in argvs), argvs
 
 
 def _converged_provenance(tmp_path, version: str = _REQUIRED_STR) -> dict:
@@ -733,6 +738,35 @@ class TestFailLoud:
         assert "stop-sweep" in joined, (
             f"the sweep must be visible in the reported actions: {actions}"
         )
+
+    def test_restart_and_verify_passes_config_dir_explicitly_on_both_calls(
+        self, tmp_path,
+    ) -> None:
+        """nexus-cd1k0.19 review round 2, finding 4: the two bare
+        subprocess.run(["nx", "daemon", "service", "stop"/"start"]) calls
+        used to inherit environment and never pass --config-dir at all --
+        closing the false-positive surface storage_service_stack_matcher's
+        flagless-matches-default rule otherwise has against a live,
+        env-scoped invocation on the same box. Both calls must now carry
+        an explicit --config-dir with the RESOLVED absolute path."""
+        from nexus import upgrade_finish as uf
+
+        stop_ok = MagicMock(returncode=0, stdout="", stderr="")
+        start_ok = MagicMock(returncode=0, stdout="", stderr="")
+        running = MagicMock(version="v0.1.60", pid=214)
+
+        with patch.object(uf, "service_stack_pids", return_value=[]), \
+             patch.object(uf.subprocess, "run", side_effect=[stop_ok, start_ok]) as sp, \
+             patch.object(uf, "_running_engine", return_value=running):
+            actions: list[str] = []
+            uf._restart_and_verify(tmp_path, actions, "v0.1.60")
+
+        argvs = [c.args[0] for c in sp.call_args_list if c.args]
+        resolved = str(tmp_path.resolve())
+        stop_argv = next(a for a in argvs if a[:4] == ["nx", "daemon", "service", "stop"])
+        start_argv = next(a for a in argvs if a[:4] == ["nx", "daemon", "service", "start"])
+        assert stop_argv == ["nx", "daemon", "service", "stop", "--config-dir", resolved], stop_argv
+        assert start_argv == ["nx", "daemon", "service", "start", "--config-dir", resolved], start_argv
 
     def test_sweep_kills_a_stack_that_survived_stop(self, tmp_path):
         """THE FIX: `nx daemon service stop` reports success having signalled

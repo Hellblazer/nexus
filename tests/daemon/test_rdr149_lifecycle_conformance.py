@@ -68,7 +68,6 @@ from nexus.daemon.service_registry import (
     LeaseRecord,
     ServiceRegistry,
     ServiceSupervisor,
-    fenced_exit_code,
     pid_alive,
     pid_running,
     process_state,
@@ -187,6 +186,7 @@ class RecordHarness:
     scope: str  # "uid" (one per user) | "session" (one per session-id) | "tenant" (one per tenant)
     has_self_heal: bool
     has_version_cycle: bool
+    has_dead_owner_heal: bool
 
     def __init__(self, config_dir: Path, alive: _AliveSet, clock: _FakeClock) -> None:
         self._cd = config_dir
@@ -236,11 +236,35 @@ class RecordHarness:
     def owners_in_scope(self, session_id: str) -> int:
         raise NotImplementedError
 
-    def fenced_owner_run_loop_would_stop(self, owner: int) -> bool:
-        """True when the tier's run loop, on the NEXT tick after ``owner``
-        was fenced (see ``stale_reassert``), must exit rather than keep
-        heartbeating a lease it no longer holds (nexus-cd1k0.2, AGENTS.md's
-        must-stop-when-fenced contract)."""
+    def dead_owner_lease_is_reclaimed(self, owner: int = _OWNER_PID) -> bool:
+        """Publish ``owner``'s lease with a genuinely dead pid in its
+        ``supervisor_pid`` payload, then call the shared
+        ``reclaim_lease_if_dead_owner`` against the real registry and
+        confirm the stale record no longer resolves (nexus-cd1k0.17,
+        AGENTS.md's self-heal rule). Only meaningful for a tier whose
+        ``has_dead_owner_heal`` is True; a GAP tier's test never reaches
+        this call (``_maybe_xfail`` stops it first)."""
+        raise NotImplementedError
+
+    def assert_fenced_owner_stops_and_cleans_up(self) -> None:
+        """Drive the tier's REAL run loop (not a shared predicate) through
+        one full fenced-stand-down and assert on the outcome (nexus-cd1k0's
+        review round 2, finding 1): the loop exits within one tick, the
+        owner's own child/worker is torn down, and a co-existing foreign
+        owner's state is untouched.
+
+        Deliberately NOT implemented in ``_LeaseHarness`` — each concrete
+        tier has genuinely different real-loop machinery (storage_service:
+        ``_supervise_until_stopped`` returning an int; aspect_worker: a
+        threaded ``_heartbeat_loop`` setting an Event), and AGENTS.md's
+        "no per-tier lifecycle copy" gate is about the FENCING MECHANISM
+        (unified: ``ServiceSupervisor.fenced`` / ``heartbeat_tick``), not
+        about every tier's run-loop SHAPE being identical — the shape is
+        tier-specific exactly like ``owns_process`` is (see
+        ``service_registry.SupervisedResource``'s own docstring). A tier
+        that stops honouring the must-stop-when-fenced contract, whether it
+        goes through the shared ``fenced_exit_code()`` helper (storage) or
+        its own inline check (aspect_worker), fails HERE."""
         raise NotImplementedError
 
 
@@ -254,6 +278,7 @@ class _LeaseHarness(RecordHarness):
     scope = "uid"
     has_self_heal = True
     has_version_cycle = True
+    has_dead_owner_heal = True
     _REGISTRY_TIER: str = ""
 
     def __init__(self, config_dir: Path, alive: _AliveSet, clock: _FakeClock) -> None:
@@ -322,10 +347,27 @@ class _LeaseHarness(RecordHarness):
     def owners_in_scope(self, session_id: str) -> int:
         return 1 if self.discover() is not None else 0
 
-    def fenced_owner_run_loop_would_stop(self, owner: int) -> bool:
-        sup = self._supervisors.get(owner)
-        assert sup is not None, "owner never published"
-        return fenced_exit_code(sup.fenced) is not None
+    def dead_owner_lease_is_reclaimed(self, owner: int = _OWNER_PID) -> bool:
+        from nexus.daemon.service_registry import reclaim_lease_if_dead_owner
+
+        dead = subprocess.Popen(["true"])  # noqa: S603, S607 — fixed argv, a genuinely dead pid
+        dead.wait()
+        sup = ServiceSupervisor(
+            self._registry, self._scope, version="1.0.0",
+            endpoint_provider=lambda o=owner: {"pid": o, "host": "127.0.0.1", "port": 0},
+            owner_token=f"tok-dead-{owner}",
+            payload={"supervisor_pid": dead.pid},
+        )
+        record = sup.publish_once()
+        reclaimed = reclaim_lease_if_dead_owner(self._registry, record)
+        return reclaimed and self._registry.discover(self._scope) is None
+
+    # NO fenced_owner_run_loop_would_stop / assert_fenced_owner_stops_and_cleans_up
+    # here (nexus-cd1k0 review round 2): a shared shortcut through
+    # fenced_exit_code() alone drove neither tier's REAL run loop, so it
+    # could not fail if a tier stopped honouring the contract. Each
+    # concrete subclass below now implements it against its own real
+    # production machinery instead.
 
 
 # NO T3RecordHarness: RDR-149 P3 migrated the T3-daemon lease onto this same
@@ -353,6 +395,68 @@ class StorageServiceRecordHarness(_LeaseHarness):
     tier = "storage_service"
     _REGISTRY_TIER = "storage_service"
 
+    def assert_fenced_owner_stops_and_cleans_up(self) -> None:
+        """Real ``_supervise_until_stopped`` loop, a real engine-child
+        subprocess, a real successor lease at a strictly higher generation
+        — the actual production run loop, not the shared predicate alone."""
+        import threading
+
+        from nexus.daemon import storage_service_daemon as ssd
+
+        scope = self._scope
+        sup = object.__new__(ssd.StorageServiceSupervisor)
+        sup._config_dir = self._cd
+        sup._svc_log_name = "x"
+        sup._scope = scope
+        sup._consecutive_unhealthy_heartbeats = 0
+        sup._service_port = 1
+        sup._pg_port = 1
+
+        engine = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        sup._proc = engine
+        owner_registry = ServiceRegistry(dir=self._cd, tier=self._REGISTRY_TIER, clock=self._clock)
+        sup._registry = owner_registry
+        sup._supervisor = ServiceSupervisor(
+            owner_registry, scope, version="1",
+            endpoint_provider=lambda: {"pid": engine.pid}, payload={"supervisor_pid": os.getpid()},
+        )
+        sup._supervisor.publish_once()
+
+        # A genuine successor republishes at a strictly higher generation.
+        successor_registry = ServiceRegistry(dir=self._cd, tier=self._REGISTRY_TIER, clock=self._clock)
+        successor = ServiceSupervisor(
+            successor_registry, scope, version="1",
+            endpoint_provider=lambda: {"pid": 999999, "host": "127.0.0.1", "port": 0},
+        )
+        successor.publish_once()
+        lease_path = self._cd / f"storage_service_addr.{scope}"
+        successor_bytes_before = lease_path.read_bytes()
+
+        stop_requested = threading.Event()
+        with patch.object(sup, "start", lambda **_k: None), \
+             patch.object(ssd.StorageServiceSupervisor, "_probe_service_health", return_value=ssd.HealthProbe.OK), \
+             patch.object(ssd.StorageServiceSupervisor, "_pg_reachable", return_value=True):
+            t0 = time.monotonic()
+            exit_code = ssd._supervise_until_stopped(sup, stop_requested, lambda: None)
+            elapsed = time.monotonic() - t0
+
+        assert exit_code == 0, f"a fenced owner's run loop must exit 0, not {exit_code}"
+        assert elapsed < 5.0, f"the loop must exit within roughly one tick, took {elapsed:.2f}s"
+
+        try:
+            rc = engine.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            engine.kill()
+            raise AssertionError("the fenced owner's engine child was not reaped")
+        assert rc is not None
+
+        assert lease_path.read_bytes() == successor_bytes_before, (
+            "a fenced owner's stand-down must not touch the successor's lease"
+        )
+
 
 class AspectWorkerRecordHarness(_LeaseHarness):
     """RDR-173 P1 (nexus-plzhp): the aspect-worker rides the SAME leased registry
@@ -371,6 +475,98 @@ class AspectWorkerRecordHarness(_LeaseHarness):
     scope = "tenant"
     _REGISTRY_TIER = "aspect_worker"
     has_version_cycle = False
+    # nexus-cd1k0.17 review round 2, finding 2: aspect_worker's OWN spawn
+    # path (ensure_aspect_worker_daemon) has no equivalent inline
+    # dead-owner check to generalise into reclaim_lease_if_dead_owner --
+    # a different spawn shape (per-tenant, spawn-if-absent from the
+    # enqueue hook) with nothing analogous to storage_service's
+    # foreground-unit-vs-CLI-client duplication this bead fixed. A GAP,
+    # not a silent omission (AGENTS.md).
+    has_dead_owner_heal = False
+
+    def assert_fenced_owner_stops_and_cleans_up(self) -> None:
+        """Two REAL AspectWorkerDaemon instances sharing a tenant, driven
+        through their OWN threaded ``_heartbeat_loop`` (started via
+        ``.start()``, not a bare ``ServiceSupervisor``) — the inline
+        must-stop-when-fenced check (aspect_worker_daemon.py's own
+        ``_heartbeat_loop``, not the shared ``fenced_exit_code()`` helper
+        storage_service uses; AGENTS.md's shared-fencing-MECHANISM gate is
+        satisfied either way, see the base method's docstring)."""
+        import threading
+
+        from nexus.daemon import aspect_worker_daemon as awd
+
+        tenant = f"tenant-fence-{id(self)}"
+        stopped: dict[str, bool] = {"A": False, "B": False}
+        closed: dict[str, bool] = {"A": False, "B": False}
+
+        class _FakeWorker:
+            def __init__(self, name: str) -> None:
+                self._name = name
+
+            def start(self) -> None:
+                pass
+
+            def stop(self, timeout: float = 0) -> None:
+                stopped[self._name] = True
+
+        class _FakeQueue:
+            def __init__(self, name: str) -> None:
+                self._name = name
+
+            def reclaim_stale(self, _t: float) -> int:
+                return 0
+
+            def close(self) -> None:
+                closed[self._name] = True
+
+        a = awd.AspectWorkerDaemon(
+            config_dir=self._cd, tenant=tenant, clock=self._clock,
+            worker_factory=lambda: _FakeWorker("A"),
+            queue_factory=lambda: _FakeQueue("A"),
+            heartbeat_interval=0.05,
+        )
+        b = awd.AspectWorkerDaemon(
+            config_dir=self._cd, tenant=tenant, clock=self._clock,
+            worker_factory=lambda: _FakeWorker("B"),
+            queue_factory=lambda: _FakeQueue("B"),
+            heartbeat_interval=0.05,
+        )
+        a.start()
+        b.start()
+        try:
+            deadline = time.monotonic() + 5.0
+            while not a.is_fenced() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert a.is_fenced(), "A must be fenced once B (higher generation) publishes"
+
+            # The loop exits within one tick: _heartbeat_loop's own
+            # must-stop-when-fenced check sets self._stop, independent of
+            # anyone calling .stop() -- this is the ACTUAL production
+            # decision, not a proxy.
+            deadline2 = time.monotonic() + 2.0
+            while not a._stop.is_set() and time.monotonic() < deadline2:
+                time.sleep(0.02)
+            assert a._stop.is_set(), (
+                "the fenced owner's heartbeat loop must request its own "
+                "stop within roughly one tick"
+            )
+            assert not b.is_fenced(), "the successor must never be fenced by its own predecessor's fencing"
+
+            # "The child is reaped": A's own worker/queue are torn down by
+            # a real .stop() call, exactly as run_aspect_worker_daemon's
+            # own finally-block would do next.
+            a.stop()
+            assert stopped["A"] is True, "the fenced owner's worker must be stopped"
+            assert closed["A"] is True, "the fenced owner's queue must be closed"
+
+            # Foreign state untouched: B is still live, still unfenced,
+            # and its own worker/queue are untouched by A's teardown.
+            assert not b.is_fenced()
+            assert stopped["B"] is False
+            assert closed["B"] is False
+        finally:
+            b.stop()
 
 
 _HARNESS_CLASSES: dict[str, type[RecordHarness]] = {
@@ -432,6 +628,24 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
         # property existed to check it.
         "storage_service": "pass",  # nexus-cd1k0.2: _supervise_until_stopped checks fenced_exit_code
         "aspect_worker": "pass",  # RDR-173 P1: _heartbeat_loop already stands down on fenced
+    },
+    "dead_owner_lease_reclaimed": {
+        # nexus-cd1k0.17: a TTL-fresh lease held by a DEAD supervisor_pid
+        # (hard crash) must be reclaimed, not honored as live, so a
+        # respawn can happen instead of the stack staying down until the
+        # TTL ages the dead lease out on its own. storage_service's TWO
+        # call sites (commands/daemon.py.ensure_storage_supervisor and
+        # storage_service_daemon._start_locked) both use the shared
+        # reclaim_lease_if_dead_owner. aspect_worker's own spawn path
+        # (ensure_aspect_worker_daemon) has no equivalent inline check to
+        # generalise -- documented GAP (AGENTS.md forbids a silent
+        # omission), not a silent pass.
+        "storage_service": "pass",  # nexus-cd1k0.17: both call sites share reclaim_lease_if_dead_owner
+        "aspect_worker": (
+            GAP,
+            "ensure_aspect_worker_daemon has no inline dead-owner check to generalise "
+            "(different, per-tenant spawn-if-absent shape; nexus-cd1k0.17)",
+        ),
     },
 }
 
@@ -593,17 +807,30 @@ class TestLifecycleConformance:
         assert rec["owner"] == _SIBLING_PID, "stale predecessor clobbered the record"
 
     def test_fenced_owner_stops(self, harness: RecordHarness, tier: str) -> None:
-        # nexus-cd1k0.2: a fenced owner's run loop must stop within one
-        # tick, not keep heartbeating (successfully or not) a lease a
-        # higher-generation successor now owns -- the two-engines-on-one-
-        # Postgres defect. AGENTS.md's must-stop-when-fenced contract, held
-        # uniformly across every tier via the shared fenced_exit_code().
+        # nexus-cd1k0.2, made behavioral in review round 2 (nexus-cd1k0
+        # follow-up): a fenced owner's REAL run loop must stop within one
+        # tick, tear down what it owns, and leave a co-existing owner's
+        # state untouched -- not merely satisfy the shared fenced_exit_code()
+        # predicate in isolation (that shortcut drove neither tier's actual
+        # production loop, so it could not fail if a tier stopped
+        # honouring the contract). Each harness drives its own tier's real
+        # machinery; see assert_fenced_owner_stops_and_cleans_up's docstring.
         _maybe_xfail("fenced_owner_stops", tier)
-        harness.publish(_OWNER_PID)  # predecessor
-        harness.publish(_SIBLING_PID)  # successor takes over (higher generation)
-        harness.stale_reassert(_OWNER_PID)  # predecessor wakes late, gets fenced
-        assert harness.fenced_owner_run_loop_would_stop(_OWNER_PID), (
-            "a fenced owner's run loop must stop (nexus-cd1k0.2)"
+        harness.assert_fenced_owner_stops_and_cleans_up()
+
+    def test_dead_owner_lease_reclaimed(self, harness: RecordHarness, tier: str) -> None:
+        # nexus-cd1k0.17 review round 2, finding 2: a TTL-fresh lease held
+        # by a dead supervisor_pid must be reclaimed on discover, not
+        # honored as live. Real dead pid (spawn + reap), the real shared
+        # primitive (reclaim_lease_if_dead_owner) — a GAP tier's own
+        # production spawn path never reaches this helper at all, so its
+        # cell is a documented GAP, not a silent pass.
+        _maybe_xfail("dead_owner_lease_reclaimed", tier)
+        assert harness.has_dead_owner_heal, (
+            "tier is not covered by any dead-owner-lease-heal entrypoint"
+        )
+        assert harness.dead_owner_lease_is_reclaimed(), (
+            "a fresh lease held by a dead supervisor_pid must be reclaimed (nexus-cd1k0.17)"
         )
 
 
@@ -699,6 +926,7 @@ class TestMatrixIsNotVacuous:
             "restart_higher_generation",
             "restart_race_fencing",
             "fenced_owner_stops",  # nexus-cd1k0.2 ratchet
+            "dead_owner_lease_reclaimed",  # nexus-cd1k0.17 ratchet
         ):
             assert EXPECTATIONS[prop]["storage_service"] == "pass", (
                 f"storage_service lease property {prop!r} regressed to non-pass after P5.1"

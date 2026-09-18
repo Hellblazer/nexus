@@ -3580,12 +3580,34 @@ def _run_psql(
     sql: str,
     *,
     psql_runner=None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a single-statement psql query and return the CompletedProcess.
 
     ``-t -A`` gives unaligned, tuple-only output suitable for line-by-line
     parsing. ``-v ON_ERROR_STOP=1`` makes psql exit non-zero on SQL errors.
     ``psql_runner`` is injectable for unit tests (avoids shelling out).
+
+    ``timeout`` (nexus-cd1k0.19 review round 2, finding 5) defaults to
+    ``None`` — UNBOUNDED, preserving the exact pre-existing behavior for
+    every caller in this module (the various health/doctor checks and the
+    changelog-lock release helpers in storage_service_daemon.py) — NONE
+    of them pass a timeout today, and none of them run on the
+    stop-request-sensitive readiness-wait hot path, so their blocking
+    semantics are intentionally left unchanged here.
+    ``storage_service_daemon.StorageServiceSupervisor._migration_pg_probe``
+    is the ONE caller that now passes a bounded timeout: it is the
+    readiness monitor's pg_probe, invoked from inside the per-tick
+    readiness wait during MIGRATING — the exact phase the whole readiness
+    module exists to survive (20+ minutes) — and an unresponsive local
+    psql there previously made ``stop_check`` invisible for as long as
+    this call blocked, since nothing else in that tick's path could
+    notice a pending stop request until ``_run_psql`` returned. A raised
+    ``subprocess.TimeoutExpired`` propagates to the caller exactly like
+    any other psql failure (both existing callers already wrap this in a
+    broad ``except`` and degrade to their own "unavailable" verdict, so a
+    timeout is not a NEW failure mode to handle, only a NEW way to reach
+    an already-handled one).
     """
     cmd = [
         str(psql_bin),
@@ -3611,7 +3633,9 @@ def _run_psql(
 
     env = _bundle_lib_env(cmd, None)
     env["PGPASSWORD"] = password
-    return subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
+    return subprocess.run(
+        cmd, capture_output=True, text=True, check=False, env=env, timeout=timeout,
+    )
 
 
 def _check_engine_convergence(config_dir: Path | None = None) -> list[HealthResult]:

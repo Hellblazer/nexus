@@ -302,6 +302,36 @@ class TestSupervisorLifecycleLog:
             "via an exception, not just a normal break/loop-condition exit"
         )
 
+    def test_system_exit_mid_loop_still_writes_the_exit_breadcrumb_and_stops(
+        self, config_dir: Path, fake_storage_sup, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-cd1k0 review round 3 finding 7: sibling of the
+        KeyboardInterrupt case above, for ``SystemExit`` specifically —
+        ``BaseException``, not ``Exception``, so it is the other class of
+        escape a bare ``except Exception`` around the loop body would
+        have missed, and the try/finally tail must run for it exactly the
+        same way. ``SystemExit`` in particular is what ``sys.exit()``
+        raises, so this also covers "something in the loop body called
+        sys.exit() directly" as a live-interpreter path distinct from
+        ``run_storage_supervisor``'s own deliberate ``sys.exit(exit_code)``
+        AFTER this function returns normally."""
+        _write_creds(config_dir)
+        fake_storage_sup.start_raises = None
+
+        def _boom(self):  # noqa: ANN001
+            raise SystemExit(1)
+
+        monkeypatch.setattr(_FakeStorageSupervisor, "heartbeat_once", _boom)
+        with pytest.raises(SystemExit):
+            ssd.run_storage_supervisor(config_dir=config_dir)
+        text = (config_dir / "logs" / "storage_service.log").read_text()
+        assert "storage_service_supervisor_started" in text
+        assert "storage_service_supervisor_exit" in text
+        assert fake_storage_sup.instances[-1].stopped is True, (
+            "the engine child must be torn down even when the loop exits "
+            "via SystemExit, not just a normal break/loop-condition exit"
+        )
+
     def test_run_storage_supervisor_crash_backstop_logs_exception(
         self, config_dir: Path, fake_storage_sup, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

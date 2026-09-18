@@ -92,6 +92,8 @@ from nexus.db.service_bge_model import service_bge_engine_dir_mismatch
 from nexus.db.service_crossencoder_model import service_crossencoder_engine_dir_mismatch
 from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
+    DEFAULT_STOP_ELECTION_BUDGET,
+    ElectionBusyError,
     ServiceRegistry,
     ServiceSupervisor,
     exit_if_process_unowned,
@@ -185,21 +187,57 @@ _GRACEFUL_STOP_TIMEOUT: float = 5.0
 #: uninterruptible-sleep (D-state) child cannot hang the stopper forever.
 _POST_KILL_REAP_TIMEOUT: float = 2.0
 
+#: Budget for each of the two election-flock waits on the STOP path
+#: (``mark_shutting_down`` then ``relinquish``, in ``StorageServiceSupervisor.
+#: stop``) — nexus-cd1k0 review round 3 finding 6. Before this, both calls
+#: passed no budget at all (an unconditionally BLOCKING ``LOCK_EX``), which
+#: made ``_SUPERVISOR_STOP_GRACE``'s docstring claim -- that it strictly
+#: exceeds the inner worst case -- false: an unbounded wait has no worst
+#: case for any outer grace to exceed. Reuses the shared primitive's
+#: ``DEFAULT_STOP_ELECTION_BUDGET`` rather than a tier-local number; see
+#: that constant's docstring for why a few seconds is ample and why
+#: exhaustion (``ElectionBusyError``) is caught as best-effort at both call
+#: sites below, never allowed to skip the child-teardown that follows.
+_STOP_ELECTION_BUDGET: float = DEFAULT_STOP_ELECTION_BUDGET
+
 #: nexus-cd1k0.1: the OUTER stopper (``stop_storage_service``) waits for
 #: the SUPERVISOR PROCESS itself to exit after SIGTERM. A CLEAN stop
-#: needs the supervisor to first stop ITS OWN engine child — up to
-#: ``_GRACEFUL_STOP_TIMEOUT`` (SIGTERM grace) plus
-#: ``_POST_KILL_REAP_TIMEOUT`` (post-SIGKILL reap) — before the
-#: supervisor process itself can exit. Reusing ``_GRACEFUL_STOP_TIMEOUT``
-#: for BOTH the inner (engine) and outer (supervisor) wait made the two
-#: windows race: a supervisor that legitimately needed its own full
-#: inner grace to shut down cleanly could still get SIGKILLed by the
-#: OUTER caller for "taking too long", even though nothing was wrong —
-#: the outer window simply lost the race it was never given enough
-#: margin to win. This is strictly longer than that inner worst case,
-#: plus a small margin for the supervisor's own log-flush + exit-path
-#: overhead, so a genuinely clean stop always has room to finish.
-_SUPERVISOR_STOP_GRACE: float = _GRACEFUL_STOP_TIMEOUT + _POST_KILL_REAP_TIMEOUT + 1.0
+#: needs the supervisor to first (a) publish the shutdown marker, (b)
+#: relinquish the lease -- EACH of those bounded by ``_STOP_ELECTION_BUDGET``
+#: per nexus-cd1k0 review round 3 finding 6, above -- and then (c) stop its
+#: own engine child, up to ``_GRACEFUL_STOP_TIMEOUT`` (SIGTERM grace) plus
+#: ``_POST_KILL_REAP_TIMEOUT`` (post-SIGKILL reap) — before the supervisor
+#: process itself can exit. Reusing ``_GRACEFUL_STOP_TIMEOUT`` for BOTH the
+#: inner (engine) and outer (supervisor) wait made the two windows race: a
+#: supervisor that legitimately needed its own full inner grace to shut
+#: down cleanly could still get SIGKILLed by the OUTER caller for "taking
+#: too long", even though nothing was wrong — the outer window simply lost
+#: the race it was never given enough margin to win. This is strictly
+#: longer than that inner worst case -- 2 * ``_STOP_ELECTION_BUDGET`` (the
+#: two election waits, worst case each spending its full budget before
+#: raising ``ElectionBusyError``) plus ``_GRACEFUL_STOP_TIMEOUT`` plus
+#: ``_POST_KILL_REAP_TIMEOUT`` -- plus a small margin for the supervisor's
+#: own log-flush + exit-path overhead, so a genuinely clean stop always has
+#: room to finish.
+_SUPERVISOR_STOP_GRACE: float = (
+    2 * _STOP_ELECTION_BUDGET + _GRACEFUL_STOP_TIMEOUT + _POST_KILL_REAP_TIMEOUT + 1.0
+)
+
+#: Bound on the readiness monitor's pg_probe call (nexus-cd1k0.19 review
+#: round 2, finding 5). ``_migration_pg_probe`` shells out to ``psql``
+#: with NO timeout before this — the exact phase the readiness module
+#: exists to survive (MIGRATING, 20+ minutes) is the phase where a single
+#: tick could block unboundedly on an unresponsive local psql, making
+#: ``stop_check`` invisible for that duration: nothing else in that
+#: tick's path could notice a pending stop request until this call
+#: returned. Comfortably below ``_SUPERVISOR_STOP_GRACE`` so even a
+#: fully-blocked probe (this tier's own throttle already caps how often
+#: it fires, to once per ``_MIGRATION_PG_PROBE_MIN_INTERVAL``) leaves
+#: ample room for the rest of the stop path to finish inside the outer
+#: stopper's grace window. (This tier's own throttle is
+#: ``readiness.DEFAULT_PG_PROBE_MIN_INTERVAL`` = 5.0s — how often the
+#: probe fires at all, orthogonal to how long any one call may take.)
+_PG_PROBE_TIMEOUT: float = 3.0
 
 #: HTTP timeout for /health probes.
 #:
@@ -1176,7 +1214,15 @@ class StorageServiceSupervisor:
                 "AND state = 'active' AND wait_event_type IS DISTINCT FROM 'Lock' "
                 "AND pid != pg_backend_pid();"
             )
-            proc = _run_psql(psql_bin, host, port, dbname, user, password, sql)
+            # nexus-cd1k0.19 review round 2, finding 5: bounded, unlike
+            # every other _run_psql caller — this is the readiness
+            # monitor's pg_probe, invoked from inside the per-tick
+            # readiness wait, so an unresponsive local psql must not make
+            # stop_check invisible for longer than _PG_PROBE_TIMEOUT.
+            proc = _run_psql(
+                psql_bin, host, port, dbname, user, password, sql,
+                timeout=_PG_PROBE_TIMEOUT,
+            )
             if proc.returncode != 0:
                 return readiness.PgActivity.UNAVAILABLE
             try:
@@ -2108,6 +2154,16 @@ class StorageServiceSupervisor:
         """Graceful shutdown: mark_shutting_down -> relinquish -> killpg.
 
         Postgres is intentionally NOT stopped — PG is independently managed.
+
+        nexus-cd1k0 review round 3 finding 6: both election calls are now
+        BOUNDED (``budget=_STOP_ELECTION_BUDGET``) and best-effort. Before
+        this, ``relinquish`` in particular took no budget at all — an
+        unconditionally blocking flock wait that could hang this whole
+        method (and therefore the child-teardown below, and therefore the
+        supervisor process's own exit) for as long as some OTHER process
+        held the scope's election lock. A busy flock now degrades to "the
+        lease ages out via TTL instead of being explicitly relinquished",
+        never to a stop that itself never returns.
         """
         if self._registry is not None and self._supervisor is not None:
             rec = self._supervisor.record
@@ -2115,8 +2171,16 @@ class StorageServiceSupervisor:
                 # RDR-151 P1.3: publish shutdown marker BEFORE tearing down the
                 # process so discoverers stop resolving us immediately.
                 with contextlib.suppress(Exception):
-                    self._registry.mark_shutting_down(rec)
-                self._registry.relinquish(rec)
+                    self._registry.mark_shutting_down(rec, budget=_STOP_ELECTION_BUDGET)
+                try:
+                    self._registry.relinquish(rec, budget=_STOP_ELECTION_BUDGET)
+                except ElectionBusyError:
+                    _log.warning(
+                        "storage_service_relinquish_election_busy",
+                        scope=rec.scope_key,
+                        budget_s=_STOP_ELECTION_BUDGET,
+                        msg="election flock still held; lease left to age out via TTL",
+                    )
 
         self._stop_service()
         self._supervisor = None
@@ -2592,9 +2656,14 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
             source = "lease"
             from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
             safe_killpg(pid_to_signal, signal.SIGTERM)
-            # Clean up the lease record.
+            # Clean up the lease record. Bounded (nexus-cd1k0 review round 3
+            # finding 6): this is the OUTER ``stop_storage_service`` caller
+            # (e.g. the CLI's ``nx daemon service stop``) doing its own
+            # cleanup on a legacy lease with no ``supervisor_pid`` payload —
+            # an unbounded flock wait here would hang THAT caller, not just
+            # a supervisor process, so it gets the same budget.
             with contextlib.suppress(Exception):
-                registry.relinquish(record)
+                registry.relinquish(record, budget=_STOP_ELECTION_BUDGET)
             _log.info("storage_service_stopped", pid=pid_to_signal)
             signalled.append(pid_to_signal)
 

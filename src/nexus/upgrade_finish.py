@@ -1491,9 +1491,20 @@ def _restart_and_verify(
     except Exception as exc:  # noqa: BLE001 — no process table: degrade to the old choreography
         _log.warning("restart_stack_snapshot_failed", error=str(exc))
         before = []
+    # nexus-cd1k0.19 review round 2, finding 4: pass --config-dir
+    # EXPLICITLY on both calls, resolved absolute, rather than letting
+    # each bare "nx daemon service stop"/"start" subprocess re-derive its
+    # own config dir from its (inherited) environment. Without this, a
+    # caller running under a non-default NEXUS_CONFIG_DIR (an e2e sandbox
+    # script) spawns a supervisor whose own argv would otherwise still be
+    # explicit via ensure_storage_supervisor's own --config-dir -- but
+    # THIS process's own stop/start invocations, and the process-table
+    # sweep they trigger, must target the SAME resolved dir this function
+    # was itself called with, not whatever a bare "nx" re-derives.
+    resolved_config_dir = str(config_dir.resolve())
     try:
         stop = subprocess.run(
-            ["nx", "daemon", "service", "stop"],
+            ["nx", "daemon", "service", "stop", "--config-dir", resolved_config_dir],
             capture_output=True, text=True, timeout=60,
         )
         try:
@@ -1502,7 +1513,7 @@ def _restart_and_verify(
             _log.warning("restart_stack_sweep_failed", error=str(exc))
             sweep_note = f"(stack sweep failed: {exc} — proceeding to start)"
         start = subprocess.run(
-            ["nx", "daemon", "service", "start"],
+            ["nx", "daemon", "service", "start", "--config-dir", resolved_config_dir],
             capture_output=True, text=True, timeout=120,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort cycle; surfaced in the line

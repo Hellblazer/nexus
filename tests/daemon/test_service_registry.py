@@ -571,13 +571,16 @@ class TestStorageServiceStackMatcher:
     def test_flagless_unit_launched_supervisor_matches_the_default_dir(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """nexus-cd1k0.3: the shipped launchd/systemd units exec
-        ``nx daemon service start --foreground`` with NO ``--config-dir``
-        token at all (``ensure_storage_supervisor`` -- the client spawn
-        path -- always passes the flag; a unit's ExecStart never goes
-        through it). A unit-launched supervisor is invisible to this
-        matcher unless a flagless command is recognized as belonging to
-        the DEFAULT config dir."""
+        """nexus-cd1k0.3, narrowed to LEGACY by nexus-cd1k0.19 review round
+        2, finding 4: a unit installed BEFORE the fix that bakes an
+        explicit --config-dir into every generated unit (installer.py /
+        _render_template) still execs ``nx daemon service start
+        --foreground`` with NO ``--config-dir`` token at all, so this
+        fallback stays required for it — a unit-launched supervisor from
+        THAT era is invisible to this matcher unless a flagless command
+        is recognized as belonging to the DEFAULT config dir. A unit
+        generated from now on is argv-explicit and never reaches this
+        fallback at all (see the matcher's own docstring)."""
         default_dir = Path("/home/fakehome") / ".config" / "nexus"
         monkeypatch.setattr(Path, "home", lambda: Path("/home/fakehome"))
         matcher = storage_service_stack_matcher(default_dir)

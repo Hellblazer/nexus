@@ -293,15 +293,15 @@ class TestStorageServiceSupervisorUnit:
 
         original_msd = sup._registry.mark_shutting_down
 
-        def track_msd(rec: Any) -> None:
+        def track_msd(rec: Any, **kwargs: Any) -> None:
             call_order.append("mark_shutting_down")
-            original_msd(rec)
+            original_msd(rec, **kwargs)
 
         original_relinquish = sup._registry.relinquish
 
-        def track_relinquish(rec: Any) -> None:
+        def track_relinquish(rec: Any, **kwargs: Any) -> None:
             call_order.append("relinquish")
-            original_relinquish(rec)
+            original_relinquish(rec, **kwargs)
 
         def track_killpg() -> None:
             call_order.append("stop_service")
@@ -352,6 +352,72 @@ class TestStorageServiceSupervisorUnit:
 
         # After stop: lease is relinquished (None)
         assert registry.discover(scope) is None
+
+    def test_stop_returns_promptly_when_the_election_flock_is_held(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        """nexus-cd1k0 review round 3 finding 6: before this fix,
+        mark_shutting_down()/relinquish() on the stop path took NO
+        budget -- an unconditionally blocking LOCK_EX -- so a contested
+        election flock could hang stop() (and therefore the supervisor
+        process's own exit) indefinitely, making _SUPERVISOR_STOP_GRACE's
+        docstring claim ("strictly exceeds the inner worst case") false.
+
+        Hold the REAL election flock from a second fd in this same
+        process -- flock() locks are per open-file-description, so a
+        second open() of the same path takes a genuinely separate lock
+        that contends with the first, even within one process (mirrors
+        tests/daemon/test_service_registry_election_bound.py's
+        ``held_flock`` fixture). stop() must still return, bounded by
+        the two election budgets, not hang on the contested flock.
+        """
+        import fcntl
+
+        from nexus.daemon.storage_service_daemon import (
+            _STOP_ELECTION_BUDGET,
+            _SUPERVISOR_STOP_GRACE,
+        )
+
+        sup = _make_supervisor(config_dir, clock)
+        fake_proc = _FakeProc(pid=42610)
+        sup._proc = fake_proc
+        sup._service_port = 18088
+        sup._publish(18088)
+
+        scope = str(os.getuid())
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service", clock=clock)
+        assert registry.discover(scope) is not None, "sanity: lease published"
+
+        election_path = sup._registry._election_path(scope)
+        election_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(election_path), os.O_WRONLY | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            with patch.object(sup, "_stop_service"):
+                t0 = time.monotonic()
+                sup.stop()  # must return, not hang on the held flock
+                elapsed = time.monotonic() - t0
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+        assert elapsed < _SUPERVISOR_STOP_GRACE, (
+            f"stop() took {elapsed:.2f}s with the election flock held, "
+            f"past its own documented outer grace ({_SUPERVISOR_STOP_GRACE}s)"
+        )
+        # Bounded specifically by the two election budgets (mark_shutting_down
+        # then relinquish), not merely "eventually" inside the outer grace.
+        assert elapsed < 2 * _STOP_ELECTION_BUDGET + 1.0, (
+            f"stop() took {elapsed:.2f}s, not bounded by 2x "
+            f"_STOP_ELECTION_BUDGET ({_STOP_ELECTION_BUDGET}s each)"
+        )
+        # Neither election call could take the flock we hold, so neither ran
+        # its critical section: the lease is untouched (still fresh, never
+        # relinquished) until the foreign holder above releases it.
+        assert registry.discover(scope) is not None, (
+            "relinquish must not have run its critical section while the "
+            "flock was held -- the lease should still be there"
+        )
 
     def test_endpoint_carries_host_port_and_token(
         self, config_dir: Path, clock: _FakeClock
@@ -2511,6 +2577,45 @@ class TestEnsureStorageSupervisor:
         assert rec is not None and rec.endpoint.get("port") == 18098
         assert se.has_ever_resolved_lease() is True
 
+    def test_spawn_argv_carries_config_dir_even_when_it_came_from_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-cd1k0.19 review round 2, finding 4: whatever combination of
+        NEXUS_CONFIG_DIR / default resolved this call's config_dir, the
+        spawned supervisor's argv must carry an EXPLICIT, RESOLVED-ABSOLUTE
+        --config-dir -- never rely on the spawned process re-deriving its
+        own config dir from an inherited environment. storage_service_stack_
+        matcher's flagless-matches-default rule exists only for units
+        installed BEFORE this fix; a freshly spawned supervisor must never
+        be flagless."""
+        from nexus.commands import daemon as daemon_mod
+        from nexus import config as _config
+
+        env_scoped_dir = tmp_path / "env-scoped-nexus-config"
+        env_scoped_dir.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(env_scoped_dir))
+        resolved_config_dir = _config.nexus_config_dir()  # reads the env var just set
+        assert resolved_config_dir == env_scoped_dir
+
+        captured: dict[str, list[str]] = {}
+
+        def _fake_popen(argv, **_kw):
+            captured["argv"] = argv
+            return MagicMock()
+
+        with patch.object(daemon_mod, "_resolve_nx_bin", return_value=["nx"]), \
+             patch.object(daemon_mod, "_popen", side_effect=_fake_popen), \
+             patch.object(daemon_mod.time, "monotonic", side_effect=[0.0, 100.0]):
+            with pytest.raises(StorageServiceStartError):
+                # No lease is ever published (the fake Popen does nothing
+                # real) -- this call is only here to observe the spawn argv,
+                # not to succeed.
+                daemon_mod.ensure_storage_supervisor(resolved_config_dir)
+
+        assert "--config-dir" in captured["argv"], captured["argv"]
+        idx = captured["argv"].index("--config-dir")
+        assert captured["argv"][idx + 1] == str(env_scoped_dir.resolve()), captured["argv"]
+
 
 # ---------------------------------------------------------------------------
 # nexus-lz3f2: lease-TTL margin + optional service heap bound
@@ -3393,6 +3498,54 @@ class TestStaleChangelogLockCleanup:
         }
         sup = _make_supervisor(config_dir, clock, creds=creds)
         assert sup._migration_pg_probe() is readiness.PgActivity.UNAVAILABLE
+
+    def test_pg_probe_unwinds_promptly_when_psql_hangs(
+        self, config_dir: Path, clock: _FakeClock,
+    ) -> None:
+        """nexus-cd1k0.19 review round 2, finding 5: _run_psql had NO
+        timeout, so an unresponsive local psql during MIGRATING could
+        block the readiness monitor's per-tick pg_probe unboundedly,
+        making stop_check invisible for that whole duration. Real
+        subprocess that sleeps well past _PG_PROBE_TIMEOUT (3s) -- the
+        probe must still return (UNAVAILABLE, via TimeoutExpired ->
+        the existing broad except) well under the OLD unbounded
+        behavior, and comfortably under _SUPERVISOR_STOP_GRACE."""
+        import stat
+
+        import nexus.daemon.readiness as readiness
+        from nexus.daemon.storage_service_daemon import _PG_PROBE_TIMEOUT, _SUPERVISOR_STOP_GRACE
+
+        fake_psql = config_dir / "fake-psql-that-hangs.sh"
+        fake_psql.write_text(
+            "#!/bin/sh\nsleep 60\necho 't'\n"
+        )
+        fake_psql.chmod(fake_psql.stat().st_mode | stat.S_IEXEC)
+
+        creds = {
+            "NX_DB_URL": "jdbc:...", "NX_DB_USER": "svc", "NX_DB_PASS": "pass",
+            "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "admin",
+            "NX_DB_ADMIN_PASS": "adminpass", "PG_PORT": "15432",
+            "PG_DATA": str(config_dir / "pgdata"),
+            "NX_SERVICE_TOKEN": "root-token-from-creds-deadbeef",
+        }
+        sup = _make_supervisor(config_dir, clock, creds=creds)
+
+        fake_bins = SimpleNamespace(psql=fake_psql)
+        t0 = time.monotonic()
+        with patch("nexus.db.pg_provision.discover_pg_binaries", return_value=fake_bins):
+            result = sup._migration_pg_probe()
+        elapsed = time.monotonic() - t0
+
+        assert result is readiness.PgActivity.UNAVAILABLE
+        assert elapsed < _SUPERVISOR_STOP_GRACE, (
+            f"an unresponsive psql must not block the pg_probe past the "
+            f"outer stop grace; took {elapsed:.2f}s"
+        )
+        # Bounded specifically by _PG_PROBE_TIMEOUT, not merely "eventually".
+        assert elapsed < _PG_PROBE_TIMEOUT + 2.0, (
+            f"pg_probe took {elapsed:.2f}s, not bounded by _PG_PROBE_TIMEOUT "
+            f"({_PG_PROBE_TIMEOUT}s)"
+        )
 
     def test_skips_when_a_live_engine_is_found(
         self, config_dir: Path, clock: _FakeClock

@@ -105,41 +105,65 @@ def _read_template(name: str) -> str:
 
 
 _PLIST_NX_BIN_LINE_RE = re.compile(r"^(?P<indent>[ \t]*)<string>__NX_BIN__</string>\s*$")
+_PLIST_CONFIG_DIR_LINE_RE = re.compile(r"^(?P<indent>[ \t]*)<string>__CONFIG_DIR_ARGV__</string>\s*$")
 
 
-def _substitute_plist_argv(body: str, nx_bin: list[str]) -> str:
-    """Expand ``<string>__NX_BIN__</string>`` into one entry per argv
-    token. The plist's ProgramArguments array gives launchd one
-    ``<string>`` per element; a multi-token fallback
-    (``[python, "-m", "nexus.cli"]``) must render as multiple siblings,
-    not a single space-joined string, or posix_spawn fails with ENOENT.
-    """
+def _substitute_plist_multi_token(body: str, pattern: re.Pattern[str], tokens: list[str]) -> str:
+    """Expand a single ``<string>PLACEHOLDER</string>`` line into one
+    ``<string>`` element per token in *tokens*. The plist's argv arrays
+    (ProgramArguments) give launchd one ``<string>`` per element; ANY
+    multi-token substitution (the nx-bin fallback ``[python, "-m",
+    "nexus.cli"]``, or ``--config-dir <path>`` as two tokens) must render
+    as multiple siblings, never a single joined string, or posix_spawn
+    fails with ENOENT / mis-parses the argument boundary."""
     out_lines: list[str] = []
     for line in body.splitlines(keepends=True):
-        match = _PLIST_NX_BIN_LINE_RE.match(line.rstrip("\n"))
+        match = pattern.match(line.rstrip("\n"))
         if match is None:
             out_lines.append(line)
             continue
         indent = match.group("indent")
         trailing_nl = "\n" if line.endswith("\n") else ""
-        for token in nx_bin:
+        for token in tokens:
             out_lines.append(f"{indent}<string>{_xml_escape(token)}</string>{trailing_nl}")
     return "".join(out_lines)
 
 
-def _render_template(name: str, *, nx_bin: list[str], log_dir: str, path_env: str) -> str:
+def _render_template(
+    name: str, *, nx_bin: list[str], log_dir: str, path_env: str, config_dir: str,
+) -> str:
     """Substitute placeholders in a shipped autostart template.
 
     The plist substitutes ``<string>__NX_BIN__</string>`` into one
     ``<string>`` per argv token; the systemd unit's
     ``ExecStart=__NX_BIN__ ...`` line uses ``shlex.join`` so multi-token
     argvs survive systemd's whitespace-split parser.
+
+    ``config_dir`` (nexus-cd1k0.19 review round 2, finding 4) is the
+    RESOLVED ABSOLUTE config dir this install used, baked into the
+    generated unit's argv as an explicit ``--config-dir <path>`` — on the
+    plist side as TWO separate ``<string>`` elements (never a single
+    joined string, so a directory containing a space survives launchd's
+    argv array intact, mirroring ``storage_service_stack_matcher``'s own
+    space-safety discipline on the matching side); on the systemd side
+    via ``shlex.quote`` so the same holds through ``ExecStart``'s
+    whitespace-split parser. This closes the false-positive surface the
+    matcher's flagless-matches-default rule otherwise has against a live,
+    env-scoped supervisor spawned some OTHER way on this same box (see
+    that function's docstring) — a unit generated from this point on is
+    argv-explicit, never flagless.
     """
     body = _read_template(name)
     if name.endswith(".plist"):
-        body = _substitute_plist_argv(body, nx_bin)
+        body = _substitute_plist_multi_token(body, _PLIST_NX_BIN_LINE_RE, nx_bin)
+        body = _substitute_plist_multi_token(
+            body, _PLIST_CONFIG_DIR_LINE_RE, ["--config-dir", config_dir],
+        )
     else:
         body = body.replace("__NX_BIN__", shlex.join(nx_bin))
+        body = body.replace(
+            "__CONFIG_DIR_ARGV__", shlex.join(["--config-dir", config_dir]),
+        )
     return (
         body
         .replace("__LOG_DIR__", log_dir)
@@ -638,9 +662,16 @@ def ensure_storage_supervisor(config_dir: Path):
             # docstring in db/service_endpoint.py).
             return existing
 
+    # nexus-cd1k0.19 review round 2, finding 4: always RESOLVE to an
+    # absolute path before it goes into argv, however config_dir itself
+    # was derived (an explicit --config-dir flag, NEXUS_CONFIG_DIR, or the
+    # bare default) -- a relative path in argv would not match the same
+    # string another caller's own (independently resolved) matcher target
+    # compares against, defeating the token-exact discipline
+    # storage_service_stack_matcher relies on.
     argv = [
         *_resolve_nx_bin(), "daemon", "service", "start", "--foreground",
-        "--config-dir", str(config_dir),
+        "--config-dir", str(Path(config_dir).resolve()),
     ]
     # nexus-ovbr7: route the child's streams to a crash-channel file so a failure
     # BEFORE run_storage_supervisor's configure_logging runs (import error, bad

@@ -165,6 +165,78 @@ def test_supervisor_tick_logs_and_skips_a_busy_election(
     assert sup.record is rec, "the lease we hold is unchanged; the next tick retries"
 
 
+def test_mark_shutting_down_gives_up_within_budget_when_election_is_held(
+    registry: ServiceRegistry, mono: _FakeMonotonic, held_flock
+) -> None:
+    """nexus-cd1k0 review round 3 finding 6: mark_shutting_down() on the
+    stop path now accepts a budget, exactly like heartbeat's bounded
+    election -- before this it took none at all (unconditionally
+    blocking)."""
+    rec = LeaseRecord(
+        scope_key="42", generation=1, owner_token="a", heartbeat_epoch=1000.0,
+        ttl=15.0, endpoint=_endpoint(), version="1",
+    )
+    registry._write_record_atomic(rec)
+    before = mono.now
+    with pytest.raises(ElectionBusyError):
+        registry.mark_shutting_down(rec, budget=5.0)
+    assert mono.now - before < 5.0 + 2 * mono.step, "must give up within its budget"
+    assert mono.sleeps, "polled with LOCK_NB, not spun hot"
+    assert registry._read_record("42").status != "shutting_down", (
+        "the marker must never have been written -- the flock was never taken"
+    )
+
+
+def test_relinquish_gives_up_within_budget_when_election_is_held(
+    registry: ServiceRegistry, mono: _FakeMonotonic, held_flock
+) -> None:
+    """Sibling of the mark_shutting_down case above, same finding: relinquish()
+    previously blocked unconditionally too, and is the one of the two whose
+    caller (StorageServiceSupervisor.stop) did NOT already suppress every
+    exception -- an ElectionBusyError here used to propagate straight out of
+    stop() and skip the child-teardown that follows it."""
+    rec = LeaseRecord(
+        scope_key="42", generation=1, owner_token="a", heartbeat_epoch=1000.0,
+        ttl=15.0, endpoint=_endpoint(), version="1",
+    )
+    registry._write_record_atomic(rec)
+    before = mono.now
+    with pytest.raises(ElectionBusyError):
+        registry.relinquish(rec, budget=5.0)
+    assert mono.now - before < 5.0 + 2 * mono.step, "must give up within its budget"
+    assert mono.sleeps, "polled with LOCK_NB, not spun hot"
+    assert registry._read_record("42") is not None, (
+        "the record must never have been unlinked -- the flock was never taken"
+    )
+
+
+def test_mark_shutting_down_and_relinquish_default_to_blocking(
+    registry: ServiceRegistry, mono: _FakeMonotonic, held_flock
+) -> None:
+    """budget=None (the default) is unchanged: both calls still wait their
+    turn rather than raising, proven by releasing the foreign flock from a
+    thread and observing each complete only afterwards -- the same proof
+    shape as test_publish_still_blocks_on_a_held_election below."""
+    rec = LeaseRecord(
+        scope_key="42", generation=1, owner_token="a", heartbeat_epoch=1000.0,
+        ttl=15.0, endpoint=_endpoint(), version="1",
+    )
+    registry._write_record_atomic(rec)
+
+    released = threading.Event()
+
+    def release_later() -> None:
+        time.sleep(0.2)
+        fcntl.flock(held_flock, fcntl.LOCK_UN)
+        released.set()
+
+    threading.Thread(target=release_later, daemon=True).start()
+    registry.mark_shutting_down(rec)
+    assert released.is_set(), "mark_shutting_down returned before the foreign holder released"
+    assert registry._read_record("42").status == "shutting_down"
+    assert not mono.sleeps, "the blocking default uses LOCK_EX, not the polled path"
+
+
 def test_publish_still_blocks_on_a_held_election(
     registry: ServiceRegistry, mono: _FakeMonotonic, held_flock
 ) -> None:

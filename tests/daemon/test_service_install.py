@@ -352,6 +352,84 @@ class TestServicePlistRespawnPosture:
         assert data["RunAtLoad"] is True
 
 
+class TestGeneratedUnitCarriesExplicitConfigDir:
+    """nexus-cd1k0.19 review round 2, finding 4: a unit generated FROM THIS
+    POINT ON must carry an explicit --config-dir <resolved absolute path>
+    in its argv, never rely on storage_service_stack_matcher's
+    flagless-matches-default fallback — that fallback exists only for
+    units installed BEFORE this fix. Closes the false-positive surface a
+    live, env-scoped `nx daemon service start`/`stop` invocation
+    (upgrade_finish.py's bare CLI calls; e2e sandbox scripts) otherwise
+    has against the matcher's default-dir target."""
+
+    def test_rendered_service_plist_carries_config_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import plistlib
+        import re
+
+        _set_platform(monkeypatch, "darwin")
+        _stub_paths(tmp_path, monkeypatch)
+        env_scoped_dir = tmp_path / "env-scoped-nexus-config"
+        env_scoped_dir.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(env_scoped_dir))
+
+        _dest, rendered = installer.rendered_unit_content(tier="service")
+        raw = re.sub(rb"<!--.*?-->", b"", rendered.encode(), flags=re.S)
+        data = plistlib.loads(raw)
+        argv = data["ProgramArguments"]
+        assert "--config-dir" in argv, argv
+        idx = argv.index("--config-dir")
+        assert argv[idx + 1] == str(env_scoped_dir.resolve()), argv
+
+    def test_rendered_systemd_unit_carries_config_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _set_platform(monkeypatch, "linux")
+        _stub_paths(tmp_path, monkeypatch)
+        env_scoped_dir = tmp_path / "env-scoped-nexus-config"
+        env_scoped_dir.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(env_scoped_dir))
+
+        _dest, rendered = installer.rendered_unit_content(tier="service")
+        exec_start = next(
+            ln for ln in rendered.splitlines() if ln.startswith("ExecStart=")
+        )
+        assert "--config-dir" in exec_start, exec_start
+        assert str(env_scoped_dir.resolve()) in exec_start, exec_start
+
+    def test_rendered_units_carry_config_dir_with_a_space(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A config_dir containing a space must survive both templates
+        intact -- the plist as two separate argv array entries (never a
+        single joined string), the systemd unit properly shell-quoted."""
+        import plistlib
+        import re
+        import shlex
+
+        spaced_dir = tmp_path / "Application Support" / "nexus"
+        spaced_dir.mkdir(parents=True)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(spaced_dir))
+
+        _set_platform(monkeypatch, "darwin")
+        _stub_paths(tmp_path, monkeypatch)
+        _dest, plist_rendered = installer.rendered_unit_content(tier="service")
+        raw = re.sub(rb"<!--.*?-->", b"", plist_rendered.encode(), flags=re.S)
+        argv = plistlib.loads(raw)["ProgramArguments"]
+        idx = argv.index("--config-dir")
+        assert argv[idx + 1] == str(spaced_dir.resolve()), argv
+
+        _set_platform(monkeypatch, "linux")
+        _dest, unit_rendered = installer.rendered_unit_content(tier="service")
+        exec_start = next(
+            ln for ln in unit_rendered.splitlines() if ln.startswith("ExecStart=")
+        )
+        tokens = shlex.split(exec_start[len("ExecStart="):])
+        idx = tokens.index("--config-dir")
+        assert tokens[idx + 1] == str(spaced_dir.resolve()), exec_start
+
+
 class TestNoBackgroundProcessType:
     """nexus-rlp0v: ``ProcessType=Background`` in the launchd unit made
     macOS apply background QoS to the whole storage-service tree, confining
