@@ -359,9 +359,10 @@ so are the mitigation, and the auto-approve matcher covers them.
 `json` before dispatch, the verb's module after. It reads the payload
 from stdin (TTY-aware, empty or malformed reads as `None`), calls the
 same `run()`, writes the decision JSON to stdout, and exits 0 for every
-hook verb. The four ledger verbs whose callers branch on the exit code
-exit with the code `run()` returns instead: `expect` and `start` on
-invalid input, `undeclared` and `reconcile` on their audit outcomes
+hook verb. Every ledger verb propagates the code `run()` returns instead,
+so a caller that branches on it keeps working: `expect` and `start`
+return 2 on invalid input, `census` 1 on a blind spot, `undeclared` 1, 2
+or 3, `reconcile` 2 or 4, and `archive` and `sweep` 0 on every path
 (Contracts, below). `nx hook` keeps its Click verbs for a human at a
 terminal; no `hooks.json` entry names it.
 
@@ -379,9 +380,12 @@ each byte for byte and the retargeted test asserts them. Two are quoted
 outside the tests: the ledger verbs' codes (0 clean, 1 BLINDSPOT, 2
 undeclared, 3 no ledger for `undeclared`; 0, 2, 4 for `reconcile`) in
 AGENTS.md and the orchestration skill, and the close gate's deny text in
-19 files. `expect` and `start` return 2 on invalid input, a code
-`tests/e2e/lib/expectations_test.sh` branches on and the port keeps,
-asserted in the tests rather than quoted outside them.
+19 files. Three more codes live only in the tests: `census` returns 1 on
+a blind spot, which `tests/e2e/lib/expectations_test.sh` asserts by value
+and `tests/hooks/test_subagent_stop_hook.py` asserts again, and `expect`
+and `start` return 2 on invalid input, which that e2e file exercises for
+`expect` by success or failure and for `start` not at all. The port keeps
+all three and the Test Plan adds the assertions that are missing.
 
 **The ledger** (`nexus.hooks.expectations`). A TSV file under
 `$XDG_STATE_HOME/nexus/orchestration/<session>.expectations` with
@@ -555,9 +559,10 @@ distro, with the timing of the first `PreToolUse` after launch recorded.
   with the same payload and the same expected output.
 - One stdio integration test drives a real `nx-mcp` for one hook tool.
 - The lint test of Technical Design, both shapes, whole-string matching.
-- The expectations module gets unit tests for the verbs' exit codes
-  0, 1, 2, 3 and 0, 2, 4 against fixture ledgers, and for `expect` and
-  `start` returning 2 on invalid input.
+- The expectations module gets unit tests for every verb's exit codes
+  against fixture ledgers: `undeclared`'s 0, 1, 2 and 3, `reconcile`'s
+  0, 2 and 4, `census`'s 0 and 1, and `expect` and `start` returning 2 on
+  invalid input.
 - The budget tests keep their thresholds.
 
 ## Finalization Gate
