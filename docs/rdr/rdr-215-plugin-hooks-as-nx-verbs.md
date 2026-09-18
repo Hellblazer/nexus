@@ -438,19 +438,88 @@ shape and the PATH assumption before anything larger moves.
 
 ## Finalization Gate
 
-To be completed before the gate.
-
 ### Contradiction Check
+
+- The Provenance line says Sam's decision was "behind `nx hook` verbs";
+  the Approach says the plugin declares `nx-hook`, a separate console
+  script, and keeps `nx hook` as a human alias. Both are true in
+  sequence: the decision named the verb surface, research-5 measured the
+  entry cost, and the entry point moved. The Revision History records the
+  move.
+- Gap 2 and Gap 3 speak of `nx` as the executable that inherits
+  interpreter resolution. The design uses a sibling console script from
+  the same generation table, which inherits it the same way. The gaps
+  describe the property; the design names the script.
+- The inventory (research-1) counted `timeout` 16, `uname` 1, `curl` 1
+  as call sites; the contract map (research-6) found no script calls
+  them. The Technical Environment carries the corrected list and names
+  the correction; research-1's counts stand as what a word count gave.
 
 ### Assumption Verification
 
+Three assumptions of record are in Critical Assumptions. Status at gate:
+
+- **Console scripts on the hook PATH.** Assumed, inherited from the bash
+  layer (research-4: eight `command -v nx` sites). Not yet measured on
+  an app-launched macOS Claude Code or in WSL2. Phase 1 item 2 measures
+  it and records the result here; a verb that cannot find its generation
+  fails loud.
+- **Start-up cost.** Verified by spike (research-5): the cost is
+  `nexus.cli`'s eager import, avoided by a dedicated entry that imports
+  only the verb's module. Phase 1 pins a sub-0.1 s start on the dev box.
+- **`bd` stays a subprocess.** Assumed. The bash layer calls `bd list`
+  and `bd set-state` today (research-6); a Python port calls the same
+  binary with `subprocess.run`. No bead-tool Python API exists and none
+  is needed.
+
 #### API Verification
+
+| Surface | Verification |
+| --- | --- |
+| Claude Code hook exec form (`command` plus `args`, real executable, no shell) | Docs only: code.claude.com/docs/en/hooks, read 2026-09-18 (research-2). Not yet exercised against a running Claude Code; the MVV does that. |
+| Console-script entry with pre-fork minimal imports | Source search: `src/nexus/_session_end_launcher.py`, `pyproject.toml:233` (research-6). |
+| Atomic claims via `os.mkdir` and `os.symlink` | Source search: `expectations.sh` uses `mkdir` and `ln -s` for the same guarantee (research-6); the POSIX and Windows semantics of both calls are documented as atomic-create-or-fail. |
+| Hook payload and decision envelope shapes | Source search: per-script stdout shapes cited to lines in T2 `215-hook-contract-map`. |
 
 ### Scope Verification
 
+In scope: the 16 scripts in the two plugins' `hooks/scripts/`, the
+launcher, the e2e copy of the ledger library, the `hooks.json`
+declarations, the tests that drive them, and the AGENTS.md entry that
+documents the ledger verbs. Out of scope: the bash generation-install
+scripts under `src/nexus/_install/` (a different surface with its own
+tests, and not a hook), the PG bundle, any Windows build, and making
+`nexus.cli` lazy (named as its own bead in Decision Rationale). The three
+defects listed under Technical Design are fixed because the port
+replaces the lines that carry them; no other behaviour changes.
+
 ### Cross-Cutting Concerns
 
+- **Plugin release surface.** `hooks.json` and every file under
+  `conexus/hooks/scripts/` are plugin content; the change ships through
+  the drift ledger (`conexus/PENDING_RELEASE.md`) and a client release or
+  a plugin cut. Until then the installed plugin keeps running the bash.
+- **Version lock-step.** A plugin whose `hooks.json` names `nx-hook`
+  requires a conexus wheel that ships that console script; the existing
+  lock-step hook (`version_lockstep_hook.py`) is the mechanism that
+  reports the mismatch, and the drift ledger entry states the floor.
+- **Logging.** Hooks log to the hook log through `_hook_logging.py`
+  today; the shared boundary keeps that path so a swallowed exception is
+  still recorded.
+- **Worktree agents.** The subagent hooks read the worktree guard; the
+  port keeps the same file reads.
+
 ### Proportionality
+
+About 4,200 lines of bash become roughly the same amount of Python, with
+per-module tests where the bash had end-to-end tests only. The port is
+phased so the smallest decision-emitting hook proves the shape before
+the ledger moves, and each phase leaves the plugin working. The
+alternative of keeping bash costs nothing today and blocks any host
+without a POSIX shell; the alternative of a Node rewrite would
+re-implement the `nexus` client. The work is sized to the surface it
+retires and adds no new mechanism beyond one console script and one
+package.
 
 ## References
 
