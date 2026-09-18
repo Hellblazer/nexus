@@ -58,7 +58,23 @@ if [ -n "$PUBLISHED" ]; then
     printf 'conexus==%s\n' "$PUBLISHED" > "$STAGE/wheel/SPEC"
 else
     DIRTY=""
-    [ -z "$(git -C "$ROOT" status --porcelain)" ] || DIRTY="-dirty"
+    if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+        DIRTY="-dirty"
+        # This checkout is shared with other sessions, so a dirty tree here is
+        # usually a PEER's in-flight work, not this caller's: the wheel under
+        # test would then carry someone else's half-finished edit, and these
+        # are billed sessions. Refuse by default and name what is dirty.
+        # NX_MVV_ALLOW_DIRTY=1 is the deliberate opt-in for testing your own
+        # uncommitted change.
+        if [ "${NX_MVV_ALLOW_DIRTY:-}" != "1" ]; then
+            echo "RDR-208 LOCAL-MODE MVV UNVERIFIED: the checkout is dirty, so the wheel under" >&2
+            echo "test would carry uncommitted work (this tree is shared with other sessions)." >&2
+            git -C "$ROOT" status --porcelain >&2
+            echo "Commit, stash, or set NX_MVV_ALLOW_DIRTY=1 if the changes are yours and intended." >&2
+            exit 2
+        fi
+        echo "WARNING: running billed sessions against a DIRTY tree (NX_MVV_ALLOW_DIRTY=1)" >&2
+    fi
     LABEL="tree-$(git -C "$ROOT" rev-parse --short HEAD)$DIRTY"
     uv build --wheel --out-dir "$STAGE/wheel" "$ROOT" > "$STAGE/build.log" 2>&1 \
         || { cat "$STAGE/build.log" >&2; exit 1; }

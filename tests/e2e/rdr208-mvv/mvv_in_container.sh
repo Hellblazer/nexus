@@ -232,9 +232,18 @@ stop() {  # NAME: /exit, a plain process exit (releases nothing, as Claude Code 
     wait_for 30 exited "$1" || { kill -TERM "${PID_OF[$1]}" 2>/dev/null; sleep 1; }
     T kill-session -t "$1" 2>/dev/null
 }
-arm() {  # NAME INSTANCE: the session subscribes its instance-name mailbox
+arm() {  # NAME INSTANCE: the session subscribes its OWN instance-name mailbox
+    # The prompt STATES whose name this is. `tuple_subscribe` accepts board
+    # topics and this session's own instance-name mailbox, and refuses any
+    # other session's, so a bare "subscribe mailbox/alpha-e6" leaves the model
+    # to guess whether alpha-e6 is its own name. In the third billed run it
+    # guessed not, declined, and asked which of two alternatives was meant
+    # (2026-09-18) -- correctly, on the information it had. In production
+    # that name comes from ListAgents; here the harness assigns it, so the
+    # harness says so. The effect is still asserted from the engine (the
+    # directory resolves to this session), never from the model's words.
     local t; t="$(tok DONE-ARM)"
-    prompt "$1" "Call the nexus MCP tool tuple_subscribe with subspace \"mailbox/$2\" and then reply with exactly $t and nothing else." "$t"
+    prompt "$1" "This session's own instance name is $2: that is the name other sessions address this session by, the way a ListAgents row would give it. Call the nexus MCP tool tuple_subscribe with subspace \"mailbox/$2\", which is this session's own instance-name mailbox and is exactly what that tool accepts. Then reply with exactly $t and nothing else." "$t"
 }
 model_send() {  # NAME TO CORR: a send with the DEFAULT sender, from inside the session
     local t; t="$(tok DONE-SEND)"
