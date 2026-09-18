@@ -532,4 +532,67 @@ Sam whether to continue, change the tiers or stop.
 
 ## Finalization Gate
 
-Not yet run.
+### Contradiction Check
+
+The draft's own first conclusion contradicted its later evidence, and the
+contradiction is left visible rather than edited out: the second-run section
+concluded that unpromising code yielded more defects per line, and the
+withdrawal that follows it says why that count was an artifact of the brief's
+cap. The Research Findings, the Proposed Solution, the Decision Rationale and
+the Implementation Plan all rest on the uncapped recapture
+(T2 `nexus_rdr/214-research-5`), not on the withdrawn figure. The one
+tension the research surfaced is stated in Decision Rationale: the batch tier
+departs from the project's fix-do-not-file rule, and the argument for that is
+made there, not hidden.
+
+### Assumption Verification
+
+The five research records are spikes, each with a prediction recorded before
+its result and two of the predictions wrong (T2 `nexus_rdr/214-research-1`
+to `-5`). Three assumptions remain and are listed as such under Critical
+Assumptions: the cost holding for a different model, the return-on-change
+fraction of one fifth, and the affects rule being assignable by rule. The
+third is what Phase 1 measures before anything depends on it, with its
+agreement threshold recorded in advance.
+
+#### API Verification
+
+| Surface | Verification |
+| --- | --- |
+| Reviewer dispatch under the brief | Spike: eight passes, six capped and two uncapped, all probes re-run by a second session for the capped ones |
+| Checked tables under `docs/tables/` | Source Search: `docs/rdr/AGENTS.md` and the release-choreography table already load this way |
+| Beads as the landing place | Spike: run 2 filed 16 beads with probes in one step |
+
+### Scope Verification
+
+The RDR decides the practice: brief, cadence, disposition rule, landing
+place, cost ledger. It does not fix any finding; the findings from the two
+uncapped passes are recorded in T2 and deliberately unfiled until the
+disposition rule is accepted. Nothing in the plan builds infrastructure.
+
+### Cross-Cutting Concerns
+
+- **Versioning**: the brief lives in the repository and its hash is recorded
+  per run; a changed brief resets the return rule for that package.
+- **Build tool compatibility**: N/A.
+- **Licensing**: N/A.
+- **Deployment model**: N/A; reviews run on a developer box.
+- **Incremental adoption**: the first run under the rule is one package.
+  Nothing changes for packages not yet reviewed.
+
+### Proportionality
+
+Review costs about 1.6 agent-minutes per thousand lines. One day of
+remediating about 55 findings cost 40 commits, four red runs on the
+integration branch and two shipped regressions. The design spends its rules
+on the expensive half and leaves the cheap half nearly unconstrained.
+
+## Revision History
+
+- 2026-09-17: created as a draft from the pilot's three reports and the
+  remediation scorecard (bead nexus-z2rvr).
+- 2026-09-17: second run, second pass and recapture recorded; the capped
+  per-line comparison withdrawn; affects classification added
+  (T2 `nexus_rdr/214-research-2` to `-5`).
+- 2026-09-17: Proposed Solution, Technical Design, alternatives and plan
+  written from the research.
