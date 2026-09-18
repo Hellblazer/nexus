@@ -218,10 +218,17 @@ launch() {  # NAME [SID]: one real Claude Code session; with SID, `--resume SID`
     check "  the SessionStart hook ran and its marker names this session" wait_for 60 marker_names "$name" "$sid"
     snap "$name"
     # Warmup turn: the MCP tools are deferred until ToolSearch loads them
-    # (tests/cc-validation/README.md, "Deferred MCP tools").
+    # (tests/cc-validation/README.md, "Deferred MCP tools"). The prefix is
+    # `mcp__nexus__`, from the SERVER NAME in the generated --mcp-config
+    # ("nexus"), NOT the `mcp__plugin_conexus_nexus__` form a plugin-provided
+    # server carries: this container loads the server by config. A model told
+    # to load the plugin-form names answered, correctly, that they do not
+    # exist here (2026-09-18) -- and the turn is a warmup either way, so the
+    # prompt now says to reply regardless rather than fail a session over the
+    # name of a schema pre-load.
     local t; t="$(tok LOADED)"
     check "  warmup: the deferred nexus tools are loaded" prompt "$name" \
-        "Call ToolSearch with query \"select:mcp__plugin_conexus_nexus__tuple_subscribe,mcp__plugin_conexus_nexus__mailbox_send,mcp__plugin_conexus_nexus__tuple_in\" and then reply with exactly $t and nothing else." "$t"
+        "Call ToolSearch with query \"select:mcp__nexus__tuple_subscribe,mcp__nexus__mailbox_send,mcp__nexus__tuple_in\", then reply with exactly $t and nothing else. If ToolSearch reports no match under those names, just reply $t anyway: this turn only warms the deferred-tool schemas and the later steps name the tools in prose." "$t"
     # The transcript file appears at the FIRST user message, not at startup,
     # so it is asserted AFTER the warmup turn, never before it.
     check "  the session transcript exists once the first turn has run" has_transcript "$name"
@@ -261,6 +268,10 @@ arm() {  # NAME: the session subscribes ITS OWN instance name
     wait_for 30 armed_name_known "$1" || { echo "  no directory entry for ${SID_OF[$1]} after the arm"; return 1; }
     NAME_OF[$1]="$(discover_name "$1")"
     echo "  session $1 armed its own name: ${NAME_OF[$1]}"
+}
+model_send() {  # NAME TO CORR: a send with the DEFAULT sender, from inside the session
+    local t; t="$(tok DONE-SEND)"
+    prompt "$1" "Call the nexus MCP tool mailbox_send with to=\"$2\", body=\"rdr-208 local-mode mvv $3\", kind=\"notice\", correlation_id=\"$3\" and NO from_address, then reply with exactly $t and nothing else." "$t"
 }
 send() {  # TO CORR FROM -> result JSON (a harness send, explicit sender)
     "$NXPY" "$HOME/send.py" "$1" "$2" "rdr-208 local-mode mvv $2" "$3" 2>> "$RUN/send.err"

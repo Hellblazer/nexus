@@ -152,6 +152,37 @@ def test_the_generated_hooks_json_names_a_verb_the_cli_still_has() -> None:
     assert 'add_command(hook_group, name="hook")' in cli
 
 
+def test_every_journey_helper_it_calls_is_defined() -> None:
+    """`bash -n` parses a script whose helpers do not exist: an undefined
+    function is a RUNTIME "command not found", one step at a time, deep into
+    a billed run. That happened: a block replacement that rewrote `arm()`
+    swallowed `model_send()` with it, the syntax check stayed green, the
+    change shipped to origin, and the next run died at step 1 with
+    `model_send: command not found` after launching two real sessions.
+
+    So the journey's own vocabulary is pinned here: every name below must be
+    DEFINED in the script, and any of them that the script CALLS must resolve.
+    A helper that is genuinely retired is removed from this list in the same
+    diff that removes it, which is the point at which someone thinks about it.
+    """
+    text = (_DIR / "mvv_in_container.sh").read_text(encoding="utf-8")
+    defined = set(re.findall(r"^(\w+)\(\) \{", text, re.M))
+    required = {
+        "launch", "stop", "arm", "prompt", "send", "model_send",
+        "delivered", "delivered_by_floor", "not_delivered", "discover_name",
+        "rendered_count", "rendered_from", "reply_has", "wake_count",
+        "transcript_of", "turn_stamp", "wait_for", "check", "snap",
+    }
+    assert required <= defined, sorted(required - defined)
+
+    # And nothing calls a helper-shaped name this file does not define: scan
+    # command positions for the journey's own vocabulary only, so a shell
+    # builtin or a real binary is never mistaken for a missing helper.
+    called = set(re.findall(r"^\s*(?:\w+=\S+\s+)*(\w+)\s", text, re.M))
+    journey_calls = {c for c in called if c in required or c.endswith("_of") or c.startswith("delivered")}
+    assert journey_calls <= defined, sorted(journey_calls - defined)
+
+
 def test_the_step6_expectation_names_the_live_mechanism() -> None:
     """run.sh derives EXPECT_BRANCH_FIX from `fork` in the plugin's
     SessionStart matcher; the tree's plugin carries it, and the wheel's
