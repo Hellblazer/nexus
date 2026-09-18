@@ -3380,6 +3380,9 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     # nexus.tuple_tenants is deliberately NOT here (no RLS, it names tenants
     # and holds no tenant data).
     "nexus.tuple_claim_log",
+    # nexus.tuple_deliveries: RDR-213 boards half (nexus-q82tk),
+    # tuples-007-deliveries.xml, ENABLE + FORCE + tenant_isolation.
+    "nexus.tuple_deliveries",
     "nexus.tuples",
     "t1.scratch",
 )

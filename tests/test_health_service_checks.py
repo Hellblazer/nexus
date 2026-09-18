@@ -1007,6 +1007,7 @@ _ALL_TENANT_TABLES = [
     "nexus.topic_links",
     "nexus.topics",
     "nexus.tuple_claim_log",  # RDR-205 Phase 1 (mirrors health._RLS_TENANT_TABLES)
+    "nexus.tuple_deliveries",  # RDR-213 boards half, nexus-q82tk (mirrors health._RLS_TENANT_TABLES)
     "nexus.tuples",
     "t1.scratch",
 ]
