@@ -176,20 +176,35 @@ These need only a declaration change to exec form once a verb wraps them.
 - **Verified** (source search): four hooks are already `nx` verbs and one
   already ships as a separate console script (`nx-session-end-launcher`),
   so the pattern exists in the repo.
+- **Verified** (source search, 2026-09-18): the bash layer already depends
+  on `nx` being on the hook PATH. Eight call sites locate it with
+  `command -v nx` and degrade when it is absent; the close gate warns when
+  `bd` is missing. A verb-based layer inherits that assumption rather than
+  adding one. *Source: T2 `nexus_rdr/215-research-4`.*
+- **Verified** (spike, 2026-09-18, dev Mac, mean of five runs): the cost of
+  an `nx` invocation is the CLI's import tree, not Python. The generation
+  interpreter starts in 0.010 s and imports `nexus` in 0.010 s;
+  `nexus.commands.hook` alone imports in 0.080 s; `nexus.cli`, which
+  registers 38 command modules eagerly, imports in 0.788 s, and
+  `nx --version` takes 0.808 s. A Python hook run through the bash launcher
+  costs 0.042 s. The bash auto-approve hook costs 0.096 s. Routing hooks
+  through `nx` would therefore add about 0.8 s to every PreToolUse and
+  PermissionRequest event. *Source: T2 `nexus_rdr/215-research-5`.*
 
 ### Critical Assumptions
 
-- **Assumed**: `nx` is on the PATH Claude Code gives hooks, on every
-  supported install. The generation install writes the shim to
-  `~/.local/bin`; whether Claude Code's hook environment inherits the
-  user's login PATH on macOS app launches and on Windows is to be
-  measured, not assumed. A hook that cannot find `nx` must fail loud, not
-  silently skip.
-- **Assumed**: hook start-up latency under `nx` (a Python process import)
-  is within the budgets the existing byte-and-time tests pin
-  (`tests/hooks/test_session_start_combined_budget.py`,
-  `test_subagent_start_byte_budget.py`). The bash hooks that call `nx`
-  already pay that cost once; a verb pays it exactly once.
+- **Assumed**: the generation's console scripts are on the PATH Claude
+  Code gives hooks on every supported install. The bash layer already
+  assumes this (research-4), so a port cannot make it worse, but whether
+  an app-launched Claude Code on macOS or a WSL2 distro inherits the login
+  PATH is still to be measured in Phase 1. A hook that cannot find its
+  generation must fail loud, not silently skip.
+- **Verified, with a design consequence** (research-5): a hook that enters
+  through the `nx` console script pays about 0.8 s for the CLI's eager
+  imports. The verbs therefore get their own console script, `nx-hook`,
+  whose module imports only what the invoked verb needs, so a hook costs
+  what the Python hooks cost today (about 0.04 s) rather than what `nx`
+  costs. The budget tests keep their thresholds and pin this.
 - **Assumed**: the `bd` calls (29 sites) can stay as subprocess calls from
   Python; no bead-tool Python API is required.
 
@@ -197,16 +212,21 @@ These need only a declaration change to exec form once a verb wraps them.
 
 ### Approach
 
-1. Every hook in both plugins is declared in exec form as `nx hook <verb>`
-   (or `nx-<verb>` for a separate console script where a process must
-   outlive the hook, as `nx-session-end-launcher` does today).
+1. Every hook in both plugins is declared in exec form as
+   `nx-hook <verb>`, a new console script beside `nx-session-end-launcher`
+   in `pyproject.toml`, whose entry module imports nothing from
+   `nexus.cli` and resolves the verb to its module lazily. `nx hook <verb>`
+   stays as an alias for a human at a terminal; the plugin never declares
+   it, because `nx` pays the CLI's 0.8 s import on every call
+   (research-5).
 2. Each bash script becomes a module under `src/nexus/hooks/` with one
-   entry function, registered as a subcommand of `nx hook`. The module
+   entry function, registered in the `nx-hook` verb table. The module
    reads the hook payload from stdin and writes the decision JSON to
-   stdout, exactly as the script did.
+   stdout, exactly as the script did. Heavy imports (the catalog client,
+   T3) happen inside the branch that needs them.
 3. `expectations.sh` becomes `nexus.hooks.expectations`, one module, with
-   the three ledger verbs exposed as `nx hook expect`, `nx hook census`
-   and `nx hook undeclared` keeping the documented exit codes. The e2e
+   the three ledger verbs exposed as `nx-hook expect`, `nx-hook census`
+   and `nx-hook undeclared` keeping the documented exit codes. The e2e
    copy and its byte-identity test are deleted; `tests/e2e/lib` imports the
    module.
 4. `_run_python_hook.sh` is deleted once no declaration names it.
@@ -236,9 +256,14 @@ Open questions the design must settle:
 
 ### Decision Rationale
 
-- **`nx` over a second launcher.** The generation shim already solves
-  interpreter resolution; a Python launcher next to it would be a second
-  copy of the same ladder.
+- **A generation console script over a second launcher.** The generation
+  install already produces console scripts whose interpreter is the right
+  one; `nx-hook` is one more entry in the same table, not a second copy of
+  the bash launcher's resolution ladder.
+- **A separate script over `nx hook`.** Measured, not preferred: `nx`
+  imports 38 command modules before it dispatches (research-5). Making
+  `nexus.cli` lazy would fix that for every `nx` call and is worth its own
+  bead, but this RDR does not depend on it.
 - **Exec form over `shell: powershell` variants.** One declaration per
   hook, no per-platform fork of the logic.
 - **Move, do not rewrite.** The scripts encode months of measured
@@ -302,15 +327,17 @@ No implementation starts before this RDR is accepted.
 
 ### Minimum Viable Validation
 
-The first port, `auto-approve-nx-mcp.sh` to `nx hook auto-approve`, with
+The first port, `auto-approve-nx-mcp.sh` to `nx-hook auto-approve`, with
 its declaration in exec form, passing `tests/hooks/test_permission_request_hooks.py`
 retargeted, on macOS and inside a WSL2 distro. That settles the module
 shape and the PATH assumption before anything larger moves.
 
 ### Phase 1: Shape
 
-1. `src/nexus/hooks/` package, `nx hook` subcommand registration pattern,
-   the payload reader and decision writer, one ported hook, its test.
+1. `src/nexus/hooks/` package, the `nx-hook` console script and its lazy
+   verb table, the payload reader and decision writer, one ported hook,
+   its test, and a timing assertion that the ported hook starts in under
+   0.1 s on the dev box.
 2. PATH measurement on the four host shapes above; the result recorded in
    this RDR.
 
@@ -373,3 +400,6 @@ To be completed before the gate.
 
 - 2026-09-18: Created from the Windows-support research; inventory and
   plan drafted, Technical Design deferred to the first port.
+- 2026-09-18: research-4 and research-5 recorded; the entry point moves
+  from `nx hook` to a dedicated `nx-hook` console script after measuring
+  the CLI's 0.8 s eager import.
