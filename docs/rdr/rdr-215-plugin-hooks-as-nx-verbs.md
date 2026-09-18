@@ -34,7 +34,7 @@ day: move the hook logic out of bash and behind `nx hook` verbs.
 A Claude Code hook is a command the client runs at a lifecycle event
 (session start, a tool call, a subagent stopping) and whose exit code and
 JSON on stdout can block the event or add context to it. The conexus and
-sn plugins declare 30 such hooks in their `hooks.json` files. Of those, 15
+sn plugins declare 28 such hooks in their `hooks.json` files. Of those, 15
 are bash scripts totalling about 4,200 lines, and every Python hook is
 launched through one more bash script, `_run_python_hook.sh`, whose job is
 to find an interpreter that can import `nexus`.
@@ -106,7 +106,7 @@ module has one home, one import path and one test file.
 The hook layer grew one script at a time between 2026-05 and 2026-09.
 Early hooks were a few lines of bash. Later ones (`subagent-start.sh` at
 399 lines, `subagent-stop.sh` at 290) accumulated JSON assembly in shell,
-byte budgets, and calls into `nx` and `bd`. Eleven hooks were written in
+byte budgets, and calls into `nx` and `bd`. Eight hooks were written in
 Python from the start and are launched through `_run_python_hook.sh`;
 four already name an `nx` entry point (`nx hook session-start`,
 `nx upgrade --auto`, `nx self gc`, `nx-session-end-launcher`), but all
@@ -156,7 +156,7 @@ Inventory at develop tip 62b5fcb90, 2026-09-18:
 | `subagent-start-stamp.sh` | 96 | SubagentStart | no |
 | `divergence-language-guard.sh` | 80 | PostToolUse Write, Edit | yes |
 | `post_compact_hook.sh` | 57 | PostCompact | no |
-| `_run_python_hook.sh` | 49 | launcher for 11 Python hooks | n/a |
+| `_run_python_hook.sh` | 49 | launcher for 8 Python hooks | n/a |
 | `subagent-start-tuple-async.sh` | 38 | SubagentStart | no |
 | `subagent-stop-tuple-async.sh` | 24 | SubagentStop | no |
 | `sn/mcp-inject.sh` | 79 | SubagentStart | yes |
@@ -167,8 +167,12 @@ Python hooks already present and launched through the bash launcher:
 `preflight.py`, `session_start_hook.py`, `rdr_hook.py`,
 `version_lockstep_hook.py`, `stop_failure_hook.py`, `mailbox_drain.py`,
 `routing/subagent_git_write_requires_orchestrator.py`,
-`routing/phase_review_close_requires_gate.py`, and their helper modules.
-These need only a declaration change to exec form once a verb wraps them.
+`routing/phase_review_close_requires_gate.py`, with their helper modules.
+Seven of the eight need only a declaration change to exec form once a
+verb wraps them. The eighth, `version_lockstep_hook.py`, is the permanent
+exception of Approach item 4: it is never wrapped, and it also calls the
+launcher in its own code (lines 101, 218 and 521) to dispatch its repair
+action, so its port is a change to those three lines, not a declaration.
 
 The full contract map, one row per script with stdin fields, stdout
 shapes, exit codes, files touched outside the repo and every quoting
@@ -185,9 +189,10 @@ site, is T2 `nexus_rdr/215-hook-contract-map` (research-6).
   presence of the `args` key, needs a real executable, and passes `args`
   verbatim, so `{"command": "nx-hook", "args": ["subagent-start"]}` runs
   identically on every platform where the console script is on PATH.
-- **Verified** (source search): four hooks are already `nx` verbs and one
-  already ships as a separate console script (`nx-session-end-launcher`),
-  so the pattern exists in the repo.
+- **Verified** (source search): four hook entries already name an `nx`
+  entry point, though all in shell form, and one of them is a separate
+  console script (`nx-session-end-launcher`), so the pattern exists in
+  the repo.
 - **Verified** (source search, 2026-09-18): the bash layer already depends
   on `nx` being on the hook PATH. Eight call sites locate it with
   `command -v nx` and degrade when it is absent; the close gate warns when
@@ -252,20 +257,28 @@ site, is T2 `nexus_rdr/215-hook-contract-map` (research-6).
 3. `expectations.sh` becomes `nexus.hooks.expectations`, one module, with
    the three ledger verbs exposed as `nx-hook expect`, `nx-hook census`
    and `nx-hook undeclared` keeping the documented exit codes. The e2e
-   copy and its byte-identity test are deleted; the bash e2e scripts that
-   sourced it call `nx-hook <verb>` instead.
-4. `_run_python_hook.sh` is deleted once no declaration names it, with
-   one permanent exception: `version_lockstep_hook.py` is the hook that
-   repairs a wheel behind the plugin, so it can never depend on a console
-   script the stale wheel may lack. It stays a stdlib-only script launched
-   as `{"command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py"]}`
-   (exec form, no shell, no `nexus` import), and the RDR's "no `.sh`" lint
-   allows exactly that one `python3` command.
+   copy and its byte-identity test are deleted. Its consumers are two
+   classes: the bash e2e scripts that `source` it call `nx-hook <verb>`
+   instead, and the Python test files that shell out to `bash -c "source
+   ..."` import `nexus.hooks.expectations` directly.
+4. `_run_python_hook.sh` is deleted once no declaration and no hook code
+   path names it, with one permanent exception to the verb migration:
+   `version_lockstep_hook.py` is the hook that repairs a wheel behind the
+   plugin, so it can never depend on a console script the stale wheel may
+   lack. It stays a stdlib-only script launched as
+   `{"command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py"]}`
+   (exec form, no shell, no `nexus` import). Its own dispatch of the repair
+   action, which today runs `bash _run_python_hook.sh version_lockstep_action.py`
+   at lines 218 and 521, becomes `python3 version_lockstep_action.py`,
+   which is sound because the action imports only the standard library
+   (research-8). The lint allows `python3` only when the entry's sole
+   `args` element ends in `version_lockstep_hook.py`.
 4b. The four entries that already name `nx` are in scope: `nx hook
-   session-start` and `nx-session-end-launcher` are reshaped to exec form
-   with `args`; `nx upgrade --auto` and `nx self gc`, whose shell logic
-   (`||`, redirects) lives in the command string, become `nx-hook
-   upgrade-auto` and `nx-hook self-gc` verbs that carry that logic.
+   session-start` becomes `{"command": "nx-hook", "args": ["session-start"]}`,
+   `nx-session-end-launcher` becomes `{"command": "nx-session-end-launcher", "args": []}`,
+   and `nx upgrade --auto` and `nx self gc`, whose shell logic (`||`,
+   redirects) lives in the command string, become `nx-hook upgrade-auto`
+   and `nx-hook self-gc` verbs that carry that logic. No entry names `nx`.
 5. Each port is a behaviour-preserving move: the existing subprocess test
    for the script is retargeted at the verb with the same stdin payload
    and the same expected stdout and exit code, and passes before the bash
@@ -329,10 +342,12 @@ bytes and spawns `nx-hook <verb>` instead of `bash <script>`. Three
 scripts have no test in `tests/hooks/` (`sn/session-start.sh`,
 `sn/mcp-inject.sh`, and the sn auto-approve wrapper); their ports get
 one. A lint test asserts, for every entry in both `hooks.json` files:
-the entry has an `args` key (the doc's exec-form selector), `command` is
-`nx-hook`, an existing console script, or `python3` for the lockstep
-hook alone, and no `command` or `args` element names `bash`, `sh` or a
-`.sh` path.
+the entry has an `args` key (the doc's exec-form selector); `command` is
+exactly `nx-hook` or `nx-session-end-launcher`, or `python3` with a sole
+`args` element ending in `version_lockstep_hook.py`; and no `command` or
+`args` element names `bash`, `sh`, `nx` or a `.sh` path. `nx` is excluded
+by name because it is itself a console script and pays the CLI import
+(research-5, research-8).
 
 ### Decision Rationale
 
@@ -433,17 +448,20 @@ shape and the PATH assumption before anything larger moves.
    (`pre_close_verification_hook.sh`, `stop_verification_hook.sh`,
    `subagent-start-stamp.sh`, `divergence-language-guard.sh`,
    `post_compact_hook.sh`, the two async wrappers).
-5. Ten of the 11 existing Python hooks re-declared in exec form behind
-   verbs; `version_lockstep_hook.py` re-declared as exec-form `python3`
-   (Approach item 4); `_run_python_hook.sh` deleted. The four shell-form
-   `nx` entries reshaped or ported per Approach item 4b.
+5. Seven of the eight existing Python hooks re-declared in exec form
+   behind verbs; `version_lockstep_hook.py` re-declared as exec-form
+   `python3` and its two dispatch lines rewritten (Approach item 4);
+   `_run_python_hook.sh` deleted once a grep of `hooks.json` and of
+   `conexus/hooks/scripts/` finds no reference. The four shell-form `nx`
+   entries reshaped or ported per Approach item 4b.
 6. The three sn hooks.
 
 ### Phase 4: Close
 
-7. Every `hooks.json` entry carries `args`, no entry names `bash` or a
-   `.sh`, and every `command` is `nx-hook`, an existing console script or
-   the lockstep hook's `python3`; a lint test pins all three clauses.
+7. Every `hooks.json` entry carries `args`; no entry names `bash`, `sh`,
+   `nx` or a `.sh`; and every `command` is `nx-hook`,
+   `nx-session-end-launcher`, or the lockstep hook's `python3` with its
+   script as the sole argument; a lint test pins all three clauses.
 8. AGENTS.md's `expectations_*` entry rewritten for the verbs.
 
 ## Test Plan
@@ -451,8 +469,9 @@ shape and the PATH assumption before anything larger moves.
 - Every ported hook keeps its subprocess test, retargeted at the verb with
   the same stdin and the same expected stdout and exit code.
 - A lint test asserts the three clauses of Phase 4 item 7: `args` on
-  every entry, no `bash` or `.sh` anywhere, and every `command` one of
-  `nx-hook`, an existing console script, or the lockstep hook's `python3`.
+  every entry; no `bash`, `sh`, `nx` or `.sh` anywhere; and every
+  `command` one of `nx-hook`, `nx-session-end-launcher`, or `python3` with
+  `version_lockstep_hook.py` as its sole argument.
 - The expectations module gets unit tests for the three verbs' exit codes
   0, 1, 2, 3 against fixture ledgers.
 - The budget tests keep their thresholds.
@@ -567,3 +586,9 @@ package.
   stdlib-only `python3` launch; the four shell-form `nx` entries enter the
   inventory; the lint asserts the `args` key; the stale `nx` example, the
   e2e consumer sentence and the symlink claim corrected.
+- 2026-09-18: Second fix after fix check `215-fix-check-faeef1ce8`
+  (research-8): the lint names its allowed commands and excludes `nx`;
+  item 4b states each reshape target; the launcher's deletion criterion
+  covers hook code paths and the lockstep dispatch lines are rewritten;
+  counts corrected to 28 entries and 8 Python hooks; the Background and
+  Key Discoveries sentences and the ledger consumer classes corrected.
