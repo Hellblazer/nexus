@@ -207,6 +207,94 @@ def _deactivate_cmd(dest: Path, *, tier: str = "t2") -> list[str]:
     return ["systemctl", "--user", "disable", "--now", dest.name]
 
 
+class ActivationState(Enum):
+    """What the OS service manager says about an installed autostart unit
+    (nexus-mac7t). Distinct from the unit FILE being present: the file is
+    written before activation, so a unit whose ``launchctl bootstrap`` /
+    ``systemctl enable`` failed (or was later booted out by hand) reads as
+    installed on disk while the manager knows nothing about it."""
+
+    #: The manager reports the unit registered (``launchctl print`` finds the
+    #: label / ``systemctl --user is-enabled`` exits 0).
+    ACTIVE = "active"
+    #: A manager is present and answered, but does not have the unit.
+    NOT_ACTIVE = "not_active"
+    #: No ``launchctl`` / ``systemctl`` on PATH: nothing on this box can
+    #: activate the unit, so its absence from a manager is not a defect.
+    NO_MANAGER = "no_manager"
+
+
+@dataclass(frozen=True)
+class ActivationProbe:
+    """Result of :func:`autostart_activation_state`."""
+
+    state: ActivationState
+    #: The manager's own words (first line of stderr/stdout) or the missing
+    #: command, for the caller's report line. Empty on ``ACTIVE``.
+    detail: str = ""
+
+
+#: Ceiling on the activation query. A hung manager must not wedge
+#: ``nx doctor`` or the finish pass; ``TimeoutExpired`` propagates as a
+#: genuine probe failure rather than reading as any of the three states.
+_ACTIVATION_QUERY_TIMEOUT: float = 10.0
+
+
+def _activation_query_cmd(dest: Path, *, tier: str) -> list[str]:
+    """The read-only manager query that mirrors :func:`_activate_cmd`:
+    ``launchctl print gui/<uid>/<label>`` (exit 0 only for a loaded job) on
+    macOS, ``systemctl --user is-enabled <unit>`` (exit 0 only for an
+    enabled unit) on Linux."""
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    if _daemon._autostart_platform() == "darwin":
+        uid = os.getuid()
+        label = (
+            _daemon._SERVICE_LAUNCHD_LABEL
+            if tier == "service"
+            else _daemon._T2_LAUNCHD_LABEL
+        )
+        return ["launchctl", "print", f"gui/{uid}/{label}"]
+    return ["systemctl", "--user", "is-enabled", dest.name]
+
+
+def autostart_activation_state(dest: Path, *, tier: str) -> ActivationProbe:
+    """Ask the OS service manager whether the installed unit at ``dest`` is
+    actually registered (nexus-mac7t).
+
+    :func:`install_autostart` writes the unit file before it activates, and
+    every drift check compared file content only, so once the file matched
+    the template a unit whose activation had failed (or been undone) read
+    as "already up to date" forever. This is the second half of that check.
+
+    Returns ``ACTIVE`` when the manager reports the unit, ``NOT_ACTIVE``
+    when a present manager does not (its message in ``detail``), and
+    ``NO_MANAGER`` when the manager binary is not on PATH at all. Raises
+    ``subprocess.TimeoutExpired`` if the manager hangs: that is a probe
+    failure for the caller to report, never a state.
+    """
+    cmd = _activation_query_cmd(dest, tier=tier)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=False,
+            timeout=_ACTIVATION_QUERY_TIMEOUT,
+        )
+    except FileNotFoundError as exc:
+        return ActivationProbe(
+            ActivationState.NO_MANAGER,
+            f"{cmd[0]} not found on PATH ({exc})",
+        )
+    if result.returncode == 0:
+        return ActivationProbe(ActivationState.ACTIVE)
+    raw = (result.stderr or "").strip() or (result.stdout or "").strip()
+    first_line = raw.splitlines()[0] if raw else ""
+    return ActivationProbe(
+        ActivationState.NOT_ACTIVE,
+        f"`{' '.join(cmd)}` exited {result.returncode}"
+        + (f": {first_line}" if first_line else ""),
+    )
+
+
 def _autostart_filename_for(tier: str) -> str:
     from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
@@ -310,9 +398,15 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     except FileNotFoundError as exc:
+        # No service manager on PATH. The file STAYS, force or not: there
+        # is nothing to retry against on the next run (cd1k0.4's restore
+        # is for a present manager that failed), and the installed file is
+        # what `nx doctor`'s activation row and
+        # converge_service_autostart_unit's no-manager NOTE report on. The
+        # message says so; the remedy once a manager appears is
+        # `uninstall --autostart && install --autostart`.
         msg = f"{cmd[0]} not found on PATH; file installed but not activated ({exc})."
         if not force:
-            _restore_on_activation_failure()
             raise ActivationError(msg) from exc
         _log.warning(f"{tier}_install_activation_not_found", dest=str(dest), error=str(exc))
         return InstallResult(

@@ -378,13 +378,22 @@ class TestCheckServiceAutostartDrift:
             results = _check_service_autostart_drift()
         assert results == []
 
-    def test_local_content_matches_returns_ok(self, tmp_path):
+    @staticmethod
+    def _activation(state, detail=""):
+        from nexus.daemon.installer import ActivationProbe  # noqa: PLC0415 — local import, test-only convenience
+        return ActivationProbe(state, detail)
+
+    def test_local_content_matches_and_registered_returns_ok(self, tmp_path):
+        from nexus.daemon.installer import ActivationState  # noqa: PLC0415 — local import, test-only convenience
+
         dest = tmp_path / "com.nexus.service.plist"
         dest.write_text("same content\n")
         with patch("nexus.config.is_local_mode", return_value=True), \
              patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
              patch("nexus.daemon.installer.rendered_unit_content",
-                   return_value=(dest, "same content\n")):
+                   return_value=(dest, "same content\n")), \
+             patch("nexus.daemon.installer.autostart_activation_state",
+                   return_value=self._activation(ActivationState.ACTIVE)):
             results = _check_service_autostart_drift()
         assert len(results) == 1
         r = results[0]
@@ -392,14 +401,103 @@ class TestCheckServiceAutostartDrift:
         assert r.warn is False
         assert r.fatal is False
         assert str(dest) in r.detail
+        assert "registered" in r.detail
+
+    def test_local_content_matches_but_not_activated_warns_with_reinstall_remedy(self, tmp_path):
+        """nexus-mac7t: the file matched the template, so after one warning
+        a unit whose activation failed (or was booted out) read as up to
+        date on every later doctor / restart-stale / finish pass."""
+        from nexus.daemon.installer import ActivationState  # noqa: PLC0415 — local import, test-only convenience
+
+        dest = tmp_path / "com.nexus.service.plist"
+        dest.write_text("same content\n")
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content",
+                   return_value=(dest, "same content\n")), \
+             patch("nexus.daemon.installer.autostart_activation_state",
+                   return_value=self._activation(
+                       ActivationState.NOT_ACTIVE,
+                       "`launchctl print gui/501/com.nexus.service` exited 113: Could not find service")):
+            results = _check_service_autostart_drift()
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is False
+        assert r.warn is True
+        assert r.fatal is False
+        assert "installed but not activated" in r.detail
+        assert "Could not find service" in r.detail
+        assert any(
+            "nx daemon service uninstall --autostart && nx daemon service install --autostart" in f
+            for f in r.fix_suggestions
+        ), r.fix_suggestions
+
+    def test_local_content_matches_with_no_manager_is_informational(self, tmp_path):
+        """Nothing on the box can activate the unit, so its absence from a
+        manager is reported, never warned about."""
+        from nexus.daemon.installer import ActivationState  # noqa: PLC0415 — local import, test-only convenience
+
+        dest = tmp_path / "com.nexus.service.plist"
+        dest.write_text("same content\n")
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
+             patch("nexus.daemon.installer.rendered_unit_content",
+                   return_value=(dest, "same content\n")), \
+             patch("nexus.daemon.installer.autostart_activation_state",
+                   return_value=self._activation(ActivationState.NO_MANAGER, "launchctl not found on PATH")):
+            results = _check_service_autostart_drift()
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is True
+        assert r.warn is False
+        assert "no service manager" in r.detail
+        assert "launchctl not found on PATH" in r.detail
+
+    def test_real_unit_file_and_a_fake_manager_that_reports_not_enabled_warns(self, tmp_path, monkeypatch):
+        """End to end through the REAL subprocess path: a real unit file on
+        disk, and a fake `launchctl` on a PATH of exactly one directory that
+        answers the way launchd does for an unknown label (exit 113,
+        'Could not find service')."""
+        from nexus.commands import daemon as daemon_cmd  # noqa: PLC0415 — local import, test-only convenience
+
+        units = tmp_path / "units"
+        units.mkdir()
+        dest = units / "com.nexus.service.plist"
+        dest.write_text("<plist>current</plist>\n")
+        fake_bin = tmp_path / "fakebin"
+        fake_bin.mkdir()
+        script = fake_bin / "launchctl"
+        script.write_text(
+            "#!/bin/sh\n"
+            "echo 'Could not find service \"com.nexus.service\" in domain for uid: 501' >&2\n"
+            "exit 113\n"
+        )
+        script.chmod(0o755)
+        monkeypatch.setenv("PATH", str(fake_bin))
+        monkeypatch.setattr(daemon_cmd, "_autostart_platform", lambda: "darwin")
+        monkeypatch.setattr(daemon_cmd, "_autostart_install_dir", lambda: units)
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.daemon.installer.rendered_unit_content",
+                   return_value=(dest, "<plist>current</plist>\n")):
+            results = _check_service_autostart_drift()
+        assert len(results) == 1, results
+        r = results[0]
+        assert r.ok is False and r.warn is True
+        assert "installed but not activated" in r.detail
+        assert "Could not find service" in r.detail
+        assert "exited 113" in r.detail
 
     def test_local_content_drifted_returns_warn_naming_restart_stale(self, tmp_path):
+        from nexus.daemon.installer import ActivationState  # noqa: PLC0415 — local import, test-only convenience
+
         dest = tmp_path / "com.nexus.service.plist"
         dest.write_text("old content with ProcessType Background\n")
         with patch("nexus.config.is_local_mode", return_value=True), \
              patch("nexus.commands.daemon._service_autostart_unit_installed", return_value=dest), \
              patch("nexus.daemon.installer.rendered_unit_content",
-                   return_value=(dest, "new content\n")):
+                   return_value=(dest, "new content\n")), \
+             patch("nexus.daemon.installer.autostart_activation_state",
+                   return_value=self._activation(ActivationState.ACTIVE)):
             results = _check_service_autostart_drift()
         assert len(results) == 1
         r = results[0]

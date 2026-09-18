@@ -216,8 +216,9 @@ class TestActivationFailure:
             mock_run.return_value.stdout = ""
             with pytest.raises(installer.ActivationError):
                 installer.install_autostart(tier="service")
-        # The file was written before activation was attempted.
-        assert (tmp_path / "units" / "com.nexus.service.plist").exists()
+        # nexus-cd1k0.4: a present manager that refused restores the tree so
+        # the retry activates again instead of reading file == render.
+        assert not (tmp_path / "units" / "com.nexus.service.plist").exists()
 
     def test_activation_failure_with_force_returns_newly_installed_with_warning(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

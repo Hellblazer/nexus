@@ -589,3 +589,102 @@ class TestActivationFailure:
         assert result.status is installer.InstallStatus.NEWLY_INSTALLED
         verbs = [c[1] for c in calls if c and c[0] == "launchctl"]
         assert verbs == ["bootout", "bootstrap"], calls
+
+
+# ── library: autostart_activation_state (nexus-mac7t) ────────────────────────
+
+
+class TestAutostartActivationState:
+    """The manager's answer, through the REAL subprocess path against fake
+    manager binaries on a PATH of exactly one directory."""
+
+    @staticmethod
+    def _fake_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, body: str) -> Path:
+        fake_bin = tmp_path / "fakebin"
+        fake_bin.mkdir(exist_ok=True)
+        script = fake_bin / name
+        script.write_text("#!/bin/sh\n" + body)
+        script.chmod(0o755)
+        monkeypatch.setenv("PATH", str(fake_bin))
+        return fake_bin
+
+    def test_query_cmd_shapes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        dest = tmp_path / "units" / "com.nexus.service.plist"
+        _set_platform(monkeypatch, "darwin")
+        cmd = installer._activation_query_cmd(dest, tier="service")
+        assert cmd[:2] == ["launchctl", "print"]
+        assert cmd[2].endswith("/com.nexus.service")
+        _set_platform(monkeypatch, "linux")
+        dest = tmp_path / "units" / "nexus-service.service"
+        assert installer._activation_query_cmd(dest, tier="service") == [
+            "systemctl", "--user", "is-enabled", "nexus-service.service",
+        ]
+
+    def test_darwin_unknown_label_is_not_active_with_launchds_words(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_platform(monkeypatch, "darwin")
+        self._fake_manager(
+            tmp_path, monkeypatch, "launchctl",
+            "echo 'Could not find service \"com.nexus.service\" in domain for uid: 501' >&2\nexit 113\n",
+        )
+        probe = installer.autostart_activation_state(tmp_path / "com.nexus.service.plist", tier="service")
+        assert probe.state is installer.ActivationState.NOT_ACTIVE
+        assert "exited 113" in probe.detail
+        assert "Could not find service" in probe.detail
+
+    def test_darwin_loaded_label_is_active(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_platform(monkeypatch, "darwin")
+        self._fake_manager(tmp_path, monkeypatch, "launchctl", "echo 'com.nexus.service = { ... }'\nexit 0\n")
+        probe = installer.autostart_activation_state(tmp_path / "com.nexus.service.plist", tier="service")
+        assert probe.state is installer.ActivationState.ACTIVE
+        assert probe.detail == ""
+
+    def test_linux_disabled_unit_is_not_active_with_systemds_word(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_platform(monkeypatch, "linux")
+        self._fake_manager(tmp_path, monkeypatch, "systemctl", "echo disabled\nexit 1\n")
+        probe = installer.autostart_activation_state(tmp_path / "nexus-service.service", tier="service")
+        assert probe.state is installer.ActivationState.NOT_ACTIVE
+        assert probe.detail.endswith("exited 1: disabled"), probe.detail
+
+    def test_no_manager_on_path_is_no_manager(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_platform(monkeypatch, "darwin")
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", str(empty))
+        probe = installer.autostart_activation_state(tmp_path / "com.nexus.service.plist", tier="service")
+        assert probe.state is installer.ActivationState.NO_MANAGER
+        assert probe.detail.startswith("launchctl not found on PATH")
+
+    def test_hung_manager_raises_rather_than_answering(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_platform(monkeypatch, "darwin")
+        self._fake_manager(tmp_path, monkeypatch, "launchctl", "/bin/sleep 5\nexit 0\n")
+        monkeypatch.setattr(installer, "_ACTIVATION_QUERY_TIMEOUT", 0.2)
+        with pytest.raises(subprocess.TimeoutExpired):
+            installer.autostart_activation_state(tmp_path / "com.nexus.service.plist", tier="service")
+
+
+class TestInstallAutostartWithoutAManager:
+    """nexus-mac7t sibling of cd1k0.4: an ABSENT manager keeps the file. There
+    is nothing to retry against, and the installed file is what the doctor
+    row and the converge NOTE report on; the present-manager failure is the
+    one that restores the tree."""
+
+    def test_missing_manager_raises_but_leaves_the_file_installed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _set_platform(monkeypatch, "darwin")
+        _stub_paths(tmp_path, monkeypatch)
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", str(empty))
+        dest = tmp_path / "units" / "com.nexus.service.plist"
+        with pytest.raises(installer.ActivationError) as excinfo:
+            installer.install_autostart(tier="service")
+        assert isinstance(excinfo.value.__cause__, FileNotFoundError)
+        assert dest.exists(), "with no manager to retry against the file stays installed"
+        assert "file installed but not activated" in str(excinfo.value)

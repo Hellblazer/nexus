@@ -68,6 +68,7 @@ from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 
 if TYPE_CHECKING:
     from nexus import install_layout
+    from nexus.daemon.installer import ActivationProbe
 
 _log = structlog.get_logger(__name__)
 
@@ -2196,17 +2197,51 @@ def _autostart_probe_failure_action(exc: Exception) -> str:
     )
 
 
-def _probe_service_autostart_drift() -> tuple[Path, str, str] | None:
-    """Probe the LOCAL-mode service-tier autostart unit for content drift.
+@dataclass(frozen=True)
+class AutostartDriftProbe:
+    """What :func:`_probe_service_autostart_drift` found for an installed
+    service-tier unit: its on-disk content, the current render, and what
+    the OS service manager says about it (nexus-mac7t)."""
+
+    dest: Path
+    existing: str
+    rendered: str
+    activation: ActivationProbe
+
+    @property
+    def content_matches(self) -> bool:
+        return self.existing == self.rendered
+
+    @property
+    def not_activated(self) -> bool:
+        """The file is current but a present manager does not have the unit:
+        the state the content comparison alone masked after one warning."""
+        from nexus.daemon.installer import ActivationState  # noqa: PLC0415 — deferred, CLI startup cost (same reason the probe imports installer lazily)
+
+        return self.activation.state is ActivationState.NOT_ACTIVE
+
+
+def _probe_service_autostart_drift() -> AutostartDriftProbe | None:
+    """Probe the LOCAL-mode service-tier autostart unit for content drift
+    and, since nexus-mac7t, for activation.
 
     Returns ``None`` for a BENIGN not-applicable result: this box is not
-    local mode, or no service-tier unit is installed here. Returns
-    ``(dest, existing, rendered)`` when a unit IS installed -- callers
-    compare ``existing == rendered`` themselves rather than this function
-    returning a bare bool, because the two current callers have
-    DIFFERENT reactions to a match/mismatch (one is verbose and offers to
-    converge; the other is a silent ``nx doctor`` row) and collapsing that
-    into a bool here would just move the comparison, not remove it.
+    local mode, or no service-tier unit is installed here. Returns an
+    :class:`AutostartDriftProbe` when a unit IS installed -- callers
+    decide what a content mismatch or a ``NOT_ACTIVE`` manager answer
+    means for them rather than this function returning a bare bool,
+    because the two current callers have DIFFERENT reactions (one is
+    verbose and offers to converge; the other is a silent ``nx doctor``
+    row) and collapsing that into a bool here would just move the
+    comparison, not remove it.
+
+    The activation half exists because :func:`nexus.daemon.installer.install_autostart`
+    writes the unit file before it activates: once the file matched the
+    template, a unit whose ``launchctl bootstrap`` / ``systemctl enable``
+    had failed (``--force``), or was later booted out by hand, compared
+    equal on every later pass and the unmanaged state was never surfaced
+    again. A box with no manager at all reports ``NO_MANAGER``, which
+    callers treat as benign (nothing here could activate it).
 
     Raises on a genuine probe failure (``is_local_mode()`` / the unit
     lookup / the render / the read blowing up) -- this function does NOT
@@ -2239,7 +2274,10 @@ def _probe_service_autostart_drift() -> tuple[Path, str, str] | None:
 
     _, rendered = installer.rendered_unit_content(tier="service")
     existing = dest.read_text()
-    return dest, existing, rendered
+    activation = installer.autostart_activation_state(dest, tier="service")
+    return AutostartDriftProbe(
+        dest=dest, existing=existing, rendered=rendered, activation=activation,
+    )
 
 
 def _restart_service_after_unit_reinstall(config_dir: Path) -> tuple[bool, str]:
@@ -2366,15 +2404,27 @@ def converge_service_autostart_unit(
         return [_autostart_probe_failure_action(exc)]
     if probe is None:
         return []  # benign: not local mode, or no service-tier unit installed here
-    dest, existing, rendered = probe
+    dest = probe.dest
 
-    if existing == rendered:
-        return []  # benign: already up to date
+    if probe.content_matches and not probe.not_activated:
+        # benign: already up to date, and either the manager has it or
+        # there is no manager on this box to have it (NO_MANAGER).
+        return []
 
-    note = (
-        f"the storage-service autostart unit at {dest} differs from the "
-        "current template"
-    )
+    if probe.content_matches:
+        # nexus-mac7t: the file is current but the manager does not have
+        # the unit. The remedy is the same bounce as content drift (the
+        # uninstall + reinstall below is exactly what re-registers it),
+        # so it rides the same path with its own note.
+        note = (
+            f"the storage-service autostart unit at {dest} is installed "
+            f"but not activated ({probe.activation.detail})"
+        )
+    else:
+        note = (
+            f"the storage-service autostart unit at {dest} differs from the "
+            "current template"
+        )
     if unattended or dry_run:
         return [
             f"NOTE: {note}. Not reinstalling it here -- run `nx daemon "

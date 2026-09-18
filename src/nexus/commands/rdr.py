@@ -5262,15 +5262,21 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
             roots_source = "default candidates (set NEXUS_PROJECT_ROOTS to override)"
 
         candidate_paths = [r / target for r in roots if r.is_dir()]
-        # nexus-u1jxt.6: the checkout the command runs in IS the target when
-        # the names agree, whatever directory it lives under -- the home
-        # candidates alone scanned nothing from a repo outside them, and from
-        # a linked worktree they scanned the primary checkout's files.
-        found_path = Path(cwd_repo_root) if target == cwd_repo_name else None
+        # Precedence: an explicit NEXUS_PROJECT_ROOTS that holds the target
+        # wins (the operator said where to look), then the checkout the
+        # command runs in when the names agree (nexus-u1jxt.6: the home
+        # candidates alone scanned nothing from a repo outside them, and
+        # from a linked worktree they scanned the primary checkout's files),
+        # then the home candidates. Before this ordering the cwd repo also
+        # beat the explicit env, so a run from inside a nexus checkout
+        # ignored NEXUS_PROJECT_ROOTS entirely (CI red on d4f298ac5).
+        found_path = None
+        if roots_env:
+            found_path = next((p for p in candidate_paths if p.is_dir()), None)
+        if found_path is None and target == cwd_repo_name:
+            found_path = Path(cwd_repo_root)
         if found_path is None:
-            found_path = next(
-                (p for p in candidate_paths if p.exists() and p.is_dir()), None
-            )
+            found_path = next((p for p in candidate_paths if p.is_dir()), None)
         if found_path:
             print(f"**Worktree found:** `{found_path}`")
             postmortem_dir = found_path / "docs" / "rdr" / "post-mortem"
@@ -5341,7 +5347,11 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
             if t2_ambiguous:
                 census_str += "; ambiguous: " + "; ".join(t2_ambiguous)
             print(f"**T2 `{target}_rdr` status census:** {census_str}")
-            scan_dir = (found_path / "docs" / "rdr") if found_path else None
+            # nexus-u1jxt.6 sibling: the same declared RDR dir the vocabulary
+            # scan above reads, not a hard-coded docs/rdr.
+            scan_dir = (
+                found_path / _preamble_rdr_dir(str(found_path)) if found_path else None
+            )
             if scan_dir is not None and scan_dir.is_dir():
                 drift = _file_vs_t2_status_drift(_rdr_file_statuses(scan_dir), t2_by_number)
                 for number, file_status, t2_status in drift:

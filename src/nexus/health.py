@@ -3867,13 +3867,56 @@ def _check_service_autostart_drift() -> list[HealthResult]:
     if probe is None:
         return []  # not local mode, or no service-tier unit installed here
 
-    dest, existing, rendered = probe
-    if existing == rendered:
-        return [HealthResult(
-            label="Service autostart unit (local mode)",
-            ok=True,
-            detail=f"{dest} matches the current template",
-        )]
+    from nexus.daemon.installer import ActivationState  # noqa: PLC0415 — deferred, CLI startup cost
+
+    dest = probe.dest
+    if probe.content_matches:
+        # nexus-mac7t: content alone masked a unit whose activation failed
+        # (or was undone) after the first warning, because the file matched
+        # the template from then on. The manager's answer is the other half.
+        match probe.activation.state:
+            case ActivationState.ACTIVE:
+                return [HealthResult(
+                    label="Service autostart unit (local mode)",
+                    ok=True,
+                    detail=(
+                        f"{dest} matches the current template and the "
+                        "service manager has it registered"
+                    ),
+                )]
+            case ActivationState.NO_MANAGER:
+                # Informational, never a warning: nothing on this box can
+                # activate the unit, so its not being registered is not a
+                # defect to fix here.
+                return [HealthResult(
+                    label="Service autostart unit (local mode)",
+                    ok=True,
+                    detail=(
+                        f"{dest} matches the current template; no service "
+                        f"manager on this box can activate it "
+                        f"({probe.activation.detail})"
+                    ),
+                )]
+            case _:
+                return [HealthResult(
+                    label="Service autostart unit (local mode)",
+                    ok=False,
+                    warn=True,
+                    detail=(
+                        f"{dest} is installed but not activated: the "
+                        f"service manager does not have it "
+                        f"({probe.activation.detail}) -- the unit file "
+                        "matches the current template, so nothing "
+                        "re-attempts the activation on its own; the "
+                        "service will not start at login until it is "
+                        "re-registered"
+                    ),
+                    fix_suggestions=[
+                        "nx daemon service uninstall --autostart && "
+                        "nx daemon service install --autostart"
+                        "  # re-registers the unit with launchd/systemd",
+                    ],
+                )]
 
     return [HealthResult(
         label="Service autostart unit (local mode)",
