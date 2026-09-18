@@ -360,11 +360,9 @@ so are the mitigation, and the auto-approve matcher covers them.
 from stdin (TTY-aware, empty or malformed reads as `None`), calls the
 same `run()`, writes the decision JSON to stdout, and exits 0 for every
 hook verb. Every ledger verb propagates the code `run()` returns instead,
-so a caller that branches on it keeps working: `expect` and `start`
-return 2 on invalid input, `census` 1 on a blind spot, `undeclared` 1, 2
-or 3, `reconcile` 2 or 4, and `archive` and `sweep` 0 on every path
-(Contracts, below). `nx hook` keeps its Click verbs for a human at a
-terminal; no `hooks.json` entry names it.
+so a caller that branches on it keeps working; Contracts, below, carries
+the codes. `nx hook` keeps its Click verbs for a human at a terminal; no
+`hooks.json` entry names it.
 
 **Package.** `src/nexus/hooks/` (the existing `nexus.hooks` module that
 `session-start` calls becomes `nexus/hooks/__init__.py`). One module per
@@ -380,12 +378,14 @@ each byte for byte and the retargeted test asserts them. Two are quoted
 outside the tests: the ledger verbs' codes (0 clean, 1 BLINDSPOT, 2
 undeclared, 3 no ledger for `undeclared`; 0, 2, 4 for `reconcile`) in
 AGENTS.md and the orchestration skill, and the close gate's deny text in
-19 files. Three more codes live only in the tests: `census` returns 1 on
-a blind spot, which `tests/e2e/lib/expectations_test.sh` asserts by value
-and `tests/hooks/test_subagent_stop_hook.py` asserts again, and `expect`
-and `start` return 2 on invalid input, which that e2e file exercises for
-`expect` by success or failure and for `start` not at all. The port keeps
-all three and the Test Plan adds the assertions that are missing.
+19 files. `census` returns 1 on the same blind-spot shape, quoted in the
+orchestration skill and asserted by value in
+`tests/e2e/lib/expectations_test.sh` and
+`tests/hooks/test_subagent_stop_hook.py`. `expect` and `start` return 2
+on invalid input, a code no file outside the tests quotes: the e2e file
+exercises `expect`'s path by success or failure, and never drives `start`
+with invalid input at all. The port keeps all three codes and the Test
+Plan adds the assertions that are missing.
 
 **The ledger** (`nexus.hooks.expectations`). A TSV file under
 `$XDG_STATE_HOME/nexus/orchestration/<session>.expectations` with
