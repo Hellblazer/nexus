@@ -56,6 +56,12 @@ bad() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$*"; }
 check() { local what="$1"; shift; if "$@"; then ok "$what"; else bad "$what"; fi; }
 now() { date +%s; }
 tok() { SEQ=$((SEQ + 1)); printf '%s-%s' "$1" "$SEQ"; }
+# NOTE, and the reason the conditions above are FUNCTIONS rather than an
+# inline `test "$(...)"`: `wait_for 30 test "$(cmd)" = 0` expands the command
+# substitution ONCE, before wait_for is ever called, so it polls a CONSTANT --
+# it either passes immediately or burns the whole timeout. Every condition
+# passed to wait_for must be a function name it can re-invoke. Measured
+# 2026-09-18, three sites.
 wait_for() {  # SECONDS CMD... : poll until CMD succeeds
     local deadline=$(( $(now) + $1 )); shift
     until "$@"; do [ "$(now)" -ge "$deadline" ] && return 1; sleep 1; done
@@ -65,10 +71,21 @@ wait_for() {  # SECONDS CMD... : poll until CMD succeeds
 declare -A SID_OF=() PID_OF=() ANN=() WAKES=()
 
 pane() { T capture-pane -p -J -S -400 -t "$1" 2>/dev/null; }
-# A reply line from the model carries the ⏺ marker; the prompt echo (`> ...`)
-# carries the token too, so a bare pane grep would pass before the model
-# answered.
-reply_has() { local p; p="$(pane "$1")"; [[ "$p" =~ ⏺.*$2 ]]; }
+# Reply detection reads the TRANSCRIPT, never the pane. The pane carries the
+# prompt's own echo, and the prompt names the token it asks for, so a bare
+# pane grep passes before the model has answered; anchoring on the reply
+# bullet instead made it depend on how this Claude Code version renders a
+# turn, which cost a billed run on 2026-09-18 (the model HAD replied
+# LOADED-1; the bullet was not on that line). An assistant message in the
+# JSONL is unambiguous and version-stable.
+reply_has() {  # NAME TOKEN: an ASSISTANT message carrying TOKEN
+    local f; f="$(transcript_of "$1")"
+    [ -n "$f" ] || return 1
+    "$NXPY" "$HOME/assistant_said.py" "$f" "$2"
+}
+mailbox_empty() { [ "$(available "$1")" = 0 ]; }
+rendered_once() { [ "$(rendered_count "$1" "$2")" = 1 ]; }
+has_transcript() { [ -n "$(transcript_of "$1")" ]; }
 status_field() { jq -r ".$2" "$STATUS_D/$1" 2>/dev/null; }
 status_is() { [ "$(status_field "$1" "$2")" = "$3" ]; }
 marker_of() { cat "$TW/session.${PID_OF[$1]}" 2>/dev/null; }
@@ -112,7 +129,13 @@ prompt() {  # NAME TEXT TOKEN: paste TEXT, Enter, wait for TOKEN in a reply
     T paste-buffer -t "$1"
     sleep 0.5
     T send-keys -t "$1" Enter
-    wait_for 180 reply_has "$1" "$3" || { echo "  TIMEOUT waiting for $3 in $1:"; pane "$1" | tail -15; return 1; }
+    if ! wait_for 180 reply_has "$1" "$3"; then
+        echo "  TIMEOUT waiting for $3 in $1 (pane tail, then the transcript tail):"
+        pane "$1" | tail -15
+        local f; f="$(transcript_of "$1")"
+        [ -n "$f" ] && tail -3 "$f" | cut -c1-400
+        return 1
+    fi
 }
 _mcp_json() {  # NAME -> path
     local f="$RUN/mcp-$1.json"
@@ -130,7 +153,11 @@ launch() {  # NAME [SID]: one real Claude Code session; with SID, `--resume SID`
     t0="$(now)"
     # `exec`: the pane's process IS claude, so pane_pid is the claude pid the
     # hooks resolve through nexus.session.find_immediate_claude_pid.
-    local cmd="cd $WORK && exec claude --dangerously-skip-permissions --plugin-dir $PLUGIN --mcp-config $mcp --strict-mcp-config --dangerously-load-development-channels server:nexus"
+    # PATH explicitly: tmux opens a login shell, which rebuilds PATH from the
+    # profile and drops the image's own ENV PATH, so neither `nx` nor the venv
+    # is on it. The hooks carry absolute paths for the same reason (run.sh),
+    # this is the belt to that suspenders.
+    local cmd="export PATH=$HOME/nxenv/bin:$HOME/.local/bin:\$PATH && cd $WORK && exec claude --dangerously-skip-permissions --plugin-dir $PLUGIN --mcp-config $mcp --strict-mcp-config --dangerously-load-development-channels server:nexus"
     [ -n "$resume" ] && cmd="$cmd --resume $resume"
     T kill-session -t "$name" 2>/dev/null
     T new-session -d -s "$name" -x 240 -y 50 || { bad "launch $name: tmux"; return 1; }
@@ -167,12 +194,14 @@ launch() {  # NAME [SID]: one real Claude Code session; with SID, `--resume SID`
     SID_OF[$name]="$sid"
     echo "  session $name: id $sid, claude pid ${PID_OF[$name]}"
     check "launch $name: waiter alive under its status record" wait_for 30 status_is "$sid" alive true
-    check "  session marker names it (the harness and the hooks agree on the claude pid)" wait_for 30 marker_names "$name" "$sid"
-    check "  the session transcript exists" wait_for 30 test -n "$(transcript_of "$name")"
+    check "  the SessionStart hook ran and its marker names this session" wait_for 60 marker_names "$name" "$sid"
     snap "$name"
     # Warmup turn: the MCP tools are deferred until ToolSearch loads them
     # (tests/cc-validation/README.md, "Deferred MCP tools").
     local t; t="$(tok LOADED)"
+    # The transcript file appears at the FIRST user message, not at startup,
+    # so it is asserted around the warmup turn rather than before it.
+    check "  the session transcript appears at the first turn" wait_for 60 has_transcript "$name"
     check "  warmup: the deferred nexus tools are loaded" prompt "$name" \
         "Call ToolSearch with query \"select:mcp__plugin_conexus_nexus__tuple_subscribe,mcp__plugin_conexus_nexus__mailbox_send,mcp__plugin_conexus_nexus__tuple_in\" and then reply with exactly $t and nothing else." "$t"
 }
@@ -201,7 +230,7 @@ delivered() {  # NAME CORR: channel-delivered to NAME, with no prompt from this 
     check "  $name woke on the reference (a new wake line, no prompt sent)" wait_for 60 woke
     check "  its status record's announced count advanced" wait_for 30 announced
     check "  the drain hook rendered $corr exactly once at that wake" wait_for 60 rendered
-    check "  mailbox/$sid is empty afterwards (claimed and acked at the wake)" wait_for 30 test "$(available "$sid")" = 0
+    check "  mailbox/$sid is empty afterwards (claimed and acked at the wake)" wait_for 30 mailbox_empty "$sid"
     snap "$name"
 }
 not_delivered() {  # NAME CORR SECONDS: never rendered and no new wake within SECONDS
@@ -308,7 +337,7 @@ send "$SA" s4-pending "$SB" > /dev/null
 check "mail to the OLD id after the clear waits in mailbox/old (nothing pushes it)" test "$(available "$SA")" = 1
 t="$(tok OK)"
 prompt A2 "Reply with exactly $t and nothing else." "$t" || bad "first prompt after the clear"
-check "the first prompt delivers it exactly once, through the cleared record" wait_for 30 test "$(rendered_count A2 s4-pending)" = 1
+check "the first prompt delivers it exactly once, through the cleared record" wait_for 30 rendered_once A2 s4-pending
 check "  the record is deleted once the old mailbox is empty" wait_for 15 test ! -e "$TW/cleared.$SA_C"
 check "  mailbox/old is empty" test "$(available "$SA")" = 0
 send "$SA" s4-late "$SB" > /dev/null

@@ -47,7 +47,7 @@ trap 'rm -rf "$STAGE"' EXIT
 umask 077
 printf '%s' "$FRESHCREDS" > "$STAGE/.claude-credentials.json"
 umask 022
-cp "$HERE/Dockerfile" "$HERE/mvv_in_container.sh" "$HERE/send.py" "$STAGE/"
+cp "$HERE/Dockerfile" "$HERE/mvv_in_container.sh" "$HERE/send.py" "$HERE/assistant_said.py" "$STAGE/"
 mkdir -p "$STAGE/wheel" "$STAGE/plugin/.claude-plugin" "$STAGE/plugin/hooks/scripts"
 if [ -n "$PUBLISHED" ]; then
     LABEL="published-$PUBLISHED"
@@ -91,7 +91,13 @@ if len(blocks) != 1:
     raise SystemExit(f"expected one SessionStart block running session-start, found {len(blocks)}")
 print(blocks[0]["matcher"])
 ' "$SRC/hooks/hooks.json")"
-# The generated declaration uses the SHELL spelling, `nx hook session-start`,
+# The generated declaration uses the SHELL spelling of the verb, at an
+# ABSOLUTE path: a hook runs under `/bin/sh` with the environment Claude Code
+# inherited, which inside the container is a tmux login shell whose PATH does
+# NOT carry /home/nexus/nxenv/bin -- a bare `nx` there is "sh: 1: nx: not
+# found" on every SessionStart, and the session marker is never written
+# (measured 2026-09-18, one billed run; the design memo had said to bake
+# absolute paths in for exactly this reason).
 # because it drives the WHEEL under test through the nx console script. That
 # Click verb is this generator's only dependency on the CLI surface, and this
 # generator is its only consumer that nothing else names (RDR-215 moves the
@@ -104,7 +110,7 @@ python3 - "$STAGE/plugin/hooks/hooks.json" "$MATCHER" <<'PY'
 import json, sys
 json.dump({"hooks": {
     "SessionStart": [{"matcher": sys.argv[2], "hooks": [
-        {"type": "command", "command": "nx hook session-start", "timeout": 10}]}],
+        {"type": "command", "command": "/home/nexus/nxenv/bin/nx hook session-start", "timeout": 10}]}],
     "UserPromptSubmit": [{"matcher": "", "hooks": [
         {"type": "command",
          "command": "$CLAUDE_PLUGIN_ROOT/hooks/scripts/_run_python_hook.sh $CLAUDE_PLUGIN_ROOT/hooks/scripts/mailbox_drain.py",

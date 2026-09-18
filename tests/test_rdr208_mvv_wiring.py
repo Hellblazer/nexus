@@ -136,7 +136,12 @@ def test_the_generated_hooks_json_names_a_verb_the_cli_still_has() -> None:
     SessionStart hook never runs and a journey that fails far from its
     cause."""
     run_sh = (_DIR / "run.sh").read_text(encoding="utf-8")
-    spelling = re.search(r'"command": "(nx hook session-start)"', run_sh)
+    assert '"/home/nexus/nxenv/bin/nx hook session-start"' in run_sh, (
+        "the generated hook must name nx by ABSOLUTE path: a hook runs under /bin/sh "
+        "with a PATH that does not carry the venv, and a bare `nx` is 'not found' on "
+        "every SessionStart (measured 2026-09-18)"
+    )
+    spelling = re.search(r'"command": "(?:[\w/.-]*/)?(nx hook session-start)"', run_sh)
     assert spelling, "run.sh no longer generates a session-start hook declaration"
     hook_cmd = (_ROOT / "src" / "nexus" / "commands" / "hook.py").read_text(encoding="utf-8")
     assert '@hook_group.command("session-start")' in hook_cmd, (
