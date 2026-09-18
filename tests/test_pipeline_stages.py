@@ -263,14 +263,18 @@ class TestExtractorLoop:
         assert ret.metadata["table_regions"] == [{"page": 2, "html": "<table/>"}]
 
     def test_retry_after_caught_failure_reextracts_all_pages(self, db: HttpPipelineDB) -> None:
-        """nexus-6m9zy.1 (#1): pages_extracted survives clear_orphan_wal.
-
-        pipeline_index_pdf's caught-exception handler is
-        mark_failed + clear_orphan_wal (see :func:`extractor_loop`'s
-        nexus-gl99l comment) -- it wipes the pdf_pages WAL rows but never
-        resets the pages_extracted progress counter. A retry must not
-        trust that stale counter to skip pages the WAL no longer holds,
-        or the document completes with the skipped pages missing.
+        """nexus-6m9zy.1 (#1), superseded by nexus-33q80: pipeline_index_pdf's
+        caught-exception handler is mark_failed + clear_orphan_wal (see
+        :func:`extractor_loop`'s nexus-gl99l comment). Before nexus-33q80,
+        clear_orphan_wal wiped the pdf_pages WAL rows but never reset the
+        pages_extracted progress counter, so a naive retry could trust a
+        stale counter to skip pages the WAL no longer held. nexus-33q80
+        makes the engine zero pages_extracted (and chunks_uploaded) in the
+        SAME transaction as the wipe, so the counter is now accurate --
+        this test's own regression protection (the retry must still
+        re-extract every page, never skip any) stays exactly as strong
+        with an accurate counter as it did with the old defensive
+        WAL-count re-verification in extractor_loop's fast path.
         """
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         with patch(_P_EXT) as ME:
@@ -287,8 +291,8 @@ class TestExtractorLoop:
         db.mark_failed("h1", error="boom")
         db.clear_orphan_wal("h1")
         state = db.get_pipeline_state("h1")
-        assert state["pages_extracted"] == 6  # counter survives the clear
-        assert db.read_pages("h1") == []  # but the WAL does not
+        assert state["pages_extracted"] == 0  # nexus-33q80: reset in the same transaction as the wipe
+        assert db.read_pages("h1") == []  # and the WAL is gone too
 
         with patch(_P_EXT) as ME:
             ME.return_value.extract.side_effect = _fx(10)
@@ -704,6 +708,32 @@ class TestUploaderLoop:
             f"upsert must strictly precede fire_batch — got {seq}"
         )
 
+
+class TestMarkFailedAndResetWal:
+    """nexus-33q80: the engine now zeroes chunks_uploaded/pages_extracted
+    inside clear_orphan_wal's own transaction, so the client's terminal
+    handler makes exactly ONE reset-relevant call sequence -- mark_failed
+    then clear_orphan_wal -- and never a separate update_progress call to
+    undo the wipe's staleness. Two client calls could never be atomic;
+    removing the second one removes the failure window entirely, not just
+    the class of failure that leaves a log line behind."""
+
+    def test_makes_exactly_mark_failed_then_clear_orphan_wal_no_separate_reset(self) -> None:
+        from nexus.pipeline_stages import _mark_failed_and_reset_wal
+
+        mock_db = MagicMock()
+        mock_db.mock_calls.clear()
+
+        _mark_failed_and_reset_wal(mock_db, "hX", RuntimeError("boom"))
+
+        assert [c[0] for c in mock_db.mock_calls] == ["mark_failed", "clear_orphan_wal"], (
+            f"expected exactly mark_failed then clear_orphan_wal; got {mock_db.mock_calls} "
+            f"-- a separate update_progress(chunks_uploaded=0) call is the nexus-6m9zy.1 "
+            f"non-atomicity nexus-33q80 removes"
+        )
+        mock_db.update_progress.assert_not_called()
+        mock_db.mark_failed.assert_called_once_with("hX", error="boom")
+        mock_db.clear_orphan_wal.assert_called_once_with("hX")
 
 
 class TestPipelineIndexPdf:

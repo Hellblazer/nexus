@@ -220,6 +220,14 @@ class FakePipelineEngine:
         h = body["content_hash"]
         self.pages = {k: v for k, v in self.pages.items() if k[0] != h}
         self.chunks = {k: v for k, v in self.chunks.items() if k[0] != h}
+        # nexus-33q80: zero chunks_uploaded/pages_extracted on the pipeline
+        # row in the SAME call as the wipe, mirroring
+        # PipelineRepository.clearOrphanWal's single transaction.
+        row = self.pipelines.get(h)
+        if row is not None:
+            row["chunks_uploaded"] = 0
+            row["pages_extracted"] = 0
+            row["updated_at"] = self.clock().isoformat()
         return {"cleared": True}
 
     def delete(self, body: dict) -> dict:

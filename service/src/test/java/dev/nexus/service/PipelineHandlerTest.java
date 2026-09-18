@@ -277,6 +277,11 @@ class PipelineHandlerTest {
         post("/v1/pipeline/pages", TOKEN, TENANT, """
             {"content_hash":"%s","pages":[{"page_index":0,"page_text":"p","metadata_json":"{}"}]}"""
             .formatted(hash));
+        // nexus-33q80: give both counters clear_orphan_wal must reset a
+        // real, non-zero value BEFORE the wipe -- proves the reset, not
+        // just the pre-existing default.
+        post("/v1/pipeline/progress", TOKEN, TENANT,
+            "{\"content_hash\":\"" + hash + "\",\"fields\":{\"pages_extracted\":7,\"chunks_uploaded\":20}}");
         post("/v1/pipeline/fail", TOKEN, TENANT,
             "{\"content_hash\":\"" + hash + "\",\"error\":\"math pdf without MinerU\"}");
 
@@ -289,6 +294,17 @@ class PipelineHandlerTest {
             .as("the audit row survives clear_wal (nexus-2fyb orphan-replay fix)")
             .isNotNull();
         assertThat(state.get("error")).isEqualTo("math pdf without MinerU");
+        // nexus-33q80: chunks_uploaded/pages_extracted reset in the SAME
+        // call (server-side transaction) as the WAL wipe -- no window
+        // where the wipe has landed and the counters have not, which is
+        // exactly the window a SEPARATE client-side reset call could not
+        // close (nexus-6m9zy.1's non-atomicity).
+        assertThat(state.get("chunks_uploaded"))
+            .as("chunks_uploaded must be zeroed in the same transaction as the WAL wipe")
+            .isEqualTo(0);
+        assertThat(state.get("pages_extracted"))
+            .as("pages_extracted must be zeroed in the same transaction as the WAL wipe")
+            .isEqualTo(0);
     }
 
     // ── Test 8: delete_collection sweeps all three tables ────────────────────
