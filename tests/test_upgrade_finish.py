@@ -2612,6 +2612,10 @@ class TestConvergeServiceAutostartUnitNoServiceManager:
         # This box is darwin; the activation command it will genuinely try
         # is `launchctl bootstrap ...` -- stripped off PATH below exactly
         # like `systemctl` would be on the Linux container that found this.
+        # Pin the platform to darwin so the seeded plist is the unit the probe
+        # reads on every CI host; on a Linux runner the unpinned probe looks
+        # for a systemd unit, finds none, and reports nothing to converge.
+        monkeypatch.setattr(daemon_cmd, "_autostart_platform", lambda: "darwin")
         monkeypatch.setattr(daemon_cmd, "_autostart_install_dir", lambda: tmp_path / "units")
         monkeypatch.setattr(daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "logs")
         monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/conexus/bin/nx"])
