@@ -28,8 +28,9 @@ hook's `command` through bash, or through PowerShell on Windows when Git
 Bash is absent, and it also offers an exec form (`command` plus `args`)
 that spawns a real executable with no shell at all, and an `mcp_tool`
 form that calls a tool on an already-connected MCP server with no
-process at all. Sam's decision that day: move the hook logic out of bash
-and into the `nexus` package.
+process at all. Sam's decision that day: move the hook logic out of bash,
+into the `nexus` package for conexus and onto sn's own bundled Python
+scripts for sn.
 
 ## Problem Statement
 
@@ -324,9 +325,13 @@ functions.
 8. **The sn plugin.** sn ships no Python package and no server of its
    own, and its hook logic already lives in two bundled stdlib scripts
    (`auto_approve_sn_mcp.py`, `worktree_guard.py`) that the bash wrappers
-   call with `python3`. Its four entries become exec-form `python3` on
-   those scripts, with the session-start section emitted by a third small
-   script. sn keeps no dependency on the conexus wheel or server.
+   call with `python3`. Its four entries become exec-form `python3`: the
+   `PreToolUse` and `PermissionRequest` entries on `auto_approve_sn_mcp.py`,
+   `SubagentStart` on a new `subagent_start.py` that carries
+   `mcp-inject.sh`'s body (the section files, the envelope, and the
+   worktree decision imported from `worktree_guard.py`), and
+   `SessionStart` on a new `session_start.py` that emits the session-start
+   section. sn keeps no dependency on the conexus wheel or server.
 9. **Move, then delete.** Each port retargets the script's existing test
    at the new entry with the same payload and the same expected output,
    passes, and only then deletes the script. Byte and timing budgets keep
@@ -353,7 +358,10 @@ so are the mitigation, and the auto-approve matcher covers them.
 `pyproject.toml`, built like `nx-session-end-launcher`: `os`, `sys` and
 `json` before dispatch, the verb's module after. It reads the payload
 from stdin (TTY-aware, empty or malformed reads as `None`), calls the
-same `run()`, writes the decision JSON to stdout, and exits 0. `nx hook`
+same `run()`, writes the decision JSON to stdout, and exits 0 for every
+hook verb; the ledger's `undeclared` and `reconcile` verbs, which the e2e
+scripts branch on, exit with the code `run()` returns (Contracts, below).
+`nx hook`
 keeps its Click verbs for a human at a terminal; no `hooks.json` entry
 names it.
 
@@ -401,9 +409,8 @@ the sn `hooks.json`: every entry has `args`, `command` is exactly
 **Tests.** Each retargeted test keeps its payload fixture and expected
 bytes. Tool-tier tests call the registered tool through the server's
 in-process dispatch; one integration test drives a real `nx-mcp` over
-stdio for one tool. Command-tier tests spawn `nx-hook <verb>`. Two
-scripts have no test today (`sn/session-start.sh`, `sn/mcp-inject.sh`);
-their ports get one.
+stdio for one tool. Command-tier tests spawn `nx-hook <verb>`. One
+script has no test today (`sn/session-start.sh`); its port gets one.
 
 ### Decision Rationale
 
