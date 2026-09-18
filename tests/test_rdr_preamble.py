@@ -4424,6 +4424,33 @@ class TestU1jxtVerdictAndPaths:
         assert "**Worktree found:**" in out and str(rdr_env["repo_root"]) in out, out
         assert "bogus-status" in out, out
 
+    def test_blank_status_key_is_an_empty_status_not_a_crash(self, rdr_env, monkeypatch):
+        """nexus-u1jxt.10: ``status:`` with no value made rdr-accept (no id)
+        and rdr-close die with AttributeError on ``None.lower()``."""
+        import nexus.commands.rdr as rdr_mod
+
+        _write_rdr(rdr_env["rdr_dir"], "rdr-300-x.md", {"title": "X", "status": "", "type": "feature"})
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: _FakeT2ResearchClient({}))
+        for argv in (["preamble", "rdr-accept"], ["preamble", "rdr-close", "--", "300"]):
+            result = _runner().invoke(rdr, argv)
+            assert result.exit_code == 0, (argv, result.output, result.exception)
+
+    def test_close_force_on_a_deferred_rdr_prints_the_tables_own_command(self, rdr_env, monkeypatch):
+        """nexus-u1jxt.10: ``rdr-close --force`` on a non-accepted RDR
+        printed ``set-status N closed``, which the lifecycle table always
+        refuses. A deferred RDR has no close edge (resume first); a draft
+        closes only with ``--reason``."""
+        import nexus.commands.rdr as rdr_mod
+
+        _write_rdr(rdr_env["rdr_dir"], "rdr-400-x.md", {"title": "X", "status": "deferred", "type": "feature"})
+        _write_rdr(rdr_env["rdr_dir"], "rdr-401-y.md", {"title": "Y", "status": "draft", "type": "feature"})
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: _FakeT2ResearchClient({}))
+        out = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "400", "--force"]).output
+        assert "set-status 400 closed" not in out, out
+        assert "set-status 400 draft" in out and "no close edge" in out, out
+        out = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "401", "--force"]).output
+        assert "set-status 401 closed --reason" in out, out
+
     def test_preamble_rdr_dir_accepts_a_scalar_rdr_paths(self, tmp_path):
         """nexus-u1jxt.10: ``rdr_paths: docs/decisions`` (a scalar, not a
         list) resolved to its first character."""

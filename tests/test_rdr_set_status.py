@@ -1365,3 +1365,13 @@ def test_readme_row_with_an_escaped_pipe_keeps_its_title(tmp_path):
     row = [ln for ln in readme.read_text().splitlines() if "RDR-233" in ln][0]
     assert "A \\| B in one title" in row, row
     assert "| Closed |" in row, row
+
+
+def test_crlf_file_keeps_crlf_fence_lines_through_the_rewriter():
+    """nexus-u1jxt.10: the rewriter re-emitted both fences as bare LF in a
+    CRLF file, leaving two odd lines in an otherwise CRLF document."""
+    text = "---\r\ntitle: X\r\nstatus: draft\r\n---\r\nbody\r\n"
+    out = rdr_mod._rewrite_frontmatter_status(text, "accepted", "2026-09-17")
+    assert "\n" not in out.replace("\r\n", ""), out
+    assert out.startswith("---\r\n") and "\r\n---\r\nbody" in out, out
+    assert "status: accepted\r\n" in out and "accepted_date: 2026-09-17\r\n" in out

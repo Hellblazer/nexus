@@ -603,7 +603,11 @@ def _rewrite_frontmatter_status(text: str, new_status: str, date: str, reason: s
                 fm, count=1, flags=re.MULTILINE,
             )
 
-    return "---" + fm + "---" + parts[2]
+    # nexus-u1jxt.10: re-emit the file's OWN fence lines. The split drops
+    # each fence's text, and a bare "---" here left a CRLF file with two
+    # LF-only fence lines while every other line kept its \r\n.
+    fences = list(_FRONTMATTER_FENCE_RE.finditer(text))
+    return fences[0].group(0) + fm + fences[1].group(0) + parts[2]
 
 
 def _yaml_scalar(value: str) -> str:
@@ -3234,7 +3238,7 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
         # GH #1409 (nexus-qsryj): `open` is an accepted pre-accept synonym for
         # `draft` — some projects' RDR conventions (open -> accepted) never use
         # draft at all; the rdr-gate PASSED check is the real acceptance guard.
-        draft_rdrs = [r for r in rdrs if r["status"].lower() in pre_accept_statuses]
+        draft_rdrs = [r for r in rdrs if str(r.get("status") or "").lower() in pre_accept_statuses]
         print("### Draft RDRs (eligible for acceptance)")
         print()
         if draft_rdrs:
@@ -3270,7 +3274,7 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
     # PASSED lookup below is the real acceptance guard, not the status word.
     # RDR-201 P1.5: derived from the table (pre-accept statuses plus the
     # `accept` event's own target status), not a hand-maintained literal.
-    if current_status.lower() not in pre_accept_statuses | {accept_target_status}:
+    if str(current_status or "").lower() not in pre_accept_statuses | {accept_target_status}:
         print(
             f"> **BLOCKED**: RDR status is `{current_status}`. "
             "Only pre-accept (draft or open) RDRs can be accepted."
@@ -3630,7 +3634,7 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
         return
     close_source_statuses = _from_statuses_for_event(close_table, "close")
     close_source_label = " or ".join(f"`{s}`" for s in sorted(close_source_statuses))
-    if current_status.lower() not in close_source_statuses:
+    if str(current_status or "").lower() not in close_source_statuses:
         if force:
             print(
                 f"> **Override**: RDR status is `{current_status}` (not {close_source_label}). "
@@ -3797,7 +3801,28 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
         "atomically with the CLI instead of editing by hand:"
     )
     print()
-    print(f"    nx rdr set-status {t2_key} closed")
+    # nexus-u1jxt.10: the printed command follows the lifecycle table. An
+    # override on a non-accepted RDR used to print the plain close, which
+    # the table always refuses: a draft closes only through the guarded
+    # close-unaccepted edge (--reason), and a deferred RDR has no close
+    # edge at all (resume, or abandon).
+    _cur = str(current_status or "").lower()
+    if _cur in close_source_statuses:
+        print(f"    nx rdr set-status {t2_key} closed")
+    elif _cur in _from_statuses_for_event(close_table, "close-unaccepted"):
+        print(f"    nx rdr set-status {t2_key} closed --reason \"<why it shipped without acceptance>\"")
+        print()
+        print(
+            f"> `{current_status}` closes only through the table's `close-unaccepted` edge, which "
+            "requires `--reason`; a bare `closed` is refused (`reason-not-stated`)."
+        )
+    else:
+        print(f"    nx rdr set-status {t2_key} draft   # resume first: the table has no close edge from `{current_status}`")
+        print()
+        print(
+            f"> The lifecycle table admits no close from `{current_status}`. Resume it to draft, gate, "
+            f"accept, then close; or `nx rdr set-status {t2_key} abandoned` if the work is not coming back."
+        )
     print()
 
     # Bead status advisory
@@ -4145,7 +4170,7 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
 
     print(f"### Fix RDR-{t2_key} ({rdr_file.name}, status `{status or '?'}`)")
     print()
-    if status.lower() not in ("", "draft", "open"):
+    if str(status or "").lower() not in ("", "draft", "open"):
         print(
             f"> RDR-{t2_key} is past the gate (status `{status}`). Post-accept edits are "
             "not gate fixes and there is no gate fix to make here; residual dispositions "
