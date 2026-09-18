@@ -2,10 +2,20 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """RDR-213 (amends RDR-211 Phase 1 Step 3, bead nexus-tk2cz): the
 `claude/channel` capability declaration and the lifespan waiter
-(`nexus.mcp.channel`), with the proof gate and claim-at-delivery deleted,
-and (T2 `nexus_rdr/213-decision-announcements-rate-limited-not-ack-gated-
-2026-09-17`) the mailbox path rebuilt on the SAME cursor shape the board
-path already used.
+(`nexus.mcp.channel`), with the proof gate and claim-at-delivery deleted.
+
+Mailboxes and boards take DIFFERENT shapes (bead nexus-vsipz, RDR-213
+engine half): a board keeps its own position cursor, unchanged. A
+mailbox instead asks the ENGINE to gate cadence and cap via a
+`WaitSpec.announce` field -- superseding the first RDR-213 cut's
+cursor-shares-one-shape design (T2 `nexus_rdr/213-decision-
+announcements-rate-limited-not-ack-gated-2026-09-17`), which carried a
+structural gap this module's stop-rule test measured directly: a cursor
+keyed on `(created_at, id)` can skip a transaction that started earlier
+but committed later, because a client-side position has no way to know a
+slower sibling is still in flight. The engine's own re-scan of the
+claimable-and-due set, ordered oldest first with no position to skip
+past, cannot lose that row.
 
 Layers, cheapest first:
 
@@ -14,13 +24,13 @@ Layers, cheapest first:
   round trip and reads the returned `InitializeResult` -- no stdio, no
   engine.
 - ``TestChannelWaiterFakeStore``: a `_FakeTupleStore` -- a minimally
-  stateful in-memory model of the engine's own `queryOnce` semantics
-  (since/n/ordering/claim_state) -- drives every `ChannelWaiter` branch
-  deterministically.
+  stateful in-memory model of the engine's own `queryOnce`/announce-mode
+  semantics (since/n/ordering/claim_state/announce) -- drives every
+  `ChannelWaiter` branch deterministically.
 - ``TestChannelWaiterRealEngine`` (``t2_service_env``): the properties a
   fake store cannot prove -- genuine parking against a real `wait()`,
-  and the cursor design's one loss-of-liveness risk under concurrent
-  writers.
+  and (the stop rule) that announce mode, unlike a client-side cursor,
+  never loses a row under concurrent writers.
 - ``TestChannelStatusPublish``: the on-disk record `nx doctor` reads.
 - ``TestDoctorProbeNeverStartsAWaiter``: RDR-213 MVV run 2 finding D1.
 """
@@ -36,7 +46,7 @@ from typing import Any
 import httpx
 import pytest
 
-from nexus.db.t2.records import TupleRow, WaitResult, WaitSpec
+from nexus.db.t2.records import Announce, TupleRow, WaitResult, WaitSpec
 from nexus.mcp import channel
 
 
@@ -120,19 +130,33 @@ class TestCapabilityDeclaration:
 
 class _FakeTupleStore:
     """A minimally-stateful in-memory model of the engine's own
-    `queryOnce` semantics (`TupleRepository.java`, confirmed live by
-    `TestChannelWaiterRealEngine::
-    test_wait_returns_claimed_and_dead_rows_not_just_available_ones`):
-    one append-only, creation-ordered table per subspace (`seed()`
-    appends; nothing else adds rows). `wait` returns UNCONSUMED rows
-    (claimed and dead-lettered included, never filtered on
-    `claim_state`) strictly after `since`, capped at `n`, in
-    `(created_at, id)` order -- exactly `queryOnce`'s own contract. It
-    returns immediately with whatever specs currently match (there is no
-    real blocking here -- honouring `timeout_s` with a genuine
-    wall-clock wait would cost the suite real seconds per empty-spec
-    call for no test-value); a spec with no match is simply ABSENT from
-    the result, never present with empty `tuples` (`WaitResult`'s own
+    `queryOnce`/announce-mode semantics (`TupleRepository.java`,
+    confirmed live by `TestChannelWaiterRealEngine::
+    test_wait_returns_claimed_and_dead_rows_not_just_available_ones` for
+    the plain path): one append-only, creation-ordered table per
+    subspace (`seed()` appends; nothing else adds rows).
+
+    A spec with NO `announce` (boards, always) gets the OLD `queryOnce`
+    contract unchanged: UNCONSUMED rows (claimed and dead-lettered
+    included, never filtered on `claim_state`) strictly after `since`,
+    capped at `n`, in `(created_at, id)` order.
+
+    A spec WITH `announce` (mailboxes, since bead nexus-vsipz) gets the
+    announce-mode contract instead: rows narrowed to CLAIMABLE (`consumed_at
+    IS NULL`, `claim_state` neither `claimed` nor `dead` -- this fake has
+    no lease to model a lapsed-claim exception to that, unlike the real
+    engine) and DUE (never announced, or last announced longer than
+    `interval_s` ago with `announce_count < max`), oldest `created_at`
+    first, capped at `n`, and STAMPED (`announced_at`/`announce_count`
+    incremented) on every row returned, in the SAME call -- `wait`'s
+    announce branch never reads a row back afterward to confirm the
+    stamp; the returned dataclass instance already carries it.
+
+    Both branches return immediately with whatever currently matches --
+    no real blocking here, since honouring `timeout_s` with a genuine
+    wall-clock wait would cost the suite real seconds per empty-spec call
+    for no test-value; a spec with no match is simply ABSENT from the
+    result, never present with empty `tuples` (`WaitResult`'s own
     documented contract).
 
     `claim`/`release`/`dead_letter`/`consume` mutate a row's state,
@@ -140,14 +164,19 @@ class _FakeTupleStore:
     `claim_state`/`consumed_at` value (`tuple_in`, `tuple_release`,
     repeated `tuple_nack` to `max_attempts`, and an ack, respectively).
     `max_calls` is a fail-fast busy-loop guard, orthogonal to the
-    stateful table -- the cursor design (T2 `nexus_rdr/213-decision-
-    announcements-rate-limited-not-ack-gated-2026-09-17`) has no
-    reconcile path any more, so `rd` is never called by the waiter at
-    all; this fake still implements it (mirroring `wait`'s own read
-    path) purely so a test can assert it stays at zero."""
+    stateful table -- neither subspace shape has a reconcile path any
+    more, so `rd` is never called by the waiter at all; this fake still
+    implements it (mirroring the plain read path) purely so a test can
+    assert it stays at zero."""
 
     def __init__(self) -> None:
         self._rows: dict[str, list[TupleRow]] = {}
+        #: (subspace, id) -> monotonic time of the row's last announce-mode
+        #: stamp -- the fake's OWN timing state, kept separate from the
+        #: `TupleRow.announced_at` string field (an ISO-shaped placeholder
+        #: here, never parsed) so due-ness can be computed against a real
+        #: clock without needing a real timestamp format.
+        self._announced_monotonic: dict[tuple[str, str], float] = {}
         self._seq = 0
         self.wait_calls: list[tuple[list, int]] = []
         self.wait_raises: Exception | None = None
@@ -176,15 +205,29 @@ class _FakeTupleStore:
         `created_at` is this store's own monotonic sequence, zero-padded
         so lexicographic string ordering matches insertion order exactly
         -- insertion order IS creation order, as the real engine
-        guarantees. Returns the row for convenience."""
+        guarantees. `announced_at=None, announce_count=0` -- the column
+        defaults a fresh row genuinely has (never `None` for
+        `announce_count`, which is reserved for simulating an engine that
+        predates this bead -- see `seed_old_engine_row`). Returns the row
+        for convenience."""
         self._seq += 1
         row = TupleRow(
             id=id_, subspace=subspace, template=subspace.split("/")[0], keys={}, dims=dims or {},
             body=body, claim_state=claim_state, claimant=None, lease_until=None, attempts=0,
             consumed_at=None, consumed_by=None, expires_at=None, created_at=f"{self._seq:020d}",
+            announced_at=None, announce_count=0,
         )
         self._rows.setdefault(subspace, []).append(row)
         return row
+
+    def seed_old_engine_row(self, subspace: str, id_: str, body: str | None = None) -> TupleRow:
+        """Like `seed`, but with `announce_count=None` -- simulating a row
+        rendered by an engine that predates bead nexus-vsipz and never
+        includes the field in its JSON at all (`TupleRow.announce_count`'s
+        own docstring). Used only by the "old engine" detection test."""
+        row = self.seed(subspace, id_, body)
+        self._mutate(subspace, id_, announce_count=None)
+        return self._rows[subspace][-1]
 
     def _mutate(self, subspace: str, id_: str, **changes: Any) -> None:
         rows = self._rows.get(subspace, [])
@@ -206,7 +249,7 @@ class _FakeTupleStore:
     def consume(self, subspace: str, id_: str) -> None:
         self._mutate(subspace, id_, consumed_at="2026-01-01T00:00:01+00:00")
 
-    # ── the read path ─────────────────────────────────────────────────
+    # ── the plain (non-announce) read path -- boards, `rd`/`rdp` ────────
 
     def _unconsumed(self, subspace: str, since: tuple[str, str] | None, n: int) -> list[TupleRow]:
         rows = [r for r in self._rows.get(subspace, []) if r.consumed_at is None]
@@ -219,6 +262,43 @@ class _FakeTupleStore:
         self._check_max_calls()
         return self._unconsumed(subspace, since, n)
 
+    # ── the announce-mode read path -- mailboxes (bead nexus-vsipz) ─────
+
+    def _announce_due(self, subspace: str, row: TupleRow, announce: Announce) -> bool:
+        # `announce_count is None` (`seed_old_engine_row`) simulates an
+        # engine that predates this bead entirely: it ignores `announce`
+        # and answers via its plain path, which has no concept of
+        # due-ness at all -- so every such row is unconditionally
+        # included, never excluded, never stamped (see `_announce_rows`).
+        if row.announce_count is None:
+            return True
+        last = self._announced_monotonic.get((subspace, row.id))
+        if last is None:
+            return True
+        return (time.monotonic() - last) >= announce.interval_s and row.announce_count < announce.max
+
+    def _announce_rows(self, subspace: str, n: int, announce: Announce) -> list[TupleRow]:
+        claimable = [
+            r for r in self._rows.get(subspace, [])
+            if r.consumed_at is None and r.claim_state not in ("claimed", "dead")
+        ]
+        due = [r for r in claimable if self._announce_due(subspace, r, announce)]
+        due = due[:n]
+        stamped: list[TupleRow] = []
+        for row in due:
+            if row.announce_count is None:
+                # Old-engine simulation: returned exactly as stored --
+                # unstamped, `announce_count` still `None` -- never
+                # mutated by an announce-mode call this fake models.
+                stamped.append(row)
+                continue
+            new_count = row.announce_count + 1
+            self._announced_monotonic[(subspace, row.id)] = time.monotonic()
+            updated = dataclasses.replace(row, announced_at="stamped", announce_count=new_count)
+            self._mutate(subspace, row.id, announced_at="stamped", announce_count=new_count)
+            stamped.append(updated)
+        return stamped
+
     def wait(self, specs, timeout_s):
         self.wait_calls.append((list(specs), timeout_s))
         self._check_max_calls()
@@ -226,7 +306,11 @@ class _FakeTupleStore:
             raise self.wait_raises
         results = []
         for spec in specs:
-            rows = self._unconsumed(spec.subspace, spec.since, spec.n)
+            rows = (
+                self._announce_rows(spec.subspace, spec.n, spec.announce)
+                if spec.announce is not None
+                else self._unconsumed(spec.subspace, spec.since, spec.n)
+            )
             if rows:
                 results.append(WaitResult(subspace=spec.subspace, tuples=rows))
         return results
@@ -342,18 +426,21 @@ def _dead_letter_n_rows(addr: str, to_key: str, claimant: str, count: int, prefi
 
 
 class TestChannelWaiterFakeStore:
-    """The cursor design's Test Plan scenarios against the fake store
-    (T2 `nexus_rdr/213-decision-announcements-rate-limited-not-ack-
-    gated-2026-09-17`)."""
+    """Mailbox scenarios against the fake store's announce-mode branch
+    (bead nexus-vsipz, RDR-213 engine half). Letters (a)-(f) mirror the
+    original RDR-213 Test Plan's own scenario numbering, carried forward
+    from the cursor design this bead supersedes."""
 
     @pytest.mark.asyncio
-    async def test_one_row_is_referenced_once_and_the_cursor_advances(self) -> None:
-        """(a) one row: referenced exactly once; the cursor advances
-        past it so it can never match again."""
+    async def test_one_row_is_referenced_once_and_stamped(self) -> None:
+        """(a) one row: referenced exactly once; the engine's own stamp
+        (`announce_count=1`) is what keeps it from matching again before
+        `reannounce_interval_s` elapses -- there is no client-side cursor
+        for this waiter to hold any more."""
         session_id = str(uuid.uuid4())
         addr = f"mailbox/{session_id}"
         fake = _FakeTupleStore()
-        row = fake.seed(addr, "t1", "hello")
+        fake.seed(addr, "t1", "hello")
         sender = _FakeSender()
         waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
 
@@ -361,9 +448,9 @@ class TestChannelWaiterFakeStore:
         assert len(fake.wait_calls) == 1
         mail_sends = [m for _c, m in sender.calls if m.get("tuple_id") == "t1"]
         assert len(mail_sends) == 1
-        assert waiter._cursor[addr] == (row.created_at, "t1")  # noqa: SLF001
+        assert waiter._last_seen[addr][0] == 1  # noqa: SLF001 -- announce_count
 
-        await waiter.tick()  # since now excludes t1 -- nothing new, no re-send (cadence not due)
+        await waiter.tick()  # not yet due for a re-send (default reannounce_interval_s=150)
         assert len(fake.wait_calls) == 2, "every tick calls wait() exactly once"
         mail_sends = [m for _c, m in sender.calls if m.get("tuple_id") == "t1"]
         assert len(mail_sends) == 1
@@ -373,7 +460,8 @@ class TestChannelWaiterFakeStore:
     async def test_two_rows_arriving_together_are_referenced_one_wake_apart(self) -> None:
         """(b) two rows arriving together: two references, one wake
         apart, in (created_at, id) order -- the mailbox spec's own `n=1`
-        means only the oldest unreferenced row appears per wake."""
+        means only the oldest DUE row appears per wake, and a row just
+        stamped is no longer due, so the second row surfaces next."""
         session_id = str(uuid.uuid4())
         addr = f"mailbox/{session_id}"
         fake = _FakeTupleStore()
@@ -391,8 +479,9 @@ class TestChannelWaiterFakeStore:
 
     @pytest.mark.asyncio
     async def test_an_ignored_reference_is_resent_five_times_then_falls_silent(self) -> None:
-        """(c) an ignored reference is re-sent at `reannounce_interval_s`
-        up to `max_announces` times, then left alone."""
+        """(c) the ENGINE re-announces at `interval_s` up to `max` times
+        (via the `announce` field this waiter now sends every tick),
+        then never again -- this waiter applies no budget of its own."""
         session_id = str(uuid.uuid4())
         addr = f"mailbox/{session_id}"
         fake = _FakeTupleStore()
@@ -403,18 +492,19 @@ class TestChannelWaiterFakeStore:
             reannounce_interval_s=0.0, max_announces=5, wait_timeout_s=0,
         )
 
-        for _ in range(11):  # 1 initial + 4 resends reaches the cap; the rest must stay silent
+        for _ in range(8):  # comfortably past 5 -- must never exceed the cap
             await waiter.tick()
 
         mail_sends = [m for _c, m in sender.calls if m.get("tuple_id") == "t1"]
         assert len(mail_sends) == 5, "must stop at max_announces=5 and never exceed it"
-        assert waiter.status()["announced"] == 1
+        assert waiter.status()["announced"] == 1, "credited once, on the first send, never on a re-send"
         assert waiter.status()["pending"] == 0, "spent -- no longer counts as pending"
 
     @pytest.mark.asyncio
-    async def test_a_new_row_supersedes_the_resend_budget_of_the_old_one(self) -> None:
-        """(c) a new row supersedes whatever the mailbox was tracking --
-        by simple dict overwrite, never a merge of two budgets."""
+    async def test_a_new_row_supersedes_the_last_seen_state_of_the_old_one(self) -> None:
+        """(c) a new row's own stamp is what this waiter's `_last_seen`
+        reflects once the engine starts returning it instead -- by
+        simple dict overwrite, never a merge of two rows' state."""
         session_id = str(uuid.uuid4())
         addr = f"mailbox/{session_id}"
         fake = _FakeTupleStore()
@@ -426,59 +516,72 @@ class TestChannelWaiterFakeStore:
         )
 
         await waiter.tick()  # t1 referenced, count=1
-        await waiter.tick()  # nothing new, no resend due
+        await waiter.tick()  # t1 not yet due -- nothing new
         fake.seed(addr, "t2", "second")
-        await waiter.tick()  # t2 referenced -- supersedes t1's entry entirely
+        await waiter.tick()  # t2 is due (never announced); t1 is not -- t2 wins the n=1 slot
 
         mail_sends = [m.get("tuple_id") for _c, m in sender.calls]
         assert mail_sends == ["t1", "t2"]
         assert waiter.status()["announced"] == 2
-        assert waiter.status()["pending"] == 1, "only ONE active last-reference per mailbox -- t2's, not both"
+        assert waiter.status()["pending"] == 1, "one entry per mailbox -- t2's last-seen state, not both"
 
     @pytest.mark.asyncio
-    async def test_a_claimed_row_seen_at_the_wake_gets_one_reference_nothing_read_back(self) -> None:
-        """(d) a row already claimed when the wake sees it gets one
-        reference like any other -- the notification text already
-        covers an empty `tuple_in`, so nothing is ever read back."""
+    async def test_a_claimed_row_is_never_returned_by_announce_mode_while_live(self) -> None:
+        """(d), REVISED under bead nexus-vsipz: the engine's own
+        claimable filter excludes a claimed-and-live row from announce
+        mode entirely -- the opposite of the cursor design's own
+        behaviour, which referenced it once regardless. Released, it
+        becomes claimable again and is referenced on the next tick (the
+        real engine's own count-continuation across a claim/release
+        cycle is proven server-side, not by this fake: `TupleAnnounceTest
+        .announce_claimedRow_excludedWhileLive_returnedAfterRelease_withCountContinuing`)."""
         session_id = str(uuid.uuid4())
         addr = f"mailbox/{session_id}"
         fake = _FakeTupleStore()
         fake.seed(addr, "t1", "already-claimed", claim_state="claimed")
         sender = _FakeSender()
-        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), _subs(session_id), sender=sender,
+            reannounce_interval_s=0.0, wait_timeout_s=0,
+        )
 
         await waiter.tick()
+        assert sender.calls == [], "claimed-and-live -- announce mode must not see it at all"
+        assert waiter.status()["announced"] == 0
 
+        fake.release(addr, "t1")
+        await waiter.tick()
         mail_sends = [m for _c, m in sender.calls if m.get("tuple_id") == "t1"]
-        assert len(mail_sends) == 1
-        assert len(fake.rd_calls) == 0
+        assert len(mail_sends) == 1, "released -- now claimable, and due"
         assert waiter.status()["announced"] == 1
 
     @pytest.mark.asyncio
-    async def test_a_dead_row_at_the_head_is_skipped_and_the_cursor_advances_past_it(self) -> None:
-        """(e) a dead-lettered row is skipped silently, its cursor
-        advanced past it; the live row behind it is referenced the very
-        next wake (the mailbox spec's own `n=1` caps one row per wake)."""
+    async def test_a_dead_row_is_never_returned_and_the_live_row_behind_it_is_referenced_immediately(
+        self,
+    ) -> None:
+        """(e), REVISED under bead nexus-vsipz: a dead-lettered row is
+        excluded from announce mode's match entirely -- not skipped one
+        tick at a time via a cursor, simply never a candidate -- so the
+        live row behind it is the oldest CLAIMABLE-and-due row from the
+        very FIRST tick, not the second."""
         session_id = str(uuid.uuid4())
         addr = f"mailbox/{session_id}"
         fake = _FakeTupleStore()
-        dead = fake.seed(addr, "d1", None, claim_state="dead")
+        fake.seed(addr, "d1", None, claim_state="dead")
         fake.seed(addr, "live1", "finally-live")
         sender = _FakeSender()
         waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
 
-        await waiter.tick()  # d1 is dead -- skipped, cursor advances past it, nothing sent
-        assert sender.calls == []
-        assert waiter._cursor[addr] == (dead.created_at, "d1")  # noqa: SLF001
-
-        await waiter.tick()  # since=d1's position now -- live1 is the oldest, referenced
+        await waiter.tick()
         mail_sends = [m.get("tuple_id") for _c, m in sender.calls]
-        assert mail_sends == ["live1"]
+        assert mail_sends == ["live1"], "the dead row is never a candidate -- live1 wins the FIRST tick"
 
     @pytest.mark.asyncio
-    async def test_nine_dead_rows_then_a_live_one_is_referenced_within_ten_wakes(self) -> None:
-        """(e) nine dead rows then a live one: the live one is
-        referenced within 10 wakes and nothing else is ever sent."""
+    async def test_nine_dead_rows_then_a_live_one_is_referenced_on_the_first_wake(self) -> None:
+        """(e) nine dead rows then a live one: referenced on the FIRST
+        wake (the engine's claimable filter excludes all nine before
+        `n=1`/ordering is even applied) -- a strictly better bound than
+        the cursor design's own "within 10 wakes"."""
         session_id = str(uuid.uuid4())
         addr = f"mailbox/{session_id}"
         fake = _FakeTupleStore()
@@ -488,16 +591,18 @@ class TestChannelWaiterFakeStore:
         sender = _FakeSender()
         waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
 
-        for _ in range(10):
-            await waiter.tick()
+        await waiter.tick()
 
         mail_sends = [m.get("tuple_id") for _c, m in sender.calls]
-        assert mail_sends == ["live1"], "the live row must be referenced within 10 wakes, nothing else sent"
+        assert mail_sends == ["live1"], "referenced on the first wake; nothing else ever sent"
 
     @pytest.mark.asyncio
     async def test_restart_with_a_backlog_of_three_references_one_per_wake(self) -> None:
-        """(f) a restart with no persisted cursor walks a backlog one
-        reference per wake."""
+        """(f) a restart with no persisted state walks a backlog one
+        reference per wake: a never-announced row is always due, but
+        `n=1` caps one per tick, and the just-announced row is not due
+        again before `reannounce_interval_s` (default 150s), so the
+        NEXT-oldest never-announced row wins the following tick."""
         session_id = str(uuid.uuid4())
         addr = f"mailbox/{session_id}"
         fake = _FakeTupleStore()
@@ -512,6 +617,27 @@ class TestChannelWaiterFakeStore:
 
         mail_sends = [m.get("tuple_id") for _c, m in sender.calls]
         assert mail_sends == ["t1", "t2", "t3"]
+
+    @pytest.mark.asyncio
+    async def test_engine_that_never_renders_announce_count_stops_the_waiter(self) -> None:
+        """The refusal this bead adds, mirroring the existing 404-on-
+        `/wait` rule: an engine that ignores `announce` entirely (one
+        predating nexus-vsipz) never renders `announce_count` on any
+        row, including one matched by an announce-mode mailbox spec --
+        detected on the FIRST such row, logged, and the waiter stops
+        rather than spin against a substrate that cannot honour the
+        cadence/cap it asked for."""
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        fake = _FakeTupleStore()
+        fake.seed_old_engine_row(addr, "t1", "from-an-old-engine")
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), _subs(session_id), sender=sender)
+
+        await waiter.tick()
+
+        assert waiter._stopped is True  # noqa: SLF001 -- white-box assertion, mirrors the 404 test
+        assert sender.calls == [], "must stop BEFORE referencing a row it cannot trust the stamp of"
 
     @pytest.mark.asyncio
     async def test_two_mailboxes_and_a_board_post_in_one_wake(self) -> None:
@@ -544,9 +670,9 @@ class TestChannelWaiterFakeStore:
         assert len(fake.wait_calls) == 1, "one wait() call covers every subscription"
 
     @pytest.mark.asyncio
-    async def test_unsubscribing_a_mailbox_drops_its_cursor_and_last_reference(self) -> None:
-        """(h) unsubscribing a mailbox drops its cursor and last
-        reference -- nothing further is ever sent for it."""
+    async def test_unsubscribing_a_mailbox_drops_its_last_seen_state(self) -> None:
+        """(h) unsubscribing a mailbox drops its `_last_seen` bookkeeping
+        -- nothing further is ever sent for it."""
         session_id = str(uuid.uuid4())
         subs = _subs(session_id)
         addr_b = f"mailbox/{uuid.uuid4().hex}"
@@ -560,15 +686,13 @@ class TestChannelWaiterFakeStore:
         )
 
         await waiter.tick()
-        assert addr_b in waiter._cursor  # noqa: SLF001
-        assert addr_b in waiter._last_ref  # noqa: SLF001
+        assert addr_b in waiter._last_seen  # noqa: SLF001
 
         subs.unsubscribe(addr_b)
         for _ in range(3):
             await waiter.tick()
 
-        assert addr_b not in waiter._cursor  # noqa: SLF001
-        assert addr_b not in waiter._last_ref  # noqa: SLF001
+        assert addr_b not in waiter._last_seen  # noqa: SLF001
         mail_sends = [m for _c, m in sender.calls if m.get("tuple_id") == "b1"]
         assert len(mail_sends) == 1, "zero further sends once unsubscribed"
 
@@ -720,19 +844,23 @@ class TestChannelWaiterFakeStore:
 
 class TestChannelWaiterRealEngine:
     """Properties a fake store cannot prove: the real engine's own
-    global park-slot accounting, genuine parking under `wait()`, and the
-    cursor design's one loss-of-liveness risk under concurrent writers
-    (T2 `nexus_rdr/213-waiter-deep-analysis-2026-09-17` (2/2) section E,
-    stop rule 1)."""
+    global park-slot accounting, genuine parking under `wait()`, and (the
+    stop rule) that announce mode, unlike a client-side cursor, never
+    loses a row under concurrent writers (T2 `nexus_rdr/213-waiter-deep-
+    analysis-2026-09-17` (2/2) section E, stop rule 1)."""
 
     def test_wait_returns_claimed_and_dead_rows_not_just_available_ones(self, t2_service_env) -> None:
         """Engine-fact check, confirmed against the real engine
-        (`TupleRepository.queryOnce`, `wait`'s per-spec query, filters
-        ONLY `consumed_at IS NULL AND expires_at > now` -- no
-        `claim_state` condition at all; only `claimOnce`, backing
-        `in`/`inp`, filters to claimable rows). `wait` returns the
-        oldest UNCONSUMED row, which can be claimed or dead-lettered --
-        exactly what the cursor design's items (d) and (e) depend on."""
+        (`TupleRepository.queryOnce`'s PLAIN branch -- no `announce` on
+        the spec -- filters ONLY `consumed_at IS NULL AND expires_at >
+        now`, no `claim_state` condition at all; only the announce-mode
+        branch, and `claimOnce` backing `in`/`inp`, filter to claimable
+        rows). A plain `wait` (a board's own spec, always; a mailbox
+        spec with no `announce`) returns the oldest UNCONSUMED row
+        regardless of claim state -- UNCHANGED by bead nexus-vsipz, which
+        only narrows the ANNOUNCE-MODE branch. Items (d)/(e) below now
+        depend on the OPPOSITE of this for a mailbox's own `announce`
+        spec -- see their own docstrings."""
         from nexus.mcp.core import tuple_in, tuple_nack, tuple_out, tuple_registry
         from nexus.mcp_infra import t2_ctx
 
@@ -892,8 +1020,10 @@ class TestChannelWaiterRealEngine:
         mail_sends = [m for _c, m in sender.calls if m.get("subspace") == addr]
         assert len(mail_sends) == 3
 
-    def test_a_claimed_row_seen_at_the_wake_gets_one_reference_real_engine(self, t2_service_env) -> None:
-        """(d) real-engine companion."""
+    def test_a_claimed_row_is_never_referenced_by_announce_mode_real_engine(self, t2_service_env) -> None:
+        """(d), REVISED under bead nexus-vsipz: real-engine companion of
+        the claimable-exclusion fake test -- a claimed-and-live row is
+        never returned by announce mode at all."""
         from nexus.mcp.core import tuple_in, tuple_out
         from nexus.mcp_infra import t2_ctx
 
@@ -910,10 +1040,15 @@ class TestChannelWaiterRealEngine:
         asyncio.run(waiter.tick())
 
         mail_sends = [m for _c, m in sender.calls if m.get("subspace") == addr]
-        assert len(mail_sends) == 1
+        assert len(mail_sends) == 0, "claimed-and-live -- the engine's claimable filter must exclude it"
 
-    def test_nine_dead_rows_then_a_live_one_is_referenced_within_ten_wakes_real_engine(self, t2_service_env) -> None:
-        """(e) real-engine companion."""
+    def test_nine_dead_rows_then_a_live_one_is_referenced_on_the_first_wake_real_engine(
+        self, t2_service_env,
+    ) -> None:
+        """(e), REVISED under bead nexus-vsipz: real-engine companion --
+        the live row is referenced on the FIRST wake, since the engine's
+        claimable filter excludes all nine dead rows from the match
+        entirely, rather than the cursor design's "within 10 wakes"."""
         from nexus.mcp.core import tuple_out
         from nexus.mcp_infra import t2_ctx
 
@@ -926,11 +1061,10 @@ class TestChannelWaiterRealEngine:
         sender = _FakeSender()
         waiter = channel.ChannelWaiter(session_id, t2_ctx, subs, sender=sender, wait_timeout_s=1)
 
-        for _ in range(10):
-            asyncio.run(waiter.tick())
+        asyncio.run(waiter.tick())
 
         mail_sends = [m for _c, m in sender.calls if m.get("subspace") == addr]
-        assert len(mail_sends) == 1
+        assert len(mail_sends) == 1, "referenced on the FIRST wake"
 
     def test_restart_with_a_backlog_of_three_real_engine(self, t2_service_env) -> None:
         """(f) real-engine companion."""
@@ -987,20 +1121,26 @@ class TestChannelWaiterRealEngine:
     def test_stop_rule_two_hundred_rows_two_concurrent_writers_no_row_ever_lost_to_the_cursor(
         self, t2_service_env,
     ) -> None:
-        """(g) THE STOP RULE (T2 `nexus_rdr/213-waiter-deep-analysis-
-        2026-09-17` (2/2) section E), and the reproduction of record for
-        `nexus-vsipz`: `TupleRepository.out()` stamps `created_at` with
-        Postgres `now()` at transaction START, not commit, so a slower
-        transaction that starts earlier can commit later and land behind
-        a cursor a reader has already advanced past a younger row's
-        (created_at, id) -- silently and permanently skipping it under a
-        `since=cursor` query. 200 rows, written by TWO CONCURRENT writer
-        threads to ONE mailbox, while a reader repeatedly advances its own
-        cursor after each read, reproduces this ordering race under load
-        (it closes in isolation, which is why it is intermittent here).
-        The engine-side fix in `nexus-vsipz` (an announce stamp set in the
-        same transaction as the row it marks) removes the cursor's read of
-        `created_at` entirely and flips this test to a strict pass."""
+        """(g) A PRIMITIVE-LEVEL test of `rd`'s own `since`-cursor, under
+        two concurrent writers to one mailbox address -- NOT a test of
+        the mailbox delivery path, which this bead (nexus-vsipz) moves
+        off `since` entirely onto the engine's announce stamp, and NOT a
+        test of `ChannelWaiter`'s board branch either: this calls
+        `db.tuples.rd(...)` directly, never `_build_specs`, never
+        `_process_results`'s board arm, never `subs.advance_cursor`.
+        `TupleRepository.out()` stamps `created_at` at transaction START,
+        not commit, so a slower transaction that starts earlier can
+        commit later and land behind a `since` cursor a reader has
+        already advanced past a younger row's `(created_at, id)` --
+        silently and permanently skipping it. Kept, still exercising a
+        live risk, because BOARDS still read by `since` cursor through
+        exactly this code path (`_build_specs`'s board branch is
+        unchanged by this bead) -- the boards decision and fix are bead
+        nexus-q82tk's, not this one's. The xfail reason above (landed on
+        develop ahead of this bead) already states the mailbox path no
+        longer uses a cursor at all; this docstring is about what THIS
+        test exercises today, which the mailbox announce stamp does not
+        touch."""
         from nexus.mcp.core import tuple_out
         from nexus.mcp_infra import t2_ctx
 
@@ -1048,16 +1188,88 @@ class TestChannelWaiterRealEngine:
         missing = written_ids - seen_ids
         assert not missing, (
             f"STOP RULE VIOLATED: {len(missing)} of {len(written_ids)} rows were never observed by a "
-            f"since-advancing reader -- the cursor design can silently skip live mail under concurrent "
-            f"writers. ids: {sorted(missing)[:10]}"
+            f"since-advancing reader -- a client-side cursor can silently skip live mail under "
+            f"concurrent writers. ids: {sorted(missing)[:10]}"
         )
 
-    def test_falsify_cursor_removed_from_mailbox_spec_wait_call_count_explodes(self, t2_service_env) -> None:
-        """Falsification of (a): reverting `_build_specs` to drop the
-        mailbox cursor (`since=None`, always) must make `wait()` return
-        the SAME row immediately every time -- the engine's own
-        immediate-match short circuit -- exploding the call count well
-        past the healthy bound over the SAME real-time window."""
+    def test_announce_mode_never_loses_a_row_to_a_concurrent_writer_skew(self, t2_service_env) -> None:
+        """(g) THE STOP RULE, mailbox path (bead nexus-vsipz, RDR-213
+        engine half; T2 `nexus_rdr/213-waiter-deep-analysis-2026-09-17`
+        (2/2) section E, and the Java-side deterministic proof
+        `TupleAnnounceTest.announce_lateCommittingRow_isReturnedAtNextCall`,
+        which holds a transaction open across a faster sibling's commit
+        to reproduce the skew exactly -- Python cannot control engine
+        transaction boundaries over HTTP, so this test reproduces the
+        SAME class of risk statistically, the way the sibling `since`-
+        cursor test above already does).
+
+        `max=1` makes each row's own announce budget a ONE-SHOT: once
+        the engine has returned it, it is permanently excluded
+        (`announce_count(1)` is never `< max(1)` again), which is what
+        lets an `n=1` poll loop DRAIN a backlog exactly the way a
+        cursor-advancing `rd` loop would -- except announce mode has NO
+        cursor to skip past, so a row that commits out of `created_at`
+        order relative to its siblings is still the oldest UNSTAMPED
+        claimable row the next time anyone asks, and gets picked up
+        regardless of when it happened to commit."""
+        from nexus.mcp.core import tuple_out
+        from nexus.mcp_infra import t2_ctx
+
+        session_id = str(uuid.uuid4())
+        addr = f"mailbox/{session_id}"
+        written_ids: set[str] = set()
+        written_lock = threading.Lock()
+        rows_per_writer = 100
+
+        def _writer(prefix: str) -> None:
+            for i in range(rows_per_writer):
+                tid = tuple_out(
+                    addr, {"to": session_id}, {"from": prefix}, f"{prefix}-{i}", nonce=uuid.uuid4().hex,
+                )
+                with written_lock:
+                    written_ids.add(tid)
+
+        t1 = threading.Thread(target=_writer, args=("writer-a",))
+        t2 = threading.Thread(target=_writer, args=("writer-b",))
+        t1.start()
+        t2.start()
+
+        seen_ids: set[str] = set()
+        spec = WaitSpec(subspace=addr, n=1, announce=Announce(interval_s=0, max=1))
+        with t2_ctx() as db:
+            deadline = time.monotonic() + 60.0
+            empty_polls = 0
+            while time.monotonic() < deadline:
+                results = db.tuples.wait([spec], 0)
+                rows = results[0].tuples if results else []
+                if rows:
+                    empty_polls = 0
+                    for r in rows:
+                        seen_ids.add(r.id)
+                    continue
+                empty_polls += 1
+                writers_done = not t1.is_alive() and not t2.is_alive()
+                if writers_done and empty_polls >= 5:
+                    break
+                time.sleep(0.05)
+
+        t1.join()
+        t2.join()
+        assert len(written_ids) == 2 * rows_per_writer, "sanity: both writers must have completed all their writes"
+        missing = written_ids - seen_ids
+        assert not missing, (
+            f"{len(missing)} of {len(written_ids)} rows were never observed by announce mode's own "
+            f"one-shot drain -- this would be the same stop-rule violation the since-cursor test above "
+            f"guards against, and announce mode is supposed to be immune to it. ids: {sorted(missing)[:10]}"
+        )
+
+    def test_falsify_announce_removed_from_mailbox_spec_wait_call_count_explodes(self, t2_service_env) -> None:
+        """Falsification of (a): reverting `_build_specs` to send a
+        mailbox spec with NO `announce` field at all must make `wait()`
+        return the SAME never-excluded row immediately every time -- the
+        engine's own immediate-match short circuit on the plain
+        (non-announce) path -- exploding the call count well past the
+        healthy bound over the SAME real-time window."""
         from concurrent.futures import ThreadPoolExecutor
 
         from nexus.mcp.core import tuple_out
@@ -1075,8 +1287,10 @@ class TestChannelWaiterRealEngine:
         )
 
         def _reverted_build_specs(self: "channel.ChannelWaiter") -> list[WaitSpec]:
-            # The bug: every mailbox spec's `since` is dropped, so the
-            # SAME already-referenced row matches again on every call.
+            # The bug: every mailbox spec's `announce` is dropped, so the
+            # SAME already-referenced (and never excluded) row matches
+            # again on every call -- the plain `queryOnce` path has no
+            # claim_state/due filtering at all.
             specs: list[WaitSpec] = []
             for entry in self.subs.entries():
                 subspace = entry["subspace"]
@@ -1085,7 +1299,7 @@ class TestChannelWaiterRealEngine:
                     since = (cursor["created_at"], cursor["id"]) if cursor else None
                     specs.append(WaitSpec(subspace=subspace, since=since))
                 else:
-                    specs.append(WaitSpec(subspace=subspace, since=None))
+                    specs.append(WaitSpec(subspace=subspace, n=1))
             return specs
 
         original = channel.ChannelWaiter._build_specs  # noqa: SLF001
@@ -1103,9 +1317,9 @@ class TestChannelWaiterRealEngine:
             channel.ChannelWaiter._build_specs = original  # type: ignore[method-assign]
 
         assert counts["wait"] > 4, (
-            f"removing the cursor from the mailbox spec must blow past the healthy bound of 4 "
-            f"wait() calls over 2.5s at wait_timeout_s=1 -- confirming that bound tests the "
-            f"cursor, not an artifact of the floor (OFF here too); got {counts['wait']}"
+            f"removing `announce` from the mailbox spec must blow past the healthy bound of 4 "
+            f"wait() calls over 2.5s at wait_timeout_s=1 -- confirming that bound tests announce "
+            f"mode, not an artifact of the floor (OFF here too); got {counts['wait']}"
         )
 
 

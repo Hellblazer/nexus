@@ -18,12 +18,27 @@ Two independent halves live here:
   ``HttpTupleStore.wait`` over the session's :class:`~nexus.mcp.
   subscriptions.SubscriptionSet`, and NEVER claims anything (T2
   ``nexus_rdr/213-decision-notify-then-claim-2026-09-17`` -- Sam's
-  original intent). The mailbox path and the board path share ONE shape
-  (T2 ``nexus_rdr/213-decision-announcements-rate-limited-not-ack-gated-
-  2026-09-17``): a per-mailbox CURSOR past the last referenced row, kept
-  in the wait spec every tick, plus the last reference's own re-send
-  budget. The waiter tracks POSITION, not row identity -- no read-back,
-  no claim-state classification, no reconcile.
+  original intent). Mailboxes and boards now take DIFFERENT shapes (bead
+  nexus-vsipz, RDR-213 engine half, superseding the cursor-shares-one-
+  shape design T2 ``nexus_rdr/213-decision-announcements-rate-limited-
+  not-ack-gated-2026-09-17`` first landed): a board keeps its own
+  position cursor (unchanged -- boards have no analogue of a mailbox's
+  claim/ack lifecycle for the engine to gate on). A mailbox instead asks
+  the ENGINE to gate cadence and cap: every tick's mailbox spec carries
+  an ``announce={interval_s, max}`` field, and the engine returns a row
+  only when it is claimable and due, stamping ``announced_at``/
+  ``announce_count`` on it in the same statement that selects it
+  (``TupleRepository.WaitSpec.Announce``, service-side). This closes the
+  cursor design's one structural gap: a cursor keyed on ``(created_at,
+  id)`` can skip a transaction that started earlier but committed later,
+  because a client-side position has no way to know a slower sibling is
+  still in flight. The engine's own re-scan of the claimable-and-due set,
+  ordered oldest first with no position to skip past, cannot lose that
+  row. The waiter tracks nothing about pacing itself for a mailbox any
+  more -- no cursor, no last-reference bookkeeping, no re-send pass, no
+  same-tick double-send exclusion, no dead-row skip (the engine's own
+  claimable filter already excludes a dead-lettered row) -- it renders
+  whatever the engine hands it and stops.
 
 RDR-211 gated every mailbox claim on proof that the channel was live for
 this session (a parent command-line read, or a probe notification the
@@ -82,7 +97,6 @@ import json
 import re
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -90,7 +104,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import structlog
 
-from nexus.db.t2.records import TupleRow, WaitResult, WaitSpec
+from nexus.db.t2.records import Announce, TupleRow, WaitResult, WaitSpec
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
@@ -122,12 +136,12 @@ DEFAULT_MAX_ANNOUNCES = 5
 DEFAULT_TICK_ERROR_BACKOFF_S: float = 5.0
 #: Belt-and-braces floor: a minimum real-clock gap `run()` enforces
 #: between the START of one tick and the START of the next, whenever a
-#: tick returns faster than this. Genuinely defensive under the cursor
-#: design (T2 `nexus_rdr/213-decision-announcements-rate-limited-not-ack-
-#: gated-2026-09-17`) -- the cursor moving past every referenced row
-#: already makes a busy loop structurally impossible, since `wait`'s own
-#: `since` then excludes it from matching again -- kept as a belt against
-#: a future bug, or an engine, that returns from `wait()` before its own
+#: tick returns faster than this. Genuinely defensive, not the fix, for
+#: either subspace shape: a board's own cursor excludes an already-
+#: delivered post from matching again, and a mailbox's `announce` field
+#: makes the engine itself refuse to return a row before its own
+#: interval/cap says so (bead nexus-vsipz) -- kept as a belt against a
+#: future bug, or an engine, that returns from `wait()` before its own
 #: timeout for a reason this waiter did not anticipate.
 DEFAULT_MIN_TICK_INTERVAL_S: float = 0.25
 #: Consecutive fast ticks (faster than `min_tick_interval_s`) before the
@@ -299,24 +313,6 @@ async def send_channel_notification(content: str, meta: dict[str, str]) -> bool:
 # ── The waiter ───────────────────────────────────────────────────────────
 
 
-@dataclass
-class _LastRef:
-    """The last reference sent for one mailbox (RDR-213 Approach item 2,
-    T2 `nexus_rdr/213-decision-announcements-rate-limited-not-ack-gated-
-    2026-09-17`): the exact rendered `(content, meta)` a re-send replays
-    verbatim (never re-derived from a row read back -- there is no row
-    read-back anywhere in this design), when it was last sent, and how
-    many times. Superseded outright -- this dict entry simply replaced --
-    the instant a DIFFERENT row is referenced for the same mailbox;
-    re-sent at `reannounce_interval_s` intervals up to `max_announces`
-    times, then left alone (never dropped) until superseded."""
-
-    content: str
-    meta: dict[str, str]
-    sent_at: float
-    count: int = 1
-
-
 #: Sam's decision, T2 ``nexus_rdr/211-decision-push-reference-2026-09-17``,
 #: carried into RDR-213: the notification `content` a mailbox row or board
 #: post sends is a FIXED template built only from server-controlled
@@ -352,45 +348,45 @@ def _board_notification_content(subspace: str, tuple_id: str) -> str:
 class ChannelWaiter:
     """One session's lifespan waiter: loops ``HttpTupleStore.wait`` over
     its :class:`~nexus.mcp.subscriptions.SubscriptionSet`, delivering
-    board posts and mailbox references by CURSOR, never a claim (RDR-213,
-    T2 ``nexus_rdr/213-decision-announcements-rate-limited-not-ack-gated-
+    board posts and mailbox references, never a claim (RDR-213, T2
+    ``nexus_rdr/213-decision-announcements-rate-limited-not-ack-gated-
     2026-09-17``).
 
-    Every subscription -- board or mailbox -- enters the SAME single
-    ``wait`` call every tick, with ``since`` set to that subspace's own
-    cursor (:meth:`_build_specs`): the position just past the last row
-    this waiter has already referenced or skipped. The spec is NEVER
-    empty. A wake returning a new mailbox row advances that mailbox's
-    cursor past it and, unless the row is dead-lettered (skipped
-    silently -- the ``UserPromptSubmit`` drain hook surfaces a dead row
-    once on its own), sends ONE reference for it, claimed or not: the
-    notification text already states what an empty ``tuple_in`` means, so
-    there is nothing to read back first. The reference is re-sent at
-    ``reannounce_interval_s`` intervals up to ``max_announces`` times
-    (:meth:`_resend_due_references`) until superseded by the next row's
-    own reference; nothing is ever read back to check whether the prior
-    row was consumed.
+    Every subscription enters the SAME single ``wait`` call every tick
+    (:meth:`_build_specs`); the spec is NEVER empty. A board's spec
+    carries ``since`` set to its own position cursor, unchanged from
+    before. A mailbox's spec instead carries ``announce={interval_s,
+    max}`` (bead nexus-vsipz, RDR-213 engine half): the ENGINE decides
+    whether a row is claimable and due, and stamps it in the same
+    statement that selects it, so a row it returns is a row this waiter
+    has never seen re-sent too soon or too often. A returned mailbox row
+    is always sent -- claimed or not, the notification text already
+    states what an empty ``tuple_in`` means -- and ``_announced_total``
+    increments only the first time a row is seen (``announce_count ==
+    1``), never on a re-send the engine itself chose to make.
 
-    This makes a busy loop structurally impossible rather than excluded
-    by a rule: the cursor moves past every row this waiter has ever acted
-    on, so ``wait``'s own ``since`` filter stops that row from matching
-    again, and the call genuinely parks. Two rows arriving together are
-    referenced one wake apart (the second becomes the new cursor position
-    the very next tick, immediately, not gated on the first being acked);
-    a restart walks a backlog one reference per wake, exactly as RDR-213
-    already says a restart re-announces once more. The cursor is not
-    perfectly ordered against the engine's own ``created_at`` (stamped at
-    transaction start, not commit -- ``nexus-vsipz``), so a row from a
-    slower, earlier-started transaction can commit after the cursor has
-    already advanced past a younger row's position and be skipped by
-    every later ``since`` query; the cost is a delayed wake, never a lost
-    message, since the ``UserPromptSubmit`` drain hook and ``tuple_in``
-    both filter by claim state, not by this cursor.
+    This makes a busy loop structurally impossible for either subspace
+    shape, by different mechanisms: a board's cursor stops an
+    already-delivered post from matching `wait` again; a mailbox's
+    engine-side due check stops a row from matching before its own
+    interval/cap says so. Two rows arriving together are referenced one
+    wake apart (the second becomes newly due the very next tick,
+    immediately, never gated on the first being acked); a restart with a
+    backlog walks it one reference per wake, since a never-announced row
+    is always due. A restart that lands MID-INTERVAL on an already-
+    announced, not-yet-due row does NOT re-announce it: the stamp lives
+    in Postgres, not in this waiter, so the row simply stays silent until
+    it is next due on its own schedule -- a real divergence from RDR-213's
+    original client-side-dict design, named here rather than left
+    implicit (bead nexus-vsipz review round; see the RDR's own amendment
+    for the full accounting).
 
     Constants (`wait_timeout_s`, `reannounce_interval_s`, `max_announces`)
     default to the production values (RDR-213 Technical Design "Delivery":
     25/150/5) and are overridden only by tests, so the suite never
-    actually waits real minutes.
+    actually waits real minutes. `reannounce_interval_s`/`max_announces`
+    are sent to the ENGINE as `Announce.interval_s`/`.max` every tick
+    (bead nexus-vsipz) -- this waiter no longer applies them itself.
 
     `sender` defaults to :func:`send_channel_notification`; tests inject
     a fake recording calls instead of touching a real stdio connection.
@@ -446,17 +442,19 @@ class ChannelWaiter:
         self._fast_tick_streak = 0
         self._warned_fast_ticks = False
 
-        #: subspace -> `(created_at, id)` past the last row this waiter
-        #: has referenced OR skipped (dead-lettered) for that mailbox --
-        #: the position `_build_specs` threads into that mailbox's own
-        #: `WaitSpec.since`, exactly the board path's own cursor. Only
-        #: ever moves forward.
-        self._cursor: dict[str, tuple[str, str]] = {}
-        #: subspace -> the last reference sent for that mailbox (see
-        #: `_LastRef`) -- the whole of this design's back-pressure state.
-        self._last_ref: dict[str, _LastRef] = {}
-        #: Cumulative count of DISTINCT rows ever referenced (never
-        #: incremented on a re-send of the same reference).
+        #: subspace -> `(announce_count, seen_at)` of the LAST mailbox row
+        #: this waiter was handed, where `seen_at` is `time.monotonic()`
+        #: (bead nexus-vsipz). The engine owns cadence and cap now -- this
+        #: is not back-pressure state, only enough to answer `status()`'s
+        #: `pending`/`oldest_pending_age_s` honestly: "pending" means "the
+        #: last row we saw for this mailbox had not yet exhausted its
+        #: announce budget when we saw it" -- the closest this waiter can
+        #: state without reading a row back (which the design deliberately
+        #: never does), not a claim that the row is still unconsumed.
+        self._last_seen: dict[str, tuple[int, float]] = {}
+        #: Cumulative count of DISTINCT rows ever referenced (incremented
+        #: only when a mailbox row's own `announce_count == 1` -- its
+        #: FIRST send -- never on a re-send the engine chose to make).
         self._announced_total = 0
 
         self._alive = False
@@ -483,17 +481,27 @@ class ChannelWaiter:
 
     def status(self) -> dict[str, Any]:
         """`alive`: this waiter's task is running (never proved past
-        `_stop_no_wait_support` or a real cancellation). `last_wake`:
-        ISO-8601 timestamp of the last completed `wait()` round-trip, or
-        `None` before the first one. `announced`: the cumulative count of
-        DISTINCT rows this waiter has ever referenced (never incremented
-        on a re-send). `pending`: how many mailboxes have a last reference
-        still under budget (`count < max_announces`) and not yet
-        superseded by a newer row's own reference -- 0 or 1 per mailbox.
-        `oldest_pending_age_s`: seconds since the oldest such reference
-        was (last) sent, or `None` when `pending` is 0."""
-        active = [ref for ref in self._last_ref.values() if ref.count < self.max_announces]
-        oldest_pending_age_s = (time.monotonic() - min(ref.sent_at for ref in active)) if active else None
+        `_stop_no_wait_support`/`_stop_no_announce_support` or a real
+        cancellation). `last_wake`: ISO-8601 timestamp of the last
+        completed `wait()` round-trip, or `None` before the first one.
+        `announced`: the cumulative count of DISTINCT rows this waiter has
+        ever referenced (incremented only on a row's first send, never on
+        a re-send the engine chose to make).
+
+        `pending` (bead nexus-vsipz, RDR-213 engine half): the engine now
+        owns cadence and cap, so this waiter has no local back-pressure
+        state to report `pending` from precisely. The definition used here
+        is the simplest HONEST one available without reading a row back
+        (which this design deliberately never does): how many mailboxes'
+        LAST SEEN row had not yet exhausted its announce budget
+        (`announce_count < max_announces`) at the moment this waiter saw
+        it -- not "is still genuinely outstanding" (a claimed-and-acked
+        row's last-seen count does not change merely because it was
+        consumed; this waiter would have no way to know). `
+        oldest_pending_age_s`: seconds since the oldest such row was last
+        seen, or `None` when `pending` is 0."""
+        active = [seen for seen in self._last_seen.values() if seen[0] < self.max_announces]
+        oldest_pending_age_s = (time.monotonic() - min(seen_at for _, seen_at in active)) if active else None
         return {
             "alive": self._alive,
             "last_wake": self._last_wake.isoformat() if self._last_wake else None,
@@ -566,32 +574,25 @@ class ChannelWaiter:
             return fn(db.tuples)
 
     async def tick(self) -> None:
-        """One iteration. Drops the cursor and last reference of any
-        mailbox no longer subscribed (unsubscribe), then parks ONE
-        `wait()` call over EVERY subscription -- board or mailbox alike,
-        the spec is never empty -- capped to the nearest still-active
-        mailbox's next re-send point so a re-send is never late by up to
-        a full tick merely because some OTHER subspace kept the spec
-        matching sooner. Exposed (not folded into :meth:`run`) so tests
-        can drive iterations directly instead of a real timed loop."""
+        """One iteration. Drops the last-seen record of any mailbox no
+        longer subscribed (unsubscribe), then parks ONE `wait()` call
+        over EVERY subscription -- board or mailbox alike, the spec is
+        never empty. There is no local re-send point to cap the timeout
+        to any more (bead nexus-vsipz): a mailbox's own due timing now
+        lives entirely in the engine's `announce` predicate, so this tick
+        simply asks for up to `wait_timeout_s` and lets the engine decide
+        when (or whether) anything is due before that. Exposed (not
+        folded into :meth:`run`) so tests can drive iterations directly
+        instead of a real timed loop."""
         live_subspaces = {e["subspace"] for e in self.subs.entries()}
-        for subspace in list(self._cursor):
+        for subspace in list(self._last_seen):
             if subspace not in live_subspaces:
-                del self._cursor[subspace]
-        for subspace in list(self._last_ref):
-            if subspace not in live_subspaces:
-                del self._last_ref[subspace]
+                del self._last_seen[subspace]
 
         specs = self._build_specs()
-        effective_timeout_s = min(self.wait_timeout_s, self._seconds_to_nearest_resend_s())
-        # `HttpTupleStore.wait`'s `timeout_s` is typed (and wired to the
-        # engine's `long timeoutSeconds`) as an integer -- floor, never
-        # round, so this tick wakes AT OR BEFORE the nearest re-send
-        # point, never after it.
-        wait_timeout_arg = max(0, int(effective_timeout_s))
         try:
             results: list[WaitResult] = await asyncio.to_thread(
-                self._call, lambda t: t.wait(specs, wait_timeout_arg),
+                self._call, lambda t: t.wait(specs, self.wait_timeout_s),
             )
         except httpx.HTTPStatusError as exc:
             if exc.response is not None and exc.response.status_code == 404:
@@ -601,37 +602,50 @@ class ChannelWaiter:
                 self._stop_no_wait_support()
                 return
             raise  # any other status is a transient fault: `run()` logs, backs off and ticks again
-        just_referenced = await self._process_results(results)
+        if self._engine_ignores_announce(results):
+            self._stop_no_announce_support()
+            return
+        await self._process_results(results)
         self._last_wake = datetime.now(UTC)
-        await self._resend_due_references(skip=just_referenced)
         self._publish_status()
 
     def _stop_no_wait_support(self) -> None:
         self._stopped = True
         _log.warning("channel_waiter_no_wait_support", session_id=self.session_id)
 
-    def _seconds_to_nearest_resend_s(self) -> float:
-        """Seconds until the nearest still-active mailbox's next re-send
-        is due (floored at 0); `wait_timeout_s` when none is due at all --
-        either no mailbox has a last reference, or every one is already
-        spent (`count >= max_announces`, which must never re-enter this
-        calculation -- a spent reference is left alone, not resent)."""
-        now = time.monotonic()
-        due_times = [
-            ref.sent_at + self.reannounce_interval_s
-            for ref in self._last_ref.values()
-            if ref.count < self.max_announces
-        ]
-        if not due_times:
-            return float(self.wait_timeout_s)
-        return max(0.0, min(due_times) - now)
+    def _stop_no_announce_support(self) -> None:
+        self._stopped = True
+        _log.warning("channel_waiter_no_announce_support", session_id=self.session_id)
+
+    @staticmethod
+    def _engine_ignores_announce(results: list[WaitResult]) -> bool:
+        """`True` the first time ANY mailbox row in *results* carries
+        `announce_count=None` (bead nexus-vsipz): a real engine ALWAYS
+        renders that field, on every tuple it returns, whether or not the
+        spec that matched it carried `announce` at all (0 is the column
+        default) -- so seeing `None` on a row returned FOR an announce-
+        mode mailbox spec is proof the engine never even looked at that
+        field, exactly the same class of evidence a 404 from `/wait`
+        itself is for an engine predating `wait` entirely. A board's rows
+        are never checked here: a board spec carries no `announce`, so an
+        old engine's board behaviour is unaffected and tells us nothing
+        about announce support."""
+        for result in results:
+            if result.subspace.startswith("board/"):
+                continue
+            for row in result.tuples:
+                if row.announce_count is None:
+                    return True
+        return False
 
     def _build_specs(self) -> list[WaitSpec]:
         """Every subscription -- board or mailbox -- enters the spec
-        every tick (T2 `nexus_rdr/213-decision-announcements-rate-
-        limited-not-ack-gated-2026-09-17`): a mailbox's own spec asks for
-        `n=1` since its own cursor, exactly the board path's own shape.
-        The spec is NEVER empty."""
+        every tick. The spec is NEVER empty. A board's spec is unchanged:
+        `since` set to its own position cursor. A mailbox's spec (bead
+        nexus-vsipz, RDR-213 engine half) asks for `n=1` and an `announce`
+        field carrying this waiter's `reannounce_interval_s`/
+        `max_announces` -- the engine, not this waiter, decides whether
+        anything is due."""
         specs: list[WaitSpec] = []
         for entry in self.subs.entries():
             subspace = entry["subspace"]
@@ -640,26 +654,23 @@ class ChannelWaiter:
                 since = (cursor["created_at"], cursor["id"]) if cursor else None
                 specs.append(WaitSpec(subspace=subspace, since=since))
             else:
-                specs.append(WaitSpec(subspace=subspace, since=self._cursor.get(subspace)))
+                specs.append(WaitSpec(
+                    subspace=subspace, n=1,
+                    announce=Announce(interval_s=int(self.reannounce_interval_s), max=self.max_announces),
+                ))
         return specs
 
-    async def _process_results(self, results: list[WaitResult]) -> set[str]:
+    async def _process_results(self, results: list[WaitResult]) -> None:
         """Board posts: unchanged -- deliver each, advance the cursor,
-        persist. Mailboxes: each spec asks for `n=1`, so at most one NEW
-        row per mailbox per wake -- dead-lettered: advance the cursor
-        past it and send nothing (the drain hook surfaces a dead row once
-        on its own); otherwise reference it, claimed or not (the
-        notification text already covers an empty `tuple_in`), and
-        advance the cursor past it too.
-
-        Returns the set of mailbox subspaces just referenced THIS tick,
-        so :meth:`tick` can exclude them from :meth:`_resend_due_
-        references` -- a fresh reference's own `sent_at` is `now`, and
-        `reannounce_interval_s=0` (several tests use it to force "always
-        due" quickly) would otherwise make the SAME tick's resend pass
-        re-send it a second time immediately."""
+        persist. Mailboxes (bead nexus-vsipz, RDR-213 engine half): each
+        spec asks for `n=1`, so at most one row per mailbox per wake, and
+        the engine has already decided it is claimable and due -- there
+        is no dead-row skip here any more, because the engine's own
+        claimable filter excludes a dead-lettered row before this waiter
+        ever sees it. Every returned mailbox row is referenced, claimed
+        or not (the notification text already covers an empty
+        `tuple_in`)."""
         advanced = False
-        just_referenced: set[str] = set()
         for result in results:
             if result.subspace.startswith("board/"):
                 for row in result.tuples:
@@ -670,11 +681,7 @@ class ChannelWaiter:
                     advanced = True
                 continue
             for row in result.tuples:  # n=1 caps this to at most one row
-                if row.claim_state == "dead":
-                    self._cursor[result.subspace] = (row.created_at or "", row.id)
-                    continue
                 await self._reference_mailbox_row(result.subspace, row)
-                just_referenced.add(result.subspace)
         if advanced:
             # Code review Significant 3 (RDR-211): `self.persist()` (a T1
             # write-back, a synchronous HTTP call) must never run directly
@@ -682,7 +689,6 @@ class ChannelWaiter:
             # already goes through `asyncio.to_thread` for exactly this
             # reason.
             await asyncio.to_thread(self.persist)
-        return just_referenced
 
     async def _deliver_board_post(self, subspace: str, row: TupleRow) -> None:
         meta = {"subspace": subspace, "tuple_id": row.id}
@@ -693,10 +699,13 @@ class ChannelWaiter:
 
     async def _reference_mailbox_row(self, subspace: str, row: TupleRow) -> None:
         """Send ONE reference for *row* (claimed or not -- the
-        notification text already covers an empty `tuple_in`), advance
-        *subspace*'s cursor past it, and start a fresh re-send budget --
-        superseding, by simple dict overwrite, whatever reference this
-        mailbox tracked before."""
+        notification text already covers an empty `tuple_in`). The engine
+        has already decided this row is due and stamped it (bead
+        nexus-vsipz) -- this method's only jobs are rendering the
+        notification, crediting `_announced_total` on the row's FIRST
+        send (`announce_count == 1`, never on a re-send the engine chose
+        to make), and recording the `status()` bookkeeping in
+        `_last_seen`."""
         to_address = subspace.removeprefix("mailbox/")
         meta = {"subspace": subspace, "tuple_id": row.id}
         for key in ("from", "kind", "correlation_id"):
@@ -704,27 +713,9 @@ class ChannelWaiter:
                 meta[key] = row.dims[key]
         content = _mailbox_notification_content(subspace, row.id, to_address)
         await self.sender(content, meta)
-        self._cursor[subspace] = (row.created_at or "", row.id)
-        self._last_ref[subspace] = _LastRef(content=content, meta=meta, sent_at=time.monotonic(), count=1)
-        self._announced_total += 1
-
-    async def _resend_due_references(self, *, skip: set[str]) -> None:
-        """Re-send every mailbox's last reference whose budget is not yet
-        spent and whose re-send point is due -- the EXACT `(content,
-        meta)` last sent, replayed verbatim; nothing is ever read back to
-        check whether the row was consumed. *skip* names the mailboxes
-        `_process_results` just referenced THIS tick -- excluded here
-        so a fresh reference (`sent_at = now`) is never ALSO resent in
-        the same tick merely because `reannounce_interval_s` happens to
-        be 0 (several tests use that to force "always due" quickly)."""
-        now = time.monotonic()
-        for subspace, ref in self._last_ref.items():
-            if subspace in skip:
-                continue
-            if ref.count < self.max_announces and (now - ref.sent_at) >= self.reannounce_interval_s:
-                await self.sender(ref.content, ref.meta)
-                ref.sent_at = now
-                ref.count += 1
+        if row.announce_count == 1:
+            self._announced_total += 1
+        self._last_seen[subspace] = (row.announce_count or 0, time.monotonic())
 
     def start(self) -> None:
         self._task = asyncio.create_task(self.run())

@@ -132,6 +132,23 @@ class TupleRow:
     would silently be absent on some call paths and present on none.
     ``in_``/``inp`` deliver the claim id as the SECOND element of their
     own ``(TupleRow, claim_id)`` return, never inside the row.
+
+    ``announced_at`` / ``announce_count`` (bead nexus-vsipz, RDR-213
+    engine half) are ADDITIVE wire fields, present on every tuple an
+    engine that carries this bead renders, not only an announce-mode
+    result -- a row nothing has ever announced simply carries
+    ``announced_at=None, announce_count=0``, the column defaults.
+
+    ``announce_count`` is ``None`` ONLY when the engine did not render
+    the field at all -- an engine predating this bead, which never
+    stamps announce_count and never sends the key. A row an announce-
+    mode query actually returns always carries ``announce_count >= 1``
+    (the SAME statement that selects it also increments it), so a
+    caller that asked for announce mode and sees ``announce_count is
+    None`` on a returned row has proof the engine ignored the request
+    entirely -- :class:`~nexus.mcp.channel.ChannelWaiter` uses exactly
+    this to refuse to run against such an engine, mirroring how it
+    already refuses on a 404 from ``/wait`` itself.
     """
 
     id: str
@@ -148,6 +165,8 @@ class TupleRow:
     consumed_by: str | None
     expires_at: str | None
     created_at: str | None
+    announced_at: str | None = None
+    announce_count: int | None = 0
 
 
 @dataclass(frozen=True)
@@ -227,6 +246,20 @@ class SubspaceCensus:
 
 
 @dataclass(frozen=True)
+class Announce:
+    """Rate-limited engine announcement for one ``WaitSpec`` (bead
+    nexus-vsipz, RDR-213 engine half), mirroring the engine's
+    ``TupleRepository.WaitSpec.Announce`` field for field. ``interval_s``
+    is the minimum gap between two announcements of the SAME row;
+    ``max`` bounds how many times total. See ``WaitSpec.announce``'s own
+    docstring for the full contract.
+    """
+
+    interval_s: int
+    max: int
+
+
+@dataclass(frozen=True)
 class WaitSpec:
     """One subspace entry in a ``HttpTupleStore.wait`` call (RDR-211 Phase 1
     Step 3, bead nexus-rplay.9), mirroring the engine's
@@ -237,16 +270,27 @@ class WaitSpec:
     :func:`~nexus.db.t2.http_tuple_store._since_payload` does that
     translation for both callers.
 
+    ``announce`` (bead nexus-vsipz, RDR-213 engine half) is an ADDITIVE
+    field: ``None`` (the default) is today's unchanged behaviour. When
+    set, the engine restricts its match to claimable rows due for a
+    first-or-repeat announcement and stamps ``announced_at``/
+    ``announce_count`` on every row it returns, in the same statement --
+    see ``TupleRepository.WaitSpec.Announce``'s own javadoc for the full
+    mechanism. ``since`` and ``announce`` together are refused by the
+    engine (``SchemaViolation``): announce mode tracks position on the
+    ROW itself, never via a client-supplied cursor.
+
     ``wait`` is an internal transport method: the session's own MCP server
-    lifespan waiter (a later bead) is its only caller (RDR-211 Open
-    Question 6, Sam's decision). There is no MCP tool or CLI verb for it,
-    so nothing outside that waiter constructs a ``WaitSpec`` today.
+    lifespan waiter (:mod:`nexus.mcp.channel`) is its only caller (RDR-211
+    Open Question 6, Sam's decision). There is no MCP tool or CLI verb for
+    it, so nothing outside that waiter constructs a ``WaitSpec`` today.
     """
 
     subspace: str
     keys_pattern: dict[str, str] | None = None
     n: int = 1
     since: tuple[str, str] | None = None
+    announce: Announce | None = None
 
 
 @dataclass(frozen=True)

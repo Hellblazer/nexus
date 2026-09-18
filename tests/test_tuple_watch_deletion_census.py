@@ -105,6 +105,27 @@ _ROUND_3_5_IDENTITY_TRACKING_BANNED_STRINGS: tuple[str, ...] = (
     "_RECONCILE_MAX_PASSES",
 )
 
+#: Bead nexus-vsipz (RDR-213 engine half): the mailbox path's own cursor
+#: and per-mailbox re-send bookkeeping -- the ROUND-3-5-successor design
+#: T2 `nexus_rdr/213-decision-announcements-rate-limited-not-ack-gated-
+#: 2026-09-17` landed and this bead itself supersedes -- replaced by the
+#: engine's own `announced_at`/`announce_count` stamp
+#: (`TupleRepository.WaitSpec.Announce`, service-side): the engine now
+#: decides cadence and cap, and this waiter tracks no position of its
+#: own for a mailbox at all. `._cursor` (not the bare word `cursor`,
+#: which boards' own position-cursor dict key and `ReadCursor` both still
+#: use legitimately) is the exact attribute-access shape the deleted
+#: `self._cursor`/`waiter._cursor` dict used and nothing else in the live
+#: tree ever wrote.
+_NEXUS_VSIPZ_ENGINE_STAMP_BANNED_STRINGS: tuple[str, ...] = (
+    "_LastRef",
+    "_last_ref",
+    "_resend_due_references",
+    "_seconds_to_nearest_resend_s",
+    "just_referenced",
+    "._cursor",
+)
+
 RDR_213_BANNED_STRINGS: tuple[str, ...] = (
     "detect_channel_argv",
     "_CHANNEL_ARGV_FLAGS",
@@ -121,6 +142,7 @@ RDR_213_BANNED_STRINGS: tuple[str, ...] = (
     "renew_interval_s",
     "max_resends",
     *_ROUND_3_5_IDENTITY_TRACKING_BANNED_STRINGS,
+    *_NEXUS_VSIPZ_ENGINE_STAMP_BANNED_STRINGS,
 )
 
 #: Every directory this census walks, relative to the repo root.
