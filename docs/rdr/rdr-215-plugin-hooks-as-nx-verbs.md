@@ -2,12 +2,12 @@
 title: "Plugin Hooks as nx Verbs: Retire the Bash Hook Layer"
 id: RDR-215
 type: Technical Debt
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-09-18
-accepted_date:
+accepted_date: 2026-09-18
 related_issues: []
 related_rdrs: [RDR-184, RDR-205]
 ---
