@@ -275,8 +275,35 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
                 "lost), or remove the file first."
             )
 
+    # nexus-cd1k0.5: --force over a unit the OS already loaded must unload
+    # it first, or launchd keeps running the OLD definition (bootstrap of an
+    # already-loaded label is a no-op) and systemd keeps the old ExecStart
+    # until a daemon-reload. converge_service_autostart_unit avoids this by
+    # uninstalling first; the CLI's --force path did not. A deactivation
+    # that fails (nothing loaded) is harmless and ignored.
+    previous: str | None = existing if dest.exists() else None
+    if force and previous is not None and previous != rendered:
+        try:
+            subprocess.run(_deactivate_cmd(dest, tier=tier), capture_output=True, text=True, check=False)
+        except (FileNotFoundError, OSError):
+            pass
+
     dest.write_text(rendered)
     dest.chmod(0o644)
+
+    def _restore_on_activation_failure() -> None:
+        # nexus-cd1k0.4: the unit file was written before activation, so an
+        # activation failure (no user bus over SSH, a transient launchctl
+        # error) left it in place and the NEXT run read file == render,
+        # answered ALREADY_PRESENT, and activated nothing. Put the tree
+        # back the way it was so the retry actually retries.
+        try:
+            if previous is None:
+                dest.unlink(missing_ok=True)
+            else:
+                dest.write_text(previous)
+        except OSError:
+            pass
 
     cmd = _activate_cmd(dest)
     warnings: tuple[str, ...] = ()
@@ -285,6 +312,7 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
     except FileNotFoundError as exc:
         msg = f"{cmd[0]} not found on PATH; file installed but not activated ({exc})."
         if not force:
+            _restore_on_activation_failure()
             raise ActivationError(msg) from exc
         _log.warning(f"{tier}_install_activation_not_found", dest=str(dest), error=str(exc))
         return InstallResult(
@@ -294,6 +322,7 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
         detail = (result.stderr or "").strip() or (result.stdout or "").strip()
         msg = f"{' '.join(cmd)} exited {result.returncode}: {detail}"
         if not force:
+            _restore_on_activation_failure()
             raise ActivationError(msg)
         _log.warning(f"{tier}_install_activation_failed", dest=str(dest), returncode=result.returncode)
         warnings = (msg,)

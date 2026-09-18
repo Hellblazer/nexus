@@ -356,3 +356,24 @@ def test_vimgrep_without_query_uses_line_start() -> None:
 def test_compact(query, content, expected) -> None:
     lines = format_compact([_result(content=content)], query=query)
     assert lines[0] == expected
+
+
+def test_bat_line_range_is_relative_to_the_stdin_start(monkeypatch) -> None:
+    """nexus-cd1k0.14: bat's --line-range was given in file line numbers over
+    a stdin that starts at the chunk, so a chunk at lines 40-42 highlighted
+    nothing (range 40:42 over three lines) and fell back to plain."""
+    from nexus import formatters as fm  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+
+    argv_seen: list[list[str]] = []
+
+    def _fake_run(cmd, *a, **k):
+        argv_seen.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, stdout="hl\n", stderr="")
+
+    monkeypatch.setattr(fm.subprocess, "run", _fake_run)
+    fm._is_bat_installed.cache_clear()
+    monkeypatch.setattr(fm, "_is_bat_installed", lambda: True)
+    fm._format_with_bat([_result(content="a\nb\nc", line_start=40)])
+    assert argv_seen, "bat must have been invoked"
+    cmd = argv_seen[0]
+    assert cmd[cmd.index("--line-range") + 1] == "1:3", cmd

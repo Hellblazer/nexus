@@ -18,6 +18,7 @@ for real.
 """
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -538,3 +539,53 @@ class TestUnitRestartPolicyMatchesFencedExitContract:
         assert not any(ln.startswith("Restart=") and ln != "Restart=on-failure" for ln in active), (
             f"exactly one Restart= directive, and it must be on-failure; got {active}"
         )
+
+
+class TestActivationFailure:
+    """nexus-cd1k0.4 and .5: the unit file's fate around activation."""
+
+    def test_activation_failure_restores_the_tree_so_the_retry_activates_again(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The unit file was written before activation and stayed on an
+        ActivationError, so the next run read file == render, answered
+        ALREADY_PRESENT and activated nothing (activation attempts stayed
+        at 1 across two installs). Reproduced pre-fix."""
+        _set_platform(monkeypatch, "darwin")
+        _stub_paths(tmp_path, monkeypatch)
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="Failed to bootstrap")
+
+        monkeypatch.setattr(installer.subprocess, "run", _fake_run)
+        dest = tmp_path / "units" / "com.nexus.service.plist"
+        with pytest.raises(installer.ActivationError):
+            installer.install_autostart(tier="service")
+        assert not dest.exists(), "a unit that never activated must not be left as installed"
+        with pytest.raises(installer.ActivationError):
+            installer.install_autostart(tier="service")
+        assert sum(1 for c in calls if "bootstrap" in c) == 2, calls
+
+    def test_force_over_a_differing_unit_unloads_it_before_activating(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--force over a loaded unit ran no bootout, so launchd kept running
+        the old definition (bootstrap of a loaded label is a no-op)."""
+        _set_platform(monkeypatch, "darwin")
+        _stub_paths(tmp_path, monkeypatch)
+        dest = tmp_path / "units" / "com.nexus.service.plist"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text("<plist>old definition</plist>\n")
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(installer.subprocess, "run", _fake_run)
+        result = installer.install_autostart(tier="service", force=True)
+        assert result.status is installer.InstallStatus.NEWLY_INSTALLED
+        verbs = [c[1] for c in calls if c and c[0] == "launchctl"]
+        assert verbs == ["bootout", "bootstrap"], calls

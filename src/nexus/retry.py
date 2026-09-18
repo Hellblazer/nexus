@@ -273,13 +273,19 @@ def _is_retryable_vector_error(exc: BaseException) -> bool:
     # 2. Transport-level errors — no HTTP response, but clearly transient.
     if isinstance(exc, httpx.TransportError):
         return True
+    # 2b. A DIRECT connectivity error is transient whatever it carries in
+    #     __context__ (nexus-cd1k0.10): http_vector_client's post-401
+    #     re-resolve retry runs inside the except block, so a
+    #     ConnectionResetError raised there chains the 401, and step 3's
+    #     chained-status walk classed it non-retryable on the first attempt.
+    #     The ETL classifier checks the direct type first and gets it right.
+    if isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError)):
+        return True
     # 3. Authoritative status-code check across both HTTP-error families.
     found = _extract_status_and_retry_after(exc)
     if found is not None:
         return found[0] in _RETRYABLE_HTTP_STATUSES
-    # 3b. Bare urllib connectivity errors, direct or chained (see docstring).
-    if isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError)):
-        return True
+    # 3b. Chained urllib connectivity errors (the direct form is 2b above).
     cause = exc.__cause__ or exc.__context__
     if isinstance(cause, (urllib.error.URLError, TimeoutError, ConnectionError)):
         return True
@@ -849,6 +855,11 @@ def _etl_batch_with_breaker(
     genuinely dead endpoint cannot hang forever; the caller's existing
     per-batch except/record path then attributes the failure.
     """
+    # nexus-cd1k0.11: max_trips is documented per BATCH ("a batch gives up")
+    # but trip_count lived on the leg-wide breaker and never reset, so the
+    # 21st trip anywhere in a long leg abandoned a batch whose next call
+    # would have succeeded. consecutive_failures stays leg-wide by design.
+    breaker.trip_count = 0
     while True:
         try:
             result = _etl_with_retry(fn, *args, max_attempts=max_attempts, **kwargs)

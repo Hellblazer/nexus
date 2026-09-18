@@ -448,3 +448,42 @@ class TestGetCredentialConfigCache:
         first = cfgmod._load_global_config(cfg)
         first["credentials"] = {"probe_key": "poisoned"}
         assert cfgmod._load_global_config(cfg)["credentials"]["probe_key"] == "sekrit"
+
+
+# ── nexus-cd1k0.7 / .8: config set strings and empty sections ─────────────────
+
+
+def test_pdf_bool_strings_from_config_set_are_honoured(home: Path) -> None:
+    """`nx config set pdf.mineru_autostart false` stores the STRING, and
+    bool("false") is True, so the switch nx doctor names never turned
+    autostart off. Reproduced pre-fix."""
+    global_dir = home / ".config" / "nexus"
+    global_dir.mkdir(parents=True)
+    (global_dir / "config.yml").write_text(
+        yaml.dump({"pdf": {"mineru_autostart": "false", "mineru_table_enable": "no"}})
+    )
+    pdf = cfgmod.get_pdf_config(repo_root=home)
+    assert pdf.mineru_autostart is False
+    assert pdf.mineru_table_enable is False
+
+
+def test_coerce_bool_reads_the_strings_config_set_writes() -> None:
+    for raw, want in (("true", True), ("False", False), ("1", True), ("0", False), ("off", False), (1, True)):
+        assert cfgmod._coerce_bool(raw, key="k", default=not want) is want, raw
+    assert cfgmod._coerce_bool("maybe", key="k", default=True) is True  # malformed -> default, as before
+
+
+def test_empty_sections_read_as_empty_dicts(home: Path) -> None:
+    """A section whose children are all commented out parses as None and
+    made five readers raise AttributeError at CLI and MCP startup,
+    is_local_mode and get_credential included. Reproduced pre-fix."""
+    global_dir = home / ".config" / "nexus"
+    global_dir.mkdir(parents=True)
+    (global_dir / "config.yml").write_text("credentials:\ninstall:\n")
+    (home / ".nexus.yml").write_text("tuning:\npdf:\n")
+    cfg = cfgmod.load_config(repo_root=home)
+    assert isinstance(cfg["tuning"], dict) and cfg["tuning"], "the default tuning section survives"
+    assert cfg["pdf"]["extractor"] == "auto"
+    assert cfgmod.get_credential("service_url") == ""
+    assert isinstance(cfgmod.is_local_mode(), bool)
+    assert isinstance(cfgmod.get_tuning_config(repo_root=home).vector_weight, float)

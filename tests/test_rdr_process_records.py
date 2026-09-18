@@ -315,3 +315,38 @@ class TestReviewRoundFixes:
         ]
         text = "\n".join(rdr_mod._close_override_lines(rows, today="2026-09-17"))
         assert "1 closed record" in text and "could not be dated" in text, text
+
+
+class TestAuditRowsCountEachRdrOnce:
+    """nexus-duwtl (intrastate-4e's review of nexus-5r0ho): 39 RDRs carry
+    both a bare NNN and an RDR-NNN T2 row and the three new audit rows
+    counted each twice; and the reason field the corpus carries is
+    deferred_reason, which the field list did not name."""
+
+    def test_terminated_records_dedup_by_number_and_read_deferred_reason(self):
+        from nexus.commands.rdr import _terminated_reason_lines  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+
+        rows = [
+            {"title": "147", "content": "status: deferred\ndeferred_reason: parked on beads\n"},
+            {"title": "RDR-147", "content": "status: deferred\n"},
+            {"title": "150", "content": "status: abandoned\nclose_reason: superseded by 205\n"},
+            {"title": "150-gate-latest", "content": "outcome: PASSED\n"},
+        ]
+        lines = _terminated_reason_lines(rows)
+        assert lines and "2 terminated" in lines[0], lines
+        assert "no reason: 0" in lines[0], lines
+        assert not any("RDR-147 (deferred)" in ln for ln in lines), lines
+
+    def test_post_mortem_coverage_counts_a_closed_rdr_once(self, tmp_path):
+        from nexus.commands.rdr import _post_mortem_coverage_lines  # noqa: PLC0415 — test-local import, same idiom as this file's siblings
+
+        pm = tmp_path / "post-mortem"
+        pm.mkdir()
+        (pm / "rdr-211-x.md").write_text("# pm\n")
+        rows = [
+            {"title": "211", "content": "status: closed\n"},
+            {"title": "RDR-211", "content": "status: closed\n"},
+            {"title": "212", "content": "status: closed\n"},
+        ]
+        lines = _post_mortem_coverage_lines(rows, pm)
+        assert any("closed: 1 of 2" in ln for ln in lines), lines

@@ -1104,6 +1104,29 @@ def _gate_outcome_for(rdr_num: str, repo_name: str) -> tuple[str, str | None]:
                         f"deferred on {resumed}; resumed work re-gates (rdr-lifecycle table), so run the gate again"
                     )
                 break
+            # nexus-duwtl: the under-dispatched fix-check flag ran only in the
+            # gate preamble; accept admitted a record whose fix check shows
+            # fewer than three dispatches. Read the record the pointer names.
+            fix_check_field = (_preamble_parse_t2_field(content, "fix_check") or "").strip()
+            m = re.search(r"fix-check-([0-9a-f]{6,40})", fix_check_field)
+            if m:
+                sha = m.group(1)
+                fc_row = None
+                for prefix in _t2_rdr_titles(int(rdr_num)):
+                    fc_row = client.get(project=project, title=f"{prefix}-fix-check-{sha}")
+                    if fc_row:
+                        break
+                if fc_row is None:
+                    return "none", f"gate record {title!r} names fix check {sha} but no `*-fix-check-{sha}` record exists; the pointer is not evidence"
+                fc_content = fc_row.get("content", "") if isinstance(fc_row, dict) else ""
+                dispatches = (_preamble_parse_t2_field(fc_content, "dispatches") or "").strip()
+                verdict_lines = sum(1 for ln in fc_content.splitlines() if ln.strip().upper().startswith("FIX CHECK:"))
+                declared = int(dispatches) if dispatches.isdigit() else verdict_lines
+                if min(declared, verdict_lines) < 3:
+                    return "none", (
+                        f"fix check {sha} shows {min(declared, verdict_lines)} dispatch(es); the fix check is three "
+                        "independent dispatches with one `FIX CHECK:` line each, never fewer"
+                    )
     except Exception as exc:  # noqa: BLE001 — same posture as the gate read above: named, never raised past the CLI
         return "none", f"T2 unreachable reading the status record: {type(exc).__name__}: {exc}"
     return "passed", None
@@ -2843,7 +2866,38 @@ def _layer2_census_lines(rows: list[dict], t2_key: str) -> list[str]:
 
 
 _TERMINATED_STATUSES: Final = frozenset({"abandoned", "deferred", "superseded"})
-_REASON_FIELDS: Final = ("close_reason", "scrap_reason", "abandon_reason", "defer_reason", "reason", "superseded_by")
+_REASON_FIELDS: Final = (
+    "close_reason", "scrap_reason", "abandon_reason", "defer_reason",
+    "deferred_reason",  # nexus-duwtl: the field the corpus actually carries (RDR-147)
+    "reason", "superseded_by",
+)
+
+
+def _audit_rows_one_per_rdr(rows: list[dict]) -> list[dict]:
+    """*rows* with the status records de-duplicated to one per RDR number
+    (nexus-duwtl): 39 RDRs carry both a bare ``NNN`` and an ``RDR-NNN``
+    row, and the three audit rows counted each twice (30 terminated where
+    the true set is 24, RDR-147 listed twice). The bare-number row wins,
+    the shape set-status writes first; rows that are not status records
+    (gate, research, close-override) pass through untouched."""
+    kept: dict[str, dict] = {}
+    order: list[str] = []
+    passthrough: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title", ""))
+        num = _rdr_number_of_title(title)
+        if num is None:
+            passthrough.append(row)
+            continue
+        bare = re.fullmatch(r"0*\d+", title.strip()) is not None
+        if num not in kept:
+            kept[num] = row
+            order.append(num)
+        elif bare and re.fullmatch(r"0*\d+", str(kept[num].get("title", "")).strip()) is None:
+            kept[num] = row
+    return passthrough + [kept[n] for n in order]
 
 
 def _rdr_number_of_title(title: str) -> str | None:
@@ -2860,7 +2914,7 @@ def _terminated_reason_lines(rows: list[dict]) -> list[str]:
     missing: list[str] = []
     off_field: list[str] = []
     total = 0
-    for row in rows:
+    for row in _audit_rows_one_per_rdr(rows):
         if not isinstance(row, dict):
             continue
         num = _rdr_number_of_title(str(row.get("title", "")))
@@ -2919,7 +2973,7 @@ def _close_override_lines(rows: list[dict], today: str) -> list[str]:
     closes = 0
     overrides = 0
     undated: list[str] = []
-    for row in rows:
+    for row in _audit_rows_one_per_rdr(rows):
         if not isinstance(row, dict):
             continue
         title = str(row.get("title", ""))
@@ -2965,7 +3019,7 @@ def _post_mortem_coverage_lines(rows: list[dict], postmortem_dir: Path) -> list[
         if nums:
             have.add(str(int(nums[0])))
     per_status: dict[str, list[int]] = {}
-    for row in rows:
+    for row in _audit_rows_one_per_rdr(rows):
         if not isinstance(row, dict):
             continue
         num = _rdr_number_of_title(str(row.get("title", "")))

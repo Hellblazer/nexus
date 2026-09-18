@@ -287,3 +287,32 @@ def test_a_query_starting_with_a_dash_is_searched_for(tmp_path: Path) -> None:
     cache.write_text("/r/a.py:1:def f() -> None:\n/r/a.py:2:    run(--count marker)\n")
     assert [h["line_number"] for h in search_ripgrep("-> None", cache)] == [1]
     assert [h["line_number"] for h in search_ripgrep("--count marker", cache)] == [2]
+
+
+def test_cache_skips_a_utf8_file_that_carries_a_nul(tmp_path: Path) -> None:
+    """nexus-cd1k0.9: NUL is valid UTF-8, so "decodes" was not "is text"; one
+    such file made rg treat the WHOLE cache as binary and every search
+    returned nothing. Reproduced pre-fix: the NUL file landed in the cache."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    nul_file = repo / "nul.py"
+    nul_file.write_bytes(b"print('x')\x00\n")
+    good_file = repo / "good.py"
+    good_file.write_text("needle\n")
+    cache_path = tmp_path / "cache.txt"
+    build_cache(repo, cache_path, [(1.0, nul_file), (0.5, good_file)])
+    content = cache_path.read_text()
+    assert str(nul_file) not in content
+    assert f"{good_file}:1:needle" in content
+
+
+def test_cache_line_numbers_count_newlines_only(tmp_path: Path) -> None:
+    """nexus-cd1k0.9 (LOW): str.splitlines() also breaks on form feed, so a
+    hit past one reported the wrong line; rg counts newlines alone."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    f = repo / "ff.py"
+    f.write_text("a\x0cb\nneedle\n")
+    cache_path = tmp_path / "cache.txt"
+    build_cache(repo, cache_path, [(1.0, f)])
+    assert f"{f}:2:needle" in cache_path.read_text()

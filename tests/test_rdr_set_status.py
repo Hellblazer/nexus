@@ -1347,11 +1347,31 @@ def test_accept_is_refused_for_a_regated_record_without_a_fix_check(tmp_path, mo
     assert res.exit_code != 0, res.output
     assert "fix_check" in res.output or "fix check" in res.output, res.output
 
+    fc_ok = "dispatches: 3\nFIX CHECK: PASS\nFIX CHECK: PASS\nFIX CHECK: PASS\nconsensus: PASS\n"
     _install_fake_t2(monkeypatch, entries={
         (project, title): {"content": base + "fix_check: nexus_rdr/232-fix-check-abc1234\n"},
+        (project, "232-fix-check-abc1234"): {"content": fc_ok},
     })
     res = _invoke(rdr_dir, "232", "accepted", "--date", "2026-09-18")
     assert res.exit_code == 0, res.output
+
+
+def test_accept_is_refused_for_an_under_dispatched_fix_check(tmp_path, monkeypatch):
+    """nexus-duwtl (smaller item): the under-dispatched flag ran only in the
+    gate preamble; accept admitted a record whose fix-check record shows
+    fewer than three dispatches."""
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 234, "draft")
+    _write_readme(rdr_dir, 234, "Draft")
+    project, title = _gate_coords(tmp_path, 234)
+    base = "outcome: PASSED\ndate: 2026-09-18\ncommit: abc1234\nprior: [1] (BLOCKED 1C 0S)\nfix_check: nexus_rdr/234-fix-check-abc1234\n"
+    _install_fake_t2(monkeypatch, entries={
+        (project, title): {"content": base},
+        (project, "234-fix-check-abc1234"): {"content": "dispatches: 3\nFIX CHECK: PASS\nconsensus: PASS\n"},
+    })
+    res = _invoke(rdr_dir, "234", "accepted", "--date", "2026-09-18")
+    assert res.exit_code != 0, res.output
+    assert "dispatch" in res.output, res.output
 
 
 def test_readme_row_with_an_escaped_pipe_keeps_its_title(tmp_path):
