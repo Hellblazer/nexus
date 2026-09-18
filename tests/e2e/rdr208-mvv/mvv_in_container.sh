@@ -254,6 +254,25 @@ delivered() {  # NAME CORR: channel-delivered to NAME, with no prompt from this 
     check "  mailbox/$sid is empty afterwards (claimed and acked at the wake)" wait_for 30 mailbox_empty "$sid"
     snap "$name"
 }
+delivered_by_floor() {  # NAME CORR: the drain-hook FLOOR, at the session's next prompt
+    # Used where the CHANNEL cannot be asserted inside a sane window: the
+    # engine paces re-announcement per mailbox at DEFAULT_REANNOUNCE_INTERVAL_S
+    # (150 s, src/nexus/mcp/channel.py), so a row written to a session that
+    # was announced to moments ago waits out the rest of that window. A
+    # resumed session is exactly that case, since the pre-resume process was
+    # announced to on the same mailbox. Measured and reproduced without
+    # Claude Code at all (T2 nexus/finding-resumed-session-waiter-does-not-
+    # announce-2026-09-18): the second waiter DOES announce, just later. The
+    # floor is unconditional and is what the design promises here, so this
+    # asserts the floor and says so, rather than waiting out the interval in
+    # every future run or pretending the channel missed.
+    local t; t="$(tok OK)"
+    prompt "$1" "Reply with exactly $t and nothing else." "$t" || bad "  prompt for the floor drain of $2"
+    check "  the drain hook delivered $2 at the next prompt (the floor, not the channel)" \
+        wait_for 30 rendered_once "$1" "$2"
+    check "  mailbox/${SID_OF[$1]} is empty afterwards" wait_for 30 mailbox_empty "${SID_OF[$1]}"
+    snap "$1"
+}
 not_delivered() {  # NAME CORR SECONDS: never rendered and no new wake within SECONDS
     sleep "$3"
     [ "$(rendered_count "$1" "$2")" = 0 ] && [ "$(wake_count "$1")" -eq "${WAKES[$1]}" ]
@@ -337,13 +356,15 @@ arm A2 alpha-fc || bad "arm A2 (a resumed session subscribes its NEW name)"
 check "directory/alpha-fc resolves to the same session id" wait_for 30 resolves_to alpha-fc "$SA"
 r="$(send alpha-fc s2-new-name "$SB")"
 check "B -> alpha-fc resolved to A's unchanged session id" test "$(jq -r .to <<<"$r")" = "$SA"
-delivered A2 s2-new-name
+echo "  (a resumed session is inside the engine's 150 s re-announce window for its own"
+echo "   mailbox, so delivery here is asserted at the floor; see delivered_by_floor)"
+delivered_by_floor A2 s2-new-name
 
 # ── step 3a: the old name inside its TTL ─────────────────────────────────────
 say "step 3a: old name inside its lease"
 r="$(send alpha-e6 s3a-old-name "$SB")"
 check "alpha-e6 still resolves inside its TTL (a plain exit releases nothing)" test "$(jq -r .to <<<"$r")" = "$SA"
-delivered A2 s3a-old-name
+delivered_by_floor A2 s3a-old-name
 
 # ── step 4: /clear ───────────────────────────────────────────────────────────
 say "step 4: /clear: the MCP server hands off, the lease is released, the cleared record drains once"
