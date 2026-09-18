@@ -1158,6 +1158,53 @@ class TestCheckTupleChannelDelivery:
         assert "stale" in r.detail
         assert r.fix_suggestions
 
+    def test_not_alive_no_stopped_reason_suggests_mcp_restart(self, monkeypatch, tmp_path: Path) -> None:
+        """A dead waiter with no known cause (a crash, or an ordinary
+        `cancel()` teardown never wrote a fresh record) gets the generic
+        `/mcp` restart suggestion -- restarting is the only lever when
+        there is no more specific cause to name."""
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        now = datetime.now(UTC).isoformat()
+        _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason=None)
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is False and r.warn is True
+        assert any("/mcp" in s for s in r.fix_suggestions)
+        assert not any("current engine" in s for s in r.fix_suggestions)
+
+    def test_no_announce_support_names_the_cause_and_suggests_rebuilding_the_engine(
+        self, monkeypatch, tmp_path: Path,
+    ) -> None:
+        """bead nexus-vsipz review round: `stopped_reason="no_announce_
+        support"` means the LOCAL ENGINE predates announce mode -- the
+        detail must name that (not the generic "not alive"), and the fix
+        must point at rebuilding/reinstalling the engine, never `/mcp`
+        restart (a restart alone would hit the identical stale engine)."""
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        now = datetime.now(UTC).isoformat()
+        _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason="no_announce_support")
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is False and r.warn is True
+        assert "announce_count" in r.detail
+        assert any("current engine" in s for s in r.fix_suggestions)
+        assert not any(s == "Restart the MCP server: /mcp" for s in r.fix_suggestions)
+
+    def test_no_wait_support_names_the_cause_and_suggests_rebuilding_the_engine(
+        self, monkeypatch, tmp_path: Path,
+    ) -> None:
+        """Same class as `no_announce_support` above, for an engine that
+        predates `/wait` itself (a bare 404)."""
+        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        now = datetime.now(UTC).isoformat()
+        _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason="no_wait_support")
+        r = h._check_tuple_channel_delivery()[0]
+        assert r.ok is False and r.warn is True
+        assert "/wait" in r.detail
+        assert any("current engine" in s for s in r.fix_suggestions)
+        assert not any(s == "Restart the MCP server: /mcp" for s in r.fix_suggestions)
+
 
 def test_rdr211_channel_delivery_row_is_registered_in_run_health_checks() -> None:
     import inspect

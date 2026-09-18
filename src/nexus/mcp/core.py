@@ -6401,6 +6401,12 @@ def _tuple_row_to_dict(row: Any) -> dict[str, Any]:
         "consumed_by": row.consumed_by,
         "expires_at": row.expires_at,
         "created_at": row.created_at,
+        # bead nexus-vsipz (RDR-213 engine half, review round): additive --
+        # lets a session inspecting a mailbox row via tuple_rd/tuple_in see
+        # its own announce budget, which was previously visible only to
+        # ChannelWaiter internally.
+        "announced_at": row.announced_at,
+        "announce_count": row.announce_count,
     }
 
 

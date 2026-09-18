@@ -208,6 +208,56 @@ class TupleAnnounceTest {
                 .isInstanceOf(SchemaViolationException.class);
     }
 
+    // ── Announce bounds (review round, bead nexus-vsipz) ──────────────────────
+
+    @Test
+    void announce_negativeIntervalSeconds_isRefused() {
+        assertThatThrownBy(() -> new TupleRepository.WaitSpec.Announce(-1, 5))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("interval_s");
+    }
+
+    @Test
+    void announce_maxZero_isRefused() {
+        assertThatThrownBy(() -> new TupleRepository.WaitSpec.Announce(150, 0))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("max");
+    }
+
+    @Test
+    void announce_maxNegative_isRefused() {
+        assertThatThrownBy(() -> new TupleRepository.WaitSpec.Announce(150, -1))
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("max");
+    }
+
+    @Test
+    void announce_intervalZero_isAccepted() {
+        // 0 is a valid (if aggressive) rate limit -- "due again the instant it
+        // was last announced" -- distinct from a NEGATIVE interval, which would
+        // invert the due comparison. Not refused.
+        assertThat(new TupleRepository.WaitSpec.Announce(0, 5).intervalSeconds()).isZero();
+    }
+
+    @Test
+    void announce_maxOne_isTheSmallestAcceptedValue_andAnnouncesExactlyOnce() {
+        String to = "announce-max-one-" + UUID.randomUUID();
+        repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "sender"),
+                "hello", "nonce-1", null);
+
+        TupleRepository.WaitSpec.Announce announce = new TupleRepository.WaitSpec.Announce(0, 1);
+        assertThat(announce.max()).isEqualTo(1);
+
+        TupleRepository.WaitSpec spec = mailboxSpec(to, 0, 1);
+        List<TupleRepository.WaitResult> first = probe(spec);
+        assertThat(first).hasSize(1);
+        assertThat(first.get(0).tuples().get(0).announceCount()).isEqualTo(1);
+
+        assertThat(probe(spec))
+                .as("announce_count(1) is never < max(1) -- a one-shot announce, never repeated")
+                .isEmpty();
+    }
+
     // ── a spec without announce is unchanged: rd's own since-cursor semantics ──
 
     @Test
@@ -229,23 +279,48 @@ class TupleAnnounceTest {
         assertThat(repo.waitAny(TENANT_A, List.of(spec), 0)).hasSize(1);
     }
 
-    // ── the defect this bead fixes: a late-committing row is not skipped ──────
+    // ── the defect this bead fixes: a since cursor skips a late commit ────────
 
     /**
-     * Reproduces the exact defect nexus-vsipz's own bead description names: a
-     * transaction that STARTS first (and so gets the earlier {@code created_at})
-     * but COMMITS second, after a later-starting transaction has already been
-     * announced. A cursor design (the one this same tree's client half replaces)
-     * would have advanced past the second row's {@code (created_at, id)} and never
-     * revisit anything sorting before it. Announce mode has no cursor to skip past
-     * -- it re-scans the full claimable-and-due set, oldest first, on every call --
-     * so the late-committing row is picked up the very next time anyone asks.
+     * Reproduces the exact defect nexus-vsipz's own bead description names, on
+     * ONE shared mailbox (review round S1 -- the original two-mailbox version
+     * proved only ordinary READ COMMITTED visibility, since a cursor is scoped
+     * per-subspace and no cursor was ever advanced past row A at all). Row A's
+     * transaction STARTS first (the earlier {@code created_at}) but is held open
+     * on a latch past row B's own transaction, which starts second and commits
+     * immediately. A reader that has already delivered B and advanced a
+     * {@code since} cursor to B's own {@code (created_at, id)} position:
+     *
+     * <ol>
+     *   <li>(a) sees nothing further via that cursor while A is still
+     *       uncommitted -- unsurprising, nothing new exists yet;</li>
+     *   <li>(b) an independent announce-mode {@code wait} returns B once, on
+     *       its own due check, unrelated to any cursor;</li>
+     *   <li>A then commits, with a {@code created_at} STRICTLY EARLIER than
+     *       B's;</li>
+     *   <li>(c) THE DEFECT ITSELF: the SAME {@code since} cursor at B's
+     *       position still returns nothing -- A is now committed and
+     *       claimable, but {@code (A.created_at, A.id) > (B.created_at, B.id)}
+     *       is FALSE (A sorts before B), so the row-order comparison every
+     *       cursor query uses excludes it, silently and permanently, for any
+     *       reader already holding this exact cursor;</li>
+     *   <li>(d) an announce-mode {@code wait}, which holds no cursor at all,
+     *       returns A: the full re-scan orders by {@code created_at} ASC
+     *       every time, so A -- the oldest claimable-and-due row -- is
+     *       returned regardless of when it happened to commit relative to
+     *       B.</li>
+     * </ol>
+     *
+     * The {@link CountDownLatch} synchronization (not a sleep) is what makes
+     * this deterministic: A's insert is confirmed complete-but-uncommitted
+     * before B's transaction ever starts, and A's commit is confirmed complete
+     * before step (c)/(d) run.
      */
     @Test
-    void announce_lateCommittingRow_isReturnedAtNextCall() throws Exception {
-        String toHeld = "announce-late-held-" + UUID.randomUUID();
-        String toFast = "announce-late-fast-" + UUID.randomUUID();
-        String templateName = registry.resolve("mailbox/" + toHeld).name();
+    void announce_sinceCursorSkipsALateCommit_announceModeDoesNot() throws Exception {
+        String toShared = "announce-late-shared-" + UUID.randomUUID();
+        String templateName = registry.resolve("mailbox/" + toShared).name();
+        Map<String, String> pattern = Map.of("to", toShared);
 
         byte[] heldId = new byte[32];
         new java.security.SecureRandom().nextBytes(heldId);
@@ -254,13 +329,16 @@ class TupleAnnounceTest {
         CountDownLatch release = new CountDownLatch(1);
         ExecutorService pool = Executors.newSingleThreadExecutor();
         try {
+            // Writer A: opens a transaction and inserts row A (the EARLIER
+            // created_at, since its transaction starts first), held open on
+            // `release` before its own commit.
             Future<?> held = pool.submit(() -> tenantScope.withTenant(TENANT_A, ctx -> {
                 ctx.insertInto(TUPLES,
                                 TUPLES.ID, TUPLES.TENANT_ID, TUPLES.SUBSPACE, TUPLES.TEMPLATE,
                                 TUPLES.KEYS, TUPLES.BODY, TUPLES.EXPIRES_AT, TUPLES.CREATED_AT)
-                        .values(DSL.val(heldId), DSL.val(TENANT_A), DSL.val("mailbox/" + toHeld),
-                                DSL.val(templateName), DSL.val(JSONB.valueOf("{\"to\":\"" + toHeld + "\"}")),
-                                DSL.val("held"), DSL.currentOffsetDateTime().add(interval(3600)),
+                        .values(DSL.val(heldId), DSL.val(TENANT_A), DSL.val("mailbox/" + toShared),
+                                DSL.val(templateName), DSL.val(JSONB.valueOf("{\"to\":\"" + toShared + "\"}")),
+                                DSL.val("A-held"), DSL.currentOffsetDateTime().add(interval(3600)),
                                 DSL.currentOffsetDateTime())
                         .execute();
                 inserted.countDown();
@@ -273,34 +351,60 @@ class TupleAnnounceTest {
             }));
 
             assertThat(inserted.await(5, TimeUnit.SECONDS))
-                    .as("the held transaction's insert ran before we proceed")
+                    .as("row A's insert ran (uncommitted) before we proceed")
                     .isTrue();
 
-            // A second, ordinary write to a DIFFERENT mailbox -- its own transaction
-            // starts (and commits) strictly AFTER the held one started, so its
-            // created_at sorts LATER.
-            repo.out(TENANT_A, "mailbox/" + toFast, Map.of("to", toFast), Map.of("from", "sender"),
-                    "fast", "nonce-fast", null);
+            // Writer B: an ordinary, immediately-committed write to the SAME
+            // mailbox -- its transaction starts (and commits) strictly AFTER
+            // A's started, so B's created_at sorts LATER than A's.
+            repo.out(TENANT_A, "mailbox/" + toShared, Map.of("to", toShared), Map.of("from", "sender"),
+                    "B-fast", "nonce-b", null);
 
-            // The held row is uncommitted (invisible under READ COMMITTED): only the
-            // fast mailbox's own spec sees anything.
-            assertThat(probe(mailboxSpec(toFast, 0, 5))).hasSize(1);
-            assertThat(probe(mailboxSpec(toHeld, 0, 5)))
-                    .as("not yet committed -- invisible to every other transaction")
+            List<TupleRepository.TupleRow> seeded = repo.rd(TENANT_A, "mailbox/" + toShared, pattern, 10, null, 0);
+            assertThat(seeded)
+                    .as("A is still uncommitted -- only B is visible to a plain read")
+                    .hasSize(1);
+            TupleRepository.TupleRow rowB = seeded.get(0);
+            var cursorAtB = new TupleRepository.ReadCursor(rowB.createdAt(), rowB.id());
+
+            // (a) a since-shaped rd at B's own position -- exactly what a
+            // cursor-advancing reader would issue right after delivering B --
+            // sees nothing further while A is still uncommitted.
+            assertThat(repo.rd(TENANT_A, "mailbox/" + toShared, pattern, 10, cursorAtB, 0))
+                    .as("(a) nothing past B yet -- A has not committed")
                     .isEmpty();
 
+            // (b) an announce-mode wait, independently, returns B once.
+            TupleRepository.WaitSpec announceOne = new TupleRepository.WaitSpec(
+                    "mailbox/" + toShared, pattern, 1, null, new TupleRepository.WaitSpec.Announce(0, 5));
+            List<TupleRepository.WaitResult> announcedB = probe(announceOne);
+            assertThat(announcedB).hasSize(1);
+            assertThat(announcedB.get(0).tuples().get(0).id())
+                    .as("(b) B is the only claimable-and-due row so far")
+                    .isEqualTo(rowB.id());
+
+            // A commits now, with a created_at STRICTLY EARLIER than B's.
             release.countDown();
             held.get(5, TimeUnit.SECONDS);
 
-            // Now committed, with a created_at STRICTLY EARLIER than the fast row's --
-            // and it has never been announced. There is no cursor to have skipped past
-            // it, so the very next call returns it.
-            List<TupleRepository.WaitResult> afterCommit = probe(mailboxSpec(toHeld, 0, 5));
-            assertThat(afterCommit)
-                    .as("the late-committing row is returned at the next call -- the defect the cursor "
-                            + "design (nexus-gomuo.1) carries and this design does not")
+            // (c) THE DEFECT, asserted as the fact it is.
+            assertThat(repo.rd(TENANT_A, "mailbox/" + toShared, pattern, 10, cursorAtB, 0))
+                    .as("(c) A is committed and claimable, but its created_at sorts BEHIND the cursor's "
+                            + "own position (B's) -- silently and permanently invisible to any reader already "
+                            + "holding this exact since cursor. This is the defect nexus-vsipz fixes.")
+                    .isEmpty();
+
+            // (d) an announce-mode wait, which holds no cursor, returns A: the
+            // oldest claimable-and-due row in the full re-scan, independent of
+            // commit order.
+            List<TupleRepository.WaitResult> announcedA = probe(announceOne);
+            assertThat(announcedA)
+                    .as("(d) announce mode has no cursor to have skipped past -- A is returned")
                     .hasSize(1);
-            assertThat(afterCommit.get(0).tuples().get(0).announceCount()).isEqualTo(1);
+            assertThat(announcedA.get(0).tuples().get(0).id())
+                    .as("(d) A, not B -- both are due (interval_s=0), but n=1 caps the result to the "
+                            + "single OLDEST due row, and A's created_at sorts before B's")
+                    .isEqualTo(heldId);
         } finally {
             pool.shutdownNow();
         }

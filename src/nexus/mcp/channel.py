@@ -324,10 +324,12 @@ async def send_channel_notification(content: str, meta: dict[str, str]) -> bool:
 #: body with THAT prompt, before the model's turn, so the session claims
 #: for itself only when no body was rendered that way -- the text states
 #: both outcomes so the model does not act on an already-claimed row. The
-#: SAME text covers a row already claimed when the cursor passes it (T2
-#: `nexus_rdr/213-decision-announcements-rate-limited-not-ack-gated-2026-
-#: 09-17`): the model calls `tuple_in`, gets nothing, and this text
-#: already says what that means.
+#: SAME text covers a row someone else claims or consumes in the gap
+#: between this notification being sent and the model acting on it (bead
+#: nexus-vsipz: the engine's announce-mode query excludes a claimed-and-
+#: live row from being referenced in the FIRST place, but a race after
+#: the reference is already in flight is still possible): the model calls
+#: `tuple_in`, gets nothing, and this text already says what that means.
 def _mailbox_notification_content(subspace: str, tuple_id: str, to_address: str) -> str:
     return (
         f"nexus mailbox message: subspace {subspace}, tuple {tuple_id}. If its body is rendered "
@@ -459,6 +461,14 @@ class ChannelWaiter:
 
         self._alive = False
         self._stopped = False
+        #: `None` while running, or the running (never alive-and-stopped)
+        #: waiter's own stop cause once `_stopped` flips (review round,
+        #: bead nexus-vsipz): `"no_wait_support"` (a bare 404 from an
+        #: engine predating `/wait` itself) or `"no_announce_support"` (an
+        #: engine that answers `/wait` but never renders `announce_count`
+        #: -- one predating THIS bead). `cancel()`'s own stop (a normal
+        #: lifespan teardown) leaves this `None` -- it is not a fault.
+        self._stopped_reason: str | None = None
         self._last_wake: datetime | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task | None = None
@@ -482,7 +492,12 @@ class ChannelWaiter:
     def status(self) -> dict[str, Any]:
         """`alive`: this waiter's task is running (never proved past
         `_stop_no_wait_support`/`_stop_no_announce_support` or a real
-        cancellation). `last_wake`: ISO-8601 timestamp of the last
+        cancellation). `stopped_reason` (bead nexus-vsipz review round):
+        `None` while alive or on an ordinary `cancel()` teardown;
+        `"no_wait_support"` or `"no_announce_support"` when one of those
+        two loud stops fired -- lets a reader (the doctor row) name WHY
+        the waiter is not alive instead of only THAT it is not.
+        `last_wake`: ISO-8601 timestamp of the last
         completed `wait()` round-trip, or `None` before the first one.
         `announced`: the cumulative count of DISTINCT rows this waiter has
         ever referenced (incremented only on a row's first send, never on
@@ -504,6 +519,7 @@ class ChannelWaiter:
         oldest_pending_age_s = (time.monotonic() - min(seen_at for _, seen_at in active)) if active else None
         return {
             "alive": self._alive,
+            "stopped_reason": self._stopped_reason,
             "last_wake": self._last_wake.isoformat() if self._last_wake else None,
             "announced": self._announced_total,
             "pending": len(active),
@@ -523,11 +539,16 @@ class ChannelWaiter:
     # ── the loop ─────────────────────────────────────────────────────────
 
     async def run(self) -> None:
-        """The loop. The cursor design (`tick`/`_build_specs`) makes a
-        busy loop structurally impossible on its own -- `wait`'s own
-        `since` excludes every row this waiter has already referenced or
-        skipped, so a healthy tick never returns faster than a genuine
-        wake or its own capped timeout; the floor below is a defensive
+        """The loop. `tick`/`_build_specs` make a busy loop structurally
+        impossible on their own, by TWO SEPARATE mechanisms (bead
+        nexus-vsipz split boards from mailboxes): a board's own `since`
+        cursor excludes every post this waiter has already delivered, so
+        `wait` genuinely parks on that subspace; a mailbox's `announce`
+        field makes the ENGINE itself refuse to return a row before its
+        own interval/cap says so, so `wait` genuinely parks on that
+        subspace too -- for a different reason, but the same effect. A
+        healthy tick never returns faster than a genuine wake or its own
+        capped timeout for either shape; the floor below is a defensive
         belt on top of that, not the fix -- see
         `DEFAULT_MIN_TICK_INTERVAL_S`."""
         self._loop = asyncio.get_running_loop()
@@ -611,10 +632,12 @@ class ChannelWaiter:
 
     def _stop_no_wait_support(self) -> None:
         self._stopped = True
+        self._stopped_reason = "no_wait_support"
         _log.warning("channel_waiter_no_wait_support", session_id=self.session_id)
 
     def _stop_no_announce_support(self) -> None:
         self._stopped = True
+        self._stopped_reason = "no_announce_support"
         _log.warning("channel_waiter_no_announce_support", session_id=self.session_id)
 
     @staticmethod

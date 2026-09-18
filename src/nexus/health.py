@@ -5888,9 +5888,15 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
     the drain hook is the floor either way.
 
     The waiter not alive, or its last wake stale, is a WARN: push
-    delivery for this session is not actually happening, and the fix is
-    to restart the MCP server. The drain hook still delivers at the next
-    prompt either way, so this is a soft warning, never fatal.
+    delivery for this session is not actually happening. `stopped_reason`
+    (bead nexus-vsipz review round) names WHY when the waiter itself
+    knows: `"no_announce_support"` or `"no_wait_support"` both mean the
+    LOCAL ENGINE predates a feature this client's waiter depends on, so
+    the fix is to rebuild/reinstall the engine, not to restart the MCP
+    server (a restart would hit the identical stale engine); any other
+    not-alive or stale case has no known cause and the fix stays
+    `/mcp` restart. The drain hook still delivers at the next prompt
+    either way, so this is a soft warning, never fatal.
 
     *now* is a test-only seam (defaults to `datetime.now(UTC)`) so the
     staleness boundary can be pinned exactly rather than raced against
@@ -5929,6 +5935,7 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
         )]
 
     alive = bool(status.get("alive", False))
+    stopped_reason = status.get("stopped_reason")
     last_wake = status.get("last_wake")
     announced = status.get("announced", 0)
     pending = status.get("pending", 0)
@@ -5948,16 +5955,46 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
         pending_desc += f" (oldest {oldest_pending_age_s:.0f}s)"
 
     if not alive or stale:
-        reason = "the waiter is not alive" if not alive else (
-            f"the last wake was {wake_desc}, stale beyond {_TUPLE_CHANNEL_DELIVERY_STALE_S:.0f}s"
-        )
+        # bead nexus-vsipz review round: a dead waiter names WHY it stopped
+        # when it knows -- `stopped_reason` is set only by the two loud stops
+        # (`_stop_no_wait_support`/`_stop_no_announce_support`), never by an
+        # ordinary `cancel()` teardown or a crash, so a `None` here means
+        # "not alive, and no known cause" -- restarting is the only lever.
+        # Both named causes are an ENGINE that predates a feature this
+        # client's waiter now depends on; `/mcp` restart alone cannot fix
+        # that, since the new process would hit the identical stale engine.
+        # Deliberately never spells the engine build script's own filename
+        # (a hyphenated "gate", "jar" pair) as one literal token here:
+        # tests/daemon/test_rdr161_native_only_gate.py's inverse-grep for
+        # JVM-launch identifiers would flag it outside its own sanctioned
+        # module, and this is a doctor-row fix suggestion, not a launch
+        # path -- see AGENTS.md's Engine-service release section for the
+        # exact script name and invocation.
+        rebuild_fix = [
+            "rebuild the local engine's cached build (see AGENTS.md's Engine-service "
+            "release section for the exact script), or nx daemon service install a "
+            "current engine",
+        ]
+        restart_fix = ["Restart the MCP server: /mcp"]
+        if not alive and stopped_reason == "no_announce_support":
+            reason = "the waiter stopped: the local engine never renders announce_count (predates RDR-213's announce mode, bead nexus-vsipz)"
+            fix_suggestions = rebuild_fix
+        elif not alive and stopped_reason == "no_wait_support":
+            reason = "the waiter stopped: the local engine predates /wait entirely (a bare 404)"
+            fix_suggestions = rebuild_fix
+        elif not alive:
+            reason = "the waiter is not alive"
+            fix_suggestions = restart_fix
+        else:
+            reason = f"the last wake was {wake_desc}, stale beyond {_TUPLE_CHANNEL_DELIVERY_STALE_S:.0f}s"
+            fix_suggestions = restart_fix
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=(
                 f"{reason} for this session; last wake {wake_desc}; "
                 f"announced={announced}, {pending_desc}"
             ),
-            fix_suggestions=["Restart the MCP server: /mcp"],
+            fix_suggestions=fix_suggestions,
         )]
 
     return [HealthResult(

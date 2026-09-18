@@ -964,6 +964,33 @@ public final class TupleRepository {
          * behind.
          */
         public record Announce(long intervalSeconds, int max) {
+
+            /** Bounds check (review round, bead nexus-vsipz): a compact constructor
+             *  so EVERY construction path -- {@link TupleHandler#readAnnounce}, a
+             *  direct Java caller, a future one -- is covered, not just the wire
+             *  parser. Mirrors {@code claimOnce}'s own {@code lease_s <= 0} refusal
+             *  ({@code SchemaViolationException("lease_s", "must be positive")}):
+             *  a negative {@code intervalSeconds} would make {@code announced_at <
+             *  now() - interval} read as {@code now() + |interval|}, defeating rate
+             *  limiting outright rather than merely under-limiting it, and {@code
+             *  max < 1} would make the due check's {@code announce_count < max}
+             *  arm false for every row from its very first stamp (announce_count=1
+             *  is never {@code < 0} or {@code < 1} except when max is at least 1),
+             *  silently reducing "up to max announcements" to "zero, ever" for
+             *  max=0 while still passing the {@code announced_at IS NULL} arm
+             *  exactly once for a never-announced row -- one stray announcement
+             *  before going permanently silent, not the loud refusal a caller
+             *  asking for a nonsensical cap deserves. {@code max == 1} is the
+             *  smallest MEANINGFUL value (announce once, never again) and is
+             *  explicitly allowed. */
+            public Announce {
+                if (intervalSeconds < 0) {
+                    throw new SchemaViolationException("interval_s", "must not be negative");
+                }
+                if (max < 1) {
+                    throw new SchemaViolationException("max", "must be at least 1");
+                }
+            }
         }
     }
 
