@@ -68,7 +68,7 @@ wait_for() {  # SECONDS CMD... : poll until CMD succeeds
 }
 
 # ── sessions ─────────────────────────────────────────────────────────────────
-declare -A SID_OF=() PID_OF=() ANN=() WAKES=()
+declare -A SID_OF=() PID_OF=() ANN=() WAKES=() NAME_OF=()
 
 pane() { T capture-pane -p -J -S -400 -t "$1" 2>/dev/null; }
 # Reply detection reads the TRANSCRIPT, never the pane. The pane carries the
@@ -232,23 +232,35 @@ stop() {  # NAME: /exit, a plain process exit (releases nothing, as Claude Code 
     wait_for 30 exited "$1" || { kill -TERM "${PID_OF[$1]}" 2>/dev/null; sleep 1; }
     T kill-session -t "$1" 2>/dev/null
 }
-arm() {  # NAME INSTANCE: the session subscribes INSTANCE as its instance mailbox
-    # The prompt is TRUTHFUL about the harness, which is what two billed runs
-    # cost to learn. `tuple_subscribe` itself accepts any safe name and only
-    # refuses a SECOND instance mailbox for one session (subscriptions.py
-    # _SAFE_INSTANCE_NAME and "already subscribes"), so nothing here is being
-    # tricked past a guard. But the tool's own text says "this session's own
-    # instance-name mailbox", and a real session's name comes from ListAgents.
-    # Run 3: told only to subscribe "mailbox/alpha-fc", the model declined and
-    # asked which of two alternatives was meant. Run 4: told that alpha-e6 WAS
-    # this session's own name, it called ListAgents, found "work-a0", and
-    # declined again -- correctly, because that claim was false. So the prompt
-    # now says what is actually true: this is a test, the harness assigns the
-    # name under test, ListAgents reports something else, and that is expected.
-    # The effect is still read from the engine (the directory resolves to this
-    # session), never from the model's words.
+discover_name() {  # NAME -> the instance name this session actually armed
+    # Read from the ENGINE, never from the model's words: scan the live
+    # directory subspaces for the one whose holders include this session id.
+    local sid="${SID_OF[$1]}" sub n
+    for sub in $(nx tuple list --prefix directory/ --json 2>/dev/null | jq -r '.[] | .subspace // empty'); do
+        n="${sub#directory/}"
+        if nx tuple directory "$n" --json 2>/dev/null | jq -e --arg s "$sid" '.holders | index($s)' > /dev/null 2>&1; then
+            printf '%s' "$n"
+            return 0
+        fi
+    done
+    return 1
+}
+armed_name_known() { [ -n "$(discover_name "$1")" ]; }
+arm() {  # NAME: the session subscribes ITS OWN instance name
+    # The harness no longer assigns the name. Three billed runs died here
+    # because it did: a session's instance name comes from ListAgents, the
+    # tool's contract is "this session's OWN instance-name mailbox", and a
+    # model asked to subscribe some other string checks, finds the mismatch
+    # and declines -- correctly, and unpredictably (2026-09-18: in one run
+    # session A complied and session B refused, same prompt). Asking for the
+    # session's own name removes the false premise entirely, and the name
+    # this journey then uses is the REAL one, so the rename across a
+    # /resume is a genuine rename rather than a scripted one.
     local t; t="$(tok DONE-ARM)"
-    prompt "$1" "You are a session in an automated test of the nexus mailbox addressing system (RDR-208). This test assigns the instance name under test, which is $2. A fresh ListAgents call will report a different, harness-generated name for this session; that is expected and is not the name to use here. Subscribing mailbox/$2 is intended and safe: tuple_subscribe accepts any well-formed instance name, it refuses only a second instance mailbox for one session, and no other session holds $2 unless this test deliberately arranges it. Call the nexus MCP tool tuple_subscribe with subspace \"mailbox/$2\", then reply with exactly $t and nothing else." "$t"
+    prompt "$1" "Call ListAgents to read this session's own instance name, then call the nexus MCP tool tuple_subscribe with subspace \"mailbox/<that exact name>\" -- your own instance-name mailbox, which is what that tool accepts. Then reply with exactly $t and nothing else." "$t" || return 1
+    wait_for 30 armed_name_known "$1" || { echo "  no directory entry for ${SID_OF[$1]} after the arm"; return 1; }
+    NAME_OF[$1]="$(discover_name "$1")"
+    echo "  session $1 armed its own name: ${NAME_OF[$1]}"
 }
 send() {  # TO CORR FROM -> result JSON (a harness send, explicit sender)
     "$NXPY" "$HOME/send.py" "$1" "$2" "rdr-208 local-mode mvv $2" "$3" 2>> "$RUN/send.err"
@@ -333,27 +345,28 @@ else
     bad "no directory template on the local engine"; nx tuple templates 2>&1 | tail -20
 fi
 
-say "launch A and B (serialized), arm alpha-e6 and bravo-94"
+say "launch A and B (serialized); each arms its OWN instance name"
 launch A || { echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): launch A"; exit 1; }
 SA="${SID_OF[A]}"
-arm A alpha-e6 || bad "arm A"
+arm A || bad "arm A"
 launch B || { echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): launch B"; exit 1; }
 SB="${SID_OF[B]}"
-arm B bravo-94 || bad "arm B"
-check "directory/alpha-e6 resolves to A's session" wait_for 30 resolves_to alpha-e6 "$SA"
-check "directory/bravo-94 resolves to B's session" wait_for 30 resolves_to bravo-94 "$SB"
+arm B || bad "arm B"
+A_NAME="${NAME_OF[A]}"; B_NAME="${NAME_OF[B]}"
+check "directory/$A_NAME resolves to A's session" wait_for 30 resolves_to "$A_NAME" "$SA"
+check "directory/$B_NAME resolves to B's session" wait_for 30 resolves_to "$B_NAME" "$SB"
 
 # ── step 1: name resolution, both directions ─────────────────────────────────
 say "step 1: send by name, both directions"
-model_send B alpha-e6 s1-b2a || bad "B's model-driven send"
+model_send B "$A_NAME" s1-b2a || bad "B's model-driven send"
 delivered A s1-b2a
 # CONSUMED, not total: the drain hook claims and acks at the wake, so a
 # delivered row is gone from the live census by the time this runs.
 consumed_rows() { nx tuple stats "mailbox/$1" --json 2>/dev/null | jq '.consumed'; }
 check "  it landed in A's mailbox (the name resolved to A's session id)" test "$(consumed_rows "$SA")" -ge 1
 check "  from = B's session id (the default sender, as the hook rendered it)" test "$(rendered_from A s1-b2a)" = "$SB"
-r="$(send bravo-94 s1-a2b "$SA")"
-check "A -> bravo-94 resolved to B's session id" test "$(jq -r .to <<<"$r")" = "$SB"
+r="$(send "$B_NAME" s1-a2b "$SA")"
+check "A -> $B_NAME resolved to B's session id" test "$(jq -r .to <<<"$r")" = "$SB"
 check "  address_kind=session" test "$(jq -r .address_kind <<<"$r")" = session
 delivered B s1-a2b
 
@@ -362,18 +375,20 @@ say "step 2: /resume (new process, same session id, new name)"
 stop A
 RESUME_T="$(now)"
 launch A2 "$SA" || { echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): resume"; exit 1; }
-arm A2 alpha-fc || bad "arm A2 (a resumed session subscribes its NEW name)"
-check "directory/alpha-fc resolves to the same session id" wait_for 30 resolves_to alpha-fc "$SA"
-r="$(send alpha-fc s2-new-name "$SB")"
-check "B -> alpha-fc resolved to A's unchanged session id" test "$(jq -r .to <<<"$r")" = "$SA"
+arm A2 || bad "arm A2 (a resumed session subscribes its NEW name)"
+A2_NAME="${NAME_OF[A2]}"
+check "the resumed session's name differs from the pre-resume one (a real rename)" test "$A2_NAME" != "$A_NAME"
+check "directory/$A2_NAME resolves to the same session id" wait_for 30 resolves_to "$A2_NAME" "$SA"
+r="$(send "$A2_NAME" s2-new-name "$SB")"
+check "B -> $A2_NAME resolved to A's unchanged session id" test "$(jq -r .to <<<"$r")" = "$SA"
 echo "  (a resumed session is inside the engine's 150 s re-announce window for its own"
 echo "   mailbox, so delivery here is asserted at the floor; see delivered_by_floor)"
 delivered_by_floor A2 s2-new-name
 
 # ── step 3a: the old name inside its TTL ─────────────────────────────────────
 say "step 3a: old name inside its lease"
-r="$(send alpha-e6 s3a-old-name "$SB")"
-check "alpha-e6 still resolves inside its TTL (a plain exit releases nothing)" test "$(jq -r .to <<<"$r")" = "$SA"
+r="$(send "$A_NAME" s3a-old-name "$SB")"
+check "$A_NAME still resolves inside its TTL (a plain exit releases nothing)" test "$(jq -r .to <<<"$r")" = "$SA"
 delivered_by_floor A2 s3a-old-name
 
 # ── step 4: /clear ───────────────────────────────────────────────────────────
@@ -386,7 +401,7 @@ echo "  session A2: id $SA -> $SA_C"
 check "cleared.<new id> written, naming the old id" wait_for 30 grep -qsx "$SA" "$TW/cleared.$SA_C"
 check "the old waiter stopped (its record shows alive=false within 30 s)" wait_for 30 status_is "$SA" alive false
 check "a waiter runs under the new id (alive=true)" wait_for 60 status_is "$SA_C" alive true
-check "  the old instance lease is released (alpha-fc gone within 30 s, not left to the 300 s TTL)" wait_for 30 no_entries alpha-fc
+check "  the old instance lease is released ($A2_NAME gone within 30 s, not left to the 300 s TTL)" wait_for 30 no_entries "$A2_NAME"
 SID_OF[A2]="$SA_C"; snap A2
 send "$SA" s4-pending "$SB" > /dev/null
 check "mail to the OLD id after the clear waits in mailbox/old (nothing pushes it)" test "$(available "$SA")" = 1
@@ -399,28 +414,47 @@ send "$SA" s4-late "$SB" > /dev/null
 t="$(tok OK)"
 prompt A2 "Reply with exactly $t and nothing else." "$t" || bad "prompt after the late send"
 check "mail to the old id after the record is gone stays stranded (accepted baseline)" test "$(available "$SA")" = 1
-arm A2 alpha-fc || bad "re-arm A2"
-check "re-armed: alpha-fc resolves to the new session id" wait_for 30 resolves_to alpha-fc "$SA_C"
-model_send A2 bravo-94 s4-from-after-clear || bad "A2's model-driven send"
+arm A2 || bad "re-arm A2"
+A2C_NAME="${NAME_OF[A2]}"
+check "re-armed: $A2C_NAME resolves to the new session id" wait_for 30 resolves_to "$A2C_NAME" "$SA_C"
+model_send A2 "$B_NAME" s4-from-after-clear || bad "A2's model-driven send"
 delivered B s4-from-after-clear
 check "a send after the clear defaults its from to the new session id" test "$(rendered_from B s4-from-after-clear)" = "$SA_C"
 
 # ── step 5: one name, two live sessions ──────────────────────────────────────
 say "step 5: a name held by two sessions is refused"
 launch C || { echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): launch C"; exit 1; }
-launch D || { echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): launch D"; exit 1; }
-SC="${SID_OF[C]}"; SD="${SID_OF[D]}"
-arm C mvv-shared || bad "arm C"
-arm D mvv-shared || bad "arm D"
-held_by_two() { [ "$(dir_json mvv-shared | jq '.holders | length')" = 2 ]; }
-check "directory/mvv-shared has two distinct holders" wait_for 30 held_by_two
-before_c="$(total_rows "$SC")"; before_d="$(total_rows "$SD")"
-r="$(send mvv-shared s5-shared "$SB")"
+SC="${SID_OF[C]}"
+# The second holder is B, a session that already exists, rather than a
+# fifth launch: this step needs two DISTINCT live session ids under one
+# name, and B is one. Sessions are real and billed, so the journey does
+# not start one whose only contribution is an id.
+SECOND="$SB"
+arm C || bad "arm C"
+SHARED="${NAME_OF[C]}"
+# D holds C's name too. No session can be asked to subscribe another
+# session's name -- `tuple_subscribe` exists to refuse exactly that, and a
+# model asked to do it declines, rightly. So the harness writes the SECOND
+# directory row itself, with the same shape the lease writes (keys {name},
+# dims {session_id}, a fresh nonce, the 300 s TTL). That is legitimate for
+# what this step asserts: the claim under test is how `mailbox_send`
+# RESOLVES a name two sessions hold, not how the second row came to exist.
+# The state is real either way -- one `directory/<name>` subspace, two live
+# rows naming different sessions -- and it is the state RDR-208's own Test
+# Plan describes ("two sessions arming one name with the same nonce write
+# two entries").
+nx tuple out "directory/$SHARED" --key "name=$SHARED" --dim "session_id=$SECOND" \
+    --nonce "mvv-second-holder-$(now)" --ttl-seconds 300 > /dev/null 2>&1 \
+    || bad "writing the second directory row for $SHARED"
+held_by_two() { [ "$(dir_json "$1" | jq '.holders | length')" = 2 ]; }
+check "directory/$SHARED has two distinct holders" wait_for 30 held_by_two "$SHARED"
+before_c="$(total_rows "$SC")"; before_d="$(total_rows "$SECOND")"
+r="$(send "$SHARED" s5-shared "$SB")"
 check "mailbox_send refuses the ambiguous name" grep -q "more than one session" <<<"$r"
-names_both() { grep -q "$SC" <<<"$r" && grep -q "$SD" <<<"$r"; }
+names_both() { grep -q "$SC" <<<"$r" && grep -q "$SECOND" <<<"$r"; }
 check "  and names both holders" names_both
-check "  and writes nothing" test "$(total_rows "$SC")/$(total_rows "$SD")" = "$before_c/$before_d"
-stop C; stop D
+check "  and writes nothing" test "$(total_rows "$SC")/$(total_rows "$SECOND")" = "$before_c/$before_d"
+stop C
 
 # ── step 6: /branch ──────────────────────────────────────────────────────────
 say "step 6: /branch (a new id in the same process)"
@@ -435,14 +469,14 @@ if [ "$EXPECT_BRANCH_FIX" = 1 ]; then
     check "the fork's SessionStart moves the marker to the fork" wait_for 30 marker_names A2 "$SF"
     check "the parent's waiter stopped (alive=false)" wait_for 30 status_is "$SA_C" alive false
     check "a waiter runs under the fork (alive=true)" wait_for 60 status_is "$SF" alive true
-    check "  the parent's directory entry is released" wait_for 30 no_entries alpha-fc
+    check "  the parent's directory entry is released" wait_for 30 no_entries "$A2C_NAME"
     send "$SA_C" s6-parent "$SB" > /dev/null
     check "the parent's mail is NOT pushed into the fork (15 s, no wake, nothing rendered)" not_delivered A2 s6-parent 15
     SID_OF[A2]="$SF"
     check "  and it stays in the parent's mailbox" test "$(available "$SA_C")" = 1
 else
     check "pre-fix behaviour reproduces: no hook fired, the marker still names the parent" marker_names A2 "$SA_C"
-    check "pre-fix behaviour reproduces: alpha-fc still resolves to the parent" resolves_to alpha-fc "$SA_C"
+    check "pre-fix behaviour reproduces: $A2C_NAME still resolves to the parent" resolves_to "$A2C_NAME" "$SA_C"
     send "$SA_C" s6-parent "$SB" > /dev/null
     pushed() { [ "$(wake_count A2)" -gt "${WAKES[A2]}" ]; }
     check "pre-fix behaviour reproduces: the parent's reference is pushed into the fork" wait_for 30 pushed
@@ -453,8 +487,8 @@ say "step 3b: old name after its TTL (plain exit at $(date -u -d "@$RESUME_T" +%
 wait_s=$(( RESUME_T + 300 + 20 - $(now) ))
 [ "$wait_s" -gt 0 ] && { echo "  waiting ${wait_s}s for the 300 s lease to lapse"; sleep "$wait_s"; }
 before="$(total_rows "$SA")"
-r="$(send alpha-e6 s3b-lapsed "$SB")"
-check "the lapsed name is refused, naming the name" grep -q "no live holder for name 'alpha-e6'" <<<"$r"
+r="$(send "$A_NAME" s3b-lapsed "$SB")"
+check "the lapsed name is refused, naming the name" grep -q "no live holder for name '$A_NAME'" <<<"$r"
 check "  and nothing is written" test "$(total_rows "$SA")" = "$before"
 
 stop A2; stop B
