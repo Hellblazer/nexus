@@ -487,8 +487,13 @@ def test_audit_preamble_prints_drift_lines(monkeypatch, tmp_path, capsys):
     })
     monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: t2)
     monkeypatch.setenv("NEXUS_PROJECT_ROOTS", str(tmp_path))
+    # nexus-u1jxt.6: a checkout named like the target wins over the env
+    # roots, so this test must not run from inside the real nexus checkout
+    # (CI red on d4f298ac5: it scanned the real docs/rdr).
+    monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(rdr, ["preamble", "rdr-audit", "nexus"])
     assert result.exit_code == 0, result.output
+    assert f"**Worktree found:** `{root}` (via NEXUS_PROJECT_ROOTS)" in result.output
     assert "- DRIFT: RDR-159 file=`closed` T2=`superseded`" in result.output
     assert "1 file-vs-T2 status disagreement(s)" in result.output
 

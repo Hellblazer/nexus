@@ -3870,52 +3870,67 @@ def _check_service_autostart_drift() -> list[HealthResult]:
     from nexus.daemon.installer import ActivationState  # noqa: PLC0415 — deferred, CLI startup cost
 
     dest = probe.dest
+    label = "Service autostart unit (local mode)"
     if probe.content_matches:
-        # nexus-mac7t: content alone masked a unit whose activation failed
-        # (or was undone) after the first warning, because the file matched
-        # the template from then on. The manager's answer is the other half.
-        match probe.activation.state:
+        # nexus-mac7t: content alone masked a unit the manager did not have
+        # after the first warning, because the file matched the template
+        # from then on. The manager's answer is the other half. Only a
+        # POSITIVE "disabled / unknown" answer warns; a box with no manager
+        # or one this process cannot ask is informational (nothing here
+        # can act, and a false warning fed a destructive repair once).
+        activation = probe.activation
+        assert activation is not None  # the probe asks whenever content matches
+        match activation.state:
             case ActivationState.ACTIVE:
                 return [HealthResult(
-                    label="Service autostart unit (local mode)",
+                    label=label,
                     ok=True,
                     detail=(
-                        f"{dest} matches the current template and the "
-                        "service manager has it registered"
+                        f"{dest} matches the current template and is "
+                        "registered with the service manager"
                     ),
                 )]
-            case ActivationState.NO_MANAGER:
-                # Informational, never a warning: nothing on this box can
-                # activate the unit, so its not being registered is not a
-                # defect to fix here.
+            case ActivationState.NOT_ACTIVE:
                 return [HealthResult(
-                    label="Service autostart unit (local mode)",
-                    ok=True,
-                    detail=(
-                        f"{dest} matches the current template; no service "
-                        f"manager on this box can activate it "
-                        f"({probe.activation.detail})"
-                    ),
-                )]
-            case _:
-                return [HealthResult(
-                    label="Service autostart unit (local mode)",
+                    label=label,
                     ok=False,
                     warn=True,
                     detail=(
-                        f"{dest} is installed but not activated: the "
-                        f"service manager does not have it "
-                        f"({probe.activation.detail}) -- the unit file "
-                        "matches the current template, so nothing "
-                        "re-attempts the activation on its own; the "
-                        "service will not start at login until it is "
-                        "re-registered"
+                        f"{dest} is installed but not registered for login: "
+                        f"{activation.detail} -- the unit file matches the "
+                        "current template, so nothing re-attempts the "
+                        "registration on its own; the service will not "
+                        "start at login until it is re-registered"
                     ),
                     fix_suggestions=[
-                        "nx daemon service uninstall --autostart && "
-                        "nx daemon service install --autostart"
-                        "  # re-registers the unit with launchd/systemd",
+                        f"{activation.remedy}  # re-registers the unit with the service manager",
                     ],
+                )]
+            case ActivationState.NO_MANAGER:
+                return [HealthResult(
+                    label=label,
+                    ok=True,
+                    detail=(
+                        f"{dest} matches the current template; no service "
+                        f"manager on this box can register it "
+                        f"({activation.detail}), so the service will not "
+                        "start at login here until one exists"
+                    ),
+                    fix_suggestions=[
+                        "nx daemon service uninstall --autostart && nx daemon "
+                        "service install --autostart  # once a service manager is available",
+                    ],
+                )]
+            case _:
+                return [HealthResult(
+                    label=label,
+                    ok=True,
+                    detail=(
+                        f"{dest} matches the current template; the service "
+                        f"manager could not be asked from this process "
+                        f"({activation.detail}) -- run `nx doctor` from a "
+                        "login session to confirm it is registered"
+                    ),
                 )]
 
     return [HealthResult(

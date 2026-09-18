@@ -151,7 +151,10 @@ class TestInstallIdempotent:
         with patch.object(daemon_cmd.subprocess, "run") as mock_run2:
             result = installer.install_autostart(tier="service")
         assert result.status is installer.InstallStatus.ALREADY_PRESENT
-        assert mock_run2.call_count == 0
+        # nexus-mac7t: the one call is the read-only registration query
+        # (launchctl print-disabled), never an activation.
+        assert mock_run2.call_count == 1
+        assert mock_run2.call_args.args[0][1] == "print-disabled"
         assert result.activated_cmd is None
 
 
@@ -216,9 +219,10 @@ class TestActivationFailure:
             mock_run.return_value.stdout = ""
             with pytest.raises(installer.ActivationError):
                 installer.install_autostart(tier="service")
-        # nexus-cd1k0.4: a present manager that refused restores the tree so
-        # the retry activates again instead of reading file == render.
-        assert not (tmp_path / "units" / "com.nexus.service.plist").exists()
+        # The file stays on an activation failure (nexus-mac7t): the retry
+        # asks the service manager before it short-circuits, so cd1k0.4's
+        # invariant no longer needs the file deleted.
+        assert (tmp_path / "units" / "com.nexus.service.plist").exists()
 
     def test_activation_failure_with_force_returns_newly_installed_with_warning(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

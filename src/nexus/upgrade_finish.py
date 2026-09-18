@@ -2200,25 +2200,33 @@ def _autostart_probe_failure_action(exc: Exception) -> str:
 @dataclass(frozen=True)
 class AutostartDriftProbe:
     """What :func:`_probe_service_autostart_drift` found for an installed
-    service-tier unit: its on-disk content, the current render, and what
-    the OS service manager says about it (nexus-mac7t)."""
+    service-tier unit: its on-disk content, the current render, and, when
+    the content is current, what the OS service manager says about it
+    (nexus-mac7t). ``activation`` is ``None`` when the content drifted:
+    the manager's answer is unused on that branch, and asking it is a
+    subprocess on every ``nx doctor``."""
 
     dest: Path
     existing: str
     rendered: str
-    activation: ActivationProbe
+    activation: ActivationProbe | None
 
     @property
     def content_matches(self) -> bool:
         return self.existing == self.rendered
 
     @property
-    def not_activated(self) -> bool:
-        """The file is current but a present manager does not have the unit:
-        the state the content comparison alone masked after one warning."""
+    def manager_lacks_unit(self) -> bool:
+        """The file is current but the manager POSITIVELY reports the unit
+        disabled or unknown: the state the content comparison alone masked
+        after one warning. False for NO_MANAGER and UNREACHABLE, which are
+        not defects and must never route into a repair."""
         from nexus.daemon.installer import ActivationState  # noqa: PLC0415 — deferred, CLI startup cost (same reason the probe imports installer lazily)
 
-        return self.activation.state is ActivationState.NOT_ACTIVE
+        return (
+            self.activation is not None
+            and self.activation.state is ActivationState.NOT_ACTIVE
+        )
 
 
 def _probe_service_autostart_drift() -> AutostartDriftProbe | None:
@@ -2237,11 +2245,13 @@ def _probe_service_autostart_drift() -> AutostartDriftProbe | None:
 
     The activation half exists because :func:`nexus.daemon.installer.install_autostart`
     writes the unit file before it activates: once the file matched the
-    template, a unit whose ``launchctl bootstrap`` / ``systemctl enable``
-    had failed (``--force``), or was later booted out by hand, compared
-    equal on every later pass and the unmanaged state was never surfaced
-    again. A box with no manager at all reports ``NO_MANAGER``, which
-    callers treat as benign (nothing here could activate it).
+    template, a unit the manager did not have (a ``--force`` install whose
+    activation failed, a later ``launchctl disable`` / ``systemctl
+    disable``) compared equal on every later pass and the unregistered
+    state was never surfaced again. Only a POSITIVE "disabled / unknown"
+    answer is a defect; a box with no manager (``NO_MANAGER``) or one that
+    cannot be asked from this process (``UNREACHABLE``: no user bus over
+    ssh, no GUI domain headless) is benign to every caller.
 
     Raises on a genuine probe failure (``is_local_mode()`` / the unit
     lookup / the render / the read blowing up) -- this function does NOT
@@ -2274,7 +2284,11 @@ def _probe_service_autostart_drift() -> AutostartDriftProbe | None:
 
     _, rendered = installer.rendered_unit_content(tier="service")
     existing = dest.read_text()
-    activation = installer.autostart_activation_state(dest, tier="service")
+    activation = (
+        installer.autostart_activation_state(dest, tier="service")
+        if existing == rendered
+        else None
+    )
     return AutostartDriftProbe(
         dest=dest, existing=existing, rendered=rendered, activation=activation,
     )
@@ -2406,25 +2420,30 @@ def converge_service_autostart_unit(
         return []  # benign: not local mode, or no service-tier unit installed here
     dest = probe.dest
 
-    if probe.content_matches and not probe.not_activated:
-        # benign: already up to date, and either the manager has it or
-        # there is no manager on this box to have it (NO_MANAGER).
-        return []
-
     if probe.content_matches:
-        # nexus-mac7t: the file is current but the manager does not have
-        # the unit. The remedy is the same bounce as content drift (the
-        # uninstall + reinstall below is exactly what re-registers it),
-        # so it rides the same path with its own note.
-        note = (
-            f"the storage-service autostart unit at {dest} is installed "
-            f"but not activated ({probe.activation.detail})"
-        )
-    else:
-        note = (
-            f"the storage-service autostart unit at {dest} differs from the "
-            "current template"
-        )
+        if not probe.manager_lacks_unit:
+            # benign: already up to date, and the manager has it, or there
+            # is no manager to have it, or it could not be asked.
+            return []
+        # nexus-mac7t: the file is current but the manager positively
+        # reports the unit disabled or unknown. NEVER the bounce below:
+        # on macOS a disabled label refuses `launchctl bootstrap`, so the
+        # stop/uninstall/install would stop the service, fail to
+        # re-register it, and leave a NEEDS HUMAN line where a working
+        # box was (code-review-expert and critic on 9ffaa462f). Name the
+        # platform remedy the probe carries; the doctor row names the same.
+        assert probe.activation is not None  # manager_lacks_unit implies it
+        return [
+            f"NOTE: the storage-service autostart unit at {dest} is current "
+            f"but not registered for login ({probe.activation.detail}). Not "
+            f"touching it here -- run `{probe.activation.remedy}` to "
+            "re-register it, then `nx doctor` to confirm."
+        ]
+
+    note = (
+        f"the storage-service autostart unit at {dest} differs from the "
+        "current template"
+    )
     if unattended or dry_run:
         return [
             f"NOTE: {note}. Not reinstalling it here -- run `nx daemon "

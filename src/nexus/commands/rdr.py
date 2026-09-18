@@ -5262,24 +5262,22 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
             roots_source = "default candidates (set NEXUS_PROJECT_ROOTS to override)"
 
         candidate_paths = [r / target for r in roots if r.is_dir()]
-        # Precedence: an explicit NEXUS_PROJECT_ROOTS that holds the target
-        # wins (the operator said where to look), then the checkout the
-        # command runs in when the names agree (nexus-u1jxt.6: the home
-        # candidates alone scanned nothing from a repo outside them, and
-        # from a linked worktree they scanned the primary checkout's files),
-        # then the home candidates. Before this ordering the cwd repo also
-        # beat the explicit env, so a run from inside a nexus checkout
-        # ignored NEXUS_PROJECT_ROOTS entirely (CI red on d4f298ac5).
-        found_path = None
-        if roots_env:
+        # nexus-u1jxt.6: the checkout the command runs in IS the target when
+        # the names agree, whatever directory it lives under -- the home
+        # candidates alone scanned nothing from a repo outside them, and from
+        # a linked worktree they scanned the primary checkout's files. That
+        # holds over an explicit NEXUS_PROJECT_ROOTS too: the env is a
+        # standing default, the checkout you stand in is this invocation's
+        # intent. The source is printed so a surprise is visible.
+        if target == cwd_repo_name:
+            found_path: Path | None = Path(cwd_repo_root)
+            found_via = "the current checkout"
+        else:
             found_path = next((p for p in candidate_paths if p.is_dir()), None)
-        if found_path is None and target == cwd_repo_name:
-            found_path = Path(cwd_repo_root)
-        if found_path is None:
-            found_path = next((p for p in candidate_paths if p.is_dir()), None)
+            found_via = roots_source
         if found_path:
-            print(f"**Worktree found:** `{found_path}`")
-            postmortem_dir = found_path / "docs" / "rdr" / "post-mortem"
+            print(f"**Worktree found:** `{found_path}` (via {found_via})")
+            postmortem_dir = found_path / _preamble_rdr_dir(str(found_path)) / "post-mortem"
             if postmortem_dir.exists():
                 count = len(list(postmortem_dir.glob("*.md")))
                 print(f"**Post-mortems available:** {count} files in `{postmortem_dir}`")
