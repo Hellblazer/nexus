@@ -192,11 +192,16 @@ that one capped pass does not exhaust a package
 
 To replace the capped counts, the daemon package and the seven quiet modules
 were each reviewed again at HEAD d8d45f761 by a fresh isolated reviewer under
-the same brief with the cap removed. Nothing was fixed between the passes
-except the ripgrep argument fix, which is left out of the match. Findings were
-matched by hand. The overlap between two independent passes estimates the
-population they draw from (Lincoln-Petersen: first-pass count times second-pass
-count, divided by the overlap).
+the same brief with the cap removed (pass B, one reviewer per target). Pass A
+is not a new run: it is the original capped pass on each target, reused as
+the first sample, with the quiet-module pass's eight lower-ranked findings
+included. Nothing was fixed between the passes except the ripgrep argument
+fix, which is left out of the match. Findings were matched by hand. The
+overlap between the two passes estimates the population they draw from
+(Lincoln-Petersen: first-pass count times second-pass count, divided by the
+overlap). Because pass A was capped, it is a truncated sample: that pushes
+the overlap up and the estimate down, on top of the same-model correlation
+noted below.
 
 | Target | Lines | Pass A | Pass B (uncapped) | In both | Estimated population | Known so far |
 |---|---|---|---|---|---|---|
@@ -209,16 +214,23 @@ second session. Result of record: T2 `nexus_rdr/214-research-5`.
 What this shows:
 
 - The set of defects this reviewer can see is finite, and one uncapped pass
-  finds most of it. Pass B alone re-found 17 of 19 and 10 of 12. A second pass
-  over an unchanged package would add roughly a tenth.
+  finds most of it. Pass B alone re-found 17 of 19 and 10 of 12, and held 46
+  of the 48 and 26 of the 28 findings known after both. A second pass over an
+  unchanged package added 2 to each: 4 and 8 percent of what one pass found.
 - The estimate is a floor. Both passes are the same model under the same
   brief, so what one misses the other tends to miss. The figure bounds what the
   instrument sees, not how many defects the code has.
-- Severity labels did not reproduce. The defect behind the P1 bead
+- Severity labels reproduced poorly. Of the 27 overlapping findings, 19
+  carried a label on both sides (the quiet-module pass A's eight lower-ranked
+  findings carry none). Of those 19, 11 kept their label and 8 moved,
+  including both of pass A's highs: the defect behind the P1 bead
   nexus-cd1k0.1 (stop waits on a zombie, so the supervisor is killed and the
-  operating system restarts the stack) was high in pass A and low in pass B.
-  The fenced-supervisor defect was high in A and medium in B. Pass B's one high
-  finding was absent from pass A. The finding reproduces; its label does not.
+  operating system restarts the stack) went from high to low, and the
+  fenced-supervisor defect from high to medium; two lows moved up to medium.
+  Pass B's one high finding was absent from pass A. This is a small sample,
+  and it says the label moves on about two findings in five, not that it is
+  arbitrary. The finding reproduces; its label is unreliable as a sort key.
+  (Census: T2 `nexus_rdr/214-research-6`.)
 - Most of what uncapping added is low severity: 28 of 46 and 17 of 26, largely
   functions documented as never raising that raise on a malformed local file.
 
@@ -266,8 +278,9 @@ follows from the file and the failure scenario, so it can be assigned by rule.
   population this reviewer can see at about 51 and 31, of which 48 and 28 are
   now known. This is a floor on the true count.
   *Source: T2 `nexus_rdr/214-research-5`.*
-- **Verified** (spike): the reviewer's severity label does not reproduce
-  between passes over the same defect; what the defect affects does.
+- **Verified** (spike, small sample): the reviewer's severity label moved
+  on 8 of 19 overlapping findings that carried one on both sides, both highs
+  among them; what the defect affects did not move.
 - **Verified** (spike): one capped pass does not exhaust a package. A second
   capped pass over remediated code found 12 defects, none a repeat.
 - **Verified** (spike): an independent re-run of the reviewer's probes is not
@@ -322,9 +335,10 @@ say which findings are acted on.
 ### Approach
 
 1. **One uncapped pass per package.** The brief loses its cap of 12 findings.
-   One uncapped pass found 89 and 83 percent of what two passes found
-   together, and a second pass over unchanged code adds about a tenth. A
-   package counts as reviewed after one pass.
+   One uncapped pass alone re-found 89 and 83 percent of what the earlier
+   capped pass had found, and held 96 and 93 percent of everything the two
+   passes found together. A second pass over unchanged code added 4 and 8
+   percent. A package counts as reviewed after one pass.
 2. **Every finding carries an "affects" class.** The class is one of eight
    values in a checked table (below). It is assigned by rule from the file and
    the failure scenario. The reviewer proposes it and the session that takes
@@ -351,7 +365,11 @@ say which findings are acted on.
    finding counts by class. A package is due again when more than a fifth of
    its non-test lines differ from the reviewed commit. The fraction is a
    starting value and is not measured. Each return run records a predicted
-   finding count first, so the fraction can be corrected from evidence.
+   finding count first. Checkpoint: after the third return run, compare
+   predicted with actual across the three. If actual is below half of
+   predicted on all three, the fraction is too small and doubles; if above
+   twice predicted on any, it halves; otherwise it stands. The revision is a
+   ledger entry with the three pairs, never a silent edit.
 6. **The reviewer stays isolated; matching happens afterwards.** The reviewer
    reads no memory, tracker or RDR. After the run, a separate step drops
    findings that match an open bead, a closed bead or a recorded disposition.
@@ -366,8 +384,8 @@ say which findings are acted on.
 
 ### Technical Design
 
-Nothing here needs new infrastructure. The reviewers are ordinary agents and
-beads are the tracker.
+Nothing here needs a new service or store. Phase 1 adds two checked tables
+and their tests; the reviewers are ordinary agents and beads are the tracker.
 
 **The brief.** `docs/review/standing-code-review-brief.md`, moved into the
 repository from the probe directory so its hash means something. Changes from
@@ -375,9 +393,14 @@ the recapture version: each finding states its affects class and whether the
 failing path is reachable with default settings.
 
 **The affects table.** `docs/tables/standing-review-affects.toml`, a checked
-table in the sense of `docs/rdr/AGENTS.md`: a closed vocabulary that a test
-loads and validates. Each class has a name, a one-sentence test, a tier, and
-path patterns that make it the default for a file.
+table in the sense of `docs/rdr/AGENTS.md`. The loader
+(`src/nexus/tables/load.py`) knows two kinds, state machines and decision
+tables, with every dimension a declared enum and every row emitting one
+result. This one is a decision table: dimensions `class` (the eight values
+below) and `reachable` (by default, not by default, not applicable), rows
+emitting the disposition (act now, own bead, batch). The one-sentence test
+for each class and the path patterns that make it a file's default are
+documentation beside the domain, not checked content.
 
 | Class | The finding means | Tier |
 |---|---|---|
@@ -413,9 +436,10 @@ search modules at the top level not yet covered, `mcp`, then `commands`
 - **Uncapped, one pass.** The cap made every count meaningless (five of six
   passes returned exactly 12). With it removed, one pass reaches close to the
   ceiling of what this reviewer can see.
-- **Affects over severity.** The same defect was labelled high in one pass
-  and low in the next. What it affects follows from the file and the failure
-  scenario and did not move. A high-severity defect in this project's own
+- **Affects over severity.** The label moved on 8 of 19 overlapping
+  findings, and the same defect was high in one pass and low in the next.
+  What it affects follows from the file and the failure scenario and did not
+  move. A high-severity defect in this project's own
   gate tooling was fixed first on the pilot day, ahead of defects that
   silently dropped pages from a user's index. That ordering was wrong, and
   the label caused it.
@@ -424,10 +448,14 @@ search modules at the top level not yet covered, `mcp`, then `commands`
 - **Batch beads are not a way to forget.** The project rule is to fix what is
   found instead of filing it. That rule was written for a residual found
   while working in a file. A sweep that returns hundreds of low-impact
-  findings in files nobody is working in is a different case, and the pilot
-  day shows what applying the rule to it costs. The batch bead keeps the
-  probes, and the fix happens with the file open for a real reason, when the
-  sibling sweep and the tests are already being paid for.
+  findings in files nobody is working in is a different case. The pilot day
+  measured the cost of fixing many findings at once, which Approach item 4
+  bounds; it did not measure the cost of fixing one finding in a file nobody
+  is otherwise in, so the untouched-file part of this argument is inferred,
+  not measured. The batch bead keeps the probes, and the fix happens with
+  the file open for a real reason, when the sibling sweep and the tests are
+  already being paid for. The ledger's cost rows are where this inference
+  gets tested.
 
 ## Alternatives Considered
 
@@ -452,8 +480,8 @@ and not small. Rejected.
 ### Alternative 4: Two independent passes per package
 
 It gives a population estimate for every package. It doubles the cost for
-about a tenth more findings, mostly low. Kept as a measuring tool for the
-return runs, rejected as the routine.
+4 to 8 percent more findings, mostly low. Kept as a measuring tool: the
+first large package in Phase 2 and the return runs. Rejected as the routine.
 
 ### Briefly Rejected
 
@@ -513,9 +541,14 @@ No implementation starts before this RDR is accepted.
    for at least 90 percent. Below that, the table's tests are rewritten and
    the measurement repeated before Phase 2.
 
-**Phase 2: the first run under the rule.** Review `db` with the new brief.
-Match, classify, re-run act-now probes, file beads by tier. Fix the act-now
-beads. Fill in the cost fields.
+**Phase 2: the first run under the rule.** Review `db` with the new brief,
+as two independent passes (Alternative 4), because the near-ceiling result
+comes from two targets under 7,000 lines and `db` is four times larger.
+Recorded before the run: the second pass adds at most 15 percent of what
+the first found. Above that, the sweep in Phase 3 runs two passes per
+package until three consecutive packages come in under it. Match, classify,
+re-run act-now probes, file beads by tier. Fix the act-now beads. Fill in
+the cost fields.
 
 **Phase 3: the sweep.** One package per run in the order above, each gated
 by Approach item 4. After the third run, read the cost rows and decide with
@@ -550,10 +583,14 @@ made there, not hidden.
 The five research records are spikes, each with a prediction recorded before
 its result and two of the predictions wrong (T2 `nexus_rdr/214-research-1`
 to `-5`). Three assumptions remain and are listed as such under Critical
-Assumptions: the cost holding for a different model, the return-on-change
-fraction of one fifth, and the affects rule being assignable by rule. The
-third is what Phase 1 measures before anything depends on it, with its
-agreement threshold recorded in advance.
+Assumptions: the cost holding for a different model, the affects rule being
+assignable by rule, and findings being worth more than the remediation they
+trigger. The second is what Phase 1 measures before anything depends on it,
+with its agreement threshold recorded in advance. The third is what the
+ledger's cost rows measure, with the decision point at the third run
+(Approach item 7). The return-on-change fraction is a design parameter, not
+an assumption of record; Approach item 5 gives it a prediction, a threshold
+and a checkpoint.
 
 #### API Verification
 
@@ -568,7 +605,7 @@ agreement threshold recorded in advance.
 The RDR decides the practice: brief, cadence, disposition rule, landing
 place, cost ledger. It does not fix any finding; the findings from the two
 uncapped passes are recorded in T2 and deliberately unfiled until the
-disposition rule is accepted. Nothing in the plan builds infrastructure.
+disposition rule is accepted. The plan adds two checked tables and a brief file, no service or store.
 
 ### Cross-Cutting Concerns
 
