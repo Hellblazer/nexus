@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
 import nexus.commands.rdr as rdr_mod
 from nexus.commands.rdr import rdr
 from tests.test_rdr_preamble import (  # noqa: F401 — rdr_env and _rdr_git_template are fixtures
@@ -231,6 +232,26 @@ class TestSetStatusWritesTheReason:
         assert res.exit_code == 0, res.output
         assert "close_reason: premise void after RDR-155" in (d / "rdr-150-x.md").read_text()
         assert "close_reason: premise void after RDR-155\n" in fake._store["150"]
+
+    def test_reason_with_a_colon_still_parses_as_yaml(self, rdr_env, monkeypatch):
+        """RDR-214's abandonment (2026-09-18) wrote `close_reason: Sam's decision
+        2026-09-18: the batch tier ...` verbatim; the bare `: ` inside a plain
+        scalar broke the whole frontmatter, `nx rdr lint` went red and the
+        indexer would skip the file. A reason that cannot stand as a plain
+        scalar is written quoted, on the file and on the T2 record; one that
+        can stays plain (the sibling test pins that)."""
+        d = rdr_env["rdr_dir"]
+        _write_rdr(d, "rdr-152-x.md", {"title": "X", "status": "draft"}, "x\n")
+        fake = _FakeT2ResearchClient(entries={"152": "id: RDR-152\nstatus: draft\n"})
+        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+        reason = "Sam's decision 2026-09-18: the batch tier re-creates a backlog; #3 stands"
+        res = _runner().invoke(rdr, ["set-status", "152", "abandoned", "--reason", reason])
+        assert res.exit_code == 0, res.output
+        text = (d / "rdr-152-x.md").read_text()
+        fm = yaml.safe_load(text.split("---")[1])
+        assert fm["close_reason"] == reason
+        assert fm["status"] == "abandoned"
+        assert yaml.safe_load(fake._store["152"])["close_reason"] == reason
 
     def test_no_reason_writes_no_field(self, rdr_env, monkeypatch):
         d = rdr_env["rdr_dir"]

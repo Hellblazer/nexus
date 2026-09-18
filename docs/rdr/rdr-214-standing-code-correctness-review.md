@@ -3,7 +3,7 @@ title: "Standing-Code Correctness Review: From Pilot to Decision"
 id: RDR-214
 type: Technical Debt
 status: abandoned
-close_reason: Sam's decision 2026-09-18: the batch tier re-creates a backlog the fix-don't-file rule forbids, triage cost is uncosted, the near-ceiling result measures reviewer self-consistency, and the design adds process tooling; the remediation loop from the pilot has not closed
+close_reason: "Sam's decision 2026-09-18: the batch tier re-creates a backlog the fix-don't-file rule forbids, triage cost is uncosted, the near-ceiling result measures reviewer self-consistency, and the design adds process tooling; the remediation loop from the pilot has not closed"
 priority: medium
 author: Sam
 reviewed-by: self

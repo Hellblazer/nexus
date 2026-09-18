@@ -7,6 +7,7 @@ Exposes:
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -586,18 +587,34 @@ def _rewrite_frontmatter_status(text: str, new_status: str, date: str, reason: s
         if re.search(r"^close_reason:", fm, re.MULTILINE):
             fm = re.sub(
                 r"^close_reason:.*?(\r?)$",
-                lambda m: f"close_reason: {reason}{m.group(1)}",
+                lambda m: f"close_reason: {_yaml_scalar(reason)}{m.group(1)}",
                 fm, count=1, flags=re.MULTILINE,
             )
         else:
             fm = re.sub(
                 r"^(status:.*?)(\r?)$",
-                lambda m: f"{m.group(1)}{m.group(2)}\nclose_reason: {reason}{m.group(2)}",
+                lambda m: f"{m.group(1)}{m.group(2)}\nclose_reason: {_yaml_scalar(reason)}{m.group(2)}",
                 fm, count=1, flags=re.MULTILINE,
             )
 
     return "---" + fm + "---" + parts[2]
 
+
+def _yaml_scalar(value: str) -> str:
+    """Render *value* so ``key: <rendered>`` parses back to *value*.
+
+    A plain scalar is kept when it round-trips; otherwise the value is
+    double-quoted (JSON string syntax is valid YAML). RDR-214's abandonment
+    wrote ``close_reason: Sam's decision 2026-09-18: the batch tier ...``
+    verbatim, and the bare ``: `` inside the plain scalar broke the whole
+    frontmatter (nexus-z2rvr, 2026-09-18).
+    """
+    try:
+        if yaml.safe_load(f"k: {value}") == {"k": value}:
+            return value
+    except yaml.YAMLError:
+        pass
+    return json.dumps(value, ensure_ascii=False)
 
 #: Extracts a cell's leading word, tolerant of markdown decoration
 #: (``**Scrapped 2026-05-19**`` -> ``Scrapped``) so a decorated README cell
@@ -945,7 +962,7 @@ def _write_t2_status(
                     out.insert(1 if not seen_status else out.index(f"status: {new_status}") + 1, f"{date_key}: {date}")
                 if reason:
                     out = [ln for ln in out if not ln.strip().startswith("close_reason:")]
-                    out.insert(out.index(f"status: {new_status}") + 1, f"close_reason: {reason}")
+                    out.insert(out.index(f"status: {new_status}") + 1, f"close_reason: {_yaml_scalar(reason)}")
                 tags = entry.get("tags", "")
                 if isinstance(tags, (list, tuple)):
                     tags = ",".join(str(t) for t in tags)
