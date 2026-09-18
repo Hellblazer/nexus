@@ -276,8 +276,17 @@ functions.
    "tool": "hook_<name>", "input": {...}}`. The `input` map names the
    payload fields the hook reads (the contract map lists them per script)
    as `${session_id}`, `${tool_input.command}` and so on. The tool returns
-   the same decision JSON the script wrote to stdout. That is 16 of the 24
-   conexus entries.
+   the same decision JSON the script wrote to stdout. That is 15 of the 24
+   conexus entries. One `PreToolUse` entry is excluded:
+   `phase_review_close_requires_gate` is the routing framework's only
+   `fail_closed: true` rule (`routing/registry.yaml`), and its contract is
+   that a crash still emits a deny envelope (`routing/_lib.py`'s
+   `run_hook`). On this tier it could not: the tool boundary returns a
+   raised exception as empty text with `isError` false, and Claude Code
+   treats a disconnected server as non-blocking, so both a crash and a
+   server that is down would read as allow and a phase could close without
+   its gate. It takes the command tier instead, where the process can still
+   write the deny envelope before it exits.
 2. **The command tier.** Six of the seven `SessionStart` entries (the
    seventh is item 3) become command hooks in exec form on `nx-hook`, a
    new console script beside
@@ -471,9 +480,10 @@ that client or shell out to `nx` for every call.
   and ships through the drift ledger and a plugin cut or client release;
   the tool tier also requires a wheel whose `nx-mcp` registers the hook
   tools, so the drift ledger entry states the wheel floor.
-- 16 conexus hooks stop spawning a process at all; six `SessionStart`
-  hooks spawn one `nx-hook` each instead of bash, the lockstep hook
-  spawns `python3`, and the four sn hooks spawn `python3` instead of bash.
+- 15 conexus hooks stop spawning a process at all; six `SessionStart`
+  hooks and the close gate spawn one `nx-hook` each instead of bash, the
+  lockstep hook spawns `python3`, and the four sn hooks spawn `python3`
+  instead of bash.
 - The hook tools appear in the model's tool list.
 - 4,200 lines of bash leave; roughly the same amount of Python arrives,
   with unit tests per module.
@@ -674,3 +684,4 @@ registration module on the existing server, and one package.
 - 2026-09-18: Design amended to two tiers (research-9): `mcp_tool` hooks on `nx-mcp` for every event after session start, `nx-hook` command hooks for `SessionStart`, the lockstep hook on stdlib `python3`.
 - 2026-09-18: Gate round 3 — PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); commit `dd95743fa`; critique `nexus_rdr/215-gate-critique-2026-09-18-r3`.
 - 2026-09-18: Accept dispositions of the round-3 residuals: the four carried from round 2 closed by `dd95743fa` (fix check `nexus_rdr/215-fix-check-dd95743fa`); the four from round 3 fixed in `faa779251`.
+- 2026-09-18: `phase_review_close_requires_gate` carved out of the tool tier to the command tier; the tool tier is 15 of 24 conexus entries, not 16. Raised during bead `nexus-q02nx.1` review; critique `nexus_rdr/critique-impl-nexus-q02nx.1-hooks-package`.
