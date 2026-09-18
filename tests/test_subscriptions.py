@@ -339,6 +339,84 @@ class TestInstanceMailboxTakeover:
             s.shutdown()
 
 
+class TestDirectoryRelease:
+    """nexus-kdxyv (RDR-208 test plan: "a /clear self-stop releases the
+    watcher's entry within about a second; an ordinary exit leaves it for
+    one TTL"). Stopping a lease on purpose -- ``unsubscribe`` of the
+    instance mailbox, or ``shutdown`` on a handoff -- re-sends the SAME
+    nonce with ``ttl_seconds=1`` so the ``directory/<name>`` row lapses
+    within about a second instead of at the 300 s TTL. The idempotent
+    tuple id (keys + nonce) makes that an update of the live row, never a
+    second row. A plain process exit still leaves the row for one TTL:
+    nothing here runs on exit."""
+
+    def _armed(self, tmp_path):
+        fake = _FakeTuples()
+        s = SubscriptionSet(session_id="sess-1")
+        s.subscribe("mailbox/inst-a", templates=_FIXTURE_TEMPLATES,
+                    store_factory=lambda: _fake_store_factory(fake), state_dir=tmp_path)
+        assert len(fake.calls) == 1
+        return s, fake
+
+    def test_shutdown_releases_the_entry_with_the_same_nonce_and_ttl_one(self, tmp_path):
+        s, fake = self._armed(tmp_path)
+        arm_subspace, arm_keys, arm_dims, arm_nonce, arm_ttl = fake.calls[0]
+        assert arm_ttl == int(DIRECTORY_TTL_S)
+        s.shutdown()
+        assert len(fake.calls) == 2, fake.calls
+        subspace, keys, dims, nonce, ttl = fake.calls[1]
+        assert (subspace, keys, dims) == (arm_subspace, arm_keys, arm_dims)
+        assert nonce == arm_nonce
+        assert ttl == 1
+
+    def test_unsubscribe_releases_the_entry(self, tmp_path):
+        s, fake = self._armed(tmp_path)
+        s.unsubscribe("mailbox/inst-a")
+        assert len(fake.calls) == 2, fake.calls
+        assert fake.calls[1][4] == 1
+        assert fake.calls[1][3] == fake.calls[0][3]
+
+    def test_shutdown_twice_releases_once(self, tmp_path):
+        s, fake = self._armed(tmp_path)
+        s.shutdown()
+        s.shutdown()
+        assert len(fake.calls) == 2
+
+    def test_shutdown_with_no_lease_writes_nothing(self, tmp_path):
+        s = SubscriptionSet(session_id="sess-1")
+        s.subscribe("board/t", templates=_FIXTURE_TEMPLATES,
+                    store_factory=_poison_store_factory(), state_dir=tmp_path)
+        s.shutdown()  # the poison factory proves no out() happened
+
+    def test_a_failed_release_is_swallowed(self, tmp_path):
+        s, fake = self._armed(tmp_path)
+
+        def _boom(*a, **kw):
+            raise RuntimeError("engine gone")
+        fake.out = _boom
+        s.shutdown()  # logged, never raised: a handoff must not die on this
+        assert s._lease_thread is None
+
+    def test_on_the_real_engine_the_row_lapses_within_seconds(self, t2_service_env, tmp_path) -> None:
+        from nexus.mcp_infra import t2_ctx
+
+        sid = str(uuid.uuid4())
+        s = SubscriptionSet(session_id=sid)
+        name = f"inst-{uuid.uuid4().hex[:8]}"
+        s.subscribe(f"mailbox/{name}", templates=[], store_factory=t2_ctx, state_dir=tmp_path)
+        with t2_ctx() as db:
+            assert len(db.tuples.rd(f"directory/{name}", {"name": name})) == 1
+        s.unsubscribe(f"mailbox/{name}")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            with t2_ctx() as db:
+                rows = db.tuples.rd(f"directory/{name}", {"name": name})
+            if not rows:
+                break
+            time.sleep(0.25)
+        assert not rows, "the released directory row did not lapse within 10 s (TTL is 300 s)"
+
+
 class TestPersistenceAcrossResumeAndClear:
     def test_resume_restores_the_list_and_a_clear_starts_fresh(
         self, t2_service_env, tmp_path, monkeypatch,
@@ -367,6 +445,35 @@ class TestPersistenceAcrossResumeAndClear:
             assert f"mailbox/{session_a}" in names
         finally:
             fresh_a.shutdown()
+
+        # nexus-kdxyv: the instance mailbox is NOT restored on resume. The
+        # ListAgents name changes at every process start (RDR-208), so the
+        # resumed session subscribes its NEW name (RDR-211: "a /resume
+        # under a new name repeats it, and the old name's mail strands");
+        # restoring the old one re-armed a stale lease and made that
+        # subscribe refuse as a second instance mailbox.
+        fake = _FakeTuples()
+        subs2 = load(t1_a, session_a)
+        subs2.subscribe("mailbox/name-before-resume", templates=[],
+                        store_factory=lambda: _fake_store_factory(fake), state_dir=tmp_path)
+        persist(t1_a, subs2)
+        subs2.shutdown()
+        resumed = load(t1_a, session_a, store_factory=lambda: _fake_store_factory(fake))
+        try:
+            assert resumed.instance_mailbox is None
+            assert "board/release-notes" in {e["subspace"] for e in resumed.entries()}
+            before = len(fake.calls)
+            resumed.subscribe("mailbox/name-after-resume", templates=[],
+                              store_factory=lambda: _fake_store_factory(fake), state_dir=tmp_path)
+            assert resumed.instance_mailbox == "mailbox/name-after-resume"
+            # Assert WHICH names were written, not how many writes happened: a
+            # heartbeat thread may tick under a loaded box, and a count would
+            # make this test fail for a reason it does not name.
+            after = [c[0] for c in fake.calls[before:]]
+            assert "directory/name-after-resume" in after, after
+            assert "directory/name-before-resume" not in after, after
+        finally:
+            resumed.shutdown()
 
         # A DIFFERENT session id (the clear path) sees only its own
         # mailbox: T1 itself is session-scoped, so it never finds session

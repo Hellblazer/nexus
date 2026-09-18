@@ -6,6 +6,40 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `/clear` or `/resume` handoff now moves the channel waiter with the
+  session** (nexus-kdxyv). The MCP server's T1 handoff swapped the session
+  id but left the channel waiter and subscription set built for the old
+  id running: the old mailbox's references kept flowing into the new
+  conversation, no channel-status record was written for the new id, the
+  old instance name's directory lease kept heartbeating, and teardown
+  never cancelled the old waiter. The handoff now cancels the old waiter
+  (recording `alive: false` under the old id), releases the old
+  subscription set's `directory/<name>` row within about a second (the
+  RDR-208 release, re-sending the same nonce with a one-second TTL, which
+  `tuple_unsubscribe` now performs too) and starts a waiter under the new
+  id.
+- **A resumed session no longer restores its old instance-name mailbox.**
+  `nexus.mcp.subscriptions.load()` restored the whole subscription list on
+  a `/resume`, instance mailbox included, but the `ListAgents` name changes
+  at every process start, so the restored name was stale by construction:
+  its `directory/<name>` lease was re-armed for the life of the new
+  process, and the session's own `tuple_subscribe` under its NEW name was
+  then refused as a second instance mailbox. Board topics still restore.
+  This is what RDR-211 already describes ("a `/resume` under a new name
+  repeats it, and the old name's mail strands"); the old name's row now
+  lapses at its TTL from the previous process's exit.
+- **`/branch` and `--fork-session` are handoff sources.** Claude Code has
+  reported them to SessionStart as source `fork` since 2.1.213; the
+  plugin's matcher excluded it, so a fork fired no hook, the session
+  marker kept naming the parent, and the parent's waiter pushed the
+  parent's mail into the fork. `fork` joins the matcher and the wheel's
+  `_T1_HANDOFF_SOURCES`: the marker moves to the fork, no cleared record
+  is written (the parent's mailbox stays with the parent, RDR-208), and
+  the waiter and lease follow the fork. The T1 scope moves with it, which
+  JDR-001 lists only for `/clear` and `/resume`.
+
 ## [7.53.0] - 2026-09-18
 
 Paired engine: engine-service-v0.1.129 (`REQUIRED_ENGINE_VERSION` (0, 1, 129);

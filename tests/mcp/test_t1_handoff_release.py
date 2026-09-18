@@ -65,6 +65,11 @@ def _isolate_handoff_globals(monkeypatch):
     monkeypatch.setattr(core, "_T1_HANDOFF_GIVE_UP_LOGGED", False)
     mcp_infra.set_t1_pre_init_hook(None)
     mcp_infra.reset_t1_for_release()
+    # nexus-kdxyv: a consumed handoff now starts the new id's channel
+    # waiter, which reconstructs the T1 handle these tests assert the tick
+    # itself dropped. Inert here by default; the re-key test below replaces
+    # it with a recorder of its own.
+    monkeypatch.setattr(core, "_start_channel_waiter", lambda: None)
     yield
     task = core._T1_SESSION_REFRESH_TASK
     if task is not None:
@@ -76,6 +81,62 @@ def _isolate_handoff_globals(monkeypatch):
 
 def _fake_mint(session_id_arg: str, *, context: str = "") -> dict:
     return {"session_token": f"tok-{session_id_arg}", "expires_in_seconds": 3600}
+
+
+# ── valid marker: the channel waiter and subscription set follow the id ───────
+
+
+@pytest.mark.asyncio
+async def test_valid_marker_rekeys_the_channel_waiter_and_subscriptions(monkeypatch) -> None:
+    """nexus-kdxyv: a consumed handoff (``/clear``, ``/resume``, ``/branch``)
+    moves the SESSION this process serves, so the channel waiter registered
+    under the old id is cancelled (its own ``finally`` then records
+    ``alive=false`` under that id), the old subscription set is shut down
+    (releasing its directory lease) and dropped from the process cache, and
+    a waiter starts under the new id. Before this, the old waiter kept
+    parking on the old mailbox for the rest of the process, no record was
+    ever written for the new id, and teardown (which looks the waiter up by
+    the CURRENT id) never cancelled it."""
+    from nexus.db import t1 as t1_mod
+
+    monkeypatch.setattr(t1_mod, "mint_t1_session_token", _fake_mint)
+    monkeypatch.setattr(
+        "nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID,
+    )
+    write_handoff_marker(
+        _MCP_PID, new_session_id="new-sess", claude_pid=_CLAUDE_PID,
+        config_dir=nexus_config_dir(),
+    )
+    os.environ["NX_T1_SESSION_ID"] = "old-sess"
+    os.environ["NX_T1_SESSION"] = "old-token"
+
+    events: list[tuple[str, str]] = []
+
+    class _Waiter:
+        session_id = "old-sess"
+
+        async def cancel(self) -> None:
+            events.append(("cancel", os.environ.get("NX_T1_SESSION_ID", "")))
+
+    class _Subs:
+        def shutdown(self) -> None:
+            events.append(("shutdown", os.environ.get("NX_T1_SESSION_ID", "")))
+
+    monkeypatch.setattr(core._channel, "_ACTIVE", {"old-sess": _Waiter()})
+    monkeypatch.setattr(core._subscriptions, "_CACHE", {"old-sess": _Subs()})
+    monkeypatch.setattr(
+        core, "_start_channel_waiter",
+        lambda: events.append(("start", os.environ.get("NX_T1_SESSION_ID", ""))),
+    )
+
+    await core._t1_handoff_tick(_MCP_PID, MagicMock())
+
+    assert os.environ["NX_T1_SESSION_ID"] == "new-sess"
+    assert ("cancel", "old-sess") in events, events   # cancelled while still findable under the old id
+    assert ("shutdown", "old-sess") in events, events
+    assert events[-1] == ("start", "new-sess"), events  # the new waiter starts AFTER the swap
+    assert "old-sess" not in core._channel._ACTIVE
+    assert "old-sess" not in core._subscriptions._CACHE
 
 
 # ── valid marker: consumed + re-lease happens ────────────────────────────────

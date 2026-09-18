@@ -1,147 +1,243 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# RDR-208 local-mode MVV, the in-container journey (bead nexus-galkv.19).
-#
-# RETIRED FUNCTIONALLY, KEPT AS A RECORD (RDR-211 nexus-rplay.14, 2026-09-17):
-# this journey's `arm()` step exec'd the CLI ping-then-pull watcher that
-# nexus-rplay.14 deleted outright, so this script no longer runs end to end.
-# Its disposition, like nexus-6konb's other open beads (.15 live MVV, .16
-# close gate, .21 pre-resume instance mailbox), is Sam's per T2
-# nexus_rdr/211-decision-channel-delivery-2026-09-16. Left in place, still
-# parsing (`bash -n`, tests/test_rdr208_mvv_wiring.py), so the historical
-# shape is not lost before that disposition is made.
+# RDR-208 local-mode MVV, the in-container journey (beads nexus-galkv.19,
+# nexus-kdxyv: re-pointed from the deleted CLI watcher at the channel waiter).
 #
 # A virgin local-mode box: `nx init` provisions the bundled engine and PG.
-# Stand-in claude processes (session_server.sh) play two or more Claude Code
-# sessions; under them run the REAL SessionStart hook, the REAL drain hook
-# (conexus/hooks/scripts/mailbox_drain.py from the version under test), the
-# (deleted) CLI mailbox watcher, and the REAL mailbox_send tool function.
-# Only Claude Code itself is stood in for, replaying what was measured live
-# on 2026-09-14 (T2 nexus/rdr-208-mvv-2026-09-14): /clear fires SessionStart
-# source=clear in the same process; /resume is a new process on the same
-# session id; /branch mints a new id in the same process and fires no
-# SessionStart.
+# REAL Claude Code sessions run here, driven through tmux on a private socket
+# and launched with the development-channel flag, so each session's own
+# nx-mcp pushes mailbox references through the Claude Code channel (RDR-211,
+# RDR-213). Under them run the REAL SessionStart and UserPromptSubmit hooks
+# of the plugin under test (--plugin-dir /home/nexus/plugin, staged by run.sh
+# from conexus/hooks) and the REAL mailbox_send tool. The sessions are real
+# and billed. Nothing is stood in for.
 #
-# EXPECT_BRANCH_FIX=1 asserted step 6's fix (the parent's watcher stops and
-# releases after /branch); 0 asserted the 7.46.0 defect reproduces.
+# "Delivered over the channel" (never the pane alone): with NO prompt sent
+# by this harness, the pane shows a new wake line for the session's mailbox,
+# the session's channel-status record shows `announced` advanced, the
+# session transcript carries exactly one UserPromptSubmit hook_success
+# attachment rendering the correlation id (the drain hook claimed, acked and
+# rendered the body at that wake), and the mailbox is empty afterwards.
+# Default senders are proven the same way: the hook renders `from=<id>` from
+# the row's own dims. Model-driven steps end on a literal token; every effect
+# is read from the engine, a record, or the transcript, never the model's prose.
+#
+# EXPECT_BRANCH_FIX=1 (the plugin's SessionStart matcher names `fork`): step
+# 6 asserts /branch hands the MCP server off to the fork: the session marker
+# moves, the parent's directory entry is released, the parent's mail stays in
+# the parent's mailbox and is never pushed into the fork. 0 asserts the
+# pre-fix behaviour reproduces: no hook fires on /branch, the marker still
+# names the parent, the parent's reference is pushed into the fork.
 set -uo pipefail
 
 EXPECT_BRANCH_FIX="${EXPECT_BRANCH_FIX:-1}"
 MVV_LABEL="${MVV_LABEL:-unlabelled}"
 export RUN="$HOME/run"
-HOOKS="$HOME/hooks"
 NXPY="$HOME/nxenv/bin/python"
 TW="$HOME/.config/nexus/tuple-watch"
-mkdir -p "$RUN"
-unset NX_SESSION_ID CLAUDE_CODE_SESSION_ID
+STATUS_D="$TW/channel-status.d"
+WORK="$HOME/work"
+PLUGIN="$HOME/plugin"
+SOCK=rdr208
+mkdir -p "$RUN" "$WORK"
+unset NX_SESSION_ID CLAUDE_CODE_SESSION_ID CLAUDECODE CLAUDE_CODE_ENTRYPOINT ANTHROPIC_API_KEY
+[ -f "$HOME/seed/claude.json" ] && cp "$HOME/seed/claude.json" "$HOME/.claude.json"
+
+# Every tmux call goes through this wrapper: a private socket, never the
+# default server (tests/test_rdr208_mvv_wiring.py pins it).
+T() { command tmux -L "$SOCK" "$@"; }
 
 PASS=0
 FAIL=0
+SEQ=0
 say() { printf '\n== %s\n' "$*"; }
 ok() { PASS=$((PASS + 1)); printf '  PASS  %s\n' "$*"; }
 bad() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$*"; }
 check() { local what="$1"; shift; if "$@"; then ok "$what"; else bad "$what"; fi; }
 now() { date +%s; }
-uuid() { cat /proc/sys/kernel/random/uuid; }
+tok() { SEQ=$((SEQ + 1)); printf '%s-%s' "$1" "$SEQ"; }
+wait_for() {  # SECONDS CMD... : poll until CMD succeeds
+    local deadline=$(( $(now) + $1 )); shift
+    until "$@"; do [ "$(now)" -ge "$deadline" ] && return 1; sleep 1; done
+}
 
-# ── stand-in sessions ────────────────────────────────────────────────────────
-declare -A SID_OF=()
-LAST_ID=""
-# Unique per call without a shared counter: send() and drain() run inside
-# $(...), a subshell, where a counter increment never reaches the parent and
-# a reused id would read a stale .rc before the new command finished.
-_new_id() { printf 'c%s-%s-%s' "$(date +%s%N)" "$BASHPID" "$RANDOM"; }
-_send_cmd() {  # SERVER MODE CMD
-    LAST_ID="$(_new_id)"
-    printf '%s %s %s\n' "$LAST_ID" "$2" "$(printf '%s' "$3" | base64 -w0)" > "$RUN/$1.fifo"
-    local waited=0
-    until [ -f "$RUN/$LAST_ID.rc" ]; do
-        sleep 0.2
-        waited=$((waited + 1))
-        [ "$waited" -gt 1500 ] && { echo "TIMEOUT: $LAST_ID on $1" >&2; return 99; }
-    done
-    return "$(cat "$RUN/$LAST_ID.rc")"
+# ── sessions ─────────────────────────────────────────────────────────────────
+declare -A SID_OF=() PID_OF=() ANN=() WAKES=()
+
+pane() { T capture-pane -p -J -S -400 -t "$1" 2>/dev/null; }
+# A reply line from the model carries the ⏺ marker; the prompt echo (`> ...`)
+# carries the token too, so a bare pane grep would pass before the model
+# answered.
+reply_has() { local p; p="$(pane "$1")"; [[ "$p" =~ ⏺.*$2 ]]; }
+status_field() { jq -r ".$2" "$STATUS_D/$1" 2>/dev/null; }
+status_is() { [ "$(status_field "$1" "$2")" = "$3" ]; }
+marker_of() { cat "$TW/session.${PID_OF[$1]}" 2>/dev/null; }
+marker_names() { [ "$(marker_of "$1")" = "$2" ]; }
+transcript_of() {
+    local hits; hits="$(ls "$HOME/.claude/projects"/*/"${SID_OF[$1]}.jsonl" 2>/dev/null)"
+    printf '%s' "${hits%%$'\n'*}"
 }
-start_server() {  # NAME
-    nohup "$HOME/bin/claude" "$HOME/session_server.sh" "$1" > "$RUN/$1.server.log" 2>&1 &
-    local waited=0
-    until [ -p "$RUN/$1.fifo" ] && [ -f "$RUN/$1.server.pid" ]; do
-        sleep 0.1
-        waited=$((waited + 1))
-        [ "$waited" -gt 100 ] && { echo "server $1 never started" >&2; return 1; }
-    done
+transcripts() { ls "$HOME/.claude/projects"/*/*.jsonl 2>/dev/null | sort; }
+wake_count() {  # NAME -> wake lines for its mailbox in the pane
+    pane "$1" | grep -c "nexus mailbox message: subspace mailbox/${SID_OF[$1]}," | tr -d ' '
 }
-stop_server() {  # NAME: a process exit, as when Claude Code quits
-    local pid
-    pid="$(cat "$RUN/$1.server.pid")"
-    pkill -TERM -P "$pid" 2>/dev/null
-    kill -TERM "$pid" 2>/dev/null
-    sleep 1
+snap() { ANN[$1]="$(status_field "${SID_OF[$1]}" announced)"; WAKES[$1]="$(wake_count "$1")"; }
+rendered_count() {  # NAME CORR -> UserPromptSubmit hook_success attachments rendering CORR
+    local f; f="$(transcript_of "$1")"
+    [ -n "$f" ] || { echo 0; return; }
+    "$NXPY" - "$f" "$2" <<'PY'
+import json, sys
+n = 0
+for line in open(sys.argv[1], encoding="utf-8"):
+    try:
+        d = json.loads(line)
+    except ValueError:
+        continue
+    a = d.get("attachment") or {}
+    if d.get("type") == "attachment" and a.get("type") == "hook_success" \
+            and a.get("hookEvent") == "UserPromptSubmit" \
+            and f"correlation_id={sys.argv[2]} address=mailbox/" in (a.get("stdout") or ""):
+        n += 1
+print(n)
+PY
 }
-alive() {  # PID: running, not a zombie
-    local stat
-    stat="$(ps -o stat= -p "$1" 2>/dev/null)" || return 1
-    [ -n "$stat" ] && [[ "$stat" != Z* ]]
+rendered_from() {  # NAME CORR -> the from= the hook rendered for CORR
+    local f; f="$(transcript_of "$1")"
+    local hits; hits="$(grep -o "from=[^ ]* kind=[^ ]* correlation_id=$2 address" "$f" 2>/dev/null)"
+    [[ "${hits%%$'\n'*}" =~ ^from=([^ ]+) ]] && printf '%s' "${BASH_REMATCH[1]}"
 }
-env_for() { printf 'unset NX_SESSION_ID; export CLAUDE_CODE_SESSION_ID=%q; ' "$1"; }
-_payload() {  # KIND JSON -> path
-    local f="$RUN/payload.$1.$(_new_id).json"
-    printf '%s' "$2" > "$f"
+
+prompt() {  # NAME TEXT TOKEN: paste TEXT, Enter, wait for TOKEN in a reply
+    printf '%s' "$2" | T load-buffer -
+    T paste-buffer -t "$1"
+    sleep 0.5
+    T send-keys -t "$1" Enter
+    wait_for 180 reply_has "$1" "$3" || { echo "  TIMEOUT waiting for $3 in $1:"; pane "$1" | tail -15; return 1; }
+}
+_mcp_json() {  # NAME -> path
+    local f="$RUN/mcp-$1.json"
+    printf '{"mcpServers":{"nexus":{"type":"stdio","command":"%s/nxenv/bin/nx-mcp","args":[],"env":{"NX_MCP_LOG":"%s/nx-mcp-%s.log"}}}}\n' \
+        "$HOME" "$RUN" "$1" > "$f"
     printf '%s' "$f"
 }
-# Every command's out/err/rc and the watch-state files leave the container on
-# any exit, for diagnosis (run.sh mounts MVV_ARTIFACTS).
+new_records_since() {  # LISTING -> status records not in LISTING
+    comm -13 <(printf '%s\n' "$1") <(ls -1 "$STATUS_D" 2>/dev/null | sort) | grep -v '\.tmp$' || true
+}
+launch() {  # NAME [SID]: one real Claude Code session; with SID, `--resume SID`
+    local name="$1" resume="${2:-}" mcp before t0
+    mcp="$(_mcp_json "$name")"
+    before="$(ls -1 "$STATUS_D" 2>/dev/null | sort)"
+    t0="$(now)"
+    # `exec`: the pane's process IS claude, so pane_pid is the claude pid the
+    # hooks resolve through nexus.session.find_immediate_claude_pid.
+    local cmd="cd $WORK && exec claude --dangerously-skip-permissions --plugin-dir $PLUGIN --mcp-config $mcp --strict-mcp-config --dangerously-load-development-channels server:nexus"
+    [ -n "$resume" ] && cmd="$cmd --resume $resume"
+    T kill-session -t "$name" 2>/dev/null
+    T new-session -d -s "$name" -x 240 -y 50 || { bad "launch $name: tmux"; return 1; }
+    T send-keys -t "$name" "$cmd" Enter
+    # Each dialog is answered only when its own anchored text is on screen; a
+    # dialog that never appears (trust is pre-seeded) is simply never answered.
+    local deadline=$(( $(now) + 120 )) p
+    while [ "$(now)" -lt "$deadline" ]; do
+        p="$(pane "$name")"
+        if grep -qF "bypass permissions on" <<<"$p"; then break
+        elif grep -qF "I am using this for local development" <<<"$p"; then T send-keys -t "$name" Enter; sleep 3
+        elif grep -qiE "trust this folder|project you trust" <<<"$p"; then T send-keys -t "$name" Enter; sleep 2
+        elif grep -qF "Yes, I accept" <<<"$p"; then T send-keys -t "$name" Down; sleep 0.5; T send-keys -t "$name" Enter; sleep 5
+        elif grep -qiE "oauth/authorize|Paste code|Login expired|Not logged in" <<<"$p"; then
+            bad "launch $name: the session is not logged in"; pane "$name" | tail -15; return 1
+        fi
+        sleep 1
+    done
+    grep -qF "bypass permissions on" <<<"$(pane "$name")" \
+        || { bad "launch $name: no prompt within 120 s"; pane "$name" | tail -25; return 1; }
+    PID_OF[$name]="$(T display-message -p -t "$name" '#{pane_pid}')"
+    local sid=""
+    if [ -n "$resume" ]; then
+        rewritten() { [ -f "$STATUS_D/$resume" ] && [ "$(stat -c %Y "$STATUS_D/$resume")" -ge "$t0" ]; }
+        wait_for 90 rewritten || { bad "launch $name: status record for resumed $resume not rewritten within 90 s"; pane "$name" | tail -20; return 1; }
+        sid="$resume"
+    else
+        one_new() { [ -n "$(new_records_since "$before")" ]; }
+        wait_for 90 one_new || { bad "launch $name: no channel-status record within 90 s"; pane "$name" | tail -20; return 1; }
+        local n; n="$(new_records_since "$before" | wc -l | tr -d ' ')"
+        [ "$n" = 1 ] || { bad "launch $name: $n new status records, expected exactly one (launches are serialized)"; return 1; }
+        sid="$(new_records_since "$before")"
+    fi
+    SID_OF[$name]="$sid"
+    echo "  session $name: id $sid, claude pid ${PID_OF[$name]}"
+    check "launch $name: waiter alive under its status record" wait_for 30 status_is "$sid" alive true
+    check "  session marker names it (the harness and the hooks agree on the claude pid)" wait_for 30 marker_names "$name" "$sid"
+    check "  the session transcript exists" wait_for 30 test -n "$(transcript_of "$name")"
+    snap "$name"
+    # Warmup turn: the MCP tools are deferred until ToolSearch loads them
+    # (tests/cc-validation/README.md, "Deferred MCP tools").
+    local t; t="$(tok LOADED)"
+    check "  warmup: the deferred nexus tools are loaded" prompt "$name" \
+        "Call ToolSearch with query \"select:mcp__plugin_conexus_nexus__tuple_subscribe,mcp__plugin_conexus_nexus__mailbox_send,mcp__plugin_conexus_nexus__tuple_in\" and then reply with exactly $t and nothing else." "$t"
+}
+stop() {  # NAME: /exit, a plain process exit (releases nothing, as Claude Code quitting does)
+    T send-keys -t "$1" "/exit" Enter
+    exited() { ! kill -0 "${PID_OF[$1]}" 2>/dev/null; }
+    wait_for 30 exited "$1" || { kill -TERM "${PID_OF[$1]}" 2>/dev/null; sleep 1; }
+    T kill-session -t "$1" 2>/dev/null
+}
+arm() {  # NAME INSTANCE: the session subscribes its instance-name mailbox
+    local t; t="$(tok DONE-ARM)"
+    prompt "$1" "Call the nexus MCP tool tuple_subscribe with subspace \"mailbox/$2\" and then reply with exactly $t and nothing else." "$t"
+}
+model_send() {  # NAME TO CORR: a send with the DEFAULT sender, from inside the session
+    local t; t="$(tok DONE-SEND)"
+    prompt "$1" "Call the nexus MCP tool mailbox_send with to=\"$2\", body=\"rdr-208 local-mode mvv $3\", kind=\"notice\", correlation_id=\"$3\" and NO from_address, then reply with exactly $t and nothing else." "$t"
+}
+send() {  # TO CORR FROM -> result JSON (a harness send, explicit sender)
+    "$NXPY" "$HOME/send.py" "$1" "$2" "rdr-208 local-mode mvv $2" "$3" 2>> "$RUN/send.err"
+}
+delivered() {  # NAME CORR: channel-delivered to NAME, with no prompt from this harness
+    local name="$1" corr="$2" sid="${SID_OF[$1]}"
+    woke() { [ "$(wake_count "$name")" -gt "${WAKES[$name]}" ]; }
+    announced() { [ "$(status_field "$sid" announced)" -gt "${ANN[$name]}" ] 2>/dev/null; }
+    rendered() { [ "$(rendered_count "$name" "$corr")" = 1 ]; }
+    check "  $name woke on the reference (a new wake line, no prompt sent)" wait_for 60 woke
+    check "  its status record's announced count advanced" wait_for 30 announced
+    check "  the drain hook rendered $corr exactly once at that wake" wait_for 60 rendered
+    check "  mailbox/$sid is empty afterwards (claimed and acked at the wake)" wait_for 30 test "$(available "$sid")" = 0
+    snap "$name"
+}
+not_delivered() {  # NAME CORR SECONDS: never rendered and no new wake within SECONDS
+    sleep "$3"
+    [ "$(rendered_count "$1" "$2")" = 0 ] && [ "$(wake_count "$1")" -eq "${WAKES[$1]}" ]
+}
 _save_artifacts() {
     [ -n "${MVV_ARTIFACTS:-}" ] && [ -d "$MVV_ARTIFACTS" ] || return 0
+    local n
+    for n in "${!PID_OF[@]}"; do pane "$n" > "$MVV_ARTIFACTS/pane.$n.txt" 2>/dev/null; done
     find "$RUN" -maxdepth 1 -type f -exec cp {} "$MVV_ARTIFACTS/" \;
     [ -d "$TW" ] && cp -R "$TW" "$MVV_ARTIFACTS/tuple-watch"
+    [ -d "$HOME/.claude/projects" ] && cp -R "$HOME/.claude/projects" "$MVV_ARTIFACTS/transcripts"
+    T kill-server 2>/dev/null
     return 0
 }
 trap _save_artifacts EXIT
-session_start() {  # SERVER SID SOURCE
-    local f
-    f="$(_payload ss "{\"session_id\":\"$2\",\"source\":\"$3\",\"hook_event_name\":\"SessionStart\"}")"
-    SID_OF[$1]="$2"
-    _send_cmd "$1" run "$(env_for "$2")nx hook session-start < $f"
-}
-branch() {  # SERVER NEW_SID: /branch mints an id and fires no SessionStart
-    SID_OF[$1]="$2"
-}
-drain() {  # SERVER -> the hook's stdout (the injected context)
-    local sid="${SID_OF[$1]}" f
-    f="$(_payload dr "{\"session_id\":\"$sid\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"mvv\",\"cwd\":\"$HOME\"}")"
-    _send_cmd "$1" run "$(env_for "$sid")python3 $HOOKS/mailbox_drain.py < $f"
-    cat "$RUN/$LAST_ID.out"
-}
-arm() {  # SERVER NAME -> WATCH_PID, WATCH_OUT -- RETIRED (RDR-211
-    # nexus-rplay.14): this used to spawn the CLI mailbox watcher this MVV
-    # exercised; that command was deleted outright. See the file header.
-    WATCH_PID=""
-    WATCH_OUT="/dev/null"
-}
-send() {  # SERVER TO CORRELATION [FROM] -> result JSON
-    _send_cmd "$1" run "$(env_for "${SID_OF[$1]}")$NXPY $HOME/send.py $2 $3 'rdr-208 local-mode mvv $3' ${4:-}"
-    cat "$RUN/$LAST_ID.out"
-}
-count_delivered() {  # CORRELATION TEXT
-    printf '%s' "$2" | grep -o "correlation_id=$1\b" | wc -l | tr -d ' '
-}
+
+# ── engine reads ──────────────────────────────────────────────────────────────
 dir_json() { nx tuple directory "$1" --json 2>/dev/null; }
 resolved() { dir_json "$1" | jq -r '.resolved_session_id // empty'; }
 entries() { dir_json "$1" | jq '.entries | length'; }
 available() { nx tuple stats "mailbox/$1" --json 2>/dev/null | jq '.available'; }
 total_rows() { nx tuple stats "mailbox/$1" --json 2>/dev/null | jq '.total'; }
-marker_of() { cat "$TW/session.$(cat "$RUN/$1.server.pid")" 2>/dev/null; }
-wait_for() {  # SECONDS CMD... : poll until CMD succeeds
-    local deadline=$(( $(now) + $1 )); shift
-    until "$@"; do [ "$(now)" -ge "$deadline" ] && return 1; sleep 1; done
-}
 resolves_to() { [ "$(resolved "$1")" = "$2" ]; }
 no_entries() { [ "$(entries "$1")" = "0" ]; }
-exited() { ! alive "$1"; }
+new_transcript_since() {  # LISTING -> the one transcript not in LISTING, as a session id
+    local new; new="$(comm -13 <(printf '%s\n' "$1") <(transcripts))"
+    new="${new%%$'\n'*}"
+    new="${new##*/}"
+    printf '%s' "${new%.jsonl}"
+}
 
-echo "RDR-208 local-mode MVV: label=$MVV_LABEL expect_branch_fix=$EXPECT_BRANCH_FIX"
+echo "RDR-208 local-mode MVV: label=$MVV_LABEL expect_branch_fix=$EXPECT_BRANCH_FIX (real sessions, billed)"
 nx --version
+claude --version
 
 # ── provision ────────────────────────────────────────────────────────────────
 say "provision: nx init (local mode, virgin HOME)"
@@ -158,124 +254,126 @@ else
     bad "no directory template on the local engine"; nx tuple templates 2>&1 | tail -20
 fi
 
-SA="$(uuid)"; SB="$(uuid)"
-start_server A; start_server B
-session_start A "$SA" startup; session_start B "$SB" startup
-arm A alpha-e6; WA="$WATCH_PID"; WA_OUT="$WATCH_OUT"
-arm B bravo-94; WB="$WATCH_PID"
-drain A > /dev/null; drain B > /dev/null
+say "launch A and B (serialized), arm alpha-e6 and bravo-94"
+launch A || { echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): launch A"; exit 1; }
+SA="${SID_OF[A]}"
+arm A alpha-e6 || bad "arm A"
+launch B || { echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): launch B"; exit 1; }
+SB="${SID_OF[B]}"
+arm B bravo-94 || bad "arm B"
 check "directory/alpha-e6 resolves to A's session" wait_for 30 resolves_to alpha-e6 "$SA"
 check "directory/bravo-94 resolves to B's session" wait_for 30 resolves_to bravo-94 "$SB"
 
 # ── step 1: name resolution, both directions ─────────────────────────────────
 say "step 1: send by name, both directions"
-r="$(send B alpha-e6 s1-b2a)"
-check "B -> alpha-e6 resolved to A's session id" test "$(jq -r .to <<<"$r")" = "$SA"
-check "  address_kind=session" test "$(jq -r .address_kind <<<"$r")" = session
-check "  from = B's session id (default sender)" test "$(jq -r .from <<<"$r")" = "$SB"
-check "  A's watcher pinged it" wait_for 15 grep -q "s1-b2a" "$WA_OUT"
-check "  A's drain delivered it exactly once" test "$(count_delivered s1-b2a "$(drain A)")" = 1
-check "  mailbox/A is empty after the drain" test "$(available "$SA")" = 0
-r="$(send A bravo-94 s1-a2b)"
+model_send B alpha-e6 s1-b2a || bad "B's model-driven send"
+delivered A s1-b2a
+check "  it landed in A's mailbox (the name resolved to A's session id)" test "$(total_rows "$SA")" -ge 1
+check "  from = B's session id (the default sender, as the hook rendered it)" test "$(rendered_from A s1-b2a)" = "$SB"
+r="$(send bravo-94 s1-a2b "$SA")"
 check "A -> bravo-94 resolved to B's session id" test "$(jq -r .to <<<"$r")" = "$SB"
-check "  B's drain delivered it exactly once" test "$(count_delivered s1-a2b "$(drain B)")" = 1
+check "  address_kind=session" test "$(jq -r .address_kind <<<"$r")" = session
+delivered B s1-a2b
 
 # ── step 2: /resume renames the session, the id stays ────────────────────────
 say "step 2: /resume (new process, same session id, new name)"
-stop_server A
+stop A
 RESUME_T="$(now)"
-check "A's watcher stopped with its process" wait_for 10 exited "$WA"
-start_server A2
-session_start A2 "$SA" resume
-arm A2 alpha-fc; WA2="$WATCH_PID"; WA2_OUT="$WATCH_OUT"
-drain A2 > /dev/null
+launch A2 "$SA" || { echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): resume"; exit 1; }
+arm A2 alpha-fc || bad "arm A2 (a resumed session subscribes its NEW name)"
 check "directory/alpha-fc resolves to the same session id" wait_for 30 resolves_to alpha-fc "$SA"
-r="$(send B alpha-fc s2-new-name)"
+r="$(send alpha-fc s2-new-name "$SB")"
 check "B -> alpha-fc resolved to A's unchanged session id" test "$(jq -r .to <<<"$r")" = "$SA"
-check "  delivered once" test "$(count_delivered s2-new-name "$(drain A2)")" = 1
+delivered A2 s2-new-name
 
 # ── step 3a: the old name inside its TTL ─────────────────────────────────────
 say "step 3a: old name inside its lease"
-r="$(send B alpha-e6 s3a-old-name)"
+r="$(send alpha-e6 s3a-old-name "$SB")"
 check "alpha-e6 still resolves inside its TTL (a plain exit releases nothing)" test "$(jq -r .to <<<"$r")" = "$SA"
-check "  delivered once" test "$(count_delivered s3a-old-name "$(drain A2)")" = 1
+delivered A2 s3a-old-name
 
 # ── step 4: /clear ───────────────────────────────────────────────────────────
-say "step 4: /clear with mail pending, lease release, cleared record"
-r="$(send B "$SA" s4-pending)"
-check "mail pending at the clear is in mailbox/A" test "$(available "$SA")" = 1
-SA_C="$(uuid)"
-session_start A2 "$SA_C" clear
-check "cleared.<new id> written, naming the old id" grep -qx "$SA" "$TW/cleared.$SA_C"
-check "the old watcher self-stops" wait_for 15 exited "$WA2"
-check "  its STOP line names the new session" grep -q "STOP: this conversation is now session $SA_C" "$WA2_OUT"
-check "  its directory entry is released (gone within 5 s, not left to the 300 s TTL)" wait_for 5 no_entries alpha-fc
-out="$(drain A2)"
-check "the first prompt delivers the pending mail exactly once, through the record" test "$(count_delivered s4-pending "$out")" = 1
-check "  the record is deleted once the old mailbox is empty" test ! -e "$TW/cleared.$SA_C"
+say "step 4: /clear: the MCP server hands off, the lease is released, the cleared record drains once"
+before_t="$(transcripts)"
+T send-keys -t A2 "/clear" Enter
+cleared_id() { SA_C="$(new_transcript_since "$before_t")"; [ -n "$SA_C" ]; }
+check "the clear minted a new session id" wait_for 60 cleared_id
+echo "  session A2: id $SA -> $SA_C"
+check "cleared.<new id> written, naming the old id" wait_for 30 grep -qsx "$SA" "$TW/cleared.$SA_C"
+check "the old waiter stopped (its record shows alive=false within 30 s)" wait_for 30 status_is "$SA" alive false
+check "a waiter runs under the new id (alive=true)" wait_for 60 status_is "$SA_C" alive true
+check "  the old instance lease is released (alpha-fc gone within 30 s, not left to the 300 s TTL)" wait_for 30 no_entries alpha-fc
+SID_OF[A2]="$SA_C"; snap A2
+send "$SA" s4-pending "$SB" > /dev/null
+check "mail to the OLD id after the clear waits in mailbox/old (nothing pushes it)" test "$(available "$SA")" = 1
+t="$(tok OK)"
+prompt A2 "Reply with exactly $t and nothing else." "$t" || bad "first prompt after the clear"
+check "the first prompt delivers it exactly once, through the cleared record" wait_for 30 test "$(rendered_count A2 s4-pending)" = 1
+check "  the record is deleted once the old mailbox is empty" wait_for 15 test ! -e "$TW/cleared.$SA_C"
 check "  mailbox/old is empty" test "$(available "$SA")" = 0
-send B "$SA" s4-late > /dev/null
-drain A2 > /dev/null
+send "$SA" s4-late "$SB" > /dev/null
+t="$(tok OK)"
+prompt A2 "Reply with exactly $t and nothing else." "$t" || bad "prompt after the late send"
 check "mail to the old id after the record is gone stays stranded (accepted baseline)" test "$(available "$SA")" = 1
-arm A2 alpha-fc; WA3="$WATCH_PID"; WA3_OUT="$WATCH_OUT"
+arm A2 alpha-fc || bad "re-arm A2"
 check "re-armed: alpha-fc resolves to the new session id" wait_for 30 resolves_to alpha-fc "$SA_C"
-r="$(send A2 bravo-94 s4-from-after-clear)"
-check "a send after the clear defaults its from to the new session id" test "$(jq -r .from <<<"$r")" = "$SA_C"
-drain B > /dev/null
+model_send A2 bravo-94 s4-from-after-clear || bad "A2's model-driven send"
+delivered B s4-from-after-clear
+check "a send after the clear defaults its from to the new session id" test "$(rendered_from B s4-from-after-clear)" = "$SA_C"
 
 # ── step 5: one name, two live sessions ──────────────────────────────────────
 say "step 5: a name held by two sessions is refused"
-SC="$(uuid)"; SD="$(uuid)"
-start_server C; start_server D
-session_start C "$SC" startup; session_start D "$SD" startup
-arm C mvv-shared; WC="$WATCH_PID"
-arm D mvv-shared; WD="$WATCH_PID"
+launch C || { echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): launch C"; exit 1; }
+launch D || { echo "RDR-208 LOCAL-MODE MVV FAILED ($MVV_LABEL): launch D"; exit 1; }
+SC="${SID_OF[C]}"; SD="${SID_OF[D]}"
+arm C mvv-shared || bad "arm C"
+arm D mvv-shared || bad "arm D"
 held_by_two() { [ "$(dir_json mvv-shared | jq '.holders | length')" = 2 ]; }
 check "directory/mvv-shared has two distinct holders" wait_for 30 held_by_two
 before_c="$(total_rows "$SC")"; before_d="$(total_rows "$SD")"
-r="$(send B mvv-shared s5-shared)"
+r="$(send mvv-shared s5-shared "$SB")"
 check "mailbox_send refuses the ambiguous name" grep -q "more than one session" <<<"$r"
 names_both() { grep -q "$SC" <<<"$r" && grep -q "$SD" <<<"$r"; }
 check "  and names both holders" names_both
 check "  and writes nothing" test "$(total_rows "$SC")/$(total_rows "$SD")" = "$before_c/$before_d"
-stop_server C; stop_server D
+stop C; stop D
 
 # ── step 6: /branch ──────────────────────────────────────────────────────────
-say "step 6: /branch (new id in the same process, no SessionStart)"
-SF="$(uuid)"
-branch A2 "$SF"
-out="$(drain A2)"
+say "step 6: /branch (a new id in the same process)"
+before_t="$(transcripts)"
+T send-keys -t A2 "/branch" Enter
+fork_id() { SF="$(new_transcript_since "$before_t")"; [ -n "$SF" ]; }
+check "the branch minted a new session id" wait_for 60 fork_id
+echo "  session A2: fork $SF of $SA_C"
+sleep 3
 check "the fork writes no cleared record" test ! -e "$TW/cleared.$SF"
-send B "$SA_C" s6-parent > /dev/null
 if [ "$EXPECT_BRANCH_FIX" = 1 ]; then
-    check "the fork's first prompt moves the marker to the fork" test "$(marker_of A2)" = "$SF"
-    check "the parent's watcher self-stops" wait_for 15 exited "$WA3"
-    check "  its STOP line names the fork" grep -q "STOP: this conversation is now session $SF" "$WA3_OUT"
-    check "  its directory entry is released" wait_for 5 no_entries alpha-fc
-    # RETIRED (RDR-211 nexus-rplay.14): the arm instruction this checked for
-    # was deleted along with the CLI watcher; arm() above no longer spawns
-    # anything, so this check is dead weight kept only for historical shape.
-    check "the fork's first prompt re-arms (arm instruction printed)" grep -q "SUBSCRIBE" <<<"$out"
+    check "the fork's SessionStart moves the marker to the fork" wait_for 30 marker_names A2 "$SF"
+    check "the parent's waiter stopped (alive=false)" wait_for 30 status_is "$SA_C" alive false
+    check "a waiter runs under the fork (alive=true)" wait_for 60 status_is "$SF" alive true
+    check "  the parent's directory entry is released" wait_for 30 no_entries alpha-fc
+    send "$SA_C" s6-parent "$SB" > /dev/null
+    check "the parent's mail is NOT pushed into the fork (15 s, no wake, nothing rendered)" not_delivered A2 s6-parent 15
+    SID_OF[A2]="$SF"
+    check "  and it stays in the parent's mailbox" test "$(available "$SA_C")" = 1
 else
-    check "7.46.0 defect reproduces: the marker still names the parent" test "$(marker_of A2)" = "$SA_C"
-    sleep 12
-    check "7.46.0 defect reproduces: the parent's watcher is still running in the fork" alive "$WA3"
-    check "7.46.0 defect reproduces: alpha-fc still resolves to the parent" resolves_to alpha-fc "$SA_C"
-    check "7.46.0 defect reproduces: the parent's mail is pinged into the fork" wait_for 15 grep -q s6-parent "$WA3_OUT"
+    check "pre-fix behaviour reproduces: no hook fired, the marker still names the parent" marker_names A2 "$SA_C"
+    check "pre-fix behaviour reproduces: alpha-fc still resolves to the parent" resolves_to alpha-fc "$SA_C"
+    send "$SA_C" s6-parent "$SB" > /dev/null
+    pushed() { [ "$(wake_count A2)" -gt "${WAKES[A2]}" ]; }
+    check "pre-fix behaviour reproduces: the parent's reference is pushed into the fork" wait_for 30 pushed
 fi
-drain A2 > /dev/null
-check "the parent's mail stays in the parent's mailbox" test "$(available "$SA_C")" = 1
 
 # ── step 3b: the old name after its lease lapses ─────────────────────────────
 say "step 3b: old name after its TTL (plain exit at $(date -u -d "@$RESUME_T" +%H:%M:%SZ))"
 wait_s=$(( RESUME_T + 300 + 20 - $(now) ))
 [ "$wait_s" -gt 0 ] && { echo "  waiting ${wait_s}s for the 300 s lease to lapse"; sleep "$wait_s"; }
 before="$(total_rows "$SA")"
-r="$(send B alpha-e6 s3b-lapsed)"
+r="$(send alpha-e6 s3b-lapsed "$SB")"
 check "the lapsed name is refused, naming the name" grep -q "no live holder for name 'alpha-e6'" <<<"$r"
 check "  and nothing is written" test "$(total_rows "$SA")" = "$before"
 
-stop_server A2; stop_server B
+stop A2; stop B
 say "summary: $PASS passed, $FAIL failed"
 if [ "$FAIL" -eq 0 ]; then
     echo "RDR-208 LOCAL-MODE MVV PASSED ($MVV_LABEL, expect_branch_fix=$EXPECT_BRANCH_FIX, $PASS checks)"

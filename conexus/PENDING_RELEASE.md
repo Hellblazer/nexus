@@ -31,3 +31,16 @@ mechanize, it matters enough to ship.
 
 
 ## Awaiting the next release or plugin cut (pinned: v7.53.0)
+
+- `hooks/hooks.json` (nexus-kdxyv): the SessionStart matcher gains `fork`, so `/branch`
+  and `--fork-session` (Claude Code >= 2.1.213 reports them as source
+  `fork`) run `nx hook session-start` like a `/clear` does: the session
+  marker moves to the fork, no cleared record is written, and the wheel's
+  handoff (`_T1_HANDOFF_SOURCES` now includes `fork`) moves the live MCP
+  server's channel waiter and directory lease to the fork, so the parent's
+  mail stays with the parent instead of being pushed into the fork
+  (nexus-kdxyv, RDR-208 Fork paragraph). Inert until installed: with the
+  pinned plugin a `/branch` fires no hook at all.
+- `hooks/scripts/mailbox_drain.py` (nexus-kdxyv): the dead `_session_marker_names`
+  (unused since RDR-211 nexus-rplay.14; kept only for an e2e grep that
+  now reads the matcher above) is deleted. No behaviour change.
