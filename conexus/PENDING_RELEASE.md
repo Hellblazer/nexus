@@ -30,18 +30,4 @@ mechanize, it matters enough to ship.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.51.1)
-
-- `conexus/skills/phase-review-gate/SKILL.md`: the evidence-key note says Pass 1 renumbers and heading-qualifies items when two §Approach lists each restart at 1, so keys are copied from the Pass 1 table (bead nexus-8tpw3).
-- `conexus/hooks/scripts/rdr_hook.py`: the SessionStart status loader keeps `RDR-NNN`-titled T2 status records, keyed on the bare number and counted once per RDR (bead nexus-nc08w.1); `_collection_exists`'s T3 timeout leg no longer leaks a non-daemon `ThreadPoolExecutor` worker past `_T3_DEADLINE_S` — a bare daemon thread cannot hold the hook process open past the harness's 10s cap (bead nexus-r8643, intrastate review [26115] #3).
-- `conexus/skills/rdr-close/SKILL.md`: the file-flip step names `--reason` for closing a never-accepted draft, the lifecycle table's guarded `close-unaccepted` edge (bead nexus-nc08w.4).
-- `conexus/skills/rdr-create/SKILL.md`: the T2 record template writes `status: draft`, the lifecycle domain's lower-case value, not `Draft` (bead nexus-nc08w.5).
-- `conexus/agents/code-review-expert.md`: a mandated terminal `## Verdict` block with the same `- **outcome**:` shape and the same three values `substantive-critic` emits (bead nexus-4hoc0).
-- `conexus/skills/development/SKILL.md`: a new check, gate, census or lint pastes its first live run, with examined and skipped counts, into its bead before close (bead nexus-uuf3w).
-- `conexus/agents/substantive-critic.md`: one sentence fixing the order at the end of the output: a Recommended Next Step block precedes the Verdict block, which is always last (bead nexus-4hoc0).
-- `conexus/skills/rdr-gate-checklist/SKILL.md`: the critique is stored under the round-numbered title the preamble prints (`{id}-gate-critique-{date}-r{N}`), `{repo}_rdr` is named as its only home, and Layer 2 reads the preamble's computed census, with `Layer 2 VACUOUS` as a named non-pass (bead nexus-5r0ho).
-- `conexus/skills/rdr-research/SKILL.md`: `add` takes `--classification` and `--method` from closed sets; the gate's Layer 2 reads them (bead nexus-5r0ho).
-- `conexus/skills/rdr-fix-checklist/SKILL.md`: the fix-check record opens with `dispatches: 3` and one `FIX CHECK:` line per run; the gate preamble counts them (bead nexus-5r0ho).
-- `conexus/hooks/scripts/auto-approve-nx-mcp.sh`: `tuple_channel_probe` dropped from the auto-approval allowlist, RDR-213's deleted proof-gate tool (bead nexus-gomuo.1).
-- `conexus/skills/mailbox/SKILL.md`: the push-delivery rule now says claim with `tuple_in`, act, then ack, nack, or release when only deferring, never nack, matching RDR-213's waiter, which pushes a reference and never claims (bead nexus-gomuo.2).
-- `conexus/skills/peer-messaging/SKILL.md`: a claimed mailbox row that is only being deferred, not answered, is given back with `tuple_release`, never `tuple_nack`, matching RDR-213 (bead nexus-gomuo.2).
+## Awaiting the next release or plugin cut (pinned: v7.52.0)

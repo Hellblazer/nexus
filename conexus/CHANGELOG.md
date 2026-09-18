@@ -4,6 +4,64 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.52.0] - 2026-09-18
+
+Paired engine: engine-service-v0.1.128 (`REQUIRED_ENGINE_VERSION` (0, 1, 128),
+was engine-service-v0.1.127), RDR-213 (epic nexus-gomuo, bead nexus-vsipz) and
+the intrastate remediation beads. Plugin version aligned with conexus 7.52.0.
+This pin advance makes live the thirteen plugin changes `PENDING_RELEASE.md`
+held:
+
+- `hooks/scripts/auto-approve-nx-mcp.sh`: `tuple_channel_probe` is dropped
+  from the auto-approve allow-list; the tool itself is deleted with RDR-213's
+  proof gate (bead nexus-gomuo.1).
+- `skills/mailbox/SKILL.md`: the push-delivery rule says the channel
+  notification is a wake signal that carries a reference only; with the
+  plugin's hooks the drain hook delivers the body at that same prompt,
+  already claimed and acked, so the session claims nothing; without them
+  the session claims with `tuple_in`, acts, then acks, nacks, or releases
+  when only deferring, never nacks (bead nexus-gomuo.2).
+- `skills/peer-messaging/SKILL.md`: a claimed mailbox row that is only
+  being deferred, not answered, is given back with `tuple_release`, never
+  `tuple_nack` (bead nexus-gomuo.2).
+- `hooks/scripts/rdr_hook.py`: the SessionStart status loader keeps
+  `RDR-NNN`-titled T2 status records, keyed on the bare number and counted
+  once per RDR, so an accepted RDR is no longer read as draft for the
+  rdr-fix line (bead nexus-nc08w.1); `_collection_exists`'s T3 timeout leg
+  runs on a daemon thread, so a hung T3 client can no longer hold the hook
+  open past its deadline until the harness's 10 s cap kills it (bead
+  nexus-r8643).
+- `agents/code-review-expert.md`: a mandated terminal `## Verdict` block
+  with the same `- **outcome**:` field and the same three values
+  `substantive-critic` emits; a lint checks both definitions carry it
+  (bead nexus-4hoc0).
+- `agents/substantive-critic.md`: the Recommended Next Step block precedes
+  the Verdict block, which is always last (bead nexus-4hoc0).
+- `skills/development/SKILL.md`: a new check, gate, census or lint pastes
+  its first live run, with examined and skipped counts, into its bead
+  before close; the rule is repeated at the commit and close step (bead
+  nexus-uuf3w).
+- `skills/phase-review-gate/SKILL.md`: the evidence-key note says Pass 1
+  renumbers and heading-qualifies items when two §Approach lists each
+  restart at 1, so keys are copied from the Pass 1 table (bead nexus-8tpw3).
+- `skills/rdr-close/SKILL.md`: the file-flip step names `--reason` for
+  closing a never-accepted draft, the lifecycle table's `close-unaccepted`
+  edge (bead nexus-nc08w.4).
+- `skills/rdr-create/SKILL.md`: the T2 record template writes
+  `status: draft`, the lifecycle domain's lower-case value, not `Draft`
+  (bead nexus-nc08w.5).
+- `skills/rdr-gate-checklist/SKILL.md`: the critique is stored under the
+  round-numbered title the preamble prints
+  (`{id}-gate-critique-{date}-r{N}`), `{repo}_rdr` is its only home, and
+  Layer 2 reads the preamble's computed census, with `Layer 2 VACUOUS` as a
+  named non-pass (bead nexus-5r0ho).
+- `skills/rdr-research/SKILL.md`: `add` takes `--classification` and
+  `--method` from closed sets; the gate's Layer 2 reads them (bead
+  nexus-5r0ho).
+- `skills/rdr-fix-checklist/SKILL.md`: the fix-check record opens with
+  `dispatches: 3` and one `FIX CHECK:` line per run; the gate preamble
+  counts them (bead nexus-5r0ho).
+
 ## [7.51.1] - 2026-09-17
 
 Paired engine: engine-service-v0.1.127 (unchanged from 7.51.0;

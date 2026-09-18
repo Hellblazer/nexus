@@ -250,6 +250,27 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * coverage regeneration needed (OLD_TAG did not change); {@code uv run
      * pytest tests/test_rehearsal_seed_coverage_lint.py} and this class both
      * stayed green throughout.
+     *
+     * <p><strong>2026-09-18 rotation check (engine-service-v0.1.128, conexus
+     * 7.52.0 release prep): STILL NOT rotated, same reason.</strong> {@code
+     * git diff engine-service-v0.1.119 engine-service-v0.1.128 --
+     * service/src/main/resources/db/changelog} shows four new files:
+     * {@code catalog-037-gc-quarantine-orphans-bounded.xml} (creates a new
+     * bounded-sweep FUNCTION and grants EXECUTE on it — no CHECK/NOT NULL
+     * added to any existing table, explicitly "No DATA EFFECT" per its own
+     * header), {@code memory-004-quarantine-and-rollup.xml} and {@code
+     * tuples-005-subspace-and-claim-log-indexes.xml} (unrelated tables), and
+     * this tag's own {@code tuples-006-announce-columns.xml} (two nullable/
+     * defaulted columns on {@code nexus.tuples}). None constrains existing
+     * data on an already-populated table, so none is a candidate
+     * divergence-injection point and the catalog-013/014 boundary this pin
+     * is anchored to has not moved. {@code catalog-013-chash-checks-
+     * validate.xml} itself picked up a checksum-neutral DATA EFFECT comment
+     * backfill in this range (no SQL statement changed, same class of edit
+     * as the catalog-002-hygiene.xml backfill the 2026-09-14 check already
+     * absorbed) — structurally unchanged. {@code engine-service-v0.1.17}
+     * stays pinned. No manifest/seed-coverage regeneration needed (OLD_TAG
+     * did not change).
      */
     private static final String OLD_TAG = "engine-service-v0.1.17";
 
