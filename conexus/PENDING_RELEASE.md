@@ -32,4 +32,4 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.52.0)
 
-- `skills/mailbox/SKILL.md`: a board post's notification names the subspace and tuple id only, read with `tuple_rd`; a post is announced once per session from the engine's per-subscriber stamp, and `tuple_subscriptions` lists the set without a cursor (bead nexus-q82tk).
+- `conexus/skills/mailbox/SKILL.md`: a board post's notification names the subspace and tuple id only, read with `tuple_rd`; a post is announced once per session from the engine's per-subscriber stamp, and `tuple_subscriptions` lists the set without a cursor (bead nexus-q82tk).
